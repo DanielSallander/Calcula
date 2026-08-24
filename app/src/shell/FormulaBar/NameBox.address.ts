@@ -211,3 +211,81 @@ export function parseNameBoxAddress(input: string): ParsedNameBoxAddress | null 
 export function isAddressLike(text: string): boolean {
   return parseNameBoxAddress(text) !== null;
 }
+
+// ============================================================================
+// Structured (table) references
+// ============================================================================
+//
+// Tables and defined names deliberately share ONE namespace, which is what
+// makes a table name meaningful in the Name Box at all — but every bracketed
+// spelling fell through all three Enter branches and out the bottom. "[" is not
+// an address character and not a name character either, so `Table1[#All]` —
+// the exact text the box now DISPLAYS for a whole-table selection — was
+// answered with "not a valid cell reference or defined name".
+//
+// Only the shape is decided here. WHICH cells `Table1[Margin]` covers is the
+// backend's `resolve_structured_reference`, which owns the table's header and
+// totals rows; a parser that also knew where the data starts would be a second
+// copy of that recipe, one release away from disagreeing with it.
+
+/** A structured reference as typed into the Name Box. */
+export interface ParsedStructuredReference {
+  /** The text before the first bracket. */
+  tableName: string;
+  /** Everything between the outermost brackets, verbatim (`#All`, `Margin`). */
+  specifier: string;
+}
+
+/** The name rules the backend applies to a table name, minus the reserved words. */
+const TABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+
+/**
+ * Is this entry ASKING to be a structured reference? True as soon as a bracket
+ * appears, whether or not the rest parses.
+ *
+ * Separate from the parser on purpose: the caller must be able to tell "not a
+ * table reference, try the next branch" from "a table reference I could not
+ * read, say so". Collapsing the two is what sent a mistyped bracket to the
+ * create-a-name branch, where `isValidName` refused it with a sentence about
+ * cell references.
+ */
+export function hasTableBracket(text: string): boolean {
+  return text.includes("[");
+}
+
+/**
+ * Parse `Table1[Margin]`, `Table1[#All]`, `Table1[[#Data]]`. Returns null when
+ * the text carries no bracket at all, and when the brackets or the table name
+ * are malformed.
+ */
+export function parseStructuredReference(
+  input: string,
+): ParsedStructuredReference | null {
+  const trimmed = input.trim();
+  const open = trimmed.indexOf("[");
+  if (open === -1) return null;
+  if (!trimmed.endsWith("]")) return null;
+
+  const tableName = trimmed.slice(0, open).trim();
+  if (!TABLE_NAME_RE.test(tableName)) return null;
+
+  const specifier = trimmed.slice(open + 1, trimmed.length - 1).trim();
+  if (specifier === "") return null;
+
+  // Balance check over the WHOLE reference. `Table1[Margin]]` and
+  // `Table1[[#Data]` both end in ']' and both name nothing; letting them
+  // through would send a malformed entry to the backend to be refused with a
+  // sentence about syntax the user cannot act on.
+  let depth = 0;
+  for (let i = open; i < trimmed.length; i++) {
+    if (trimmed[i] === "[") depth += 1;
+    else if (trimmed[i] === "]") {
+      depth -= 1;
+      if (depth < 0) return null;
+      if (depth === 0 && i !== trimmed.length - 1) return null;
+    }
+  }
+  if (depth !== 0) return null;
+
+  return { tableName, specifier };
+}

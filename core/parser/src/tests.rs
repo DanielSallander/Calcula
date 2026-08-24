@@ -1000,6 +1000,65 @@ fn a_leading_plus_starts_a_formula_the_way_excel_allows() {
 }
 
 #[test]
+fn an_error_literal_parses_wherever_a_value_is_accepted() {
+    // `=#REF!` was a hard parse error, and that mattered well beyond typing one:
+    // the copy/fill/structural shifters need to WRITE `#REF!` in place of a
+    // reference that left the sheet. They clamped instead — silently re-pointing
+    // the formula at surviving data — and text no parser accepts would have been
+    // WORSE than the clamp, because an unparseable formula is stored anyway and
+    // shows #VALUE! on a cell carrying no dependency edges at all.
+    assert_eq!(
+        parse("=#REF!").unwrap(),
+        Expression::Literal(Value::Error("#REF!".to_string()))
+    );
+    // Every one of Excel's, plus Calcula's own four, since a cell can hold one.
+    for lit in [
+        "#DIV/0!", "#REF!", "#NAME?", "#VALUE!", "#N/A", "#NULL!", "#NUM!", "#SPILL!",
+        "#CIRCULAR!", "#CONFLICT!", "#BLOCKED!", "#LIMIT!",
+    ] {
+        assert_eq!(
+            parse(&format!("={}", lit)).unwrap(),
+            Expression::Literal(Value::Error(lit.to_string())),
+            "`{}` must parse as itself",
+            lit
+        );
+    }
+    // In an operand position, in an argument, and inside an array constant.
+    assert!(parse("=#REF!+1").is_ok());
+    assert!(parse("=IF(A1,#N/A,0)").is_ok());
+    assert!(parse("=ISNA(#N/A)").is_ok());
+    assert_eq!(
+        parse("={1,#N/A}").unwrap(),
+        Expression::ArrayLiteral {
+            rows: vec![vec![
+                Expression::Literal(Value::Number(1.0)),
+                Expression::Literal(Value::Error("#N/A".to_string())),
+            ]]
+        }
+    );
+    // Case-insensitive on the way in, CANONICAL on the way out, so nothing
+    // downstream has to normalise a user's spelling.
+    assert_eq!(
+        parse("=#n/a").unwrap(),
+        Expression::Literal(Value::Error("#N/A".to_string()))
+    );
+}
+
+#[test]
+fn the_spill_operator_still_reads_as_itself() {
+    // `#` is BOTH the postfix spill operator and the first character of every
+    // error literal, and the lookahead that tells them apart must not eat `A1#`.
+    assert!(matches!(
+        parse("=A1#").unwrap(),
+        Expression::SpillRef { .. }
+    ));
+    assert!(parse("=SUM(A1#)").is_ok());
+    // A `#` followed by something that is NOT an error name stays the operator,
+    // so a half-typed literal fails as a parse error rather than lexing wrong.
+    assert!(parse("=#NOTANERROR").is_err());
+}
+
+#[test]
 fn percent_is_a_postfix_operator_on_any_expression() {
     // Not number-literal syntax: Excel applies `%` to whatever precedes it, so
     // `=A1%` and `=(1+1)%` are both legal.

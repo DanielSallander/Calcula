@@ -605,8 +605,17 @@ export type ChartSelectionMap = Record<string, { on: "category" | "series"; valu
 // Scale Specification
 // ============================================================================
 
-/** Scale type for value axes. "time" marks a temporal axis (epoch-ms domain). */
-export type ScaleType = "linear" | "log" | "pow" | "sqrt" | "time";
+/**
+ * Scale type for an axis. "time" marks a temporal axis (epoch-ms domain).
+ * "band"/"point" mark a CATEGORICAL axis — evenly spaced labels in the data's own
+ * order (bands for the bar-family painters, points for line/area/scatter) — and
+ * are what an `ordinal`/`nominal` encoding channel lowers to. They are an
+ * instruction, not decoration: naming one PINS the axis to categories, so a
+ * category column that happens to parse as numbers or dates is not re-spaced onto
+ * a value axis behind the user's back (see resolveScatterXAxis). On a value axis
+ * they mean nothing and degrade to linear, exactly as "time" already does.
+ */
+export type ScaleType = "linear" | "log" | "pow" | "sqrt" | "time" | "band" | "point";
 
 /** Scale configuration for a value axis. */
 export interface ScaleSpec {
@@ -764,6 +773,20 @@ export interface SortTransform {
   field: string;
   /** Sort order. Default: "asc". */
   order?: "asc" | "desc";
+  /**
+   * Order by a custom LIST instead of by value: an explicit domain
+   * (["Mon","Tue",...]), or the name of a fill list — the four the grid's Sort
+   * dialog offers ("weekdays", "weekdaysShort", "months", "monthsShort") or one
+   * the user defined. Without it a text field can only sort with localeCompare,
+   * which lays Mon..Sun out as Fri, Mon, Sat, Sun, Thu, Tue, Wed.
+   *
+   * Matching is case-insensitive on the label ($category) or on the text of the
+   * value (a named series). A label the list never mentions sorts after every
+   * listed one, keeping its source order; `order: "desc"` flips the whole
+   * comparison and so brings the unlisted ones first — the same rule the backend
+   * range sort applies with its usize::MAX key.
+   */
+  customOrder?: string | string[];
 }
 
 /** Aggregate transform: group by categories and reduce series values. */
@@ -1075,7 +1098,10 @@ export interface ChartFilters {
 export interface ChannelDef {
   /** Source column name (matched against the header row). */
   field: string;
-  /** Field type. Drives axis treatment (temporal/quantitative → value/time X). */
+  /**
+   * Field type. Drives axis treatment: temporal/quantitative give a time/value X,
+   * ordinal/nominal a categorical one (evenly spaced labels, source order).
+   */
   type?: FieldType;
   /** Aggregation applied when grouping (e.g. sum revenue per category). */
   aggregate?: AggregateOp;
@@ -1087,6 +1113,14 @@ export interface ChannelDef {
   title?: string | null;
   /** Sort direction (used by the `order` channel). */
   sort?: "asc" | "desc";
+  /**
+   * The ordinal DOMAIN order for this channel: an explicit label order, or a
+   * fill-list name (see {@link SortTransform.customOrder}). Declaring it is
+   * declaring the field ordinal — it lowers to a categorical axis scale AND a
+   * `$category` sort, so `{ field: "Day", type: "ordinal", customOrder:
+   * "weekdaysShort" }` plots Sun..Sat in that order instead of alphabetically.
+   */
+  customOrder?: string | string[];
 }
 
 /**

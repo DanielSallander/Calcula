@@ -10,6 +10,14 @@
 // FIX: When navigating FROM a merged cell, calculate target from the edge of the merge
 //      in the direction of movement to avoid getting stuck.
 // FIX: Preserve entry column/row when exiting merged cells vertically/horizontally.
+// FIX: Ctrl+End goes to the last USED cell — the same getUsedRange answer
+//      Ctrl+Shift+End extends to — instead of clamping a totalRows/totalCols
+//      delta onto XFD1048576; bare End arms Excel's End mode rather than
+//      jumping to the sheet's last column.
+// FIX: Ctrl+A / Ctrl+Shift+Space / Ctrl+Space / Shift+Space are PROGRESSIVE
+//      when the active cell sits inside a grid region that declares how they
+//      should narrow. They were four ways of selecting the whole sheet, so an
+//      object on the grid was invisible to every selection shortcut.
 
 import { useCallback, useEffect, useRef } from "react";
 import { useGridContext } from "../state/GridContext";
@@ -18,6 +26,7 @@ import { findCtrlArrowTarget, getMergeInfo, getUsedRange, type ArrowDirection } 
 import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 import { getGlobalIsEditing } from "./useEditing";
 import { handleCellTypeKeyDown } from "../../api/cellTypes";
+import { getGridRegions } from "../../api/gridOverlays";
 
 /**
  * Options for the useGridKeyboard hook.
@@ -63,10 +72,187 @@ export function setExtendMode(value: boolean): void {
 }
 
 /**
+ * MODULE-LEVEL state for Excel's "End mode" (the bare End key).
+ * Armed by End and spent by the very next key: an arrow then jumps to the edge
+ * of the data the way Ctrl+Arrow does, Home goes to the last used cell, and
+ * anything else merely cancels it.
+ *
+ * Bare End used to travel `deltaCol = config.totalCols` and land on column XFD
+ * — a place no user asked to go, and one the sheet's own data never reaches.
+ */
+let endModeActive = false;
+
+/**
+ * Read and clear End mode from outside the keydown path — the pair extend mode
+ * already needs: `getExtendMode` feeds the status bar's mode indicator and
+ * `useEditing` calls `setExtendMode(false)` when an edit begins. The flag is
+ * module-level, so it outlives any one grid instance and must be clearable.
+ */
+export function getEndMode(): boolean {
+  return endModeActive;
+}
+
+/** Set the End mode state. */
+export function setEndMode(value: boolean): void {
+  endModeActive = value;
+}
+
+/**
+ * Keys that are not "the next key" for End mode: a keydown fires for the
+ * modifier itself, so treating Shift as a keypress would disarm End mode
+ * between End and Shift+ArrowDown — the extend gesture Excel supports.
+ */
+const MODIFIER_KEYS = new Set([
+  "Shift",
+  "Control",
+  "Alt",
+  "Meta",
+  "AltGraph",
+  "CapsLock",
+  "NumLock",
+  "ScrollLock",
+]);
+
+/**
  * Clamp a value between min and max bounds.
  */
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+// ============================================================================
+// Region-scoped selection (Ctrl+Space / Shift+Space / Ctrl+A)
+// ============================================================================
+//
+// WHAT WAS WRONG. All four selection shortcuts selected the whole sheet.
+// Ctrl+A took every cell, Ctrl+Shift+Space took every cell a second way,
+// Ctrl+Space took the whole sheet column and Shift+Space the whole sheet row —
+// inside a table exactly as outside one. Excel narrows first and widens on the
+// next press: the table's column, then the whole table column, then the sheet
+// column; the table's data, then the whole table, then the sheet.
+//
+// THE GEOMETRY IS NOT DECIDED HERE. A grid region may DECLARE the blocks each
+// gesture offers inside it, and the extension that owns the region computes
+// them — the Table extension knows which of its rows are headers and which are
+// totals, and Core must never learn that recipe. Core asks only "is there
+// something narrower than the whole sheet here, and have I already offered it?"
+// It never asks what KIND of object the region is, so a pivot or a floating
+// range gets the same behaviour the day it declares the same field.
+//
+// THE STEP IS DERIVED, NOT COUNTED. Which press this is comes from comparing
+// the CURRENT selection against the blocks the region declared, not from a
+// counter: click away and press again and you are back at step one, and a
+// selection that already equals a step moves on to the next one instead of
+// spending a keypress selecting what is selected. A counter would have to be
+// reset from every other gesture in this file, and the one that was forgotten
+// would be a shortcut that silently did nothing.
+
+/** A row band for the column gesture; the gesture supplies the column. */
+interface RegionColumnStep {
+  startRow: number;
+  endRow: number;
+}
+
+/** A column band for the row gesture; the gesture supplies the row. */
+interface RegionRowStep {
+  startCol: number;
+  endCol: number;
+}
+
+/** A whole block, in the grid's 0-based inclusive coordinates. */
+interface RegionBlock {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/**
+ * What a region declares about the three selection gestures, NARROWEST FIRST.
+ * Read off `GridRegion.data.selectionScope` — the generic extension-metadata
+ * bag — because there is no typed @api seam for it yet. Every field is
+ * optional and every value is validated below: this data crosses a boundary
+ * and an extension that publishes nonsense must degrade to the old sheet-wide
+ * behaviour, never to an inverted or off-grid selection.
+ */
+export interface RegionSelectionScope {
+  columnSteps?: RegionColumnStep[];
+  rowSteps?: RegionRowStep[];
+  allSteps?: RegionBlock[];
+}
+
+/** The three gestures that scope, named once. */
+type ScopedGesture = "column" | "row" | "all";
+
+function isGridIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/** Identity of a block, for "is this what the last press produced?". */
+function blockKey(block: RegionBlock): string {
+  const startRow = Math.min(block.startRow, block.endRow);
+  const endRow = Math.max(block.startRow, block.endRow);
+  const startCol = Math.min(block.startCol, block.endCol);
+  const endCol = Math.max(block.startCol, block.endCol);
+  return `${startRow}:${startCol}:${endRow}:${endCol}`;
+}
+
+/**
+ * The blocks the region under (row, col) offers for one gesture, narrowest
+ * first, already turned into whole blocks against the active cell.
+ *
+ * Returns an empty list when no region claims the cell, when the region
+ * declares nothing for this gesture, or when what it declared does not survive
+ * validation. Duplicate consecutive blocks are dropped — a step that selects
+ * what the previous step selected reads as a dead keypress.
+ */
+function regionStepsFor(
+  gesture: ScopedGesture,
+  row: number,
+  col: number,
+): RegionBlock[] {
+  for (const region of getGridRegions()) {
+    // A floating region is positioned in pixels and owns no cells at all, so it
+    // can neither contain the active cell nor scope a selection.
+    if (region.floating) continue;
+    if (row < region.startRow || row > region.endRow) continue;
+    if (col < region.startCol || col > region.endCol) continue;
+
+    const declared = (region.data as { selectionScope?: unknown } | undefined)?.selectionScope;
+    if (!declared || typeof declared !== "object") continue;
+    const scope = declared as RegionSelectionScope;
+
+    let blocks: RegionBlock[] = [];
+    if (gesture === "column" && Array.isArray(scope.columnSteps)) {
+      blocks = scope.columnSteps
+        .filter((s) => s && isGridIndex(s.startRow) && isGridIndex(s.endRow) && s.startRow <= s.endRow)
+        .map((s) => ({ startRow: s.startRow, startCol: col, endRow: s.endRow, endCol: col }));
+    } else if (gesture === "row" && Array.isArray(scope.rowSteps)) {
+      blocks = scope.rowSteps
+        .filter((s) => s && isGridIndex(s.startCol) && isGridIndex(s.endCol) && s.startCol <= s.endCol)
+        .map((s) => ({ startRow: row, startCol: s.startCol, endRow: row, endCol: s.endCol }));
+    } else if (gesture === "all" && Array.isArray(scope.allSteps)) {
+      blocks = scope.allSteps.filter(
+        (b) =>
+          b &&
+          isGridIndex(b.startRow) &&
+          isGridIndex(b.startCol) &&
+          isGridIndex(b.endRow) &&
+          isGridIndex(b.endCol) &&
+          b.startRow <= b.endRow &&
+          b.startCol <= b.endCol,
+      );
+    }
+
+    const deduped: RegionBlock[] = [];
+    for (const block of blocks) {
+      if (deduped.length && blockKey(deduped[deduped.length - 1]) === blockKey(block)) continue;
+      deduped.push(block);
+    }
+    if (deduped.length > 0) return deduped;
+  }
+
+  return [];
 }
 
 /**
@@ -154,6 +340,84 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         navPendingRef.current -= 1;
       });
   }, []);
+
+  /**
+   * Take one step of a progressive, region-scoped selection gesture.
+   *
+   * Returns true when a region's block was selected, and false when the caller
+   * should do its own sheet-wide selection — so `onSelectColumn` /
+   * `onSelectRow` keep owning the whole-column and whole-row selections, header
+   * highlight and all, exactly as before.
+   *
+   * WHY THE WIDEST STOP IS TERMINAL, since nothing here says so. Every
+   * sheet-wide selection parks the ACTIVE cell on the sheet's edge — the last
+   * cell for select-all, the last row for a column, the last column for a row —
+   * and a region that no longer contains the active cell declares nothing, so
+   * the next press finds no steps and falls straight through again. It is worth
+   * knowing that this is what makes a fourth press stay put; a "stop if the
+   * whole sheet is already selected" line looks like the thing that does it and
+   * is in fact unreachable, which is why there isn't one.
+   */
+  const advanceScopedGesture = useCallback(
+    (
+      gesture: ScopedGesture,
+      activeRow: number,
+      activeCol: number,
+    ): boolean => {
+      const steps = regionStepsFor(gesture, activeRow, activeCol);
+      if (steps.length === 0) return false;
+
+      const current = liveSelectionRef.current;
+      const currentKey = current ? blockKey(current) : null;
+
+      // The step is where the current selection sits in the region's own list,
+      // not a press count. Searched from the END so a list that repeats a block
+      // still moves forward.
+      let matched = -1;
+      for (let i = steps.length - 1; i >= 0; i--) {
+        if (currentKey !== null && blockKey(steps[i]) === currentKey) {
+          matched = i;
+          break;
+        }
+      }
+
+      const step = matched + 1;
+      if (step >= steps.length) return false;
+
+      const block = steps[step];
+      commitSelection({ ...block, type: "cells" });
+      if (onSelectionChange) {
+        setTimeout(onSelectionChange, 0);
+      }
+      return true;
+    },
+    [commitSelection, onSelectionChange]
+  );
+
+  /**
+   * Ctrl+A and Ctrl+Shift+Space. ONE implementation for both, because in Excel
+   * they are one command — leaving Ctrl+Shift+Space as a second, flat copy of
+   * select-all is how it came to disagree with Ctrl+A about what a table is.
+   *
+   * Returns whether a region's block was selected (the whole sheet otherwise).
+   */
+  const runSelectAllGesture = useCallback((): boolean => {
+    const sheetWide: RegionBlock = {
+      startRow: 0,
+      startCol: 0,
+      endRow: config.totalRows - 1,
+      endCol: config.totalCols - 1,
+    };
+    const active = liveSelectionRef.current;
+    if (active && advanceScopedGesture("all", active.endRow, active.endCol)) {
+      return true;
+    }
+    commitSelection({ ...sheetWide, type: "cells" });
+    if (onSelectionChange) {
+      setTimeout(onSelectionChange, 0);
+    }
+    return false;
+  }, [advanceScopedGesture, commitSelection, config.totalRows, config.totalCols, onSelectionChange]);
 
   /**
    * Handle navigation to a cell, expanding to merged region if needed.
@@ -467,6 +731,16 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
 
       const modKey = ctrlKey || metaKey;
 
+      // Read End mode ONCE per keypress and disarm it here, not in the branches
+      // that use it: Excel's End mode lasts exactly one key, so every branch
+      // below either consumes `endModeArmed` or simply lets the mode lapse.
+      // Escape needs no case of its own for the same reason.
+      let endModeArmed = false;
+      if (!MODIFIER_KEYS.has(key)) {
+        endModeArmed = endModeActive;
+        endModeActive = false;
+      }
+
       // Handle ESC key - deactivate extend mode, then clear clipboard
       if (key === "Escape") {
         if (extendModeActive) {
@@ -494,6 +768,19 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         extendModeActive = !extendModeActive;
         eventLog.keyboard('Grid', 'handleKeyDown', 'F8', []);
         fnLog.exit('handleKeyDown', `extend mode ${extendModeActive ? 'on' : 'off'}`);
+        return;
+      }
+
+      // Handle bare End (and Shift+End) - arm End mode. It MOVES NOTHING by
+      // itself, as in Excel; the jump belongs to the key that follows.
+      // `endModeArmed` has already disarmed the flag, so a second End turns the
+      // mode back off instead of re-arming it.
+      if (key === "End" && !modKey && !altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        endModeActive = !endModeArmed;
+        eventLog.keyboard('Grid', 'handleKeyDown', shiftKey ? 'Shift+End' : 'End', shiftKey ? ['Shift'] : []);
+        fnLog.exit('handleKeyDown', `end mode ${endModeActive ? 'on' : 'off'}`);
         return;
       }
 
@@ -589,23 +876,16 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       // dead. See app/src/api/keybindings.ts.
       if (modKey && !altKey) {
         switch (key.toLowerCase()) {
-          case 'a':
-            // Ctrl+A - Select all cells
+          case 'a': {
+            // Ctrl+A - select all, narrowing to the region under the cursor
+            // first. Inside a table that is the table's data, then the whole
+            // table, then the sheet; outside one it is the sheet, as before.
             event.preventDefault();
             event.stopPropagation();
             eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+A', ['Ctrl']);
-            commitSelection({
-              startRow: 0,
-              startCol: 0,
-              endRow: config.totalRows - 1,
-              endCol: config.totalCols - 1,
-              type: "cells",
-            });
-            if (onSelectionChange) {
-              setTimeout(onSelectionChange, 0);
-            }
-            fnLog.exit('handleKeyDown', 'select all');
+            fnLog.exit('handleKeyDown', runSelectAllGesture() ? 'select all (region step)' : 'select all');
             return;
+          }
 
           case 'b':
             // Ctrl+B - Toggle bold
@@ -789,40 +1069,64 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         }
       }
 
-      // Handle Ctrl+Shift+End - Extend selection to last used cell
-      if (modKey && shiftKey && !altKey && key === "End" && selection) {
+      // Handle Ctrl+End / Ctrl+Shift+End / End-mode Home - the last used cell.
+      //
+      // ONE await of getUsedRange serves all three, because "the end" must be
+      // one place. Plain Ctrl+End used to be a MOVE instead: deltaRow/deltaCol
+      // of config.totalRows/totalCols, which handleArrowNavigation clamps to the
+      // sheet bounds — so it landed on XFD1048576 while Ctrl+Shift+End, decided
+      // right here, extended to the last cell that actually holds data. The two
+      // gestures visibly disagreed about where the end of the sheet is.
+      const wantsLastUsedCell =
+        (modKey && !altKey && key === "End") ||
+        (endModeArmed && !modKey && !altKey && key === "Home");
+      if (wantsLastUsedCell) {
         event.preventDefault();
         event.stopPropagation();
-        eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+End', ['Ctrl', 'Shift']);
+
+        const extend = shiftKey || extendModeActive;
+        const mods: string[] = modKey ? ['Ctrl'] : [];
+        if (shiftKey) mods.push('Shift');
+        eventLog.keyboard('Grid', 'handleKeyDown', modKey ? `Ctrl+${key}` : 'End,Home', mods);
 
         enqueueNavigation(async () => {
           // Anchor on the LIVE selection: this key can be pressed while an
           // earlier navigation is still resolving.
           const anchor = liveSelectionRef.current;
-          if (!anchor) return;
           try {
+            // An empty sheet answers {0,0,0,0,empty:true}, so this goes to A1
+            // the way Excel does without a case of its own.
             const usedRange = await getUsedRange();
-            commitSelection({
-              startRow: anchor.startRow,
-              startCol: anchor.startCol,
-              endRow: usedRange.endRow,
-              endCol: usedRange.endCol,
-              type: anchor.type,
-            });
-            if (onSelectionChange) {
-              setTimeout(onSelectionChange, 0);
+            if (extend && anchor) {
+              commitSelection({
+                startRow: anchor.startRow,
+                startCol: anchor.startCol,
+                endRow: usedRange.endRow,
+                endCol: usedRange.endCol,
+                type: anchor.type,
+              });
+              if (onSelectionChange) {
+                setTimeout(onSelectionChange, 0);
+              }
+            } else {
+              // Not extending: go there merge-aware, so landing inside a merge
+              // selects the whole merge like every other navigation does.
+              await navigateToCell(usedRange.endRow, usedRange.endCol, false);
             }
           } catch (error) {
-            console.error("[useGridKeyboard] Ctrl+Shift+End failed:", error);
+            console.error("[useGridKeyboard] navigation to last used cell failed:", error);
           }
         });
 
-        fnLog.exit('handleKeyDown', 'extend to last used cell');
+        fnLog.exit('handleKeyDown', extend ? 'extend to last used cell' : 'go to last used cell');
         return;
       }
 
-      // Handle Ctrl+Arrow for Excel-like navigation (async)
-      if (modKey && !altKey) {
+      // Handle Ctrl+Arrow for Excel-like navigation (async).
+      // An armed End mode routes a BARE arrow down the same path: in Excel,
+      // End followed by an arrow is Ctrl+Arrow, so it must be the same code and
+      // not a second edge-finding rule that can drift from this one.
+      if ((modKey || endModeArmed) && !altKey) {
         let direction: ArrowDirection | null = null;
         
         switch (key) {
@@ -844,9 +1148,9 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           event.preventDefault();
           event.stopPropagation();
           
-          const mods: string[] = ['Ctrl'];
+          const mods: string[] = modKey ? ['Ctrl'] : [];
           if (shiftKey) mods.push('Shift');
-          eventLog.keyboard('Grid', 'handleKeyDown', `Ctrl+${key}`, mods);
+          eventLog.keyboard('Grid', 'handleKeyDown', modKey ? `Ctrl+${key}` : `End,${key}`, mods);
           
           // Queued, not fired-and-forgotten: a Ctrl+Arrow still in flight must
           // finish and publish its landing cell before the next key computes
@@ -861,43 +1165,56 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
       // Handle Spacebar shortcuts (before navigation switch since Space is not a nav key)
       if (key === " ") {
         if (modKey && shiftKey && !altKey) {
-          // Ctrl+Shift+Space - Select all (same as Ctrl+A)
+          // Ctrl+Shift+Space - the same command as Ctrl+A, not a second flat
+          // select-all. Inside a table it selects the table before the sheet.
           event.preventDefault();
           event.stopPropagation();
           eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Shift+Space', ['Ctrl', 'Shift']);
-          commitSelection({
-            startRow: 0,
-            startCol: 0,
-            endRow: config.totalRows - 1,
-            endCol: config.totalCols - 1,
-            type: "cells",
-          });
-          if (onSelectionChange) {
-            setTimeout(onSelectionChange, 0);
-          }
-          fnLog.exit('handleKeyDown', 'select all (Ctrl+Shift+Space)');
+          fnLog.exit(
+            'handleKeyDown',
+            runSelectAllGesture()
+              ? 'select all (region step, Ctrl+Shift+Space)'
+              : 'select all (Ctrl+Shift+Space)',
+          );
           return;
         }
 
         if (modKey && !shiftKey && !altKey) {
-          // Ctrl+Space - Select entire column
+          // Ctrl+Space - the table column's data, then the whole table column,
+          // then the sheet column. Outside a table: the sheet column, as before.
           event.preventDefault();
           event.stopPropagation();
           eventLog.keyboard('Grid', 'handleKeyDown', 'Ctrl+Space', ['Ctrl']);
-          if (onSelectColumn && selection) {
-            onSelectColumn(selection.endCol);
+          const columnAnchor = liveSelectionRef.current;
+          if (columnAnchor) {
+            const activeCol = columnAnchor.endCol;
+            if (advanceScopedGesture("column", columnAnchor.endRow, activeCol)) {
+              fnLog.exit('handleKeyDown', 'select column (region step)');
+              return;
+            }
+            if (onSelectColumn) {
+              onSelectColumn(activeCol);
+            }
           }
           fnLog.exit('handleKeyDown', 'select column');
           return;
         }
 
         if (shiftKey && !modKey && !altKey) {
-          // Shift+Space - Select entire row
+          // Shift+Space - the table's row, then the sheet row.
           event.preventDefault();
           event.stopPropagation();
           eventLog.keyboard('Grid', 'handleKeyDown', 'Shift+Space', ['Shift']);
-          if (onSelectRow && selection) {
-            onSelectRow(selection.endRow);
+          const rowAnchor = liveSelectionRef.current;
+          if (rowAnchor) {
+            const activeRow = rowAnchor.endRow;
+            if (advanceScopedGesture("row", activeRow, rowAnchor.endCol)) {
+              fnLog.exit('handleKeyDown', 'select row (region step)');
+              return;
+            }
+            if (onSelectRow) {
+              onSelectRow(activeRow);
+            }
           }
           fnLog.exit('handleKeyDown', 'select row');
           return;
@@ -982,15 +1299,10 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
           handled = true;
           break;
 
-        case "End":
-          if (modKey) {
-            deltaRow = config.totalRows;
-            deltaCol = config.totalCols;
-          } else {
-            deltaCol = config.totalCols;
-          }
-          handled = true;
-          break;
+        // No "End" case: every End that this handler acts on is decided above —
+        // Ctrl+End against the used range, bare End as a mode. Travelling
+        // config.totalCols columns is exactly the bug that put Ctrl+End on
+        // XFD1048576, so the delta path must never learn that trick again.
 
         default:
           fnLog.exit('handleKeyDown', 'not a navigation key');
@@ -1022,7 +1334,7 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
         fnLog.exit('handleKeyDown', 'handled');
       }
     },
-    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation, enqueueNavigation, commitSelection]
+    [enabled, isEditing, config.totalRows, config.totalCols, viewport.rowCount, selection, onSelectionChange, onClearClipboard, hasClipboardContent, onDelete, onSelectColumn, onSelectRow, onCommand, handleCtrlArrow, handleArrowNavigation, navigateToCell, enqueueNavigation, commitSelection, advanceScopedGesture, runSelectAllGesture]
   );
 
   /**

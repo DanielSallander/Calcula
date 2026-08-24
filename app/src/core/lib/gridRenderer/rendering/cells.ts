@@ -41,6 +41,14 @@ import {
 } from "./overflowMarker";
 import { pointsToPixels, buildCellFont } from "../fonts";
 import { rowHeaderGutter, colHeaderGutter } from "../layout/headerVisibility";
+// LINE BREAKING LIVES IN layout/autoFit.ts and the painter imports it rather
+// than owning it. This file used to carry the wrapper and autoFit.ts a
+// byte-identical copy of it, which is how a hard break came to be ignored in
+// TWO places at once: the cell painted on one line AND the row would not grow
+// for the break either, so autofitting the row could not reveal the defect.
+// The measurer has to mirror the painter exactly; there is one copy, and the
+// painter is not it.
+import { wrapText, splitHardBreaks, hasHardBreak } from "../layout/autoFit";
 
 // ============================================================================
 // Over-selection cell decorations
@@ -431,61 +439,6 @@ function getMergedCellHeight(
     totalHeight += getRowHeight(r, config, dimensions);
   }
   return totalHeight;
-}
-
-/**
- * Break text into lines that fit within maxWidth.
- * Uses word-boundary wrapping with fallback to character wrapping for long words.
- */
-function wrapText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number
-): string[] {
-  if (maxWidth <= 0) return [text];
-
-  const words = text.split(/(\s+)/); // Split keeping whitespace
-  const lines: string[] = [];
-  let currentLine = "";
-
-  for (const word of words) {
-    const testLine = currentLine + word;
-    const testWidth = ctx.measureText(testLine).width;
-
-    if (testWidth <= maxWidth || currentLine === "") {
-      currentLine = testLine;
-    } else {
-      // Current line is full, push it and start new line
-      if (currentLine.trim() !== "") {
-        lines.push(currentLine);
-      }
-      // Check if the word itself is wider than maxWidth (needs character wrapping)
-      if (ctx.measureText(word).width > maxWidth) {
-        let remaining = word;
-        while (remaining.length > 0) {
-          let charCount = 1;
-          while (charCount < remaining.length && ctx.measureText(remaining.substring(0, charCount + 1)).width <= maxWidth) {
-            charCount++;
-          }
-          if (charCount < remaining.length) {
-            lines.push(remaining.substring(0, charCount));
-            remaining = remaining.substring(charCount);
-          } else {
-            currentLine = remaining;
-            remaining = "";
-          }
-        }
-      } else {
-        currentLine = word;
-      }
-    }
-  }
-
-  if (currentLine.trim() !== "") {
-    lines.push(currentLine);
-  }
-
-  return lines.length > 0 ? lines : [""];
 }
 
 /**
@@ -1223,6 +1176,13 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // shrinks the font until the value fits, so there is no overhang to spill.
       let overflowRight = cellRight;
       const shouldWrapEarly = baseCellStyle.wrapText === true;
+      // A hard break makes the value MULTI-LINE, and a multi-line value does not
+      // spill: Excel's spill rule is about ONE line running out of room, which is
+      // also why a wrapped cell never spills. Left in, the spill would be decided
+      // on the run-together string anyway -- `measureText` turns LF into a space
+      // exactly as `fillText` does -- and paint a second line over a neighbour
+      // that the first line had already been given room for.
+      const hardBreak = hasHardBreak(displayValue);
       // The width this block measured, kept so the draw below does not measure
       // the same string at the same font a second time. Only set when the spill
       // block ran, which is exactly when shrink-to-fit is off — and shrink is
@@ -1232,6 +1192,7 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       const overflowedCells: Array<{ key: string; col: number; x: number; width: number; styleIndex: number }> = [];
       if (
         !shouldWrapEarly &&
+        !hardBreak &&
         !isMergedMaster &&
         !shrinkToFit &&
         contentKind === "text" &&
@@ -1472,8 +1433,37 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // "1234.5678" was cut into "1234." / "5678" — a number Excel never shows.)
       const shouldWrap = baseCellStyle.wrapText === true;
 
-      if (shouldWrap && contentKind === "text") {
-        const lines = wrapText(ctx, displayValue, availableWidth);
+      // A HARD BREAK BREAKS THE LINE WITH WRAP TEXT OFF TOO, and reaching that
+      // required a second entrance to this block: with wrap off the value goes to
+      // the single-line painter below, which hands the whole string to `fillText`
+      // -- and fillText's text preparation replaces every space character, LF
+      // included, with U+0020. So `="a"&CHAR(10)&"b"` painted `a b` on one line.
+      //
+      // Excel can afford not to need this because typing Alt+Enter switches Wrap
+      // Text ON for the cell as a side effect. Calcula's editor does not -- it
+      // inserts "\n" and touches no style (InlineEditor.tsx) -- so without this
+      // branch an Alt+Enter entry is invisible in the grid FOREVER: the <textarea>
+      // honours the break while you type it (InlineEditor.styles.ts) and the canvas
+      // eats it the moment you commit.
+      //
+      // A HARD BREAK IS DECISIVE EVIDENCE OF TEXT, which is why it can enter here
+      // past a `numeric` classification. `isNumericValue` strips ALL whitespace
+      // before parsing (`replace(/[$%,\s]/g, "")`, styles/cellFormatting.ts), so
+      // `="1"&CHAR(10)&"2"` reads as the number 12 whenever the backend's
+      // transported class is absent -- and would have shown '####' in a narrow
+      // column. No number format this renderer knows emits a newline.
+      //
+      // RICH TEXT IS DELIBERATELY EXCLUDED from the new entrance. It has its own
+      // painter below, and routing it here would trade every run's formatting for
+      // a line break. A hard-broken rich-text cell still paints on one line.
+      const richTextRuns = (cell as { richText?: RichTextRun[] }).richText;
+      const hasRichText = !!richTextRuns && richTextRuns.length > 0 && !state.showFormulas;
+      const breakWithoutWrap = hardBreak && !shouldWrap && !hasRichText;
+
+      if ((shouldWrap || breakWithoutWrap) && (contentKind === "text" || hardBreak)) {
+        const lines = shouldWrap
+          ? wrapText(ctx, displayValue, availableWidth)
+          : splitHardBreaks(displayValue);
         const lineHeight = fontSizePx * 1.2;
         const totalTextHeight = lines.length * lineHeight;
         const cellHeight = cellBottom - cellTop;
@@ -1510,8 +1500,9 @@ export function drawCellText(state: RenderState): DeferredCellDecoration[] {
       // -----------------------------------------------------------------------
       // Rich Text rendering (partial formatting within a cell)
       // -----------------------------------------------------------------------
-      const richTextRuns = (cell as { richText?: RichTextRun[] }).richText;
-      if (richTextRuns && richTextRuns.length > 0 && !state.showFormulas) {
+      // `richTextRuns` / `hasRichText` are hoisted above the wrap block, which has
+      // to know whether this cell belongs to this painter before it claims it.
+      if (richTextRuns && hasRichText) {
         ctx.textBaseline = "middle";
         const textX = cellLeft + paddingX + indentOffset;
         const textY = vAlign === "top"

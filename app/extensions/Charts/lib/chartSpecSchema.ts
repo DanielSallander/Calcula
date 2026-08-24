@@ -3,6 +3,24 @@
 //          validation, and hover documentation in the chart spec editor.
 // CONTEXT: Mirrors the TypeScript ChartSpec interface from types.ts.
 
+import { BUILT_IN_CUSTOM_ORDER_NAMES } from "./customOrderLists";
+
+/**
+ * The `customOrder` declaration, shared by the sort transform and the ordinal
+ * encoding channel: one shape, one description, so the two can never drift. The
+ * built-in list names are read from the resolver rather than retyped here.
+ */
+const CUSTOM_ORDER_PROPERTY = {
+  description:
+    "Order by a custom list instead of by value: an explicit label order, or the name of a fill list — " +
+    `the built-ins (${BUILT_IN_CUSTOM_ORDER_NAMES.join(", ")}) or one the user defined. ` +
+    "Matching is case-insensitive; labels the list does not mention sort after every listed one.",
+  oneOf: [
+    { type: "string", description: "Fill-list name." },
+    { type: "array", items: { type: "string" }, minItems: 1, description: "Explicit label order." },
+  ],
+};
+
 /**
  * Per-mark narrowing of `markOptions`: each chart type's options are validated
  * against (and autocompleted as) the one matching *MarkOptions definition. This
@@ -322,8 +340,8 @@ export const chartSpecJsonSchema: object = {
       properties: {
         type: {
           type: "string",
-          enum: ["linear", "log", "pow", "sqrt", "time"],
-          description: "Scale type. Default: \"linear\". Use \"log\" for exponential data, \"sqrt\" for area-proportional, \"time\" for a temporal X axis on line/area/scatter (when the category column is dates).",
+          enum: ["linear", "log", "pow", "sqrt", "time", "band", "point"],
+          description: "Scale type. Default: \"linear\". Use \"log\" for exponential data, \"sqrt\" for area-proportional, \"time\" for a temporal X axis on line/area/scatter (when the category column is dates), and \"band\"/\"point\" for a categorical X axis — evenly spaced labels in the data's order, which also stops number-like labels being re-spaced by value.",
         },
         domain: {
           type: "array",
@@ -919,6 +937,7 @@ export const chartSpecJsonSchema: object = {
         type: { type: "string", const: "sort" },
         field: { type: "string", description: "Series name to sort by. Use \"$category\" for alphabetical sort." },
         order: { type: "string", enum: ["asc", "desc"], description: "Sort order. Default: \"asc\"." },
+        customOrder: CUSTOM_ORDER_PROPERTY,
       },
       additionalProperties: false,
     },
@@ -1007,12 +1026,13 @@ export const chartSpecJsonSchema: object = {
       required: ["field"],
       properties: {
         field: { type: "string", description: "Source column name (matched against the header row)." },
-        type: { type: "string", enum: ["nominal", "ordinal", "quantitative", "temporal"], description: "Field type. temporal/quantitative drive a time/value X axis." },
+        type: { type: "string", enum: ["nominal", "ordinal", "quantitative", "temporal"], description: "Field type. temporal/quantitative drive a time/value X axis; ordinal/nominal a categorical one (evenly spaced labels, source order)." },
         aggregate: { type: "string", enum: ["sum", "mean", "median", "min", "max", "count"], description: "Aggregation applied when grouping." },
         timeUnit: { type: "string", description: "Time bucketing hint; presence implies a temporal axis." },
         scale: { $ref: "#/definitions/ScaleSpec", description: "Scale override for this channel's axis." },
         title: { type: ["string", "null"], description: "Axis/legend title (null = none)." },
         sort: { type: "string", enum: ["asc", "desc"], description: "Sort direction (used by the `order` channel)." },
+        customOrder: CUSTOM_ORDER_PROPERTY,
       },
       additionalProperties: false,
     },
@@ -1281,7 +1301,7 @@ export function generateSpecReference(): string {
   lines.push("");
   lines.push("| Property | Type | Default | Description |");
   lines.push("|----------|------|---------|-------------|");
-  lines.push("| type | string | \"linear\" | linear, log, pow, or sqrt |");
+  lines.push("| type | string | \"linear\" | linear, log, pow, sqrt, time, or band/point (categorical X) |");
   lines.push("| domain | [number, number] | auto | Override data extent [min, max] |");
   lines.push("| zero | boolean | varies | Include zero in domain |");
   lines.push("| nice | boolean | true | Round domain to nice values |");
@@ -1538,6 +1558,10 @@ export function generateSpecReference(): string {
   lines.push("| type | \"sort\" | yes | |");
   lines.push("| field | string | yes | Series name or \"$category\" |");
   lines.push("| order | string | no | \"asc\" (default) or \"desc\" |");
+  lines.push(`| customOrder | string \\| string[] | no | Fill-list name (${BUILT_IN_CUSTOM_ORDER_NAMES.join(", ")}, or a user list) or an explicit label order |`);
+  lines.push("");
+  lines.push("Sorting text by value is alphabetical, so weekday/month labels need customOrder:");
+  lines.push("  { \"type\": \"sort\", \"field\": \"$category\", \"customOrder\": \"weekdaysShort\" }");
   lines.push("");
   lines.push("### aggregate");
   lines.push("Group and reduce data.");

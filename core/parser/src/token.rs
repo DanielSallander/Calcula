@@ -46,6 +46,16 @@ pub enum Token {
     Hash,
     /// Postfix percent operator: 50%
     Percent,
+    /// Excel's trim-reference operator, the `.` in `A1.:.B10`.
+    ///
+    /// Only ever produced where a `.` cannot be part of a number or of a
+    /// dotted defined name -- see the lexer for both exclusions.
+    Dot,
+    /// An Excel ERROR LITERAL written into a formula: `#REF!`, `#N/A`, ...
+    ///
+    /// Carries the CANONICAL spelling (the lexer uppercases), so nothing
+    /// downstream has to normalise a user's `#n/a`.
+    ErrorLiteral(String),
     /// Row separator inside an ARRAY CONSTANT: `{1,2;3,4}`.
     ///
     /// Only ever legal between braces. Outside them a `;` is still an error —
@@ -71,6 +81,7 @@ impl std::fmt::Display for Token {
             Token::Asterisk => write!(f, "*"),
             Token::Slash => write!(f, "/"),
             Token::Caret => write!(f, "^"),
+            Token::Dot => write!(f, "."),
             Token::Ampersand => write!(f, "&"),
             Token::Equals => write!(f, "="),
             Token::NotEqual => write!(f, "<>"),
@@ -90,6 +101,7 @@ impl std::fmt::Display for Token {
             Token::RBracket => write!(f, "]"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
+            Token::ErrorLiteral(s) => write!(f, "{}", s),
             Token::Percent => write!(f, "%"),
             Token::Semicolon => write!(f, ";"),
             Token::EOF => write!(f, "EOF"),

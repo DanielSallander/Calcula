@@ -280,8 +280,28 @@ export function setArrowRefColor(color: string | null): void {
  * The visual highlight will show this many rows/cols, which is sufficient for
  * indicating a full column/row reference without iterating over millions of cells.
  */
-const MAX_FORMULA_REFERENCE_ROWS = 1000;
+export const MAX_FORMULA_REFERENCE_ROWS = 1000;
 const MAX_FORMULA_REFERENCE_COLS = 100;
+
+/**
+ * The last row a full-row highlight is allowed to reach.
+ *
+ * The reference TEXT always names the real range; this bounds only the rectangle
+ * `drawFormulaReferences` paints -- and that painter measures its height by
+ * ADDING UP `getRowHeight` over the whole extent, on every frame, as does the
+ * border hit test that runs on every mouse move. The select-all corner inserts
+ * `1:1048576`, so an uncapped extent is a million height lookups per repaint:
+ * the same trap the column inserters already dodge by capping THEIR rows.
+ *
+ * Capped as an EXTENT measured from the top of the range, never to an absolute
+ * row: `Math.min(maxRow, MAX_FORMULA_REFERENCE_ROWS - 1)` would drag a highlight
+ * of rows 5001-6000 up to rows 1-1000 and point at the wrong data.
+ */
+export function cappedHighlightEndRow(startRow: number, endRow: number): number {
+  const minRow = Math.min(startRow, endRow);
+  const maxRow = Math.max(startRow, endRow);
+  return Math.min(maxRow, minRow + MAX_FORMULA_REFERENCE_ROWS - 1);
+}
 
 // =============================================================================
 // REFERENCE DRAGGING STATE
@@ -1386,7 +1406,10 @@ export function useEditing(): UseEditingReturn {
       // FIX: Use limited bounds instead of totalCols to prevent performance issues
       const maxCol = Math.min(MAX_FORMULA_REFERENCE_COLS - 1, (config?.totalCols || MAX_FORMULA_REFERENCE_COLS) - 1);
       const minRow = Math.min(startRow, endRow);
-      const maxRow = Math.max(startRow, endRow);
+      // The ROW extent is capped too, since the select-all corner calls this with
+      // all 1,048,576 of them -- see cappedHighlightEndRow. The reference text
+      // above is built from the raw arguments, so it still says `1:1048576`.
+      const maxRow = cappedHighlightEndRow(startRow, endRow);
       // FIX: Include sheetName for cross-sheet reference highlighting
       const newRef: FormulaReference = {
         startRow: minRow,

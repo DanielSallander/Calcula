@@ -3,10 +3,13 @@
 // CONTEXT: Creates handlers for inserting column and row references when
 // clicking on headers while in formula editing mode, supporting both
 // single column/row and range references via drag selection.
+// UPDATED: The select-all corner inserts the whole-sheet reference. It is a
+// click, not a drag -- see handleFormulaCornerMouseDown for why a drag would
+// insert `1:1` instead of `1:1048576`.
 
 import type { GridConfig, Viewport, DimensionOverrides } from "../../../types";
 import type { FormulaHeaderDragState, MousePosition } from "../types";
-import { getColumnFromHeader, getRowFromHeader } from "../../../lib/gridRenderer";
+import { getColumnFromHeader, getRowFromHeader, isSelectAllCorner } from "../../../lib/gridRenderer";
 
 interface FormulaHeaderDependencies {
   config: GridConfig;
@@ -25,6 +28,11 @@ interface FormulaHeaderDependencies {
 }
 
 interface FormulaHeaderHandlers {
+  handleFormulaCornerMouseDown: (
+    mouseX: number,
+    mouseY: number,
+    event: React.MouseEvent<HTMLElement>
+  ) => boolean;
   handleFormulaColumnHeaderMouseDown: (
     mouseX: number,
     mouseY: number,
@@ -64,6 +72,45 @@ export function createFormulaHeaderHandlers(deps: FormulaHeaderDependencies): Fo
     formulaHeaderDragStartRef,
     lastMousePosRef,
   } = deps;
+
+  /**
+   * Handle mouse down on the select-all corner in formula mode.
+   * Inserts the whole-sheet reference and returns true if the event was handled.
+   *
+   * The corner is the header intersection, so it belongs to this file -- and it
+   * had to be added here because the two handlers below cannot see it: their hit
+   * tests return null for every corner pixel by construction. Before this
+   * existed, a corner click during formula entry inserted NOTHING and said
+   * nothing; `insertRowRangeReference` had exactly one caller (the row-header
+   * mouse-up below), reachable only from a row-header pixel, so no code path in
+   * the repo could emit `1:1048576`.
+   *
+   * A CLICK, NOT A DRAG -- deliberately, and Excel's corner is the same. The two
+   * handlers below seed `formulaHeaderDragStartRef` and insert on mouse UP so a
+   * drag can widen the range; doing that here would insert the WRONG reference,
+   * because mouse up re-reads the pointer through `getRowFromHeader`, which is
+   * null on corner pixels, so `finalRow` would fall back to the start index and
+   * the whole sheet would collapse to `1:1`. There is also nothing to widen: the
+   * corner already names every row of the sheet.
+   *
+   * Sheet qualification comes for free: `insertRowRangeReference` prefixes the
+   * source sheet exactly as the row-header path does, so a formula being written
+   * on another sheet gets `Sheet2!1:1048576`.
+   */
+  const handleFormulaCornerMouseDown = (
+    mouseX: number,
+    mouseY: number,
+    event: React.MouseEvent<HTMLElement>
+  ): boolean => {
+    if (!isSelectAllCorner(mouseX, mouseY, config) || !onInsertRowRangeReference) {
+      return false;
+    }
+
+    event.preventDefault();
+    onInsertRowRangeReference(0, config.totalRows - 1);
+
+    return true;
+  };
 
   /**
    * Handle mouse down on column header in formula mode.
@@ -205,6 +252,7 @@ export function createFormulaHeaderHandlers(deps: FormulaHeaderDependencies): Fo
   };
 
   return {
+    handleFormulaCornerMouseDown,
     handleFormulaColumnHeaderMouseDown,
     handleFormulaRowHeaderMouseDown,
     handleFormulaHeaderDragMove,

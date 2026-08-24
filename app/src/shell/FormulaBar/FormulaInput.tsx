@@ -5,6 +5,7 @@
 // FIX: Added F4 key handler for toggling absolute/relative cell references
 // FIX: Parses formula references on selection change for passive highlighting
 // REFACTOR: Imports from api layer instead of core internals
+// FEATURE: Expanded (multi-line) mode — one <textarea> instead of the <input>
 
 import React, { useCallback, useRef, useEffect } from "react";
 import { useGridContext, getCell, getMergeInfo, isSheetProtected, getCellProtection, checkRangeGuards, getSpillRanges } from "../../api";
@@ -15,12 +16,34 @@ import { formulaA1ToR1C1 } from "../../core/lib/r1c1";
 import { setFormulaReferences, clearFormulaReferences } from "../../core/state/gridActions";
 import { isFormulaAutocompleteVisible, AutocompleteEvents } from "../../api/formulaAutocomplete";
 import { AppEvents } from "../../api/events";
+import { FORMULA_BAR_DEFAULT_EXPANDED_HEIGHT } from "../../core/types";
 import * as S from './FormulaInput.styles';
 
-export function FormulaInput(): React.ReactElement {
+/**
+ * The bar's editor is an <input> collapsed and a <textarea> expanded, so every
+ * handler below is written against what the two SHARE — value, selectionStart,
+ * setSelectionRange, blur, getBoundingClientRect. Nothing here may reach for an
+ * input-only or textarea-only member.
+ */
+type FormulaEditorElement = HTMLInputElement | HTMLTextAreaElement;
+
+interface FormulaInputProps {
+  /** Multi-line mode: the bar has been expanded (chevron or Ctrl+Shift+U). */
+  expanded?: boolean;
+  /** Editor height in px when expanded; ignored collapsed. */
+  editorHeight?: number;
+}
+
+// Both props default to the collapsed one-line editor — the shape this
+// component had before the bar could expand — so anything that renders it
+// without a size (a test, a future host) gets the ordinary formula bar.
+export function FormulaInput({
+  expanded = false,
+  editorHeight = FORMULA_BAR_DEFAULT_EXPANDED_HEIGHT,
+}: FormulaInputProps = {}): React.ReactElement {
   const { state, dispatch } = useGridContext();
   const { editing, updateValue, commitEdit, cancelEdit, startEdit } = useEditing();
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<FormulaEditorElement | null>(null);
   const [displayValue, setDisplayValue] = React.useState("");
   const [isFocused, setIsFocused] = React.useState(false);
   const [prevEditing, setPrevEditing] = React.useState(editing);
@@ -254,8 +277,37 @@ export function FormulaInput(): React.ReactElement {
     return () => window.removeEventListener(AutocompleteEvents.ACCEPTED, handleAccepted);
   }, [editing, updateValue]);
 
+  /**
+   * Tell the autocomplete extension what the caret is standing in.
+   *
+   * Both halves of that feature read this one event, and they need it at
+   * different moments: the suggestion dropdown only while a name is being
+   * TYPED, but the function screen tip whenever the CARET moves — its whole job
+   * is to say which argument of which (innermost) call the caret is in.
+   */
+  const emitAutocompleteInput = useCallback((value: string, cursorPos: number) => {
+    const inputEl = inputRef.current;
+    if (!inputEl) return;
+    const rect = inputEl.getBoundingClientRect();
+    window.dispatchEvent(
+      new CustomEvent(AutocompleteEvents.INPUT, {
+        detail: {
+          value,
+          cursorPosition: cursorPos,
+          anchorRect: {
+            x: rect.left,
+            y: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+          },
+          source: "formulaBar",
+        },
+      })
+    );
+  }, []);
+
   const handleChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
+    (e: React.ChangeEvent<FormulaEditorElement>) => {
       const newValue = e.target.value;
       setDisplayValue(newValue);
       if (editing) {
@@ -263,31 +315,12 @@ export function FormulaInput(): React.ReactElement {
       }
 
       // FIX: Track cursor position globally for cursor-aware formula mode detection
-      const inputEl = inputRef.current;
-      const cursorPos = inputEl?.selectionStart ?? newValue.length;
+      const cursorPos = inputRef.current?.selectionStart ?? newValue.length;
       setGlobalCursorPosition(cursorPos);
 
-      // Emit autocomplete input event with cursor position and anchor rect
-      if (inputEl) {
-        const rect = inputEl.getBoundingClientRect();
-        window.dispatchEvent(
-          new CustomEvent(AutocompleteEvents.INPUT, {
-            detail: {
-              value: newValue,
-              cursorPosition: cursorPos,
-              anchorRect: {
-                x: rect.left,
-                y: rect.bottom,
-                width: rect.width,
-                height: rect.height,
-              },
-              source: "formulaBar",
-            },
-          })
-        );
-      }
+      emitAutocompleteInput(newValue, cursorPos);
     },
-    [editing, updateValue]
+    [editing, updateValue, emitAutocompleteInput]
   );
 
   const handleFocus = useCallback(async () => {
@@ -316,7 +349,16 @@ export function FormulaInput(): React.ReactElement {
     if (!editing && state.selection) {
       await startEdit(state.selection.endRow, state.selection.endCol);
     }
-  }, [editing, state.selection, startEdit, isSpillRef]);
+
+    // An edit that OPENS on an existing formula gets its screen tip straight
+    // away. Nothing else emits for this: the first keystroke used to be the
+    // earliest the extension heard anything at all, so clicking into
+    // `=VLOOKUP(...)` to check which argument you were on showed nothing.
+    const inputEl = inputRef.current;
+    if (inputEl && inputEl.value.startsWith("=")) {
+      emitAutocompleteInput(inputEl.value, inputEl.selectionStart ?? inputEl.value.length);
+    }
+  }, [editing, state.selection, startEdit, isSpillRef, emitAutocompleteInput]);
 
   const handleBlur = useCallback(() => {
     setIsFocused(false);
@@ -325,15 +367,37 @@ export function FormulaInput(): React.ReactElement {
   /**
    * FIX: Track cursor position changes from arrow keys, mouse clicks within input, etc.
    * This ensures globalCursorPosition stays accurate even when the value doesn't change.
+   *
+   * It also re-emits the autocomplete input, because the screen tip resolves
+   * the INNERMOST open call: arrowing or clicking out of `SUM` into the nested
+   * `ROUND` changes which tip is correct without changing a character of the
+   * formula. Emitting only from onChange meant that logic — which is written
+   * and correct — was simply never re-run, so the tip kept describing the call
+   * the caret had left. (The Define Name dialog's "Refers to" field has always
+   * emitted from onSelect; the grid's two editors had not.)
    */
   const handleSelect = useCallback(() => {
-    if (inputRef.current) {
-      setGlobalCursorPosition(inputRef.current.selectionStart ?? inputRef.current.value.length);
+    const inputEl = inputRef.current;
+    if (!inputEl) return;
+    const cursorPos = inputEl.selectionStart ?? inputEl.value.length;
+    setGlobalCursorPosition(cursorPos);
+    if (inputEl.value.startsWith("=")) {
+      emitAutocompleteInput(inputEl.value, cursorPos);
     }
-  }, []);
+  }, [emitAutocompleteInput]);
 
+  /**
+   * THE TEXTAREA TRAP. Expanded, this runs on a <textarea>, where Enter inserts
+   * a newline by DEFAULT. Every branch below that ends an entry — Enter, Tab,
+   * Escape — therefore has to keep calling preventDefault() before it commits,
+   * or committing an entry would also leave a stray "\n" in the cell. The one
+   * key that is allowed to type a newline is Alt+Enter, and it does so by
+   * splicing the character itself rather than by letting the default through,
+   * which is exactly what the in-cell editor (a <textarea> since it shipped)
+   * does. Nothing in here may be "simplified" by dropping a preventDefault.
+   */
   const handleKeyDown = useCallback(
-    async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    async (e: React.KeyboardEvent<FormulaEditorElement>) => {
       e.stopPropagation();
 
       // Intercept keys for formula autocomplete when the dropdown is visible
@@ -442,23 +506,48 @@ export function FormulaInput(): React.ReactElement {
   // Read-only when showing chart series formula, protected cell, or spill ref
   const isReadOnly = isProtectedCell || chartSeriesFormula !== null || isSpillRef;
 
-  return (
-    <S.StyledInput
-      ref={inputRef}
-      type="text"
-      value={displayValue}
-      onChange={handleChange}
-      onFocus={handleFocus}
-      onBlur={handleBlur}
-      onKeyDown={handleKeyDown}
-      onMouseDown={handleMouseDown}
-      onSelect={handleSelect}
-      readOnly={isReadOnly}
-      $isFocused={isFocused}
-      $isSpillRef={isSpillRef}
-      data-formula-bar="true"
-      placeholder=""
-      aria-label="Formula Bar"
+  /**
+   * One ref for two element types. A callback ref takes the union without the
+   * cast a `RefObject<HTMLInputElement>` would need on the textarea branch.
+   */
+  const setEditorRef = useCallback((el: FormulaEditorElement | null) => {
+    inputRef.current = el;
+  }, []);
+
+  /**
+   * Identical on both elements — including `data-formula-bar`, which is how the
+   * in-cell editor decides that focus moving to the bar is a hand-off rather
+   * than a blur to be committed (InlineEditor.tsx), and how the E2E helpers
+   * find the bar.
+   */
+  const editorProps = {
+    value: displayValue,
+    onChange: handleChange,
+    onFocus: handleFocus,
+    onBlur: handleBlur,
+    onKeyDown: handleKeyDown,
+    onMouseDown: handleMouseDown,
+    onSelect: handleSelect,
+    readOnly: isReadOnly,
+    $isFocused: isFocused,
+    $isSpillRef: isSpillRef,
+    "data-formula-bar": "true",
+    placeholder: "",
+    "aria-label": "Formula Bar",
+  };
+
+  // Collapsed the bar stays an <input>: it is the shape everything already
+  // points at, and a one-line textarea would only be an input that can scroll
+  // its second line out of sight.
+  return expanded ? (
+    <S.StyledTextArea
+      ref={setEditorRef}
+      rows={1}
+      spellCheck={false}
+      $height={editorHeight}
+      {...editorProps}
     />
+  ) : (
+    <S.StyledInput ref={setEditorRef} type="text" {...editorProps} />
   );
 }

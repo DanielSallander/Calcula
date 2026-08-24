@@ -11,9 +11,9 @@ use crate::api_types::{
 use crate::{
     evaluate_formula_multi_sheet_with_files,
     evaluate_formula_raw_with_files_and_pivot,
-    extract_all_references, format_cell_value, get_column_row_dependents,
-    get_recalculation_order, parse_cell_input, parse_cell_input_invariant,
-    parse_cell_input_with_format,
+    entry_format_at, extract_all_references, format_cell_value, get_column_row_dependents,
+    get_recalculation_order, is_text_format, parse_cell_input, parse_cell_input_in_format,
+    parse_cell_input_invariant, parse_cell_input_invariant_in_format,
     update_column_dependencies, update_cross_sheet_dependencies,
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
@@ -1925,7 +1925,18 @@ fn update_cell_impl(
         // or 0.5 — and without the implied format the cell shows `43983` and
         // `0.5`. Excel applies the format the entry implied, which is what makes
         // a typed date look like the date the user typed.
-        let (mut cell, implied_format) = parse_cell_input_with_format(&value, &locale);
+        //
+        // AND THE FORMAT THE ENTRY IS LANDING IN, which is the mirror image of
+        // that and the half that used to LOSE data. The Text format `@` read
+        // nothing on any entry path, so `007` typed into a Text-formatted cell
+        // was stored as the number 7 and then re-rendered through `General`:
+        // the cell displayed "7", leading zeros gone, ISTEXT false. It is the
+        // EFFECTIVE format (`entry_format_at`), because a column formatted as
+        // Text is how a column of part numbers gets protected and every cell in
+        // it still carries style index 0.
+        let target_format = entry_format_at(&grid, &styles, row, col);
+        let (mut cell, implied_format) =
+            parse_cell_input_in_format(&value, &locale, Some(&target_format));
 
         // Preserve existing style
         if let Some(existing) = grid.get_cell(row, col) {
@@ -3461,10 +3472,24 @@ pub(crate) fn update_cells_batch_core(
         // write in canonical US form, and a script that means to write a date
         // says so with a format of its own rather than having one inferred from
         // the string it passed.
+        //
+        // BOTH branches are told the format the entry LANDS in, which is the
+        // opposite direction and applies to a script as much as to a paste: an
+        // `@` cell stores what it was given, verbatim (see the ladder). An
+        // explicit `styleIndex` on the update wins, because that IS the cell's
+        // format once this write completes; otherwise it is the format that
+        // effectively applies at the position, row and column tiers included.
+        let target_format = match update.style_index {
+            Some(idx) => styles.get(idx).number_format.clone(),
+            None => entry_format_at(&grid, &styles, row, col),
+        };
         let (mut cell, implied_format) = if update.invariant.unwrap_or(false) {
-            (parse_cell_input_invariant(value, &locale), None)
+            (
+                parse_cell_input_invariant_in_format(value, &locale, Some(&target_format)),
+                None,
+            )
         } else {
-            parse_cell_input_with_format(value, &locale)
+            parse_cell_input_in_format(value, &locale, Some(&target_format))
         };
 
         // Apply explicit style from input if provided, otherwise preserve existing
@@ -7445,6 +7470,12 @@ pub(crate) fn update_cell_on_sheets_inner(
         let locale = state.locale.lock().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
         let sheet_names = state.sheet_names.read().unwrap();
+        // READ-ONLY, and in the same position the canonical order gives it in
+        // `update_cell_impl` (grids, sheet_names, user_files, then styles). Only
+        // the Text-format decision below needs it: a group edit has one typed
+        // string and N destinations, and the format that decides the VALUE is a
+        // property of each destination.
+        let styles = state.style_registry.read().unwrap();
         let active_sheet = *state.active_sheet.read().unwrap();
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let mut wrote: Vec<usize> = Vec::new();
@@ -7528,15 +7559,36 @@ pub(crate) fn update_cell_on_sheets_inner(
                 undo_stack.begin_transaction(format!("Update cell on sheet {}", sheet_idx));
                 let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
 
-                let mut cell = cell_template.clone();
+                // THE TEXT FORMAT DECIDES THE VALUE, AND IT DECIDES IT PER
+                // SHEET. `cell_template` was parsed once with no destination in
+                // view, which is fine for every other rung of the ladder but not
+                // for this one: `007` on a group where Sheet2's column is
+                // formatted as Text must be the string "007" there and the
+                // number 7 elsewhere. Re-parsed rather than post-processed, so
+                // the one ladder stays the one authority.
+                let target_format =
+                    entry_format_at(&grids[sheet_idx], &styles, row, col);
+                let stored_as_text = is_text_format(&target_format);
+                let mut cell = if stored_as_text {
+                    if invariant.unwrap_or(false) {
+                        parse_cell_input_invariant_in_format(&value, &locale, Some(&target_format))
+                    } else {
+                        parse_cell_input_in_format(&value, &locale, Some(&target_format)).0
+                    }
+                } else {
+                    cell_template.clone()
+                };
 
                 // Preserve existing style from target sheet
                 if let Some(existing) = grids[sheet_idx].get_cell(row, col) {
                     cell.style_index = existing.style_index;
                 }
 
-                // If formula, evaluate in the context of the target sheet
-                if is_formula {
+                // If formula, evaluate in the context of the target sheet.
+                // `stored_as_text` excluded: a formula typed into a Text cell is
+                // the literal string on THAT sheet, and evaluating it would put
+                // a value behind text the user asked to be left alone.
+                if is_formula && !stored_as_text {
                     if let Some(ref ast) = engine_ast {
                         let result_value = crate::evaluate_formula_multi_sheet_with_ast_and_files(
                             &grids,
@@ -7562,8 +7614,9 @@ pub(crate) fn update_cell_on_sheets_inner(
                 // to walk. Registered here for EVERY caller, through the same
                 // normalize-then-update pair `update_cell_impl` uses. A
                 // non-formula overwrite registers the empty set, which removes
-                // whatever the previous formula had registered.
-                let new_refs = if is_formula {
+                // whatever the previous formula had registered — and a formula
+                // stored as TEXT on this sheet is a non-formula overwrite.
+                let new_refs = if is_formula && !stored_as_text {
                     if let Some(ref ast) = engine_ast {
                         crate::normalize_cross_sheet_refs(
                             &crate::extract_all_references(ast, &grids[sheet_idx])

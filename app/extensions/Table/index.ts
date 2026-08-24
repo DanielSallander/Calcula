@@ -29,6 +29,7 @@ import {
   initRequestStateListener,
   initClickInterceptor,
 } from "./handlers/selectionHandler";
+import { registerTableSelectCommands } from "./handlers/selectCommands";
 import {
   resetTableStore,
   syncTableRegions,
@@ -67,6 +68,11 @@ function activate(context: ExtensionContext): void {
 
   // Register style interceptor for table formatting (header, banded rows, etc.)
   cleanupFunctions.push(registerTableStyleInterceptor());
+
+  // "Select this table" for the ribbon, macros and scripts. The grid keyboard
+  // reaches the same geometry through the region's selectionScope instead,
+  // because its gestures are progressive and a command yields one block.
+  cleanupFunctions.push(registerTableSelectCommands(context.commands));
 
   // Register grid overlay renderer for table borders
   cleanupFunctions.push(

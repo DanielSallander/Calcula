@@ -141,6 +141,75 @@ fn nlogn_units(n: u64) -> u64 {
 /// the budget is exhausted (or the pass was cancelled). Used for work measured
 /// in "node equivalents": range materialization, array element production,
 /// per-element `EvalResult` handling.
+/// The uppercased wildcard PATTERN a lookup value carries, or `None` when it is
+/// not a pattern at all.
+///
+/// One place decides "is this a wildcard lookup", so the SCAN and the pass-CACHE
+/// cannot disagree about it. They did: `match_cached` bailed out on a `*`/`?`
+/// needle so MATCH kept its wildcard scan, while `vlookup_hlookup_cached` had no
+/// such bail-out and served the pattern from a string-equality index — so the
+/// same VLOOKUP answered differently on a cold pass and a warm one.
+fn wildcard_pattern(v: &EvalResult) -> Option<String> {
+    match v {
+        EvalResult::Text(s) if needs_wildcard_matcher(s) => Some(s.to_uppercase()),
+        _ => None,
+    }
+}
+
+/// Excel-on-Windows reads CHAR's argument as WINDOWS-1252, not Latin-1.
+///
+/// The two agree on 0-127 and on 160-255 and disagree on exactly 32 code
+/// points, 128-159, where Latin-1 has unused C1 control characters and
+/// Windows-1252 has typographic punctuation. So `CHAR(128)` is the EURO SIGN in
+/// Excel and was U+0080 here -- an invisible control character where a currency
+/// symbol belonged, which is the kind of difference that survives a save and
+/// turns up in somebody else's spreadsheet.
+///
+/// A TABLE, not arithmetic: the mapping is not a formula. Five of the 32 slots
+/// (129, 141, 143, 144, 157) are UNDEFINED in Windows-1252, and the table keeps
+/// the raw code point for those -- which is what Excel returns too.
+fn windows_1252_char(byte: u8) -> char {
+    const HIGH: [char; 32] = [
+        '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}', '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+    ];
+    if (128..=159).contains(&byte) {
+        HIGH[(byte - 128) as usize]
+    } else {
+        byte as char
+    }
+}
+
+/// Whether a string carries an UNESCAPED Excel wildcard.
+///
+/// `~` ESCAPES, so `"~*"` is a literal asterisk and is NOT a pattern. Testing
+/// `contains('*')` alone — which is what this replaced — made
+/// `COUNTIF(rng,"~*")` take the wildcard path, where the `~` was consumed as an
+/// escape and the pattern became "match anything".
+fn has_wildcard(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'~' => i += 2, // whatever follows is a literal
+            b'*' | b'?' => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Whether a string must be handled by the wildcard MATCHER rather than by
+/// plain equality.
+///
+/// WIDER THAN `has_wildcard`, and the difference is the tilde. `"~*"` has no
+/// unescaped wildcard, so it is not a pattern — but it is not a literal
+/// `"~*"` either: it means the single character `*`, and ONLY the matcher knows
+/// how to unescape it. Comparing it with `eq_ci_folded` made
+/// `COUNTIF(rng,"~*")` answer 0 for a range that does contain an asterisk.
+fn needs_wildcard_matcher(s: &str) -> bool {
+    has_wildcard(s) || s.contains('~')
+}
+
 /// Reserved scope slots for ARRAY LIFTING (`call_with_values`).
 ///
 /// Each begins with a SPACE, which the lexer's `is_letter` never accepts as the
@@ -213,6 +282,11 @@ enum CriteriaMatch {
     TextNotEqual(String),
     Compare(CriteriaOp, f64),
     Wildcard(String),
+    /// `"<>a*"` — the NEGATION of a wildcard match, which used to be
+    /// unreachable: `parse_criteria` tested the `<>` prefix before the wildcard
+    /// test, so the pattern arrived at `TextNotEqual` and was compared as a
+    /// literal asterisk.
+    WildcardNotEqual(String),
     /// `""` — a blank cell OR a cell holding the empty string. Excel's
     /// `COUNTIF(rng,"")`.
     BlankOrEmpty,
@@ -220,6 +294,29 @@ enum CriteriaMatch {
     OnlyBlank,
     /// `"<>"` — anything that is not a blank cell.
     NonBlank,
+}
+
+/// Something a LAMBDA helper can invoke: a user LAMBDA, or a BUILT-IN passed by
+/// bare name (Excel's eta-reduced form).
+enum Callable {
+    Lambda { params: Vec<String>, body: Expression },
+    Builtin(BuiltinFunction),
+}
+
+impl Callable {
+    /// Whether this accepts a call of `n` arguments.
+    ///
+    /// A LAMBDA declares its parameters and must match exactly — that check was
+    /// already at every call site and is preserved. A BUILT-IN accepts whatever
+    /// the helper hands it and validates its own arity, exactly as it would if
+    /// the user had written the wrapper out: `BYROW(rng, SUM)` and
+    /// `BYROW(rng, LAMBDA(r, SUM(r)))` must not disagree about anything.
+    fn accepts_arity(&self, n: usize) -> bool {
+        match self {
+            Callable::Lambda { params, .. } => params.len() == n,
+            Callable::Builtin(_) => true,
+        }
+    }
 }
 
 /// The result of evaluating an expression.
@@ -1173,12 +1270,19 @@ impl<'a> Evaluator<'a> {
             Expression::NamedRef { name, .. } => {
                 // Check scope first (LAMBDA/LET bindings)
                 let key = name.to_uppercase();
-                let scope = self.scope.borrow();
-                if let Some(val) = scope.get(&key) {
-                    val.clone()
-                } else {
-                    // Unresolved name → #NAME? error
-                    EvalResult::Error(CellError::Name)
+                let bound = self.scope.borrow().get(&key).cloned();
+                match bound {
+                    Some(val) => val,
+                    // Unresolved name -> #NAME?, and it must STAY that.
+                    //
+                    // A bare built-in name IS a function value in Excel, but only
+                    // where a function is expected: `callable_arg` resolves it
+                    // there, from the EXPRESSION. Resolving it here instead would
+                    // change what `=RATE*2` means in every workbook whose defined
+                    // name collides with a built-in — and RATE, VALUE, INDEX and
+                    // LOG are all both. It did, and it turned two #NAME? cells
+                    // into #VALUE! ones.
+                    None => EvalResult::Error(CellError::Name),
                 }
             }
             Expression::SpillRef { .. } => {
@@ -1194,91 +1298,146 @@ impl<'a> Evaluator<'a> {
 
     /// Evaluates the @ implicit intersection operator.
     /// Extracts the single value from a range at the formula's row or column.
+    /// Evaluates Excel's `@` operator — implicit intersection.
+    ///
+    /// EXCEL'S RULES, and three of the four were wrong here.
+    ///
+    /// 1. A REFERENCE spanning ONE COLUMN reduces to the cell on the formula's
+    ///    ROW; one spanning ONE ROW reduces to the cell in its COLUMN. Outside
+    ///    the span there is no intersection and the answer is `#VALUE!`.
+    /// 2. A ONE-CELL reference is already a single value and reduces to itself,
+    ///    wherever the formula sits. That case used to fall through to the
+    ///    "formula is outside the range" arm and answer `#VALUE!`.
+    /// 3. An ARRAY that is not a reference — `@SEQUENCE(3)`, `@{1;2;3}` — reduces
+    ///    to its FIRST (top-left) element. This used to index the array by
+    ///    `current_row`, the ABSOLUTE grid row, so `=@SEQUENCE(3)` answered the
+    ///    first element in row 1, the second in row 2, and `#VALUE!` from row 4
+    ///    down: an answer that depended on where the formula was typed, and one
+    ///    that was right in row 1 only by accident.
+    /// 4. A 2-D reference has no single-axis intersection, so it is `#VALUE!`.
+    ///    It used to return `grid.get_cell(current_row, current_col)` — the
+    ///    formula's OWN cell — which is a self-reference rather than an
+    ///    intersection, so the whole branch was degenerate.
+    ///
+    /// COLUMN AND ROW REFERENCES (`@A:A`, `@1:1`) go through the same rules
+    /// rather than through the array path, so `=@A:A` is the cell on this row
+    /// and not the first populated cell in the column.
     fn eval_implicit_intersection(&self, operand: &Expression) -> EvalResult {
         // Get the formula's position
         let current_row = self.context.current_row.unwrap_or(0);
         let current_col = self.context.current_col.unwrap_or(0);
 
-        // Try to determine the range start position from the operand
-        match operand {
+        // The rectangle this operand names, when it names one at all.
+        let rect = match operand {
             Expression::Range { start, end, sheet, .. } => {
+                match (start.as_ref(), end.as_ref()) {
+                    (
+                        Expression::CellRef { col: sc, row: sr, .. },
+                        Expression::CellRef { col: ec, row: er, .. },
+                    ) => {
+                        let (a, b) = (col_to_index(sc), col_to_index(ec));
+                        Some((sheet, (sr - 1).min(er - 1), (sr - 1).max(er - 1), a.min(b), a.max(b)))
+                    }
+                    // A range whose endpoints are not literal cells (a spill ref
+                    // resolved elsewhere, say) has no rectangle to intersect;
+                    // its VALUE takes the array rule below.
+                    _ => None,
+                }
+            }
+            Expression::ColumnRef { sheet, start_col, end_col, .. } => {
+                let (a, b) = (col_to_index(start_col), col_to_index(end_col));
                 let grid = match self.resolve_grid_for_sheet(sheet) {
-                    Ok(grid) => grid,
+                    Ok(g) => g,
                     Err(err) => return EvalResult::Error(err),
                 };
-                let (start_col_s, start_row) = if let Expression::CellRef { col, row, .. } = start.as_ref() {
-                    (col.clone(), *row)
-                } else {
-                    return self.evaluate(operand);
+                Some((sheet, 0, grid.max_row, a.min(b), a.max(b)))
+            }
+            Expression::RowRef { sheet, start_row, end_row, .. } => {
+                let grid = match self.resolve_grid_for_sheet(sheet) {
+                    Ok(g) => g,
+                    Err(err) => return EvalResult::Error(err),
                 };
-                let (end_col_s, end_row) = if let Expression::CellRef { col, row, .. } = end.as_ref() {
-                    (col.clone(), *row)
+                Some((
+                    sheet,
+                    (start_row - 1).min(end_row - 1),
+                    (start_row - 1).max(end_row - 1),
+                    0,
+                    grid.max_col,
+                ))
+            }
+            _ => None,
+        };
+
+        if let Some((sheet, min_row, max_row, min_col, max_col)) = rect {
+            let grid = match self.resolve_grid_for_sheet(sheet) {
+                Ok(grid) => grid,
+                Err(err) => return EvalResult::Error(err),
+            };
+            let cell_at = |r: u32, c: u32| match grid.get_cell(r, c) {
+                Some(cell) => self.cell_value_to_result(&cell.value),
+                None => EvalResult::Blank,
+            };
+            let single_col = min_col == max_col;
+            let single_row = min_row == max_row;
+
+            return if single_col && single_row {
+                // Rule 2: already one cell.
+                cell_at(min_row, min_col)
+            } else if single_col {
+                if current_row >= min_row && current_row <= max_row {
+                    cell_at(current_row, min_col)
                 } else {
-                    return self.evaluate(operand);
-                };
-
-                let start_col_idx = col_to_index(&start_col_s);
-                let end_col_idx = col_to_index(&end_col_s);
-                let start_row_idx = start_row - 1;
-                let end_row_idx = end_row - 1;
-
-                let min_row = start_row_idx.min(end_row_idx);
-                let max_row = start_row_idx.max(end_row_idx);
-                let min_col = start_col_idx.min(end_col_idx);
-                let max_col = start_col_idx.max(end_col_idx);
-
-                let is_single_col = min_col == max_col;
-                let is_single_row = min_row == max_row;
-
-                if is_single_col && current_row >= min_row && current_row <= max_row {
-                    // Vertical range: return cell at formula's row
-                    match grid.get_cell(current_row, min_col) {
-                        Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Blank,
-                    }
-                } else if is_single_row && current_col >= min_col && current_col <= max_col {
-                    // Horizontal range: return cell at formula's column
-                    match grid.get_cell(min_row, current_col) {
-                        Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Blank,
-                    }
-                } else if current_row >= min_row && current_row <= max_row
-                       && current_col >= min_col && current_col <= max_col {
-                    // 2D range but formula is inside it: return the intersecting cell
-                    match grid.get_cell(current_row, current_col) {
-                        Some(cell) => self.cell_value_to_result(&cell.value),
-                        None => EvalResult::Blank,
-                    }
-                } else {
-                    // Formula is outside the range - no intersection
                     EvalResult::Error(CellError::Value)
                 }
-            }
-            _ => {
-                // For non-range operands, evaluate normally
-                let result = self.evaluate(operand);
-                // If result is an array, try to pick the element at the formula's row
-                match &result {
-                    EvalResult::Array(arr) if !arr.is_empty() => {
-                        let idx = current_row as usize;
-                        if idx < arr.len() {
-                            arr[idx].clone()
-                        } else {
-                            EvalResult::Error(CellError::Value)
-                        }
-                    }
-                    _ => result,
+            } else if single_row {
+                if current_col >= min_col && current_col <= max_col {
+                    cell_at(min_row, current_col)
+                } else {
+                    EvalResult::Error(CellError::Value)
+                }
+            } else {
+                // Rule 4: no single-axis intersection exists for a 2-D
+                // reference. Excel answers #VALUE! outside it and a circular
+                // reference inside it; refusing both is the honest answer and
+                // never invents a self-reference.
+                EvalResult::Error(CellError::Value)
+            };
+        }
+
+        // Rule 3: an ARRAY reduces to its top-left element.
+        let result = self.evaluate(operand);
+        match &result {
+            EvalResult::Array(_) => {
+                let (rows, cols) = array_lift::shape(&result);
+                if rows == 0 || cols == 0 {
+                    EvalResult::Error(CellError::Value)
+                } else {
+                    array_lift::at(&result, 0, 0)
                 }
             }
+            _ => result,
         }
     }
 
     /// Evaluates a literal value.
     fn eval_literal(&self, value: &Value) -> EvalResult {
         match value {
-            Value::Number(n) => EvalResult::Number(*n),
+            // `finite_or_num`, not a bare `Number`. The numeric ceiling was only
+            // half enforced: `finite_or_num` gates arithmetic RESULTS, so
+            // `=1.8E308+0` was correctly #NUM! while the bare literal `=1.8E308`
+            // sailed past as an infinity — `=ISNUMBER(1.8E308)` answered TRUE and
+            // `=1.8E308&""` rendered the text "inf". Excel refuses such a literal
+            // at entry; refusing it at evaluation is the same answer one layer
+            // later, and it keeps an infinity from ever entering a cell.
+            Value::Number(n) => finite_or_num(*n),
             Value::String(s) => EvalResult::Text(s.clone()),
             Value::Boolean(b) => EvalResult::Boolean(*b),
+            // An error LITERAL evaluates to that error. The parser holds it as
+            // text because `CellError` lives here and the engine depends on the
+            // parser, not the reverse; `from_literal` is the single mapping and
+            // `error_literals_match_the_lexers_table` pins the two tables
+            // against each other.
+            Value::Error(lit) => EvalResult::Error(CellError::from_literal(lit)),
         }
     }
 
@@ -1426,11 +1585,38 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Evaluates a column reference and returns an array of values.
-    /// Only includes cells that have data (iterates over actual cells, not all rows).
-    /// OPTIMIZED: Instead of iterating 0..max_row (potentially thousands of iterations),
-    /// we iterate directly over the grid's HashMap and filter by column range.
-    /// This is O(n) where n = number of cells, not O(max_row * columns).
+    /// Evaluates a whole-column reference (`A:A`, `A:D`, `Sheet1!A:B`).
+    ///
+    /// BOUNDED TO THE USED RANGE AND DENSE, which is a change from what this
+    /// used to do and the point of the whole function. It used to return only
+    /// the POPULATED cells, so the array was shorter than the column and its
+    /// index `i` had nothing to do with row `i`. That is invisible to an
+    /// aggregate — `SUM` skips blanks either way — and wrong for everything that
+    /// pairs two references by ordinal:
+    ///
+    /// - `=SUMIF(B:B,x,C:C)` compacted the two columns INDEPENDENTLY, so one
+    ///   blank in B and the sum came from the wrong rows of C. A plausible wrong
+    ///   number, only on gapped data, with no error on it. Same for SUMIFS,
+    ///   COUNTIFS, AVERAGEIFS, MAXIFS/MINIFS and the cached criteria path.
+    /// - `MATCH` returned the ordinal AMONG POPULATED CELLS, so `INDEX`/`MATCH`
+    ///   over a gapped column addressed the wrong row.
+    /// - `=TEXTJOIN(",",FALSE,A:A)` dropped the blanks that `A1:A3` keeps, so the
+    ///   two spellings of the same data disagreed.
+    ///
+    /// WHY THE USED RANGE MAKES THIS AFFORDABLE, and it is the reason the naive
+    /// "materialise the whole column" objection does not apply: the span is
+    /// `0..=grid.max_row`, the bottom of the sheet's own bounding box, not
+    /// 1,048,576. A column of 200 rows materialises 200 cells. This is also what
+    /// Excel does, and it is why the two spellings can agree at all — the bound
+    /// has to be the SHEET's used range and not each column's own last row, or
+    /// two columns would be bounded differently and misalign again.
+    ///
+    /// The pathological shape is a stray cell far down the sheet, which makes
+    /// `max_row` huge for every column: that is charged for its full span
+    /// (`charge!` below) and capped by `MAX_ARRAY_ELEMENTS`, so it answers
+    /// `#LIMIT!` rather than quietly allocating for a million rows. Excel has the
+    /// same cliff, which is why "clean up the used range" is a known ritual
+    /// there.
     fn eval_column_ref(
         &self,
         sheet: &Option<String>,
@@ -1447,95 +1633,20 @@ impl<'a> Evaluator<'a> {
         let min_col = start_col_idx.min(end_col_idx);
         let max_col = start_col_idx.max(end_col_idx);
 
-        // FAST PATH (C3a): a single whole-column reference (the dominant shape,
-        // e.g. SUM(A:A) / INDEX(A:A,k) / MATCH(x,A:A,0)) needs only the populated
-        // rows of that ONE column, in row-ascending order — never the column-
-        // major-then-row sort the general path does. Both strategies below yield
-        // the SAME cells in the SAME order (provably identical, including for the
-        // order-sensitive INDEX/MATCH/SUMIF consumers); we pick the cheaper:
-        //   - row-walk O(max_row): one get_cell probe per row. Best for a DENSE
-        //     column (max_row near the populated-cell count) and avoids the sort.
-        //   - filtered collect + row-sort O(populated + M log M): used when
-        //     max_row greatly exceeds the populated-cell count (a SPARSE column in
-        //     a tall grid, e.g. SUM(Z:Z) when another column reaches row 1e6),
-        //     where a 0..=max_row walk would be a needless O(max_row) cliff.
-        // The multi-column branch below still sorts column-major then row-major
-        // (that order IS consumed positionally and must be preserved).
-        // BULK PRE-CHARGE, per branch rather than once up front, because the
-        // branches differ by orders of magnitude: charging the populated-cell
-        // count for the DENSE walk would bill `SUM(A:A)` for the whole
-        // workbook when it only probes one column's worth of rows. (The `+1`
-        // keeps a reference into an empty grid from being free.)
-        if min_col == max_col {
-            if (grid.max_row as usize) <= grid.cells.len() {
-                // Dense enough: the walk costs <= populated-cell count probes.
-                charge!(self, (grid.max_row as u64).saturating_add(1));
-                let mut values = Vec::new();
-                for row in 0..=grid.max_row {
-                    if let Some(cell) = grid.get_cell(row, min_col) {
-                        values.push(self.cell_value_to_result(&cell.value));
-                    }
-                }
-                return EvalResult::Array(values);
-            }
-            // Sparse/tall: iterate only the populated cells of this column + sort
-            // by row, avoiding the O(max_row) walk.
-            charge!(self, (grid.cells.len() as u64).saturating_add(1));
-            let mut col_cells: Vec<(u32, &crate::cell::Cell)> = grid
-                .cells
-                .iter()
-                .filter_map(|((row, col), cell)| {
-                    if *col == min_col {
-                        Some((*row, cell))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            col_cells.sort_by_key(|(row, _)| *row);
-            let values = col_cells
-                .into_iter()
-                .map(|(_, cell)| self.cell_value_to_result(&cell.value))
-                .collect();
-            return EvalResult::Array(values);
-        }
-
-        // OPTIMIZED: Collect cells from the HashMap that fall within the column range
-        // This avoids iterating over potentially thousands of empty rows
-        charge!(self, (grid.cells.len() as u64).saturating_add(1));
-        let mut cell_list: Vec<(u32, u32, &crate::cell::Cell)> = grid
-            .cells
-            .iter()
-            .filter_map(|((row, col), cell)| {
-                if *col >= min_col && *col <= max_col {
-                    Some((*row, *col, cell))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Sort by column first, then row to match Excel's order
-        cell_list.sort_by(|a, b| {
-            match a.1.cmp(&b.1) {
-                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
-                other => other,
-            }
-        });
-
-        let mut values = Vec::new();
-        for (_row, _col, cell) in cell_list {
-            let result = self.cell_value_to_result(&cell.value);
-            values.push(result);
-        }
-
-        EvalResult::Array(values)
+        self.materialize_axis_rect(grid, 0, grid.max_row, min_col, max_col)
     }
 
-    /// Evaluates a row reference and returns an array of values.
-    /// Only includes cells that have data (iterates over actual cells, not all cols).
-    /// OPTIMIZED: Instead of iterating 0..max_col, we iterate directly over the
-    /// grid's HashMap and filter by row range. This is O(n) where n = number of cells.
+    /// Evaluates a whole-row reference (`1:1`, `1:5`, `Sheet1!1:5`).
+    ///
+    /// Bounded and dense for the same reasons as `eval_column_ref` — see its
+    /// note; the defects were identical on this axis and one was worse. Beyond
+    /// the shared compaction problem, a row reference also LOST ITS ORIENTATION:
+    /// `get_range_dimensions` had no `RowRef` arm and answered `(1, 1)` from its
+    /// catch-all, so `fn_index` took the single-column branch and
+    /// `=INDEX(1:1,1,3)` returned the first populated cell of row 1 instead of
+    /// C1 — wrong even on a fully dense row, where blanks are not involved at
+    /// all. Producing a real 1 x N rectangle here is what fixes that, because
+    /// the shape now says what it is.
     fn eval_row_ref(&self, sheet: &Option<String>, start_row: u32, end_row: u32) -> EvalResult {
         let grid = match self.resolve_grid_for_sheet(sheet) {
             Ok(grid) => grid,
@@ -1547,37 +1658,67 @@ impl<'a> Evaluator<'a> {
         let min_row = start_row_idx.min(end_row_idx);
         let max_row = start_row_idx.max(end_row_idx);
 
-        // BULK PRE-CHARGE: one scan of the populated cell map, then a sort.
-        charge!(self, (grid.cells.len() as u64).saturating_add(1));
+        self.materialize_axis_rect(grid, min_row, max_row, 0, grid.max_col)
+    }
 
-        // OPTIMIZED: Collect cells from the HashMap that fall within the row range
-        let mut cell_list: Vec<(u32, u32, &crate::cell::Cell)> = grid
-            .cells
-            .iter()
-            .filter_map(|((row, col), cell)| {
-                if *row >= min_row && *row <= max_row {
-                    Some((*row, *col, cell))
-                } else {
-                    None
-                }
-            })
-            .collect();
+    /// Materialises a whole-axis reference as a DENSE rectangle over the used
+    /// range, in the same shapes `eval_range` produces for an explicit range.
+    ///
+    /// ONE function for both axes so they cannot disagree about the
+    /// representation, which they previously did: the column path sorted
+    /// COLUMN-major and the row path ROW-major, while `eval_range` — feeding the
+    /// same consumers — used array-of-rows. Three spellings of "a rectangle of
+    /// cells" is two too many.
+    fn materialize_axis_rect(
+        &self,
+        grid: &Grid,
+        min_row: u32,
+        max_row: u32,
+        min_col: u32,
+        max_col: u32,
+    ) -> EvalResult {
+        // An EMPTY sheet has max_row == max_col == 0, so the span below is one
+        // cell and the answer is a single Blank — the same thing `A1:A1` gives
+        // for an empty grid, and what every collector already treats as nothing.
+        let num_rows = (max_row - min_row + 1) as u64;
+        let num_cols = (max_col - min_col + 1) as u64;
+        let area = num_rows.saturating_mul(num_cols);
 
-        // Sort by row first, then column to match Excel's order
-        cell_list.sort_by(|a, b| {
-            match a.0.cmp(&b.0) {
-                std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-                other => other,
+        if area > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        // BULK PRE-CHARGE BEFORE THE ALLOCATION, the same order `eval_range`
+        // uses and for the same reason: a per-element charge only notices after
+        // the Vec has been reserved.
+        charge!(self, area);
+
+        let mut flat: Vec<EvalResult> = Vec::with_capacity(area as usize);
+        for r in min_row..=max_row {
+            for c in min_col..=max_col {
+                flat.push(match grid.get_cell(r, c) {
+                    Some(cell) => self.cell_value_to_result(&cell.value),
+                    None => EvalResult::Blank,
+                });
             }
-        });
-
-        let mut values = Vec::new();
-        for (_row, _col, cell) in cell_list {
-            let result = self.cell_value_to_result(&cell.value);
-            values.push(result);
         }
 
-        EvalResult::Array(values)
+        // The SAME shape rules as `eval_range`: array-of-rows for a true
+        // rectangle, nested for a single row (the only spelling that reads as
+        // one row), flat for a single column.
+        if num_rows > 1 && num_cols > 1 {
+            let mut rows = Vec::with_capacity(num_rows as usize);
+            let mut iter = flat.into_iter();
+            for _ in 0..num_rows {
+                rows.push(EvalResult::Array(
+                    iter.by_ref().take(num_cols as usize).collect(),
+                ));
+            }
+            EvalResult::Array(rows)
+        } else if num_rows == 1 && num_cols > 1 {
+            EvalResult::Array(vec![EvalResult::Array(flat)])
+        } else {
+            EvalResult::Array(flat)
+        }
     }
 
     /// Evaluates a 3D (cross-sheet) reference.
@@ -3162,6 +3303,7 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::VStack => self.fn_vstack(args),
             BuiltinFunction::ToCol => self.fn_tocol(args),
             BuiltinFunction::ToRow => self.fn_torow(args),
+            BuiltinFunction::TrimRange => self.fn_trimrange(args),
             BuiltinFunction::WrapCols => self.fn_wrapcols(args),
             BuiltinFunction::WrapRows => self.fn_wraprows(args),
 
@@ -5366,7 +5508,15 @@ impl<'a> Evaluator<'a> {
                     if let Ok(n) = rest.trim().parse::<f64>() {
                         return CriteriaMatch::Compare(CriteriaOp::NotEqual, n);
                     }
-                    return CriteriaMatch::TextNotEqual(rest.trim().to_uppercase());
+                    let rest = rest.trim();
+                    // AN OPERATOR PREFIX DOES NOT CANCEL THE WILDCARD. This arm
+                    // and the `=` one below were tested BEFORE the wildcard
+                    // check further down, so `"<>a*"` and `"=a*"` compared a
+                    // literal asterisk and matched nothing a user meant.
+                    if needs_wildcard_matcher(rest) {
+                        return CriteriaMatch::WildcardNotEqual(rest.to_uppercase());
+                    }
+                    return CriteriaMatch::TextNotEqual(rest.to_uppercase());
                 }
                 if let Some(rest) = trimmed.strip_prefix("<=") {
                     if let Ok(n) = rest.trim().parse::<f64>() {
@@ -5392,10 +5542,14 @@ impl<'a> Evaluator<'a> {
                     if let Ok(n) = rest.trim().parse::<f64>() {
                         return CriteriaMatch::ExactNumber(n);
                     }
-                    return CriteriaMatch::ExactText(rest.trim().to_uppercase());
+                    let rest = rest.trim();
+                    if needs_wildcard_matcher(rest) {
+                        return CriteriaMatch::Wildcard(rest.to_uppercase());
+                    }
+                    return CriteriaMatch::ExactText(rest.to_uppercase());
                 }
                 // Check for wildcards
-                if trimmed.contains('*') || trimmed.contains('?') {
+                if needs_wildcard_matcher(trimmed) {
                     return CriteriaMatch::Wildcard(trimmed.to_uppercase());
                 }
                 // Try as number
@@ -5455,10 +5609,24 @@ impl<'a> Evaluator<'a> {
                     false
                 }
             }
-            CriteriaMatch::Wildcard(pattern) => {
-                let text = value.as_text().to_uppercase();
-                self.xlookup_wildcard_match(pattern, &text)
-            }
+            // WILDCARDS MATCH TEXT, NOT NUMBERS. This stringified the cell
+            // first, so `=COUNTIF(range,"1*")` counted the NUMBER 100. Excel
+            // applies wildcards to text values only; a number never matches a
+            // pattern, whatever its digits look like.
+            CriteriaMatch::Wildcard(pattern) => match value {
+                EvalResult::Text(t) => {
+                    self.xlookup_wildcard_match(pattern, &t.to_uppercase())
+                }
+                _ => false,
+            },
+            // `"<>a*"`. A non-text value satisfies "is not like this pattern"
+            // for the same reason a number never matches one.
+            CriteriaMatch::WildcardNotEqual(pattern) => match value {
+                EvalResult::Text(t) => {
+                    !self.xlookup_wildcard_match(pattern, &t.to_uppercase())
+                }
+                _ => true,
+            },
         }
     }
 
@@ -6833,11 +7001,31 @@ impl<'a> Evaluator<'a> {
             match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) }
         } else { 0 };
         if start > within_text.len() { return EvalResult::Error(CellError::Value); }
-        // SEARCH supports wildcards
-        if find_text.contains('*') || find_text.contains('?') {
-            // Try matching at each position
-            for pos in start..within_text.len() {
-                if self.xlookup_wildcard_match(&find_text, &within_text[pos..]) {
+        // SEARCH supports wildcards — and its match is a PREFIX match, not a
+        // whole-remainder one.
+        //
+        // THE DEFECT THIS FIXES. `xlookup_wildcard_match` requires the pattern to
+        // consume the ENTIRE text it is given (`pi == len` succeeds only when
+        // `ti == len`), which is right for COUNTIF and MATCH and wrong here: the
+        // loop handed it `within_text[pos..]`, so `=SEARCH("?","abc")` answered
+        // 3 — the only position where one character IS the whole remainder —
+        // instead of Excel's 1, and `=SEARCH("a*c","xabcy")` was #VALUE! instead
+        // of 2.
+        //
+        // Appending `*` turns the whole-match into a prefix-match using the SAME
+        // matcher rather than a second one with a different contract. An
+        // already-trailing `*` is idempotent, and a trailing `~*` (an escaped
+        // literal asterisk) becomes "that asterisk, then anything", which is
+        // what a prefix match of it means.
+        //
+        // The gate is `needs_wildcard_matcher`, not `has_wildcard`: `"~*"` holds
+        // no unescaped wildcard, but the plain `find` below would search for the
+        // two characters `~*` rather than the one character `*`. Only the
+        // matcher knows how to unescape.
+        if needs_wildcard_matcher(&find_text) {
+            let prefix_pattern = format!("{}*", find_text);
+            for pos in start..=within_text.len() {
+                if self.xlookup_wildcard_match(&prefix_pattern, &within_text[pos..]) {
                     return EvalResult::Number((pos + 1) as f64);
                 }
             }
@@ -6935,7 +7123,9 @@ impl<'a> Evaluator<'a> {
     fn fn_char(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
-            Some(n) if n >= 1.0 && n <= 255.0 => EvalResult::Text(String::from(n as u8 as char)),
+            Some(n) if n >= 1.0 && n <= 255.0 => {
+                EvalResult::Text(String::from(windows_1252_char(n as u8)))
+            }
             _ => EvalResult::Error(CellError::Value),
         }
     }
@@ -7460,7 +7650,10 @@ impl<'a> Evaluator<'a> {
                 // Sorted ascending, find largest <= lookup_val
                 let mut last_match = None;
                 for (i, val) in lookup_array.iter().enumerate() {
-                    if self.xlookup_compare(val, &lookup_val) != std::cmp::Ordering::Greater {
+                    // A blank is not a candidate — see `is_lookup_candidate`.
+                    if Self::is_lookup_candidate(val)
+                        && self.xlookup_compare(val, &lookup_val) != std::cmp::Ordering::Greater
+                    {
                         last_match = Some(i);
                     }
                 }
@@ -7473,7 +7666,9 @@ impl<'a> Evaluator<'a> {
                 // Sorted descending, find smallest >= lookup_val
                 let mut last_match = None;
                 for (i, val) in lookup_array.iter().enumerate() {
-                    if self.xlookup_compare(val, &lookup_val) != std::cmp::Ordering::Less {
+                    if Self::is_lookup_candidate(val)
+                        && self.xlookup_compare(val, &lookup_val) != std::cmp::Ordering::Less
+                    {
                         last_match = Some(i);
                     }
                 }
@@ -7527,22 +7722,86 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// `OFFSET(reference, rows, cols, [height], [width])`.
+    ///
+    /// THREE DEFECTS, and the first was a silently WRONG SHEET. This
+    /// destructured `Expression::CellRef { col, row, .. }` — dropping the SHEET
+    /// — and then read `self.grid` directly instead of `resolve_grid_for_sheet`.
+    /// Measured on Sheet2 with Sheet1!B5:B7 = 1,2,3 and Sheet2!B5:B7 = 10,20,30:
+    /// `=SUM(Sheet1!B5:B7)` was 6 while `=SUM(OFFSET(Sheet1!B5,0,0,3,1))` was 60.
+    /// Worse, `=SUM(OFFSET(NoSuchSheet!B5,0,0,3,1))` answered 60 as well, walking
+    /// straight through the deleted-sheet guard that makes the plain reference
+    /// `#REF!`. Since workbook scope is the default and both the Name Box and
+    /// the New Name dialog write a sheet prefix, a workbook-scoped DYNAMIC NAME
+    /// read from another sheet returned the reader's own numbers, with no error.
+    ///
+    /// SECOND: the base had to be a single cell, so Excel's range form
+    /// `=SUM(OFFSET(B5:B7,0,0))` — where height and width are INHERITED from the
+    /// base — was `#VALUE!`, and so was any defined name that resolves to a
+    /// range used as the base.
+    ///
+    /// THIRD: the multi-cell result came back as a FLAT array, which every shape
+    /// reader in the engine takes to mean a COLUMN — so a wide OFFSET spilled
+    /// down the sheet. `array_lift::pack` is the one place that shape is decided.
     fn fn_offset(&self, args: &[Expression]) -> EvalResult {
-        // OFFSET(reference, rows, cols, [height], [width])
         if args.len() < 3 || args.len() > 5 { return EvalResult::Error(CellError::Value); }
-        // Get the base cell reference
-        let (base_row, base_col) = match &args[0] {
-            Expression::CellRef { col, row, .. } => ((*row as i64) - 1, col_to_index(col) as i64),
+
+        // The base: a single cell, or a RANGE whose size is inherited.
+        let (sheet, base_row, base_col, base_h, base_w) = match &args[0] {
+            Expression::CellRef { sheet, col, row, .. } => {
+                (sheet, (*row as i64) - 1, col_to_index(col) as i64, 1usize, 1usize)
+            }
+            Expression::Range { sheet, start, end, .. } => match (start.as_ref(), end.as_ref()) {
+                (
+                    Expression::CellRef { col: sc, row: sr, .. },
+                    Expression::CellRef { col: ec, row: er, .. },
+                ) => {
+                    let (c1, c2) = (col_to_index(sc), col_to_index(ec));
+                    let (r1, r2) = (sr - 1, er - 1);
+                    (
+                        sheet,
+                        r1.min(r2) as i64,
+                        c1.min(c2) as i64,
+                        (r1.max(r2) - r1.min(r2) + 1) as usize,
+                        (c1.max(c2) - c1.min(c2) + 1) as usize,
+                    )
+                }
+                _ => return EvalResult::Error(CellError::Value),
+            },
             _ => return EvalResult::Error(CellError::Value),
         };
+
+        // RESOLVED, not assumed. An unknown or deleted sheet is `#REF!` here for
+        // the same reason it is everywhere else.
+        let grid = match self.resolve_grid_for_sheet(sheet) {
+            Ok(grid) => grid,
+            Err(err) => return EvalResult::Error(err),
+        };
+
         let row_offset = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
         let col_offset = match self.evaluate(&args[2]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
         let new_row = base_row + row_offset;
         let new_col = base_col + col_offset;
         if new_row < 0 || new_col < 0 { return EvalResult::Error(CellError::Ref); }
-        // For single cell (no height/width), return the cell value
-        let height = if args.len() >= 4 { match self.evaluate(&args[3]).as_number() { Some(n) => n as usize, None => return EvalResult::Error(CellError::Value) } } else { 1 };
-        let width = if args.len() == 5 { match self.evaluate(&args[4]).as_number() { Some(n) => n as usize, None => return EvalResult::Error(CellError::Value) } } else { 1 };
+
+        // Height and width default to the BASE's, which is Excel's rule and what
+        // makes the range form useful.
+        let height = if args.len() >= 4 {
+            match self.evaluate(&args[3]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) }
+        } else { base_h as i64 };
+        let width = if args.len() == 5 {
+            match self.evaluate(&args[4]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) }
+        } else { base_w as i64 };
+        if height <= 0 || width <= 0 { return EvalResult::Error(CellError::Ref); }
+        let (height, width) = (height as usize, width as usize);
+
+        // Off the sheet is #REF!, as it is for the negative case above.
+        if new_row + height as i64 - 1 > crate::navigation::EXCEL_MAX_ROW_INDEX as i64
+            || new_col + width as i64 - 1 > crate::navigation::EXCEL_MAX_COL_INDEX as i64
+        {
+            return EvalResult::Error(CellError::Ref);
+        }
+
         // height/width come from arguments, and the walk below probes the grid
         // once per cell: OFFSET(A1,0,0,1e6,1e4) is 1e10 probes.
         let cells = (height as u64).saturating_mul(width as u64);
@@ -7550,30 +7809,30 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Limit);
         }
         charge!(self, cells);
+
         if height == 1 && width == 1 {
-            match self.grid.get_cell(new_row as u32, new_col as u32) {
+            return match grid.get_cell(new_row as u32, new_col as u32) {
                 Some(cell) => self.cell_value_to_result(&cell.value),
                 None => EvalResult::Blank,
-            }
-        } else {
-            // Return array of values
-            let mut values = Vec::new();
-            for r in 0..height {
-                for c in 0..width {
-                    let cell_row = (new_row + r as i64) as u32;
-                    let cell_col = (new_col + c as i64) as u32;
-                    match self.grid.get_cell(cell_row, cell_col) {
-                        Some(cell) => values.push(self.cell_value_to_result(&cell.value)),
-                        // The single-cell branch above already answers `Blank`;
-                        // only half of OFFSET was converted, so
-                        // `COUNT(OFFSET(A1,0,0,3,1))` disagreed with
-                        // `COUNT(A1:A3)` over the same three cells.
-                        None => values.push(EvalResult::Blank),
-                    }
-                }
-            }
-            EvalResult::Array(values)
+            };
         }
+
+        let mut values = Vec::with_capacity(cells as usize);
+        for r in 0..height {
+            for c in 0..width {
+                let cell_row = (new_row + r as i64) as u32;
+                let cell_col = (new_col + c as i64) as u32;
+                values.push(match grid.get_cell(cell_row, cell_col) {
+                    Some(cell) => self.cell_value_to_result(&cell.value),
+                    // The single-cell branch above already answers `Blank`;
+                    // only half of OFFSET was converted, so
+                    // `COUNT(OFFSET(A1,0,0,3,1))` disagreed with
+                    // `COUNT(A1:A3)` over the same three cells.
+                    None => EvalResult::Blank,
+                });
+            }
+        }
+        array_lift::pack(height, width, values)
     }
 
     fn fn_address(&self, args: &[Expression]) -> EvalResult {
@@ -8136,6 +8395,66 @@ impl<'a> Evaluator<'a> {
         self.invoke_lambda_with_captured(params, body, args, &empty)
     }
 
+    /// Something the LAMBDA helpers can INVOKE with argument values.
+    ///
+    /// EXISTS BECAUSE SEVEN SITES HAD THE SAME THREE LINES. MAP, REDUCE, SCAN,
+    /// MAKEARRAY, BYROW, BYCOL and `apply_lambda` each destructured
+    /// `EvalResult::Lambda` and answered #VALUE! for anything else — which is
+    /// why passing a BUILT-IN by bare name failed, and failed as #VALUE! rather
+    /// than as the #NAME? the NamedRef arm had actually produced.
+    fn as_callable(v: &EvalResult) -> Option<Callable> {
+        match v {
+            EvalResult::Lambda { params, body, .. } => Some(Callable::Lambda {
+                params: params.clone(),
+                body: body.as_ref().clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The callable an ARGUMENT EXPRESSION denotes.
+    ///
+    /// LOOKS AT THE EXPRESSION, NOT ITS VALUE, and that is the whole design.
+    /// `SUM` in an argument slot parses to a `NamedRef` — the parser resolves a
+    /// built-in only when `(` immediately follows — so the eta-reduced form
+    /// `=BYROW(A1:C3, SUM)` arrives here as a name. Excel accepts it because a
+    /// function is what this position expects; it does NOT accept `=SUM*2`.
+    /// Resolving the name to a function in the general `NamedRef` arm would
+    /// change the second one too.
+    ///
+    /// A binding in SCOPE wins over the built-in, so a `LET(SUM, …)` parameter
+    /// still shadows it — the same precedence the evaluator gives every name.
+    fn callable_arg(&self, expr: &Expression) -> Option<Callable> {
+        if let Expression::NamedRef { name, .. } = expr {
+            let key = name.to_uppercase();
+            if self.scope.borrow().get(&key).is_none() {
+                // A DEFINED NAME never reaches here: `resolve_names_in_ast`
+                // splices one into the tree before evaluation (D2), so a
+                // surviving `NamedRef` is a scope binding or nothing at all.
+                // `Custom` is what `from_name` answers for a name it does not
+                // know, and a JS UDF is spelled that way too.
+                let f = BuiltinFunction::from_name(&key);
+                if !matches!(f, BuiltinFunction::Custom(_)) {
+                    return Some(Callable::Builtin(f));
+                }
+            }
+        }
+        Self::as_callable(&self.evaluate(expr))
+    }
+
+    /// Invoke a callable with already-evaluated arguments.
+    ///
+    /// A built-in goes through `call_with_values`, the same scope-binding
+    /// mechanism array lifting uses — so `BYROW(rng, SUM)` runs exactly the SUM
+    /// a user would have written inside a LAMBDA, rather than a second
+    /// implementation of it.
+    fn invoke_callable(&self, callable: &Callable, args: &[EvalResult]) -> EvalResult {
+        match callable {
+            Callable::Lambda { params, body } => self.invoke_lambda(params, body, args),
+            Callable::Builtin(f) => self.call_with_values(f, args),
+        }
+    }
+
     // ==================== LAMBDA Functions ====================
 
     /// LAMBDA([param1], [param2], ..., calculation)
@@ -8179,21 +8498,21 @@ impl<'a> Evaluator<'a> {
         }
 
         let (rows, cols, data) = self.eval_range_2d(&args[0]);
-        let lambda = self.evaluate(&args[1]);
+        let callable = self.callable_arg(&args[1]);
 
-        let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
-            _ => return EvalResult::Error(CellError::Value),
+        let callable = match callable {
+            Some(c) => c,
+            None => return EvalResult::Error(CellError::Value),
         };
 
-        if params.len() != 1 {
+        if !callable.accepts_arity(1) {
             return EvalResult::Error(CellError::Value);
         }
 
         // Apply lambda to each element
         let mut results: Vec<EvalResult> = Vec::with_capacity(rows * cols);
         for item in &data {
-            let result = self.invoke_lambda(&params, &body, &[item.clone()]);
+            let result = self.invoke_callable(&callable, &[item.clone()]);
             results.push(result);
         }
 
@@ -8224,20 +8543,20 @@ impl<'a> Evaluator<'a> {
         }
 
         let flat = self.eval_flat(&args[1]);
-        let lambda = self.evaluate(&args[2]);
+        let callable = self.callable_arg(&args[2]);
 
-        let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
-            _ => return EvalResult::Error(CellError::Value),
+        let callable = match callable {
+            Some(c) => c,
+            None => return EvalResult::Error(CellError::Value),
         };
 
-        if params.len() != 2 {
+        if !callable.accepts_arity(2) {
             return EvalResult::Error(CellError::Value);
         }
 
         let mut accumulator = initial;
         for item in &flat {
-            accumulator = self.invoke_lambda(&params, &body, &[accumulator, item.clone()]);
+            accumulator = self.invoke_callable(&callable, &[accumulator, item.clone()]);
             if let EvalResult::Error(_) = &accumulator {
                 return accumulator;
             }
@@ -8259,21 +8578,21 @@ impl<'a> Evaluator<'a> {
         }
 
         let flat = self.eval_flat(&args[1]);
-        let lambda = self.evaluate(&args[2]);
+        let callable = self.callable_arg(&args[2]);
 
-        let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
-            _ => return EvalResult::Error(CellError::Value),
+        let callable = match callable {
+            Some(c) => c,
+            None => return EvalResult::Error(CellError::Value),
         };
 
-        if params.len() != 2 {
+        if !callable.accepts_arity(2) {
             return EvalResult::Error(CellError::Value);
         }
 
         let mut accumulator = initial;
         let mut results: Vec<EvalResult> = Vec::with_capacity(flat.len());
         for item in &flat {
-            accumulator = self.invoke_lambda(&params, &body, &[accumulator, item.clone()]);
+            accumulator = self.invoke_callable(&callable, &[accumulator, item.clone()]);
             if let EvalResult::Error(_) = &accumulator {
                 return accumulator;
             }
@@ -8300,13 +8619,13 @@ impl<'a> Evaluator<'a> {
             _ => return EvalResult::Error(CellError::Value),
         };
 
-        let lambda = self.evaluate(&args[2]);
-        let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
-            _ => return EvalResult::Error(CellError::Value),
+        let callable = self.callable_arg(&args[2]);
+        let callable = match callable {
+            Some(c) => c,
+            None => return EvalResult::Error(CellError::Value),
         };
 
-        if params.len() != 2 {
+        if !callable.accepts_arity(2) {
             return EvalResult::Error(CellError::Value);
         }
 
@@ -8325,7 +8644,7 @@ impl<'a> Evaluator<'a> {
             // Single column → flat array
             let mut results = Vec::with_capacity(rows);
             for r in 0..rows {
-                let result = self.invoke_lambda(&params, &body, &[
+                let result = self.invoke_callable(&callable, &[
                     EvalResult::Number((r + 1) as f64),
                     EvalResult::Number(1.0),
                 ]);
@@ -8338,7 +8657,7 @@ impl<'a> Evaluator<'a> {
             for r in 0..rows {
                 let mut row = Vec::with_capacity(cols);
                 for c in 0..cols {
-                    let result = self.invoke_lambda(&params, &body, &[
+                    let result = self.invoke_callable(&callable, &[
                         EvalResult::Number((r + 1) as f64),
                         EvalResult::Number((c + 1) as f64),
                     ]);
@@ -8359,14 +8678,14 @@ impl<'a> Evaluator<'a> {
         }
 
         let (rows, cols, data) = self.eval_range_2d(&args[0]);
-        let lambda = self.evaluate(&args[1]);
+        let callable = self.callable_arg(&args[1]);
 
-        let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
-            _ => return EvalResult::Error(CellError::Value),
+        let callable = match callable {
+            Some(c) => c,
+            None => return EvalResult::Error(CellError::Value),
         };
 
-        if params.len() != 1 {
+        if !callable.accepts_arity(1) {
             return EvalResult::Error(CellError::Value);
         }
 
@@ -8378,7 +8697,7 @@ impl<'a> Evaluator<'a> {
                 .map(|c| data.get(start + c).cloned().unwrap_or(EvalResult::Number(0.0)))
                 .collect();
             let row_arg = EvalResult::Array(row_data);
-            let result = self.invoke_lambda(&params, &body, &[row_arg]);
+            let result = self.invoke_callable(&callable, &[row_arg]);
             results.push(result);
         }
 
@@ -8394,14 +8713,14 @@ impl<'a> Evaluator<'a> {
         }
 
         let (rows, cols, data) = self.eval_range_2d(&args[0]);
-        let lambda = self.evaluate(&args[1]);
+        let callable = self.callable_arg(&args[1]);
 
-        let (params, body) = match &lambda {
-            EvalResult::Lambda { params, body, .. } => (params.clone(), body.as_ref().clone()),
-            _ => return EvalResult::Error(CellError::Value),
+        let callable = match callable {
+            Some(c) => c,
+            None => return EvalResult::Error(CellError::Value),
         };
 
-        if params.len() != 1 {
+        if !callable.accepts_arity(1) {
             return EvalResult::Error(CellError::Value);
         }
 
@@ -8412,7 +8731,7 @@ impl<'a> Evaluator<'a> {
                 .map(|r| data.get(r * cols + c).cloned().unwrap_or(EvalResult::Number(0.0)))
                 .collect();
             let col_arg = EvalResult::Array(col_data);
-            let result = self.invoke_lambda(&params, &body, &[col_arg]);
+            let result = self.invoke_callable(&callable, &[col_arg]);
             results.push(result);
         }
 
@@ -9106,7 +9425,17 @@ impl<'a> Evaluator<'a> {
 
         // Determine aggregation function
         let agg_fn_code = self.evaluate(&args[2]);
-        let has_lambda = matches!(&agg_fn_code, EvalResult::Lambda { .. });
+        // The AGGREGATOR may be an eta-reduced built-in — `SUM` rather than
+        // `LAMBDA(v,SUM(v))`, which is how Excel spells this argument. Resolved
+        // from the EXPRESSION, because a bare name evaluates to #NAME? and only
+        // this position is allowed to read it as a function.
+        let agg_callable = self.callable_arg(&args[2]);
+        // A BUILT-IN BY BARE NAME COUNTS TOO. GROUPBY/PIVOTBY accepted a
+        // non-lambda aggregator only as a NUMERIC CODE (0/101 = SUM, 2/103 =
+        // AVERAGE, ...), while Excel spells that argument as an eta-reduced
+        // lambda — so `=GROUPBY(A:A,B:B,SUM)` reached `as_number()` on a #NAME?
+        // and answered #VALUE!. `apply_lambda` invokes either.
+        let has_lambda = agg_callable.is_some();
 
         let field_headers = if args.len() >= 4 {
             match self.evaluate(&args[3]).as_number() {
@@ -9235,7 +9564,7 @@ impl<'a> Evaluator<'a> {
                     .collect();
 
                 let agg = if has_lambda {
-                    self.apply_lambda(&agg_fn_code, &[EvalResult::Array(vals)])
+                    self.invoke_callable(agg_callable.as_ref().expect("has_lambda"), &[EvalResult::Array(vals)])
                 } else {
                     Self::aggregate_values(&vals, &agg_fn_code)
                 };
@@ -9266,7 +9595,7 @@ impl<'a> Evaluator<'a> {
                     .map(|r| v_data[r * v_cols + c].clone())
                     .collect();
                 let agg = if has_lambda {
-                    self.apply_lambda(&agg_fn_code, &[EvalResult::Array(all_vals)])
+                    self.invoke_callable(agg_callable.as_ref().expect("has_lambda"), &[EvalResult::Array(all_vals)])
                 } else {
                     Self::aggregate_values(&all_vals, &agg_fn_code)
                 };
@@ -9331,15 +9660,6 @@ impl<'a> Evaluator<'a> {
                 EvalResult::Number(nums.iter().product())
             }
             _ => EvalResult::Error(CellError::Value),
-        }
-    }
-
-    /// Apply a lambda to arguments
-    fn apply_lambda(&self, lambda: &EvalResult, apply_args: &[EvalResult]) -> EvalResult {
-        if let EvalResult::Lambda { params, body, captured } = lambda {
-            self.invoke_lambda_with_captured(params, body, apply_args, captured)
-        } else {
-            EvalResult::Error(CellError::Value)
         }
     }
 
@@ -9519,7 +9839,17 @@ impl<'a> Evaluator<'a> {
         let (cf_rows, cf_cols, cf_data) = self.eval_range_2d(&args[1]);
         let (v_rows, v_cols, v_data) = self.eval_range_2d(&args[2]);
         let agg_fn_code = self.evaluate(&args[3]);
-        let has_lambda = matches!(&agg_fn_code, EvalResult::Lambda { .. });
+        // The AGGREGATOR may be an eta-reduced built-in — `SUM` rather than
+        // `LAMBDA(v,SUM(v))`, which is how Excel spells this argument. Resolved
+        // from the EXPRESSION, because a bare name evaluates to #NAME? and only
+        // this position is allowed to read it as a function.
+        let agg_callable = self.callable_arg(&args[3]);
+        // A BUILT-IN BY BARE NAME COUNTS TOO. GROUPBY/PIVOTBY accepted a
+        // non-lambda aggregator only as a NUMERIC CODE (0/101 = SUM, 2/103 =
+        // AVERAGE, ...), while Excel spells that argument as an eta-reduced
+        // lambda — so `=GROUPBY(A:A,B:B,SUM)` reached `as_number()` on a #NAME?
+        // and answered #VALUE!. `apply_lambda` invokes either.
+        let has_lambda = agg_callable.is_some();
 
         let field_headers = if args.len() >= 5 {
             self.evaluate(&args[4]).as_number().unwrap_or(0.0) as i32
@@ -9646,7 +9976,7 @@ impl<'a> Evaluator<'a> {
                         .map(|&r| v_data[r * v_cols].clone())
                         .collect();
                     let agg = if has_lambda {
-                        self.apply_lambda(&agg_fn_code, &[EvalResult::Array(vals)])
+                        self.invoke_callable(agg_callable.as_ref().expect("has_lambda"), &[EvalResult::Array(vals)])
                     } else {
                         Self::aggregate_values(&vals, &agg_fn_code)
                     };
@@ -13210,14 +13540,14 @@ impl<'a> Evaluator<'a> {
                 // Wildcard match
                 for &i in &indices {
                     let val_text = lookup_array[i].as_text();
-                    // `wildcard_match` allocates and fills a (p+1)x(t+1) bool
-                    // grid PER ELEMENT; the materializer only charged for the
-                    // array's length, not for this factor.
-                    charge_arith!(
-                        self,
-                        (lookup_text.len() as u64 + 1).saturating_mul(val_text.len() as u64 + 1)
-                    );
-                    if wildcard_match(&lookup_text, &val_text) {
+                    // ONE WILDCARD ENGINE. This called a SECOND, older matcher
+                    // whose DP loop handled `*` and `?` but compared `~`
+                    // LITERALLY — so the escape worked everywhere in the product
+                    // except here, and `~*` in an XMATCH meant "any run of
+                    // characters" instead of "an asterisk". `xlookup_wildcard_match`
+                    // charges its own budget per recursive step, so the bulk
+                    // charge the old DP grid needed is gone with it.
+                    if self.xlookup_wildcard_match(&lookup_text, &val_text) {
                         return EvalResult::Number((i + 1) as f64);
                     }
                 }
@@ -13389,6 +13719,101 @@ impl<'a> Evaluator<'a> {
         }).collect();
         // Return as vertical array (each element is a single-value row)
         EvalResult::Array(filtered)
+    }
+
+    /// `TRIMRANGE(range, [trim_rows], [trim_cols])` -- drop the BLANK rows and
+    /// columns at a range's edges.
+    ///
+    /// This is what makes `=SUM(A:A)` safe to write in an over-reaching
+    /// spelling: name the whole column, trim the empty tail, compute over the
+    /// data. The trim codes are Excel's, and they are per-axis:
+    /// `0` none, `1` leading, `2` trailing, `3` both (the default for each).
+    ///
+    /// It trims only the PERIPHERY -- a blank row with data above AND below it
+    /// survives, because the hole is part of the data's shape. Blank means
+    /// genuinely empty: a formula returning `""` is text and holds its row, the
+    /// same distinction `is_blank` draws everywhere else in this file.
+    ///
+    /// An all-blank input trims away to nothing, which no array shape can
+    /// express; it answers a single blank, so `SUM(TRIMRANGE(A:A))` on an empty
+    /// column is `0` rather than an error.
+    fn fn_trimrange(&self, args: &[Expression]) -> EvalResult {
+        if args.is_empty() || args.len() > 3 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let trim_code = |slot: usize| -> Result<(bool, bool), EvalResult> {
+            if args.len() <= slot {
+                return Ok((true, true));
+            }
+            let v = self.evaluate(&args[slot]);
+            if let EvalResult::Error(e) = v {
+                return Err(EvalResult::Error(e));
+            }
+            match v.as_number().unwrap_or(f64::NAN).trunc() {
+                0.0 => Ok((false, false)),
+                1.0 => Ok((true, false)),
+                2.0 => Ok((false, true)),
+                3.0 => Ok((true, true)),
+                _ => Err(EvalResult::Error(CellError::Value)),
+            }
+        };
+        let (trim_top, trim_bottom) = match trim_code(1) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let (trim_left, trim_right) = match trim_code(2) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+        let grid = self.eval_as_2d(&args[0]);
+        let n_rows = grid.len();
+        let n_cols = grid.iter().map(|r| r.len()).max().unwrap_or(0);
+        if n_rows == 0 || n_cols == 0 {
+            return EvalResult::Blank;
+        }
+        let at = |r: usize, c: usize| -> &EvalResult {
+            grid[r].get(c).unwrap_or(&EvalResult::Blank)
+        };
+        let row_blank = |r: usize| (0..n_cols).all(|c| at(r, c).is_blank());
+        let col_blank = |c: usize| (0..n_rows).all(|r| at(r, c).is_blank());
+
+        let mut top = 0usize;
+        let mut bottom = n_rows; // exclusive
+        if trim_top {
+            while top < bottom && row_blank(top) {
+                top += 1;
+            }
+        }
+        if trim_bottom {
+            while bottom > top && row_blank(bottom - 1) {
+                bottom -= 1;
+            }
+        }
+        let mut left = 0usize;
+        let mut right = n_cols; // exclusive
+        if trim_left {
+            while left < right && col_blank(left) {
+                left += 1;
+            }
+        }
+        if trim_right {
+            while right > left && col_blank(right - 1) {
+                right -= 1;
+            }
+        }
+        if top >= bottom || left >= right {
+            return EvalResult::Blank;
+        }
+
+        let (out_rows, out_cols) = (bottom - top, right - left);
+        let mut cells = Vec::with_capacity(out_rows * out_cols);
+        for r in top..bottom {
+            for c in left..right {
+                cells.push(at(r, c).clone());
+            }
+        }
+        array_lift::pack(out_rows, out_cols, cells)
     }
 
     fn fn_torow(&self, args: &[Expression]) -> EvalResult {
@@ -14065,29 +14490,6 @@ fn matrix_inverse(m: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     Some(aug.iter().map(|row| row[n..].to_vec()).collect())
 }
 
-/// Simple wildcard matching (* and ?)
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let pattern = pattern.to_uppercase();
-    let text = text.to_uppercase();
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let mut dp = vec![vec![false; t.len() + 1]; p.len() + 1];
-    dp[0][0] = true;
-    for i in 1..=p.len() {
-        if p[i-1] == '*' { dp[i][0] = dp[i-1][0]; }
-    }
-    for i in 1..=p.len() {
-        for j in 1..=t.len() {
-            if p[i-1] == '*' {
-                dp[i][j] = dp[i-1][j] || dp[i][j-1];
-            } else if p[i-1] == '?' || p[i-1] == t[j-1] {
-                dp[i][j] = dp[i-1][j-1];
-            }
-        }
-    }
-    dp[p.len()][t.len()]
-}
-
 impl<'a> Evaluator<'a> {
 
     // ==================== Lookup index cache (PERF-03 / PERF-14) ====================
@@ -14210,7 +14612,9 @@ impl<'a> Evaluator<'a> {
             lookup_cache::Axis::RectRow(_) => (rect.max_col - rect.min_col + 1) as u64,
             lookup_cache::Axis::RectFlat => ((rect.max_row - rect.min_row + 1) as u64)
                 .saturating_mul((rect.max_col - rect.min_col + 1) as u64),
-            lookup_cache::Axis::WholeCol(_) => (grid.cells.len() as u64).saturating_add(1),
+            // The SPAN now, not the populated-cell count: the whole-column index
+            // is dense over the used range, so that is what it costs to build.
+            lookup_cache::Axis::WholeCol(_) => (grid.max_row as u64).saturating_add(1),
         };
         let _ = self.budget.charge(fuel_units(bound));
         let fetch = |r: u32, c: u32| match grid.get_cell(r, c) {
@@ -14235,26 +14639,16 @@ impl<'a> Evaluator<'a> {
                 }
                 out
             }
+            // DENSE OVER THE USED RANGE, in lockstep with `eval_column_ref`.
+            // This branch used to compact to the populated cells (two ways, one
+            // per density), mirroring what the materialiser then did. Both
+            // changed together, and they have to: `cached_results_equal_scan_
+            // results` is a differential test that runs every probe through the
+            // cache AND the scan and compares, so an index that still compacted
+            // would make MATCH answer one row from a cold pass and another from
+            // a warm one.
             lookup_cache::Axis::WholeCol(col) => {
-                if (grid.max_row as usize) <= grid.cells.len() {
-                    let mut out = Vec::new();
-                    for row in 0..=grid.max_row {
-                        if let Some(cell) = grid.get_cell(row, col) {
-                            out.push(self.cell_value_to_result(&cell.value));
-                        }
-                    }
-                    out
-                } else {
-                    let mut rows: Vec<(u32, &crate::cell::Cell)> = grid
-                        .cells
-                        .iter()
-                        .filter_map(|((r, c), cell)| if *c == col { Some((*r, cell)) } else { None })
-                        .collect();
-                    rows.sort_by_key(|(r, _)| *r);
-                    rows.into_iter()
-                        .map(|(_, cell)| self.cell_value_to_result(&cell.value))
-                        .collect()
-                }
+                (0..=grid.max_row).map(|r| fetch(r, col)).collect()
             }
         }
     }
@@ -14384,7 +14778,7 @@ impl<'a> Evaluator<'a> {
         };
         match match_type {
             0 => {
-                if matches!(lookup_val, EvalResult::Text(s) if s.contains('*') || s.contains('?')) {
+                if wildcard_pattern(lookup_val).is_some() {
                     return None; // wildcard exact match keeps the scan
                 }
                 let served = lc::with_active(|cache| {
@@ -14504,6 +14898,7 @@ impl<'a> Evaluator<'a> {
         if matches!(
             criteria,
             CriteriaMatch::Wildcard(_)
+                | CriteriaMatch::WildcardNotEqual(_)
                 | CriteriaMatch::BlankOrEmpty
                 | CriteriaMatch::OnlyBlank
                 | CriteriaMatch::NonBlank
@@ -14536,6 +14931,7 @@ impl<'a> Evaluator<'a> {
                     },
                     // Refused above, so this arm cannot be reached.
                     CriteriaMatch::Wildcard(_)
+                    | CriteriaMatch::WildcardNotEqual(_)
                     | CriteriaMatch::BlankOrEmpty
                     | CriteriaMatch::OnlyBlank
                     | CriteriaMatch::NonBlank => unreachable!(),
@@ -14668,9 +15064,12 @@ impl<'a> Evaluator<'a> {
             // Approximate match: find largest value <= lookup_val in first column (assumed sorted)
             let mut best_idx: Option<usize> = None;
             for (i, row) in rows.iter().enumerate() {
-                if !row.is_empty() && self.compare_values(&row[0], &lookup_val) <= 0 {
+                if row.is_empty() || !Self::is_lookup_candidate(&row[0]) {
+                    continue;
+                }
+                if self.compare_values(&row[0], &lookup_val) <= 0 {
                     best_idx = Some(i);
-                } else if !row.is_empty() && self.compare_values(&row[0], &lookup_val) > 0 {
+                } else {
                     break;
                 }
             }
@@ -14680,9 +15079,22 @@ impl<'a> Evaluator<'a> {
                 None => EvalResult::Error(CellError::NA),
             }
         } else {
-            // Exact match
+            // Exact match. WILDCARDS APPLY HERE TOO, and did not: both lookups
+            // used a plain case-insensitive equality, so `=VLOOKUP("Jo*",...)`
+            // — one of the idioms the glossary term exists for — found nothing.
+            // MATCH and XLOOKUP had honoured wildcards all along, so the three
+            // disagreed about the same pattern.
+            let pattern = wildcard_pattern(&lookup_val);
             for row in &rows {
-                if !row.is_empty() && self.values_equal(&row[0], &lookup_val) {
+                if row.is_empty() {
+                    continue;
+                }
+                let hit = match &pattern {
+                    Some(p) => matches!(&row[0], EvalResult::Text(t)
+                        if self.xlookup_wildcard_match(p, &t.to_uppercase())),
+                    None => self.values_equal(&row[0], &lookup_val),
+                };
+                if hit {
                     return row[col_index - 1].clone().collapse_blank();
                 }
             }
@@ -14754,6 +15166,12 @@ impl<'a> Evaluator<'a> {
         if range_lookup {
             let mut best_col: Option<usize> = None;
             for (j, val) in first_row.iter().enumerate() {
+                // A blank is not a candidate — see `is_lookup_candidate`. The
+                // row axis has the same trailing-empty problem the column axis
+                // does, now that `1:1` is dense over the used range.
+                if !Self::is_lookup_candidate(val) {
+                    continue;
+                }
                 if self.compare_values(val, &lookup_val) <= 0 {
                     best_col = Some(j);
                 } else {
@@ -14765,8 +15183,15 @@ impl<'a> Evaluator<'a> {
                 None => EvalResult::Error(CellError::NA),
             }
         } else {
+            // Wildcards, as in `fn_vlookup` above.
+            let pattern = wildcard_pattern(&lookup_val);
             for (j, val) in first_row.iter().enumerate() {
-                if self.values_equal(val, &lookup_val) {
+                let hit = match &pattern {
+                    Some(p) => matches!(val, EvalResult::Text(t)
+                        if self.xlookup_wildcard_match(p, &t.to_uppercase())),
+                    None => self.values_equal(val, &lookup_val),
+                };
+                if hit {
                     return rows[row_index - 1].get(j).cloned().map(EvalResult::collapse_blank).unwrap_or(EvalResult::Error(CellError::NA));
                 }
             }
@@ -14798,6 +15223,13 @@ impl<'a> Evaluator<'a> {
         // Approximate match: find largest value <= lookup_val (assumed sorted ascending)
         let mut best_idx: Option<usize> = None;
         for (i, val) in lookup_vector.iter().enumerate() {
+            // A BLANK IS SKIPPED, not treated as 0 and not treated as the end of
+            // the sorted run: trailing empties are exactly what a whole-column
+            // or over-long vector has, and stopping at the first one would make
+            // `LOOKUP` blind to data below a gap.
+            if !Self::is_lookup_candidate(val) {
+                continue;
+            }
             if self.compare_values(val, &lookup_val) <= 0 {
                 best_idx = Some(i);
             } else {
@@ -14834,11 +15266,38 @@ impl<'a> Evaluator<'a> {
                             other => std::slice::from_ref(other),
                         })
                         .collect(),
-                    _ => vec![items.as_slice()],
+                    // A FLAT ARRAY IS A COLUMN — n rows of one — and this used
+                    // to read it as one row of n. Everything else in the engine
+                    // reads flat as a column (`spill_dimensions`,
+                    // `array_lift::shape`, `eval_range`), so VLOOKUP was the
+                    // one dissenter: `=VLOOKUP(x, A1:A100, 1)` saw a single row
+                    // and answered A1 for every lookup value, which is a wrong
+                    // value rather than an error. A single-ROW range arrives
+                    // NESTED and takes the arm above, so HLOOKUP is unaffected.
+                    _ => items.iter().map(std::slice::from_ref).collect(),
                 }
             }
             other => vec![std::slice::from_ref(other)],
         }
+    }
+
+    /// Whether a cell can be the ANSWER to an approximate lookup.
+    ///
+    /// A BLANK CANNOT, and that one rule is what the BigNum idiom rests on.
+    /// `as_number()` deliberately answers `Some(0.0)` for a blank (see its own
+    /// doc), so before this every trailing empty cell compared as `0 <= BigNum`
+    /// and `=MATCH(9.99999999999999E+307, A1:A100)` answered 100 — the last
+    /// EMPTY row — where Excel answers 10, the last numeric one. The
+    /// value-returning lookups were worse: `=LOOKUP(BigNum, A1:A100)` landed on
+    /// a blank and `collapse_blank()` turned it into **0**, a plausible number
+    /// with nothing to mark it wrong.
+    ///
+    /// Applies to the APPROXIMATE walks only. Exact match already has its own
+    /// equality, and Excel's exact MATCH does find a genuinely empty cell when
+    /// you look one up.
+    #[inline]
+    fn is_lookup_candidate(v: &EvalResult) -> bool {
+        !v.is_blank()
     }
 
     /// Helper: extract 2D rows from an EvalResult (typically an Array from a range).
@@ -15230,13 +15689,19 @@ impl<'a> Evaluator<'a> {
     fn fn_unichar(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
-            Some(n) => {
-                let code = n as u32;
-                match char::from_u32(code) {
+            // `n as u32` SATURATES, so UNICHAR(0) and UNICHAR(-1) both produced
+            // code point 0 -- a NUL character in a cell, where Excel answers
+            // #VALUE!. A NUL is worse than an error: it is invisible, it
+            // survives into the saved file, and this repo has its own history
+            // with NUL bytes appearing where spaces belonged.
+            Some(n) if n >= 1.0 && n <= 1_114_111.0 => {
+                match char::from_u32(n as u32) {
                     Some(c) => EvalResult::Text(c.to_string()),
+                    // A surrogate half is in range and is not a character.
                     None => EvalResult::Error(CellError::Value),
                 }
             }
+            Some(_) => EvalResult::Error(CellError::Value),
             None => EvalResult::Error(CellError::Value),
         }
     }
@@ -15842,6 +16307,95 @@ mod tests {
         assert_eq!(crate::ast_render::render_formula_raw(&ast), "CONCAT(A1:A3)");
     }
 
+    // ---- Eta-reduced lambdas (glossary term "eta lambda") ----
+
+    #[test]
+    fn a_builtin_can_be_passed_by_bare_name_to_a_lambda_helper() {
+        let mut grid = Grid::new();
+        // A1:C2 = 1..6
+        for r in 0..2u32 {
+            for c in 0..3u32 {
+                grid.set_cell(r, c, Cell::new_number((r * 3 + c + 1) as f64));
+            }
+        }
+        let run = |f: &str| {
+            let ast = parser::parse(f).expect("parses");
+            Evaluator::new(&grid).evaluate(&ast)
+        };
+
+        // THE DEFECT. `SUM` in an argument slot parses to a `NamedRef` — the
+        // parser resolves a builtin only when `(` immediately follows — and the
+        // NamedRef arm answered #NAME?, which every helper then rewrote to
+        // #VALUE!. So the eta form showed the wrong error for the wrong reason.
+        assert_eq!(run("=SUM(BYROW(A1:C2,SUM))"), EvalResult::Number(21.0));
+        assert_eq!(run("=SUM(BYCOL(A1:C2,SUM))"), EvalResult::Number(21.0));
+        assert_eq!(run("=SUM(MAP(A1:C2,ABS))"), EvalResult::Number(21.0));
+
+        // ...and it agrees with the written-out wrapper, which is the property
+        // that makes it an ETA REDUCTION rather than a second code path.
+        assert_eq!(
+            run("=SUM(BYROW(A1:C2,SUM))"),
+            run("=SUM(BYROW(A1:C2,LAMBDA(r,SUM(r))))")
+        );
+        assert_eq!(
+            run("=SUM(MAP(A1:C2,ABS))"),
+            run("=SUM(MAP(A1:C2,LAMBDA(x,ABS(x))))")
+        );
+    }
+
+    #[test]
+    fn a_bare_builtin_name_is_a_function_only_where_a_function_is_expected() {
+        // Excel shows #NAME? for a bare `=SUM`, and `=SUM*2` is #NAME? too. The
+        // eta form is accepted ONLY in an argument slot that invokes it —
+        // `callable_arg` reads the EXPRESSION for exactly that reason.
+        //
+        // THIS IS NOT HYPOTHETICAL CAUTION. Resolving a bare name to a function
+        // in the general `NamedRef` arm was the first attempt, and it turned two
+        // #NAME? cells into #VALUE! ones in the defined-name suite: RATE, VALUE,
+        // INDEX and LOG are all both built-in names and plausible defined names,
+        // so a workbook whose name is not defined yet would have changed error.
+        assert_eq!(eval_bare("=SUM"), EvalResult::Error(CellError::Name));
+        assert_eq!(eval_bare("=SUM*2"), EvalResult::Error(CellError::Name));
+        assert_eq!(eval_bare("=RATE&\"\""), EvalResult::Error(CellError::Name));
+        // A name that is not a builtin either is still plain #NAME?.
+        assert_eq!(eval_bare("=NOTAFUNCTION"), EvalResult::Error(CellError::Name));
+    }
+
+    #[test]
+    fn a_scope_binding_still_shadows_a_builtin_of_the_same_name() {
+        let grid = Grid::new();
+        let run = |f: &str| {
+            let ast = parser::parse(f).expect("parses");
+            Evaluator::new(&grid).evaluate(&ast)
+        };
+        // A LET-bound lambda called SUM is the user's, not the builtin — the
+        // same precedence every other name gets.
+        assert_eq!(
+            run("=BYROW({1,2;3,4},LET(SUM,LAMBDA(r,99),SUM))"),
+            run("=BYROW({1,2;3,4},LAMBDA(r,99))")
+        );
+    }
+
+    #[test]
+    fn an_arity_mismatch_is_still_refused_for_a_written_lambda() {
+        let mut grid = Grid::new();
+        for r in 0..2u32 {
+            grid.set_cell(r, 0, Cell::new_number((r + 1) as f64));
+        }
+        let run = |f: &str| {
+            let ast = parser::parse(f).expect("parses");
+            Evaluator::new(&grid).evaluate(&ast)
+        };
+        // BYROW hands its lambda ONE argument. A two-parameter lambda is a
+        // mistake and stays refused — the eta form must not have loosened that.
+        assert_eq!(
+            run("=BYROW(A1:A2,LAMBDA(a,b,a+b))"),
+            EvalResult::Error(CellError::Value)
+        );
+        // Something that is neither callable is still #VALUE!.
+        assert_eq!(run("=BYROW(A1:A2,42)"), EvalResult::Error(CellError::Value));
+    }
+
     // ---- Inverse hyperbolics (glossary term "hyperbolic angle") ----
 
     #[test]
@@ -16440,11 +16994,18 @@ mod tests {
 
     #[test]
     fn test_column_ref_single_column_row_order_preserved_c3a() {
-        // C3a fast path: a single whole-column reference must return its populated
-        // cells in ROW-ASCENDING order regardless of insertion order (HashMap
-        // iteration is nondeterministic, so this is the property INDEX/MATCH/SUMIF
-        // depend on). This grid is SPARSE/TALL (max_row 5 > cells.len 4), so it
-        // exercises the collect-and-sort branch.
+        // A single whole-column reference is ROW-INDEXED: element i is row i,
+        // dense over the used range, regardless of insertion order (HashMap
+        // iteration is nondeterministic, so this is the property INDEX/MATCH/
+        // SUMIF depend on).
+        //
+        // THIS TEST ASSERTED THE COMPACTED VECTOR UNTIL 2026-08-24 — `[10, 20,
+        // 30, 60]` for a column with a hole at A4/A5 — and that compaction was
+        // the defect, not the contract: it made element 3 mean "the fourth
+        // POPULATED cell" instead of "row 4", so two columns compacted
+        // independently paired the wrong rows off against each other. The
+        // ordering property the test was written for is unchanged and still
+        // asserted; what changed is that the holes are now present.
         let mut grid = Grid::new();
         grid.set_cell(0, 0, Cell::new_number(10.0)); // A1
         grid.set_cell(2, 0, Cell::new_number(30.0)); // A3
@@ -16464,7 +17025,13 @@ mod tests {
         match eval.evaluate(&col_a()) {
             EvalResult::Array(vals) => {
                 let nums: Vec<f64> = vals.iter().map(|v| v.as_number().unwrap_or(f64::NAN)).collect();
-                assert_eq!(nums, vec![10.0, 20.0, 30.0, 60.0], "single-column ref must be row-ascending (sparse branch)");
+                // Rows 4 and 5 (A4, A5) are the holes, and they are BLANK
+                // members now rather than absent ones.
+                assert_eq!(vals.len(), 6, "A:A spans rows 1..6, the used range");
+                assert!(matches!(vals[3], EvalResult::Blank), "A4 is blank, not absent");
+                assert!(matches!(vals[4], EvalResult::Blank), "A5 is blank, not absent");
+                let nums: Vec<f64> = nums.iter().map(|n| if n.is_nan() { 0.0 } else { *n }).collect();
+                assert_eq!(nums, vec![10.0, 20.0, 30.0, 0.0, 0.0, 60.0], "single-column ref must be row-indexed and row-ascending");
             }
             other => panic!("expected Array, got {:?}", other),
         }
@@ -16479,12 +17046,14 @@ mod tests {
         match eval_dense.evaluate(&col_a()) {
             EvalResult::Array(vals) => {
                 let nums: Vec<f64> = vals.iter().map(|v| v.as_number().unwrap_or(f64::NAN)).collect();
-                assert_eq!(nums, vec![1.0, 2.0, 3.0], "single-column ref must be row-ascending (dense branch)");
+                assert_eq!(nums, vec![1.0, 2.0, 3.0], "a gapless column is unchanged by the row-indexing");
             }
             other => panic!("expected Array, got {:?}", other),
         }
 
-        // SUM over the sparse ref is order-independent but must still total 120.
+        // SUM over the gapped ref is unaffected: a collector skips blanks, so
+        // the row-indexing is invisible to it. This is the control that proves
+        // the change did not turn holes into zeros for aggregates.
         let sum = Expression::FunctionCall {
             func: BuiltinFunction::Sum,
             args: vec![col_a()],

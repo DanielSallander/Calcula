@@ -12,17 +12,7 @@ import {
   restoreFocusToGrid,
 } from "@api";
 import type { GoToSpecialCriteria } from "@api";
-
-const CRITERIA_OPTIONS: Array<{ value: GoToSpecialCriteria; label: string }> = [
-  { value: "blanks", label: "Blanks" },
-  { value: "formulas", label: "Formulas" },
-  { value: "constants", label: "Constants" },
-  { value: "errors", label: "Errors" },
-  { value: "comments", label: "Comments" },
-  { value: "notes", label: "Notes" },
-  { value: "conditionalFormats", label: "Conditional Formats" },
-  { value: "dataValidation", label: "Data Validation" },
-];
+import { CRITERIA_OPTIONS } from "../criteriaOptions";
 
 const styles = {
   backdrop: {

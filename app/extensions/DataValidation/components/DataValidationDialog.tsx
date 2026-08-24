@@ -15,6 +15,8 @@ import {
   getDataValidation,
   setDataValidation,
   clearDataValidation,
+  getSheets,
+  evaluateExpression,
   DEFAULT_ERROR_ALERT,
   DEFAULT_PROMPT,
   DEFAULT_VALIDATION,
@@ -28,6 +30,12 @@ import {
   createTimeRule,
 } from "@api";
 import { joinValidationRefresh, getCurrentSelection } from "../lib/validationStore";
+import { formatListSourceText, parseListSourceText } from "../lib/listSourceRef";
+import {
+  operatorNeedsSecondValue,
+  parseCriterionValue,
+  typeNeedsCriteria,
+} from "../lib/criteriaValue";
 import type { ValidationDialogData } from "../types";
 import { SettingsTab } from "./tabs/SettingsTab";
 import { InputMessageTab } from "./tabs/InputMessageTab";
@@ -114,6 +122,14 @@ const bodyStyle: React.CSSProperties = {
   flex: 1,
 };
 
+const errorStyle: React.CSSProperties = {
+  padding: "8px 16px",
+  borderTop: "1px solid #f0c0c0",
+  backgroundColor: "#fdf2f2",
+  color: "#a80000",
+  fontSize: 12,
+};
+
 const footerStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "flex-end",
@@ -157,6 +173,11 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "errorAlert", label: "Error Alert" },
 ];
 
+/** What the Settings tab currently describes: a rule, or the reason it is not one. */
+type BuiltRule =
+  | { ok: true; rule: DataValidationRule }
+  | { ok: false; message: string };
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -195,6 +216,15 @@ export function DataValidationDialog(props: DialogProps) {
   const [endRow, setEndRow] = useState(0);
   const [endCol, setEndCol] = useState(0);
 
+  // Workbook sheets, for reading and writing a range-backed list source.
+  // Null means the sheet list could not be read, which is NOT the same as "the
+  // first sheet" -- a range would be stored against the wrong sheet.
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [activeSheetIndex, setActiveSheetIndex] = useState<number | null>(null);
+
+  // Why the last OK was refused ("" = nothing to say).
+  const [invalidReason, setInvalidReason] = useState("");
+
   // Loading state
   const [loaded, setLoaded] = useState(false);
 
@@ -225,13 +255,32 @@ export function DataValidationDialog(props: DialogProps) {
     setStartCol(sc);
     setEndRow(er);
     setEndCol(ec);
+    setInvalidReason("");
 
     // Load existing validation for this range
     async function loadExisting() {
+      // The sheet list comes FIRST: a range-backed list source cannot be
+      // rendered as text without the names, and rendering one wrong is how the
+      // rule used to get destroyed.
+      let names: string[] = [];
+      let active: number | null = null;
+      try {
+        const sheets = await getSheets();
+        names = [];
+        for (const info of sheets.sheets) {
+          names[info.index] = info.name;
+        }
+        active = sheets.activeIndex;
+      } catch (error) {
+        console.error("[DataValidation] Failed to read the sheet list:", error);
+      }
+      setSheetNames(names);
+      setActiveSheetIndex(active);
+
       try {
         const existing = dialogData?.existingValidation ?? (await getDataValidation(sr, sc));
         if (existing) {
-          populateFromValidation(existing);
+          populateFromValidation(existing, names, active);
         } else {
           resetToDefaults();
         }
@@ -246,7 +295,11 @@ export function DataValidationDialog(props: DialogProps) {
     loadExisting();
   }, [isOpen]);
 
-  function populateFromValidation(dv: DataValidation) {
+  function populateFromValidation(
+    dv: DataValidation,
+    names: readonly string[],
+    active: number | null
+  ) {
     const rule = dv.rule;
 
     // Determine type and populate fields
@@ -264,13 +317,11 @@ export function DataValidationDialog(props: DialogProps) {
       setFormula2(rule.decimal.formula2 != null ? String(rule.decimal.formula2) : "");
     } else if ("list" in rule) {
       setValidationType("list");
-      const src = rule.list.source;
-      if ("values" in src) {
-        setListSource(src.values.join(","));
-      } else if ("range" in src) {
-        const r = src.range;
-        setListSource(`=${r.startRow}:${r.startCol}:${r.endRow}:${r.endCol}`);
-      }
+      // A range renders as a REFERENCE (=$A$1:$A$4), not as its coordinates:
+      // the old "=1:0:4:0" was re-saved by OK as a literal one-value list.
+      // -1 matches no sheet, so an unread sheet list renders the range as #REF!
+      // instead of implying it is on this one -- and OK refuses to save that.
+      setListSource(formatListSourceText(rule.list.source, names, active ?? -1));
       setInCellDropdown(rule.list.inCellDropdown);
     } else if ("date" in rule) {
       setValidationType("date");
@@ -326,47 +377,113 @@ export function DataValidationDialog(props: DialogProps) {
     setActiveTab("settings");
   }
 
-  // Build the rule object from current state
-  function buildRule(): DataValidationRule {
-    const f1 = parseFloat(formula1) || 0;
-    const f2 = formula2 ? parseFloat(formula2) || 0 : undefined;
-    switch (validationType) {
-      case "none":
-        return { none: true };
-      case "wholeNumber":
-        return createWholeNumberRule(operator, f1, f2);
-      case "decimal":
-        return createDecimalRule(operator, f1, f2);
-      case "list": {
-        // If source starts with = it's a range reference
-        if (listSource.startsWith("=")) {
-          // Store as inline values for now (range parsing is complex)
-          const values = [listSource];
-          return createListRule(values, inCellDropdown);
-        }
-        // Otherwise it's inline comma-separated
-        const values = listSource.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
-        return createListRule(values, inCellDropdown);
-      }
-      case "date":
-        return createDateRule(operator, f1, f2);
-      case "time":
-        return createTimeRule(operator, f1, f2);
-      case "textLength":
-        return createTextLengthRule(operator, f1, f2);
-      case "custom":
-        return createCustomRule(customFormula);
-      default:
-        return { none: true };
+  // Build the rule object from current state, or say why it is not a rule.
+  // Nothing here coerces: a criterion that cannot be represented is REFUSED, so
+  // that OK never writes a rule the user did not describe.
+  async function buildRule(): Promise<BuiltRule> {
+    if (validationType === "none") {
+      return { ok: true, rule: { none: true } };
     }
+
+    if (validationType === "list") {
+      if (activeSheetIndex === null) {
+        return {
+          ok: false,
+          message: "The sheet list could not be read, so a source cannot be resolved. Close and reopen the dialog.",
+        };
+      }
+      const parsed = parseListSourceText(listSource, sheetNames, activeSheetIndex);
+      if (parsed.kind === "error") {
+        return { ok: false, message: parsed.message };
+      }
+      if (parsed.kind === "values") {
+        return { ok: true, rule: createListRule(parsed.values, inCellDropdown) };
+      }
+      const r = parsed.range;
+      return {
+        ok: true,
+        rule: createListRuleFromRange(
+          r.startRow,
+          r.startCol,
+          r.endRow,
+          r.endCol,
+          r.sheetIndex,
+          inCellDropdown
+        ),
+      };
+    }
+
+    if (validationType === "custom") {
+      const formula = customFormula.trim();
+      if (formula.length === 0) {
+        // An empty formula evaluates to no boolean, and the backend reads that
+        // as "invalid" -- an empty Custom rule rejects every entry.
+        return { ok: false, message: "Enter a formula. An empty custom rule rejects every entry." };
+      }
+      return { ok: true, rule: createCustomRule(formula) };
+    }
+
+    if (!typeNeedsCriteria(validationType)) {
+      // Unreachable while the Settings tab shows a box for every criteria type:
+      // it asks typeNeedsCriteria too, so what is DISPLAYED and what is READ
+      // here cannot drift apart.
+      return { ok: false, message: "This validation type cannot be saved." };
+    }
+
+    const needsSecond = operatorNeedsSecondValue(operator);
+    const first = await parseCriterionValue(
+      formula1,
+      validationType,
+      needsSecond ? "Minimum" : "Value",
+      evaluateExpression
+    );
+    if (!first.ok) {
+      return { ok: false, message: first.message };
+    }
+
+    let second: number | undefined;
+    if (needsSecond) {
+      const maximum = await parseCriterionValue(
+        formula2,
+        validationType,
+        "Maximum",
+        evaluateExpression
+      );
+      if (!maximum.ok) {
+        return { ok: false, message: maximum.message };
+      }
+      second = maximum.value;
+    }
+
+    switch (validationType) {
+      case "wholeNumber":
+        return { ok: true, rule: createWholeNumberRule(operator, first.value, second) };
+      case "decimal":
+        return { ok: true, rule: createDecimalRule(operator, first.value, second) };
+      case "date":
+        return { ok: true, rule: createDateRule(operator, first.value, second) };
+      case "time":
+        return { ok: true, rule: createTimeRule(operator, first.value, second) };
+      case "textLength":
+        return { ok: true, rule: createTextLengthRule(operator, first.value, second) };
+    }
+
+    return { ok: false, message: "This validation type cannot be saved." };
   }
 
   // Apply validation
   const handleOk = useCallback(async () => {
     try {
-      const rule = buildRule();
+      const built = await buildRule();
+      if (!built.ok) {
+        // Refusing keeps the dialog open with the user's text intact; closing on
+        // a rule we could not build is how a wrong rule got written silently.
+        setInvalidReason(built.message);
+        setActiveTab("settings");
+        return;
+      }
       const validation: DataValidation = {
-        rule,
+        rule: built.rule,
         ignoreBlanks,
         prompt: {
           showPrompt,
@@ -386,12 +503,13 @@ export function DataValidationDialog(props: DialogProps) {
       onClose();
     } catch (error) {
       console.error("[DataValidation] Failed to set validation:", error);
+      setInvalidReason("The rule could not be saved. See the console for details.");
     }
   }, [
     validationType, operator, formula1, formula2, listSource, customFormula,
     ignoreBlanks, inCellDropdown, showPrompt, promptTitle, promptMessage,
     showAlert, alertStyle, errorTitle, errorMessage,
-    startRow, startCol, endRow, endCol, onClose,
+    startRow, startCol, endRow, endCol, sheetNames, activeSheetIndex, onClose,
   ]);
 
   // Clear all validation for the range
@@ -428,6 +546,15 @@ export function DataValidationDialog(props: DialogProps) {
     },
     [onClose]
   );
+
+  // A refusal describes the fields as they were when OK was pressed; the first
+  // edit afterwards makes it stale, so it is dropped as soon as one lands.
+  function edited<T>(set: (value: T) => void): (value: T) => void {
+    return (value: T) => {
+      setInvalidReason("");
+      set(value);
+    };
+  }
 
   if (!isOpen) {
     return null;
@@ -473,12 +600,12 @@ export function DataValidationDialog(props: DialogProps) {
               customFormula={customFormula}
               ignoreBlanks={ignoreBlanks}
               inCellDropdown={inCellDropdown}
-              onChangeType={setValidationType}
-              onChangeOperator={setOperator}
-              onChangeFormula1={setFormula1}
-              onChangeFormula2={setFormula2}
-              onChangeListSource={setListSource}
-              onChangeCustomFormula={setCustomFormula}
+              onChangeType={edited(setValidationType)}
+              onChangeOperator={edited(setOperator)}
+              onChangeFormula1={edited(setFormula1)}
+              onChangeFormula2={edited(setFormula2)}
+              onChangeListSource={edited(setListSource)}
+              onChangeCustomFormula={edited(setCustomFormula)}
               onChangeIgnoreBlanks={setIgnoreBlanks}
               onChangeInCellDropdown={setInCellDropdown}
             />
@@ -506,6 +633,13 @@ export function DataValidationDialog(props: DialogProps) {
             />
           )}
         </div>
+
+        {/* Why OK was refused */}
+        {invalidReason !== "" && (
+          <div style={errorStyle} role="alert">
+            {invalidReason}
+          </div>
+        )}
 
         {/* Footer */}
         <div style={footerStyle}>

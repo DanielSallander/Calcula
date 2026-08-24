@@ -221,7 +221,16 @@ pub enum Expression {
 pub enum TableSpecifier {
     /// A single column reference: Table1[Revenue]
     Column(String),
-    /// This-row reference: [@Revenue] (resolves to a single cell in the formula's row)
+    /// This-row reference: [@Revenue] (resolves to a single cell in the formula's row).
+    ///
+    /// `[[#This Row],[Revenue]]` is Excel's LONG spelling of exactly this and
+    /// parses to exactly this. The two used to disagree -- the long one became
+    /// `SpecialColumn(DataRows, "Revenue")` and read the whole data column.
+    ///
+    /// An EMPTY column name is the bare `Table1[#This Row]`: the formula's row
+    /// across the table, naming no column. It is the only spelling that carries
+    /// no column, and nothing else can produce it -- `parse_bracket_content`
+    /// rejects an empty name, so `[@]` is a parse error, not this.
     ThisRow(String),
     /// Column range: Table1[[Col1]:[Col2]]
     ColumnRange(String, String),
@@ -742,6 +751,14 @@ pub enum BuiltinFunction {
     VStack,
     ToCol,
     ToRow,
+    /// Excel 2024's `TRIMRANGE(range, [trim_rows], [trim_cols])` -- drops BLANK
+    /// rows and columns from a range's PERIPHERY, so a formula can name a whole
+    /// column and still compute over just the data in it.
+    ///
+    /// The `.` reference operator (`A1:.A100`) is sugar for this, which is why
+    /// the two arrived together: the parser lowers a dotted range straight to a
+    /// `TrimRange` call rather than growing trim flags on `Expression::Range`.
+    TrimRange,
     WrapCols,
     WrapRows,
 
@@ -1416,6 +1433,7 @@ impl BuiltinFunction {
             "VSTACK" => BuiltinFunction::VStack,
             "TOCOL" => BuiltinFunction::ToCol,
             "TOROW" => BuiltinFunction::ToRow,
+            "TRIMRANGE" => BuiltinFunction::TrimRange,
             "WRAPCOLS" => BuiltinFunction::WrapCols,
             "WRAPROWS" => BuiltinFunction::WrapRows,
 
@@ -1831,6 +1849,7 @@ impl BuiltinFunction {
             BuiltinFunction::VStack => "VSTACK",
             BuiltinFunction::ToCol => "TOCOL",
             BuiltinFunction::ToRow => "TOROW",
+            BuiltinFunction::TrimRange => "TRIMRANGE",
             BuiltinFunction::WrapCols => "WRAPCOLS",
             BuiltinFunction::WrapRows => "WRAPROWS",
             BuiltinFunction::Bin2Dec => "BIN2DEC",
@@ -2461,6 +2480,7 @@ impl BuiltinFunction {
             FunctionMeta::new("EXPAND", "Dynamic Array", "EXPAND(array, rows, [columns], [pad_with])", "Expands an array to specified dimensions"),
             FunctionMeta::new("TOCOL", "Dynamic Array", "TOCOL(array, [ignore], [scan_by_column])", "Transforms an array into a single column"),
             FunctionMeta::new("TOROW", "Dynamic Array", "TOROW(array, [ignore], [scan_by_column])", "Transforms an array into a single row"),
+            FunctionMeta::new("TRIMRANGE", "Dynamic Array", "TRIMRANGE(range, [trim_rows], [trim_cols])", "Removes blank rows and columns from the edges of a range (0=none, 1=leading, 2=trailing, 3=both)"),
             FunctionMeta::new("WRAPCOLS", "Dynamic Array", "WRAPCOLS(vector, wrap_count, [pad_with])", "Wraps a row or column vector into columns"),
             FunctionMeta::new("WRAPROWS", "Dynamic Array", "WRAPROWS(vector, wrap_count, [pad_with])", "Wraps a row or column vector into rows"),
             // Writeback aggregation
@@ -2614,6 +2634,16 @@ pub enum Value {
     String(String),
     #[serde(rename = "boolean")]
     Boolean(bool),
+    /// An Excel ERROR LITERAL: `=#REF!`, `={1,#N/A}`, `=IF(A1,#N/A,0)`.
+    ///
+    /// HELD AS TEXT, not as an error TYPE, and that is a crate-dependency
+    /// decision rather than laziness: `CellError` lives in the ENGINE, and the
+    /// engine depends on this crate, not the reverse. The evaluator maps this
+    /// string through `CellError::from_literal`, and a test in the engine diffs
+    /// the lexer's table against `CellError::as_literal` so the two spellings
+    /// cannot drift.
+    #[serde(rename = "error")]
+    Error(String),
 }
 
 /// Binary operators for expressions.
@@ -2718,6 +2748,7 @@ impl std::fmt::Display for Value {
             Value::Number(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Boolean(b) => write!(f, "{}", if *b { "TRUE" } else { "FALSE" }),
+            Value::Error(e) => write!(f, "{}", e),
         }
     }
 }

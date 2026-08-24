@@ -409,6 +409,43 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
   };
 
   /**
+   * Tell the autocomplete extension what the caret is standing in.
+   *
+   * Use getBoundingClientRect() for accurate viewport-relative positioning,
+   * matching what FormulaBar and other emitters do.
+   *
+   * Both halves of that feature read this one event, and they need it at
+   * different moments: the suggestion dropdown only while a name is being
+   * TYPED, but the function screen tip whenever the CARET moves — its whole job
+   * is to say which argument of which (innermost) call the caret is in.
+   */
+  const emitAutocompleteInput = useCallback(
+    (value: string, cursorPos: number) => {
+      const inputEl = inputRef.current;
+      if (!inputEl) return;
+      const rect = inputEl.getBoundingClientRect();
+      window.dispatchEvent(
+        new CustomEvent(AutocompleteEvents.INPUT, {
+          detail: {
+            value,
+            cursorPosition: cursorPos,
+            anchorRect: {
+              x: rect.left,
+              y: rect.bottom,
+              width: rect.width,
+              height: rect.height,
+            },
+            source: "inline",
+            row: editing.row,
+            col: editing.col,
+          },
+        })
+      );
+    },
+    [editing.row, editing.col]
+  );
+
+  /**
    * Handle input value changes.
    */
   const handleChange = useCallback(
@@ -417,48 +454,37 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
         onValueChange(event.target.value);
 
         // FIX: Track cursor position globally for cursor-aware formula mode detection
-        const inputEl = inputRef.current;
-        const cursorPos = inputEl?.selectionStart ?? event.target.value.length;
+        const cursorPos = inputRef.current?.selectionStart ?? event.target.value.length;
         setGlobalCursorPosition(cursorPos);
 
-        // Emit autocomplete input event with cursor position and anchor rect.
-        // Use getBoundingClientRect() for accurate viewport-relative positioning,
-        // matching what FormulaBar and other emitters do.
         console.log("[InlineEditor] handleChange, dispatching autocomplete:input for:", event.target.value);
-        if (inputEl) {
-          const rect = inputEl.getBoundingClientRect();
-          window.dispatchEvent(
-            new CustomEvent(AutocompleteEvents.INPUT, {
-              detail: {
-                value: event.target.value,
-                cursorPosition: cursorPos,
-                anchorRect: {
-                  x: rect.left,
-                  y: rect.bottom,
-                  width: rect.width,
-                  height: rect.height,
-                },
-                source: "inline",
-                row: editing.row,
-                col: editing.col,
-              },
-            })
-          );
-        }
+        emitAutocompleteInput(event.target.value, cursorPos);
       }
     },
-    [onValueChange, disabled, editing.row, editing.col]
+    [onValueChange, disabled, emitAutocompleteInput]
   );
 
   /**
    * FIX: Track cursor position changes from arrow keys, mouse clicks within input, etc.
    * This ensures globalCursorPosition stays accurate even when the value doesn't change.
+   *
+   * It also re-emits the autocomplete input, because the screen tip resolves
+   * the INNERMOST open call: arrowing or clicking out of `SUM` into the nested
+   * `ROUND` changes which tip is correct without changing a character of the
+   * formula. Emitting only from onChange meant that logic — which is written
+   * and correct — was simply never re-run, so the tip kept describing the call
+   * the caret had left. (The Define Name dialog's "Refers to" field has always
+   * emitted from onSelect; the grid's two editors had not.)
    */
   const handleSelect = useCallback(() => {
-    if (inputRef.current) {
-      setGlobalCursorPosition(inputRef.current.selectionStart ?? inputRef.current.value.length);
+    const inputEl = inputRef.current;
+    if (!inputEl) return;
+    const cursorPos = inputEl.selectionStart ?? inputEl.value.length;
+    setGlobalCursorPosition(cursorPos);
+    if (inputEl.value.startsWith("=")) {
+      emitAutocompleteInput(inputEl.value, cursorPos);
     }
-  }, []);
+  }, [emitAutocompleteInput]);
 
   /**
    * Carry out an edit-ending key: Enter commits and moves, Tab commits and
@@ -908,6 +934,14 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
           inputRef.current.setSelectionRange(pos, pos);
           console.log("[InlineEditor] Focused input, cursor at position:", pos);
 
+          // An edit that OPENS on an existing formula gets its screen tip
+          // straight away. Focus is placed programmatically here, so no select
+          // event follows and nothing else would emit until the first
+          // keystroke — F2 into `=VLOOKUP(...)` showed no tip at all.
+          if (inputRef.current.value.startsWith("=")) {
+            emitAutocompleteInput(inputRef.current.value, pos);
+          }
+
           // FIX: Clear the prevent flag AFTER focus is restored
           // This prevents blur from committing during the race between
           // event handlers and the setTimeout focus restoration.
@@ -916,7 +950,7 @@ export function InlineEditor(props: InlineEditorProps): React.ReactElement | nul
       }, 0);
 
     return () => clearTimeout(timeoutId);
-  }, [editing.row, editing.col, position.visible, disabled, refocusTrigger]);
+  }, [editing.row, editing.col, position.visible, disabled, refocusTrigger, emitAutocompleteInput]);
 
   // Don't render the inline editor if we're viewing a different sheet than the source.
   // This happens during cross-sheet formula reference selection (point mode).

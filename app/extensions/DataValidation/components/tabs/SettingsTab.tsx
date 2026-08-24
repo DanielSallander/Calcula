@@ -7,6 +7,7 @@ import type {
   DataValidationType,
   DataValidationOperator,
 } from "@api";
+import { operatorNeedsSecondValue, typeNeedsCriteria } from "../../lib/criteriaValue";
 
 // ============================================================================
 // Styles
@@ -107,11 +108,21 @@ const OPERATORS: { value: DataValidationOperator; label: string }[] = [
   { value: "lessThanOrEqual", label: "less than or equal to" },
 ];
 
-// Types that use the operator + value fields
-const NUMERIC_TYPES: DataValidationType[] = ["wholeNumber", "decimal", "date", "time", "textLength"];
+// Which types show the operator + value fields, and which operators need the
+// second one, are NOT decided here: the dialog reads those same two boxes on
+// save, and a box that is shown but never read (or read but never shown) is a
+// rule the user did not describe. Both sides ask ../../lib/criteriaValue.
 
-// Types that need two value fields
-const RANGE_OPERATORS: DataValidationOperator[] = ["between", "notBetween"];
+// What to suggest in the value boxes. The date suggestion is honoured now:
+// "2024-01-01" is handed to the engine's DATEVALUE, where it used to be handed
+// to parseFloat, which read it as the year alone.
+const VALUE_PLACEHOLDERS: Partial<Record<DataValidationType, [string, string]>> = {
+  date: ["e.g., 2024-01-01", "e.g., 2024-12-31"],
+  time: ["e.g., 09:00", "e.g., 17:30"],
+  wholeNumber: ["e.g., 1", "e.g., 100"],
+  decimal: ["e.g., 0.5", "e.g., 99.5"],
+  textLength: ["e.g., 1", "e.g., 10"],
+};
 
 // ============================================================================
 // Component
@@ -137,8 +148,8 @@ export function SettingsTab(props: SettingsTabProps) {
     onChangeInCellDropdown,
   } = props;
 
-  const showOperator = NUMERIC_TYPES.includes(validationType);
-  const showTwoValues = showOperator && RANGE_OPERATORS.includes(operator);
+  const showOperator = typeNeedsCriteria(validationType);
+  const showTwoValues = showOperator && operatorNeedsSecondValue(operator);
   const showListSource = validationType === "list";
   const showCustomFormula = validationType === "custom";
   const showValueFields = showOperator && !showListSource && !showCustomFormula;
@@ -152,6 +163,7 @@ export function SettingsTab(props: SettingsTabProps) {
   };
 
   const { label1, label2 } = getValueLabels();
+  const [placeholder1, placeholder2] = VALUE_PLACEHOLDERS[validationType] ?? ["", ""];
 
   return (
     <div style={fieldGroupStyle}>
@@ -199,7 +211,7 @@ export function SettingsTab(props: SettingsTabProps) {
               type="text"
               value={formula1}
               onChange={(e) => onChangeFormula1(e.target.value)}
-              placeholder={validationType === "date" ? "e.g., 2024-01-01" : ""}
+              placeholder={placeholder1}
             />
           </div>
           {showTwoValues && (
@@ -210,7 +222,7 @@ export function SettingsTab(props: SettingsTabProps) {
                 type="text"
                 value={formula2}
                 onChange={(e) => onChangeFormula2(e.target.value)}
-                placeholder={validationType === "date" ? "e.g., 2024-12-31" : ""}
+                placeholder={placeholder2}
               />
             </div>
           )}

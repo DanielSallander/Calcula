@@ -4,7 +4,7 @@
 // single name so their argument hints can be looked up.
 
 import { describe, it, expect } from "vitest";
-import { parseTokenAtCursor } from "./tokenParser";
+import { parseTokenAtCursor, findArgumentSpans } from "./tokenParser";
 
 describe("parseTokenAtCursor - dropdown trigger", () => {
   it("triggers on a plain function prefix right after '='", () => {
@@ -111,5 +111,63 @@ describe("parseTokenAtCursor - enclosing function (argument hints)", () => {
     const ctx = parseTokenAtCursor(value, value.length);
     expect(ctx.enclosingFunction).toBe("IF");
     expect(ctx.argumentIndex).toBe(1);
+  });
+});
+
+// The screen tip bolds an argument by index; clicking that argument has to
+// select the matching characters in the editor. These spans are what the click
+// selects, and they come from the same scan the bolded parameter does — a
+// second, independent walk over the formula would eventually disagree with the
+// bolded parameter and select the wrong text.
+describe("findArgumentSpans - what clicking a parameter selects", () => {
+  /** The text a span covers, which is what the editor would highlight. */
+  function texts(value: string, cursor: number): string[] {
+    return findArgumentSpans(value, cursor).map((s) => value.substring(s.start, s.end));
+  }
+
+  it("covers every argument of the call, including the ones right of the caret", () => {
+    // The caret is inside the FIRST argument; the other three are still there
+    // to be clicked, so the spans may not stop where the caret does.
+    const value = "=VLOOKUP(A1,B:C,2,FALSE)";
+    expect(texts(value, value.indexOf("A1") + 1)).toEqual(["A1", "B:C", "2", "FALSE"]);
+  });
+
+  it("gives an argument that has not been typed yet a zero-width span at its place", () => {
+    // Clicking the second parameter of "=SUM(A1," must put the caret after the
+    // separator rather than do nothing.
+    const value = "=SUM(A1,";
+    const spans = findArgumentSpans(value, value.length);
+    expect(spans).toHaveLength(2);
+    expect(spans[1]).toEqual({ start: 8, end: 8 });
+  });
+
+  it("selects the argument text without the space in front of it", () => {
+    const value = "=SUM(A1, B1)";
+    expect(texts(value, 6)).toEqual(["A1", "B1"]);
+  });
+
+  it("does not split on a separator that belongs to a nested call or a string", () => {
+    const value = '=IF(SUM(A1,B1)>0,"yes,no",C1)';
+    expect(texts(value, value.indexOf("A1") + 1)).toEqual(["A1", "B1"]);
+    // ...and from the outer call, the nested one is a single argument.
+    expect(texts(value, value.indexOf(">"))).toEqual(['SUM(A1,B1)>0', '"yes,no"', "C1"]);
+  });
+
+  it("spans the innermost open call, the same one the hint names", () => {
+    const value = "=ROUND(SUM(A1,B1),2)";
+    const cursor = value.indexOf("B1");
+    expect(parseTokenAtCursor(value, cursor).enclosingFunction).toBe("SUM");
+    expect(texts(value, cursor)).toEqual(["A1", "B1"]);
+  });
+
+  it("stops at the end of a half-typed formula that has no closing paren", () => {
+    const value = "=SUM(A1,B1";
+    expect(texts(value, value.length)).toEqual(["A1", "B1"]);
+  });
+
+  it("has nothing to select when the caret is not inside a named call", () => {
+    expect(findArgumentSpans("=A1+B1", 4)).toEqual([]);
+    // A bare grouping paren names no function, so the tip shows nothing either.
+    expect(findArgumentSpans("=(A1+B1)", 4)).toEqual([]);
   });
 });

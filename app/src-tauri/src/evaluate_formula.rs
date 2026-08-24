@@ -399,6 +399,9 @@ pub(crate) fn value_to_display(val: &Value) -> String {
         }
         Value::String(s) => format!("\"{}\"", s),
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        // Unquoted: an error literal IS its own display form, and the
+        // step-by-step evaluator should show `#REF!` rather than `"#REF!"`.
+        Value::Error(e) => e.clone(),
     }
 }
 

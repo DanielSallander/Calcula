@@ -10,7 +10,7 @@
 
 import type { GridConfig, Viewport, Selection, SelectionType, DimensionOverrides } from "../../../types";
 import type { MousePosition, HeaderDragState } from "../types";
-import { getColumnFromHeader, getRowFromHeader } from "../../../lib/gridRenderer";
+import { getColumnFromHeader, getRowFromHeader, isSelectAllCorner } from "../../../lib/gridRenderer";
 import { getColumnWidth } from "../../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../../types";
 import { checkColumnHeaderClickInterceptor } from "../../../../api/columnHeaderOverrides";
@@ -37,6 +37,11 @@ interface HeaderSelectionDependencies {
 }
 
 interface HeaderSelectionHandlers {
+  handleSelectAllCornerMouseDown: (
+    mouseX: number,
+    mouseY: number,
+    event: React.MouseEvent<HTMLElement>
+  ) => Promise<boolean>;
   handleColumnHeaderMouseDown: (
     mouseX: number,
     mouseY: number,
@@ -101,6 +106,40 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
 
   // Track the last extended index to avoid redundant updates
   let lastExtendedIndex: number | null = null;
+
+  /**
+   * Handle mouse down on the select-all corner: select the whole sheet.
+   * Returns true if the event was handled.
+   *
+   * The corner rule lives in `isSelectAllCorner` rather than in this file so
+   * that normal mode and formula mode cannot disagree about which pixels are the
+   * corner: formula mode grew its own corner handler
+   * (`editing/formulaHeaderHandlers.ts`) in 2026-08, and a second inline copy of
+   * `mouseX < rowHeaderWidth && mouseY < colHeaderHeight` is precisely the thing
+   * that drifts when the outline bar or a collapsed gutter changes the geometry.
+   */
+  const handleSelectAllCornerMouseDown = async (
+    mouseX: number,
+    mouseY: number,
+    event: React.MouseEvent<HTMLElement>
+  ): Promise<boolean> => {
+    if (!isSelectAllCorner(mouseX, mouseY, config)) {
+      return false;
+    }
+
+    event.preventDefault();
+
+    // If we're editing, commit first
+    if (onCommitBeforeSelect) {
+      await onCommitBeforeSelect();
+    }
+
+    // Single dispatch with endRow/endCol: a select-then-extend pair scrolls to
+    // the end of the sheet on the way through.
+    onSelectCell(0, 0, "cells", config.totalRows - 1, config.totalCols - 1);
+
+    return true;
+  };
 
   /**
    * Handle mouse down on column header.
@@ -287,6 +326,7 @@ export function createHeaderSelectionHandlers(deps: HeaderSelectionDependencies)
   };
 
   return {
+    handleSelectAllCornerMouseDown,
     handleColumnHeaderMouseDown,
     handleRowHeaderMouseDown,
     handleHeaderDragMove,

@@ -550,17 +550,20 @@ fn offset_answers_the_same_as_the_range_it_describes() {
 /// TEXTJOIN's Array branch swallowed blanks that its Range branch kept, so the
 /// answer depended on how the argument was SHAPED rather than on what it held.
 ///
-/// THE COMPARISON IS AGAINST `OFFSET`, NOT AGAINST `A:A`, and the difference is
-/// worth stating. A whole-column reference COMPACTS — `eval_column_ref` returns
-/// only the populated cells, so the array is shorter than the column. For an
-/// aggregate that ignores blanks that is indistinguishable from keeping them;
-/// for a POSITIONAL consumer like `TEXTJOIN(…, FALSE, …)` it is not, and
-/// `=TEXTJOIN(",",FALSE,A:A)` therefore yields `"1,3"` where `A1:A3` yields
-/// `"1,,3"`. That compaction predates the blank work and is a separate,
-/// still-open limitation (it also shifts `INDEX`/`MATCH` positions on a gapped
-/// whole-column ref); it is named here rather than papered over, because the
-/// obvious "fix" — materialising a whole column densely — would make
-/// `SUM(A:A)` walk a million rows.
+/// `A:A` USED TO BE THE ODD ONE OUT HERE, AND IS NOT ANY MORE. This comment
+/// used to record a still-open limitation: a whole-column reference COMPACTED —
+/// `eval_column_ref` returned only the populated cells — so `A:A` was shorter
+/// than the column, and `=TEXTJOIN(",",FALSE,A:A)` yielded `"1,3"` where
+/// `A1:A3` yielded `"1,,3"`. Invisible to an aggregate that skips blanks;
+/// wrong for every positional consumer, which is why it also shifted
+/// `INDEX`/`MATCH` positions and misaligned `SUMIF`'s two columns.
+///
+/// The objection recorded here was that the obvious fix — materialising a whole
+/// column densely — would make `SUM(A:A)` walk a million rows. That was right
+/// about the naive fix and wrong about the real one: the span is the USED RANGE
+/// (`grid.max_row`), not the sheet, so a 200-row column materialises 200 cells.
+/// Closed 2026-08-24; all three spellings now agree, and the assertion below
+/// changed from `"1,3"` to `"1,,3"` to say so.
 #[test]
 fn textjoin_treats_every_positional_argument_shape_the_same_way() {
     let g = gapped();
@@ -576,13 +579,17 @@ fn textjoin_treats_every_positional_argument_shape_the_same_way() {
     // ...and the values themselves are Excel's.
     assert_eq!(text(&g, "=TEXTJOIN(\",\",TRUE,A1:A3)"), "1,3");
     assert_eq!(text(&g, "=TEXTJOIN(\",\",FALSE,A1:A3)"), "1,,3");
-    // The compacting spelling, asserted at its OWN value so the divergence is
-    // recorded rather than merely absent from the suite.
+    // ...and the whole-column spelling now agrees with the rectangular one,
+    // which is the property that used to be missing. `gapped()` puts data in
+    // A1 and A3 with A2 empty, and the used range ends at row 3, so `A:A` is
+    // exactly the three cells `A1:A3` is.
     assert_eq!(
         text(&g, "=TEXTJOIN(\",\",FALSE,A:A)"),
-        "1,3",
-        "a whole-column reference compacts; see this test's doc comment"
+        text(&g, "=TEXTJOIN(\",\",FALSE,A1:A3)"),
+        "a whole-column reference is row-indexed now; it must not drop the \
+         blanks the rectangular spelling keeps"
     );
+    assert_eq!(text(&g, "=TEXTJOIN(\",\",FALSE,A:A)"), "1,,3");
 }
 
 /// One criteria filter, one population: every D-function must agree about which

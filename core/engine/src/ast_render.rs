@@ -287,7 +287,8 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             // Collapse the named-function invocation marker back to `Name(args)`
             // for display. The raw path (collapse == false) falls through and
             // renders the literal `__INVOKE__("Name", lambda, args)` form.
-            let collapsed = ctx.collapse && render_named_invoke_into(func, args, ctx, out);
+            let collapsed = (ctx.collapse && render_named_invoke_into(func, args, ctx, out))
+                || render_trim_dots_into(func, args, ctx, out);
             if !collapsed {
                 out.push_str(func.to_canonical_name());
                 out.push('(');
@@ -408,6 +409,72 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
     ctx.record(start, end);
 }
 
+/// Renders `TRIMRANGE(range, k, k)` back as the dotted range the user typed —
+/// `A1.:.A8` — and returns true. Returns false for every other shape, so the
+/// caller renders the function call normally.
+///
+/// WHY RENDER IT BACK. The parser lowers the `.` operator to this call, which
+/// is what keeps the two spellings from drifting; the cost is that without
+/// this, a user who typed `=A1:.A8` would find `=TRIMRANGE(A1:A8,2,2)` in the
+/// formula bar the next time they opened the cell. Excel keeps the dots, and
+/// a formula that rewrites itself on being looked at is its own defect.
+///
+/// The shape it matches — three arguments, both codes equal, both in 1..=3 — is
+/// exactly what the parser emits. An explicit `TRIMRANGE(A1:A8,3,3)` matches it
+/// too and comes back as dots. That collision is accepted deliberately: the two
+/// forms mean the same thing, and preserving the spelling users actually type
+/// is worth more than preserving the one they can also spell out.
+fn render_trim_dots_into(
+    func: &BuiltinFunction,
+    args: &[Expression],
+    ctx: &mut RenderCtx<'_>,
+    out: &mut String,
+) -> bool {
+    if *func != BuiltinFunction::TrimRange || args.len() != 3 {
+        return false;
+    }
+    let code = match (&args[1], &args[2]) {
+        (Expression::Literal(Value::Number(r)), Expression::Literal(Value::Number(c)))
+            if r == c && (*r == 1.0 || *r == 2.0 || *r == 3.0) => *r as u8,
+        _ => return false,
+    };
+    // The argument must BE a reference, not merely render with a colon in it.
+    // Without this, `TRIMRANGE(SORT(A1:A8),3,3)` rendered `SORT(A1.:.A8)` --
+    // the dots landed on the inner range and the formula said something the
+    // AST never did. `Range` covers the whole-axis spellings too, since a
+    // `ColumnRef`/`RowRef` renders as `A:A` / `1:1`.
+    if !matches!(
+        args[0],
+        Expression::Range { .. }
+            | Expression::ColumnRef { .. }
+            | Expression::RowRef { .. }
+            | Expression::Sheet3DRef { .. }
+    ) {
+        return false;
+    }
+
+    let start = out.len();
+    ctx.enter(0);
+    render_into(&args[0], ctx, out);
+    ctx.leave();
+
+    // The LAST colon, not the first: in a 3-D reference (`Sheet1:Sheet3!A1:A8`)
+    // the first one joins the sheets and the dots belong to the cells. A range
+    // always has one — if this rendered to something without a colon it is not
+    // a range, and the function form is the honest way to show it.
+    let Some(colon) = out[start..].rfind(':').map(|i| start + i) else {
+        out.truncate(start);
+        return false;
+    };
+    if code & 2 != 0 {
+        out.insert(colon + 1, '.');
+    }
+    if code & 1 != 0 {
+        out.insert(colon, '.');
+    }
+    true
+}
+
 /// If `func`/`args` are the named-function invocation marker
 /// `__INVOKE__("Name", lambda, arg1, ...)`, append `Name(arg1, ...)` and return
 /// true. Returns false for the inline-lambda shape `__INVOKE__(lambda, args)`
@@ -494,6 +561,10 @@ fn render_value(val: &Value) -> String {
         // not re-parse, and was lost on save/reload.
         Value::String(s) => format!("\"{}\"", s.replace('"', "\"\"")),
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        // Verbatim: the parser stored the CANONICAL spelling (the lexer
+        // uppercases), so this re-lexes to the same literal and the round trip
+        // is a fixed point.
+        Value::Error(e) => e.clone(),
     }
 }
 
@@ -567,6 +638,13 @@ fn needs_quoting(name: &str) -> bool {
 pub fn render_table_specifier(spec: &TableSpecifier) -> String {
     match spec {
         TableSpecifier::Column(name) => format!("[{}]", name),
+        // An EMPTY column name is the bare `[#This Row]` -- the formula's row
+        // across the table, naming no column. It has no `@` spelling (`[@]` is a
+        // parse error), and there was no arm for it at all: the parser aliased
+        // `#This Row` to `DataRows`, so the formula bar and every saved `.cala`
+        // re-spelled the user's own `[#This Row]` as `[#Data]` -- a reference to
+        // one row coming back as a reference to the whole table body.
+        TableSpecifier::ThisRow(name) if name.is_empty() => "[#This Row]".to_string(),
         TableSpecifier::ThisRow(name) => format!("[@{}]", name),
         TableSpecifier::ColumnRange(start, end) => format!("[[{}]:[{}]]", start, end),
         TableSpecifier::ThisRowRange(start, end) => format!("[[@{}]:[@{}]]", start, end),
@@ -985,6 +1063,9 @@ mod tests {
         let variants = vec![
             TableSpecifier::Column("REV".to_string()),
             TableSpecifier::ThisRow("REV".to_string()),
+            // The bare `[#This Row]`. Rendered `[#Data]` before it had an arm,
+            // so this row of the census re-parsed as a DIFFERENT specifier.
+            TableSpecifier::ThisRow(String::new()),
             TableSpecifier::ColumnRange("A".to_string(), "B".to_string()),
             TableSpecifier::ThisRowRange("A".to_string(), "B".to_string()),
             TableSpecifier::AllRows,
@@ -1047,12 +1128,32 @@ mod tests {
             "SUM(SALES[#All])",
             "SUM(SALES[#Headers])",
             "SUM(SALES[#Totals])",
+            "SUM(SALES[#This Row])",
         ] {
             let ast = parser::parse(source)
                 .unwrap_or_else(|e| panic!("Excel spelling {} does not parse: {}", source, e));
             let rendered = render_formula_raw(&ast);
             assert_eq!(rendered, source, "{} did not round-trip", source);
         }
+    }
+
+    /// THE LONG SPELLING OF A THIS-ROW REFERENCE MUST RENDER AS THE SHORT ONE.
+    ///
+    /// `Sales[[#This Row],[REVENUE]]` and `Sales[@REVENUE]` are the same
+    /// reference, so they must render to the same text -- and they must render
+    /// to text that MEANS the same thing. The long form parsed to
+    /// `SpecialColumn(DataRows, "REVENUE")` and rendered `SALES[[#Data],[REVENUE]]`:
+    /// the reference widened from one cell to the whole data column, and the
+    /// widened form is what `.cala` saved and the formula bar showed. Nothing
+    /// failed -- `=SALES[[#This Row],[REVENUE]]*2` just answered with a number
+    /// computed over every row instead of the formula's own.
+    #[test]
+    fn long_and_short_this_row_spellings_render_identically() {
+        let long = parser::parse("SALES[[#This Row],[REVENUE]]").expect("long form parses");
+        let short = parser::parse("SALES[@REVENUE]").expect("short form parses");
+
+        assert_eq!(render_formula_raw(&long), "SALES[@REVENUE]");
+        assert_eq!(render_formula_raw(&long), render_formula_raw(&short));
     }
 
     /// AN EXTREME NUMERIC LITERAL MUST NOT EXPAND TO 301 DIGITS.

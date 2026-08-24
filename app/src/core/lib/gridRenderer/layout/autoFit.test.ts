@@ -7,6 +7,9 @@ import {
   measureOptimalColumnWidth,
   measureOptimalRowHeight,
   setMeasureContextForTesting,
+  splitHardBreaks,
+  hasHardBreak,
+  wrapText,
 } from "./autoFit";
 import {
   registerAutoFitContributor,
@@ -322,6 +325,144 @@ describe("hidden rows/columns (Excel: AutoFit measures them anyway)", () => {
     // would make a column resize itself whenever a filter is toggled.
     expect(measureOptimalColumnWidth.length).toBe(5);
     expect(measureOptimalRowHeight.length).toBe(8);
+  });
+});
+
+// ============================================================================
+// Hard breaks (Alt+Enter, CHAR(10), and what a paste brings in)
+// ============================================================================
+//
+// The old behaviour was a SILENT WRONG ANSWER on both sides of this module.
+// `/(\s+)/` counts LF as ordinary inter-word whitespace, so the wrapper treated
+// a hard break as a mere wrap CANDIDATE, and `measureText` runs the parts
+// together (it applies the same "every space character becomes U+0020"
+// preparation `fillText` does). Nothing errored: the row simply refused to grow
+// for a break the painter now honours, and the column autofitted to the summed
+// width of lines that are never side by side.
+
+describe("splitHardBreaks / hasHardBreak", () => {
+  it("keeps an empty segment, because a deliberately blank line is a line", () => {
+    expect(splitHardBreaks("a\n\nb")).toEqual(["a", "", "b"]);
+  });
+
+  it("treats CRLF as ONE break, never two", () => {
+    // A `[\r\n]` character class would wedge a blank line between every pair of
+    // lines in any text pasted from Windows.
+    expect(splitHardBreaks("a\r\nb")).toEqual(["a", "b"]);
+    expect(splitHardBreaks("a\rb")).toEqual(["a", "b"]);
+    expect(splitHardBreaks("a\r\nb\nc\rd")).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("gives an unbroken value exactly one segment", () => {
+    expect(splitHardBreaks("plain value")).toEqual(["plain value"]);
+    expect(splitHardBreaks("")).toEqual([""]);
+  });
+
+  it("answers the same on repeated calls (the pattern is not /g)", () => {
+    // A global regex carries `lastIndex` between `.test` calls and would answer
+    // false every other time -- which would make every second repaint of the
+    // same cell disagree with the one before it.
+    expect(hasHardBreak("a\nb")).toBe(true);
+    expect(hasHardBreak("a\nb")).toBe(true);
+    expect(hasHardBreak("plain")).toBe(false);
+  });
+});
+
+describe("wrapText (the one recipe the painter draws with)", () => {
+  it("breaks at a hard break even when both parts fit on one line", () => {
+    // 10px per character against a 100px box: "ab cd" fits, so the wrapper had
+    // no reason to break it and the newline went through as whitespace.
+    expect(wrapText(mockCtx, "ab\ncd", 100)).toEqual(["ab", "cd"]);
+  });
+
+  it("keeps a deliberately blank line the trim guard used to swallow", () => {
+    expect(wrapText(mockCtx, "a\n\nb", 100)).toEqual(["a", "", "b"]);
+  });
+
+  it("soft-wraps each part after the hard break splits them", () => {
+    expect(wrapText(mockCtx, "aaaa bbbb\ncc", 54)).toEqual(["aaaa ", "bbbb", "cc"]);
+  });
+
+  it("still splits hard breaks when there is no usable width", () => {
+    expect(wrapText(mockCtx, "a\nb", 0)).toEqual(["a", "b"]);
+  });
+
+  it("leaves ordinary wrapping alone", () => {
+    expect(wrapText(mockCtx, "aaaa bbbb cccc", 54)).toEqual(["aaaa ", "bbbb ", "cccc"]);
+    expect(wrapText(mockCtx, "", 100)).toEqual([""]);
+  });
+});
+
+describe("row auto-height counts hard breaks", () => {
+  const measure = (cells: CellData[], row = 0, widths = new Map<number, number>()) =>
+    measureOptimalRowHeight(
+      cells,
+      STYLES,
+      widths,
+      DEFAULT_COL_WIDTH,
+      THEME,
+      MIN_HEIGHT,
+      DEFAULT_ROW_HEIGHT,
+      row
+    );
+
+  it("grows the row for a break WITH WRAP TEXT OFF", () => {
+    // The painter breaks on a hard break whether or not wrap is on, so a row
+    // that stays at the default height clips the second line away. 13pt ->
+    // 17.333px; 2 * 17.333 * 1.2 + 4 = 45.6 -> 46.
+    expect(measure([makeCell({ display: "a\nb" })])).toBe(46);
+  });
+
+  it("counts a deliberately blank line", () => {
+    // 3 * 17.333 * 1.2 + 4 = 66.4 -> 67
+    expect(measure([makeCell({ display: "a\n\nb" })])).toBe(67);
+  });
+
+  it("counts CRLF and a bare CR as one line break each", () => {
+    expect(measure([makeCell({ display: "a\r\nb" })])).toBe(46);
+    expect(measure([makeCell({ display: "a\rb" })])).toBe(46);
+  });
+
+  it("leaves an unbroken single line at the default height", () => {
+    expect(measure([makeCell({ display: "abc" })])).toBe(DEFAULT_ROW_HEIGHT);
+  });
+
+  it("grows the row for a break WITH WRAP TEXT ON, even when the parts fit", () => {
+    // "ab cd" fits the 94px text box whole, so the wrapper returned one line
+    // and the row was clamped to the default height -- a break the painter
+    // draws and the row hid.
+    expect(measure([makeCell({ display: "ab\ncd", styleIndex: 2 })])).toBe(46);
+    expect(measure([makeCell({ display: "ab\n\ncd", styleIndex: 2 })])).toBe(67);
+  });
+
+  it("adds soft wraps to hard breaks rather than replacing them", () => {
+    // Column width 60 -> available 54: "aaaa bbbb" wraps to 2, then "cc".
+    const cells = [makeCell({ col: 0, display: "aaaa bbbb\ncc", styleIndex: 2 })];
+    expect(measure(cells, 0, new Map([[0, 60]]))).toBe(67);
+  });
+});
+
+describe("column auto-width fits the WIDEST line, not the run-together string", () => {
+  it("measures the longest line of a broken value", () => {
+    // Widest line "defghij" = 7 * 10 + 8 = 78. Measured whole, the string is 11
+    // characters and the column came out at 118 -- wide enough for two lines
+    // that are never side by side.
+    const cells = [makeCell({ display: "abc\ndefghij" })];
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(78);
+  });
+
+  it("does not count the break characters themselves", () => {
+    expect(
+      measureOptimalColumnWidth(0, [makeCell({ display: "abc\r\ndefghij" })], STYLES, THEME, MIN_WIDTH)
+    ).toBe(78);
+    expect(
+      measureOptimalColumnWidth(0, [makeCell({ display: "ab\n\nabcd" })], STYLES, THEME, MIN_WIDTH)
+    ).toBe(48);
+  });
+
+  it("leaves an unbroken value measured exactly as before", () => {
+    const cells = [makeCell({ display: "abcdefghij" })];
+    expect(measureOptimalColumnWidth(0, cells, STYLES, THEME, MIN_WIDTH)).toBe(108);
   });
 });
 

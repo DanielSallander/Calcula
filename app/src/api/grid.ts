@@ -111,6 +111,7 @@ import {
   setSplitWindow as backendSetSplitWindow,
   getSplitWindow as backendGetSplitWindow,
   goToSpecial as backendGoToSpecial,
+  getUsedRange,
   applyBorderPreset,
   fillRange as backendFillRange,
 } from "../core/lib/tauri-api";
@@ -197,7 +198,8 @@ export type GoToSpecialCriteria =
   | "comments"
   | "notes"
   | "conditionalFormats"
-  | "dataValidation";
+  | "dataValidation"
+  | "lastCell";
 
 // ============================================================================
 // Scroll / Navigation API
@@ -261,11 +263,26 @@ export async function borderAround(
 
 /**
  * Find cells matching specific criteria.
+ *
+ * "lastCell" is answered HERE rather than by `go_to_special`: the last used
+ * cell is a property of the SHEET, not a class of cell the backend can scan a
+ * range for, and `get_used_range` already computes it for Ctrl+End. Routing it
+ * through the same command is what keeps the dialog and the keyboard from
+ * disagreeing about where the end is — a second implementation would be a
+ * second answer. `searchRange` is deliberately ignored for it, as Excel's Last
+ * cell reports the sheet's corner whatever is selected.
  */
 export async function goToSpecial(
   criteria: GoToSpecialCriteria,
   searchRange?: { startRow: number; startCol: number; endRow: number; endCol: number }
 ): Promise<GoToSpecialResult> {
+  if (criteria === "lastCell") {
+    // An empty sheet answers {0,0,0,0,empty:true}, so this selects A1 the way
+    // Excel does without a case of its own.
+    const used = await getUsedRange();
+    return { cells: [{ row: used.endRow, col: used.endCol }] };
+  }
+
   const range = searchRange
     ? [searchRange.startRow, searchRange.startCol, searchRange.endRow, searchRange.endCol] as [number, number, number, number]
     : null;

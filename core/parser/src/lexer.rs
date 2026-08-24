@@ -27,14 +27,67 @@ pub struct Lexer<'a> {
     /// at dozens of sites and would break the moment one was missed. A flag leaves
     /// the token stream exactly as it was and adds the one bit the parser needs.
     had_leading_ws: bool,
+    /// Which sides of the colons seen so far carried Excel's trim-reference
+    /// dot: bit 0 = leading (`A1.:B10`), bit 1 = trailing (`A1:.B10`).
+    ///
+    /// A FLAG FOR THE SAME REASON `had_leading_ws` IS ONE, only more so. The
+    /// dot is not an operand and not an operator with its own precedence -- it
+    /// is a modifier on the `:` it touches. Giving it a token variant would
+    /// mean auditing every one of the parser's twenty-one `== Token::Colon`
+    /// comparisons and every range-building function behind them, and a single
+    /// miss is a formula that stops parsing. Swallowing the dots here leaves
+    /// the token stream byte-identical to what those sites already handle, and
+    /// the parser reads this one field at the single point where a reference
+    /// atom is finished.
+    ///
+    /// It ACCUMULATES rather than describing the last colon: `take_trim_flags`
+    /// clears it, and the parser saves and restores it around each atom so a
+    /// nested range cannot leak its dots to the expression containing it.
+    trim_flags: u8,
 }
+
+/// Every error literal a formula may contain, longest first.
+///
+/// LONGEST FIRST IS LOAD-BEARING: `#NUM!` and `#NULL!` both begin `#NU`, and
+/// `#N/A` begins `#N` like both of them. A shortest-first scan would match
+/// `#N/A`'s prefix inside neither, but it WOULD stop at `#NUM!` while
+/// reading `#NUMBER`-like text; ordering by length removes the question.
+///
+/// Calcula's own four (`#CIRCULAR!`, `#CONFLICT!`, `#BLOCKED!`, `#LIMIT!`)
+/// are here as well as Excel's eight: they can appear in a cell, so a
+/// formula that names one must round-trip rather than fail to parse. The
+/// canonical spellings live in `CellError::as_literal` in the engine crate —
+/// which this crate cannot depend on (the dependency runs the other way), so
+/// `errorLiteralsMatchTheEngine` in the engine's own tests diffs the two.
+/// `TRIMRANGE`'s trim code for the leading edge -- the dot BEFORE the colon.
+pub const TRIM_LEADING: u8 = 1;
+/// `TRIMRANGE`'s trim code for the trailing edge -- the dot AFTER the colon.
+pub const TRIM_TRAILING: u8 = 2;
+
+pub const ERROR_LITERALS: [&str; 12] = [
+    "#CIRCULAR!", "#CONFLICT!", "#BLOCKED!", "#DIV/0!", "#VALUE!", "#SPILL!", "#LIMIT!",
+    "#NAME?", "#NULL!", "#REF!", "#NUM!", "#N/A",
+];
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Lexer {
             input: input.chars().peekable(),
             had_leading_ws: false,
+            trim_flags: 0,
         }
+    }
+
+    /// Returns the trim-reference dots seen since the last call and clears
+    /// them. See `trim_flags`.
+    pub fn take_trim_flags(&mut self) -> u8 {
+        std::mem::take(&mut self.trim_flags)
+    }
+
+    /// Restores a previously taken set of flags, so an atom can put back what
+    /// the expression around it had accumulated.
+    pub fn restore_trim_flags(&mut self, flags: u8) {
+        self.trim_flags |= flags;
     }
 
     /// Advances the lexer and returns the next token.
@@ -51,11 +104,30 @@ impl<'a> Lexer<'a> {
             Some('(') => Token::LParen,
             Some(')') => Token::RParen,
             Some(',') => Token::Comma,
-            Some(':') => Token::Colon,
+            Some(':') => {
+                if self.input.peek() == Some(&'.') {
+                    self.input.next();
+                    self.trim_flags |= TRIM_TRAILING;
+                }
+                Token::Colon
+            }
             Some('!') => Token::Exclamation,
             Some('$') => Token::Dollar,
             Some('@') => Token::At,
-            Some('#') => Token::Hash,
+            // `#` is BOTH the postfix spill operator (`A1#`) and the first
+            // character of every ERROR LITERAL (`#REF!`, `#N/A`, ...). The two
+            // are told apart by what follows: a known error name makes it a
+            // literal, anything else stays the spill operator. The lookahead
+            // consumes nothing unless it succeeds, so `A1#` is unaffected.
+            Some('#') => match self.peek_error_literal() {
+                Some(lit) => {
+                    for _ in 0..lit.chars().count() - 1 {
+                        self.input.next();
+                    }
+                    Token::ErrorLiteral(lit)
+                }
+                None => Token::Hash,
+            },
             Some('[') => Token::LBracket,
             Some(']') => Token::RBracket,
             Some('{') => Token::LBrace,
@@ -77,6 +149,29 @@ impl<'a> Lexer<'a> {
 
             // Handle single quotes for sheet names with spaces
             Some('\'') => self.read_quoted_identifier(),
+
+            // Excel's trim-reference operator. It has to be decided here,
+            // before the number rule below, because `.5` is a number and `.`
+            // on its own is an operator -- the digit is the whole difference.
+            //
+            // A dot that really is the operator is followed by the `:` it
+            // modifies, so both are consumed together and the colon is handed
+            // to the parser unchanged. A dot with no colon behind it is a
+            // `Token::Dot` that no production accepts, which is the intent: it
+            // is a typo, and it should say so rather than parse as something.
+            Some('.') if !matches!(self.input.peek(), Some(c) if c.is_ascii_digit()) => {
+                if self.input.peek() == Some(&':') {
+                    self.input.next();
+                    self.trim_flags |= TRIM_LEADING;
+                    if self.input.peek() == Some(&'.') {
+                        self.input.next();
+                        self.trim_flags |= TRIM_TRAILING;
+                    }
+                    Token::Colon
+                } else {
+                    Token::Dot
+                }
+            }
 
             // Handle Numbers (starts with digit or dot)
             Some(ch) if ch.is_ascii_digit() || ch == '.' => self.read_number(ch),
@@ -233,6 +328,30 @@ impl<'a> Lexer<'a> {
         }
     }
 
+
+
+    /// The error literal starting at the `#` just consumed, or `None`.
+    /// Consumes nothing; the caller advances past it on success.
+    ///
+    /// Case-insensitive, because a user types `#n/a` and Excel accepts it — the
+    /// returned string is the CANONICAL spelling, so the AST never carries the
+    /// user's casing and the renderer needs no normalisation of its own.
+    fn peek_error_literal(&self) -> Option<String> {
+        let mut ahead = String::from("#");
+        let mut look = self.input.clone();
+        // The longest literal is 10 characters including the '#'.
+        for _ in 0..9 {
+            match look.next() {
+                Some(c) => ahead.push(c.to_ascii_uppercase()),
+                None => break,
+            }
+        }
+        ERROR_LITERALS
+            .iter()
+            .find(|lit| ahead.starts_with(*lit))
+            .map(|lit| (*lit).to_string())
+    }
+
     /// The exponent suffix (`E3`, `e+10`, `E-3`) starting at the current
     /// position, or `None` when what follows is not one. Consumes nothing.
     fn peek_exponent(&self) -> Option<String> {
@@ -269,11 +388,24 @@ impl<'a> Lexer<'a> {
         let mut ident = String::from(first_char);
 
         while let Some(&ch) = self.input.peek() {
-            // Allow letters, digits, and '.' as continuation characters.
-            // '.' supports defined names like "Q1.Sales".
-            if is_letter(ch) || ch.is_ascii_digit() || ch == '.' {
+            if is_letter(ch) || ch.is_ascii_digit() {
                 ident.push(ch);
                 self.input.next();
+            } else if ch == '.' {
+                // '.' continues a defined name like "Q1.Sales" -- but ONLY when
+                // something name-like follows it. A trailing dot is the
+                // trim-reference operator (`A1.:B10`), and swallowing it into
+                // the identifier here would hide the operator from the parser
+                // where it could never be recovered.
+                let mut look = self.input.clone();
+                look.next();
+                match look.peek() {
+                    Some(&next) if is_letter(next) || next.is_ascii_digit() => {
+                        ident.push(ch);
+                        self.input.next();
+                    }
+                    _ => break,
+                }
             } else {
                 break;
             }

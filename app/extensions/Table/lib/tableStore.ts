@@ -30,6 +30,7 @@ import {
 } from "@api/backend";
 import { cellEvents } from "@api";
 import { emitAppEvent, AppEvents } from "@api/events";
+import { tableSelectionScope } from "./tableBands";
 
 /**
  * Announce that the set of TABLES changed, and that the change cascaded into
@@ -490,6 +491,13 @@ export function syncTableRegions(): void {
       hasHeaders: table.styleOptions.headerRow,
       columns: table.columns,
       styleOptions: table.styleOptions,
+      // What Ctrl+Space / Shift+Space / Ctrl+A should select inside this table.
+      // The grid keyboard used to select the whole SHEET for all four gestures,
+      // whether or not the cursor sat in a table, because nothing on this side
+      // of the boundary ever told it a table was there. It reads this off the
+      // region rather than asking what kind of object the region is — the
+      // owner says WHAT the gesture selects, Core decides nothing about tables.
+      selectionScope: tableSelectionScope(table),
     },
   }));
 

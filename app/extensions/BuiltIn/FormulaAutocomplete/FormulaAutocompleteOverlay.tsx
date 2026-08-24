@@ -2,10 +2,11 @@
 // PURPOSE: Overlay component rendering the autocomplete dropdown and argument hints.
 // CONTEXT: Registered as an overlay via OverlayExtensions. Reads from the Zustand store.
 
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useState, useCallback } from "react";
 import type { OverlayProps } from "@api/uiTypes";
 import { getCachedLocale } from "@api/locale";
 import { useAutocompleteStore } from "./useAutocompleteStore";
+import { findArgumentSpans } from "./tokenParser";
 import type { ScoredSuggestion } from "../../_shared/lib/functionCatalog";
 import type { FunctionInfo } from "@api/types";
 import * as S from "./FormulaAutocompleteOverlay.styles";
@@ -17,6 +18,18 @@ const HINT_GAP = 4;
 // + a short description). Used to keep the hint clear of the dropdown when the
 // dropdown is flipped above the editor cell near the viewport bottom.
 const ARGUMENT_HINT_HEIGHT = 72;
+/** How much of a dragged hint card must stay inside the window. */
+const HINT_KEEP_VISIBLE_PX = 48;
+
+/** The hint card sits where it was computed to sit until it is dragged. */
+const NO_DRAG_OFFSET = { dx: 0, dy: 0 };
+
+interface HintDrag {
+  startX: number;
+  startY: number;
+  baseDx: number;
+  baseDy: number;
+}
 
 /**
  * Main overlay component for formula autocomplete.
@@ -32,9 +45,15 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
     argumentHintVisible,
     argumentHintFunction,
     argumentHintIndex,
+    currentValue,
+    currentCursorPosition,
   } = useAutocompleteStore();
 
   const listRef = useRef<HTMLDivElement>(null);
+
+  /** Where the user has dragged the hint card away from its computed place. */
+  const [hintOffset, setHintOffset] = useState(NO_DRAG_OFFSET);
+  const [hintDrag, setHintDrag] = useState<HintDrag | null>(null);
 
   // Scroll the selected item into view when selectedIndex changes
   useEffect(() => {
@@ -45,6 +64,74 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
       selectedEl.scrollIntoView({ block: "nearest" });
     }
   }, [selectedIndex, visible]);
+
+  // Follow the pointer for as long as the button is held. The listeners are on
+  // the WINDOW because the pointer leaves this small card almost immediately in
+  // any real drag; listening on the card itself would drop the drag there.
+  useEffect(() => {
+    if (!hintDrag) return;
+    const onMove = (e: MouseEvent) => {
+      setHintOffset({
+        dx: hintDrag.baseDx + e.clientX - hintDrag.startX,
+        dy: hintDrag.baseDy + e.clientY - hintDrag.startY,
+      });
+    };
+    const onUp = () => setHintDrag(null);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [hintDrag]);
+
+  // A card was dragged clear of one call's arguments; the next edit gets a
+  // fresh one under its own editor rather than wherever the last one ended up.
+  useEffect(() => {
+    if (argumentHintVisible) return;
+    setHintOffset((prev) => (prev.dx === 0 && prev.dy === 0 ? prev : NO_DRAG_OFFSET));
+  }, [argumentHintVisible]);
+
+  const beginHintDrag = useCallback(
+    (e: React.MouseEvent) => {
+      // preventDefault does the job the card's plain preventBlur handler did:
+      // the press must not move focus off the editor, because losing focus ends
+      // the edit the card is describing.
+      e.preventDefault();
+      setHintDrag({
+        startX: e.clientX,
+        startY: e.clientY,
+        baseDx: hintOffset.dx,
+        baseDy: hintOffset.dy,
+      });
+    },
+    [hintOffset]
+  );
+
+  /**
+   * Clicking a parameter selects that argument's text in the editor, so it can
+   * be typed straight over.
+   *
+   * The spans come from the same scan the bolded parameter does
+   * (`findArgumentSpans`), so what gets selected is always what the card was
+   * pointing at. The editor is `document.activeElement` because the press was
+   * preventDefault-ed above and focus never left it -- which is also why this
+   * one line serves EVERY formula editor that feeds the card (the grid cell,
+   * the formula bar, the defined-name and control-property fields) without any
+   * of them having to know the card exists.
+   */
+  const selectArgument = useCallback(
+    (index: number) => {
+      const span = findArgumentSpans(currentValue, currentCursorPosition)[index];
+      // A parameter the signature lists but the user has not typed yet has no
+      // text to select.
+      if (!span) return;
+      const el = document.activeElement;
+      if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return;
+      el.setSelectionRange(span.start, span.end);
+    },
+    [currentValue, currentCursorPosition]
+  );
 
   // Nothing to render
   if (!anchorRect) return null;
@@ -73,6 +160,13 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
   } else {
     hintY = anchorRect.y + HINT_GAP;
   }
+
+  // Where the card actually sits: its computed place plus wherever it has been
+  // dragged. The clamp belongs to the DRAG -- it is what stops the card being
+  // parked past the edge of the window, from where it could never be dragged
+  // back -- so an undragged card keeps exactly the position computed above.
+  const hintLeft = hintOffset.dx === 0 ? dropdownX : clampHintPos(dropdownX + hintOffset.dx, window.innerWidth);
+  const hintTop = hintOffset.dy === 0 ? hintY : clampHintPos(hintY + hintOffset.dy, window.innerHeight);
 
   return (
     <>
@@ -105,12 +199,13 @@ export function FormulaAutocompleteOverlay(_props: OverlayProps): React.ReactEle
       {argumentHintVisible && argumentHintFunction && (
         <S.ArgumentHintContainer
           data-testid="formula-argument-hint"
-          style={{ left: dropdownX, top: hintY }}
-          onMouseDown={preventBlur}
+          style={{ left: hintLeft, top: hintTop }}
+          onMouseDown={beginHintDrag}
         >
           <ArgumentHint
             func={argumentHintFunction}
             activeArgIndex={argumentHintIndex}
+            onSelectArgument={selectArgument}
           />
         </S.ArgumentHintContainer>
       )}
@@ -203,14 +298,20 @@ function HighlightedName({
  * the active argument shown as a filled chip, a label naming the active
  * parameter (and whether it is optional), and the function description.
  *
+ * Every named parameter is a click target that selects the matching argument in
+ * the editor (`onSelectArgument`), which is what makes the signature a way to
+ * NAVIGATE the call rather than just a legend for it.
+ *
  * Parses the syntax string (e.g., "SUM(number1, [number2], ...)").
  */
 function ArgumentHint({
   func,
   activeArgIndex,
+  onSelectArgument,
 }: {
   func: FunctionInfo;
   activeArgIndex: number;
+  onSelectArgument: (index: number) => void;
 }): React.ReactElement {
   const { syntax, description } = func;
 
@@ -247,16 +348,35 @@ function ArgumentHint({
     <>
       <S.SignatureLine>
         <S.FnName>{funcName}</S.FnName>(
-        {args.map((arg, i) => (
-          <React.Fragment key={i}>
-            {i > 0 && displaySep}
-            {i === activeIdx ? (
-              <S.ActiveArg>{arg}</S.ActiveArg>
-            ) : (
-              <S.InactiveArg>{arg}</S.InactiveArg>
-            )}
-          </React.Fragment>
-        ))}
+        {args.map((arg, i) => {
+          // The trailing "..." of a variadic signature stands for arguments
+          // rather than naming one -- it strips to nothing -- so there is
+          // nothing for a click on it to select.
+          const selectable = stripArgDecorations(arg) !== "";
+          const onMouseDown = selectable
+            ? (e: React.MouseEvent) => {
+                // Keep the press off the card's drag handler: a click that
+                // means "select this argument" must not also start a drag.
+                e.preventDefault();
+                e.stopPropagation();
+                onSelectArgument(i);
+              }
+            : undefined;
+          return (
+            <React.Fragment key={i}>
+              {i > 0 && displaySep}
+              {i === activeIdx ? (
+                <S.ActiveArg $selectable={selectable} onMouseDown={onMouseDown}>
+                  {arg}
+                </S.ActiveArg>
+              ) : (
+                <S.InactiveArg $selectable={selectable} onMouseDown={onMouseDown}>
+                  {arg}
+                </S.InactiveArg>
+              )}
+            </React.Fragment>
+          );
+        })}
         )
       </S.SignatureLine>
       {activeParamName && activeParamName !== "..." && (
@@ -322,6 +442,14 @@ function splitArguments(argsStr: string): string[] {
   }
 
   return args;
+}
+
+/**
+ * Keep a dragged hint card's leading edge inside the window, with enough of it
+ * showing to grab again.
+ */
+function clampHintPos(pos: number, extent: number): number {
+  return Math.max(0, Math.min(pos, extent - HINT_KEEP_VISIBLE_PX));
 }
 
 /**

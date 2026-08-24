@@ -2618,6 +2618,24 @@ fn resolve_this_row_ref(
     current_row: u32,
     sheet: Option<String>,
 ) -> ParserExpr {
+    // THE BARE `[#This Row]`: the formula's row across the WHOLE table, naming
+    // no column at all. An empty column name is that spelling's marker — it is
+    // unforgeable because `parse_bracket_content` refuses an empty name, so
+    // `[@]` and `[]` are parse errors and nothing else can produce one.
+    //
+    // Without this the name falls through to `get_column_index("")`, finds
+    // nothing, and degrades to `_UNRESOLVED_…` — which the user sees as #NAME?.
+    // (Before the parser was fixed it was worse than an error: `[#This Row]` was
+    // aliased to `[#Data]` and evaluated over EVERY data row.)
+    if col_name.is_empty() {
+        return make_range(
+            sheet,
+            current_row,
+            table.start_col,
+            current_row,
+            table.end_col,
+        );
+    }
     match table.get_column_index(col_name) {
         Some(col_idx) => {
             let abs_col = table.start_col + col_idx as u32;
@@ -3797,13 +3815,106 @@ pub fn parse_cell_input(input: &str, locale: &engine::LocaleSettings) -> Cell {
 /// through `StyleRegistry::get_or_create` and assign the returned index — and
 /// only when the cell's current format is `General`, so an explicit format the
 /// user already chose is never overwritten by what they typed into it.
+///
+/// NO DESTINATION IN VIEW. This spelling cannot see where the entry lands, so
+/// the Text-format rung of the ladder is dead for it. That is right for the
+/// callers that genuinely have no cell (CSV/BI value conversion, the UDF edit
+/// list); an entry path that DOES have one must pass it — see
+/// `parse_cell_input_in_format`.
 pub fn parse_cell_input_with_format(
     input: &str,
     locale: &engine::LocaleSettings,
 ) -> (Cell, Option<NumberFormat>) {
+    parse_cell_input_in_format(input, locale, None)
+}
+
+/// Whether a number format is Excel's Text format — the `@` code, and only it.
+///
+/// A custom code that merely CONTAINS an `@` section (`"id "@`) is not the Text
+/// category: it says how to draw text that is already there, not that whatever
+/// is entered here IS text. The same one-character test decides the overflow
+/// class in `api_types::overflow_class_for`, and the two must agree — a cell
+/// whose entry is stored as text but whose digits are then marked '####' is a
+/// contradiction visible on screen.
+pub fn is_text_format(format: &NumberFormat) -> bool {
+    matches!(format, NumberFormat::Custom { format } if format == "@")
+}
+
+/// The number format an entry at (row, col) actually lands in.
+///
+/// `Grid::effective_style_index` and NOT `cell.style_index`, because a cell's
+/// own index stays 0 until something formats that exact cell — and formatting a
+/// whole COLUMN as Text is how a column of ZIP codes or part numbers is
+/// protected. Reading the cell's own index would make the Text format work only
+/// where someone had ALSO formatted each cell individually, which is the case
+/// that needs it least.
+pub fn entry_format_at(
+    grid: &Grid,
+    styles: &StyleRegistry,
+    row: u32,
+    col: u32,
+) -> NumberFormat {
+    styles
+        .get(grid.effective_style_index(row, col))
+        .number_format
+        .clone()
+}
+
+/// The typed-entry ladder, told which number format the entry is landing in.
+///
+/// `target_format` is the format that ACTUALLY applies at the destination
+/// (`entry_format_at`), or `None` where there is no destination.
+///
+/// THE ORDER, rung by rung, and why each one sits where it does:
+///
+/// 1. **empty** — an empty entry is an empty cell, never a text cell.
+/// 2. **leading `'`** — Excel's escape: "store the rest as text, and do not show
+///    me the apostrophe". FIRST, because it overrides everything below it
+///    INCLUDING rung 3: `'123` in a Text-formatted cell must store `123`, not a
+///    visible apostrophe. `''abc` therefore stores `'abc`, which is Excel's own
+///    way to type a literal leading apostrophe, and falls out of "the rest,
+///    verbatim" rather than being a case of its own.
+/// 3. **the Text format** — an entry into an `@` cell is stored as TEXT,
+///    verbatim. Above `=` because Excel stores a formula typed into a
+///    Text-formatted cell as the literal string too, and above the number rung
+///    because that is the whole point: `007` typed into a Text cell used to be
+///    stored as the NUMBER 7 and then re-rendered through `General`, so the cell
+///    displayed "7" — the leading zeros destroyed, silently, which is precisely
+///    the loss (part numbers, ZIP codes) the Text format exists to prevent.
+/// 4. **`=` formula**.
+/// 5. **TRUE/FALSE**.
+/// 6. **number (and `%`)** — before dates, because a bare `43983` is the number
+///    43983 and not a date.
+/// 7. **date/time**.
+/// 8. **leading `+`/`-` formula** — the Lotus habit; after the number rung so
+///    that `-5` stays a number and only `-A1` becomes a formula.
+/// 9. **text**.
+///
+/// Rungs 3 and 6/7 are mirror images and must not fight: rung 3 is the FORMAT
+/// deciding the value, rungs 6/7 are the VALUE implying a format. They cannot
+/// both fire — rung 3 returns before them and reports no implied format, so a
+/// Text-formatted cell can never have its own format overwritten by what was
+/// typed into it.
+pub fn parse_cell_input_in_format(
+    input: &str,
+    locale: &engine::LocaleSettings,
+    target_format: Option<&NumberFormat>,
+) -> (Cell, Option<NumberFormat>) {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return (Cell::new(), None);
+    }
+    // RUNG 2. The rest is stored VERBATIM — no second trim, so `'  007` keeps
+    // the spaces the user deliberately typed after the escape.
+    if let Some(rest) = trimmed.strip_prefix('\'') {
+        return (
+            Cell::new_text(rest.to_string()),
+            apostrophe_implied_format(rest, locale),
+        );
+    }
+    // RUNG 3. See the ladder doc: this is the half that used to lose data.
+    if target_format.is_some_and(is_text_format) {
+        return (Cell::new_text(trimmed.to_string()), None);
     }
     if trimmed.starts_with('=') {
         // Delocalize the formula: convert locale separators to invariant format for storage
@@ -3839,12 +3950,86 @@ pub fn parse_cell_input_with_format(
     (Cell::new_text(trimmed.to_string()), None)
 }
 
+/// What a leading apostrophe implies about the CELL, not just about this entry.
+///
+/// Excel remembers the apostrophe itself — it exposes it as
+/// `Range.PrefixCharacter` and leaves the cell on `General`. Calcula does NOT
+/// store a prefix flag, and records the same intent as the Text format instead.
+///
+/// WHY NOT A STORED FLAG. The one thing the prefix drives here is the "Number
+/// Stored as Text" indicator, and `error_checking.rs` derives that from the
+/// VALUE (a `CellValue::Text` whose contents parse as a number), never from a
+/// prefix — so a stored flag would be a second source of truth for an answer the
+/// value already gives, carried on every cell of a 1M-row grid, plus a `.cala`
+/// shape change to persist it.
+///
+/// WHAT THE FORMAT BUYS INSTEAD is the round trip, which is where the prefix
+/// character earns its keep in Excel: nothing in a `CellValue::Text("123")` says
+/// an apostrophe was ever typed, so the editor re-opens on `123`, and pressing
+/// Enter on an OTHERWISE UNTOUCHED cell would store the number 123 and lose the
+/// text. With the cell now formatted as Text, rung 3 of the ladder catches that
+/// re-entry and the value survives. The price is a deliberate deviation: after
+/// `'123`, typing `456` into that same cell stays text here where Excel would
+/// make it a number. One is a surprise the user can undo from Format Cells; the
+/// other is a leading zero nobody notices is gone.
+///
+/// ONLY WHEN THE APOSTROPHE CHANGED THE ANSWER. `'hello` implies nothing —
+/// `hello` was already text, so formatting the cell would restrict it for no
+/// gain. `'123`, `'TRUE`, `'=A1+1` and `'2020-06-01` each would have become
+/// something else, and each implies Text.
+fn apostrophe_implied_format(
+    rest: &str,
+    locale: &engine::LocaleSettings,
+) -> Option<NumberFormat> {
+    // THE LADDER ITSELF decides what `rest` would have been. A second copy of
+    // "does this look like a number/date/formula" is exactly the kind of
+    // duplicate that drifts on the first locale change. It terminates because
+    // `rest` is strictly shorter than the input that reached here, so `''x`
+    // recurses once and stops.
+    let (would_be, _) = parse_cell_input_in_format(rest, locale, None);
+    if would_be.has_formula() {
+        return Some(NumberFormat::Custom { format: "@".to_string() });
+    }
+    match would_be.value {
+        // `Empty` is the lone apostrophe (`'`), which needs no protection.
+        CellValue::Text(_) | CellValue::Empty => None,
+        _ => Some(NumberFormat::Custom { format: "@".to_string() }),
+    }
+}
+
 /// Parse cell input that is already in invariant (US) format.
 /// Formulas are stored as-is without delocalization; numbers use '.' as decimal separator.
 pub fn parse_cell_input_invariant(input: &str, locale: &engine::LocaleSettings) -> Cell {
+    parse_cell_input_invariant_in_format(input, locale, None)
+}
+
+/// `parse_cell_input_invariant`, told which number format the entry lands in.
+///
+/// The two new rungs are DIALECT-FREE — neither the apostrophe nor the `@`
+/// format reads a decimal separator — so they are the same two lines here as in
+/// the localized ladder, and a script's only way to write the text "123" is the
+/// same escape a user types.
+///
+/// It returns no implied format, because this whole spelling reports none: a
+/// script that means to write a date says so with a format of its own rather
+/// than having one inferred from the string it passed. The consequence for the
+/// apostrophe is that a script's `'123` stores text WITHOUT formatting the cell
+/// as Text, so it does not get the re-entry round trip an interactive `'123`
+/// does.
+pub fn parse_cell_input_invariant_in_format(
+    input: &str,
+    locale: &engine::LocaleSettings,
+    target_format: Option<&NumberFormat>,
+) -> Cell {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Cell::new();
+    }
+    if let Some(rest) = trimmed.strip_prefix('\'') {
+        return Cell::new_text(rest.to_string());
+    }
+    if target_format.is_some_and(is_text_format) {
+        return Cell::new_text(trimmed.to_string());
     }
     if trimmed.starts_with('=') {
         // Formula is already in invariant format — store directly

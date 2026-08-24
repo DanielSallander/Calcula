@@ -444,7 +444,37 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses primary expressions (literals, cell refs, function calls, parentheses).
+    /// Parses one atom, then applies Excel's trim-reference operator to it.
+    ///
+    /// The `.` in `A1:.B10` is documented by Microsoft as shorthand for
+    /// `TRIMRANGE`, and that is exactly how it is represented here: the dotted
+    /// range lowers to the function call, so `Expression::Range` grows no trim
+    /// fields, nothing downstream of the parser learns a second spelling for
+    /// the same idea, and the two features cannot drift apart because there is
+    /// only one of them.
+    ///
+    /// The flags are saved and restored around the atom rather than merely
+    /// cleared, so that a dotted range nested inside another atom -- an
+    /// argument, a parenthesised sub-expression -- is trimmed itself and does
+    /// not silently trim its parent as well.
     fn parse_primary(&mut self) -> ParseResult<Expression> {
+        let outer = self.lexer.take_trim_flags();
+        let expr = self.parse_primary_atom();
+        let code = self.lexer.take_trim_flags();
+        self.lexer.restore_trim_flags(outer);
+        let expr = expr?;
+        if code == 0 {
+            return Ok(expr);
+        }
+        let axis = Expression::Literal(Value::Number(f64::from(code)));
+        Ok(Expression::FunctionCall {
+            func: BuiltinFunction::TrimRange,
+            args: vec![expr, axis.clone(), axis],
+            ref_site_id: RefSiteId::ZERO,
+        })
+    }
+
+    fn parse_primary_atom(&mut self) -> ParseResult<Expression> {
         match self.current_token.clone() {
             // Dollar sign - start of absolute reference like $A1 or $1:$5
             Token::Dollar => {
@@ -474,6 +504,20 @@ impl<'a> Parser<'a> {
             Token::Boolean(b) => {
                 self.advance();
                 Ok(Expression::Literal(Value::Boolean(b)))
+            }
+
+            // ERROR LITERAL: `=#REF!`, `={1,#N/A}`, `=IF(A1,#N/A,0)`.
+            //
+            // Excel accepts these anywhere a value is accepted, and Calcula could
+            // not parse one at all — which mattered beyond the typing case: the
+            // copy/fill shifters need to WRITE `#REF!` in place of a reference
+            // that leaves the sheet (they clamped instead, silently re-pointing
+            // the formula at surviving data), and text no parser accepts would
+            // have turned the whole formula into a #VALUE! cell carrying no
+            // dependency edges at all.
+            Token::ErrorLiteral(lit) => {
+                self.advance();
+                Ok(Expression::Literal(Value::Error(lit)))
             }
 
             // Quoted identifier - sheet reference or 3D sheet range reference
@@ -1297,6 +1341,8 @@ impl<'a> Parser<'a> {
     ///   Table1[#Headers]         -> Header row
     ///   Table1[#Totals]          -> Totals row
     ///   Table1[[#Headers],[Col]] -> Special + column combo
+    ///   Table1[#This Row]        -> This-row, no column (ThisRow(""))
+    ///   Table1[[#This Row],[Col]] -> This-row column: the LONG spelling of [@Col]
     ///   [@Column]                -> This-row (table inferred from context)
     ///   [Column]                 -> Column (table inferred from context)
     fn parse_table_reference(&mut self, table_name: String) -> ParseResult<Expression> {
@@ -1437,6 +1483,13 @@ impl<'a> Parser<'a> {
                 self.expect(Token::LBracket)?;
                 let col_name = self.parse_bracket_content()?;
                 self.expect(Token::RBracket)?;
+                // `[[#This Row],[Amount]]` is Excel's long spelling of `[@Amount]`,
+                // not a special-region-plus-column pair: it names ONE cell, so it
+                // has to produce the specifier `[@Amount]` produces. Wrapping it in
+                // `SpecialColumn` is what made the two spellings disagree.
+                if let TableSpecifier::ThisRow(_) = special {
+                    return Ok(TableSpecifier::ThisRow(col_name));
+                }
                 return Ok(TableSpecifier::SpecialColumn(Box::new(special), col_name));
             }
 
@@ -1501,10 +1554,24 @@ impl<'a> Parser<'a> {
                     if let Token::Identifier(row_word) = self.current_token.clone() {
                         if row_word.to_uppercase() == "ROW" {
                             self.advance();
-                            // #This Row is equivalent to this-row with no column
-                            // In practice it's used in combination: [#This Row],[Column]
-                            // We'll treat it similarly to a this-row marker
-                            return Ok(TableSpecifier::DataRows); // Placeholder - resolved at use site
+                            // `#This Row` IS the this-row marker, carrying no column
+                            // of its own: the column, when there is one, follows the
+                            // comma in `[[#This Row],[Amount]]` and is attached by
+                            // `parse_nested_bracket_specifier`.
+                            //
+                            // This returned `DataRows` "as a placeholder, resolved at
+                            // the use site", and no use site ever resolved it:
+                            // `Table1[[#This Row],[Amount]]` became
+                            // `SpecialColumn(DataRows, "Amount")` and evaluated over
+                            // EVERY data row, while `Table1[@Amount]` -- the same
+                            // reference, short spelling -- read the one cell. Two
+                            // spellings of one reference, two different NUMBERS, and
+                            // nothing reported.
+                            //
+                            // The empty column name is what tells the bare
+                            // `Table1[#This Row]` apart from `[#Data]`, which is the
+                            // only thing the renderer could spell it with before.
+                            return Ok(TableSpecifier::ThisRow(String::new()));
                         }
                     }
                     Err(ParseError::new("Expected 'Row' after '#This' in table reference"))
@@ -1699,4 +1766,114 @@ impl<'a> Parser<'a> {
 pub fn parse(input: &str) -> ParseResult<Expression> {
     let mut parser = Parser::new(input);
     parser.parse()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// The crate's suite lives in `tests.rs`; these sit next to the grammar they
+// pin because they are about ONE production -- the structured-reference
+// bracket grammar -- and each names the property it holds.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The specifier of a formula that is nothing but a table reference.
+    fn specifier_of(formula: &str) -> TableSpecifier {
+        match parse(formula).unwrap_or_else(|e| panic!("{} does not parse: {}", formula, e)) {
+            Expression::TableRef { specifier, .. } => specifier,
+            other => panic!("{} is not a table reference: {:?}", formula, other),
+        }
+    }
+
+    /// `[[#This Row],[Col]]` AND `[@Col]` ARE ONE REFERENCE, SO ONE SPECIFIER.
+    ///
+    /// The long spelling produced `SpecialColumn(DataRows, "AMOUNT")`, which the
+    /// resolver expands to the whole data COLUMN. So `=Table1[[#This Row],[Amount]]`
+    /// and `=Table1[@Amount]` -- the same reference typed two ways -- answered
+    /// with different numbers, and neither reported anything: the wrong one is a
+    /// perfectly valid range over every data row.
+    #[test]
+    fn long_this_row_spelling_is_the_same_specifier_as_the_at_sign() {
+        assert_eq!(
+            specifier_of("=Table1[[#This Row],[Amount]]"),
+            specifier_of("=Table1[@Amount]"),
+            "the two spellings of one reference disagree"
+        );
+        // Named outright, so the test still fails if BOTH spellings drift.
+        assert_eq!(
+            specifier_of("=Table1[[#This Row],[Amount]]"),
+            TableSpecifier::ThisRow("AMOUNT".to_string())
+        );
+    }
+
+    /// The bare `[#This Row]` is the formula's row, not the whole data body.
+    ///
+    /// It was aliased to `DataRows` -- indistinguishable, from that point on,
+    /// from the user having typed `[#Data]`. That is what the renderer then
+    /// wrote back into the formula bar and into every save.
+    #[test]
+    fn bare_this_row_is_not_the_data_body() {
+        assert_eq!(
+            specifier_of("=Table1[#This Row]"),
+            TableSpecifier::ThisRow(String::new())
+        );
+        assert_ne!(specifier_of("=Table1[#This Row]"), TableSpecifier::DataRows);
+    }
+
+    /// `Table1[[#This Row]]` -- the same marker inside the nested-bracket form,
+    /// which is a different code path from the bare one.
+    #[test]
+    fn nested_bare_this_row_is_this_row_too() {
+        assert_eq!(
+            specifier_of("=Table1[[#This Row]]"),
+            TableSpecifier::ThisRow(String::new())
+        );
+    }
+
+    /// Specifier keywords are case-insensitive, as Excel's are.
+    #[test]
+    fn this_row_ignores_case() {
+        assert_eq!(
+            specifier_of("=Table1[[#THIS ROW],[Amount]]"),
+            TableSpecifier::ThisRow("AMOUNT".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1[#this row]"),
+            TableSpecifier::ThisRow(String::new())
+        );
+    }
+
+    /// The this-row arm must not swallow the OTHER special-plus-column pairs:
+    /// those stay `SpecialColumn`, which is a region, not a single cell.
+    #[test]
+    fn other_special_column_pairs_are_untouched() {
+        for (formula, special) in [
+            ("=Table1[[#Data],[Amount]]", TableSpecifier::DataRows),
+            ("=Table1[[#Headers],[Amount]]", TableSpecifier::Headers),
+            ("=Table1[[#Totals],[Amount]]", TableSpecifier::Totals),
+            ("=Table1[[#All],[Amount]]", TableSpecifier::AllRows),
+        ] {
+            assert_eq!(
+                specifier_of(formula),
+                TableSpecifier::SpecialColumn(Box::new(special), "AMOUNT".to_string()),
+                "{} changed shape",
+                formula
+            );
+        }
+    }
+
+    /// NOTHING BUT `#This Row` MAY PRODUCE AN EMPTY COLUMN NAME.
+    ///
+    /// The empty name is the marker that separates the bare `[#This Row]` from
+    /// every other this-row reference, in the AST and in the renderer. It only
+    /// works while it is unforgeable, so the two spellings that could otherwise
+    /// reach it have to stay parse errors.
+    #[test]
+    fn an_empty_column_name_has_no_other_spelling() {
+        assert!(parse("=Table1[@]").is_err(), "[@] must not parse");
+        assert!(parse("=Table1[]").is_err(), "[] must not parse");
+    }
 }

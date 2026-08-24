@@ -427,6 +427,40 @@ export function getRowFromHeader(
 }
 
 /**
+ * Is this pixel on the select-all corner -- the box where the row-number gutter
+ * and the column-letter gutter meet?
+ *
+ * WHY THE CORNER NEEDS ITS OWN PREDICATE. Every other hit test in this file
+ * answers "which cell / column / row is this?", and each one deliberately
+ * refuses the corner: `getCellFromPixel` bails on
+ * `pixelX < rowHeaderWidth || pixelY < colHeaderHeight`, `getColumnFromHeader`
+ * on `pixelX < rowHeaderWidth`, `getRowFromHeader` on `pixelY < colHeaderHeight`.
+ * A caller that tries only those three is therefore STRUCTURALLY blind to the
+ * corner -- which is how a corner click during formula entry inserted nothing at
+ * all, with no error and no complaint, until 2026-08-23. Formula mode tried
+ * exactly those three handlers and fell out of the branch.
+ *
+ * A collapsed gutter (View > Headings off) measures 0, and then there is no
+ * corner at all. The half-open comparison already says that -- `x >= 0 && x < 0`
+ * is empty -- so the explicit 0 guard is belt-and-braces. Measured while proving
+ * the tests have teeth: removing that guard alone leaves every assertion green,
+ * and it only shows up together with the bounds -- guard gone AND `<` relaxed to
+ * `<=` makes a 0-gutter canvas answer "corner" for the pixel at the origin.
+ */
+export function isSelectAllCorner(
+  pixelX: number,
+  pixelY: number,
+  config: GridConfig
+): boolean {
+  const rowHeaderWidth = rowHeaderGutter(config);
+  const colHeaderHeight = colHeaderGutter(config);
+
+  if (rowHeaderWidth <= 0 || colHeaderHeight <= 0) return false;
+
+  return pixelX >= 0 && pixelY >= 0 && pixelX < rowHeaderWidth && pixelY < colHeaderHeight;
+}
+
+/**
  * Threshold in pixels for detecting mouse hover over reference border.
  */
 const REFERENCE_BORDER_THRESHOLD = 5;

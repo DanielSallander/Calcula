@@ -2667,6 +2667,168 @@ pub fn convert_to_range(
     TableResult::ok_empty()
 }
 
+/// Write and evaluate every CALCULATED COLUMN of one table across `rows`.
+///
+/// EXISTS BECAUSE A NEW ROW USED TO COME UP EMPTY. `set_calculated_column`
+/// materialises the column over the data range that exists AT CALL TIME, and it
+/// is the only writer of `calculated_formula`. `check_table_auto_expand` and
+/// `add_table_row` both advance `end_row` and the AutoFilter and then never
+/// re-apply it — so typing a VALUE in the row under a table grew the table and
+/// left its calculated columns BLANK in that row, while
+/// "fill-to-all-existing-rows" worked. That is the one advantage of an Excel
+/// Table that a user notices missing, because Excel fills the new row before
+/// they have finished typing.
+///
+/// ONE RECIPE, THREE CALLERS. The per-row work is not a loop over cells — it is
+/// a per-row RE-RESOLUTION of the table reference (`[@Price]` is a different
+/// cell on every row), a stored tree that keeps the specifier rather than the
+/// flattened coordinates (§2aj), the table's own capitalisation restamped onto
+/// it, a style preserved, a display string formatted against the row/column
+/// style tiers, and per-row dependency edges. Seventeen lines of that copied
+/// into the growth paths would be a second source of truth for all of it.
+///
+/// The caller owns the guards, in the canonical order, and is responsible for
+/// dropping them before Phase B — this function only writes cells and collects
+/// seeds.
+#[allow(clippy::too_many_arguments)]
+fn fill_calculated_columns(
+    state: &AppState,
+    grid: &mut engine::Grid,
+    grids: &mut [engine::Grid],
+    tables: &TableStorage,
+    table_names: &TableNameRegistry,
+    sheet_names: &[String],
+    styles: &engine::StyleRegistry,
+    locale: &engine::LocaleSettings,
+    user_files: &HashMap<String, Vec<u8>>,
+    control_values: &std::sync::Arc<crate::control_values::ControlValuesMap>,
+    // `table_sheet` is the sheet the TABLE lives on, not necessarily the active
+    // one: a script can call `table.addRow()` on a table the user is not looking
+    // at, and the formula must resolve and evaluate against ITS sheet.
+    // `active_sheet` is the sheet mirrored into `grid`; the write goes to
+    // `grids[table_sheet]` always and to `grid` only when the two are the same,
+    // because `grid` IS the active sheet's copy.
+    table_sheet: usize,
+    active_sheet: usize,
+    table: &Table,
+    rows: &[u32],
+    computed: &mut Vec<ComputedCell>,
+    seeds: &mut Vec<(u32, u32)>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    for (col_idx, column) in table.columns.iter().enumerate() {
+        let Some(formula) = column.calculated_formula.clone() else {
+            continue;
+        };
+        if formula.is_empty() {
+            continue;
+        }
+        // A formula that does not parse is stored but not evaluated, the same
+        // decision `set_calculated_column` makes: refusing the whole growth
+        // because one column's formula is malformed would be worse than a blank
+        // cell in it.
+        let Ok(parsed) = parser::parse(&formula) else {
+            continue;
+        };
+        let abs_col = table.start_col + col_idx as u32;
+
+        // The form every row STORES: re-spelled from the table's own
+        // capitalisation, because the lexer shouts both the table name and the
+        // column (§2t for tables).
+        let mut stored_ast = parsed.clone();
+        crate::table_deps::restamp_table_casing(&mut stored_ast, tables, table_names);
+
+        for &row in rows {
+            let resolved = if crate::ast_has_table_refs(&parsed) {
+                let ctx = crate::TableRefContext {
+                    tables,
+                    table_names,
+                    sheet_names,
+                    current_sheet_index: table_sheet,
+                    current_row: row,
+                    current_col: abs_col,
+                };
+                crate::resolve_table_refs_in_ast(&parsed, &ctx)
+            } else {
+                parsed.clone()
+            };
+
+            let engine_ast = crate::convert_expr(&resolved);
+            let eval_ctx = engine::EvalContext {
+                cube_prefetch: None,
+                current_row: Some(row),
+                current_col: Some(abs_col),
+                row_heights: None,
+                column_widths: None,
+                hidden_rows: None,
+                control_values: Some(control_values.clone()),
+            };
+            let result = crate::evaluate_formula_raw_with_files(
+                grids,
+                sheet_names,
+                table_sheet,
+                &engine_ast,
+                eval_ctx,
+                Some(styles),
+                user_files,
+            );
+
+            let mut cell = engine::Cell::new_formula(formula.clone());
+            cell.value = result.to_cell_value();
+            cell.set_cached_ast(crate::convert_expr(&stored_ast));
+            let existing_style = if table_sheet == active_sheet {
+                grid.get_cell(row, abs_col).map(|c| c.style_index)
+            } else {
+                grids.get(table_sheet).and_then(|g| g.get_cell(row, abs_col)).map(|c| c.style_index)
+            };
+            if let Some(idx) = existing_style {
+                cell.style_index = idx;
+            }
+
+            let style = styles.get(if table_sheet == active_sheet {
+                grid.effective_style_index(row, abs_col)
+            } else {
+                grids[table_sheet].effective_style_index(row, abs_col)
+            });
+            let display = crate::format_cell_value(&cell.value, style, locale);
+            computed.push(ComputedCell {
+                row,
+                col: abs_col,
+                display,
+                formula: Some(formula.clone()),
+            });
+
+            if table_sheet < grids.len() {
+                grids[table_sheet].set_cell(row, abs_col, cell.clone());
+            }
+            if table_sheet == active_sheet {
+                grid.set_cell(row, abs_col, cell);
+
+                // EDGES ARE ACTIVE-SHEET-SCOPED, like every other cell-level
+                // dependency map in this crate (`dependents`,
+                // `column_dependents`, ... are keyed by `(row, col)` with no
+                // sheet dimension and rebuilt on every sheet switch). A table on
+                // another sheet gets its cells and its VALUE; its edges are
+                // rebuilt when that sheet is next made active, which is the same
+                // contract every off-sheet write in the crate has.
+                register_table_formula_dependencies(
+                    state,
+                    grid,
+                    sheet_names,
+                    active_sheet,
+                    row,
+                    abs_col,
+                    Some(&resolved),
+                    Some(&stored_ast),
+                );
+                seeds.push((row, abs_col));
+            }
+        }
+    }
+}
+
 /// Check if a cell edit should trigger table auto-expansion.
 /// Returns Some(table) with updated boundaries if expansion occurred, None otherwise.
 ///
@@ -2686,6 +2848,12 @@ pub fn check_table_auto_expand(
     col: u32,
 ) -> Option<Table> {
     let active_sheet = *state.active_sheet.read().unwrap();
+    // GET.CONTROLVALUE snapshot, built BEFORE any table/grid lock — the same
+    // ordering `set_calculated_column` uses, and for the same reason: building
+    // it reads the control stores and the grid.
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     // CONDITIONAL MUTATION. This is the tail of a cell edit the user just made:
     // `update_cell` has already marked the document dirty, so the token here adds no
     // dirtiness the edit did not already imply -- but the paths below DO rewrite the
@@ -2694,6 +2862,9 @@ pub fn check_table_auto_expand(
     // CANONICAL LOCK ORDER: both grid locks first (see `delete_table`).
     let mut grid = state.grid.write(&effect).unwrap();
     let mut grids = state.grids.write(&effect).unwrap();
+    // `sheet_names` BEFORE `tables` (BUG-0045), which is why it is cloned here
+    // rather than taken inside the growth branch below where it is used.
+    let expand_sheet_names = state.sheet_names.read().unwrap().clone();
     let mut tables = state.tables.write(&effect).unwrap();
 
     let sheet_tables = tables.get_mut(&active_sheet)?;
@@ -2800,6 +2971,41 @@ pub fn check_table_auto_expand(
     }
 
     let result = table.clone();
+
+    // THE NEW ROW INHERITS THE COLUMN'S FORMULA, which is the advantage of a
+    // Table that a user notices missing: Excel fills a calculated column in the
+    // row you are still typing in. Only on ROW growth — a new COLUMN has no
+    // calculated formula of its own yet, and the existing columns' rows are
+    // untouched by it.
+    //
+    // `table` is borrowed mutably from `tables` above, so the helper is handed
+    // the CLONE (`result`) and an immutable view of the storage.
+    let mut computed: Vec<ComputedCell> = Vec::new();
+    if expand_type == "row" {
+        let table_names = state.table_names.read().unwrap();
+        let user_files = user_files_state.files.lock().unwrap();
+        let styles = state.style_registry.read().unwrap();
+        let locale = state.locale.lock().unwrap();
+        let new_row = result.data_end_row();
+        fill_calculated_columns(
+            &state,
+            &mut grid,
+            &mut grids,
+            &tables,
+            &table_names,
+            &expand_sheet_names,
+            &styles,
+            &locale,
+            &user_files,
+            &control_values,
+            active_sheet,
+            active_sheet,
+            &result,
+            &[new_row],
+            &mut computed,
+            &mut seeds,
+        );
+    }
 
     // PHASE B — after every guard above is released. A generated header is a
     // literal, so it owns no outgoing edges to record; it only needs to be a
@@ -2958,8 +3164,21 @@ pub fn add_table_row(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     table_id: identity::EntityId,
 ) -> Result<(), String> {
+    // GET.CONTROLVALUE snapshot, before any lock (see `set_calculated_column`).
+    let control_values = crate::control_values::build_control_values(
+        &state, &pane_control_state, &ribbon_filter_state,
+    );
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut tables = state.tables.write(&effect).unwrap();
+    // CANONICAL LOCK ORDER, and this command did not used to take these at all:
+    // it only moved `end_row`. It now also fills the table's CALCULATED COLUMNS
+    // in the new row, so it needs the grid and the tables it evaluates against —
+    // in the one order the rest of the crate uses (both grid locks, then
+    // `sheet_names`, then `tables`; BUG-0045).
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut grid = state.grid.write(&effect).unwrap();
+    let mut grids = state.grids.write(&effect).unwrap();
+    let add_sheet_names = state.sheet_names.read().unwrap().clone();
+    let mut tables = state.tables.write(&effect).unwrap();
     for sheet_tables in tables.values_mut() {
         if let Some(table) = sheet_tables.get_mut(&table_id) {
             table.end_row += 1;
@@ -2979,9 +3198,48 @@ pub fn add_table_row(
                 }
             }
             let table_name = table.name.clone();
+            let grown = table.clone();
+
+            // THE NEW ROW INHERITS EVERY CALCULATED COLUMN'S FORMULA, the same
+            // as when the user types under the table. A script's `table.addRow()`
+            // and a typed row must not disagree about whether the column fills.
+            let mut computed: Vec<ComputedCell> = Vec::new();
+            let mut seeds: Vec<(u32, u32)> = Vec::new();
+            {
+                let table_names = state.table_names.read().unwrap();
+                let user_files = user_files_state.files.lock().unwrap();
+                let styles = state.style_registry.read().unwrap();
+                let locale = state.locale.lock().unwrap();
+                let new_row = grown.data_end_row();
+                fill_calculated_columns(
+                    &state,
+                    &mut grid,
+                    &mut grids,
+                    &tables,
+                    &table_names,
+                    &add_sheet_names,
+                    &styles,
+                    &locale,
+                    &user_files,
+                    &control_values,
+                    grown.sheet_index,
+                    active_sheet,
+                    &grown,
+                    &[new_row],
+                    &mut computed,
+                    &mut seeds,
+                );
+            }
+
+            // BOTH GRID GUARDS AND `tables` GO BEFORE PHASE B.
+            // `recalc_after_table_change` takes them itself and `Persisted<T>`
+            // is a non-reentrant `std::sync::Mutex`, so holding them across the
+            // call self-deadlocks the thread — the main one, in a Tauri command.
             drop(tables);
+            drop(grids);
+            drop(grid);
             // PHASE B: one more data row is one more row inside every
-            // `Table[Column]` (§2aj).
+            // `Table[Column]` (§2aj), plus whatever the filled cells feed.
             recalc_after_table_change(
                 &state,
                 &user_files_state,
@@ -2989,7 +3247,7 @@ pub fn add_table_row(
                 &pane_control_state,
                 &ribbon_filter_state,
                 &[table_name],
-                &[],
+                &seeds,
             );
             return Ok(());
         }
@@ -3188,131 +3446,44 @@ pub fn set_calculated_column(
         Some(formula.clone())
     };
 
-    let abs_col = table.start_col + col_idx as u32;
-    let data_start = table.data_start_row();
-    let data_end = table.data_end_row();
     let table_clone = table.clone();
 
-    // Write formulas to all data rows and evaluate them
-    let mut computed = Vec::new();
+    let mut computed: Vec<ComputedCell> = Vec::new();
     let mut seeds: Vec<(u32, u32)> = Vec::new();
 
     if !formula.is_empty() {
-        // Parse the formula once
-        let parsed = match parser::parse(&formula) {
-            Ok(ast) => ast,
-            Err(_) => {
-                // If formula doesn't parse, still store it but skip evaluation
-                return TableResult::ok(table_clone);
-            }
-        };
-
-        // `grid`, `grids` and `sheet_names` were acquired at the top of the
-        // function -- see the lock-order note there.
-        let sheet_names = &calc_sheet_names;
+        // `calc_sheet_names` and both grid guards were acquired at the top of
+        // the function -- see the lock-order note there.
         let table_names = state.table_names.read().unwrap();
         let user_files = user_files_state.files.lock().unwrap();
         let styles = state.style_registry.read().unwrap();
         let locale = state.locale.lock().unwrap();
 
-        // The form every row STORES: the parse, re-spelled from the table's own
-        // capitalisation (the lexer shouts both the table name and the column,
-        // so `[@Price]` would be kept as `[@PRICE]` -- §2t for tables).
-        let mut stored_ast = parsed.clone();
-        crate::table_deps::restamp_table_casing(&mut stored_ast, &tables, &table_names);
-
-        for row in data_start..=data_end {
-            // Resolve table references for this specific row
-            let resolved = if crate::ast_has_table_refs(&parsed) {
-                let ctx = crate::TableRefContext {
-                    tables: &tables,
-                    table_names: &table_names,
-                    sheet_names: &sheet_names,
-                    current_sheet_index: active_sheet,
-                    current_row: row,
-                    current_col: abs_col,
-                };
-                crate::resolve_table_refs_in_ast(&parsed, &ctx)
-            } else {
-                parsed.clone()
-            };
-
-            // Convert to engine AST and evaluate
-            let engine_ast = crate::convert_expr(&resolved);
-            let eval_ctx = engine::EvalContext {
-                cube_prefetch: None,
-                current_row: Some(row),
-                current_col: Some(abs_col),
-                row_heights: None,
-                column_widths: None,
-                hidden_rows: None,
-                control_values: Some(control_values.clone()),
-            };
-            let result = crate::evaluate_formula_raw_with_files(
-                &grids,
-                &sheet_names,
-                active_sheet,
-                &engine_ast,
-                eval_ctx,
-                Some(&styles),
-                &user_files,
-            );
-
-            // Create cell with formula and evaluated value.
-            //
-            // THE STORED AST KEEPS THE SPECIFIER (§2aj). It used to be the
-            // per-row FLATTENING (`$B$4*$C$4`), which is what
-            // `reevaluate_formula_cell` would then re-read forever -- so a
-            // calculated column stopped following its own table the moment it
-            // was written, and the formula bar showed coordinates for a formula
-            // the user wrote in column names. `eval_ast` resolves `[@Price]`
-            // against the evaluating cell's row on every evaluation, so the
-            // stored tree is the one the user typed and the VALUE below is
-            // still this row's.
-            let mut cell = engine::Cell::new_formula(formula.clone());
-            cell.value = result.to_cell_value();
-            cell.set_cached_ast(crate::convert_expr(&stored_ast));
-
-            // Preserve existing style
-            if let Some(existing) = grid.get_cell(row, abs_col) {
-                cell.style_index = existing.style_index;
-            }
-
-            // Format display value for frontend. The cell keeps its own explicit
-            // style_index (preserved above); only the DISPLAY honours the row/column
-            // tiers, resolved against the grid this cell is written to.
-            let style = styles.get(grid.effective_style_index(row, abs_col));
-            let display = crate::format_cell_value(&cell.value, style, &locale);
-
-            computed.push(ComputedCell {
-                row,
-                col: abs_col,
-                display,
-                formula: Some(formula.clone()),
-            });
-
-            grid.set_cell(row, abs_col, cell.clone());
-            if active_sheet < grids.len() {
-                grids[active_sheet].set_cell(row, abs_col, cell);
-            }
-
-            // Record this cell's own edges. Resolution is per-ROW ([@Price] is
-            // a different cell on every row), so this cannot be hoisted out of
-            // the loop the way a plain shared formula could. The CELL edges come
-            // from the resolved tree (it is the one with coordinates in it); the
-            // TABLE edge comes from the stored one.
-            register_table_formula_dependencies(
-                &state,
-                &grid,
-                &sheet_names,
-                active_sheet,
-                row,
-                abs_col,
-                Some(&resolved),
-                Some(&stored_ast),
-            );
-            seeds.push((row, abs_col));
-        }
+        // ONE RECIPE, shared with the two GROWTH paths. This loop used to live
+        // here inline, which is why a table that grew came up BLANK in its
+        // calculated columns: the growth paths had no way to run it without
+        // copying seventeen lines of per-row resolution, restamping, styling and
+        // edge registration. See `fill_calculated_columns`.
+        let rows: Vec<u32> =
+            (table_clone.data_start_row()..=table_clone.data_end_row()).collect();
+        fill_calculated_columns(
+            &state,
+            &mut grid,
+            &mut grids,
+            &tables,
+            &table_names,
+            &calc_sheet_names,
+            &styles,
+            &locale,
+            &user_files,
+            &control_values,
+            active_sheet,
+            active_sheet,
+            &table_clone,
+            &rows,
+            &mut computed,
+            &mut seeds,
+        );
     }
 
     // PHASE B — after every guard above is released. The user-files guard is
@@ -3477,11 +3648,22 @@ fn ranges_overlap(
 }
 
 /// Parse a structured reference string
+///
+/// A BARE TABLE NAME IS A REFERENCE. `Table1` on its own means the table's DATA
+/// BODY in Excel -- `Table1[#Data]` -- which is why `=ROWS(Table1)` and
+/// `=COLUMNS(Table1)` are the first two structured-reference examples anyone
+/// meets. Requiring the '[' made both of them "Invalid structured reference
+/// syntax" here, so it is expanded to the specifier it stands for rather than
+/// given a second resolution path of its own. `Table1[]` stays an error: an
+/// empty bracket names nothing.
 fn parse_structured_ref(reference: &str) -> Option<(String, String)> {
     let trimmed = reference.trim();
 
     // Format: TableName[Specifier]
-    let bracket_start = trimmed.find('[')?;
+    let Some(bracket_start) = trimmed.find('[') else {
+        return is_valid_table_name(trimmed)
+            .then(|| (trimmed.to_string(), "#Data".to_string()));
+    };
     let bracket_end = trimmed.rfind(']')?;
 
     if bracket_end <= bracket_start {
@@ -3582,6 +3764,74 @@ mod tests {
     #[test]
     fn test_totals_row_function_default() {
         assert_eq!(TotalsRowFunction::default(), TotalsRowFunction::None);
+    }
+
+    /// EVERY PATH THAT GROWS A TABLE BY A ROW MUST FILL ITS CALCULATED COLUMNS.
+    ///
+    /// This is a source-level guard, in the shape of
+    /// `every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason`,
+    /// and it exists because the defect it protects against is exactly a path
+    /// that FORGETS. `set_calculated_column` materialises the column over the
+    /// data range that exists at call time and is the only writer of
+    /// `calculated_formula`; `check_table_auto_expand` and `add_table_row` each
+    /// advanced `end_row` and the AutoFilter and never re-applied it, so typing
+    /// a value under a table left the calculated column BLANK in the new row
+    /// while fill-to-all-existing-rows worked. Nothing failed; the cell was just
+    /// empty.
+    ///
+    /// A fourth growth path added later would reintroduce it silently, which is
+    /// what this asserts against. Counting is crude, and it is the only check
+    /// that fails when somebody adds one.
+    #[test]
+    fn every_row_growth_path_fills_the_calculated_columns() {
+        // BOUNDED AT `#[cfg(test)]`, or the guard counts its own string
+        // literals: this test names `fill_calculated_columns` three times, which
+        // would satisfy every assertion below without a line of product code.
+        let whole = include_str!("tables.rs");
+        let src = &whole[..whole
+            .find("#[cfg(test)]")
+            .expect("this file has a test module")];
+
+        // The functions that advance `end_row` by one data row.
+        for grower in ["pub fn check_table_auto_expand", "pub fn add_table_row"] {
+            let start = src
+                .find(grower)
+                .unwrap_or_else(|| panic!("`{}` has been renamed; update this guard", grower));
+            // Bound the search at the next top-level `pub fn`, so a call in a
+            // LATER function cannot satisfy an earlier one.
+            let rest = &src[start + grower.len()..];
+            let end = rest.find("\npub fn ").unwrap_or(rest.len());
+            let body = &rest[..end];
+            assert!(
+                body.contains("fill_calculated_columns("),
+                "`{}` grows a table by a row and does not fill its calculated \
+                 columns. Excel fills the new row while the user is still typing \
+                 in it; a growth path that skips this leaves the column blank in \
+                 that row with no error. Call `fill_calculated_columns` (it owns \
+                 the whole per-row recipe -- resolution, restamping, style, \
+                 display and edges) or state here why this path needs no fill.",
+                grower
+            );
+        }
+
+        // ...and the recipe itself must exist in exactly ONE place. Three
+        // callers, one definition.
+        assert_eq!(
+            src.matches("fn fill_calculated_columns(").count(),
+            1,
+            "there must be exactly one `fill_calculated_columns`; a second \
+             definition is a second source of truth for the per-row recipe, \
+             which is what this refactor removed"
+        );
+        // One definition, three call sites: the two growers above and
+        // `set_calculated_column`.
+        assert_eq!(
+            src.matches("fill_calculated_columns(").count(),
+            4,
+            "expected one definition and three call sites (the two row-growth \
+             paths and set_calculated_column); if a fourth caller is legitimate, \
+             raise this and say what it is"
+        );
     }
 
     // --- Rename: dependent structured references must follow the table ---
@@ -3892,6 +4142,65 @@ mod tests {
         let (table2, spec2) = result2.unwrap();
         assert_eq!(table2, "Sales");
         assert_eq!(spec2, "Amount");
+    }
+
+    /// A BARE TABLE NAME RESOLVES TO THE DATA BODY.
+    ///
+    /// `Table1` with no bracket is Excel's `Table1[#Data]` -- the rows without
+    /// the header and without the totals row -- and it is what makes
+    /// `=ROWS(Table1)` and `=COLUMNS(Table1)` mean anything. The '[' was
+    /// mandatory, so the whole reference was rejected as "Invalid structured
+    /// reference syntax".
+    #[test]
+    fn a_bare_table_name_means_the_data_body() {
+        let (name, spec) = parse_structured_ref("Table1").expect("a bare table name is a reference");
+        assert_eq!(name, "Table1");
+        assert_eq!(spec, "#Data", "a bare name must expand to the data-body specifier");
+
+        let table = Table {
+            id: test_id(),
+            name: "Table1".to_string(),
+            sheet_index: 0,
+            start_row: 2,
+            start_col: 1,
+            end_row: 8,
+            end_col: 3,
+            columns: vec![
+                TableColumn::new(test_id(), "Name".to_string()),
+                TableColumn::new(test_id(), "Amount".to_string()),
+                TableColumn::new(test_id(), "Total".to_string()),
+            ],
+            style_options: TableStyleOptions {
+                header_row: true,
+                total_row: true,
+                ..Default::default()
+            },
+            style_name: "TableStyleMedium2".to_string(),
+            auto_filter_id: None,
+        };
+
+        let resolved = resolve_specifier(&table, &spec).expect("#Data resolves");
+        assert_eq!(resolved.start_row, table.data_start_row(), "header row leaked in");
+        assert_eq!(resolved.end_row, table.data_end_row(), "totals row leaked in");
+        assert_eq!(resolved.start_col, table.start_col);
+        assert_eq!(resolved.end_col, table.end_col);
+
+        // `Table1[]` is NOT the bare form: the brackets are there and name
+        // nothing, so it stays an error rather than quietly meaning the body.
+        let (_, empty_spec) = parse_structured_ref("Table1[]").expect("still parses");
+        assert_eq!(empty_spec, "");
+        assert!(resolve_specifier(&table, &empty_spec).is_none());
+    }
+
+    /// The bare-name arm must not turn `parse_structured_ref` into a function
+    /// that accepts anything. It is reached only when there is no '[' at all,
+    /// and only for text that could be a table name.
+    #[test]
+    fn a_bracketless_non_name_is_still_rejected() {
+        assert!(parse_structured_ref("").is_none());
+        assert!(parse_structured_ref("   ").is_none());
+        assert!(parse_structured_ref("1Table").is_none(), "not a legal table name");
+        assert!(parse_structured_ref("Two Words").is_none(), "not a legal table name");
     }
 
     #[test]

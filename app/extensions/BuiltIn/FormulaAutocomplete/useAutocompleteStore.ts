@@ -88,10 +88,30 @@ export const useAutocompleteStore = create<AutocompleteState>((set, get) => ({
   /**
    * Handle input from an editor (value change or cursor move).
    * Determines whether to show/hide the dropdown and argument hints.
+   *
+   * THE TWO HALVES ANSWER DIFFERENT QUESTIONS, so they react to different
+   * events. The screen tip answers "which argument am I standing in", which
+   * changes when the CURSOR moves and not only when the text does -- arrowing
+   * from an outer call into a nested one must switch the tip, and opening an
+   * existing `=VLOOKUP(...)` must show one straight away. The dropdown answers
+   * "what could I be typing", and it is an as-you-TYPE affordance: opening it
+   * for a caret that merely moved puts a list under a formula the user was
+   * navigating, and the next Enter would then insert a function instead of
+   * committing the cell.
+   *
+   * So an input whose value the store has already seen refreshes the tip and
+   * leaves the dropdown alone. The same rule covers the editor announcing what
+   * a cell ALREADY contains when the edit opens (`currentValue` is "" until the
+   * first input of a session): that value was not typed either, and F2 on a
+   * cell should not drop a function list over the sheet. Nothing is lost by it
+   * -- the first thing a user types is "=", which carries no token.
    */
   handleInput: (payload: AutocompleteInputPayload) => {
     const { value, cursorPosition, anchorRect, source } = payload;
     console.log("[FormulaAutocomplete] handleInput:", { value, cursorPosition, source });
+
+    const seen = get().currentValue;
+    const userTyped = seen !== "" && value !== seen;
 
     // Do NOT trigger if not a formula
     if (!value.startsWith("=")) {
@@ -139,45 +159,53 @@ export const useAutocompleteStore = create<AutocompleteState>((set, get) => ({
     }
 
     // --- Update dropdown ---
-    if (!isRefMode && context.shouldTrigger && context.token.length > 0) {
-      const items = filterSuggestions(context.token);
-      console.log("[FormulaAutocomplete] filterSuggestions('" + context.token + "') returned", items.length, "items");
-      if (items.length > 0) {
-        // Preserve selected index if the same item is still in the list
-        const prev = get();
-        let newIndex = 0;
-        if (prev.visible && prev.items.length > 0 && prev.selectedIndex < prev.items.length) {
-          const prevName = prev.items[prev.selectedIndex].name;
-          const sameIdx = items.findIndex((it) => it.name === prevName);
-          if (sameIdx >= 0) {
-            newIndex = sameIdx;
+    // A caret move leaves the dropdown exactly as it was, open or shut. It may
+    // not CLOSE one either: every editor reports the caret on keyup as well as
+    // the text on input, so the keystroke that opens the list is followed
+    // immediately by a same-value report of where the caret landed -- and a
+    // rule that hid the list on that report would hide it one keystroke after
+    // every keystroke that showed it.
+    if (userTyped) {
+      if (!isRefMode && context.shouldTrigger && context.token.length > 0) {
+        const items = filterSuggestions(context.token);
+        console.log("[FormulaAutocomplete] filterSuggestions('" + context.token + "') returned", items.length, "items");
+        if (items.length > 0) {
+          // Preserve selected index if the same item is still in the list
+          const prev = get();
+          let newIndex = 0;
+          if (prev.visible && prev.items.length > 0 && prev.selectedIndex < prev.items.length) {
+            const prevName = prev.items[prev.selectedIndex].name;
+            const sameIdx = items.findIndex((it) => it.name === prevName);
+            if (sameIdx >= 0) {
+              newIndex = sameIdx;
+            }
           }
+
+          set({
+            visible: true,
+            items,
+            selectedIndex: newIndex,
+            tokenContext: context,
+            anchorRect,
+            source,
+            currentValue: value,
+            currentCursorPosition: cursorPosition,
+          });
+          setFormulaAutocompleteVisible(true);
+          return;
         }
-
-        set({
-          visible: true,
-          items,
-          selectedIndex: newIndex,
-          tokenContext: context,
-          anchorRect,
-          source,
-          currentValue: value,
-          currentCursorPosition: cursorPosition,
-        });
-        setFormulaAutocompleteVisible(true);
-        return;
       }
-    }
 
-    // No matches or no trigger -- hide dropdown (but keep argument hints)
-    if (get().visible) {
-      set({
-        visible: false,
-        items: [],
-        selectedIndex: 0,
-        tokenContext: null,
-      });
-      setFormulaAutocompleteVisible(false);
+      // No matches or no trigger -- hide dropdown (but keep argument hints)
+      if (get().visible) {
+        set({
+          visible: false,
+          items: [],
+          selectedIndex: 0,
+          tokenContext: null,
+        });
+        setFormulaAutocompleteVisible(false);
+      }
     }
 
     // Always update the current value for accept logic

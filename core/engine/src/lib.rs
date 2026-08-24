@@ -26,6 +26,40 @@ mod intersection_tests;
 /// than errors.
 #[cfg(test)]
 mod array_semantics_tests;
+
+/// Whole-axis references (`A:A`, `1:1`) are row- and column-INDEXED, bounded by
+/// the used range. Its own file for the third time for the same reason: the rule
+/// spans two evaluators, the pass cache and every criteria function, and the
+/// defects it pins were plausible wrong NUMBERS on gapped data.
+#[cfg(test)]
+mod whole_axis_tests;
+
+/// `TRIMRANGE` and the `.` trim-reference operator. Its own file because the
+/// dot is SUGAR for the function — it lowers to the call in the parser — and
+/// that equivalence is the design's load-bearing claim, so it is asserted on
+/// the AST and then every behavioural case is run in both spellings.
+#[cfg(test)]
+mod trim_range_tests;
+
+/// Excel's three wildcard characters and the five places they were missing or
+/// wrong. Its own file because the rule spans the criteria parser, two lookup
+/// families, the pass cache and SEARCH — and because four of the five defects
+/// were wrong ANSWERS rather than errors.
+#[cfg(test)]
+mod wildcard_tests;
+
+/// Excel's `@` operator. Its own file because the operator had NO test anywhere
+/// in the repo while two design docs listed it as shipped — and three of its
+/// four rules were wrong, one of them answering differently depending on which
+/// row the formula was typed in.
+#[cfg(test)]
+mod implicit_intersection_tests;
+
+/// `OFFSET` resolves against the sheet its base names. Its own file because the
+/// defect was a silently WRONG SHEET on the exact shape a dynamic named range is
+/// built out of, and because it walked through the deleted-sheet guard.
+#[cfg(test)]
+mod offset_sheet_tests;
 /// Excel's implicit array semantics — the shape algebra behind "array
 /// operation", "lifting", "pairwise lifting" and "broadcasting". Its own file
 /// for the reason `blank_semantics_tests` has one: the rule spans the binary

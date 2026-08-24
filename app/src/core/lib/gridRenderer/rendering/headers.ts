@@ -23,6 +23,18 @@ const HIDDEN_INDICATOR_COLOR = "#4a4a4a";
 /** Line width for the hidden boundary indicator. */
 const HIDDEN_INDICATOR_WIDTH = 2;
 
+/**
+ * Leg length of the Excel-style select-all triangle in the corner box, and its
+ * inset from the corner's bottom-right. Both in logical pixels.
+ *
+ * Sized so the whole glyph fits the shipped 22x20 gutters with a pixel to spare.
+ * This file makes 18 stroke calls, several of them gridlines at the gutter edge,
+ * and the visual goldens carry gridlines -- so the glyph stays strictly inside
+ * the corner's own rect and nothing else in the frame moves.
+ */
+const CORNER_GLYPH_SIZE = 6;
+const CORNER_GLYPH_INSET = 3;
+
 /** Size of the filter dropdown button drawn in column headers. */
 const FILTER_BUTTON_SIZE = 10;
 /** Margin from the right edge for the filter button. */
@@ -72,6 +84,18 @@ function hasHiddenRowAfter(row: number, dims?: DimensionOverrides): boolean {
 
 /**
  * Draw the corner cell (intersection of row and column headers).
+ *
+ * The triangle is the select-all AFFORDANCE. The corner has always been
+ * clickable -- it selects the whole sheet, and during formula entry it now
+ * inserts the whole-sheet reference -- but until 2026-08-23 it was a bare
+ * fillRect plus strokeRect, so nothing on screen said so and nothing in the
+ * repo tested it.
+ *
+ * Everything is drawn INSIDE the corner rect on purpose: the row-header right
+ * border and the column-header bottom border are stroked by the two functions
+ * below at exactly rowHeaderWidth + 0.5 / colHeaderHeight + 0.5, and the visual
+ * goldens carry gridlines, so a glyph leaking one pixel past the gutter would
+ * read as a moved gridline.
  */
 export function drawCorner(state: RenderState): void {
   const { ctx, config, theme } = state;
@@ -86,6 +110,23 @@ export function drawCorner(state: RenderState): void {
   ctx.strokeStyle = theme.headerBorder;
   ctx.lineWidth = 1;
   ctx.strokeRect(0.5, 0.5, rowHeaderWidth - 1, colHeaderHeight - 1);
+
+  // Select-all triangle, tucked into the bottom-right of the box and pointing at
+  // the grid. Skipped rather than shrunk when the gutters cannot hold it --
+  // View > Headings off collapses both to 0, and a 2px smudge is worse than no
+  // glyph at all.
+  const glyphSpan = CORNER_GLYPH_SIZE + CORNER_GLYPH_INSET + 1;
+  if (rowHeaderWidth >= glyphSpan && colHeaderHeight >= glyphSpan) {
+    const right = rowHeaderWidth - CORNER_GLYPH_INSET;
+    const bottom = colHeaderHeight - CORNER_GLYPH_INSET;
+    ctx.fillStyle = theme.headerText;
+    ctx.beginPath();
+    ctx.moveTo(right - CORNER_GLYPH_SIZE, bottom);
+    ctx.lineTo(right, bottom - CORNER_GLYPH_SIZE);
+    ctx.lineTo(right, bottom);
+    ctx.closePath();
+    ctx.fill();
+  }
 }
 
 /**

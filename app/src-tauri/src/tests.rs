@@ -4,7 +4,7 @@ use super::*;
 use crate::pivot::utils::{
     col_index_to_letter, parse_cell_ref, parse_range, strip_sheet_prefix,
 };
-use engine::{Cell, CellError, CellStyle, CellValue, Grid, NumberFormat};
+use engine::{Cell, CellError, CellStyle, CellValue, Grid, NumberFormat, StyleRegistry};
 use std::collections::HashMap;
 
 #[test]
@@ -1115,5 +1115,276 @@ fn a_dot_separated_date_reaches_the_date_branch_only_where_the_thousands_separat
         parse_date_time_input("1.6.2020", &de).map(|(serial, _)| serial),
         Some(43983.0),
         "the date branch itself reads a German date correctly"
+    );
+}
+
+// ============================================================================
+// TEXT VALUES: THE APOSTROPHE AND THE TEXT FORMAT
+// ============================================================================
+// Text was already a first-class STORED type here -- ISTEXT and T work, a text
+// number left-aligns under General and error_checking flags it as "Number
+// Stored as Text" -- and there was no way to CREATE one. Neither of Excel's two
+// routes existed:
+//
+//   * `'123` stored the string "'123", apostrophe and all, because no rung of
+//     the ladder looked for one. Excel means "store the rest as text and do not
+//     show me the apostrophe".
+//   * The Text format `@` was read by NO entry path, so it only ever changed
+//     how an already-stored value was drawn. Typing `007` into a Text-formatted
+//     cell stored the NUMBER 7 and then re-rendered it through `General`, so
+//     the cell displayed "7". No error and no warning anywhere: the leading
+//     zeros were simply gone, and ISTEXT answered FALSE about a cell the user
+//     had explicitly formatted as text. That is the silent wrong answer these
+//     tests exist to keep closed, and it is the exact loss (part numbers, ZIP
+//     codes, phone numbers) the Text format exists to prevent.
+
+/// Excel's Text format, which is the `@` code and nothing else.
+fn text_format() -> NumberFormat {
+    NumberFormat::Custom {
+        format: "@".to_string(),
+    }
+}
+
+fn cell_text(cell: &Cell) -> String {
+    match &cell.value {
+        CellValue::Text(s) => s.clone(),
+        other => panic!("expected text, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_leading_apostrophe_stores_the_rest_as_text_and_is_never_stored_itself() {
+    let us = us_locale();
+    for (input, expected) in [
+        ("'123", "123"),
+        ("'007", "007"),
+        ("'TRUE", "TRUE"),
+        ("'50%", "50%"),
+        ("'2020-06-01", "2020-06-01"),
+        ("'=A1+1", "=A1+1"),
+        ("'-5", "-5"),
+        ("'hello", "hello"),
+    ] {
+        let cell = parse_cell_input(input, &us);
+        assert_eq!(cell_text(&cell), expected, "{} stored the wrong text", input);
+        assert!(
+            !cell.has_formula(),
+            "{} must not be a formula -- the apostrophe suppresses every rung below it",
+            input
+        );
+    }
+}
+
+#[test]
+fn a_doubled_apostrophe_is_how_a_literal_leading_apostrophe_is_typed() {
+    // Falls out of "the rest, verbatim" rather than being a case of its own:
+    // the first apostrophe is the escape, the second is data.
+    let us = us_locale();
+    assert_eq!(cell_text(&parse_cell_input("''abc", &us)), "'abc");
+    assert_eq!(cell_text(&parse_cell_input("''123", &us)), "'123");
+}
+
+#[test]
+fn the_rest_after_an_apostrophe_keeps_the_spaces_the_user_typed() {
+    // The entry as a whole is still trimmed (it always was), but nothing trims
+    // again after the escape -- a leading space is the commonest reason to
+    // reach for the apostrophe in the first place.
+    assert_eq!(cell_text(&parse_cell_input("'  007  ", &us_locale())), "  007");
+}
+
+#[test]
+fn the_apostrophe_implies_the_text_format_only_where_it_changed_the_answer() {
+    // Calcula stores no prefix character (see apostrophe_implied_format); the
+    // Text format is what remembers the intent, and it is what makes the cell
+    // survive a re-edit -- the editor re-opens on "123" with no apostrophe in
+    // it, and pressing Enter on an otherwise untouched cell would otherwise
+    // store the number 123.
+    let us = us_locale();
+    for input in ["'123", "'007", "'TRUE", "'50%", "'2020-06-01", "'=A1+1", "'-A1"] {
+        assert_eq!(
+            parse_cell_input_with_format(input, &us).1,
+            Some(text_format()),
+            "{} would have become something other than text",
+            input
+        );
+    }
+    // Nothing to protect: these were already text, so formatting the cell would
+    // restrict it for no gain.
+    for input in ["'hello", "''abc", "'", "'A1:B2"] {
+        assert_eq!(
+            parse_cell_input_with_format(input, &us).1,
+            None,
+            "{} needed no format",
+            input
+        );
+    }
+}
+
+#[test]
+fn an_entry_into_a_text_formatted_cell_is_stored_verbatim_leading_zeros_and_all() {
+    // THE silent wrong answer. Before this rung existed the cell stored 7.0 and
+    // drew it as "7"; nothing on screen said three characters had been thrown
+    // away, and ISTEXT answered FALSE about a cell explicitly formatted as text.
+    let us = us_locale();
+    let text = text_format();
+    let (cell, implied) = parse_cell_input_in_format("007", &us, Some(&text));
+    assert_eq!(cell_text(&cell), "007");
+    assert_eq!(implied, None, "a Text cell keeps its own format");
+
+    // The old answer, still reachable through the spelling that has no
+    // destination in view (CSV/BI value conversion): 007 is the number 7.
+    assert!(
+        matches!(parse_cell_input_with_format("007", &us).0.value, CellValue::Number(n) if n == 7.0),
+        "the destination-free ladder is unchanged"
+    );
+}
+
+#[test]
+fn the_text_format_beats_every_rung_below_it_including_the_formula_rung() {
+    // Excel stores a formula typed into a Text-formatted cell as the literal
+    // string too -- the classic "my formula shows as text" case, and it is the
+    // format doing exactly what it was asked to do.
+    let us = us_locale();
+    let text = text_format();
+    for input in ["=A1+1", "TRUE", "false", "42", "50%", "2020-06-01", "13:45", "-A1", "+SUM(A1:A9)"] {
+        let (cell, implied) = parse_cell_input_in_format(input, &us, Some(&text));
+        assert_eq!(cell_text(&cell), input, "{} was not stored verbatim", input);
+        assert!(!cell.has_formula(), "{} must not be a formula", input);
+        assert_eq!(implied, None, "{} must not re-format a Text cell", input);
+    }
+}
+
+#[test]
+fn an_apostrophe_beats_the_text_format_so_no_apostrophe_is_ever_stored() {
+    // Ordering guard between the two new rungs. If the Text rung ran first, a
+    // user who typed the escape out of habit into an already-Text cell would
+    // get a VISIBLE apostrophe -- the original defect, in the one place the
+    // user had already said what they wanted.
+    let text = text_format();
+    let (cell, _) = parse_cell_input_in_format("'123", &us_locale(), Some(&text));
+    assert_eq!(cell_text(&cell), "123");
+}
+
+#[test]
+fn the_new_rungs_leave_an_ordinary_cell_exactly_as_it_was() {
+    // Regression guard for the eight rungs that already worked. `None` and a
+    // non-Text format must both behave like the ladder always did.
+    let us = us_locale();
+    let general = NumberFormat::General;
+    let currency = NumberFormat::Currency {
+        decimal_places: 2,
+        symbol: "$".to_string(),
+        symbol_position: engine::CurrencyPosition::Before,
+        negative_style: engine::NegativeStyle::Minus,
+    };
+    for target in [None, Some(&general), Some(&currency)] {
+        let (empty, _) = parse_cell_input_in_format("", &us, target);
+        assert!(matches!(empty.value, CellValue::Empty));
+
+        let (formula, _) = parse_cell_input_in_format("=A1+B1", &us, target);
+        assert_eq!(formula.formula_string(), Some("A1+B1".to_string()));
+
+        let (boolean, _) = parse_cell_input_in_format("TRUE", &us, target);
+        assert!(matches!(boolean.value, CellValue::Boolean(true)));
+
+        let (number, implied) = parse_cell_input_in_format("50%", &us, target);
+        assert!(matches!(number.value, CellValue::Number(n) if (n - 0.5).abs() < 1e-12));
+        assert_eq!(implied, Some(NumberFormat::Percentage { decimal_places: 0 }));
+
+        let (date, implied) = parse_cell_input_in_format("2020-06-01", &us, target);
+        assert_eq!(cell_number(&date), 43983.0);
+        assert_eq!(
+            implied,
+            Some(NumberFormat::Date {
+                format: us.date_format.clone()
+            })
+        );
+
+        let (lotus, _) = parse_cell_input_in_format("-A1", &us, target);
+        assert!(lotus.has_formula());
+
+        let (text, _) = parse_cell_input_in_format("hello", &us, target);
+        assert_eq!(cell_text(&text), "hello");
+    }
+}
+
+#[test]
+fn only_the_bare_at_sign_is_the_text_format() {
+    // A custom code that merely CONTAINS an @ section says how to draw text
+    // that is already there; it does not declare that everything entered here
+    // IS text. Same one-character test as api_types::overflow_class_for, which
+    // must not disagree about the same cell.
+    assert!(is_text_format(&text_format()));
+    assert!(!is_text_format(&NumberFormat::General));
+    assert!(!is_text_format(&NumberFormat::Custom {
+        format: "\"id \"@".to_string()
+    }));
+    assert!(!is_text_format(&NumberFormat::Custom {
+        format: "0.00".to_string()
+    }));
+    assert!(!is_text_format(&NumberFormat::Date {
+        format: "YYYY-MM-DD".to_string()
+    }));
+}
+
+#[test]
+fn the_format_that_decides_the_value_is_the_effective_one_column_tier_included() {
+    // A whole column formatted as Text is how a column of part numbers gets
+    // protected, and every cell in it still carries style index 0. Reading the
+    // CELL's own index would make the Text format work only where someone had
+    // also formatted each cell individually -- the case that needs it least.
+    let mut styles = StyleRegistry::new();
+    let text_index = styles.get_or_create(CellStyle::new().with_number_format(text_format()));
+    let mut grid = Grid::new();
+    grid.set_column_style(0, text_index);
+
+    // Untouched cell in a Text column.
+    assert!(is_text_format(&entry_format_at(&grid, &styles, 0, 0)));
+    // Neighbouring column is unaffected.
+    assert!(!is_text_format(&entry_format_at(&grid, &styles, 0, 1)));
+
+    // A cell style outranks the column tier, in both directions.
+    let currency_index = styles.get_or_create(CellStyle::new().with_number_format(
+        NumberFormat::Currency {
+            decimal_places: 2,
+            symbol: "$".to_string(),
+            symbol_position: engine::CurrencyPosition::Before,
+            negative_style: engine::NegativeStyle::Minus,
+        },
+    ));
+    let mut cell = Cell::new_number(1.0);
+    cell.style_index = currency_index;
+    grid.set_cell(0, 0, cell);
+    assert!(!is_text_format(&entry_format_at(&grid, &styles, 0, 0)));
+
+    let mut cell = Cell::new_number(1.0);
+    cell.style_index = text_index;
+    grid.set_cell(5, 5, cell);
+    assert!(is_text_format(&entry_format_at(&grid, &styles, 5, 5)));
+}
+
+#[test]
+fn the_invariant_ladder_takes_the_same_two_rungs() {
+    // A script's typed write is parsed by a second copy of the ladder, and both
+    // new rungs are dialect-free -- neither reads a decimal separator. Without
+    // them a script had NO way to write the text "123" at all: it is the value
+    // renderer's inverse (scripting/commands.rs renders Text("123") back as
+    // "123"), so a diff round trip converted a text number into a Number.
+    let se = se_locale();
+    let text = text_format();
+    assert_eq!(cell_text(&parse_cell_input_invariant("'123", &se)), "123");
+    assert_eq!(cell_text(&parse_cell_input_invariant("''123", &se)), "'123");
+    assert_eq!(
+        cell_text(&parse_cell_input_invariant_in_format("007", &se, Some(&text))),
+        "007"
+    );
+    assert_eq!(
+        cell_text(&parse_cell_input_invariant_in_format("=A1+1", &se, Some(&text))),
+        "=A1+1"
+    );
+    // And the invariant number rung is untouched: "42.5" is 42.5 even in a
+    // comma-decimal locale.
+    assert!(
+        matches!(parse_cell_input_invariant("42.5", &se).value, CellValue::Number(n) if (n - 42.5).abs() < 1e-12)
     );
 }

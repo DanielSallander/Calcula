@@ -2493,13 +2493,11 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
     // at different data. (Contrast shift_formula_row_references_for_fill,
     // which is the copy/fill path and MUST respect `$`.)
     // from_row is 0-indexed, row_num is 1-indexed
-    let shift = |row_num: u32| -> u32 {
-        if row_num > from_row {
-            ((row_num as i32) + delta).max(1) as u32
-        } else {
-            row_num
-        }
-    };
+    // OFF THE SHEET IS `#REF!`, and on this path the clamp could also be
+    // reached from BELOW: a structural shift moves absolutes too (`$` is a
+    // copy marker, not a pin to a physical row), so a large negative delta
+    // could push `$A$3` above row 1. `None` means the caller writes `#REF!`.
+    let shift = |row_num: u32| -> Option<u32> { structural_row(row_num, from_row, delta) };
     rewrite_outside_strings(formula, |segment| {
         // Handle cell references (e.g., A5, $A$5, A$5, $A5)
         let result = replace_all_guarded(&CELL_REF_RE, segment, |caps| {
@@ -2508,7 +2506,12 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
             let col_letters = &caps[3];
             let row_abs = &caps[4];
             let row_num: u32 = caps[5].parse().unwrap_or(0);
-            format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, shift(row_num))
+            match shift(row_num) {
+                Some(new_row) => {
+                    format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, new_row)
+                }
+                None => format!("{}{}", lead, REF_ERROR),
+            }
         });
 
         // Handle row-only references (e.g., 5:5, $2:$10, 2:$10)
@@ -2518,14 +2521,14 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
             let start_row: u32 = caps[3].parse().unwrap_or(0);
             let end_abs = &caps[4];
             let end_row: u32 = caps[5].parse().unwrap_or(0);
-            format!(
-                "{}{}{}:{}{}",
-                lead,
-                start_abs,
-                shift(start_row),
-                end_abs,
-                shift(end_row)
-            )
+            // A range with EITHER end off the sheet is `#REF!` whole: Excel does
+            // not keep half a range.
+            match (shift(start_row), shift(end_row)) {
+                (Some(a), Some(b)) => {
+                    format!("{}{}{}:{}{}", lead, start_abs, a, end_abs, b)
+                }
+                _ => format!("{}{}", lead, REF_ERROR),
+            }
         })
     })
 }
@@ -2535,13 +2538,9 @@ pub fn shift_formula_row_references(formula: &str, from_row: u32, delta: i32) ->
 pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) -> String {
     // Structural edits shift absolute references too; `$` is a copy/fill
     // marker, not a pin to a physical column. See the row equivalent above.
-    let shift = |letters: &str| -> String {
-        let col_index = shift_col_to_index(letters);
-        if col_index >= from_col {
-            shift_index_to_col(((col_index as i32) + delta).max(0) as u32)
-        } else {
-            letters.to_string()
-        }
+    // `None` means off the sheet -> `#REF!`; see the row equivalent above.
+    let shift = |letters: &str| -> Option<String> {
+        structural_col(shift_col_to_index(letters), from_col, delta).map(shift_index_to_col)
     };
     rewrite_outside_strings(formula, |segment| {
         // Handle cell references (e.g., C5, $C$5, C$5, $C5)
@@ -2551,7 +2550,12 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
             let col_letters = &caps[3];
             let row_abs = &caps[4];
             let row_num = &caps[5];
-            format!("{}{}{}{}{}", lead, col_abs, shift(col_letters), row_abs, row_num)
+            match shift(col_letters) {
+                Some(new_col) => {
+                    format!("{}{}{}{}{}", lead, col_abs, new_col, row_abs, row_num)
+                }
+                None => format!("{}{}", lead, REF_ERROR),
+            }
         });
 
         // Handle column-only references (e.g., B:B, $A:$C, A:$C)
@@ -2561,14 +2565,14 @@ pub fn shift_formula_col_references(formula: &str, from_col: u32, delta: i32) ->
             let start_col = &caps[3];
             let end_abs = &caps[4];
             let end_col = &caps[5];
-            format!(
-                "{}{}{}:{}{}",
-                lead,
-                start_abs,
-                shift(start_col),
-                end_abs,
-                shift(end_col)
-            )
+            // Either end off the sheet makes the whole range `#REF!`, as on the
+            // row axis above.
+            match (shift(start_col), shift(end_col)) {
+                (Some(a), Some(b)) => {
+                    format!("{}{}{}:{}{}", lead, start_abs, a, end_abs, b)
+                }
+                _ => format!("{}{}", lead, REF_ERROR),
+            }
         })
     })
 }
@@ -2696,6 +2700,13 @@ pub fn shift_formulas_batch(
 }
 
 /// Shift row references for fill operation (all non-absolute refs shift).
+///
+/// AN OFFSET THAT LEAVES THE SHEET IS `#REF!`, NOT A CLAMP. This used to end in
+/// `.max(1)`, so copying `=A1` from B5 up to B2 produced `=A1` again — a formula
+/// silently pointing somewhere it was never told to point, where Excel writes
+/// `=#REF!`. The far edge had no clamp at all and was worse: `=XFD1` copied one
+/// column right became `=XFE1`, which the parser rejects as a cell reference and
+/// resolves as a NAME, so the user got `#NAME?` for what is a reference problem.
 fn shift_formula_row_references_for_fill(formula: &str, delta: i32) -> String {
     rewrite_outside_strings(formula, |segment| {
         replace_all_guarded(&CELL_REF_RE, segment, |caps| {
@@ -2706,15 +2717,95 @@ fn shift_formula_row_references_for_fill(formula: &str, delta: i32) -> String {
             let row_num: u32 = caps[5].parse().unwrap_or(0);
 
             // Only shift if row is NOT absolute (no $)
-            let new_row = if row_abs.is_empty() {
-                ((row_num as i32) + delta).max(1) as u32
+            if row_abs.is_empty() {
+                match shifted_row(row_num, delta) {
+                    Some(new_row) => {
+                        format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, new_row)
+                    }
+                    None => format!("{}{}", lead, REF_ERROR),
+                }
             } else {
-                row_num
-            };
-
-            format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, new_row)
+                format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, row_num)
+            }
         })
     })
+}
+
+/// The literal every shifter writes for a reference that left the sheet.
+///
+/// The PARSER READS IT BACK (`Token::ErrorLiteral` -> `Value::Error`), which is
+/// what makes writing it safe: before that existed, text like this would have
+/// made the whole formula unparseable, and an unparseable formula is stored
+/// anyway and shows `#VALUE!` on a cell carrying NO dependency edges — so it
+/// would never have recalculated either. That is strictly worse than the clamp
+/// this replaces, which is why the parser change came first.
+const REF_ERROR: &str = "#REF!";
+
+/// A 1-based row shifted by `delta`, or `None` when it leaves the sheet.
+///
+/// BOTH EDGES. `EXCEL_MAX_ROW_INDEX` is 0-based, so the last 1-based row is one
+/// more than it.
+fn shifted_row(row_num: u32, delta: i32) -> Option<u32> {
+    let shifted = (row_num as i64) + delta as i64;
+    if shifted < 1 || shifted > engine::EXCEL_MAX_ROW_INDEX as i64 + 1 {
+        None
+    } else {
+        Some(shifted as u32)
+    }
+}
+
+/// A 0-based column index shifted by `delta`, or `None` when it leaves the sheet.
+fn shifted_col(col_index: u32, delta: i32) -> Option<u32> {
+    let shifted = (col_index as i64) + delta as i64;
+    if shifted < 0 || shifted > engine::EXCEL_MAX_COL_INDEX as i64 {
+        None
+    } else {
+        Some(shifted as u32)
+    }
+}
+
+/// A 1-based row reference re-pointed for a STRUCTURAL edit (insert/delete) at
+/// `from_row`, or `None` when the row it named no longer exists.
+///
+/// THREE CASES, and the middle one was missing entirely. A reference ABOVE the
+/// edit point is untouched; one BELOW it moves by `delta`; and one INSIDE A
+/// DELETED BAND has lost its target and is `#REF!`. That third case used to fall
+/// into the second, so deleting row 5 rewrote `=A5` to `=A4` — a formula
+/// silently re-pointed at DIFFERENT SURVIVING DATA, which is the worst shape a
+/// reference bug can take: no error, a plausible number, and a different one
+/// than the user asked for.
+///
+/// The band test needs no count parameter: for a delete (`delta < 0`) a
+/// reference below the edit point that would land AT OR ABOVE it was inside the
+/// rows that were removed.
+fn structural_row(row_num: u32, from_row: u32, delta: i32) -> Option<u32> {
+    if row_num <= from_row {
+        return Some(row_num);
+    }
+    let shifted = (row_num as i64) + delta as i64;
+    if delta < 0 && shifted <= from_row as i64 {
+        return None;
+    }
+    if shifted < 1 || shifted > engine::EXCEL_MAX_ROW_INDEX as i64 + 1 {
+        return None;
+    }
+    Some(shifted as u32)
+}
+
+/// The column twin of [`structural_row`]. `col_index` and `from_col` are both
+/// 0-based, so the "above the edit" test is `<` rather than `<=`.
+fn structural_col(col_index: u32, from_col: u32, delta: i32) -> Option<u32> {
+    if col_index < from_col {
+        return Some(col_index);
+    }
+    let shifted = (col_index as i64) + delta as i64;
+    if delta < 0 && shifted < from_col as i64 {
+        return None;
+    }
+    if shifted < 0 || shifted > engine::EXCEL_MAX_COL_INDEX as i64 {
+        return None;
+    }
+    Some(shifted as u32)
 }
 
 /// Shift column references for fill operation (all non-absolute refs shift).
@@ -2729,14 +2820,19 @@ fn shift_formula_col_references_for_fill(formula: &str, delta: i32) -> String {
 
             let col_index = shift_col_to_index(col_letters);
 
-            // Only shift if column is NOT absolute (no $)
-            let new_col_letters = if col_abs.is_empty() {
-                shift_index_to_col(((col_index as i32) + delta).max(0) as u32)
+            // Only shift if column is NOT absolute (no $). Off either edge is
+            // `#REF!` — see `shift_formula_row_references_for_fill`.
+            if col_abs.is_empty() {
+                match shifted_col(col_index, delta) {
+                    Some(idx) => format!(
+                        "{}{}{}{}{}",
+                        lead, col_abs, shift_index_to_col(idx), row_abs, row_num
+                    ),
+                    None => format!("{}{}", lead, REF_ERROR),
+                }
             } else {
-                col_letters.to_string()
-            };
-
-            format!("{}{}{}{}{}", lead, col_abs, new_col_letters, row_abs, row_num)
+                format!("{}{}{}{}{}", lead, col_abs, col_letters, row_abs, row_num)
+            }
         })
     })
 }
@@ -4568,7 +4664,277 @@ fn shift_named_ranges(
 
 #[cfg(test)]
 mod structural_formula_shift_tests {
-    use super::{shift_formula_col_references, shift_formula_row_references};
+    use super::{
+        shift_formula_col_references, shift_formula_internal, shift_formula_row_references,
+    };
+
+    // ================================================================
+    // Structured references must survive a copy (glossary terms
+    // "structured reference" and "locked table reference")
+    // ================================================================
+
+    /// A COLUMN NAME THAT LOOKS LIKE A CELL ADDRESS USED TO BE REWRITTEN.
+    ///
+    /// The shifters are A1 regexes over formula TEXT. `CELL_REF_RE`'s leading
+    /// class `[^A-Za-z0-9_.]` admits `[`, and `replace_all_guarded`'s trailing
+    /// guard does not block `]` — so `Table1[Q1]` filled one row down became
+    /// `Table1[Q2]`. Quarter and half-year names are exactly that shape, which
+    /// makes this the common case rather than a corner: `resolve_column_range`
+    /// then answered `_UNRESOLVED_{table}_RANGE` for the invented column, so the
+    /// formula pointed at a column that does not exist, silently, on an ordinary
+    /// copy.
+    ///
+    /// It also fired on the DOWN axis, which Excel never shifts a specifier on
+    /// at all, and the LOCKED spelling `[[Q1]:[Q1]]` was no protection.
+    // ================================================================
+    // The trim-reference dot must not freeze a range (glossary term
+    // "dot operator")
+    // ================================================================
+
+    /// A DOTTED RANGE USED TO STOP TRACKING ITS DATA, SILENTLY.
+    ///
+    /// Every shifter here is an A1 regex over formula TEXT, and `CELL_REF_RE`'s
+    /// leading class `[^A-Za-z0-9_.]` excludes `.` on purpose — so that a dotted
+    /// defined name like `Q1.Sales` is not read as a reference. The `.` operator
+    /// puts a dot in exactly that position, so each dot froze the end it touched:
+    ///
+    ///   =SUM(A1:.A8)   insert a row   stayed =SUM(A1:.A8)    (end never moved)
+    ///   =SUM(A1.:A8)   copied down    became =SUM(A1.:A9)    (start never moved)
+    ///   =SUM(A1.:.A8)  either         unchanged              (neither end)
+    ///
+    /// A frozen reference is a wrong NUMBER with no error on the cell, which is
+    /// why this is asserted against the SAME formula without dots rather than
+    /// against literal strings: the claim is that the dots change what the range
+    /// MEANS and nothing about where it points.
+    #[test]
+    fn the_trim_dots_never_change_where_a_range_points() {
+        // (dotted, the same range undotted) — the dots are stripped from the
+        // expected answer, so a shifter that dropped them would also fail.
+        let pairs = [
+            ("=SUM(A1:.A8)", "=SUM(A1:A8)"),
+            ("=SUM(A1.:A8)", "=SUM(A1:A8)"),
+            ("=SUM(A1.:.A8)", "=SUM(A1:A8)"),
+            ("=SUM($A$1:.$A$8)", "=SUM($A$1:$A$8)"),
+            ("=SUM(Sheet2!B2:.B9)", "=SUM(Sheet2!B2:B9)"),
+            ("=SUM(A1:.A8)+SUM(C1.:C4)", "=SUM(A1:A8)+SUM(C1:C4)"),
+        ];
+        for (dotted, plain) in pairs {
+            for (from, delta) in [(1u32, 1i32), (0, 2), (5, -1)] {
+                let got = shift_formula_row_references(dotted, from, delta);
+                assert_eq!(
+                    got.replace('.', ""),
+                    shift_formula_row_references(plain, from, delta),
+                    "`{}` shifted differently from `{}` at row {} delta {}",
+                    dotted,
+                    plain,
+                    from,
+                    delta
+                );
+                assert_eq!(
+                    got.matches('.').count(),
+                    dotted.matches('.').count(),
+                    "`{}` lost or gained a trim dot",
+                    dotted
+                );
+            }
+            for (dr, dc) in [(1, 0), (0, 1), (-1, 0), (2, 3)] {
+                let got = shift_formula_internal(dotted, dr, dc);
+                assert_eq!(
+                    got.replace('.', ""),
+                    shift_formula_internal(plain, dr, dc),
+                    "`{}` copied ({}, {}) differently from `{}`",
+                    dotted,
+                    dr,
+                    dc,
+                    plain
+                );
+            }
+        }
+    }
+
+    /// The whole-axis spellings, which go through the column/row range regexes
+    /// rather than the cell one — a separate code path with its own `.`
+    /// exclusion, so it needs its own case.
+    #[test]
+    fn a_dotted_whole_axis_reference_shifts_like_an_undotted_one() {
+        for (dotted, plain) in [
+            ("=SUM(A:.A)", "=SUM(A:A)"),
+            ("=SUM(A.:C)", "=SUM(A:C)"),
+            ("=SUM(1:.5)", "=SUM(1:5)"),
+        ] {
+            for (from, delta) in [(0u32, 1i32), (2, 2)] {
+                assert_eq!(
+                    shift_formula_col_references(dotted, from, delta).replace('.', ""),
+                    shift_formula_col_references(plain, from, delta),
+                    "`{}` shifted differently from `{}`",
+                    dotted,
+                    plain
+                );
+                assert_eq!(
+                    shift_formula_row_references(dotted, from, delta).replace('.', ""),
+                    shift_formula_row_references(plain, from, delta),
+                    "`{}` shifted differently from `{}`",
+                    dotted,
+                    plain
+                );
+            }
+        }
+    }
+
+    /// A `.` that is NOT the operator must still be untouchable — this is the
+    /// defect the `.` exclusion was added to prevent, and lifting the operator
+    /// out must not lift anything else with it.
+    #[test]
+    fn an_ordinary_dot_is_still_left_alone() {
+        for formula in ["=Q1.Sales*2", "=SUM(Q1.Sales,0.25)", "=Sales.Q1", "=1.5+0.25"] {
+            assert_eq!(
+                shift_formula_internal(formula, 1, 1),
+                formula,
+                "`{}` was rewritten by a copy",
+                formula
+            );
+        }
+        // A real reference beside a decimal still shifts — the claim is about
+        // the dot, not about freezing the formula it sits in.
+        assert_eq!(shift_formula_internal("=A1*1.5", 1, 1), "=B2*1.5");
+        // A decimal point next to a range colon is not the operator either: the
+        // dot is BETWEEN digits here, not adjacent to the `:` on the outside.
+        assert_eq!(
+            shift_formula_internal("=SUM(A1:A8)*1.5", 1, 0),
+            "=SUM(A2:A9)*1.5"
+        );
+    }
+
+    #[test]
+    fn a_structured_reference_is_never_rewritten_by_a_copy() {
+        for formula in [
+            "=SUM(Table1[Q1])",
+            "=[@Q1]*2",
+            "=SUM(Table1[[Q1]:[Q3]])",
+            "=SUM(Sales[[#Data],[H2]])",
+            "=Table1[@Q1]",
+            "=SUM(Sales[AB3])",
+        ] {
+            for (dr, dc) in [(1, 0), (0, 1), (-1, 0), (0, -1), (3, 2)] {
+                assert_eq!(
+                    shift_formula_internal(formula, dr, dc),
+                    formula,
+                    "`{}` was rewritten by a ({}, {}) copy",
+                    formula,
+                    dr,
+                    dc
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cell_reference_beside_a_structured_one_still_shifts() {
+        // THE CONTROL. Skipping bracket spans must not make the shifter stop
+        // working on the ordinary references around them, or the fix would be
+        // indistinguishable from disabling it.
+        assert_eq!(
+            shift_formula_internal("=SUM(Table1[Q1])+A5", 1, 0),
+            "=SUM(Table1[Q1])+A6"
+        );
+        assert_eq!(
+            shift_formula_internal("=A5*Table1[[Q1]:[Q3]]", 0, 1),
+            "=B5*Table1[[Q1]:[Q3]]"
+        );
+        // ...and the structural shifters share the same skip.
+        assert_eq!(
+            shift_formula_row_references("=SUM(Table1[Q1])+A5", 0, 1),
+            "=SUM(Table1[Q1])+A6"
+        );
+        assert_eq!(
+            shift_formula_col_references("=SUM(Table1[Q1])+C5", 0, 1),
+            "=SUM(Table1[Q1])+D5"
+        );
+    }
+
+    // ================================================================
+    // #REF! when an offset leaves the sheet (glossary term
+    // "relative reference")
+    // ================================================================
+
+    #[test]
+    fn a_copy_that_pushes_a_reference_off_the_near_edge_is_ref() {
+        // These CLAMPED. `=A1` copied from B5 up to B2 produced `=A1` again —
+        // a formula pointing somewhere it was never told to point, with no
+        // error. Excel writes `=#REF!`.
+        assert_eq!(shift_formula_internal("=A1", -3, 0), "=#REF!");
+        assert_eq!(shift_formula_internal("=B1", 0, -2), "=#REF!");
+        // Only the reference that left, not the whole formula.
+        assert_eq!(shift_formula_internal("=A1+B1", -3, 0), "=#REF!+#REF!");
+        assert_eq!(shift_formula_internal("=A1+B9", -3, 0), "=#REF!+B6");
+    }
+
+    #[test]
+    fn a_copy_that_pushes_a_reference_off_the_far_edge_is_ref_not_name() {
+        // The far edge had no clamp at all: `=XFD1` copied one column right
+        // became `=XFE1`, which the parser refuses as a cell reference and
+        // resolves as a NAME — so the user saw `#NAME?` for a reference problem.
+        assert_eq!(shift_formula_internal("=XFD1", 0, 1), "=#REF!");
+        assert_eq!(shift_formula_internal("=A1048576", 1, 0), "=#REF!");
+        // One inside the sheet is untouched.
+        assert_eq!(shift_formula_internal("=XFC1", 0, 1), "=XFD1");
+        assert_eq!(shift_formula_internal("=A1048575", 1, 0), "=A1048576");
+    }
+
+    #[test]
+    fn an_absolute_reference_is_not_pushed_off_by_a_copy_at_all() {
+        // `$` is a COPY marker, so a copy never moves it and it can never leave
+        // the sheet this way. (The STRUCTURAL path deliberately moves absolutes
+        // — a different rule, asserted below.)
+        assert_eq!(shift_formula_internal("=$A$1", -50, -50), "=$A$1");
+        assert_eq!(shift_formula_internal("=$A1", 0, -50), "=$A1");
+        assert_eq!(shift_formula_internal("=A$1", -50, 0), "=A$1");
+    }
+
+    #[test]
+    fn a_reference_into_deleted_rows_is_ref_not_re_pointed() {
+        // THE QUIETEST OF THE FOUR. Deleting row 5 rewrote `=A5` to `=A4`: the
+        // formula did not error, it started reading DIFFERENT SURVIVING DATA.
+        // `from_row` is 0-based, so 4 means "the edit is at 1-based row 5".
+        assert_eq!(shift_formula_row_references("=A5", 4, -1), "=#REF!");
+        // Two rows deleted from row 5: rows 5 and 6 are gone, 7 becomes 5.
+        assert_eq!(shift_formula_row_references("=A6", 4, -2), "=#REF!");
+        assert_eq!(shift_formula_row_references("=A7", 4, -2), "=A5");
+        // Above the edit: untouched.
+        assert_eq!(shift_formula_row_references("=A4", 4, -1), "=A4");
+        // The column axis behaves the same way (`from_col` is 0-based too).
+        assert_eq!(shift_formula_col_references("=C5", 2, -1), "=#REF!");
+        assert_eq!(shift_formula_col_references("=D5", 2, -1), "=C5");
+        assert_eq!(shift_formula_col_references("=B5", 2, -1), "=B5");
+    }
+
+    #[test]
+    fn a_range_with_either_end_deleted_is_ref_whole() {
+        // Excel does not keep half a range.
+        assert_eq!(shift_formula_row_references("=SUM(5:5)", 4, -1), "=SUM(#REF!)");
+        assert_eq!(shift_formula_col_references("=SUM(C:C)", 2, -1), "=SUM(#REF!)");
+    }
+
+    #[test]
+    fn every_ref_this_writes_can_be_read_back() {
+        // THE PROPERTY THAT MADE WRITING `#REF!` SAFE AT ALL. Before the parser
+        // learned error literals, this text would have made the whole formula
+        // unparseable — and an unparseable formula is stored anyway and shows
+        // #VALUE! on a cell with NO dependency edges, so it would never have
+        // recalculated either. That is strictly worse than the clamp.
+        for out in [
+            shift_formula_internal("=A1+B1", -3, 0),
+            shift_formula_internal("=XFD1", 0, 1),
+            shift_formula_row_references("=A5", 4, -1),
+            shift_formula_col_references("=SUM(C:C)", 2, -1),
+        ] {
+            assert!(
+                parser::parse(&out).is_ok(),
+                "`{}` does not parse back",
+                out
+            );
+        }
+    }
 
     // The fill/copy path shares CELL_REF_RE with these shifters — before the
     // lead+trailing guards it matched LOG10 as column LOG row 10, so filling
@@ -4840,16 +5206,87 @@ fn replace_all_guarded(
     out
 }
 
-/// Apply `rewrite` only OUTSIDE double-quoted string literals (`""` escapes a
-/// quote, per Excel). Without this, every shifter rewrote A1-looking text
-/// inside strings: `="see A5"` became `="see A6"` on a row insert.
+/// Apply `rewrite` only OUTSIDE double-quoted string literals and STRUCTURED
+/// REFERENCE BRACKETS.
+///
+/// THE STRING HALF: without it every shifter rewrote A1-looking text inside
+/// strings, so `="see A5"` became `="see A6"` on a row insert. (`""` escapes a
+/// quote, per Excel.)
+///
+/// THE BRACKET HALF, AND WHY IT IS NOT COSMETIC. The shifters are A1 REGEXES
+/// over formula TEXT, and `CELL_REF_RE`'s leading class `[^A-Za-z0-9_.]` admits
+/// `[` while `replace_all_guarded`'s trailing guard does not block `]`. So a
+/// table column whose NAME LOOKS LIKE A CELL ADDRESS was rewritten as if it were
+/// one — and quarter and half-year names are exactly that:
+///
+///   =SUM(Table1[Q1])            filled one row down became  =SUM(Table1[Q2])
+///   =[@Q1]*2                                                =[@Q2]*2
+///   =SUM(Table1[[Q1]:[Q3]])                                 =SUM(Table1[[Q2]:[Q4]])
+///   =SUM(Sales[[#Data],[H2]])                               ...[H3]]
+///
+/// `resolve_column_range` then answers `_UNRESOLVED_{table}_RANGE` for the
+/// invented column, so the formula pointed at a column that does not exist —
+/// silently, on an ordinary copy, with the LOCKED spelling `[[Q1]:[Q1]]` no
+/// protection at all. It also fired on a copy DOWN, an axis Excel never shifts a
+/// specifier on.
+///
+/// A CONSEQUENCE TO KNOW ABOUT: Calcula's subscript access (`A1[0]`,
+/// `A1["name"]`, `A1[B2]`) shares the bracket. Its INDEX expression is now
+/// skipped too, so `=A1[B2]` copied down keeps `B2` while `A1` still shifts. That
+/// is the deliberate trade: a structured reference cannot be told from a
+/// subscript by text alone (`[Q1]` is ambiguous), this function has no table
+/// registry to ask, and a mis-shifted table column corrupts the common case
+/// while an unshifted subscript index is a rare one.
+///
+/// WHAT THIS DOES NOT DO: Excel's RELATIVE-column parity, where `Table1[Qty]`
+/// copied one column right becomes `Table1[Price]`. That needs the table's
+/// column list to find the next ordinal, which a text shifter cannot reach. The
+/// result here is that a plain specifier never shifts — a divergence, but one
+/// that always names a real column.
 fn rewrite_outside_strings(formula: &str, mut rewrite: impl FnMut(&str) -> String) -> String {
+    // The trim-reference dots are lifted off before the shifter sees the text
+    // and put back after. See `shift_with_trim_dots_lifted` for why.
+    let mut rewrite = |segment: &str| shift_with_trim_dots_lifted(segment, &mut rewrite);
     let mut out = String::with_capacity(formula.len());
     let mut seg_start = 0;
     let bytes = formula.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'"' {
+        if bytes[i] == b'[' {
+            // Rewrite what came before, then copy the whole bracket span
+            // verbatim. Depth-counted, because `Table1[[Q1]:[Q3]]` nests; an
+            // UNBALANCED `[` (a half-typed formula) copies to end of input
+            // rather than looping.
+            out.push_str(&rewrite(&formula[seg_start..i]));
+            let mut depth = 0usize;
+            let mut j = i;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    // A quoted string inside a bracket span keeps its own
+                    // brackets from being counted.
+                    b'"' => {
+                        j += 1;
+                        while j < bytes.len() && bytes[j] != b'"' {
+                            j += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = j.min(bytes.len());
+            out.push_str(&formula[i..end]);
+            i = end;
+            seg_start = end;
+        } else if bytes[i] == b'"' {
             // Rewrite the segment before the string, then copy the string
             // literal (including its closing quote) verbatim.
             out.push_str(&rewrite(&formula[seg_start..i]));
@@ -4873,6 +5310,97 @@ fn rewrite_outside_strings(formula: &str, mut rewrite: impl FnMut(&str) -> Strin
         }
     }
     out.push_str(&rewrite(&formula[seg_start..]));
+    out
+}
+
+/// Runs `rewrite` over a segment with Excel's trim-reference dots taken OUT of
+/// the text, then puts them back on the same colons.
+///
+/// WHY, MEASURED. Every shifter in this file is an A1 regex over formula TEXT,
+/// and `CELL_REF_RE`'s leading class `[^A-Za-z0-9_.]` excludes `.` — deliberately,
+/// so a dotted defined name like `Q1.Sales` is not mistaken for a reference. The
+/// dot operator puts a `.` in exactly that position, and the result was a range
+/// that silently stopped moving:
+///
+///   =SUM(A1:.A8)   insert a row      stayed =SUM(A1:.A8)     (end never shifts)
+///   =SUM(A1:.A8)   copied down       became =SUM(A2:.A8)     (end never shifts)
+///   =SUM(A1.:A8)   copied down       became =SUM(A1.:A9)     (start never shifts)
+///   =SUM(A1.:.A8)  either            unchanged               (neither end)
+///
+/// against a control `=SUM(A1:A8)` that shifts both ends correctly. A reference
+/// that stops tracking its data is a wrong NUMBER with no error on the cell.
+///
+/// LIFTING THEM OUT RATHER THAN TEACHING THE REGEXES. There are four regexes
+/// and two guard edges, each with its own reason for excluding `.`; making all
+/// six dot-aware means six chances to reintroduce the `Q1.Sales` defect they
+/// exist to prevent. Removing the dots instead gives every shifter exactly the
+/// text it was written for, and no shifter has to know the operator exists.
+///
+/// THE DOTS COME BACK BY COLON ORDINAL, which is sound because a shifter
+/// rewrites reference TOKENS and never adds, removes or reorders a colon — a
+/// reference shifted off the sheet becomes `#REF!` in place, keeping its colon.
+/// If the count differs anyway the dots are DROPPED rather than guessed at: the
+/// formula has already been broken by whatever changed the count, and a
+/// misplaced trim marker would be a second, quieter wrong answer on top of it.
+fn shift_with_trim_dots_lifted(segment: &str, rewrite: &mut impl FnMut(&str) -> String) -> String {
+    if !segment.contains('.') {
+        return rewrite(segment);
+    }
+    // Lift: a `.` immediately before or after a `:` is the operator; any other
+    // `.` (a decimal point, a dotted name) is ordinary text and stays put.
+    let bytes = segment.as_bytes();
+    let mut clean = String::with_capacity(segment.len());
+    let mut marks: Vec<(usize, bool, bool)> = Vec::new();
+    let mut colon_ordinal = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let leading = bytes[i] == b'.' && bytes.get(i + 1) == Some(&b':');
+        if leading || bytes[i] == b':' {
+            let colon = if leading { i + 1 } else { i };
+            let trailing = bytes.get(colon + 1) == Some(&b'.');
+            if leading || trailing {
+                marks.push((colon_ordinal, leading, trailing));
+            }
+            clean.push(':');
+            colon_ordinal += 1;
+            i = colon + 1 + usize::from(trailing);
+            continue;
+        }
+        clean.push(bytes[i] as char);
+        i += 1;
+    }
+    if marks.is_empty() {
+        return rewrite(segment);
+    }
+
+    let shifted = rewrite(&clean);
+    if shifted.bytes().filter(|b| *b == b':').count() != colon_ordinal {
+        return shifted;
+    }
+
+    let mut out = String::with_capacity(shifted.len() + marks.len() * 2);
+    let mut next_mark = 0usize;
+    let mut seen = 0usize;
+    for ch in shifted.chars() {
+        if ch == ':' {
+            let mark = marks.get(next_mark).filter(|m| m.0 == seen).copied();
+            if let Some((_, leading, trailing)) = mark {
+                next_mark += 1;
+                if leading {
+                    out.push('.');
+                }
+                out.push(':');
+                if trailing {
+                    out.push('.');
+                }
+            } else {
+                out.push(':');
+            }
+            seen += 1;
+            continue;
+        }
+        out.push(ch);
+    }
     out
 }
 
@@ -4985,13 +5513,7 @@ pub(crate) fn shift_formula_rows_sheet_aware(
 ) -> String {
     // Absolute markers do not prevent a STRUCTURAL shift (see
     // structural_formula_shift_tests) but are preserved in the output.
-    let shift_row = |row_num: u32| -> u32 {
-        if row_num > from_row {
-            ((row_num as i32) + delta).max(1) as u32
-        } else {
-            row_num
-        }
-    };
+    let shift_row = |row_num: u32| -> Option<u32> { structural_row(row_num, from_row, delta) };
     rewrite_outside_strings(formula, |segment| {
         // Pass 1: cell refs and cell ranges (one match per range, so the
         // qualifier governs both endpoints).
@@ -5007,7 +5529,23 @@ pub(crate) fn shift_formula_rows_sheet_aware(
             let col_letters = &caps[5];
             let row_abs = &caps[6];
             let row_num: u32 = caps[7].parse().unwrap_or(0);
-            let new_row = if applies { shift_row(row_num) } else { row_num };
+            let new_row = if applies { shift_row(row_num) } else { Some(row_num) };
+            // A range is matched WHOLE here (one match governs both endpoints),
+            // so both ends are resolved before anything is emitted: if either
+            // lost its row the reference is `#REF!` entire, not half a range.
+            let second = if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
+                (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
+            {
+                let row2: u32 = rn2.as_str().parse().unwrap_or(0);
+                let new_row2 = if applies { shift_row(row2) } else { Some(row2) };
+                Some((ca2.as_str(), cl2.as_str(), ra2.as_str(), new_row2))
+            } else {
+                None
+            };
+            let second_lost = matches!(second, Some((_, _, _, None)));
+            let Some(new_row) = new_row.filter(|_| !second_lost) else {
+                return format!("{}{}", lead, REF_ERROR);
+            };
             let mut out = format!(
                 "{}{}{}{}{}{}",
                 lead,
@@ -5017,18 +5555,8 @@ pub(crate) fn shift_formula_rows_sheet_aware(
                 row_abs,
                 new_row
             );
-            if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
-                (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
-            {
-                let row2: u32 = rn2.as_str().parse().unwrap_or(0);
-                let new_row2 = if applies { shift_row(row2) } else { row2 };
-                out.push_str(&format!(
-                    ":{}{}{}{}",
-                    ca2.as_str(),
-                    cl2.as_str(),
-                    ra2.as_str(),
-                    new_row2
-                ));
+            if let Some((ca2, cl2, ra2, Some(new_row2))) = second {
+                out.push_str(&format!(":{}{}{}{}", ca2, cl2, ra2, new_row2));
             }
             out
         });
@@ -5045,16 +5573,23 @@ pub(crate) fn shift_formula_rows_sheet_aware(
             let r1: u32 = caps[5].parse().unwrap_or(0);
             let abs2 = &caps[6];
             let r2: u32 = caps[7].parse().unwrap_or(0);
-            let (n1, n2) = if applies { (shift_row(r1), shift_row(r2)) } else { (r1, r2) };
-            format!(
-                "{}{}{}{}:{}{}",
-                lead,
-                qualifier_prefix(&quoted, &bare),
-                abs1,
-                n1,
-                abs2,
-                n2
-            )
+            let (n1, n2) = if applies {
+                (shift_row(r1), shift_row(r2))
+            } else {
+                (Some(r1), Some(r2))
+            };
+            match (n1, n2) {
+                (Some(a), Some(b)) => format!(
+                    "{}{}{}{}:{}{}",
+                    lead,
+                    qualifier_prefix(&quoted, &bare),
+                    abs1,
+                    a,
+                    abs2,
+                    b
+                ),
+                _ => format!("{}{}", lead, REF_ERROR),
+            }
         })
     })
 }
@@ -5067,13 +5602,8 @@ pub(crate) fn shift_formula_cols_sheet_aware(
     from_col: u32,
     delta: i32,
 ) -> String {
-    let shift_col = |letters: &str| -> String {
-        let col_index = shift_col_to_index(letters);
-        if col_index >= from_col {
-            shift_index_to_col(((col_index as i32) + delta).max(0) as u32)
-        } else {
-            letters.to_string()
-        }
+    let shift_col = |letters: &str| -> Option<String> {
+        structural_col(shift_col_to_index(letters), from_col, delta).map(shift_index_to_col)
     };
     rewrite_outside_strings(formula, |segment| {
         // Pass 1: cell refs and cell ranges.
@@ -5089,8 +5619,28 @@ pub(crate) fn shift_formula_cols_sheet_aware(
             let col_letters = &caps[5];
             let row_abs = &caps[6];
             let row_num = &caps[7];
-            let new_col =
-                if applies { shift_col(col_letters) } else { col_letters.to_string() };
+            let new_col = if applies {
+                shift_col(col_letters)
+            } else {
+                Some(col_letters.to_string())
+            };
+            // Both ends resolved before anything is emitted -- see the row twin.
+            let second = if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
+                (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
+            {
+                let new_col2 = if applies {
+                    shift_col(cl2.as_str())
+                } else {
+                    Some(cl2.as_str().to_string())
+                };
+                Some((ca2.as_str(), new_col2, ra2.as_str(), rn2.as_str()))
+            } else {
+                None
+            };
+            let second_lost = matches!(second, Some((_, None, _, _)));
+            let Some(new_col) = new_col.filter(|_| !second_lost) else {
+                return format!("{}{}", lead, REF_ERROR);
+            };
             let mut out = format!(
                 "{}{}{}{}{}{}",
                 lead,
@@ -5100,21 +5650,8 @@ pub(crate) fn shift_formula_cols_sheet_aware(
                 row_abs,
                 row_num
             );
-            if let (Some(ca2), Some(cl2), Some(ra2), Some(rn2)) =
-                (caps.get(8), caps.get(9), caps.get(10), caps.get(11))
-            {
-                let new_col2 = if applies {
-                    shift_col(cl2.as_str())
-                } else {
-                    cl2.as_str().to_string()
-                };
-                out.push_str(&format!(
-                    ":{}{}{}{}",
-                    ca2.as_str(),
-                    new_col2,
-                    ra2.as_str(),
-                    rn2.as_str()
-                ));
+            if let Some((ca2, Some(new_col2), ra2, rn2)) = second {
+                out.push_str(&format!(":{}{}{}{}", ca2, new_col2, ra2, rn2));
             }
             out
         });
@@ -5134,17 +5671,20 @@ pub(crate) fn shift_formula_cols_sheet_aware(
             let (n1, n2) = if applies {
                 (shift_col(c1), shift_col(c2))
             } else {
-                (c1.to_string(), c2.to_string())
+                (Some(c1.to_string()), Some(c2.to_string()))
             };
-            format!(
-                "{}{}{}{}:{}{}",
-                lead,
-                qualifier_prefix(&quoted, &bare),
-                abs1,
-                n1,
-                abs2,
-                n2
-            )
+            match (n1, n2) {
+                (Some(a), Some(b)) => format!(
+                    "{}{}{}{}:{}{}",
+                    lead,
+                    qualifier_prefix(&quoted, &bare),
+                    abs1,
+                    a,
+                    abs2,
+                    b
+                ),
+                _ => format!("{}{}", lead, REF_ERROR),
+            }
         })
     })
 }

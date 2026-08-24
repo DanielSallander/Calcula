@@ -28,6 +28,7 @@ import {
   type FormulaValue,
 } from "./chartFormula";
 import { parseDisplayNumber } from "./chartFieldTypes";
+import { customOrderKey, resolveCustomOrder } from "./customOrderLists";
 import { getChartTransform } from "@api/chartTransforms";
 import { evaluateScoped, type EvalScope, type EvalResultValue } from "@api/formulaEval";
 
@@ -361,9 +362,17 @@ function applySort(
     return data;
   }
 
+  // A declared list orders by POSITION IN THE LIST — the only way a text field
+  // comes out Mon..Sun rather than the Fri, Mon, Sat, ... that localeCompare gives.
+  const rank = t.customOrder === undefined
+    ? null
+    : buildCustomOrderRank(data, seriesIdx, t.customOrder, index, diagnostics);
+
   indices.sort((a, b) => {
     let cmp: number;
-    if (field === "$category") {
+    if (rank) {
+      cmp = rank[a] - rank[b];
+    } else if (field === "$category") {
       cmp = data.categories[a].localeCompare(data.categories[b]);
     } else {
       cmp = (data.series[seriesIdx].values[a] ?? 0) - (data.series[seriesIdx].values[b] ?? 0);
@@ -372,6 +381,45 @@ function applySort(
   });
 
   return reorderByIndices(data, indices);
+}
+
+/**
+ * Per-row rank in the declared list: its position, or `list.length` for a label
+ * the list never mentions, so unlisted rows land after every listed one — and
+ * `order: "desc"` flips that, bringing them first, exactly as the backend range
+ * sort's usize::MAX key does. Ties keep source order (Array.prototype.sort is
+ * stable), so an unlisted tail stays in the order the data arrived.
+ *
+ * Returns null after reporting when the name matches no list, which leaves the
+ * caller on its by-value comparison rather than on no ordering at all.
+ */
+function buildCustomOrderRank(
+  data: ParsedChartData,
+  seriesIdx: number,
+  customOrder: string | string[],
+  index: number,
+  diagnostics?: TransformDiagnostic[],
+): number[] | null {
+  const list = resolveCustomOrder(customOrder);
+  if (!list) {
+    report(diagnostics, index, "sort", "warning",
+      `Sort: no custom list matches ${JSON.stringify(customOrder)} — ordered by value instead.`);
+    return null;
+  }
+
+  const positions = new Map<string, number>();
+  list.forEach((item, i) => {
+    const key = customOrderKey(item);
+    if (!positions.has(key)) positions.set(key, i); // a duplicated entry keeps its FIRST position
+  });
+
+  // $category ranks the label; a named series ranks the TEXT of its value, so a
+  // list of numeric-looking labels ("2024", "2025") still works on a series.
+  const labelAt = (i: number): string => seriesIdx < 0
+    ? (data.categories[i] ?? "")
+    : String(data.series[seriesIdx].values[i] ?? "");
+
+  return data.categories.map((_, i) => positions.get(customOrderKey(labelAt(i))) ?? list.length);
 }
 
 function reorderByIndices(data: ParsedChartData, indices: number[]): ParsedChartData {

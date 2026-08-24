@@ -83,6 +83,21 @@ vi.mock("../../../api/lib", () => ({
   resolveNamedRangeCoords: (...args: unknown[]) => resolveNamedRangeCoordsMock(...args),
 }));
 
+// The TABLE half of the Name Box's namespace. Doubled to "this workbook has no
+// tables" so every case here still exercises the address / defined-name / create
+// branches; the table routes have their own file (nameBoxTables.test.tsx). Left
+// undoubled these would reach the real Tauri `invoke` and pass by accident,
+// which is a doubled dependency in all but name.
+vi.mock("../../../api/backend", () => ({
+  getTableAtCell: vi.fn(async () => null),
+  getTableByName: vi.fn(async () => null),
+  getAllTables: vi.fn(async () => []),
+  resolveStructuredReference: vi.fn(async () => ({
+    success: false,
+    error: "Table not found",
+  })),
+}));
+
 vi.mock("../../../api/editing", () => ({
   setGlobalIsEditing: vi.fn(),
 }));

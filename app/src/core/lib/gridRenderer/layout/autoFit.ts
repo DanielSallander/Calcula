@@ -6,6 +6,8 @@
 //          reset empty rows to the default height. Extension-rendered content
 //          (pivot overlays, filter buttons) participates via the
 //          @api/autoFitContributors registry.
+//          ALSO OWNS the line-breaking recipe (hard breaks + word wrap) that
+//          rendering/cells.ts paints with -- see the section at the bottom.
 //
 // HIDDEN ROWS/COLUMNS ARE DELIBERATELY NOT CONSULTED HERE.
 //   Excel's AutoFit measures every cell in the column, hidden and filtered
@@ -132,6 +134,25 @@ function measureRichTextWidth(
   return total;
 }
 
+/**
+ * Width of the WIDEST line of a value, at the current font.
+ *
+ * A hard break paints as a break whether or not Wrap Text is on, so the column
+ * has to fit the widest LINE. Measuring the raw string instead runs the lines
+ * together -- `measureText` applies the same "every space character becomes
+ * U+0020" preparation `fillText` does -- and autofits the column to the summed
+ * width of lines that are never side by side.
+ */
+function measureWidestLine(ctx: CanvasRenderingContext2D, text: string): number {
+  if (!hasHardBreak(text)) return ctx.measureText(text).width;
+  let widest = 0;
+  for (const line of splitHardBreaks(text)) {
+    const width = ctx.measureText(line).width;
+    if (width > widest) widest = width;
+  }
+  return widest;
+}
+
 /** Largest effective font size across a cell's rich-text runs. */
 function maxRichTextFontSize(runs: RichTextRun[], baseFontSize: number): number {
   let max = baseFontSize;
@@ -240,7 +261,7 @@ export function measureOptimalColumnWidth(
         ctx.font = fontString;
         lastFont = fontString;
       }
-      textWidth = ctx.measureText(cell.display).width;
+      textWidth = measureWidestLine(ctx, cell.display);
     }
 
     // The renderer shifts text right by the style indent (8px per level)
@@ -356,10 +377,18 @@ export function measureOptimalRowHeight(
       }
       const colWidth = columnWidths.get(cell.col) ?? defaultColWidth;
       const availableWidth = colWidth - PADDING_X * 2 - (style?.indent ?? 0) * 8;
-      if (availableWidth > 0) {
-        const lines = wrapTextForMeasurement(ctx, cell.display, availableWidth);
-        lineCount = lines.length;
-      }
+      // No `availableWidth > 0` guard: `wrapText` falls back to hard-break
+      // splitting alone when there is no usable width, which is one line for
+      // ordinary text -- the same answer the guard used to hard-code -- and the
+      // right line COUNT for a cell whose breaks the painter honours anyway.
+      lineCount = wrapText(ctx, cell.display, availableWidth).length;
+    } else if (cell.display) {
+      // HARD BREAKS RAISE THE ROW WITH WRAP TEXT OFF TOO, because the painter
+      // breaks on them either way (rendering/cells.ts). Measuring one line here
+      // would hand back the default height and the row would then CLIP every
+      // line the painter drew below the first -- so fixing only the painter
+      // trades one wrong answer for another.
+      lineCount = splitHardBreaks(cell.display).length;
     }
 
     hasContent = true;
@@ -395,17 +424,91 @@ export function measureOptimalRowHeight(
   return Math.max(minHeight, Math.ceil(maxHeight));
 }
 
+// ---------------------------------------------------------------------------
+// Line breaking -- ONE recipe, shared with the painter
+// ---------------------------------------------------------------------------
+//
+// `rendering/cells.ts` imports these three. It used to carry its own
+// byte-identical copy of the wrapper under a different name, and the copy is
+// exactly what let a hard break be ignored in TWO places at once: the text
+// painted on one line AND the row refused to grow for it, so autofitting the
+// row could not even reveal the defect.
+//
+// THE DIRECTION IS rendering -> layout, and it is not arbitrary. The painter
+// already imports viewport/dimensions/headerVisibility from this folder; the
+// reverse edge would drag the painter's whole graph -- `@api/cellTypes`, and
+// through it `@tauri-apps/api/core` -- into a module whose only job is to
+// measure text.
+
 /**
- * Word-wrap text into lines that fit within maxWidth.
- * Mirrors the wrapText function in cells.ts for consistent measurement.
+ * A HARD line break, in every spelling text arrives in: LF (Alt+Enter and
+ * `CHAR(10)`), CRLF (a Windows paste) and a bare CR (an old-Mac paste, and what
+ * some editors leave behind).
+ *
+ * An alternation rather than a character class, because CRLF must be tried
+ * FIRST -- `[\r\n]` would break a Windows paste twice per line and produce a
+ * blank line between every pair. Deliberately not `/g`: a global regex carries
+ * `lastIndex` between `.test` calls and would answer false every other time.
  */
-function wrapTextForMeasurement(
+const HARD_BREAK = /\r\n|\r|\n/;
+
+/**
+ * Split a value at its hard breaks.
+ *
+ * AN EMPTY SEGMENT IS A LINE. `"a" & CHAR(10) & CHAR(10) & "b"` is three lines
+ * with the middle one deliberately blank, so nothing here -- and nothing
+ * downstream -- may filter empties out.
+ */
+export function splitHardBreaks(text: string): string[] {
+  return text.split(HARD_BREAK);
+}
+
+/** True when a value carries a hard break in any of its spellings. */
+export function hasHardBreak(text: string): boolean {
+  return HARD_BREAK.test(text);
+}
+
+/**
+ * Word-wrap text into lines that fit within maxWidth, breaking unconditionally
+ * at every hard break first.
+ *
+ * WHY THE HARD BREAKS COME OFF BEFORE ANY WRAPPING HAPPENS. The word splitter
+ * is `/(\s+)/`, which counts LF as ordinary inter-word whitespace -- so a
+ * newline used to be a mere wrap CANDIDATE, and once the line fit, canvas
+ * `fillText` rendered the LF as U+0020 and the two lines painted as one with a
+ * space between them.
+ *
+ * Splitting first is also what keeps a deliberately blank line alive: the
+ * `currentLine.trim() !== ""` guard in `wrapSegment` drops a whitespace-only
+ * line, which is right INSIDE a wrapped paragraph and wrong for a line the user
+ * typed on purpose. After the split it can no longer see one.
+ */
+export function wrapText(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number
 ): string[] {
-  if (maxWidth <= 0) return [text];
+  const segments = splitHardBreaks(text);
+  if (maxWidth <= 0) return segments;
 
+  const lines: string[] = [];
+  for (const segment of segments) {
+    for (const line of wrapSegment(ctx, segment, maxWidth)) {
+      lines.push(line);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Wrap ONE hard-break-free segment. Never returns an empty array: a segment
+ * that produces no glyphs is still a line on screen.
+ */
+function wrapSegment(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number
+): string[] {
   const words = text.split(/(\s+)/);
   const lines: string[] = [];
   let currentLine = "";
@@ -417,6 +520,11 @@ function wrapTextForMeasurement(
     if (testWidth <= maxWidth || currentLine === "") {
       currentLine = testLine;
     } else {
+      // Whitespace-only leftovers are dropped so a wrapped line does not START
+      // with the space run that pushed it over. SAFE ONLY BECAUSE HARD BREAKS
+      // ARE ALREADY GONE -- applied to a whole value this same guard swallows a
+      // deliberately blank line, and `"a" & CHAR(10) & CHAR(10) & "b"` came back
+      // as two lines instead of three.
       if (currentLine.trim() !== "") {
         lines.push(currentLine);
       }

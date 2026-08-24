@@ -94,6 +94,14 @@ let listenerInstalled = false;
 // Default Built-In Keybindings
 // ============================================================================
 
+/**
+ * The formula bar's expand/collapse command, named once. The binding below and
+ * the FormulaBar that registers the handler are its only two mentions, and a
+ * typo in either is a shortcut that silently does nothing — `execute` takes a
+ * string and no gate compares the two spellings.
+ */
+export const FORMULA_BAR_TOGGLE_EXPANDED_COMMAND = "core.view.toggleFormulaBarExpanded";
+
 const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   // Clipboard
   { id: "core.cut", combo: "Ctrl+X", commandId: "core.clipboard.cut", label: "Cut", category: "Clipboard", source: "built-in" },
@@ -138,6 +146,13 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   { id: "ext.fileExplorer.toggle", combo: "Ctrl+Shift+E", commandId: "fileExplorer.toggle", label: "Toggle File Explorer", category: "Navigation", source: "built-in" },
   { id: "ext.extensionsManager.toggle", combo: "Ctrl+Shift+X", commandId: "extensionsManager.toggle", label: "Toggle Extensions Manager", category: "Navigation", source: "built-in" },
   { id: "ext.settings.toggle", combo: "Ctrl+,", commandId: "settings.toggle", label: "Open Settings", category: "Navigation", source: "built-in" },
+  // Deliberately no `context`, i.e. "always". Excel expands the bar in the
+  // middle of an entry — that is when a long formula most needs the room — and
+  // the dispatcher's listener is capture-phase on window, so the combination
+  // reaches the command even while the caret sits inside the bar's own editor.
+  // The handler is registered by the FormulaBar itself and goes away with it,
+  // so with the bar hidden the shortcut correctly does nothing.
+  { id: "core.view.toggleFormulaBarExpanded", combo: "Ctrl+Shift+U", commandId: FORMULA_BAR_TOGGLE_EXPANDED_COMMAND, label: "Expand/Collapse Formula Bar", category: "Navigation", source: "built-in" },
 
   // Data
   { id: "ext.autofilter.toggle", combo: "Ctrl+Shift+L", commandId: "autofilter.toggle", label: "Toggle AutoFilter", category: "Data", source: "built-in" },
@@ -797,12 +812,15 @@ const RESERVED_SCRIPT_COMBOS: ReadonlySet<string> = new Set([
   "CTRL+SHIFT+L", // Toggle AutoFilter
   "CTRL+SHIFT+B", // Toggle Bookmark
   "CTRL+SHIFT+N", // Toggle Script Notebook
+  "CTRL+SHIFT+U", // Expand/Collapse Formula Bar — was reserved-only until the
+                  // expanded bar shipped; it moved up here rather than out
+                  // because this group is what still refuses a combination
+                  // after the user has remapped the built-in away.
   // Excel parity
   "CTRL+SHIFT+A", // Insert argument names
   "CTRL+SHIFT+F", // Format Cells (Font)
   "CTRL+SHIFT+O", // Select cells with comments
   "CTRL+SHIFT+P", // Format Cells (Font size)
-  "CTRL+SHIFT+U", // Expand/collapse the formula bar
 ]);
 
 /** How many shortcuts one script may hold at once. A script that wants nine

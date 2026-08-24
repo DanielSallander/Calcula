@@ -792,7 +792,16 @@ export async function getRangeEdge(
   });
 }
 
-/** The cell classes getSpecialCells can select (Excel Range.SpecialCells). */
+/**
+ * The cell classes getSpecialCells can select (Excel Range.SpecialCells).
+ *
+ * Excel's "Last cell" is NOT among them and must not be added here: this union
+ * mirrors the kinds `get_special_cells` decodes in Rust, so a member the
+ * backend cannot answer would be a type that lies. The last used cell is a
+ * property of the sheet rather than a class of cell, and `getUsedRange` below
+ * is the one call that reports it — for Ctrl+End, for Ctrl+Shift+End, and for
+ * Go To Special's "Last cell" (`goToSpecial` in app/src/api/grid.ts).
+ */
 export type SpecialCellsKind = "constants" | "formulas" | "blanks" | "visible";
 
 /** One cell coordinate in a getSpecialCells answer. */

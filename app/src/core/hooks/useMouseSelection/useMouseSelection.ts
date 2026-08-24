@@ -16,7 +16,7 @@ import type {
   SelectionDragState,
 } from "./types";
 import type { Selection } from "../../types";
-import { getCellFromPixel, getColumnFromHeader, getRowFromHeader, getColumnResizeHandle, getRowResizeHandle } from "../../lib/gridRenderer";
+import { getCellFromPixel, getColumnFromHeader, getRowFromHeader, getColumnResizeHandle, getRowResizeHandle, isSelectAllCorner } from "../../lib/gridRenderer";
 import { calculateAutoScrollDelta } from "./utils/autoScrollUtils";
 import { getCellFromMousePosition } from "./utils/cellUtils";
 import { useAutoScroll } from "./selection/useAutoScroll";
@@ -38,7 +38,7 @@ import { getCellCursorOverride } from "../../lib/cellClickInterceptors";
 import { getColumnWidth } from "../../lib/gridRenderer/layout/dimensions";
 import { createEmptyDimensionOverrides } from "../../types";
 import { getGridRegions, getOverlayRegistration } from "../../../api/gridOverlays";
-import { rowHeaderGutter, colHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
+import { rowHeaderGutter } from "../../lib/gridRenderer/layout/headerVisibility";
 
 // Custom cursor data URLs for Excel-style header selection arrows
 const COLUMN_SELECT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 L12 18 M12 18 L8 14 M12 18 L16 14' stroke='black' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") 12 12, pointer`;
@@ -512,6 +512,14 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
 
       // Priority 3: Check for formula mode (expecting reference) operations
       if (isCurrentlyFormulaMode) {
+        // Formula mode: insert the whole-sheet reference (select-all corner).
+        // MUST come before the two header handlers: all three of the hit tests
+        // they use return null for every corner pixel, so before this line a
+        // corner click in formula mode fell out of this branch and inserted
+        // nothing at all -- silently.
+        if (formulaHeaderHandlers.handleFormulaCornerMouseDown(mouseX, mouseY, event)) {
+          return;
+        }
         // Formula mode: insert column reference
         if (formulaHeaderHandlers.handleFormulaColumnHeaderMouseDown(mouseX, mouseY, event)) {
           return;
@@ -535,13 +543,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
         }
 
         // Normal mode: select all (corner click)
-        if (mouseX < (rowHeaderGutter(config)) && mouseY < (colHeaderGutter(config))) {
-          event.preventDefault();
-          if (onCommitBeforeSelect) {
-            await onCommitBeforeSelect();
-          }
-          // Use single dispatch with endRow/endCol to avoid scroll-to-end behavior
-          onSelectCell(0, 0, "cells", config.totalRows - 1, config.totalCols - 1);
+        if (await headerSelectionHandlers.handleSelectAllCornerMouseDown(mouseX, mouseY, event)) {
           return;
         }
 
@@ -693,7 +695,7 @@ export function useMouseSelection(props: UseMouseSelectionProps): UseMouseSelect
               setCursorStyle("pointer");
             }
             // Check if over corner (select-all button) - show pointer
-            else if (mouseX < (rowHeaderGutter(config)) && mouseY < (colHeaderGutter(config))) {
+            else if (isSelectAllCorner(mouseX, mouseY, config)) {
               setCursorStyle("pointer");
             }
             // Check if over column header (not resize handle) - show down arrow

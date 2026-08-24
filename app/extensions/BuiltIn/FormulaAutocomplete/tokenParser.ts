@@ -6,6 +6,16 @@
 import { getCachedLocale } from "@api/locale";
 
 /**
+ * The character range one argument of a call occupies in the formula text.
+ * `end` is exclusive, so an argument that has not been typed yet (e.g. the
+ * second one in "=SUM(A1,") is a zero-width span at the caret.
+ */
+export interface ArgumentSpan {
+  start: number;
+  end: number;
+}
+
+/**
  * Context about what the user is typing at the cursor position.
  */
 export interface TokenContext {
@@ -165,36 +175,45 @@ function extractNameBeforeParen(value: string, parenIndex: number): string | nul
   return nameStart < nameEnd ? value.substring(nameStart, nameEnd) : null;
 }
 
-/**
- * Find the enclosing function call at the cursor and which argument the cursor
- * is in.
- *
- * The formula is scanned FORWARD from the start up to the cursor, maintaining a
- * stack of open parentheses. Scanning forward (rather than backward from the
- * cursor) is what makes string handling correct: a quote is unambiguously an
- * OPENING quote the first time it is seen, so a half-typed string argument with
- * only an opening quote (e.g. `=GET.CONTROLVALUE("Region`) no longer swallows
- * the enclosing `(` and function name -- the argument hint stays visible while
- * the user types a string argument.
- *
- * @param value - The full formula string
- * @param cursorPosition - Current cursor position
- * @returns The innermost enclosing function name and argument index
- */
-function findEnclosingFunction(
-  value: string,
-  cursorPosition: number
-): { enclosingFunction: string | null; argumentIndex: number } {
-  const listSep = getListSeparator();
+/** One open call the forward scan is inside. */
+interface CallFrame {
+  /** The function name owning the paren; null for a bare grouping paren. */
+  name: string | null;
+  /**
+   * Where each argument of this call begins. The argument index is
+   * `argStarts.length - 1` -- the two can never disagree because they are the
+   * same fact.
+   */
+  argStarts: number[];
+}
 
-  // Each frame: the function name owning the paren (null for a bare grouping
-  // paren) and the argument index the cursor is at within that call.
-  const stack: Array<{ name: string | null; argIndex: number }> = [];
+/** Where the scan got to, so a caller can carry on from the cursor. */
+interface ScanState {
+  stack: CallFrame[];
+  inString: boolean;
+  stringChar: string;
+  /** The cursor, clamped to the value's length. */
+  stopped: number;
+}
+
+/**
+ * Scan the formula FORWARD from the start up to the cursor, maintaining a stack
+ * of open parentheses.
+ *
+ * Scanning forward (rather than backward from the cursor) is what makes string
+ * handling correct: a quote is unambiguously an OPENING quote the first time it
+ * is seen, so a half-typed string argument with only an opening quote (e.g.
+ * `=GET.CONTROLVALUE("Region`) no longer swallows the enclosing `(` and function
+ * name -- the argument hint stays visible while the user types a string
+ * argument.
+ */
+function scanCalls(value: string, cursorPosition: number, listSep: string): ScanState {
+  const stack: CallFrame[] = [];
   let inString = false;
   let stringChar = "";
 
-  const end = Math.min(cursorPosition, value.length);
-  for (let i = 0; i < end; i++) {
+  const stopped = Math.min(Math.max(cursorPosition, 0), value.length);
+  for (let i = 0; i < stopped; i++) {
     const ch = value[i];
 
     if (inString) {
@@ -210,19 +229,113 @@ function findEnclosingFunction(
       inString = true;
       stringChar = ch;
     } else if (ch === "(") {
-      stack.push({ name: extractNameBeforeParen(value, i), argIndex: 0 });
+      stack.push({ name: extractNameBeforeParen(value, i), argStarts: [i + 1] });
     } else if (ch === ")") {
       stack.pop();
     } else if (ch === listSep && stack.length > 0) {
-      stack[stack.length - 1].argIndex++;
+      stack[stack.length - 1].argStarts.push(i + 1);
     }
   }
+
+  return { stack, inString, stringChar, stopped };
+}
+
+/**
+ * Find the enclosing function call at the cursor and which argument the cursor
+ * is in.
+ *
+ * @param value - The full formula string
+ * @param cursorPosition - Current cursor position
+ * @returns The innermost enclosing function name and argument index
+ */
+function findEnclosingFunction(
+  value: string,
+  cursorPosition: number
+): { enclosingFunction: string | null; argumentIndex: number } {
+  const { stack } = scanCalls(value, cursorPosition, getListSeparator());
 
   // The innermost open call determines the hint. A bare grouping paren has no
   // name -> no hint (matching the prior behavior for e.g. "=SUM((").
   const top = stack[stack.length - 1];
   if (top && top.name) {
-    return { enclosingFunction: top.name.toUpperCase(), argumentIndex: top.argIndex };
+    return {
+      enclosingFunction: top.name.toUpperCase(),
+      argumentIndex: top.argStarts.length - 1,
+    };
   }
   return { enclosingFunction: null, argumentIndex: -1 };
+}
+
+/**
+ * Where each argument of the innermost open call actually SITS in the text.
+ *
+ * The screen tip bolds an argument by index; clicking that argument has to
+ * select the matching characters in the editor, and this is the only place that
+ * knows which characters those are. It is the SAME scan the hint is derived
+ * from -- a second, independent walk over the formula would eventually disagree
+ * with the bolded parameter and select the wrong text.
+ *
+ * The scan has to continue PAST the cursor, because the caret is normally in
+ * the middle of the call: in `=VLOOKUP(A1,B:C,2)` with the caret after `A1`,
+ * the arguments to the right of it exist and are clickable. It stops at the
+ * paren that closes this call (or at the end of a half-typed formula, which has
+ * none).
+ *
+ * @returns One span per argument, in order, or `[]` when the cursor is not
+ *          inside a named call.
+ */
+export function findArgumentSpans(value: string, cursorPosition: number): ArgumentSpan[] {
+  const listSep = getListSeparator();
+  const scan = scanCalls(value, cursorPosition, listSep);
+  const top = scan.stack[scan.stack.length - 1];
+  if (!top || !top.name) return [];
+
+  const starts = top.argStarts.slice();
+  let callEnd = value.length;
+  let depth = 0;
+  let inString = scan.inString;
+  let stringChar = scan.stringChar;
+
+  for (let i = scan.stopped; i < value.length; i++) {
+    const ch = value[i];
+
+    if (inString) {
+      if (ch === stringChar) inString = false;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringChar = ch;
+    } else if (ch === "(") {
+      depth++;
+    } else if (ch === ")") {
+      if (depth === 0) {
+        callEnd = i;
+        break;
+      }
+      depth--;
+    } else if (ch === listSep && depth === 0) {
+      starts.push(i + 1);
+    }
+  }
+
+  return starts.map((start, i) => {
+    // The separator itself belongs to neither argument, so an argument ends one
+    // character before the next one starts.
+    const end = i + 1 < starts.length ? starts[i + 1] - 1 : callEnd;
+    return trimSpan(value, start, end);
+  });
+}
+
+/**
+ * Narrow a span past the whitespace at either end, so selecting an argument of
+ * `=SUM(A1, B1)` selects `B1` and not ` B1`.
+ */
+function trimSpan(value: string, start: number, end: number): ArgumentSpan {
+  let s = start;
+  let e = end;
+  while (s < e && /\s/.test(value[s])) s++;
+  while (e > s && /\s/.test(value[e - 1])) e--;
+  return { start: s, end: e };
 }

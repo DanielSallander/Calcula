@@ -997,6 +997,42 @@ export interface ClipboardState {
 // ============================================================================
 
 /**
+ * Formula bar geometry, in device pixels.
+ *
+ * COLLAPSED is the one-line bar the app opens with; EXPANDED is what the
+ * chevron and Ctrl+Shift+U switch to and what dragging the bar's bottom edge
+ * sizes. The band is not decoration: the bar and the grid share one vertical
+ * column of screen (Layout stacks them, and the grid takes what is left), so a
+ * drag with no ceiling hands the whole window to a formula and leaves nothing
+ * to read the answer in. The floor is two lines — below that the expanded form
+ * shows nothing the one-line bar does not, so the drag collapses the bar there
+ * instead of sticking.
+ */
+export const FORMULA_BAR_COLLAPSED_HEIGHT = 28;
+export const FORMULA_BAR_COLLAPSED_EDITOR_HEIGHT = 22;
+/** Padding above and below the editor once the bar is expanded. */
+export const FORMULA_BAR_EXPANDED_CHROME_HEIGHT = 6;
+export const FORMULA_BAR_MIN_EXPANDED_HEIGHT = 44;
+export const FORMULA_BAR_MAX_EXPANDED_HEIGHT = 400;
+export const FORMULA_BAR_DEFAULT_EXPANDED_HEIGHT = 66;
+
+/**
+ * Hold an editor height inside the band above.
+ *
+ * The non-finite guard is the one that matters: the height arrives from drag
+ * arithmetic (`startHeight + clientY - startY`), and a single NaN there renders
+ * as `height: NaNpx` — a bar that silently collapses to nothing with no error
+ * anywhere. A junk value falls back to the default rather than propagating.
+ */
+export function clampFormulaBarHeight(height: number): number {
+  if (!Number.isFinite(height)) return FORMULA_BAR_DEFAULT_EXPANDED_HEIGHT;
+  return Math.min(
+    FORMULA_BAR_MAX_EXPANDED_HEIGHT,
+    Math.max(FORMULA_BAR_MIN_EXPANDED_HEIGHT, Math.round(height)),
+  );
+}
+
+/**
  * Grid state for the spreadsheet component.
  * NOTE: Find state has been moved to the FindReplaceDialog extension.
  */
@@ -1041,6 +1077,20 @@ export interface GridState {
   displayHeadings: boolean;
   /** Whether to display the formula bar */
   displayFormulaBar: boolean;
+  /**
+   * Whether the formula bar is EXPANDED to its multi-line form (Excel's
+   * Ctrl+Shift+U, and the chevron at the bar's right edge). Collapsed, the bar
+   * is a one-line slit — a nested formula is readable only by scrolling it
+   * sideways past the caret.
+   */
+  formulaBarExpanded: boolean;
+  /**
+   * Editor height of the EXPANDED formula bar — what the user leaves behind
+   * after dragging its bottom edge. Kept while collapsed so re-expanding
+   * restores the size they chose, and always inside the band enforced by
+   * `clampFormulaBarHeight`.
+   */
+  formulaBarHeight: number;
   /** Reference style: "A1" (default) or "R1C1" */
   referenceStyle: "A1" | "R1C1";
 }
@@ -1095,6 +1145,8 @@ export function createInitialGridState(): GridState {
     displayGridlines: true,
     displayHeadings: true,
     displayFormulaBar: true,
+    formulaBarExpanded: false,
+    formulaBarHeight: FORMULA_BAR_DEFAULT_EXPANDED_HEIGHT,
     referenceStyle: "A1",
   };
 }

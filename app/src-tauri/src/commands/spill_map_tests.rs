@@ -1166,6 +1166,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("computed_properties.rs", "apply_style_change", "style_index only"),
         ("mcp/tools.rs", "apply_cell_formatting", "style_index only"),
         // -- Rewrites formula REFERENCES, not the formulas' existence --------
+        ("tables.rs", "fill_calculated_columns", "writes one table's calculated columns into rows the caller just created or is re-filling. A calculated-column cell is never a spill ORIGIN (its formula is a scalar per row, and a dynamic-array result in a table cell is refused elsewhere), so it removes no origin and orphans nothing. Its three callers run the shared cascade, whose tear-down phase covers any seed that lost its formula"),
         ("named_ranges.rs", "rename_name_in_grids", "re-points defined-name references at the same range; every origin keeps its formula, so no spill ORIGIN is removed or overwritten and the map cannot be orphaned. Same class as the two table renames below"),
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; every origin keeps its formula"),
         ("tables.rs", "rename_table_column_in_formulas", "re-points a COLUMN specifier at the same cells; every origin keeps its formula"),
@@ -1225,7 +1226,6 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("bi/commands.rs", "bi_refresh_connection", "rewrites the same result block and seeds the shared cascade"),
         ("bi/cube.rs", "build_cube_prefetch", "builds a detached prefetch grid, never the document's"),
         ("tables.rs", "check_table_auto_expand", "extends a table's own rows; seeds the shared cascade"),
-        ("tables.rs", "set_calculated_column", "writes a table column; seeds the shared cascade"),
         // -- Reads, or writes something that is not the document ---------------
         ("commands/data.rs", "get_viewport_cells", "read path: builds the payload the canvas paints"),
         ("scripting/udf.rs", "collect_udf_calls", "collects call sites; writes no document cell"),

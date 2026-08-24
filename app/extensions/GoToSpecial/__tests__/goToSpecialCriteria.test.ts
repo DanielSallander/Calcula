@@ -161,25 +161,8 @@ describe("normalizeSearchRange", () => {
 // ============================================================================
 // Criteria options completeness
 // ============================================================================
-
-describe("criteria options", () => {
-  const EXPECTED_CRITERIA = [
-    "blanks",
-    "formulas",
-    "constants",
-    "errors",
-    "comments",
-    "notes",
-    "conditionalFormats",
-    "dataValidation",
-  ];
-
-  it("covers all expected criteria types", () => {
-    // This ensures we don't forget to add a criteria option
-    for (const criteria of EXPECTED_CRITERIA) {
-      expect(typeof criteria).toBe("string");
-      expect(criteria.length).toBeGreaterThan(0);
-    }
-    expect(EXPECTED_CRITERIA).toHaveLength(8);
-  });
-});
+// It used to be asserted here against a hand-written list of eight strings that
+// this file also owned, so it agreed with itself no matter what the dialog
+// offered — and "Last cell" was missing from both for as long as it existed.
+// The real guard is criteriaOptions.test.ts, which reads the dialog's own list
+// and is exhaustive over GoToSpecialCriteria by type.

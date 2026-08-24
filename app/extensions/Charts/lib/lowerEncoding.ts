@@ -7,7 +7,16 @@
 //          painters are untouched. `color` splits the data into one series per
 //          distinct value via a pivot; without it, `y` is a single series.
 
-import type { ChartSpec, TransformSpec } from "../types";
+import type { ChartSpec, ScaleType, TransformSpec } from "../types";
+
+/**
+ * Marks whose painter lays categories out as BANDS (createBandScale) rather than
+ * as points along the axis. Taken from the painters themselves, so the scale an
+ * ordinal channel declares is the scale the chart actually draws.
+ */
+const BAND_SCALE_MARKS = new Set([
+  "bar", "horizontalBar", "waterfall", "combo", "histogram", "stock", "boxPlot", "pareto",
+]);
 
 /** Find a column index by header name (-1 if absent). */
 function findColumn(headers: string[], name: string | undefined): number {
@@ -39,10 +48,6 @@ export function lowerEncoding(spec: ChartSpec, headers: string[]): ChartSpec {
   out.yAxis = { ...spec.yAxis };
   if (x && x.title !== undefined) out.xAxis.title = x.title;
   if (y && y.title !== undefined) out.yAxis.title = y.title;
-
-  if (x?.scale) out.xAxis.scale = x.scale;
-  else if (x?.type === "temporal" || x?.timeUnit) out.xAxis.scale = { type: "time" };
-  else if (x?.type === "quantitative") out.xAxis.scale = { type: "linear" };
 
   if (y?.scale) out.yAxis.scale = y.scale;
 
@@ -81,6 +86,32 @@ export function lowerEncoding(spec: ChartSpec, headers: string[]): ChartSpec {
         transforms.unshift({ type: "aggregate", groupBy: ["$category"], op, field: y.field, as: y.field });
       }
     }
+  }
+
+  // ── X scale from the x channel. ──
+  // Resolved down here, after the mark is settled: the ordinal/nominal case picks
+  // band vs point from the FINAL mark, and the size channel above can still have
+  // turned the chart into a bubble.
+  if (x?.scale) out.xAxis.scale = x.scale;
+  else if (x?.type === "temporal" || x?.timeUnit) out.xAxis.scale = { type: "time" };
+  else if (x?.type === "quantitative") out.xAxis.scale = { type: "linear" };
+  else if (x?.type === "ordinal" || x?.type === "nominal" || x?.customOrder !== undefined) {
+    // Ordinal and nominal are both categorical — evenly spaced labels in the
+    // data's order — and differ only in whether that order carries meaning, which
+    // `customOrder` below is what expresses. Naming the scale is what makes the
+    // declaration act rather than decorate: it PINS the axis, so category labels
+    // that happen to parse as numbers or dates are not silently re-spaced onto a
+    // value axis (resolveScatterXAxis).
+    const categorical: ScaleType = BAND_SCALE_MARKS.has(out.mark) ? "band" : "point";
+    out.xAxis.scale = { type: categorical };
+  }
+
+  // ── Ordinal domain order → sort the categories by the declared list. ──
+  // Pushed before the order channel so that an explicit `order` — the channel
+  // whose whole job is sorting — still wins; the sort is stable, so ties within
+  // it keep the domain order rather than falling back to source order.
+  if (x?.customOrder !== undefined) {
+    transforms.push({ type: "sort", field: "$category", customOrder: x.customOrder });
   }
 
   // ── Order channel → sort the resulting data. ──

@@ -14,6 +14,7 @@ import {
 import type { ColumnHeaderOverride, ColumnHeaderClickResult } from "@api";
 import { registerPanel, unregisterPanel } from "@api/ui";
 import { getTableAtCell, getAllTables, type Table } from "../lib/tableStore";
+import { tableBands } from "../lib/tableBands";
 import { TableDesignPanelDefinition, TABLE_DESIGN_TAB_ID } from "../manifest";
 import { TableEvents } from "../lib/tableEvents";
 
@@ -262,17 +263,15 @@ function tableColumnHeaderClickInterceptor(
     return { handled: true };
   }
 
-  // Table-scoped column selection: select only the table's data rows
-  const dataStartRow = table.styleOptions.headerRow
-    ? table.startRow + 1
-    : table.startRow;
-  const dataEndRow = table.styleOptions.totalRow
-    ? table.endRow - 1
-    : table.endRow;
+  // Table-scoped column selection: select only the table's data rows. The
+  // bands come from `tableBands` rather than from a local "+1 when there is a
+  // header" — that arithmetic used to live here as its own copy, and a click
+  // and a Ctrl+Space on the same column must scope to the same rows.
+  const bands = tableBands(table);
 
   return {
     handled: false,
-    selectionOverride: { startRow: dataStartRow, endRow: dataEndRow },
+    selectionOverride: { startRow: bands.dataStartRow, endRow: bands.dataEndRow },
   };
 }
 

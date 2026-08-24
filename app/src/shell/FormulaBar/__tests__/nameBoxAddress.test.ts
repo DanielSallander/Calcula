@@ -13,6 +13,8 @@ import { describe, it, expect } from "vitest";
 import {
   parseNameBoxAddress,
   isAddressLike,
+  hasTableBracket,
+  parseStructuredReference,
   MAX_ROW_INDEX,
   MAX_COL_INDEX,
 } from "../NameBox.address";
@@ -206,6 +208,108 @@ describe("isAddressLike - the rule that keeps a name from being an address", () 
   it("is false for names a user may define", () => {
     for (const text of ["SalesData", "_total", "Rate.2026", "ABCD1", "XFE1"]) {
       expect(isAddressLike(text)).toBe(false);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Structured (table) references
+// ---------------------------------------------------------------------------
+// SAME CLASS OF SILENT FAILURE as the range above, one namespace over. A table
+// reference carries a '[', which is neither an address character nor a name
+// character, so every bracketed spelling missed the address branch, missed the
+// defined-name lookup and missed `isValidName` — and the box refused the exact
+// text it had just displayed for the selection, with a sentence about cell
+// references.
+
+describe("parseStructuredReference - what a table entry looks like", () => {
+  it("reads a column reference", () => {
+    expect(parseStructuredReference("Sales[Margin]")).toEqual({
+      tableName: "Sales",
+      specifier: "Margin",
+    });
+  });
+
+  it("reads the whole-table and part specifiers", () => {
+    expect(parseStructuredReference("Sales[#All]")).toEqual({
+      tableName: "Sales",
+      specifier: "#All",
+    });
+    expect(parseStructuredReference("Sales[#Headers]")).toEqual({
+      tableName: "Sales",
+      specifier: "#Headers",
+    });
+  });
+
+  it("reads the doubled-bracket spelling Excel writes", () => {
+    expect(parseStructuredReference("Sales[[#Data]]")).toEqual({
+      tableName: "Sales",
+      specifier: "[#Data]",
+    });
+  });
+
+  it("keeps a column name with spaces intact", () => {
+    expect(parseStructuredReference("Q1 Sales[Unit Price]")).toBeNull();
+    expect(parseStructuredReference("Sales[Unit Price]")).toEqual({
+      tableName: "Sales",
+      specifier: "Unit Price",
+    });
+  });
+
+  it("ignores surrounding whitespace", () => {
+    expect(parseStructuredReference("  Sales[Margin]  ")).toEqual({
+      tableName: "Sales",
+      specifier: "Margin",
+    });
+  });
+
+  it("refuses an unbalanced or trailing bracket", () => {
+    expect(parseStructuredReference("Sales[Margin")).toBeNull();
+    expect(parseStructuredReference("Sales[[#Data]")).toBeNull();
+    expect(parseStructuredReference("Sales[Margin]]")).toBeNull();
+    expect(parseStructuredReference("Sales[Margin]x")).toBeNull();
+  });
+
+  it("refuses TWO references pasted together", () => {
+    // Both end in ']' and both balance overall, so only walking the brackets
+    // from the first one catches them. Left in, "Sales[Margin]Costs[Units]"
+    // would be sent to the backend as the table Sales with the specifier
+    // "Margin]Costs[Units" — a refusal phrased in terms of a reference the user
+    // never typed.
+    expect(parseStructuredReference("Sales[Margin]Costs[Units]")).toBeNull();
+    expect(parseStructuredReference("Sales[Margin] Sales[Units]")).toBeNull();
+  });
+
+  it("refuses an empty table name or an empty specifier", () => {
+    expect(parseStructuredReference("[Margin]")).toBeNull();
+    expect(parseStructuredReference("Sales[]")).toBeNull();
+    expect(parseStructuredReference("Sales[  ]")).toBeNull();
+  });
+
+  it("refuses a table name that is not a name", () => {
+    expect(parseStructuredReference("1Sales[Margin]")).toBeNull();
+    expect(parseStructuredReference("Sa les[Margin]")).toBeNull();
+  });
+
+  it("is null for an entry with no bracket at all — that is a name, not a table", () => {
+    expect(parseStructuredReference("Sales")).toBeNull();
+    expect(parseStructuredReference("A1:B2")).toBeNull();
+  });
+});
+
+describe("hasTableBracket - telling 'not a table reference' from 'a broken one'", () => {
+  it("is true as soon as a bracket appears, parseable or not", () => {
+    expect(hasTableBracket("Sales[Margin]")).toBe(true);
+    // The malformed ones matter most: the caller must REPORT these rather than
+    // pass them to the create-a-name branch, which refuses them with the wrong
+    // sentence.
+    expect(hasTableBracket("Sales[Margin")).toBe(true);
+    expect(hasTableBracket("Sales[]")).toBe(true);
+  });
+
+  it("is false for the entries the other branches own", () => {
+    for (const text of ["A1", "A1:B10", "Sheet1!A1", "SalesData"]) {
+      expect(hasTableBracket(text)).toBe(false);
     }
   });
 });

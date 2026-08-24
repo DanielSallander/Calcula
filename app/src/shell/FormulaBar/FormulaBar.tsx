@@ -1,16 +1,27 @@
 //! FILENAME: app/src/shell/FormulaBar/FormulaBar.tsx
 // PURPOSE: Formula bar with Name Box, Cancel/Enter buttons, and formula input
 // CONTEXT: Positioned between Ribbon and Spreadsheet grid
-// FEATURES: 
+// FEATURES:
 //   - Cancel (X) and Enter (checkmark) buttons appear during editing
 //   - Insert Function (fx) button opens function dialog
 //   - Formula input syncs with inline cell editor
+//   - Expand/collapse (chevron, Ctrl+Shift+U) and a draggable bottom edge
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { NameBox } from "./NameBox";
 import { FormulaInput } from "./FormulaInput";
 import { InsertFunctionDialog } from "./InsertFunctionDialog";
 import { useEditing } from "../../api/editing";
+import { useGridContext } from "../../api";
+import { CommandRegistry } from "../../api/commands";
+import { FORMULA_BAR_TOGGLE_EXPANDED_COMMAND } from "../../api/keybindings";
+import {
+  FORMULA_BAR_COLLAPSED_HEIGHT,
+  FORMULA_BAR_COLLAPSED_EDITOR_HEIGHT,
+  FORMULA_BAR_EXPANDED_CHROME_HEIGHT,
+  FORMULA_BAR_MIN_EXPANDED_HEIGHT,
+  clampFormulaBarHeight,
+} from "../../core/types";
 import * as S from './FormulaBar.styles';
 
 function CancelIcon(): React.ReactElement {
@@ -34,11 +45,122 @@ function InsertFunctionIcon(): React.ReactElement {
   return <S.InsertFunctionIconSpan>fx</S.InsertFunctionIconSpan>;
 }
 
+/** Down while collapsed (what the click will do), up while expanded. */
+function ExpandIcon({ expanded }: { expanded: boolean }): React.ReactElement {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      {expanded ? <polyline points="3,9 7,5 11,9" /> : <polyline points="3,5 7,9 11,5" />}
+    </svg>
+  );
+}
+
 export function FormulaBar(): React.ReactElement {
+  const { state } = useGridContext();
   const { editing, commitEdit, cancelEdit, updateValue, startEditing } = useEditing();
   const [showFunctionDialog, setShowFunctionDialog] = useState(false);
-  
+
+  /**
+   * WHY THE LIVE SIZE IS LOCAL AND THE SEED IS IN GRID STATE
+   * ========================================================
+   * `formulaBarExpanded` / `formulaBarHeight` live in grid state so the bar
+   * comes back the size the user left it. The value the bar RENDERS from is
+   * local because the drag below updates it at mousemove rate, and every
+   * consumer of GridContext — the whole canvas included — re-renders on a grid
+   * dispatch; sixty reducer round trips a second to move an edge is not a
+   * trade worth making.
+   */
+  const [expanded, setExpanded] = useState(state.formulaBarExpanded);
+  const [editorHeight, setEditorHeight] = useState(() => clampFormulaBarHeight(state.formulaBarHeight));
+  const [isResizing, setIsResizing] = useState(false);
+  const dragStartYRef = useRef(0);
+  const dragStartHeightRef = useRef(0);
+
+  // Adopt the grid-state values whenever THEY change (a workbook load, a View
+  // command), never on every render — re-reading them unconditionally would
+  // undo the drag in progress. Same render-time derived-state pattern the
+  // formula input uses for `editing`.
+  //
+  // Object.is, not !==, and the reason is NaN: a junk height compares unequal
+  // to ITSELF, so `!==` re-seeds on every render and React tears the app down
+  // with "Too many re-renders". The clamp below repairs the value it renders,
+  // which is precisely why the raw one can sit in `seed` forever.
+  const [seed, setSeed] = useState({ expanded: state.formulaBarExpanded, height: state.formulaBarHeight });
+  if (!Object.is(seed.expanded, state.formulaBarExpanded) || !Object.is(seed.height, state.formulaBarHeight)) {
+    setSeed({ expanded: state.formulaBarExpanded, height: state.formulaBarHeight });
+    setExpanded(state.formulaBarExpanded);
+    setEditorHeight(clampFormulaBarHeight(state.formulaBarHeight));
+  }
+
   const isEditing = editing !== null;
+
+  const toggleExpanded = useCallback(() => {
+    setExpanded((current) => !current);
+  }, []);
+
+  /**
+   * Ctrl+Shift+U arrives as a COMMAND: the keybinding registry is the one
+   * dispatcher for named shortcuts, and it holds a command id, not a callback.
+   * Registering here rather than at bootstrap ties the handler's lifetime to
+   * the bar's own — hiding the formula bar (View menu) unmounts this component,
+   * and a shortcut that toggles a bar nobody can see would be a keystroke with
+   * no visible effect at all.
+   */
+  useEffect(() => {
+    CommandRegistry.register(FORMULA_BAR_TOGGLE_EXPANDED_COMMAND, toggleExpanded);
+    return () => CommandRegistry.unregister(FORMULA_BAR_TOGGLE_EXPANDED_COMMAND);
+  }, [toggleExpanded]);
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    // Without this the mousedown starts a text selection that then drags along
+    // with the pointer, and it steals focus from an entry in progress.
+    e.preventDefault();
+    dragStartYRef.current = e.clientY;
+    // Dragging DOWN from a collapsed bar is how it opens, so the drag measures
+    // from what is on screen now — one line collapsed, the user's height not.
+    dragStartHeightRef.current = expanded ? editorHeight : FORMULA_BAR_COLLAPSED_EDITOR_HEIGHT;
+    setIsResizing(true);
+  }, [expanded, editorHeight]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const proposed = dragStartHeightRef.current + (e.clientY - dragStartYRef.current);
+      // Dragged back up past two lines, the bar COLLAPSES rather than sticking
+      // at the minimum: one edge, both jobs, and no dead zone where the pointer
+      // moves and nothing happens.
+      if (proposed < FORMULA_BAR_MIN_EXPANDED_HEIGHT) {
+        setExpanded(false);
+        return;
+      }
+      setExpanded(true);
+      setEditorHeight(clampFormulaBarHeight(proposed));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizing]);
+
+  // Prevent text selection during resize (same treatment as the side panel's
+  // edge): without it the pointer paints a selection across the ribbon.
+  useEffect(() => {
+    if (!isResizing) return;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "row-resize";
+    return () => {
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, [isResizing]);
 
   const handleCancelMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -63,6 +185,12 @@ export function FormulaBar(): React.ReactElement {
     setShowFunctionDialog(true);
   }, [editing, startEditing]);
 
+  // The chevron must not take focus off an entry in progress — clicking it
+  // mid-formula would otherwise blur the editor and commit the cell.
+  const handleExpandMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+  }, []);
+
   const handleFunctionSelect = useCallback((functionName: string, template: string) => {
     if (editing) {
       const currentValue = editing.value;
@@ -81,12 +209,23 @@ export function FormulaBar(): React.ReactElement {
     setShowFunctionDialog(false);
   }, []);
 
+  const barHeight = expanded
+    ? editorHeight + FORMULA_BAR_EXPANDED_CHROME_HEIGHT
+    : FORMULA_BAR_COLLAPSED_HEIGHT;
+  const expandLabel = expanded
+    ? "Collapse Formula Bar (Ctrl+Shift+U)"
+    : "Expand Formula Bar (Ctrl+Shift+U)";
+
   return (
     <>
-      <S.FormulaBarContainer>
+      <S.FormulaBarContainer
+        $expanded={expanded}
+        $height={barHeight}
+        data-formula-bar-expanded={expanded ? "true" : "false"}
+      >
         <NameBox />
 
-        <S.ButtonGroup>
+        <S.ButtonGroup $expanded={expanded}>
           <S.IconButton
             $variant="cancel"
             onMouseDown={handleCancelMouseDown}
@@ -116,7 +255,25 @@ export function FormulaBar(): React.ReactElement {
           </S.IconButton>
         </S.ButtonGroup>
 
-        <FormulaInput />
+        <FormulaInput expanded={expanded} editorHeight={editorHeight} />
+
+        <S.IconButton
+          $variant="expand"
+          onMouseDown={handleExpandMouseDown}
+          onClick={toggleExpanded}
+          title={expandLabel}
+          aria-label={expandLabel}
+          aria-expanded={expanded}
+          data-formula-bar-expand="true"
+        >
+          <ExpandIcon expanded={expanded} />
+        </S.IconButton>
+
+        <S.ResizeGrip
+          onMouseDown={handleResizeStart}
+          data-formula-bar-resize="true"
+          aria-hidden="true"
+        />
       </S.FormulaBarContainer>
 
       {showFunctionDialog && (

@@ -897,7 +897,16 @@ export function resolveScatterXAxis(
   const lo = Math.min(range[0], range[1]);
   const hi = Math.max(range[0], range[1]);
   const field = data.categoryField;
-  const optedIn = !options?.requireScale || spec.xAxis.scale != null;
+  // A categorical scale ("band"/"point", what an ordinal/nominal x channel lowers
+  // to) is a positive instruction — "these labels are categories, in this order" —
+  // so it must SUPPRESS the proportional axis rather than opt into it. Without
+  // this, declaring the field ordinal would do the opposite of what it says: on
+  // line/area the opt-in test IS "xAxis.scale is set", and on scatter/bubble
+  // proportional is already the default, so a category column that happens to
+  // parse as numbers would get re-spaced by value.
+  const declared = spec.xAxis.scale?.type;
+  const categorical = declared === "band" || declared === "point";
+  const optedIn = !categorical && (!options?.requireScale || spec.xAxis.scale != null);
 
   if (field && optedIn && field.values.length === data.categories.length && field.values.length > 0) {
     const cv = field.values;

@@ -118,6 +118,10 @@ export const DropdownItem = styled.div<{ $isSelected: boolean }>`
 // Argument Hint Tooltip (intellisense card)
 // ============================================================================
 
+// The whole card is the drag handle -- it is too small to spend a strip of it
+// on a title bar, and it covers the cells under the editor wherever it lands.
+// `user-select: none` because a drag over text would otherwise leave the card's
+// own signature highlighted instead of moving it.
 export const ArgumentHintContainer = styled.div`
   position: fixed;
   z-index: 10001;
@@ -128,6 +132,8 @@ export const ArgumentHintContainer = styled.div`
   padding: 7px 10px;
   max-width: 360px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  cursor: move;
+  user-select: none;
 `;
 
 export const SignatureLine = styled.div`
@@ -144,18 +150,34 @@ export const FnName = styled.span`
   color: ${v("--text-primary")};
 `;
 
+// A named parameter selects its argument in the editor when clicked, so it
+// reads as a control: pointer cursor, and an underline under the pointer. The
+// "..." of a variadic signature names no argument and gets neither.
+const selectableArg = css`
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+`;
+
 // The active argument is rendered as a filled chip so the user can see at a
 // glance which parameter they are currently entering.
-export const ActiveArg = styled.span`
+export const ActiveArg = styled.span<{ $selectable: boolean }>`
   font-weight: 700;
   color: #ffffff;
   background: ${v("--accent-color")};
   border-radius: 3px;
   padding: 0 4px;
+
+  ${(p) => p.$selectable && selectableArg}
 `;
 
-export const InactiveArg = styled.span`
+export const InactiveArg = styled.span<{ $selectable: boolean }>`
   color: ${v("--text-secondary")};
+
+  ${(p) => p.$selectable && selectableArg}
 `;
 
 export const ActiveParamLabel = styled.div`

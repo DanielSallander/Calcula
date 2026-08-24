@@ -622,14 +622,30 @@ fn table_formula_writes_record_their_own_dependency_edges() {
         );
     }
 
-    // The calculated column already builds its own resolved ast per row (the
-    // resolution is per-ROW), so it registers edges directly.
-    let body = body_of(TABLES_RS, "set_calculated_column");
+    // The calculated column builds its own resolved ast per ROW (`[@Price]` is a
+    // different cell on every row), so it registers edges directly rather than
+    // through `write_table_formula_cell`.
+    //
+    // IT REGISTERS THEM IN `fill_calculated_columns` NOW, not inline in
+    // `set_calculated_column`. That loop was extracted so the two ROW-GROWTH
+    // paths could run it too — a table that grew came up blank in its calculated
+    // columns because they had no way to. The property this test protects is
+    // unchanged and is asserted on whichever function actually writes the cells;
+    // asserting it on `set_calculated_column` would now pass for the wrong
+    // reason (that function no longer writes any cell at all).
+    let body = body_of(TABLES_RS, "fill_calculated_columns");
     assert!(
         body.contains("register_table_formula_dependencies("),
-        "`set_calculated_column` writes formulas into the grid without \
+        "`fill_calculated_columns` writes formulas into the grid without \
          registering their precedents, so a later edit to the cells they read \
          leaves the column stale"
+    );
+    // ...and `set_calculated_column` must still reach it, or the extraction
+    // would have removed the write instead of moving it.
+    let owner = body_of(TABLES_RS, "set_calculated_column");
+    assert!(
+        owner.contains("fill_calculated_columns("),
+        "`set_calculated_column` no longer writes the column at all"
     );
 
     // The shared writer must keep storing the RESOLVED form. This is the line
