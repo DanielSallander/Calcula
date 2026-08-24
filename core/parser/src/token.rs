@@ -63,6 +63,17 @@ pub enum Token {
     /// `Illegal(';')`, which is what a locale-separator mistake deserves.
     Semicolon,
 
+    /// A `"` that never found its closing `"` before end of input.
+    ///
+    /// DISTINCT FROM `String` ON PURPOSE. The lexer used to hand back whatever
+    /// it had read so far, so `="abc` parsed as the perfectly good text `abc`
+    /// and the cell showed a VALUE. A missing quote is a typo, and the user's
+    /// evidence that they mistyped is precisely that the formula does not
+    /// parse; silently completing it for them turns a typo into a wrong number
+    /// nobody looks at again. No production accepts this token, so it is a
+    /// refusal wherever it appears.
+    UnterminatedString,
+
     // Special
     EOF,
     Illegal(char),
@@ -105,6 +116,7 @@ impl std::fmt::Display for Token {
             Token::Percent => write!(f, "%"),
             Token::Semicolon => write!(f, ";"),
             Token::EOF => write!(f, "EOF"),
+            Token::UnterminatedString => write!(f, "UNTERMINATED-STRING"),
             Token::Illegal(c) => write!(f, "ILLEGAL({})", c),
         }
     }

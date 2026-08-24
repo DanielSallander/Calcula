@@ -3883,15 +3883,20 @@ pub fn entry_format_at(
 ///    the loss (part numbers, ZIP codes) the Text format exists to prevent.
 /// 4. **`=` formula**.
 /// 5. **TRUE/FALSE**.
-/// 6. **number (and `%`)** — before dates, because a bare `43983` is the number
+/// 6. **an error literal** — `#N/A`, `#DIV/0!` and the rest; see
+///    [`typed_error_literal`]. Below the Text format and the apostrophe (both of
+///    which are the user saying "this is a string"), above the number rung,
+///    where it cannot collide because no error literal is also a number.
+/// 7. **number (and `%`)** — before dates, because a bare `43983` is the number
 ///    43983 and not a date.
-/// 7. **date/time**.
-/// 8. **leading `+`/`-` formula** — the Lotus habit; after the number rung so
-///    that `-5` stays a number and only `-A1` becomes a formula.
-/// 9. **text**.
+/// 8. **date/time**.
+/// 9. **leading `+`/`-` formula** — the Lotus habit; after the number rung so
+///    that `-5` stays a number and only `-A1` becomes a formula. It requires
+///    something to actually FOLLOW the sign; see the rung.
+/// 10. **text**.
 ///
-/// Rungs 3 and 6/7 are mirror images and must not fight: rung 3 is the FORMAT
-/// deciding the value, rungs 6/7 are the VALUE implying a format. They cannot
+/// Rungs 3 and 7/8 are mirror images and must not fight: rung 3 is the FORMAT
+/// deciding the value, rungs 7/8 are the VALUE implying a format. They cannot
 /// both fire — rung 3 returns before them and reports no implied format, so a
 /// Text-formatted cell can never have its own format overwritten by what was
 /// typed into it.
@@ -3904,9 +3909,15 @@ pub fn parse_cell_input_in_format(
     if trimmed.is_empty() {
         return (Cell::new(), None);
     }
-    // RUNG 2. The rest is stored VERBATIM — no second trim, so `'  007` keeps
-    // the spaces the user deliberately typed after the escape.
-    if let Some(rest) = trimmed.strip_prefix('\'') {
+    // RUNG 2. The rest is stored VERBATIM — and the escape is read off the
+    // input BEFORE the trailing trim, because `trimmed` is the wrong string to
+    // read it from. Typing `'  007  ` is the user saying "keep exactly these
+    // characters"; taking the apostrophe off `trimmed` honoured the LEADING
+    // spaces and silently ate the TRAILING ones, so the one entry form that
+    // exists to preserve whitespace preserved half of it. `trim_start` only, so
+    // an apostrophe typed after a stray leading space is still the escape it
+    // was before.
+    if let Some(rest) = input.trim_start().strip_prefix('\'') {
         return (
             Cell::new_text(rest.to_string()),
             apostrophe_implied_format(rest, locale),
@@ -3928,6 +3939,13 @@ pub fn parse_cell_input_in_format(
     if upper == "FALSE" {
         return (Cell::new_boolean(false), None);
     }
+    // ERROR LITERALS. Without this rung `#N/A` was stored as the TEXT "#N/A" —
+    // a cell that LOOKS exactly right and is wrong to every test over it:
+    // `ISNA` FALSE, `IFERROR` passing it straight through, `ISTEXT` TRUE and
+    // `COUNTA` counting a string. See `typed_error_literal`.
+    if let Some(error) = typed_error_literal(&upper) {
+        return (error_cell(error), None);
+    }
     if let Some(num) = parse_number(trimmed, locale) {
         return (Cell::new_number(num), implied_percentage_format(trimmed, locale));
     }
@@ -3943,11 +3961,50 @@ pub fn parse_cell_input_in_format(
     // Excel — another Lotus 1-2-3 habit it never dropped, and one a lot of
     // people still type. Placed AFTER `parse_number` so the ordinary cases keep
     // winning: `-5` and `+1,5` are numbers, `-A1` and `+SUM(A1:A9)` are not.
-    if trimmed.starts_with('+') || trimmed.starts_with('-') {
+    //
+    // ONLY WHEN SOMETHING FOLLOWS THE SIGN. `+` on its own used to reach here,
+    // get an `=` prepended, and hand `Cell::new_formula` the unparsable "=+" —
+    // whose error arm stores the STRING, so the cell ended up literally showing
+    // `=+`, an equals sign the user never typed. Excel refuses a bare sign; the
+    // fall-through below stores the one character that was actually typed.
+    if (trimmed.starts_with('+') || trimmed.starts_with('-'))
+        && !trimmed[1..].trim().is_empty()
+    {
         let invariant = engine::delocalize_formula(trimmed, locale);
         return (Cell::new_formula(format!("={}", invariant)), None);
     }
     (Cell::new_text(trimmed.to_string()), None)
+}
+
+/// The error a typed entry SPELLS, or `None` if it merely starts with a `#`.
+///
+/// THE LIST IS THE LEXER'S, not a copy of it. `parser::lexer::ERROR_LITERALS` is
+/// what makes `=#N/A` parse inside a formula, and a second table here would
+/// drift the moment either side learned a spelling: the typed `#SPILL!` and the
+/// evaluated one would then be different cells. `CellError::from_literal` maps
+/// the text to the variant — but it CANNOT be the membership test on its own,
+/// because its documented contract is to fall back to `Value` for anything it
+/// does not recognise, which would turn the perfectly ordinary text
+/// `#NOTANERROR` into `#VALUE!`.
+///
+/// `upper` is the already-uppercased entry, so `#n/a` is the same error as
+/// `#N/A` — as it is in Excel, which re-spells what you type.
+fn typed_error_literal(upper: &str) -> Option<CellError> {
+    if parser::lexer::ERROR_LITERALS.contains(&upper) {
+        Some(CellError::from_literal(upper))
+    } else {
+        None
+    }
+}
+
+/// A literal error cell: a value with no AST, like a typed number or boolean.
+///
+/// `Cell` has constructors for number, text, boolean and formula but not for an
+/// error, because until this rung existed nothing could type one.
+fn error_cell(error: CellError) -> Cell {
+    let mut cell = Cell::new();
+    cell.value = CellValue::Error(error);
+    cell
 }
 
 /// What a leading apostrophe implies about the CELL, not just about this entry.
@@ -3977,6 +4034,14 @@ pub fn parse_cell_input_in_format(
 /// `hello` was already text, so formatting the cell would restrict it for no
 /// gain. `'123`, `'TRUE`, `'=A1+1` and `'2020-06-01` each would have become
 /// something else, and each implies Text.
+///
+/// `'#N/A` IS NOW IN THE FIRST GROUP, and it moved without a line changing here
+/// — which is the point of asking the ladder instead of listing the cases. It
+/// used to be in the second group because an unprefixed `#N/A` was already
+/// text, so the apostrophe changed nothing; now that the ladder has an error
+/// rung the apostrophe is the only thing standing between the string and a real
+/// `#N/A` error, so the cell has to remember it or the next Enter over an
+/// untouched cell turns the text into the error.
 fn apostrophe_implied_format(
     rest: &str,
     locale: &engine::LocaleSettings,
@@ -4005,10 +4070,10 @@ pub fn parse_cell_input_invariant(input: &str, locale: &engine::LocaleSettings) 
 
 /// `parse_cell_input_invariant`, told which number format the entry lands in.
 ///
-/// The two new rungs are DIALECT-FREE — neither the apostrophe nor the `@`
-/// format reads a decimal separator — so they are the same two lines here as in
-/// the localized ladder, and a script's only way to write the text "123" is the
-/// same escape a user types.
+/// The apostrophe, the `@` format and the error literals are all DIALECT-FREE —
+/// none of them reads a decimal separator — so they are the same three rungs
+/// here as in the localized ladder, and a script's only way to write the text
+/// "123" (or the text "#N/A") is the same escape a user types.
 ///
 /// It returns no implied format, because this whole spelling reports none: a
 /// script that means to write a date says so with a format of its own rather
@@ -4025,7 +4090,9 @@ pub fn parse_cell_input_invariant_in_format(
     if trimmed.is_empty() {
         return Cell::new();
     }
-    if let Some(rest) = trimmed.strip_prefix('\'') {
+    // Same reading as the localized ladder: the escape comes off the UNTRIMMED
+    // input so a pasted `'  007  ` keeps both ends of its whitespace.
+    if let Some(rest) = input.trim_start().strip_prefix('\'') {
         return Cell::new_text(rest.to_string());
     }
     if target_format.is_some_and(is_text_format) {
@@ -4042,6 +4109,14 @@ pub fn parse_cell_input_invariant_in_format(
     if upper == "FALSE" {
         return Cell::new_boolean(false);
     }
+    // ERROR LITERALS, on this path too — because this is the path a COPY of an
+    // error cell comes back through. The clipboard carries `#N/A` as text, and
+    // storing it as text is how a pasted column of errors turned into a column
+    // that `ISNA` calls FALSE. A script that means the string says so with the
+    // same apostrophe a user types.
+    if let Some(error) = typed_error_literal(&upper) {
+        return error_cell(error);
+    }
     // Try invariant number parsing first (dot decimal), then locale-aware
     if let Ok(n) = trimmed.parse::<f64>() {
         if n.is_finite() {
@@ -4054,45 +4129,41 @@ pub fn parse_cell_input_invariant_in_format(
     Cell::new_text(trimmed.to_string())
 }
 
-/// Parse a string as a number, respecting locale separators.
-/// - Strips the locale's thousands separator
-/// - Replaces the locale's decimal separator with '.' for f64 parsing
+/// The NUMBER rung of the typed-entry ladder.
+///
+/// ONE GRAMMAR, TWO POLICIES. This is `engine::number_text::parse` — the same
+/// parser `EvalResult::as_number` reaches for when text meets an operator —
+/// under [`ParsePolicy::ENTRY`], which differs from the coercion policy on
+/// exactly two questions (ISO dates and currency signs) for reasons stated on
+/// those two enums. It used to be a second, independent implementation, and the
+/// three defects that cost were measured before it was replaced:
+///
+///   * **`"1,5"` in en-US was FIFTEEN.** The old code stripped the group
+///     separator and parsed what was left, so a European's one-and-a-half
+///     became 15 in a cell with no error on it. Grouping is now VALIDATED
+///     (`groups_are_well_formed`), so `"1,23"` and `"1,5"` are text, as they
+///     are in Excel.
+///   * **`"inf%"` stored a NON-FINITE number.** The old percent branch was the
+///     one path that never checked `is_finite`, so `inf/100` went straight into
+///     a cell that `ISNUMBER` then called TRUE. `inf` is now structurally
+///     unreachable rather than filtered.
+///   * **`"1 000"` failed in sv-SE** while `"1\u{00A0}000"` worked — the locale's
+///     group separator is a NON-BREAKING space and the keyboard makes an
+///     ordinary one, so the separator read off the user's own regional settings
+///     rejected the way that user types it.
+///
+/// The deliberate NARROWING that came with it: in a comma-decimal locale the
+/// old code also accepted the ANGLO spelling (`"1.5"` was 1.5 in sv-SE, while
+/// `"1,5"` — the spelling that locale actually uses — was reached only by a
+/// second branch). Excel refuses the foreign spelling, and so does this now.
+/// Scripts and imports are unaffected: they go through
+/// `parse_cell_input_invariant*`, which tries the invariant dot FIRST.
 fn parse_number(s: &str, locale: &engine::LocaleSettings) -> Option<f64> {
-    let trimmed = s.trim();
-    if trimmed.ends_with('%') {
-        let num_part = trimmed.trim_end_matches('%').trim();
-        // For percentage parsing, also apply locale decimal separator
-        let cleaned = if locale.decimal_separator == ',' {
-            num_part
-                .replace('.', "") // strip thousands (dot in comma-decimal locales)
-                .replace(',', ".") // convert decimal comma to dot
-        } else {
-            num_part.replace(',', "") // strip thousands
-        };
-        if let Ok(n) = cleaned.parse::<f64>() {
-            return Some(n / 100.0);
-        }
-        return None;
-    }
-
-    // Strip thousands separator, then convert decimal separator to '.'
-    let cleaned = if locale.decimal_separator == ',' {
-        // Comma-decimal locale: thousands separator is '.', ' ', or '\u{00A0}'
-        let s = trimmed
-            .replace(&locale.thousands_separator.to_string(), "")
-            .replace(',', ".");
-        s
-    } else {
-        // Dot-decimal locale: thousands separator is ','
-        trimmed.replace(&locale.thousands_separator.to_string(), "")
-    };
-
-    if let Ok(n) = cleaned.parse::<f64>() {
-        if n.is_finite() {
-            return Some(n);
-        }
-    }
-    None
+    engine::number_text::parse(
+        s,
+        engine::number_text::NumberTextLocale::of(locale),
+        engine::number_text::ParsePolicy::ENTRY,
+    )
 }
 
 // ============================================================================
@@ -4433,7 +4504,17 @@ fn implied_time_pattern(locale: &engine::LocaleSettings, had_seconds: bool) -> S
 /// Returns `None` for anything that is not a percentage, which is what makes it
 /// safe to call on every number the parser accepts.
 fn implied_percentage_format(text: &str, locale: &engine::LocaleSettings) -> Option<NumberFormat> {
-    let body = text.trim().strip_suffix('%')?.trim_end();
+    let trimmed = text.trim();
+    // EITHER END. The shared number parser reads a percent sign on either side
+    // (`"%5"` is 0.05, as in Excel), and a rung that only recognised the
+    // trailing one would store 0.05 under `General` and DISPLAY "0.05" — the
+    // percent the user typed silently gone from a cell that is nonetheless a
+    // percentage. Recognising only what the parser accepts is what keeps the
+    // value and its format one decision.
+    let body = match trimmed.strip_suffix('%') {
+        Some(body) => body.trim_end(),
+        None => trimmed.strip_prefix('%')?.trim_start(),
+    };
     let decimals = match body.rsplit_once(locale.decimal_separator) {
         Some((_, fraction)) => fraction.chars().filter(|c| c.is_ascii_digit()).count(),
         None => 0,
@@ -6471,3 +6552,4 @@ mod named_function_display_tests {
         assert_eq!(engine::ast_render::render_formula(&resolved), "Add(A1,B2)");
     }
 }
+

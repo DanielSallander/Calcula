@@ -48,10 +48,44 @@ fn format_general(value: f64, locale: &LocaleSettings) -> String {
 
     // Use scientific notation for very large or very small numbers
     if abs_value >= 1e15 || (abs_value < 1e-4 && abs_value > 0.0) {
-        let s = format!("{:.5e}", value)
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string();
+        // TRIM THE MANTISSA ONLY. The trim used to run over the WHOLE
+        // "{:.5e}" string, and the exponent is part of that string, so every
+        // trailing zero of the EXPONENT was eaten too: 1e100 formatted as
+        // "1.00000e100" and came back "1.00000e1" -> a number 99 orders of
+        // magnitude wrong, displayed with no error on the cell. The bug hid
+        // because it only fires when the exponent ENDS in a zero, so the
+        // everyday 1.23e-7 looked fine while 1e100, 1e-100 and 1e20 did not.
+        let formatted = format!("{:.5e}", value);
+        // "{:.5e}" always emits exactly one 'e', and the sign (if any) sits
+        // after it, so splitting there separates mantissa from exponent whole.
+        //
+        // EXCEL'S SPELLING, NOT RUST'S. Rust writes "1e100"; Excel writes
+        // "1E+100" -- a CAPITAL E, the sign ALWAYS present, and at least two
+        // exponent digits ("1E-07", never "1E-7"). Round 1 fixed the exponent
+        // DIGITS here (see the test below) and left the FORM, so the two
+        // spellings of the same number DISAGREED inside one product: a value
+        // reached through `&` went via `number_text::format`, which already
+        // wrote "1E+100", while the very same value DISPLAYED in its cell as
+        // "1e100". One of those is what a user copies into another tool, and
+        // an exponent Excel cannot read back is a silent import failure
+        // rather than a cosmetic one.
+        let s = match formatted.split_once('e') {
+            Some((mantissa, exponent)) => {
+                // `{:.5e}` emits a bare exponent for positives ("100") and a
+                // leading '-' for negatives; neither carries a '+'.
+                let (sign, digits) = match exponent.strip_prefix('-') {
+                    Some(rest) => ("-", rest),
+                    None => ("+", exponent.strip_prefix('+').unwrap_or(exponent)),
+                };
+                format!(
+                    "{}E{}{:0>2}",
+                    mantissa.trim_end_matches('0').trim_end_matches('.'),
+                    sign,
+                    digits
+                )
+            }
+            None => formatted,
+        };
         return localize_decimal_output(&s, locale);
     }
 
@@ -613,6 +647,131 @@ mod tests {
         assert_eq!(format_general(42.0, &l), "42");
         assert_eq!(format_general(3.14159, &l), "3.14159");
         assert_eq!(format_general(1000000000000.0, &l), "1000000000000");
+    }
+
+    /// GENERAL TRIMS THE MANTISSA, NEVER THE EXPONENT.
+    ///
+    /// THE DEFECT. The scientific branch formatted with `{:.5e}` and then ran
+    /// `.trim_end_matches('0')` over the WHOLE resulting string. The exponent is
+    /// part of that string, so its trailing zeros were eaten too:
+    ///
+    ///     1e100  ->  "1.00000e100"  ->  trimmed  ->  "1.00000e1"
+    ///
+    /// A number displayed 99 orders of magnitude wrong, with no error on the
+    /// cell and no clue in the formula. It hid because it fires ONLY when the
+    /// exponent ends in a zero — the everyday 1.23e-7 was untouched, so casual
+    /// checking of "does scientific notation work" always said yes.
+    #[test]
+    fn general_trims_the_mantissa_and_leaves_the_exponent_intact() {
+        let l = us();
+
+        // THE REPRODUCTION. Every one of these has an exponent ending in 0,
+        // which is the only shape that triggers the bug.
+        assert_eq!(format_general(1e100, &l), "1E+100");
+        assert_eq!(format_general(1e-100, &l), "1E-100");
+        assert_eq!(format_general(1e20, &l), "1E+20");
+        assert_eq!(format_general(1e-10, &l), "1E-10");
+        // A mantissa that itself ends in a zero AND an exponent that does, so a
+        // fix that trimmed neither would also fail.
+        assert_eq!(format_general(1.5e100, &l), "1.5E+100");
+        assert_eq!(format_general(2.5e-30, &l), "2.5E-30");
+
+        // THE CONTROL, and it is what makes the pair meaningful: an exponent
+        // NOT ending in zero was always rendered correctly, and must still be.
+        // A "fix" that stopped trimming altogether would leave the mantissa
+        // padded here and fail.
+        assert_eq!(format_general(1.23e-7, &l), "1.23E-07");
+        assert_eq!(format_general(1e15, &l), "1E+15");
+        assert_eq!(format_general(1e-101, &l), "1E-101");
+
+        // THE MANTISSA TRIM MUST STILL HAPPEN. Without it every scientific
+        // value would carry five dead decimals ("1.00000e15"), which is the
+        // opposite failure and just as wrong.
+        assert!(!format_general(1e100, &l).contains("00000"));
+        assert!(!format_general(1e15, &l).contains("00000"));
+
+        // ORDERING SANITY: the rendered exponents must still be ordered, which
+        // is the property the truncation destroyed (1e100 and 1e15 both came
+        // back claiming an exponent of 1 and 15 respectively — indistinguishable
+        // from far smaller numbers).
+        assert_ne!(format_general(1e100, &l), format_general(1e10, &l));
+        assert_ne!(format_general(1e100, &l), format_general(1e1, &l));
+    }
+
+    /// GENERAL WRITES EXCEL'S SPELLING OF SCIENTIFIC NOTATION, not Rust's.
+    ///
+    /// THREE RULES, and Rust's `{:e}` breaks all three: Excel writes a CAPITAL
+    /// `E`, ALWAYS writes the exponent's sign, and pads the exponent to at
+    /// least TWO digits. Rust writes "1e100", "1e-7", "1e20".
+    ///
+    /// WHY IT IS NOT COSMETIC. Round 1 fixed the exponent DIGITS in this
+    /// function (see the test above) and left the FORM, so one product spelled
+    /// one number two ways: a cell DISPLAYED "1e100" while the same value
+    /// reached through `&` came back "1E+100" from `number_text::format`. The
+    /// displayed form is the one a user copies out, and it is the one Excel and
+    /// most CSV importers will not read back -- so the divergence turns into a
+    /// silent import failure somewhere else rather than a visible wrong number
+    /// here.
+    ///
+    /// EACH RULE IS ASSERTED ON ITS OWN, because a fix that got two of the
+    /// three right would still be wrong and would still pass a single
+    /// whole-string comparison of one lucky value.
+    #[test]
+    fn general_scientific_uses_excels_spelling() {
+        let l = us();
+
+        // RULE 1: a CAPITAL E. Asserted as a property over the whole scientific
+        // range, so a value not in the literal list below cannot slip through.
+        for v in [1e100f64, 1e-100, 1e20, 1e-7, 2.5e15, -3.5e-9] {
+            let out = format_general(v, &l);
+            assert!(out.contains('E'), "{v:e} rendered without a capital E: {out}");
+            assert!(!out.contains('e'), "{v:e} rendered with a lowercase e: {out}");
+        }
+
+        // RULE 2: the sign is ALWAYS present, positive exponents included.
+        assert_eq!(format_general(1e100, &l), "1E+100");
+        assert_eq!(format_general(2.5e15, &l), "2.5E+15");
+        assert_eq!(format_general(1e-100, &l), "1E-100");
+
+        // RULE 3: at least TWO exponent digits. This is the one a hand-rolled
+        // fix forgets, because it only shows on single-digit exponents -- and
+        // General's lower switch is 1e-4, so the ONLY single-digit exponents it
+        // ever produces are the small negative ones.
+        assert_eq!(format_general(1e-7, &l), "1E-07");
+        assert_eq!(format_general(1.23e-7, &l), "1.23E-07");
+        assert_eq!(format_general(-1e-5, &l), "-1E-05");
+        // ...and a two-or-more-digit exponent is NOT padded further.
+        assert_eq!(format_general(1e-10, &l), "1E-10");
+        assert_eq!(format_general(1e15, &l), "1E+15");
+
+        // THE CONTROL that must give the other answer: values inside General's
+        // ordinary range must not acquire an exponent at all. A "fix" that
+        // routed everything through the scientific branch would pass every
+        // assertion above and destroy the display of every normal number.
+        assert_eq!(format_general(42.0, &l), "42");
+        assert_eq!(format_general(0.0001, &l), "0.0001");
+        assert_eq!(format_general(999999999999999.0, &l), "999999999999999");
+
+        // AND THE TWO PATHS NOW AGREE. `number_text::format` is what `&` and
+        // the text family use; this function is what the renderer uses. Their
+        // agreeing on the SPELLING is the point of the change, so it is
+        // asserted here as well as from the value side.
+        for v in [1e100f64, 1e-7, 2.5e15] {
+            assert_eq!(
+                format_general(v, &l),
+                crate::number_text::format(v, crate::number_text::NumberTextLocale::INVARIANT),
+                "the display path and the value path disagree about {v:e}"
+            );
+        }
+    }
+
+    /// The decimal separator is localized; the EXPONENT is not a decimal and
+    /// must survive the same path unchanged.
+    #[test]
+    fn general_scientific_localizes_the_mantissa_only() {
+        let l = se();
+        assert_eq!(format_general(1.5e100, &l), "1,5E+100");
+        assert_eq!(format_general(1e100, &l), "1E+100");
     }
 
     #[test]

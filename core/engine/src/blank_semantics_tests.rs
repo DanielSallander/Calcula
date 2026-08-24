@@ -720,3 +720,129 @@ fn unique_does_not_emit_two_rows_that_render_identically() {
         other => panic!("UNIQUE gave {:?}", other),
     }
 }
+
+/// SUM OVER AN EMPTY POPULATION IS `+0`, NOT `-0`.
+///
+/// WHERE THE MINUS CAME FROM, because nothing in this engine's arithmetic put
+/// it there: the standard library's `Sum for f64` folds from an identity of
+/// **`-0.0`**, not `0.0`. That is deliberate upstream — it lets `[-0.0].sum()`
+/// keep its sign, since `0.0 + -0.0` is `+0.0` — but it means the sum of an
+/// EMPTY sequence is `-0.0`. Blank cells are not in the population (the rule
+/// this whole file exists for), and neither are text cells, so an ordinary
+/// `=SUM(A1:A3)` over untouched or text-holding cells produced a negative zero.
+///
+/// WHY IT MATTERS EVEN THOUGH `General` PRINTS "0" FOR IT. The value does not
+/// only get displayed under General: it is written to `.cala`, handed to
+/// scripts and the BI engine, and re-rendered under formats that DO show the
+/// sign — a cell with two decimal places paints it "-0.00", a minus sign in
+/// front of a zero total on a report with nothing wrong in the formula. That
+/// rendering is pinned by `an_empty_sum_does_not_paint_with_a_minus_sign`
+/// below. Excel has no negative zero to hand out at all, which is why this is
+/// normalized at the source rather than in each renderer.
+#[test]
+fn sum_of_a_population_with_no_numbers_is_positive_zero() {
+    // Nothing at all in the range.
+    let empty = Grid::new();
+    match eval(&empty, "=SUM(A1:A3)") {
+        EvalResult::Number(n) => {
+            assert_eq!(n, 0.0);
+            // `n == 0.0` is TRUE for -0.0, so the equality above cannot catch
+            // this on its own — the sign bit is the whole assertion.
+            assert!(
+                !n.is_sign_negative(),
+                "SUM over an empty population produced negative zero"
+            );
+        }
+        other => panic!("SUM gave {:?}", other),
+    }
+
+    // Cells that EXIST but hold no number. SUM ignores text by design, so the
+    // population is empty for the same reason and the identity leaks the same
+    // way — this is the shape a real workbook hits (a column of labels).
+    let mut texty = Grid::new();
+    texty.set_cell(0, 0, Cell::new_text("a".to_string()));
+    texty.set_cell(1, 0, Cell::new_text("b".to_string()));
+    match eval(&texty, "=SUM(A1:A3)") {
+        EvalResult::Number(n) => assert!(!n.is_sign_negative(), "text-only population"),
+        other => panic!("SUM gave {:?}", other),
+    }
+
+    // SUMSQ shares the collector and the identity, and was measured with the
+    // same defect. A sum of SQUARES carrying a minus sign is indefensible on
+    // its face.
+    match eval(&empty, "=SUMSQ(A1:A3)") {
+        EvalResult::Number(n) => assert!(!n.is_sign_negative(), "SUMSQ empty population"),
+        other => panic!("SUMSQ gave {:?}", other),
+    }
+
+    // THE CONTROL — the normalization must touch NOTHING but zero. A fix that
+    // clamped or re-signed results generally would break these.
+    let mut nums = Grid::new();
+    nums.set_cell(0, 0, Cell::new_number(-5.0));
+    nums.set_cell(1, 0, Cell::new_number(2.0));
+    assert_eq!(num(&nums, "=SUM(A1:A3)"), -3.0, "a genuinely negative sum stays negative");
+    assert_eq!(num(&nums, "=SUMSQ(A1:A3)"), 29.0);
+    // A population that sums to zero through cancellation is also plain zero,
+    // not a negative one.
+    let mut cancel = Grid::new();
+    cancel.set_cell(0, 0, Cell::new_number(-5.0));
+    cancel.set_cell(1, 0, Cell::new_number(5.0));
+    match eval(&cancel, "=SUM(A1:A3)") {
+        EvalResult::Number(n) => assert!(!n.is_sign_negative(), "cancelling to zero"),
+        other => panic!("SUM gave {:?}", other),
+    }
+}
+
+/// THE VISIBLE HALF: the total as it is actually PAINTED on a cell.
+///
+/// The sign has to be chased to a renderer that shows it, and MEASUREMENT — not
+/// assumption — picked which one:
+///
+///   * `General` renders -0.0 as "0". That is why the defect survived: the one
+///     format anybody would have checked hides it.
+///   * `TEXT(SUM(...), "0.00")` ALSO renders it "0.00". The TEXT function does
+///     not reach the same code path, so it is no good as a witness either — an
+///     earlier draft of this test used it and had NO TEETH AT ALL: it passed
+///     with the fix reverted.
+///   * `NumberFormat::Number { decimal_places: 2 }` — an ordinary cell with two
+///     decimals, which is what a currency or a total column IS — renders it
+///     "-0.00". That is the real user-visible harm: a minus sign in front of a
+///     zero total on a report, with nothing wrong in the formula.
+///
+/// So this asserts the composition end to end: evaluate the sum, then format
+/// the value the way a cell would.
+#[test]
+fn an_empty_sum_does_not_paint_with_a_minus_sign() {
+    use crate::locale::LocaleSettings;
+    use crate::style::NumberFormat;
+
+    let two_dp = NumberFormat::Number {
+        decimal_places: 2,
+        use_thousands_separator: false,
+    };
+    let l = LocaleSettings::invariant();
+
+    let empty = Grid::new();
+    let total = match eval(&empty, "=SUM(A1:A3)") {
+        EvalResult::Number(n) => n,
+        other => panic!("SUM gave {:?}", other),
+    };
+    assert_eq!(
+        crate::number_format::format_number(total, &two_dp, &l),
+        "0.00",
+        "an empty total must paint as 0.00, never -0.00"
+    );
+
+    // CONTROL 1: this formatter genuinely SHOWS a minus sign, so the assertion
+    // above is not passing because the format drops signs.
+    assert_eq!(crate::number_format::format_number(-0.5, &two_dp, &l), "-0.50");
+    // CONTROL 2: and it shows one for a negative zero specifically. This is the
+    // line that proves the test has teeth — it pins the exact rendering the
+    // un-normalized SUM would have produced.
+    assert_eq!(
+        crate::number_format::format_number(-0.0, &two_dp, &l),
+        "-0.00",
+        "the formatter DOES paint a negative zero with its sign, which is why \
+         the sign has to be normalized at the source"
+    );
+}

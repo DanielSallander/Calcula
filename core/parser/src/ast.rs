@@ -2644,6 +2644,32 @@ pub enum Value {
     /// cannot drift.
     #[serde(rename = "error")]
     Error(String),
+    /// An OMITTED FUNCTION ARGUMENT: the nothing between the two commas of
+    /// `=IF(TRUE,,5)`, `=XLOOKUP(x,a,b,,2)` or the trailing one of
+    /// `=VLOOKUP(x,t,2,)`.
+    ///
+    /// IT IS AN ARGUMENT, NOT A MISSING ARGUMENT. `=IF(TRUE,,5)` has THREE
+    /// arguments in Excel and must have three here, or every arity check in the
+    /// evaluator reads the formula as a different call than the user wrote.
+    /// Holding the slot with a value is what keeps `args.len()` honest; a
+    /// grammar that simply skipped the empty slot would have silently turned
+    /// `=VLOOKUP(x,t,2,)` -- exact match -- into `=VLOOKUP(x,t,2)`, which is
+    /// APPROXIMATE match and a different answer.
+    ///
+    /// A LITERAL AND NOT AN `Expression` VARIANT, deliberately. Excel's omitted
+    /// argument is an EMPTY VALUE -- 0 in arithmetic, "" in concatenation,
+    /// FALSE as a condition -- which is exactly `EvalResult::Blank`, the meaning
+    /// the engine already has one name for. Living inside `Expression::Literal`
+    /// also means every walker in the repo that already matches
+    /// `Expression::Literal(_)` (the dependency extractor, the reference
+    /// shifters, the renderers) keeps treating it correctly with no edit, and
+    /// none of them can forget it.
+    ///
+    /// NOT the empty string. `=ISBLANK(...)`-style questions aside, Excel's
+    /// `=LEN(IF(TRUE,,5))` differs from `=LEN(IF(TRUE,"",5))` in type, and
+    /// `=SUM(1,,2)` is 3 while `=SUM(1,"",2)` is `#VALUE!`.
+    #[serde(rename = "blank")]
+    Blank,
 }
 
 /// Binary operators for expressions.
@@ -2749,6 +2775,10 @@ impl std::fmt::Display for Value {
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Boolean(b) => write!(f, "{}", if *b { "TRUE" } else { "FALSE" }),
             Value::Error(e) => write!(f, "{}", e),
+            // The omitted argument's spelling IS nothing -- the gap between the
+            // commas. Anything else here (a `0`, a `""`) would render
+            // `=IF(TRUE,,5)` back as a formula the user did not type.
+            Value::Blank => Ok(()),
         }
     }
 }

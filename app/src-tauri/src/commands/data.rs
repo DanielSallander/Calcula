@@ -8016,10 +8016,24 @@ pub fn fill_range(
 
                 // If the source has a formula, shift the references
                 if let Some(formula) = crate::commands::structure::formula_to_rewrite(src) {
-                    let shifted = crate::commands::structure::shift_formula_internal(
+                    // WITH the table registry, so a structured reference walks
+                    // sideways the way Excel's does (Ctrl+R over `=[@Qty]` must
+                    // land on `[@Price]`, not repeat the source column). The
+                    // ANCHOR is the SOURCE cell: the unqualified `[@...]` form
+                    // means "the table this formula is in", which only the cell
+                    // it came from can answer. The resolver takes the table lock
+                    // per question rather than holding it -- the cascade below
+                    // takes `state.tables` itself.
+                    let resolver = crate::commands::structure::WorkbookTableColumns {
+                        state: &state,
+                        sheet: active_sheet,
+                        anchor: Some((src_abs_r, src_abs_c)),
+                    };
+                    let shifted = crate::commands::structure::shift_formula_internal_with_tables(
                         &formula,
                         row_delta,
                         col_delta,
+                        Some(&resolver),
                     );
                     // RAW, not the display form: formula_string() collapses a
                     // named-LAMBDA call's __INVOKE__ marker, so filling one down

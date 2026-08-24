@@ -41,6 +41,14 @@ mod whole_axis_tests;
 #[cfg(test)]
 mod trim_range_tests;
 
+/// Excel's OMITTED ARGUMENT (`=IF(TRUE,,5)`). Its own file because the feature
+/// spans three layers that can each be wrong on their own -- the parser must
+/// keep the ARITY, the evaluator must read the slot as Excel's empty value
+/// (which two hand-rolled coercions did not), and the renderer must put the
+/// comma back or a saved workbook reloads as a different formula.
+#[cfg(test)]
+mod omitted_argument_tests;
+
 /// Excel's three wildcard characters and the five places they were missing or
 /// wrong. Its own file because the rule spans the criteria parser, two lookup
 /// families, the pass cache and SEARCH — and because four of the five defects
@@ -60,11 +68,69 @@ mod implicit_intersection_tests;
 /// built out of, and because it walked through the deleted-sheet guard.
 #[cfg(test)]
 mod offset_sheet_tests;
+
 /// Excel's implicit array semantics — the shape algebra behind "array
 /// operation", "lifting", "pairwise lifting" and "broadcasting". Its own file
 /// for the reason `blank_semantics_tests` has one: the rule spans the binary
 /// operators, the unary operators and the function dispatch, and a failure
 /// needs to say WHICH shape moved.
+/// The text functions count CHARACTERS, not bytes. Its own file because the
+/// mistake is a Rust one (`str::len()` is a byte count) rather than a
+/// spreadsheet one, so it recurs wherever a new text builtin is added — and
+/// because Calcula ships Swedish by default, which makes it fire immediately.
+#[cfg(test)]
+mod text_character_semantics_tests;
+
+/// Excel's TYPE RANKING for the comparison operators — number < text < FALSE <
+/// TRUE — and the two equality sites that used a numeric tolerance. Its own file
+/// for the reason `blank_semantics_tests` has one: the rule is ONE ladder behind
+/// six operators, MATCH's exact match and a pass cache that mirrors it by hand,
+/// and every defect it pins was a plausible WRONG BOOLEAN rather than an error.
+#[cfg(test)]
+mod comparison_ranking_tests;
+
+/// EVERY EXACT-MATCH SURFACE MUST GIVE THE SAME ANSWER — MATCH 0, VLOOKUP /
+/// HLOOKUP FALSE, LOOKUP, XLOOKUP (linear AND binary), SWITCH and the pass
+/// cache — plus the criteria family's deliberate divergences from them. Its own
+/// file because the defect it prevents is DISAGREEMENT between functions rather
+/// than any one function being wrong: three hand-written equality predicates
+/// gave, in one build on one column, three different rows for the same lookup,
+/// and no single-function test can see that.
+#[cfg(test)]
+mod exact_match_agreement_tests;
+
+/// Excel's DIRECT-vs-INDIRECT coercion rule for the aggregates — the reason
+/// `=SUM(1,"2",TRUE)` is 4 and `=SUM({1,"2",TRUE})` is 1. Its own file for the
+/// reason `blank_semantics_tests` has one: the rule spans one collector, three
+/// families that must DISAGREE about it (SUM vs COUNTA vs AVERAGEA), and
+/// SUBTOTAL beside them — and every defect it pins was a plausible WRONG TOTAL,
+/// including `=SUM(A1:A3&"")`, the one formula whose entire job is to reveal
+/// that a column has silently turned into text.
+#[cfg(test)]
+mod direct_coercion_tests;
+
+/// THE ONE NUMBER PARSER AND THE ONE NUMBER FORMATTER.
+///
+/// Six separately-filed defects were two missing pieces: `as_number` reached
+/// for Rust's `f64::from_str` (one dialect, no percent, no currency, no date,
+/// and `inf`/`NaN` ACCEPTED) and `as_text` reached for Rust's `Display` (17
+/// significant digits, never scientific, always an English decimal point).
+/// Both now go through `number_text`, and so does the host's typed-entry
+/// ladder. See that module's header.
+#[cfg(test)]
+mod number_text_tests;
+
+/// AN ERROR ARGUMENT PROPAGATES out of the text family instead of being
+/// spelled out and consumed as data. Its own file for the reason
+/// `blank_semantics_tests` has one: the rule spans thirty-odd builtins, two
+/// collectors and two ceilings, and every defect it pins was a PLAUSIBLE VALUE
+/// rather than an error -- `=LEN(1/0)` answered 7, the length of "#DIV/0!".
+/// It also carries the inventory guard that makes the next omission a build
+/// failure, and the dated record of the one Excel divergence deliberately left
+/// in place (LEN counts scalar values, Excel counts UTF-16 code units).
+#[cfg(test)]
+mod error_propagation_tests;
+
 pub mod array_lift;
 pub mod budget;
 pub mod cell;
@@ -84,6 +150,7 @@ pub mod locale;
 pub mod navigation;
 pub mod lookup_cache;
 pub mod number_format;
+pub mod number_text;
 pub mod row_visibility;
 pub mod style;
 pub mod text_cmp;

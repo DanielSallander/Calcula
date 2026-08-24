@@ -1163,6 +1163,17 @@ pub struct FormulaShiftInput {
     pub row_delta: i32,
     /// Column delta to shift (positive = right, negative = left)
     pub col_delta: i32,
+    /// The cell this formula was copied FROM, when the caller knows it.
+    ///
+    /// Only the unqualified structured reference `[@Qty]` needs it: that
+    /// spelling means "the table this formula is in", so it can be walked
+    /// sideways only from the SOURCE cell's table. Absent, that form is left
+    /// exactly as written rather than resolved against a guessed table.
+    #[serde(default)]
+    pub source_row: Option<u32>,
+    /// See [`FormulaShiftInput::source_row`].
+    #[serde(default)]
+    pub source_col: Option<u32>,
 }
 
 /// Result of batch formula shifting.

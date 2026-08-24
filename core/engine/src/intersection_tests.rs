@@ -160,3 +160,122 @@ fn the_operator_round_trips_through_the_renderer() {
         );
     }
 }
+
+// ===================================================================
+// Sheet qualifiers: the operands are compared by RESOLVED SHEET, never by
+// how the sheet was SPELLED.
+// ===================================================================
+
+/// THE DEFECT: `eval_intersect` compared the two operands' raw `Option<String>`
+/// sheet qualifiers, so two references to the SAME sheet failed to intersect
+/// unless they were written identically.
+///
+/// `=SUM(Sheet1!A1:A3 A2:C2)` — a qualified operand and an unqualified one,
+/// which is the NORMAL way to write this, because the qualifier is what tells
+/// the reader which sheet the pair is about — answered `#NULL!` even though A2
+/// is plainly inside both rectangles.
+///
+/// WHY THAT WAS WORSE THAN A SYNTAX COMPLAINT. `#NULL!` means "these ranges do
+/// not overlap". It is a statement about the user's DATA, and it was false. A
+/// user reading it goes and looks at their ranges, which are fine.
+#[test]
+fn a_sheet_qualifier_on_one_operand_still_intersects() {
+    let grid = grid_3x3();
+    // A1:A3 (column A) x A2:C2 (row 2) = A2, which holds 4. The unqualified
+    // spelling of exactly this is asserted above in
+    // `an_overlap_is_the_overlapping_reference_not_an_error`; the point here is
+    // that adding a qualifier must not change the answer.
+    assert_eq!(eval(&grid, "=SUM(Sheet1!A1:A3 A2:C2)"), EvalResult::Number(4.0));
+    // ...and on the OTHER operand, because a fix that only canonicalized the
+    // left-hand side would pass the line above.
+    assert_eq!(eval(&grid, "=SUM(A1:A3 Sheet1!A2:C2)"), EvalResult::Number(4.0));
+    // Both qualified, same sheet.
+    assert_eq!(
+        eval(&grid, "=SUM(Sheet1!A1:A3 Sheet1!A2:C2)"),
+        EvalResult::Number(4.0)
+    );
+    // A larger overlap, so a fix that collapsed every intersection to a single
+    // cell could not pass: A1:B3 x B1:C3 = column B = 2 + 5 + 8.
+    assert_eq!(eval(&grid, "=SUM(Sheet1!A1:B3 B1:C3)"), EvalResult::Number(15.0));
+}
+
+/// THE CONTROL FOR THE TEST ABOVE, and the assertion that keeps the fix from
+/// being "ignore sheets entirely".
+///
+/// Two operands that genuinely name DIFFERENT sheets have no cells in common
+/// and must still be `#NULL!`. Without this, deleting the sheet comparison
+/// outright would satisfy every other test in this section.
+#[test]
+fn genuinely_different_sheets_still_have_nothing_in_common() {
+    use crate::evaluator::MultiSheetContext;
+
+    let s1 = grid_3x3();
+    let s2 = grid_3x3();
+    let mut ms = MultiSheetContext::new("Sheet1".to_string());
+    ms.add_grid("Sheet1".to_string(), &s1);
+    ms.add_grid("Sheet2".to_string(), &s2);
+    let ev = Evaluator::with_context(&s1, ms, crate::evaluator::EvalContext::default());
+
+    let run = |f: &str| {
+        let ast = parser::parse(f).expect("formula parses");
+        ev.evaluate(&ast)
+    };
+
+    // Rectangles that WOULD overlap if they were on one sheet. That is what
+    // makes this a real control: the geometry cannot be what produces #NULL!.
+    assert_eq!(
+        run("=SUM(Sheet1!A1:A3 Sheet2!A2:C2)"),
+        EvalResult::Error(CellError::Null),
+        "two different sheets share no cell, however the rectangles line up"
+    );
+    // The unqualified operand means the CURRENT sheet (Sheet1), so pairing it
+    // with Sheet2 is also two different sheets.
+    assert_eq!(
+        run("=SUM(A1:A3 Sheet2!A2:C2)"),
+        EvalResult::Error(CellError::Null)
+    );
+    // And the positive control on the same evaluator, so the #NULL!s above are
+    // not just "this context cannot intersect anything".
+    assert_eq!(run("=SUM(Sheet1!A1:A3 A2:C2)"), EvalResult::Number(4.0));
+    assert_eq!(run("=SUM(Sheet2!A1:A3 Sheet2!A2:C2)"), EvalResult::Number(4.0));
+}
+
+/// Sheet names compare CASE-INSENSITIVELY, as they do everywhere else in the
+/// engine.
+///
+/// The lexer uppercases BARE identifiers, so `Sheet1!` and `SHEET1!` already
+/// arrived spelled the same and accidentally worked. A QUOTED name keeps its
+/// case (`'Sheet1'!`), which is exactly how the spelling comparison could still
+/// fail for two references to one sheet — and quoting is not exotic: it is
+/// mandatory the moment a sheet name contains a space.
+#[test]
+fn sheet_names_intersect_case_insensitively_including_quoted_ones() {
+    let grid = grid_3x3();
+    assert_eq!(eval(&grid, "=SUM(Sheet1!A1:A3 SHEET1!A2:C2)"), EvalResult::Number(4.0));
+    assert_eq!(eval(&grid, "=SUM('Sheet1'!A1:A3 SHEET1!A2:C2)"), EvalResult::Number(4.0));
+    assert_eq!(eval(&grid, "=SUM('Sheet1'!A1:A3 'sheet1'!A2:C2)"), EvalResult::Number(4.0));
+    assert_eq!(eval(&grid, "=SUM('Sheet1'!A1:A3 A2:C2)"), EvalResult::Number(4.0));
+}
+
+/// A NESTED intersection resolves sheets the same way a flat one does.
+///
+/// `reference_rect` carries its own copy of the sheet comparison so that
+/// `A1:C3 B1:B9 B2:B2` stays left-associative, and the two copies have to agree
+/// — otherwise adding a third operand to a working two-operand formula would
+/// change its answer.
+#[test]
+fn a_nested_intersection_resolves_sheets_like_a_flat_one() {
+    let grid = grid_3x3();
+    // A1:C3 x B1:B3 = column B; x B2:B2 = B2, which holds 5.
+    assert_eq!(eval(&grid, "=SUM(A1:C3 B1:B3 B2:B2)"), EvalResult::Number(5.0));
+    // The same chain with the qualifier on each operand in turn.
+    assert_eq!(eval(&grid, "=SUM(Sheet1!A1:C3 B1:B3 B2:B2)"), EvalResult::Number(5.0));
+    assert_eq!(eval(&grid, "=SUM(A1:C3 Sheet1!B1:B3 B2:B2)"), EvalResult::Number(5.0));
+    assert_eq!(eval(&grid, "=SUM(A1:C3 B1:B3 Sheet1!B2:B2)"), EvalResult::Number(5.0));
+    // A non-overlapping chain is still #NULL!, so the above is not "nested
+    // intersections always succeed".
+    assert_eq!(
+        eval(&grid, "=SUM(Sheet1!A1:C3 B1:B3 C2:C2)"),
+        EvalResult::Error(CellError::Null)
+    );
+}

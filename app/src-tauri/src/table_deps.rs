@@ -736,10 +736,14 @@ mod tests {
         assert!(deps.get(&(0, 0)).is_none());
     }
 
-    /// The rename touches the COLUMN and nothing else. The table names come
+    /// The rename touches the COLUMN and nothing else. The TABLE names come
     /// back from the lexer uppercased, which is what `restamp_table_casing`
     /// exists to fix at entry and on load -- this walk deliberately does not
     /// re-spell anything it was not asked to.
+    ///
+    /// The untouched column keeps the case the USER typed (`[Amount]`, not
+    /// `[AMOUNT]`): a bracket body is read as raw text now, so the lexer's
+    /// uppercasing never reaches a column name at all.
     #[test]
     fn a_column_rename_rewrites_only_the_named_table() {
         let tree = ast("=SUM(Sales[Amount])+SUM(Costs[Amount])");
@@ -747,7 +751,7 @@ mod tests {
         assert!(changed);
         assert_eq!(
             format!("={}", engine::ast_render::render_formula_raw(&out)),
-            "=SUM(SALES[Total])+SUM(COSTS[AMOUNT])"
+            "=SUM(SALES[Total])+SUM(COSTS[Amount])"
         );
     }
 
@@ -758,8 +762,8 @@ mod tests {
         assert!(!changed);
         assert_eq!(
             format!("={}", engine::ast_render::render_formula_raw(&kept)),
-            "=[@AMOUNT]*2",
-            "untouched -- the lexer's spelling, because this walk was told the              cell is not inside the table being renamed"
+            "=[@Amount]*2",
+            "untouched -- the user's own spelling, because this walk was told the              cell is not inside the table being renamed"
         );
 
         let (moved, changed) = rename_table_column_in_ast(&tree, "SALES", "Amount", "Total", true);

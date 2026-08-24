@@ -110,6 +110,28 @@ pub const MAX_ARRAY_ELEMENTS: i64 = 4_194_304;
 /// `REPT("x", 1e12)` from taking the process with it.
 pub const MAX_TEXT_LEN: i64 = 1_048_576;
 
+/// Excel's ceiling on the text a CELL can hold: 32,767 characters. Exceeding it
+/// is `#VALUE!`.
+///
+/// THIS IS A DIFFERENT CEILING FROM [`MAX_TEXT_LEN`] ABOVE, and the two must not
+/// be confused or merged:
+///
+///   * `MAX_TEXT_LEN` (1 MiB) is an ALLOCATION guard. It answers `#LIMIT!`,
+///     exists to stop a single `Vec`/`String` allocation from taking the
+///     process, and is deliberately set well ABOVE Excel's cell limit so that
+///     large INTERMEDIATE values keep working (see
+///     `ordinary_concatenation_is_unaffected_by_the_text_cap`).
+///   * `MAX_CELL_TEXT_LEN` (32,767) is a SEMANTIC limit — Excel parity. It
+///     answers `#VALUE!` because that is what Excel answers, and it applies to a
+///     value that is a RESULT rather than a step on the way to one.
+///
+/// It was previously spelled as the bare literal `32_767` at TEXTJOIN's guard,
+/// which is why it never spread to the other text producers: an unnamed number
+/// is not findable. NOT every text producer enforces it today — see the report
+/// note on `&` / CONCAT / CONCATENATE / REPT, which are still governed by the
+/// 1 MiB allocation cap by an explicit earlier decision.
+pub const MAX_CELL_TEXT_LEN: u64 = 32_767;
+
 /// Why an evaluation was stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TripReason {

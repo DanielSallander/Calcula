@@ -19,7 +19,7 @@
 //!
 
 use crate::array_lift;
-use crate::budget::{BudgetPolicy, CancelToken, EvalBudget, LAMBDA_CALL_FUEL, MAX_ARRAY_ELEMENTS, MAX_TEXT_LEN};
+use crate::budget::{BudgetPolicy, CancelToken, EvalBudget, LAMBDA_CALL_FUEL, MAX_ARRAY_ELEMENTS, MAX_CELL_TEXT_LEN, MAX_TEXT_LEN};
 use crate::cell::{CellError, CellValue, DictKey};
 use crate::control_values::ControlValue;
 use crate::coord::{col_to_index, index_to_col};
@@ -80,7 +80,79 @@ fn power_result(base: f64, exponent: f64) -> EvalResult {
     if base == 0.0 && exponent < 0.0 {
         return EvalResult::Error(CellError::Div0);
     }
+    // `0 ^ 0` is INDETERMINATE and Excel refuses it with `#NUM!`. IEEE-754
+    // defines `powf(0.0, 0.0)` as 1.0 — a defensible convention for a maths
+    // library and the wrong answer for a spreadsheet, because it arrives
+    // silently: `=A1^B1` over two empty cells (blanks coerce to 0) answered 1,
+    // so an untouched model reported a plausible number instead of telling the
+    // user there was nothing to raise. Both spellings reach here, so POWER(0,0)
+    // and the `^` operator cannot disagree.
+    if base == 0.0 && exponent == 0.0 {
+        return EvalResult::Error(CellError::Num);
+    }
     finite_or_num(base.powf(exponent))
+}
+
+/// Collapses IEEE-754's negative zero onto positive zero. Any other value is
+/// returned untouched.
+///
+/// WHERE THE NEGATIVE ZERO CAME FROM, because it is not obvious and it is not a
+/// bug in this engine's arithmetic: the standard library's `Sum for f64` folds
+/// from an identity of **`-0.0`**, not `0.0`. That choice is deliberate upstream
+/// — it lets `[-0.0].sum()` keep its sign, since `0.0 + -0.0` is `+0.0` — but it
+/// means the sum of an EMPTY sequence is `-0.0`. So `=SUM(A1:A3)` over a range
+/// holding no numbers (empty cells, or text cells, which SUM ignores by design)
+/// returned `-0.0`.
+///
+/// WHY IT MATTERED even though `General` happens to print `-0.0` as "0": the
+/// value is not only displayed under General. It is compared, written to
+/// `.cala`, handed to scripts and the BI engine, and re-formatted under formats
+/// that DO show the sign — MEASURED: a cell carrying `NumberFormat::Number {
+/// decimal_places: 2 }`, which is what any currency or total column is, paints
+/// it as **"-0.00"**. (The `TEXT` function does NOT show it; it takes a
+/// different path and answers "0.00". That difference is why the test for this
+/// formats the value the way a CELL does rather than calling TEXT — an earlier
+/// draft that used TEXT had no teeth.) Excel has no negative zero to hand out
+/// at all, so the fix belongs at the source rather than in each renderer.
+fn normalize_zero(n: f64) -> f64 {
+    // `n == 0.0` is true for BOTH zeros, so this catches -0.0 without a sign
+    // test and leaves every other value, NaN and the infinities included, alone.
+    if n == 0.0 {
+        0.0
+    } else {
+        n
+    }
+}
+
+/// The BYTE offset at which character number `n` starts (0-based), or `None`
+/// if the text holds fewer than `n` characters.
+///
+/// WHY THIS EXISTS RATHER THAN `&text[n..]`. FIND and SEARCH take and return
+/// CHARACTER positions, and both used the character number directly as a byte
+/// offset. On non-ASCII text that is wrong twice over:
+///
+///   * the ANSWER was a byte position — `=FIND("ö";"åäö")` was 5, not 3;
+///   * the SLICE `within_text[start..]` PANICKED whenever the offset landed
+///     inside a multi-byte character, so `=FIND("ö";"åäö";2)` did not return a
+///     wrong number, it took the evaluator down.
+///
+/// `n` equal to the character count is the valid one-past-the-end offset (an
+/// empty remainder), which is what a `start_num` of `LEN(text)+1` means.
+fn char_to_byte_offset(text: &str, n: usize) -> Option<usize> {
+    if n == 0 {
+        return Some(0);
+    }
+    match text.char_indices().nth(n) {
+        Some((byte_idx, _)) => Some(byte_idx),
+        // Past the last character start: only the exact end is still a position.
+        None if text.chars().count() == n => Some(text.len()),
+        None => None,
+    }
+}
+
+/// The 1-based CHARACTER position of the character starting at `byte_idx`.
+fn byte_offset_to_char_pos(text: &str, byte_idx: usize) -> usize {
+    text[..byte_idx].chars().count() + 1
 }
 
 /// The maximum `places` any base-conversion function can be asked for.
@@ -210,6 +282,81 @@ fn needs_wildcard_matcher(s: &str) -> bool {
     has_wildcard(s) || s.contains('~')
 }
 
+/// The number a piece of TEXT contributes to a criteria comparison, or `None`.
+///
+/// THE ONE READING, AND IT IS USED ON BOTH SIDES. `parse_criteria` reads the
+/// criteria with it and `matches_criteria` reads each range value with it, and
+/// that symmetry is the fix for two separate defects that shared this line:
+///
+///   * the criteria side was on Rust's `f64::from_str`, which has NO LOCALE. On
+///     the shipping sv-SE build `=COUNTIF(A1:A2,">1,5")` — a Swedish user's own
+///     decimal spelling — matched NOTHING, while the foreign `">1.5"` matched.
+///     A criteria that silently selects an empty set is the worst shape of
+///     wrong answer there is: every total taken over it is a confident zero.
+///   * the two sides were on DIFFERENT parsers, so the answer depended on which
+///     side of the comparison a spelling sat. `matches_criteria` had moved to
+///     the rich arithmetic-coercion parser while `parse_criteria` had not, and
+///     `=COUNTIF(rng,0.05)` counted a text cell whose contents are `5%`.
+///
+/// [`ParsePolicy::CRITERIA`] carries the decision about WHICH spellings count
+/// (plain numbers in the workbook's dialect; not percent, currency or dates)
+/// and why.
+pub(crate) fn criteria_number_of_text(text: &str) -> Option<f64> {
+    crate::number_text::parse(
+        text,
+        crate::number_text::active(),
+        crate::number_text::ParsePolicy::CRITERIA,
+    )
+}
+
+/// The number a RANGE VALUE contributes to a numeric criteria comparison.
+///
+/// Differs from `as_number` ONLY in the text arm, and only because `as_number`
+/// is the ARITHMETIC coercion: an operator has demanded a number and every
+/// spelling that can supply one should. A criteria has demanded nothing; it is
+/// comparing against a stored value, so it reads that value the same way it
+/// read itself. Blanks keep `as_number`'s answer because the criteria matcher
+/// has already decided about them above this call.
+///
+/// A BOOLEAN IS NOT A NUMBER HERE, and it used to be. `as_number()` renders
+/// TRUE as 1 and FALSE as 0 — right for arithmetic (`=TRUE+1` is 2), wrong for
+/// a criteria TYPE test — so over a column holding {1, "1", TRUE, "apple"}:
+///
+/// ```text
+/// =COUNTIF(A1:A4,1)      answered 3   Excel: 2   (the number, the text, AND TRUE)
+/// =COUNTIF(A1:A4,">0")   answered 3   (TRUE counted as 1 > 0)
+/// =SUMIF(A1:A4,1,B1:B4)  totalled the TRUE row's payload into the answer
+/// ```
+///
+/// It is the same type-class rule `excel_comparison_ordering` encodes for the
+/// comparison operators — a boolean is its own class and never equals a number
+/// — arriving in the criteria family. `COUNTIF(rng,TRUE)` still counts booleans:
+/// that goes through `CriteriaMatch::ExactBool`, which matches on the variant
+/// and never reaches this function.
+///
+/// WHAT DELIBERATELY STAYS: numeric TEXT still answers. `COUNTIF(rng,1)`
+/// counting a cell holding the text "1" is Excel's own behaviour and is NOT the
+/// same question — criteria genuinely coerce text where `=` does not, which is
+/// why `=(A1="1")` is FALSE on that same pair. See
+/// `criteria_type_rule_tests.rs`, which pins both halves side by side.
+///
+/// `pub(crate)` for ONE other caller: `lookup_cache::CriteriaIndex::build`,
+/// which pre-buckets a range so `COUNTIF` can answer from a sorted vector
+/// instead of a scan. Its whole invariant is that the cached answer is
+/// bit-identical to the scanned one, so it has to bucket by the same reading —
+/// it was on `as_number`, which would have made the same `COUNTIF` answer
+/// differently depending on whether the pass cache happened to be live. That is
+/// also why the boolean rule belongs HERE rather than in `matches_criteria`:
+/// written there, the cache would have kept bucketing booleans as 1 and the two
+/// paths would disagree again.
+pub(crate) fn criteria_number(value: &EvalResult) -> Option<f64> {
+    match value {
+        EvalResult::Text(s) => criteria_number_of_text(s),
+        EvalResult::Boolean(_) => None,
+        other => other.as_number(),
+    }
+}
+
 /// Reserved scope slots for ARRAY LIFTING (`call_with_values`).
 ///
 /// Each begins with a SPACE, which the lexer's `is_letter` never accepts as the
@@ -235,6 +382,66 @@ macro_rules! charge_arith {
     ($self:expr, $units:expr) => {
         if $self.budget.charge_arith(fuel_units($units)).is_err() {
             return EvalResult::Error(CellError::Limit);
+        }
+    };
+}
+
+/// THE TEXT-ARGUMENT GUARD. One of these replaces every bare
+/// `self.evaluate(&args[n]).as_text()` in the text family.
+///
+/// WHAT WAS SILENTLY WRONG WITHOUT IT. `as_text` renders an error as its
+/// CANONICAL LITERAL — "#DIV/0!" — which is an improvement on the Rust variant
+/// name it used to render, but it is still not Excel's behaviour: Excel
+/// PROPAGATES an error argument out of every text function. Coercing instead
+/// consumed the error as ordinary data, and the result was a plausible value
+/// with no error anywhere on the sheet:
+///
+/// ```text
+/// =LEN(1/0)                  answered 7      (the length of "#DIV/0!")
+/// =LEFT(1/0,2)               answered "#D"
+/// =REPLACE(1/0,1,1,"x")      answered "xDIV/0!"
+/// =CODE(1/0)                 answered 35     (the code point of '#')
+/// =TEXTJOIN(",",TRUE,1/0)    answered ""     (the error was DROPPED)
+/// ```
+///
+/// A `#DIV/0!` five cells upstream therefore surfaced as a number that totals,
+/// charts and prints like any other. That is the failure mode the whole error
+/// taxonomy exists to prevent.
+///
+/// ONE GUARD, NOT THIRTY COPIES. Written out at each call site this would be a
+/// four-line `match` that a new text builtin can simply forget to write — which
+/// is exactly how the family came to have twenty-eight of them missing. The
+/// macro makes the guarded spelling SHORTER than the unguarded one, and
+/// `every_text_argument_is_guarded_against_an_error` (in
+/// `error_propagation_tests.rs`) reads this file at test time and fails the
+/// build if a `fn_*` reaches `as_text` without being on an explicit,
+/// reasoned exemption list.
+///
+/// LEFT-MOST ERROR WINS, for free: arguments are evaluated left to right and
+/// the first guard that sees an error returns, so `=FIND(1/0,NA())` is
+/// `#DIV/0!` and `=FIND(NA(),1/0)` is `#N/A`, as in Excel.
+macro_rules! text_arg {
+    ($v:expr) => {
+        match $v.text_or_error() {
+            Ok(s) => s,
+            Err(e) => return EvalResult::Error(e),
+        }
+    };
+}
+
+/// The same guard for a NUMERIC parameter of a text function.
+///
+/// It exists so that left-most-error-wins holds ACROSS the mixed signatures:
+/// `as_number` answers `None` for an error, so `=LEFT("abc",1/0)` produced
+/// `#VALUE!` — the right kind of failure reported with the wrong cause, which
+/// sends the user looking at the wrong cell. Yields the evaluated value
+/// unchanged when it is not an error, so each function keeps its own
+/// domain checks (negative counts, zero starts) exactly as they were.
+macro_rules! arg_or_err {
+    ($v:expr) => {
+        match $v {
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            other => other,
         }
     };
 }
@@ -432,7 +639,19 @@ impl EvalResult {
         match self {
             EvalResult::Number(n) => Some(*n),
             EvalResult::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
-            EvalResult::Text(s) => s.trim().parse::<f64>().ok(),
+            // ONE PARSER, and it is not Rust's. `s.trim().parse::<f64>()` was
+            // here for years and knew exactly one dialect: `.` for the decimal
+            // point, no group separator, no percent, no currency, no date — and
+            // `inf`/`NaN` ACCEPTED. That made `="5%"+0`, `="$5"+0`,
+            // `="1 000"+0` and `="2020-01-01"+1` all `#VALUE!`, made `="1,5"+0`
+            // fail while `="1.5"+0` succeeded on the sv-SE build this ships to,
+            // and let `="inf"+0` put a non-finite value in a cell that
+            // `ISNUMBER` then called TRUE. See `number_text::parse`.
+            EvalResult::Text(s) => crate::number_text::parse(
+                s,
+                crate::number_text::active(),
+                crate::number_text::ParsePolicy::COERCION,
+            ),
             EvalResult::Blank => Some(0.0),
             // List/Dict are not coercible to number (Python convention)
             _ => None,
@@ -465,6 +684,31 @@ impl EvalResult {
             return None;
         }
         self.as_number()
+    }
+
+    /// The number this value contributes to an aggregate's population when it
+    /// was reached INDIRECTLY — through a reference or from inside an array.
+    ///
+    /// # Excel coerces DIRECTLY-typed arguments only
+    ///
+    /// `=SUM(1,"2",TRUE)` is 4 and `=SUM({1,"2",TRUE})` is 1. The values are
+    /// identical; only the route differs. Excel coerces a text or logical value
+    /// that the user TYPED as an argument, and IGNORES one that arrived inside
+    /// an array or through a cell reference — which is the entire reason the
+    /// `=SUMPRODUCT(--(…))` idiom exists, since `--` is what turns a referenced
+    /// boolean into a number the aggregate will accept.
+    ///
+    /// So this is `as_number` with the coercions REMOVED, not a variant of it.
+    /// Text is out even when it parses (`"20"` in a cell is text, and a column
+    /// that has silently turned into text must total 0 — that is the whole
+    /// diagnostic value of `=SUM(A1:A3&"")`), and a boolean is out even though
+    /// it has an obvious numeric reading (`=SUM(D1:D2)` over TRUE/FALSE is 0,
+    /// not 1). A blank never reaches here; the collectors test `is_blank` first.
+    pub fn as_indirect_number(&self) -> Option<f64> {
+        match self {
+            EvalResult::Number(n) => Some(*n),
+            _ => None,
+        }
     }
 
     /// Turn a blank into the number zero, for a function that returns a VALUE
@@ -522,13 +766,15 @@ impl EvalResult {
     pub fn as_text(&self) -> String {
         match self {
             EvalResult::Blank => String::new(),
+            // ONE FORMATTER, and it is not Rust's `Display`. `Display` prints
+            // the shortest string that round-trips the f64 — 16-17 significant
+            // digits where Excel keeps 15, so `="x"&(0.1+0.2)` read
+            // "x0.30000000000000004"; it never uses scientific notation, so
+            // `="x"&1e300` built a 301-character string; and its decimal point
+            // is always `.`, so `="Total: "&1,5` read "Total: 1.5" on the sv-SE
+            // build. See `number_text::format`.
             EvalResult::Number(n) => {
-                // Format without unnecessary decimal places
-                if n.fract() == 0.0 && n.abs() < 1e15 {
-                    format!("{}", *n as i64)
-                } else {
-                    format!("{}", n)
-                }
+                crate::number_text::format(*n, crate::number_text::active())
             }
             EvalResult::Text(s) => s.clone(),
             EvalResult::Boolean(b) => {
@@ -560,6 +806,28 @@ impl EvalResult {
             EvalResult::List(items) => format!("[List({})]", items.len()),
             EvalResult::Dict(entries) => format!("[Dict({})]", entries.len()),
             EvalResult::Lambda { .. } => "#LAMBDA".to_string(),
+        }
+    }
+
+    /// The text of this value, or the ERROR that must propagate INSTEAD of
+    /// being spelled out and consumed as data.
+    ///
+    /// THE WHOLE DIFFERENCE FROM [`as_text`](Self::as_text) IS THE ERROR ARM,
+    /// and it is the difference between Excel's answer and a wrong one.
+    /// `as_text` must keep rendering an error as its literal — it is what a
+    /// deliberate value-to-text renderer (ARRAYTOTEXT) and a diagnostic want —
+    /// so the propagating decision cannot live inside it. It lives here, and
+    /// every text builtin reaches its argument through the `text_arg!` macro
+    /// that wraps this.
+    ///
+    /// Returning `Result` rather than `Option` keeps the ORIGINAL error: a
+    /// function that lost it and answered `#VALUE!` would report the right kind
+    /// of failure with the wrong cause, pointing the user at the text function
+    /// instead of at the division five cells upstream.
+    pub fn text_or_error(&self) -> Result<String, CellError> {
+        match self {
+            EvalResult::Error(e) => Err(e.clone()),
+            other => Ok(other.as_text()),
         }
     }
 
@@ -1148,6 +1416,51 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// The sheet a reference's optional qualifier actually names, as a
+    /// comparable key. Two references share a sheet exactly when their keys are
+    /// equal.
+    ///
+    /// WHAT WAS WRONG WITHOUT IT. The intersection operator compared the raw
+    /// `Option<String>` qualifiers — the SPELLING — so two references to the
+    /// SAME sheet did not match unless they were written the same way:
+    ///
+    ///   `=SUM(Sheet1!A1:A3 A2:C2)`   #NULL!, though both are Sheet1 and A2 is
+    ///                                plainly in both rectangles
+    ///   `=SUM('Sheet1'!A1:A3 SHEET1!A2:C2)`
+    ///                                #NULL!, because quoting preserves case
+    ///                                while a bare identifier is uppercased by
+    ///                                the lexer
+    ///
+    /// Qualifying one operand is the NORMAL way to write this — the qualifier is
+    /// what tells the reader which sheet the pair is about — so the operator
+    /// failed on its most idiomatic spelling, and failed with the error that
+    /// means "these ranges do not overlap", which is a false statement about the
+    /// user's data rather than a complaint about their syntax.
+    ///
+    /// The mapping mirrors `get_grid_for_sheet` / `visibility_key_for_sheet`
+    /// exactly, because "same sheet" has to mean "same GRID" or this would
+    /// disagree with the code that then reads the cells:
+    ///   * a qualifier present: that name, case-folded (the comparison Excel and
+    ///     the rest of this engine use for sheet names);
+    ///   * no qualifier, with a multi-sheet context: the formula's own sheet;
+    ///   * NO multi-sheet context at all: every reference reads the one grid, so
+    ///     every reference shares a key. That is the single-sheet evaluation
+    ///     path (chart expressions, scripts, most tests), where a qualifier has
+    ///     always been ignored — see `resolve_grid_for_sheet`.
+    ///
+    /// A qualifier naming a sheet that does not exist keeps its own spelling
+    /// rather than collapsing onto the current sheet, so it can only match
+    /// another reference to that same missing sheet. That preserves the `#REF!`
+    /// the synthesized reference goes on to raise, instead of silently
+    /// intersecting a typo against the local sheet.
+    fn resolved_sheet_key(&self, sheet: &Option<String>) -> String {
+        match (sheet, &self.multi_sheet) {
+            (Some(name), Some(_)) => name.to_uppercase(),
+            (None, Some(ctx)) => ctx.current_sheet.to_uppercase(),
+            (_, None) => String::new(),
+        }
+    }
+
     /// The row-visibility key for the sheet whose grid `get_grid_for_sheet`
     /// would return for the same argument.
     ///
@@ -1198,7 +1511,19 @@ impl<'a> Evaluator<'a> {
     /// it was; the old body moved verbatim into `eval_node`.
     pub fn evaluate(&self, expr: &Expression) -> EvalResult {
         if self.budget.arm_if_idle() {
-            let result = self.eval_charged(expr);
+            // THE DIALECT, INSTALLED ONCE PER FORMULA. `EvalResult::as_number`
+            // and `as_text` are methods on a VALUE — they have no evaluator and
+            // therefore no locale — and threading one through would mean a new
+            // parameter on 676 `as_number` and 105 `as_text` call sites. The
+            // ambient is installed on the frame that already knows it is the
+            // outermost one (`arm_if_idle`, the same signal the fuel budget
+            // uses), so a recursive `self.evaluate(...)` costs nothing and an
+            // inner evaluator carrying a different locale still wins for its
+            // own duration. See `number_text::begin`.
+            let _dialect = crate::number_text::begin(
+                crate::number_text::NumberTextLocale::of(&self.locale),
+            );
+            let result = self.eval_root(expr);
             // THE STICKY OVERRIDE, and it is not optional. Aggregates skip
             // error elements, IFERROR swallows them, TEXTJOIN drops them — any
             // of which would let a runaway formula return a plausible-looking
@@ -1215,6 +1540,31 @@ impl<'a> Evaluator<'a> {
             result
         } else {
             self.eval_charged(expr)
+        }
+    }
+
+    /// The OUTERMOST node of one formula, charged and dispatched.
+    ///
+    /// Exists for exactly one reason: Excel's cancellation correction applies
+    /// to the FINAL operation of a formula and to nothing else, so something
+    /// has to know which node is the final one. Reaching it here — where
+    /// `arm_if_idle` has already proved this is the outermost frame — costs one
+    /// extra `match` per FORMULA. The alternative considered was a "am I the
+    /// root" flag cleared in `eval_node`, which would have put a read-and-clear
+    /// on every one of the millions of nodes a big recalculation walks.
+    ///
+    /// Everything that is not a top-level `+`/`-` goes down the ordinary path
+    /// unchanged, so `=SUM(...)`, `=(a+b-a-b)*1` and a nested add all keep
+    /// their residue — which is what Excel does too.
+    fn eval_root(&self, expr: &Expression) -> EvalResult {
+        match expr {
+            Expression::BinaryOp { left, op: op @ (BinaryOperator::Add | BinaryOperator::Subtract), right } => {
+                if self.budget.charge(1).is_err() {
+                    return EvalResult::Error(CellError::Limit);
+                }
+                self.eval_binary_op_snapping(left, op, right, true)
+            }
+            other => self.eval_charged(other),
         }
     }
 
@@ -1246,7 +1596,9 @@ impl<'a> Evaluator<'a> {
             Expression::BinaryOp { left, op: BinaryOperator::Intersect, right } => {
                 self.eval_intersect(left, right)
             }
-            Expression::BinaryOp { left, op, right } => self.eval_binary_op(left, op, right),
+            Expression::BinaryOp { left, op, right } => {
+                self.eval_binary_op_snapping(left, op, right, false)
+            }
             Expression::UnaryOp { op, operand } => self.eval_unary_op(op, operand),
             Expression::FunctionCall { func, args, .. } => self.eval_function(func, args),
             Expression::Sheet3DRef { start_sheet, end_sheet, reference, .. } => {
@@ -1438,6 +1790,14 @@ impl<'a> Evaluator<'a> {
             // `error_literals_match_the_lexers_table` pins the two tables
             // against each other.
             Value::Error(lit) => EvalResult::Error(CellError::from_literal(lit)),
+            // AN OMITTED ARGUMENT IS AN EMPTY VALUE, and `Blank` is this
+            // engine's one name for that: 0 in arithmetic, "" in concatenation,
+            // and out of the population entirely for the counting functions --
+            // which is precisely how Excel reads the gap in `=IF(TRUE,,5)`
+            // (0), `=VLOOKUP(x,t,2,)` (FALSE, i.e. exact match) and
+            // `=SUM(1,,2)` (3). Reusing the variant rather than adding a second
+            // "empty" is what stops the two from ever disagreeing.
+            Value::Blank => EvalResult::Blank,
         }
     }
 
@@ -1987,7 +2347,11 @@ impl<'a> Evaluator<'a> {
             Expression::BinaryOp { left, op: BinaryOperator::Intersect, right } => {
                 let a = self.reference_rect(left)?;
                 let b = self.reference_rect(right)?;
-                if a.sheet != b.sheet {
+                // Resolved sheet, not spelling — the same rule `eval_intersect`
+                // applies, and it has to be the same one or a NESTED
+                // intersection would disagree with a flat one about the very
+                // same pair of references.
+                if self.resolved_sheet_key(&a.sheet) != self.resolved_sheet_key(&b.sheet) {
                     return None;
                 }
                 let rect = RefRect {
@@ -2025,9 +2389,10 @@ impl<'a> Evaluator<'a> {
             // inventing a value: there is nothing for the two to have in common.
             return EvalResult::Error(CellError::Null);
         };
-        // A `None` sheet means "this sheet", so it matches another `None`. Two
-        // different sheets have no cells in common at all.
-        if a.sheet != b.sheet {
+        // Two different sheets have no cells in common at all — but the test is
+        // which sheet each operand RESOLVES to, never how it is spelled. See
+        // `resolved_sheet_key`.
+        if self.resolved_sheet_key(&a.sheet) != self.resolved_sheet_key(&b.sheet) {
             return EvalResult::Error(CellError::Null);
         }
 
@@ -2078,11 +2443,16 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn eval_binary_op(
+    /// `is_final` is true only for the outermost node of a whole formula, and
+    /// only `eval_root` passes it. It gates Excel's cancellation correction —
+    /// see `number_text::snap_cancellation` for the rule and for what it
+    /// deliberately does not cover.
+    fn eval_binary_op_snapping(
         &self,
         left: &Expression,
         op: &BinaryOperator,
         right: &Expression,
+        is_final: bool,
     ) -> EvalResult {
         let left_val = self.evaluate(left);
         let right_val = self.evaluate(right);
@@ -2106,7 +2476,20 @@ impl<'a> Evaluator<'a> {
             return self.lift_binary_op(&left_val, op, &right_val);
         }
 
-        self.apply_binary_values(&left_val, op, &right_val)
+        let out = self.apply_binary_values(&left_val, op, &right_val);
+        if !is_final {
+            return out;
+        }
+        // EXCEL'S CANCELLATION CORRECTION, on the last operation and nowhere
+        // else. Without it `=1.333+1.225-1.333-1.225` answers
+        // -2.220446049250313E-16 where Excel answers 0, and every `=…=0` test a
+        // user writes over such a formula answers FALSE.
+        match (&out, left_val.as_number(), right_val.as_number()) {
+            (EvalResult::Number(n), Some(l), Some(r)) => {
+                EvalResult::Number(crate::number_text::snap_cancellation(*n, l, r))
+            }
+            _ => out,
+        }
     }
 
     /// One scalar application of a binary operator. Split out of
@@ -2300,24 +2683,136 @@ impl<'a> Evaluator<'a> {
         )
     }
 
+    /// EXCEL'S COMPARISON LADDER: operands are ranked by TYPE CLASS FIRST, and
+    /// only values inside the SAME class are ever compared to each other.
+    ///
+    /// `number  <  text  <  FALSE  <  TRUE`
+    ///
+    /// So ANY text outranks ANY number (`="1">2` is TRUE, and so is
+    /// `="a">1E308`), and ANY boolean outranks ANY text. Within text the
+    /// comparison is case-INSENSITIVE; within booleans FALSE precedes TRUE;
+    /// within numbers it is the ordinary numeric order.
+    ///
+    /// WHY THIS IS ONE FUNCTION AND NOT FIVE COPIES. `=`, `<`, `>`, `<=` and
+    /// `>=` are five entry points to ONE rule. When each reduced its operands
+    /// through `as_number()` instead, the five drifted into mutually
+    /// inconsistent answers that no single test would have caught: `="1"=1` was
+    /// TRUE (text parsed to a number), `="1">2` was FALSE (same parse, opposite
+    /// direction), and `="a">1` was `#VALUE!` (no parse at all, so the ordering
+    /// operators fell off their numeric branch into a text-vs-text arm a number
+    /// cannot enter). Chained comparisons were the visible symptom: `=1<2<3`
+    /// answered TRUE because the intermediate `TRUE` re-entered as the number 1,
+    /// where Excel says FALSE because TRUE outranks every number.
+    ///
+    /// WHY ARITHMETIC MUST NOT USE THIS. The ladder is a COMPARISON rule only.
+    /// Arithmetic keeps coercing text to number — `="1"+1` is 2 and
+    /// `=SUM(1,"2",TRUE)` is 4 — so `as_number()` stays exactly where it is in
+    /// `eval_add` and friends. Routing arithmetic through the ladder would make
+    /// `="1"+1` a `#VALUE!`.
+    ///
+    /// `None` means "not comparable at all" — an array, list, dict or lambda
+    /// operand, or a NaN that escaped `finite_or_num`. Callers map it the way
+    /// they always did: `#VALUE!` for the ordering operators, `false` for `=`.
+    ///
+    /// BLANKS NEVER REACH HERE AS BLANKS. `comparison_operands` has already
+    /// resolved a blank against the other side (0 / "" / FALSE), which is what
+    /// keeps `=A1=0` and `=A1=""` both TRUE for the same empty cell.
+    fn excel_comparison_ordering(
+        left: &EvalResult,
+        right: &EvalResult,
+    ) -> Option<std::cmp::Ordering> {
+        /// The rung, not the value. Blank is absent deliberately — see above.
+        fn class(v: &EvalResult) -> Option<u8> {
+            match v {
+                EvalResult::Number(_) => Some(0),
+                EvalResult::Text(_) => Some(1),
+                EvalResult::Boolean(_) => Some(2),
+                _ => None,
+            }
+        }
+        let (lc, rc) = (class(left)?, class(right)?);
+        if lc != rc {
+            return Some(lc.cmp(&rc));
+        }
+        match (left, right) {
+            // EXACT, not epsilon. The old `(l - r).abs() < f64::EPSILON` was an
+            // ABSOLUTE tolerance of 2.22e-16: meaningless above magnitude ~1
+            // (where it is finer than the spacing of the floats themselves) and
+            // actively wrong below it, where it declared genuinely different
+            // numbers equal — `=1E-300=2E-300` was TRUE, and so was
+            // `=1E-300=0`. Excel's `=` compares the stored doubles.
+            (EvalResult::Number(l), EvalResult::Number(r)) => l.partial_cmp(r),
+            (EvalResult::Text(l), EvalResult::Text(r)) => Some(crate::text_cmp::cmp_ci(l, r)),
+            (EvalResult::Boolean(l), EvalResult::Boolean(r)) => Some(l.cmp(r)),
+            // Unreachable: same class implies one of the three arms above.
+            _ => None,
+        }
+    }
+
+    /// THE ONE EXACT-MATCH LOOKUP EQUALITY. Every exact lookup in the engine
+    /// asks this and nothing else: `MATCH(...,0)`, `VLOOKUP`/`HLOOKUP` with
+    /// `range_lookup` FALSE, `XLOOKUP` `match_mode` 0 (and the non-text needles
+    /// that fall out of `match_mode` 2), `LOOKUP`'s exact probe, `SWITCH`, and
+    /// the pass-cache index in `lookup_cache.rs`.
+    ///
+    /// IT IS THE `=` OPERATOR'S OWN PREDICATE — the ladder returning `Equal` —
+    /// and that is the whole point. "Excel's exact-match lookup is
+    /// case-insensitive for text, exact for numbers, and never matches across
+    /// types" is a WORD-FOR-WORD restatement of the `Equal` rung of
+    /// `excel_comparison_ordering`, so writing it a second time can only
+    /// produce a second answer. It did: in ONE build, on ONE column holding
+    /// 2E-300, `=MATCH(2E-300,A1:A4,0)` found row 2 while
+    /// `=VLOOKUP(1E-300,A1:B4,2,FALSE)` ALSO found it — because the three
+    /// hand-written predicates used three different number tests:
+    ///
+    /// ```text
+    /// values_equal          |a-b| < 1e-10       VLOOKUP / HLOOKUP / LOOKUP
+    /// eval_values_equal     a == b              MATCH 0 / SWITCH
+    /// xlookup_values_equal  |a-b| < f64::EPSILON + Number<->Text cross-typing
+    /// ```
+    ///
+    /// and two different case folds (`eq_ignore_ascii_case` for VLOOKUP,
+    /// Unicode uppercase for the other two). Three measured disagreements, all
+    /// silent WRONG ROWS rather than errors:
+    ///   - `=VLOOKUP(1E-300,A1:B4,2,FALSE)` and `=XLOOKUP(1E-300,…)` both
+    ///     returned the row holding 2E-300; `=MATCH` and `=` said no match.
+    ///   - `=VLOOKUP("STRASSE",…,FALSE)` was `#N/A` over a cell holding
+    ///     "Straße" while `=MATCH`, `=XLOOKUP`, `=COUNTIF` and `=` all matched
+    ///     it — an ASCII-only fold in a product that ships Swedish by default.
+    ///   - `=XLOOKUP("1",A1:A4,B1:B4)` returned the row of the NUMBER 1 rather
+    ///     than the row of the TEXT "1", because only XLOOKUP cross-typed. Excel
+    ///     does not: a lookup value of a different type never matches.
+    ///
+    /// THE ONE DELIBERATE DIFFERENCE FROM `=`: no blank resolution. `eval_equal`
+    /// runs `comparison_operands` first, which resolves a blank against the
+    /// other operand (0 / "" / FALSE) so `=A1=0` is TRUE for an empty cell. A
+    /// lookup must NOT do that — an empty cell in a key column would then match
+    /// a needle of 0, silently returning the payload of a blank row. All three
+    /// predicates already declined to match blanks, so this preserves their
+    /// shared behaviour exactly; the ladder answers `None` for a blank, which
+    /// is not `Equal`.
+    ///
+    /// MIRRORED IN THE PASS CACHE. `lookup_cache::ExactIndex` builds a hash/
+    /// sorted-vector index that must answer identically or the same formula
+    /// gives two answers depending on whether a recalc pass guard happens to be
+    /// held. Its `EqFamily` enum is gone for the same reason this function
+    /// exists: one predicate cannot have three cache families.
+    pub(crate) fn exact_lookup_equal(a: &EvalResult, b: &EvalResult) -> bool {
+        matches!(
+            Self::excel_comparison_ordering(a, b),
+            Some(std::cmp::Ordering::Equal)
+        )
+    }
+
     fn eval_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
         let (left, right) = Self::comparison_operands(left, right);
-        let (left, right) = (&left, &right);
-        let result = match (left, right) {
-            (EvalResult::Number(l), EvalResult::Number(r)) => (l - r).abs() < f64::EPSILON,
-            (EvalResult::Text(l), EvalResult::Text(r)) => crate::text_cmp::eq_ci(l, r),
-            (EvalResult::Boolean(l), EvalResult::Boolean(r)) => l == r,
-            // Cross-type comparisons
-            (EvalResult::Number(n), EvalResult::Text(s))
-            | (EvalResult::Text(s), EvalResult::Number(n)) => {
-                if let Ok(parsed) = s.parse::<f64>() {
-                    (parsed - n).abs() < f64::EPSILON
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        };
+        // A cross-CLASS pair is simply unequal — there is no parse of `"1"` into
+        // 1 here, which is why `="1"=1` and `=TRUE=1` are both FALSE.
+        // Incomparable operands keep answering FALSE rather than #VALUE!.
+        let result = matches!(
+            Self::excel_comparison_ordering(&left, &right),
+            Some(std::cmp::Ordering::Equal)
+        );
         EvalResult::Boolean(result)
     }
 
@@ -2328,71 +2823,37 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn eval_less_than(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+    /// The four ordering operators differ ONLY in which `Ordering`s they accept,
+    /// so they share the ladder and one error policy: an operand that has no
+    /// rung at all (array/list/dict/lambda) is `#VALUE!`, exactly as before.
+    fn eval_ordering_op(
+        left: &EvalResult,
+        right: &EvalResult,
+        accept: fn(std::cmp::Ordering) -> bool,
+    ) -> EvalResult {
         // A blank resolves against the other operand first — see
         // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
         let (left, right) = Self::comparison_operands(left, right);
-        let (left, right) = (&left, &right);
-        match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => EvalResult::Boolean(l < r),
-            _ => {
-                // String comparison
-                match (left, right) {
-                    (EvalResult::Text(l), EvalResult::Text(r)) => {
-                        EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_lt())
-                    }
-                    _ => EvalResult::Error(CellError::Value),
-                }
-            }
+        match Self::excel_comparison_ordering(&left, &right) {
+            Some(o) => EvalResult::Boolean(accept(o)),
+            None => EvalResult::Error(CellError::Value),
         }
+    }
+
+    fn eval_less_than(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
+        Self::eval_ordering_op(left, right, std::cmp::Ordering::is_lt)
     }
 
     fn eval_greater_than(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
-        // A blank resolves against the other operand first — see
-        // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
-        let (left, right) = Self::comparison_operands(left, right);
-        let (left, right) = (&left, &right);
-        match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => EvalResult::Boolean(l > r),
-            _ => match (left, right) {
-                (EvalResult::Text(l), EvalResult::Text(r)) => {
-                    EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_gt())
-                }
-                _ => EvalResult::Error(CellError::Value),
-            },
-        }
+        Self::eval_ordering_op(left, right, std::cmp::Ordering::is_gt)
     }
 
     fn eval_less_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
-        // A blank resolves against the other operand first — see
-        // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
-        let (left, right) = Self::comparison_operands(left, right);
-        let (left, right) = (&left, &right);
-        match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => EvalResult::Boolean(l <= r),
-            _ => match (left, right) {
-                (EvalResult::Text(l), EvalResult::Text(r)) => {
-                    EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_le())
-                }
-                _ => EvalResult::Error(CellError::Value),
-            },
-        }
+        Self::eval_ordering_op(left, right, std::cmp::Ordering::is_le)
     }
 
     fn eval_greater_equal(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
-        // A blank resolves against the other operand first — see
-        // `coerce_blank_for_comparison`. Without it `=A1<"a"` was #VALUE!.
-        let (left, right) = Self::comparison_operands(left, right);
-        let (left, right) = (&left, &right);
-        match (left.as_number(), right.as_number()) {
-            (Some(l), Some(r)) => EvalResult::Boolean(l >= r),
-            _ => match (left, right) {
-                (EvalResult::Text(l), EvalResult::Text(r)) => {
-                    EvalResult::Boolean(crate::text_cmp::cmp_ci(l, r).is_ge())
-                }
-                _ => EvalResult::Error(CellError::Value),
-            },
-        }
+        Self::eval_ordering_op(left, right, std::cmp::Ordering::is_ge)
     }
 
     /// Evaluates a unary operation.
@@ -3385,15 +3846,152 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Collects numeric values from evaluated arguments, flattening arrays and unpacking List/Dict.
+    ///
+    /// # The DIRECT-vs-INDIRECT rule enters here, and only here
+    ///
+    /// Every aggregate in the file — SUM, AVERAGE, COUNT, MAX, MIN, PRODUCT,
+    /// SUMSQ, MEDIAN, MODE, the STDEV/VAR family, LARGE/SMALL, PERCENTILE,
+    /// FREQUENCY, the regression functions — reaches its population through
+    /// this one method, so the rule is decided once instead of forty times.
+    ///
+    /// An argument is DIRECT unless it is spelled as a REFERENCE. That single
+    /// syntactic test is what makes `=SUM(B1)` over a text cell 0 while
+    /// `=SUM("2")` is 2: the values are the same, so the value alone cannot
+    /// decide, and the reference is visible only in the expression. Everything
+    /// reached by RECURSION — the members of an array, a list, a dict — is
+    /// indirect by construction, which covers `={1,"2"}` and every computed
+    /// array such as `A1:A3&""` without needing to inspect the expression.
+    ///
+    /// WHAT IS DELIBERATELY NOT IMPLEMENTED. Excel also treats the result of a
+    /// reference-RETURNING function (`INDEX`, `OFFSET`, `INDIRECT`) as
+    /// indirect, so `=SUM(INDIRECT("B1"))` over a text cell is 0 there and 2
+    /// here. That is the same reference-propagation Calcula already declines at
+    /// `collapse_blank` — implementing it means threading reference-ness
+    /// through every function's return, not adding three names to a list, and a
+    /// three-name list would be wrong for `=SUM(INDEX({1,"2"},2))`, where the
+    /// array constant makes INDEX return a value.
+    ///
+    /// # THIS FRAME IS ON THE DEEP RECURSION PATH — measured, not assumed
+    ///
+    /// A recursive LAMBDA that calls an aggregate reaches its next level through
+    /// `self.evaluate(arg)` BELOW, so every byte this frame costs is paid
+    /// `MAX_LAMBDA_DEPTH` times over — twice per level for a body like the one
+    /// `the_deepest_allowed_recursion_fits_in_half_the_smallest_thread_stack`
+    /// measures, which nests `SUM(...MAX(...))`. That test's budget is 1 MiB and
+    /// the deepest legal recursion already used 999,655 bytes of it BEFORE this
+    /// change: 95%, with 48 KB of headroom.
+    ///
+    /// The obvious spelling — a `let direct = !Self::is_reference_argument(arg);`
+    /// next to the evaluate — cost **126 KB** (≈248 bytes per call, at two calls
+    /// per level) and overflowed the stack outright. Adding the same `bool` as a
+    /// PARAMETER cost zero. So the expression is handed DOWN to
+    /// `collect_numbers_recursive`, which is called only after `evaluate` has
+    /// returned and is therefore never on the recursive stack, and the classify
+    /// call is made from there. Both spellings were built and measured; the
+    /// difference is 126,496 bytes, and it is the reason for the `Option`.
     fn collect_numbers(&self, args: &[Expression]) -> Result<Vec<f64>, CellError> {
         let mut numbers = Vec::new();
 
         for arg in args {
             let result = self.evaluate(arg);
-            Self::collect_numbers_recursive(result, &mut numbers)?;
+            Self::collect_numbers_recursive(result, &mut numbers, Some(arg))?;
         }
 
         Ok(numbers)
+    }
+
+    /// Whether this argument delivers its value THROUGH A REFERENCE, which is
+    /// the half of Excel's coercion rule that a value cannot answer.
+    ///
+    /// A multi-cell reference already gives itself away at runtime — it
+    /// materialises as an `Array`, and the collector's recursion treats array
+    /// members as indirect. The case that needs this test is the SINGLE-cell
+    /// reference, which arrives as a bare scalar indistinguishable from a typed
+    /// literal: without it `=SUM(B1)` and `=MAX(D1)` still coerce, so a column
+    /// of text would total correctly under `=SUM(B1:B3)` and wrongly under
+    /// `=SUM(B1)+SUM(B2)+SUM(B3)`.
+    ///
+    /// # This is a CLASS, not a list of spellings
+    ///
+    /// The first version of this function listed the eight leaf reference nodes
+    /// and stopped, and the omission was not academic: the INTERSECTION operator
+    /// (`A1:A3 A2:C2`) shipped in the same programme, and a single-cell
+    /// intersection over a text cell reached the collector as a bare scalar. So
+    /// `=SUM(A1:A3 A2:C2)` COERCED the text and answered 2 while `=SUM(A2)` —
+    /// the identical cell, reached by the identical rule — answered 0. Two
+    /// spellings of one cell read, two totals.
+    ///
+    /// Every arm below is a form that produces a reference from OTHER
+    /// references, decided SYNTACTICALLY, which is what makes it sound:
+    ///
+    ///   * `ref ref` (intersection) — an overlap of two references is a
+    ///     reference. Both sides must be, or it is not a legal intersection
+    ///     anyway.
+    ///   * `INDEX(ref, …)` — a reference iff the SOURCE is one. This is the
+    ///     distinction the old comment said a name-list could not make, and the
+    ///     reason the test is on `args[0]` rather than on the function name:
+    ///     `=SUM(INDEX({1,"2"},2))` indexes an ARRAY CONSTANT, whose members are
+    ///     values, and must keep coercing to 2.
+    ///   * `OFFSET(ref, …)` — same test, same reason.
+    ///   * `INDIRECT(text)` — its whole purpose is to build a reference out of
+    ///     text; there is no argument shape that makes it return a value.
+    ///   * `IF(c, ref, ref)` / `CHOOSE(n, ref, …)` — a reference iff EVERY
+    ///     branch it could return is one. Which branch runs is a RUNTIME fact
+    ///     this function cannot see, so requiring all of them keeps the answer
+    ///     correct whichever way the condition goes; a mixed `IF(c,A1,"2")` is
+    ///     classified as a value, which is the safe direction (it coerces, as it
+    ///     did before).
+    ///
+    /// WHAT IS STILL NOT COVERED, deliberately: a LET binding (`=LET(x,A2,
+    /// SUM(x))`) and a LAMBDA parameter carry reference-ness through a NAME,
+    /// which needs the value itself to remember where it came from rather than
+    /// an expression walk. That is the reference-propagation job the old comment
+    /// described, and it is genuinely bigger than this. Pinned as a known
+    /// divergence in `direct_coercion_tests`.
+    ///
+    /// STACK NOTE: this recurses, but it is called from
+    /// `collect_numbers_recursive` AFTER `evaluate` returns — never from the
+    /// deep-recursion frame `collect_numbers` documents — and its depth is
+    /// bounded by expression nesting, which the parser already bounds.
+    fn is_reference_argument(expr: &Expression) -> bool {
+        match expr {
+            Expression::CellRef { .. }
+            | Expression::Range { .. }
+            | Expression::ColumnRef { .. }
+            | Expression::RowRef { .. }
+            | Expression::NamedRef { .. }
+            | Expression::Sheet3DRef { .. }
+            | Expression::TableRef { .. }
+            | Expression::SpillRef { .. } => true,
+            // `@A1:A10` picks ONE cell out of a reference. It is still a cell
+            // read, so it must not start coercing just because it is scalar.
+            Expression::ImplicitIntersection { operand } => Self::is_reference_argument(operand),
+            // THE INTERSECTION OPERATOR — the regression this doc opens with.
+            // A space between two references yields the overlapping reference,
+            // and a 1x1 overlap is a single-cell REFERENCE, not a value.
+            Expression::BinaryOp { left, op: BinaryOperator::Intersect, right } => {
+                Self::is_reference_argument(left) && Self::is_reference_argument(right)
+            }
+            Expression::FunctionCall { func, args, .. } => match func {
+                // Reference-returning iff their SOURCE argument is a reference.
+                BuiltinFunction::Index | BuiltinFunction::Offset => {
+                    args.first().is_some_and(Self::is_reference_argument)
+                }
+                // INDIRECT builds a reference out of text — always.
+                BuiltinFunction::Indirect => !args.is_empty(),
+                // Reference-returning iff EVERY branch is a reference. IF's
+                // two-argument form omits the FALSE branch, which yields the
+                // boolean FALSE — a value — so it never qualifies.
+                BuiltinFunction::If => {
+                    args.len() == 3 && args[1..].iter().all(Self::is_reference_argument)
+                }
+                BuiltinFunction::Choose => {
+                    args.len() >= 2 && args[1..].iter().all(Self::is_reference_argument)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// Two parallel arrays reduced to the positions where BOTH sides carry a
@@ -3434,27 +4032,48 @@ impl<'a> Evaluator<'a> {
     /// a blank (so every arithmetic operator keeps working untouched), which is
     /// exactly why the test has to be made BEFORE asking for the number: the
     /// `other` arm below would otherwise push a zero and change the denominator.
-    fn collect_numbers_recursive(result: EvalResult, numbers: &mut Vec<f64>) -> Result<(), CellError> {
+    ///
+    /// `source` is the PROVENANCE of this value, and it carries Excel's
+    /// direct-vs-indirect coercion rule:
+    ///
+    ///   * `Some(expr)` — the value IS the argument, so it coerces unless
+    ///     `expr` is spelled as a reference. `=SUM(1,"2",TRUE)` is 4.
+    ///   * `None` — the value was found INSIDE a container, so it never
+    ///     coerces. `=SUM({1,"2",TRUE})` is 1, and every recursive call below
+    ///     passes `None` because that is exactly what "inside" means.
+    ///
+    /// Passing the expression rather than a pre-computed `bool` is a stack
+    /// decision, not a taste one; `collect_numbers` documents the 126 KB.
+    ///
+    /// An ERROR still propagates from any depth, left-most first, which is why
+    /// the error arm is tested before anything looks at provenance.
+    fn collect_numbers_recursive(
+        result: EvalResult,
+        numbers: &mut Vec<f64>,
+        source: Option<&Expression>,
+    ) -> Result<(), CellError> {
+        let direct = matches!(source, Some(e) if !Self::is_reference_argument(e));
         match result {
             EvalResult::Error(e) => return Err(e),
             EvalResult::Blank => {}
             EvalResult::Array(arr) => {
                 for item in arr {
-                    Self::collect_numbers_recursive(item, numbers)?;
+                    Self::collect_numbers_recursive(item, numbers, None)?;
                 }
             }
             EvalResult::List(items) => {
                 for item in items {
-                    Self::collect_numbers_recursive(item, numbers)?;
+                    Self::collect_numbers_recursive(item, numbers, None)?;
                 }
             }
             EvalResult::Dict(entries) => {
                 for (_, value) in entries {
-                    Self::collect_numbers_recursive(value, numbers)?;
+                    Self::collect_numbers_recursive(value, numbers, None)?;
                 }
             }
             other => {
-                if let Some(n) = other.as_number() {
+                let n = if direct { other.as_number() } else { other.as_indirect_number() };
+                if let Some(n) = n {
                     numbers.push(n);
                 }
             }
@@ -3512,7 +4131,7 @@ impl<'a> Evaluator<'a> {
         match self.collect_numbers(args) {
             Ok(numbers) => {
                 let sum: f64 = numbers.iter().sum();
-                EvalResult::Number(sum)
+                EvalResult::Number(normalize_zero(sum))
             }
             Err(e) => EvalResult::Error(e),
         }
@@ -3932,11 +4551,19 @@ impl<'a> Evaluator<'a> {
         // before the number is asked for. Without it, SUBTOTAL(1, …) and
         // AGGREGATE(1, …) divide by the whole rectangle instead of by the
         // values in it.
+        //
+        // NEITHER IS TEXT OR A BOOLEAN, and here that needs no provenance flag:
+        // every value in `values` was reached through a reference argument or
+        // through an array, so ALL of them are indirect and `as_indirect_number`
+        // applies unconditionally. Coercing them made `=SUBTOTAL(9, B1:B3)`
+        // disagree with `=SUM(B1:B3)` over the same text column, which is the
+        // worse failure of the two: the user reaches for SUBTOTAL precisely
+        // when they want the filtered total to match the visible one.
         let extract_numbers = || -> Vec<f64> {
             values
                 .iter()
                 .filter(|v| !v.is_blank())
-                .filter_map(|v| v.as_sample_number())
+                .filter_map(|v| v.as_indirect_number())
                 .collect()
         };
 
@@ -4375,8 +5002,22 @@ impl<'a> Evaluator<'a> {
             EvalResult::List(items) => EvalResult::Number(items.len() as f64),
             EvalResult::Dict(entries) => EvalResult::Number(entries.len() as f64),
             _ => {
-                let text = val.as_text();
-                EvalResult::Number(text.len() as f64)
+                // AN ERROR PROPAGATES, it is not measured. `=LEN(1/0)` answered
+                // 7 — the length of the string "#DIV/0!" — so an upstream
+                // division by zero surfaced as an ordinary number that totals
+                // and charts like any other. See the `text_arg!` header.
+                let text = text_arg!(val);
+                // CHARACTERS, NOT BYTES. `str::len()` is a BYTE count, so every
+                // non-ASCII character inflated the answer: `=LEN("é")` was 2 and
+                // `=LEN("åäö")` was 6. This is a Swedish-default product, so the
+                // defect fired on ordinary Swedish words, silently, with a
+                // plausible number on the cell.
+                //
+                // It also made the two halves of one idiom contradict each other:
+                // LEFT/RIGHT/MID/REPLACE have always counted CHARACTERS, so
+                // `=LEFT(A1, LEN(A1)-1)` over "Åke" asked for 3 characters of a
+                // 3-character string and dropped nothing at all.
+                EvalResult::Number(text.chars().count() as f64)
             }
         }
     }
@@ -4386,7 +5027,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         EvalResult::Text(text.to_uppercase())
     }
 
@@ -4395,7 +5036,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         EvalResult::Text(text.to_lowercase())
     }
 
@@ -4404,7 +5045,7 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         // Trim leading/trailing whitespace and collapse internal whitespace
         let trimmed: String = text.split_whitespace().collect::<Vec<&str>>().join(" ");
         EvalResult::Text(trimmed)
@@ -4450,13 +5091,19 @@ impl<'a> Evaluator<'a> {
         let mut parts: Vec<String> = Vec::new();
         for arg in args {
             // An error ANYWHERE propagates, as it does for CONCATENATE and `&`.
-            // `textjoin_collect` pushes an error's literal text, which would
-            // launder `#DIV/0!` into the string — the one thing this file's own
-            // comment at `as_text` condemns.
-            if let EvalResult::Error(e) = self.evaluate(arg) {
+            //
+            // THE PRE-CHECK THAT USED TO STAND HERE ONLY SAW SCALARS. It
+            // evaluated the argument and tested it for `Error`, which is what a
+            // RANGE argument never is — a range evaluates to an `Array`, so
+            // `=CONCAT(A1:A3)` with `#DIV/0!` in A2 sailed past it and
+            // `textjoin_collect` glued the literal "#DIV/0!" into the middle of
+            // the string. The collector now reports the first error it meets, so
+            // the scalar and range routes cannot disagree, and it also stops the
+            // argument being evaluated TWICE (once for the check, once for the
+            // collect) — which doubled the fuel charge of every CONCAT.
+            if let Err(e) = self.textjoin_collect(arg, false, &mut parts) {
                 return EvalResult::Error(e);
             }
-            self.textjoin_collect(arg, false, &mut parts);
         }
 
         // Size cap BEFORE the join, for the reason spelled out in fn_textjoin:
@@ -4478,10 +5125,10 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
 
         let num_chars = if args.len() == 2 {
-            match self.evaluate(&args[1]).as_number() {
+            match arg_or_err!(self.evaluate(&args[1])).as_number() {
                 Some(n) if n < 0.0 => return EvalResult::Error(CellError::Value),
                 Some(n) => n as usize,
                 None => return EvalResult::Error(CellError::Value),
@@ -4499,10 +5146,10 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
 
         let num_chars = if args.len() == 2 {
-            match self.evaluate(&args[1]).as_number() {
+            match arg_or_err!(self.evaluate(&args[1])).as_number() {
                 Some(n) if n < 0.0 => return EvalResult::Error(CellError::Value),
                 Some(n) => n as usize,
                 None => return EvalResult::Error(CellError::Value),
@@ -4522,15 +5169,15 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
 
-        let start = match self.evaluate(&args[1]).as_number() {
+        let start = match arg_or_err!(self.evaluate(&args[1])).as_number() {
             Some(n) if n < 1.0 => return EvalResult::Error(CellError::Value),
             Some(n) => (n as usize) - 1, // Convert to 0-based index
             None => return EvalResult::Error(CellError::Value),
         };
 
-        let num_chars = match self.evaluate(&args[2]).as_number() {
+        let num_chars = match arg_or_err!(self.evaluate(&args[2])).as_number() {
             Some(n) if n < 0.0 => return EvalResult::Error(CellError::Value),
             Some(n) => n as usize,
             None => return EvalResult::Error(CellError::Value),
@@ -4545,9 +5192,9 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
 
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
 
-        let times = match self.evaluate(&args[1]).as_number() {
+        let times = match arg_or_err!(self.evaluate(&args[1])).as_number() {
             Some(n) if n < 0.0 => return EvalResult::Error(CellError::Value),
             Some(n) => n as usize,
             None => return EvalResult::Error(CellError::Value),
@@ -4741,16 +5388,13 @@ impl<'a> Evaluator<'a> {
                     let key = lc::EntryKey {
                         grid: Self::grid_addr(grid),
                         rect: key_rect,
-                        kind: lc::EntryKind::Exact { family: lc::EqFamily::Xlookup, axis: key_axis },
+                        kind: lc::EntryKind::Exact { axis: key_axis },
                     };
                     cache
                         .exact(key, [Some(watch), None], || {
-                            lc::ExactIndex::build(
-                                lc::EqFamily::Xlookup,
-                                &self.cache_vector(grid, &key_rect, key_axis),
-                            )
+                            lc::ExactIndex::build(&self.cache_vector(grid, &key_rect, key_axis))
                         })
-                        .map(|ix| ix.first_match(lc::EqFamily::Xlookup, &lookup_val))
+                        .map(|ix| ix.first_match(&lookup_val))
                 });
                 if let Some(Some(io)) = served {
                     return match io {
@@ -4983,7 +5627,7 @@ impl<'a> Evaluator<'a> {
         for idx in indices {
             let all_match = criteria.iter().all(|(val, arr)| {
                 match match_mode {
-                    0 => self.xlookup_values_equal(val, &arr[idx]),
+                    0 => Self::exact_lookup_equal(val, &arr[idx]),
                     2 => {
                         // Wildcard: if lookup_val is text, use wildcard matching
                         if let EvalResult::Text(pattern) = val {
@@ -4997,7 +5641,7 @@ impl<'a> Evaluator<'a> {
                             }
                         } else {
                             // Non-text values: fall back to exact match
-                            self.xlookup_values_equal(val, &arr[idx])
+                            Self::exact_lookup_equal(val, &arr[idx])
                         }
                     }
                     _ => false, // -1, 1 already rejected above for multi-criteria
@@ -5025,7 +5669,7 @@ impl<'a> Evaluator<'a> {
             1 => {
                 // Linear search first-to-last
                 for (i, item) in lookup_array.iter().enumerate() {
-                    if self.xlookup_values_equal(lookup_val, item) {
+                    if Self::exact_lookup_equal(lookup_val, item) {
                         return Some(i);
                     }
                 }
@@ -5034,7 +5678,7 @@ impl<'a> Evaluator<'a> {
             -1 => {
                 // Linear search last-to-first
                 for (i, item) in lookup_array.iter().enumerate().rev() {
-                    if self.xlookup_values_equal(lookup_val, item) {
+                    if Self::exact_lookup_equal(lookup_val, item) {
                         return Some(i);
                     }
                 }
@@ -5067,7 +5711,41 @@ impl<'a> Evaluator<'a> {
             let mid = lo + (hi - lo) / 2;
             let cmp = self.xlookup_compare(lookup_val, &lookup_array[mid]);
             match cmp {
-                std::cmp::Ordering::Equal => return Some(mid),
+                // NAVIGATE WITH THE ORDERING, DECIDE WITH THE EQUALITY.
+                //
+                // `xlookup_compare` is a SORT order — it reduces both sides
+                // through `as_number()`, so it calls the TEXT "5" equal to the
+                // NUMBER 5. Returning `mid` here therefore matched across types,
+                // and search_mode 2 disagreed with search_mode 1 on the very
+                // same data: over a sorted numeric column,
+                // `=XLOOKUP("5",A1:A4,B1:B4,"NF",0,2)` returned the row of the
+                // number 5 while `…,0,1)` correctly returned "NF". One function,
+                // one argument changed, two answers.
+                //
+                // The ordering still has to drive the DESCENT — a binary search
+                // needs the array's own sort order, and the exact predicate is
+                // not an ordering. So the landing zone is verified: walk the run
+                // the comparator calls equal and take the first member that is
+                // genuinely `exact_lookup_equal`. An empty result is a real
+                // no-match, not a reason to fall back to a scan.
+                std::cmp::Ordering::Equal => {
+                    let mut start = mid;
+                    while start > 0
+                        && self.xlookup_compare(lookup_val, &lookup_array[start - 1])
+                            == std::cmp::Ordering::Equal
+                    {
+                        start -= 1;
+                    }
+                    for (i, item) in lookup_array.iter().enumerate().skip(start) {
+                        if self.xlookup_compare(lookup_val, item) != std::cmp::Ordering::Equal {
+                            break;
+                        }
+                        if Self::exact_lookup_equal(lookup_val, item) {
+                            return Some(i);
+                        }
+                    }
+                    return None;
+                }
                 std::cmp::Ordering::Less => {
                     if ascending { hi = mid; } else { lo = mid + 1; }
                 }
@@ -5268,27 +5946,8 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Checks if two EvalResult values are equal for XLOOKUP matching.
-    /// Numbers compared with epsilon tolerance, strings case-insensitively.
-    fn xlookup_values_equal(&self, a: &EvalResult, b: &EvalResult) -> bool {
-        match (a, b) {
-            (EvalResult::Number(n1), EvalResult::Number(n2)) => (n1 - n2).abs() < f64::EPSILON,
-            (EvalResult::Text(s1), EvalResult::Text(s2)) => {
-                crate::text_cmp::eq_ci(s1, s2)
-            }
-            (EvalResult::Boolean(b1), EvalResult::Boolean(b2)) => b1 == b2,
-            // Cross-type: number vs text that parses to number
-            (EvalResult::Number(n), EvalResult::Text(s))
-            | (EvalResult::Text(s), EvalResult::Number(n)) => {
-                if let Ok(parsed) = s.parse::<f64>() {
-                    (parsed - n).abs() < f64::EPSILON
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
+    // `xlookup_values_equal` is GONE. XLOOKUP's exact match is the same
+    // predicate as every other exact lookup — `Evaluator::exact_lookup_equal`.
 
     // =========================================================================
     // UI Functions
@@ -5505,7 +6164,7 @@ impl<'a> Evaluator<'a> {
                 }
                 // Check for comparison operators
                 if let Some(rest) = trimmed.strip_prefix("<>") {
-                    if let Ok(n) = rest.trim().parse::<f64>() {
+                    if let Some(n) = criteria_number_of_text(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::NotEqual, n);
                     }
                     let rest = rest.trim();
@@ -5519,27 +6178,27 @@ impl<'a> Evaluator<'a> {
                     return CriteriaMatch::TextNotEqual(rest.to_uppercase());
                 }
                 if let Some(rest) = trimmed.strip_prefix("<=") {
-                    if let Ok(n) = rest.trim().parse::<f64>() {
+                    if let Some(n) = criteria_number_of_text(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::LessEqual, n);
                     }
                 }
                 if let Some(rest) = trimmed.strip_prefix(">=") {
-                    if let Ok(n) = rest.trim().parse::<f64>() {
+                    if let Some(n) = criteria_number_of_text(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::GreaterEqual, n);
                     }
                 }
                 if let Some(rest) = trimmed.strip_prefix('<') {
-                    if let Ok(n) = rest.trim().parse::<f64>() {
+                    if let Some(n) = criteria_number_of_text(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::Less, n);
                     }
                 }
                 if let Some(rest) = trimmed.strip_prefix('>') {
-                    if let Ok(n) = rest.trim().parse::<f64>() {
+                    if let Some(n) = criteria_number_of_text(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::Greater, n);
                     }
                 }
                 if let Some(rest) = trimmed.strip_prefix('=') {
-                    if let Ok(n) = rest.trim().parse::<f64>() {
+                    if let Some(n) = criteria_number_of_text(rest) {
                         return CriteriaMatch::ExactNumber(n);
                     }
                     let rest = rest.trim();
@@ -5552,8 +6211,10 @@ impl<'a> Evaluator<'a> {
                 if needs_wildcard_matcher(trimmed) {
                     return CriteriaMatch::Wildcard(trimmed.to_uppercase());
                 }
-                // Try as number
-                if let Ok(n) = trimmed.parse::<f64>() {
+                // Try as number — in the WORKBOOK'S dialect. `"1,5"` is one and
+                // a half in sv-SE and is not a number at all in en-US, and the
+                // engine used to answer the second in both.
+                if let Some(n) = criteria_number_of_text(trimmed) {
                     return CriteriaMatch::ExactNumber(n);
                 }
                 CriteriaMatch::ExactText(trimmed.to_uppercase())
@@ -5584,7 +6245,13 @@ impl<'a> Evaluator<'a> {
             CriteriaMatch::BlankOrEmpty => matches!(value, EvalResult::Text(s) if s.is_empty()),
             CriteriaMatch::OnlyBlank => false,
             CriteriaMatch::NonBlank => true,
-            CriteriaMatch::ExactNumber(n) => value.as_number().map_or(false, |v| (v - n).abs() < 1e-10),
+            // `criteria_number`, NOT `as_number`: the range value is read with
+            // exactly the parser the criteria was read with. See its doc — the
+            // two sides having drifted apart is how a text cell reading "5%"
+            // came to be counted by `=COUNTIF(rng,0.05)`.
+            CriteriaMatch::ExactNumber(n) => {
+                criteria_number(value).map_or(false, |v| (v - n).abs() < 1e-10)
+            }
             CriteriaMatch::ExactBool(b) => {
                 matches!(value, EvalResult::Boolean(v) if v == b)
             }
@@ -5597,7 +6264,7 @@ impl<'a> Evaluator<'a> {
                 other => !crate::text_cmp::eq_ci_folded(&other.as_text(), s),
             },
             CriteriaMatch::Compare(op, n) => {
-                if let Some(v) = value.as_number() {
+                if let Some(v) = criteria_number(value) {
                     match op {
                         CriteriaOp::Greater => v > *n,
                         CriteriaOp::GreaterEqual => v >= *n,
@@ -5917,7 +6584,7 @@ impl<'a> Evaluator<'a> {
         let pair_count = pairs.len() / 2;
         for i in 0..pair_count {
             let case_val = self.evaluate(&pairs[i * 2]);
-            if self.eval_values_equal(&expr_val, &case_val) {
+            if Self::exact_lookup_equal(&expr_val, &case_val) {
                 return self.evaluate(&pairs[i * 2 + 1]);
             }
         }
@@ -5928,14 +6595,9 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn eval_values_equal(&self, a: &EvalResult, b: &EvalResult) -> bool {
-        match (a, b) {
-            (EvalResult::Number(x), EvalResult::Number(y)) => (x - y).abs() < 1e-10,
-            (EvalResult::Text(x), EvalResult::Text(y)) => crate::text_cmp::eq_ci(x, y),
-            (EvalResult::Boolean(x), EvalResult::Boolean(y)) => x == y,
-            _ => false,
-        }
-    }
+    // `eval_values_equal` is GONE. MATCH type 0 and SWITCH ask
+    // `Evaluator::exact_lookup_equal`, which is the same predicate the `=`
+    // operator uses — see its doc for the three answers this file used to give.
 
     fn fn_xor(&self, args: &[Expression]) -> EvalResult {
         if args.is_empty() { return EvalResult::Error(CellError::Value); }
@@ -6735,8 +7397,16 @@ impl<'a> Evaluator<'a> {
             }
         }
 
+        // NUMBERS ONLY, and blanks are not in the population. Every value here
+        // came out of `collect_visible_values`, i.e. through a reference or an
+        // array, so all of it is INDIRECT and none of it coerces — the same
+        // rule `apply_subtotal_aggregate` applies, deliberately spelled the
+        // same way. This extractor is AGGREGATE's own copy of SUBTOTAL's, and
+        // the two have drifted before (`AGGREGATE(3,…)` once disagreed with
+        // `SUBTOTAL(3,…)` about blanks); a text column that totalled under one
+        // and not the other would be the same class of defect.
         let extract_numbers = || -> Vec<f64> {
-            values.iter().filter_map(|v| v.as_sample_number()).collect()
+            values.iter().filter_map(|v| v.as_indirect_number()).collect()
         };
 
         match func_num {
@@ -6962,7 +7632,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_encodeurl(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         let mut encoded = String::new();
         for byte in text.as_bytes() {
             match *byte {
@@ -6981,26 +7651,42 @@ impl<'a> Evaluator<'a> {
 
     fn fn_find(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-        let find_text = self.evaluate(&args[0]).as_text();
-        let within_text = self.evaluate(&args[1]).as_text();
-        let start = if args.len() == 3 {
-            match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) }
+        let find_text = text_arg!(self.evaluate(&args[0]));
+        let within_text = text_arg!(self.evaluate(&args[1]));
+        let start_char = if args.len() == 3 {
+            match arg_or_err!(self.evaluate(&args[2])).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) }
         } else { 0 };
-        if start > within_text.len() { return EvalResult::Error(CellError::Value); }
-        match within_text[start..].find(&find_text) {
-            Some(pos) => EvalResult::Number((start + pos + 1) as f64),
+        // `start_num` is a CHARACTER position and has to be translated before it
+        // can index bytes. Using it raw both answered a byte position and
+        // PANICKED when it landed mid-character; see `char_to_byte_offset`.
+        let Some(start_byte) = char_to_byte_offset(&within_text, start_char) else {
+            return EvalResult::Error(CellError::Value);
+        };
+        match within_text[start_byte..].find(&find_text) {
+            Some(pos) => EvalResult::Number(byte_offset_to_char_pos(&within_text, start_byte + pos) as f64),
             None => EvalResult::Error(CellError::Value),
         }
     }
 
     fn fn_search(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-        let find_text = self.evaluate(&args[0]).as_text().to_uppercase();
-        let within_text = self.evaluate(&args[1]).as_text().to_uppercase();
-        let start = if args.len() == 3 {
-            match self.evaluate(&args[2]).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) }
+        let find_text = text_arg!(self.evaluate(&args[0])).to_uppercase();
+        let within_text = text_arg!(self.evaluate(&args[1])).to_uppercase();
+        let start_char = if args.len() == 3 {
+            match arg_or_err!(self.evaluate(&args[2])).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) }
         } else { 0 };
-        if start > within_text.len() { return EvalResult::Error(CellError::Value); }
+        // Same character-vs-byte translation FIND needs, and for the same two
+        // reasons: a byte answer, and a panic on a mid-character offset.
+        //
+        // KNOWN REMAINING DIVERGENCE, deliberately not addressed here: SEARCH
+        // uppercases both operands to get its case-insensitivity, and
+        // `to_uppercase` is not length-preserving in Unicode ("ß" becomes "SS"),
+        // so a position reported in the uppercased text can be one past the
+        // position in the original. That is a separate defect in how the
+        // case-folding is done, not in the indexing.
+        let Some(start_byte) = char_to_byte_offset(&within_text, start_char) else {
+            return EvalResult::Error(CellError::Value);
+        };
         // SEARCH supports wildcards — and its match is a PREFIX match, not a
         // whole-remainder one.
         //
@@ -7024,15 +7710,25 @@ impl<'a> Evaluator<'a> {
         // matcher knows how to unescape.
         if needs_wildcard_matcher(&find_text) {
             let prefix_pattern = format!("{}*", find_text);
-            for pos in start..=within_text.len() {
-                if self.xlookup_wildcard_match(&prefix_pattern, &within_text[pos..]) {
-                    return EvalResult::Number((pos + 1) as f64);
+            // Walk CHARACTER boundaries, not byte offsets: `within_text[pos..]`
+            // over a byte range slices through multi-byte characters and panics.
+            // The trailing `len()` entry keeps the old `start..=len` inclusive
+            // bound, which is what lets an all-wildcard pattern match at the end.
+            let boundaries = within_text
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(within_text.len()));
+            for (char_idx, byte_idx) in boundaries.enumerate().skip(start_char) {
+                if self.xlookup_wildcard_match(&prefix_pattern, &within_text[byte_idx..]) {
+                    return EvalResult::Number((char_idx + 1) as f64);
                 }
             }
             EvalResult::Error(CellError::Value)
         } else {
-            match within_text[start..].find(&find_text) {
-                Some(pos) => EvalResult::Number((start + pos + 1) as f64),
+            match within_text[start_byte..].find(&find_text) {
+                Some(pos) => EvalResult::Number(
+                    byte_offset_to_char_pos(&within_text, start_byte + pos) as f64,
+                ),
                 None => EvalResult::Error(CellError::Value),
             }
         }
@@ -7040,16 +7736,16 @@ impl<'a> Evaluator<'a> {
 
     fn fn_substitute(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 3 || args.len() > 4 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
-        let old_text = self.evaluate(&args[1]).as_text();
-        let new_text = self.evaluate(&args[2]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
+        let old_text = text_arg!(self.evaluate(&args[1]));
+        let new_text = text_arg!(self.evaluate(&args[2]));
         if old_text.is_empty() { return EvalResult::Text(text); }
         // Both branches scan the whole subject string (the `find` loop below,
         // and `str::replace` in the else branch). The subject can be arbitrarily
         // long — REPT builds megabytes — and neither loop re-enters `evaluate`.
         charge_arith!(self, text.len() as u64);
         if args.len() == 4 {
-            let instance = match self.evaluate(&args[3]).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+            let instance = match arg_or_err!(self.evaluate(&args[3])).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
             let mut count = 0usize;
             let mut result = String::new();
             let mut remaining = text.as_str();
@@ -7073,10 +7769,10 @@ impl<'a> Evaluator<'a> {
 
     fn fn_replace(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 4 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
-        let start = match self.evaluate(&args[1]).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) };
-        let num_chars = match self.evaluate(&args[2]).as_number() { Some(n) if n >= 0.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
-        let new_text = self.evaluate(&args[3]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
+        let start = match arg_or_err!(self.evaluate(&args[1])).as_number() { Some(n) if n >= 1.0 => (n as usize) - 1, _ => return EvalResult::Error(CellError::Value) };
+        let num_chars = match arg_or_err!(self.evaluate(&args[2])).as_number() { Some(n) if n >= 0.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
+        let new_text = text_arg!(self.evaluate(&args[3]));
         let chars: Vec<char> = text.chars().collect();
         let mut result = String::new();
         for (i, c) in chars.iter().enumerate() {
@@ -7087,25 +7783,39 @@ impl<'a> Evaluator<'a> {
         EvalResult::Text(result)
     }
 
+    /// VALUE(text) — text to number, through THE number parser.
+    ///
+    /// `=VALUE(A1)` and `=A1+0` are the two standard spellings of one question
+    /// and they gave DIFFERENT ANSWERS: this function reached for Rust's
+    /// `f64::from_str` while arithmetic coercion had moved to
+    /// `number_text::parse`, so `=VALUE("5%")` was `#VALUE!` where `="5%"+0`
+    /// was 0.05, `=VALUE("$5")` was `#VALUE!` where `="$5"+0` was 5 — and
+    /// `=VALUE("inf")` put +INFINITY in a cell that `ISNUMBER` then called
+    /// TRUE, which is the one of those that a later comparison mis-answers
+    /// silently. One parser, one answer.
     fn fn_value(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
-        match text.trim().parse::<f64>() {
-            Ok(n) => EvalResult::Number(n),
-            Err(_) => EvalResult::Error(CellError::Value),
+        let text = text_arg!(self.evaluate(&args[0]));
+        match crate::number_text::parse(
+            &text,
+            crate::number_text::active(),
+            crate::number_text::ParsePolicy::COERCION,
+        ) {
+            Some(n) => EvalResult::Number(n),
+            None => EvalResult::Error(CellError::Value),
         }
     }
 
     fn fn_exact(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let a = self.evaluate(&args[0]).as_text();
-        let b = self.evaluate(&args[1]).as_text();
+        let a = text_arg!(self.evaluate(&args[0]));
+        let b = text_arg!(self.evaluate(&args[1]));
         EvalResult::Boolean(a == b) // case-sensitive
     }
 
     fn fn_proper(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         let mut result = String::new();
         let mut capitalize_next = true;
         for c in text.chars() {
@@ -7132,7 +7842,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_code(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         match text.chars().next() {
             Some(c) => EvalResult::Number(c as u32 as f64),
             None => EvalResult::Error(CellError::Value),
@@ -7141,19 +7851,70 @@ impl<'a> Evaluator<'a> {
 
     fn fn_clean(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         EvalResult::Text(text.chars().filter(|c| *c as u32 >= 32).collect())
     }
 
+    /// NUMBERVALUE(text, [decimal_separator], [group_separator]).
+    ///
+    /// THE SEPARATOR ARGUMENTS ARE THE WHOLE POINT OF THIS FUNCTION, so they
+    /// are honoured OVER the workbook locale — a Swedish workbook reading an
+    /// American feed writes `=NUMBERVALUE(A1,".",",")` and must get the
+    /// American reading. They only supply the locale, though: the SPELLINGS
+    /// come from the one parser, which is what stops this function from being
+    /// the last place in the engine where `"inf"` is a number. It was exactly
+    /// that: `=NUMBERVALUE("inf")` answered +INFINITY, because "strip the
+    /// separators and call `f64::from_str`" inherits every dialect Rust has and
+    /// none that Excel has.
+    ///
+    /// Excel's own three rules for it, each asserted in `number_text_tests`:
+    /// empty text is 0 (not an error); whitespace is ignored ANYWHERE, so
+    /// `NUMBERVALUE(" 3 000 ")` is 3000; and only the FIRST character of each
+    /// separator argument is used.
     fn fn_numbervalue(&self, args: &[Expression]) -> EvalResult {
         if args.is_empty() || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
-        let decimal_sep = if args.len() >= 2 { self.evaluate(&args[1]).as_text() } else { ".".to_string() };
-        let group_sep = if args.len() == 3 { self.evaluate(&args[2]).as_text() } else { ",".to_string() };
-        let cleaned = text.replace(&group_sep, "").replace(&decimal_sep, ".");
-        match cleaned.trim().parse::<f64>() {
-            Ok(n) => EvalResult::Number(n),
-            Err(_) => EvalResult::Error(CellError::Value),
+        let text = text_arg!(self.evaluate(&args[0]));
+        let ambient = crate::number_text::active();
+        let decimal = if args.len() >= 2 {
+            match text_arg!(self.evaluate(&args[1])).chars().next() {
+                Some(c) => c,
+                // An EMPTY separator argument is a refusal, not a fallback: it
+                // is a formula that computed its separator and got nothing, and
+                // silently substituting the workbook's would answer with a
+                // dialect nobody asked for.
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else {
+            ambient.decimal
+        };
+        let thousands = if args.len() == 3 {
+            match text_arg!(self.evaluate(&args[2])).chars().next() {
+                Some(c) => c,
+                None => return EvalResult::Error(CellError::Value),
+            }
+        } else if ambient.thousands != decimal {
+            ambient.thousands
+        } else {
+            // THE WORKBOOK'S DEFAULT YIELDS TO THE CALLER'S EXPLICIT CHOICE.
+            // `=NUMBERVALUE("3,5%",",")` in an en-US workbook asks for a comma
+            // decimal and says nothing about grouping; taking the workbook's
+            // comma as the group separator would make the two collide and
+            // refuse a perfectly clear request. The conventional partner of the
+            // decimal the caller named is used instead.
+            if decimal == '.' { ',' } else { '.' }
+        };
+        // One character cannot be both — reachable only when the caller named
+        // the same one twice, which Excel refuses as well.
+        if decimal == thousands { return EvalResult::Error(CellError::Value); }
+        let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        if cleaned.is_empty() { return EvalResult::Number(0.0); }
+        match crate::number_text::parse(
+            &cleaned,
+            crate::number_text::NumberTextLocale { decimal, thousands },
+            crate::number_text::ParsePolicy::NUMBERVALUE,
+        ) {
+            Some(n) => EvalResult::Number(n),
+            None => EvalResult::Error(CellError::Value),
         }
     }
 
@@ -7269,7 +8030,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_datevalue(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         match date_serial::parse_date_string(&text) {
             Some(serial) => EvalResult::Number(serial),
             None => EvalResult::Error(CellError::Value),
@@ -7278,7 +8039,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_timevalue(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         match date_serial::parse_time_string(&text) {
             Some(fraction) => EvalResult::Number(fraction),
             None => EvalResult::Error(CellError::Value),
@@ -7340,7 +8101,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let start = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
         let end = match self.evaluate(&args[1]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
-        let unit = self.evaluate(&args[2]).as_text().to_uppercase();
+        let unit = text_arg!(self.evaluate(&args[2])).to_uppercase();
         if start > end { return EvalResult::Error(CellError::Value); }
         let (sy, sm, sd) = date_serial::serial_to_date(start);
         let (ey, em, ed) = date_serial::serial_to_date(end);
@@ -7514,6 +8275,15 @@ impl<'a> Evaluator<'a> {
         // branch ignoring col_num entirely, and row/col_num 0 behaving as 1.
         // Skipping the array evaluation is unobservable (a pure grid read);
         // args[1]/args[2] evaluate in the same order as the slow path.
+        // ONE INDEX OVER A ONE-DIMENSIONAL ARRAY WALKS IT IN READING ORDER,
+        // whichever way that array happens to lie. `=INDEX(A1:A3,2)` was right
+        // because a single COLUMN takes the `cols <= 1` branch below; the same
+        // formula over the single ROW `A1:C1` computed `row_num * cols` and ran
+        // straight off the end into #REF!. Excel answers B1. Only the
+        // two-argument call is affected — `=INDEX(A1:C1,1,2)` always addressed
+        // correctly — so the arity is part of the test.
+        let one_index = args.len() == 2;
+
         if let Some((min_row, _, min_col, _, rows, cols)) = self.literal_range_rect(&args[0]) {
             let row_num = match self.evaluate(&args[1]).as_number() {
                 Some(n) if n >= 1.0 => (n as usize) - 1,
@@ -7529,7 +8299,11 @@ impl<'a> Evaluator<'a> {
             } else {
                 0
             };
-            let flat_idx = if cols <= 1 { row_num } else { row_num * cols + col_num };
+            let flat_idx = if cols <= 1 || (one_index && rows <= 1) {
+                row_num
+            } else {
+                row_num * cols + col_num
+            };
             if flat_idx >= rows * cols {
                 return EvalResult::Error(CellError::Ref);
             }
@@ -7549,7 +8323,7 @@ impl<'a> Evaluator<'a> {
             _ => return EvalResult::Error(CellError::Value),
         };
         // Determine array dimensions from the range expression
-        let (_rows, cols) = self.get_range_dimensions(&args[0]);
+        let (rows, cols) = self.get_range_dimensions(&args[0]);
         let col_num = if args.len() == 3 {
             match self.evaluate(&args[2]).as_number() {
                 Some(n) if n >= 1.0 => (n as usize) - 1,
@@ -7557,7 +8331,10 @@ impl<'a> Evaluator<'a> {
                 _ => return EvalResult::Error(CellError::Value),
             }
         } else { 0 };
-        if cols <= 1 {
+        // Same one-dimensional reading-order rule as the fast path above, and
+        // this is the branch an ARRAY CONSTANT takes: `=INDEX({1,2,3},2)` was
+        // #REF! while `=INDEX({1;2;3},2)` was 2, from the same three values.
+        if cols <= 1 || (one_index && rows <= 1) {
             // 1D array (single column or row)
             array.get(row_num).cloned().unwrap_or(EvalResult::Error(CellError::Ref))
         } else {
@@ -7640,7 +8417,7 @@ impl<'a> Evaluator<'a> {
                         if self.xlookup_wildcard_match(pattern, &text) {
                             return EvalResult::Number((i + 1) as f64);
                         }
-                    } else if self.eval_values_equal(&lookup_val, val) {
+                    } else if Self::exact_lookup_equal(&lookup_val, val) {
                         return EvalResult::Number((i + 1) as f64);
                     }
                 }
@@ -7693,7 +8470,7 @@ impl<'a> Evaluator<'a> {
     fn fn_indirect(&self, args: &[Expression]) -> EvalResult {
         // INDIRECT("A1") - parse string as cell reference and evaluate
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let ref_text = self.evaluate(&args[0]).as_text();
+        let ref_text = text_arg!(self.evaluate(&args[0]));
         // Simple A1-style reference parsing
         let ref_text = ref_text.trim().to_uppercase();
         // Try to parse as cell reference: e.g., "A1", "AB123"
@@ -8759,6 +9536,12 @@ impl<'a> Evaluator<'a> {
             EvalResult::Boolean(b) => b,
             EvalResult::Number(n) => n != 0.0,
             EvalResult::Text(s) => s.eq_ignore_ascii_case("TRUE"),
+            // `=TEXTJOIN(",",,A1:A3)` -- the omitted middle argument, which
+            // Excel reads as FALSE, i.e. KEEP the empties. The catch-all read it
+            // as TRUE and dropped them, so the joined text came back with fewer
+            // fields than the range had rows and every position after the first
+            // gap was shifted.
+            EvalResult::Blank => false,
             _ => true, // default to TRUE
         };
 
@@ -8768,7 +9551,14 @@ impl<'a> Evaluator<'a> {
         // because it also avoids materialising a whole range to join it.
         let mut parts: Vec<String> = Vec::new();
         for arg in &args[2..] {
-            self.textjoin_collect(arg, ignore_empty, &mut parts);
+            // AN ERROR IN THE INPUT PROPAGATES. `textjoin_push` used to carry
+            // the arm `EvalResult::Error(_) => {}` — a bare comment reading
+            // "skip errors in TEXTJOIN" — so `=TEXTJOIN(",",TRUE,1/0)` answered
+            // the EMPTY STRING and a `#DIV/0!` in the middle of a joined column
+            // came back as one missing field. Excel propagates.
+            if let Err(e) = self.textjoin_collect(arg, ignore_empty, &mut parts) {
+                return EvalResult::Error(e);
+            }
         }
 
         // Excel returns #VALUE! if the result exceeds 32,767 characters. Compute
@@ -8777,14 +9567,23 @@ impl<'a> Evaluator<'a> {
         // allocation this guard exists to prevent has already happened. The
         // parts themselves were charged as they were collected; this is the
         // size axis, which fuel cannot see.
+        //
+        // CHARACTERS, NOT BYTES — the limit is 32,767 CHARACTERS and this used
+        // to sum `p.len()`, which is a BYTE count. On this Swedish-default
+        // product every "å" counted twice and every CJK character three times,
+        // so a 16,000-character Swedish result was refused with `#VALUE!` for a
+        // cell Excel accepts, and the refusal moved with the DATA rather than
+        // with its length. `chars().count()` walks the parts once, which is the
+        // same order of work the join itself does.
         let joined_len = parts
             .iter()
-            .map(|p| p.len() as u64)
+            .map(|p| p.chars().count() as u64)
             .fold(0u64, |a, b| a.saturating_add(b))
             .saturating_add(
-                (delimiter.len() as u64).saturating_mul(parts.len().saturating_sub(1) as u64),
+                (delimiter.chars().count() as u64)
+                    .saturating_mul(parts.len().saturating_sub(1) as u64),
             );
-        if joined_len > 32_767 {
+        if joined_len > MAX_CELL_TEXT_LEN {
             return EvalResult::Error(CellError::Value);
         }
         EvalResult::Text(parts.join(&delimiter))
@@ -10535,7 +11334,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-        let path = self.evaluate(&args[0]).as_text();
+        let path = text_arg!(self.evaluate(&args[0]));
         match &self.file_reader {
             Some(reader) => match reader(&path) {
                 Some(content) => EvalResult::Text(content),
@@ -10550,7 +11349,7 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-        let path = self.evaluate(&args[0]).as_text();
+        let path = text_arg!(self.evaluate(&args[0]));
         match &self.file_reader {
             Some(reader) => match reader(&path) {
                 Some(content) => EvalResult::Number(content.lines().count() as f64),
@@ -10565,14 +11364,30 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 {
             return EvalResult::Error(CellError::Value);
         }
-        let path = self.evaluate(&args[0]).as_text();
+        let path = text_arg!(self.evaluate(&args[0]));
         match &self.file_reader {
             Some(reader) => EvalResult::Boolean(reader(&path).is_some()),
             None => EvalResult::Boolean(false),
         }
     }
 
-    fn textjoin_collect(&self, expr: &Expression, ignore_empty: bool, parts: &mut Vec<String>) {
+    /// Collects the string parts of one TEXTJOIN/CONCAT argument, or the FIRST
+    /// ERROR it met.
+    ///
+    /// RETURNS A `Result` FOR THE ERROR ARM ALONE. Both callers used to ignore
+    /// what this produced, and an error cell inside a joined range was pushed
+    /// as its literal text (the range branch) or dropped entirely (the value
+    /// branch) — so a `#DIV/0!` in the middle of a column came back either as
+    /// the plausible string "#DIV/0!" glued between two real fields, or as one
+    /// silently MISSING field that shifted every position after it. Excel
+    /// propagates. Reporting the error rather than pushing it is the only way
+    /// the caller can tell the two apart.
+    fn textjoin_collect(
+        &self,
+        expr: &Expression,
+        ignore_empty: bool,
+        parts: &mut Vec<String>,
+    ) -> Result<(), CellError> {
         match expr {
             Expression::Range { start, end, .. } => {
                 // Iterate raw cells in the range to detect empties
@@ -10596,7 +11411,7 @@ impl<'a> Evaluator<'a> {
                     let area = ((r_end - r_start) as u64 + 1)
                         .saturating_mul((c_end - c_start) as u64 + 1);
                     if self.budget.charge(fuel_units(area)).is_err() {
-                        return;
+                        return Ok(());
                     }
                     for r in r_start..=r_end {
                         for c in c_start..=c_end {
@@ -10612,8 +11427,11 @@ impl<'a> Evaluator<'a> {
                                     }
                                     CellValue::Number(n) => parts.push(format!("{}", n)),
                                     CellValue::Boolean(b) => parts.push(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
-                                    // The canonical literal — see EvalResult::as_text.
-                                    CellValue::Error(e) => parts.push(e.as_literal().to_string()),
+                                    // PROPAGATE, do not spell. This pushed
+                                    // `e.as_literal()`, which glued the string
+                                    // "#DIV/0!" into the joined result as if it
+                                    // were data the user had typed.
+                                    CellValue::Error(e) => return Err(e.clone()),
                                     CellValue::List(items) => parts.push(format!("[List({})]", items.len())),
                                     CellValue::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
                                 },
@@ -10627,48 +11445,56 @@ impl<'a> Evaluator<'a> {
             }
             _ => {
                 // Non-range: evaluate normally
-                match self.evaluate(expr) {
-                    EvalResult::Text(s) => {
-                        if !ignore_empty || !s.is_empty() {
-                            parts.push(s);
-                        }
-                    }
-                    // A blank contributes the empty string, and `ignore_empty`
-                    // decides whether that string survives — the same rule the
-                    // range branch above already applied to `CellValue::Empty`.
-                    EvalResult::Blank => {
-                        if !ignore_empty { parts.push(String::new()); }
-                    }
-                    EvalResult::Number(n) => parts.push(format!("{}", n)),
-                    EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
-                    EvalResult::Error(_) => {} // skip errors in TEXTJOIN
-                    EvalResult::List(items) => parts.push(format!("[List({})]", items.len())),
-                    EvalResult::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
-                    EvalResult::Lambda { .. } => parts.push("#LAMBDA".to_string()),
-                    EvalResult::Array(arr) => {
-                        for val in arr {
-                            match val {
-                                EvalResult::Text(s) => {
-                                    if !ignore_empty || !s.is_empty() {
-                                        parts.push(s);
-                                    }
-                                }
-                                EvalResult::Number(n) => parts.push(format!("{}", n)),
-                                EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
-                                // Same rule as the scalar and Range branches: a
-                                // blank contributes "" and `ignore_empty`
-                                // decides whether it survives. Without this arm
-                                // any ARRAY-shaped argument (a whole-column ref,
-                                // OFFSET, TRANSPOSE) silently dropped blanks
-                                // that `A1:A3` kept.
-                                EvalResult::Blank => { if !ignore_empty { parts.push(String::new()); } }
-                                _ => {}
-                            }
-                        }
-                    }
+                Self::textjoin_push(self.evaluate(expr), ignore_empty, parts)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One evaluated value appended to a TEXTJOIN/CONCAT part list.
+    ///
+    /// RECURSIVE, AND THAT IS THE FIX. This used to be a flat `match` with a
+    /// one-level `Array` arm, and the engine's shape convention is that a FLAT
+    /// `Array` is a COLUMN while a ROW is `Array([Array([…])])`. So a
+    /// HORIZONTAL argument — `{1,2,3}`, `A1:C1`, anything TRANSPOSE or TOROW
+    /// produced — arrived as an array whose members were themselves arrays,
+    /// fell through the inner `_ => {}`, and `=CONCAT({1,2,3})` answered the
+    /// EMPTY STRING. `{1;2;3}` answered "123" from the identical data, so the
+    /// bug was invisible to anyone testing one orientation.
+    fn textjoin_push(
+        value: EvalResult,
+        ignore_empty: bool,
+        parts: &mut Vec<String>,
+    ) -> Result<(), CellError> {
+        match value {
+            EvalResult::Text(s) => {
+                if !ignore_empty || !s.is_empty() {
+                    parts.push(s);
+                }
+            }
+            // A blank contributes the empty string, and `ignore_empty`
+            // decides whether that string survives — the same rule the
+            // range branch above already applied to `CellValue::Empty`.
+            EvalResult::Blank => {
+                if !ignore_empty { parts.push(String::new()); }
+            }
+            EvalResult::Number(n) => parts.push(format!("{}", n)),
+            EvalResult::Boolean(b) => parts.push(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
+            // WAS `EvalResult::Error(_) => {}` under the comment "skip errors in
+            // TEXTJOIN". Skipping made the error VANISH: `=TEXTJOIN(",",TRUE,1/0)`
+            // answered the empty string, and one bad cell in a joined column
+            // silently shortened the result by one field.
+            EvalResult::Error(e) => return Err(e),
+            EvalResult::List(items) => parts.push(format!("[List({})]", items.len())),
+            EvalResult::Dict(entries) => parts.push(format!("[Dict({})]", entries.len())),
+            EvalResult::Lambda { .. } => parts.push("#LAMBDA".to_string()),
+            EvalResult::Array(arr) => {
+                for val in arr {
+                    Self::textjoin_push(val, ignore_empty, parts)?;
                 }
             }
         }
+        Ok(())
     }
 
     // ==================== Text Parsing/Conversion Functions ====================
@@ -10676,15 +11502,19 @@ impl<'a> Evaluator<'a> {
     fn fn_textsplit(&self, args: &[Expression]) -> EvalResult {
         // TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])
         if args.is_empty() || args.len() > 6 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
-        let col_delim = if args.len() >= 2 { self.evaluate(&args[1]).as_text() } else { return EvalResult::Error(CellError::Value); };
+        let text = text_arg!(self.evaluate(&args[0]));
+        let col_delim = if args.len() >= 2 { text_arg!(self.evaluate(&args[1])) } else { return EvalResult::Error(CellError::Value); };
         let row_delim = if args.len() >= 3 {
-            let v = self.evaluate(&args[2]);
-            if matches!(v, EvalResult::Boolean(false)) || matches!(v, EvalResult::Number(n) if n == 0.0) || v.as_text().is_empty() {
+            // The row delimiter is a TEXT argument like the others, so an error
+            // in it propagates rather than being split on: `=TEXTSPLIT(a,",",1/0)`
+            // would otherwise have split on the literal "#DIV/0!".
+            let v = arg_or_err!(self.evaluate(&args[2]));
+            let rd = v.text_or_error().unwrap_or_default();
+            if matches!(v, EvalResult::Boolean(false)) || matches!(v, EvalResult::Number(n) if n == 0.0) || rd.is_empty() {
                 None
-            } else { Some(v.as_text()) }
+            } else { Some(rd) }
         } else { None };
-        let _ignore_empty = if args.len() >= 4 { { let _v = self.evaluate(&args[3]); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
+        let _ignore_empty = if args.len() >= 4 { { let _v = arg_or_err!(self.evaluate(&args[3])); matches!(_v, EvalResult::Boolean(true)) || matches!(_v, EvalResult::Number(n) if n != 0.0) } } else { false };
         // Split by rows first, then cols
         if let Some(ref rd) = row_delim {
             let rows: Vec<&str> = text.split(rd.as_str()).collect();
@@ -10703,9 +11533,9 @@ impl<'a> Evaluator<'a> {
     fn fn_textbefore(&self, args: &[Expression]) -> EvalResult {
         // TEXTBEFORE(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])
         if args.len() < 2 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
-        let delimiter = self.evaluate(&args[1]).as_text();
-        let instance = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
+        let text = text_arg!(self.evaluate(&args[0]));
+        let delimiter = text_arg!(self.evaluate(&args[1]));
+        let instance = if args.len() >= 3 { match arg_or_err!(self.evaluate(&args[2])).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
         let if_not_found = if args.len() >= 6 { Some(self.evaluate(&args[5])) } else { None };
         if instance == 0 { return EvalResult::Error(CellError::Value); }
         if delimiter.is_empty() { return EvalResult::Text(String::new()); }
@@ -10732,9 +11562,9 @@ impl<'a> Evaluator<'a> {
     fn fn_textafter(&self, args: &[Expression]) -> EvalResult {
         // TEXTAFTER(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])
         if args.len() < 2 || args.len() > 6 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
-        let delimiter = self.evaluate(&args[1]).as_text();
-        let instance = if args.len() >= 3 { match self.evaluate(&args[2]).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
+        let text = text_arg!(self.evaluate(&args[0]));
+        let delimiter = text_arg!(self.evaluate(&args[1]));
+        let instance = if args.len() >= 3 { match arg_or_err!(self.evaluate(&args[2])).as_number() { Some(n) => n as i32, None => 1 } } else { 1 };
         let if_not_found = if args.len() >= 6 { Some(self.evaluate(&args[5])) } else { None };
         if instance == 0 { return EvalResult::Error(CellError::Value); }
         if delimiter.is_empty() { return EvalResult::Text(text.clone()); }
@@ -10768,7 +11598,19 @@ impl<'a> Evaluator<'a> {
             }
             EvalResult::Number(n) => EvalResult::Text(format_number_clean(n)),
             EvalResult::Boolean(b) => EvalResult::Text(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
-            EvalResult::Error(e) => EvalResult::Text(format!("{:?}", e)),
+            // THE CANONICAL LITERAL, not the Rust variant name. This arm was
+            // `format!("{:?}", e)`, so `=VALUETOTEXT(1/0)` produced the text
+            // "Div0" and `=VALUETOTEXT(NA())` produced "NA" — Rust identifiers
+            // on a spreadsheet cell. Round 1 removed exactly this spelling from
+            // `EvalResult::as_text`; VALUETOTEXT had its own copy of it and was
+            // missed.
+            //
+            // VALUETOTEXT AND ARRAYTOTEXT ARE THE FAMILY'S DELIBERATE
+            // EXEMPTION from error PROPAGATION: their whole job is to render
+            // whatever value they are handed as text, an error included, which
+            // is why an error argument produces "#DIV/0!" here rather than
+            // `#DIV/0!`. Every other text function propagates — see `text_arg!`.
+            EvalResult::Error(e) => EvalResult::Text(e.as_literal().to_string()),
             _ => EvalResult::Text(val.as_text()),
         }
     }
@@ -12850,7 +13692,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_bin2dec(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Num); }
         if s.len() == 10 && s.starts_with('1') {
@@ -12867,7 +13709,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_bin2hex(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Num); }
         let val = if s.len() == 10 && s.starts_with('1') {
@@ -12883,7 +13725,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_bin2oct(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 || s.chars().any(|c| c != '0' && c != '1') { return EvalResult::Error(CellError::Num); }
         let val = if s.len() == 10 && s.starts_with('1') {
@@ -12929,7 +13771,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_hex2bin(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 16) {
@@ -12945,7 +13787,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_hex2dec(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         match i64::from_str_radix(s, 16) {
@@ -12959,7 +13801,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_hex2oct(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 16) {
@@ -12975,7 +13817,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_oct2bin(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 8) {
@@ -12991,7 +13833,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_oct2dec(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         match i64::from_str_radix(s, 8) {
@@ -13005,7 +13847,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_oct2hex(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 1 || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let s = self.evaluate(&args[0]).as_text();
+        let s = text_arg!(self.evaluate(&args[0]));
         let s = s.trim();
         if s.len() > 10 { return EvalResult::Error(CellError::Num); }
         let val = match i64::from_str_radix(s, 8) {
@@ -13059,9 +13901,9 @@ impl<'a> Evaluator<'a> {
     // Complex number functions
     fn fn_complex(&self, args: &[Expression]) -> EvalResult {
         if args.len() < 2 || args.len() > 3 { return EvalResult::Error(CellError::Value); }
-        let real = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let imag = match self.evaluate(&args[1]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let suffix = if args.len() == 3 { let s = self.evaluate(&args[2]).as_text(); if s.is_empty() { "i".to_string() } else { s } } else { "i".to_string() };
+        let real = match arg_or_err!(self.evaluate(&args[0])).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let imag = match arg_or_err!(self.evaluate(&args[1])).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
+        let suffix = if args.len() == 3 { let s = text_arg!(self.evaluate(&args[2])); if s.is_empty() { "i".to_string() } else { s } } else { "i".to_string() };
         EvalResult::Text(format_complex(real, imag, &suffix))
     }
 
@@ -13301,8 +14143,8 @@ impl<'a> Evaluator<'a> {
     fn fn_convert(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 3 { return EvalResult::Error(CellError::Value); }
         let number = match self.evaluate(&args[0]).as_number() { Some(n) => n, None => return EvalResult::Error(CellError::Value) };
-        let from = self.evaluate(&args[1]).as_text();
-        let to = self.evaluate(&args[2]).as_text();
+        let from = text_arg!(self.evaluate(&args[1]));
+        let to = text_arg!(self.evaluate(&args[2]));
         match convert_units(number, &from, &to) {
             Some(v) => EvalResult::Number(v),
             None => EvalResult::Error(CellError::NA),
@@ -13619,7 +14461,7 @@ impl<'a> Evaluator<'a> {
     fn fn_cell(&self, args: &[Expression]) -> EvalResult {
         // CELL(info_type, [reference]) - simplified implementation
         if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
-        let info_type = self.evaluate(&args[0]).as_text().to_uppercase();
+        let info_type = text_arg!(self.evaluate(&args[0])).to_uppercase();
         if args.len() == 2 {
             match &args[1] {
                 Expression::CellRef { col, row, .. } => {
@@ -14721,16 +15563,13 @@ impl<'a> Evaluator<'a> {
                 let key = lc::EntryKey {
                     grid: key_grid,
                     rect,
-                    kind: lc::EntryKind::Exact { family: lc::EqFamily::Vlookup, axis },
+                    kind: lc::EntryKind::Exact { axis },
                 };
                 cache
                     .exact(key, [Some(watch), None], || {
-                        lc::ExactIndex::build(
-                            lc::EqFamily::Vlookup,
-                            &self.cache_vector(grid, &rect, axis),
-                        )
+                        lc::ExactIndex::build(&self.cache_vector(grid, &rect, axis))
                     })
-                    .map(|ix| ix.first_match(lc::EqFamily::Vlookup, lookup_val).map(|i| i as usize))
+                    .map(|ix| ix.first_match(lookup_val).map(|i| i as usize))
             });
             match served {
                 Some(Some(io)) => io,
@@ -14785,17 +15624,14 @@ impl<'a> Evaluator<'a> {
                     let key = lc::EntryKey {
                         grid: key_grid,
                         rect,
-                        kind: lc::EntryKind::Exact { family: lc::EqFamily::Match, axis },
+                        kind: lc::EntryKind::Exact { axis },
                     };
                     cache
                         .exact(key, [Some(watch), None], || {
-                            lc::ExactIndex::build(
-                                lc::EqFamily::Match,
-                                &self.cache_vector(grid, &rect, axis),
-                            )
+                            lc::ExactIndex::build(&self.cache_vector(grid, &rect, axis))
                         })
                         .map(|ix| {
-                            ix.first_match(lc::EqFamily::Match, lookup_val).map(|i| i as usize)
+                            ix.first_match(lookup_val).map(|i| i as usize)
                         })
                 });
                 match served {
@@ -15029,6 +15865,18 @@ impl<'a> Evaluator<'a> {
             match self.evaluate(&args[3]) {
                 EvalResult::Boolean(b) => b,
                 EvalResult::Number(n) => n != 0.0,
+                // A BLANK 4th ARGUMENT IS FALSE -- EXACT MATCH.
+                //
+                // `=VLOOKUP(x,t,2,)` is the shorthand half the spreadsheet
+                // world types for "exact match", and an empty CELL in that slot
+                // means the same thing. The catch-all below read both as TRUE,
+                // so the formula quietly did an APPROXIMATE lookup: over
+                // unsorted data that returns a NEIGHBOURING row's value --
+                // a plausible number from the wrong record, where Excel
+                // answers #N/A. `as_boolean` has said `Blank => false` all
+                // along; this arm is the two lookup functions catching up
+                // with it.
+                EvalResult::Blank => false,
                 _ => true,
             }
         } else {
@@ -15092,7 +15940,7 @@ impl<'a> Evaluator<'a> {
                 let hit = match &pattern {
                     Some(p) => matches!(&row[0], EvalResult::Text(t)
                         if self.xlookup_wildcard_match(p, &t.to_uppercase())),
-                    None => self.values_equal(&row[0], &lookup_val),
+                    None => Self::exact_lookup_equal(&row[0], &lookup_val),
                 };
                 if hit {
                     return row[col_index - 1].clone().collapse_blank();
@@ -15136,6 +15984,10 @@ impl<'a> Evaluator<'a> {
             match self.evaluate(&args[3]) {
                 EvalResult::Boolean(b) => b,
                 EvalResult::Number(n) => n != 0.0,
+                // Blank is FALSE here for the same reason it is in VLOOKUP --
+                // see the note there; the two must agree or `=HLOOKUP(x,t,2,)`
+                // and `=VLOOKUP(x,t,2,)` mean different things.
+                EvalResult::Blank => false,
                 _ => true,
             }
         } else {
@@ -15189,7 +16041,7 @@ impl<'a> Evaluator<'a> {
                 let hit = match &pattern {
                     Some(p) => matches!(val, EvalResult::Text(t)
                         if self.xlookup_wildcard_match(p, &t.to_uppercase())),
-                    None => self.values_equal(val, &lookup_val),
+                    None => Self::exact_lookup_equal(val, &lookup_val),
                 };
                 if hit {
                     return rows[row_index - 1].get(j).cloned().map(EvalResult::collapse_blank).unwrap_or(EvalResult::Error(CellError::NA));
@@ -15369,15 +16221,10 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Helper: check if two EvalResult values are equal (case-insensitive for text).
-    fn values_equal(&self, a: &EvalResult, b: &EvalResult) -> bool {
-        match (a, b) {
-            (EvalResult::Number(na), EvalResult::Number(nb)) => (na - nb).abs() < 1e-10,
-            (EvalResult::Text(ta), EvalResult::Text(tb)) => ta.eq_ignore_ascii_case(tb),
-            (EvalResult::Boolean(ba), EvalResult::Boolean(bb)) => ba == bb,
-            _ => false,
-        }
-    }
+    // `values_equal` is GONE. VLOOKUP/HLOOKUP/LOOKUP exact matching asks
+    // `Evaluator::exact_lookup_equal` — the same predicate as MATCH, XLOOKUP
+    // and the `=` operator. Its 1e-10 tolerance and ASCII-only case fold were
+    // two of the three disagreements that doc records.
 
     // ==================== Additional Math Functions ====================
 
@@ -15422,8 +16269,12 @@ impl<'a> Evaluator<'a> {
     fn fn_sumsq(&self, args: &[Expression]) -> EvalResult {
         match self.collect_numbers(args) {
             Ok(numbers) => {
+                // Same `-0.0` identity as `fn_sum`; SUMSQ was measured returning
+                // it for an empty population too. A sum of SQUARES can never be
+                // legitimately negative, which is what makes the stray sign here
+                // especially indefensible.
                 let sum: f64 = numbers.iter().map(|n| n * n).sum();
-                EvalResult::Number(sum)
+                EvalResult::Number(normalize_zero(sum))
             }
             Err(e) => EvalResult::Error(e),
         }
@@ -15458,7 +16309,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_arabic(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text().trim().to_uppercase();
+        let text = text_arg!(self.evaluate(&args[0])).trim().to_uppercase();
         if text.is_empty() {
             return EvalResult::Number(0.0);
         }
@@ -15551,8 +16402,8 @@ impl<'a> Evaluator<'a> {
     fn fn_decimal(&self, args: &[Expression]) -> EvalResult {
         // DECIMAL(text, radix)
         if args.len() != 2 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text().trim().to_uppercase();
-        let radix = match self.evaluate(&args[1]).as_number() {
+        let text = text_arg!(self.evaluate(&args[0])).trim().to_uppercase();
+        let radix = match arg_or_err!(self.evaluate(&args[1])).as_number() {
             Some(r) if r >= 2.0 && r <= 36.0 => r as u32,
             Some(_) => return EvalResult::Error(CellError::Num),
             None => return EvalResult::Error(CellError::Value),
@@ -15708,7 +16559,7 @@ impl<'a> Evaluator<'a> {
 
     fn fn_unicode(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        let text = self.evaluate(&args[0]).as_text();
+        let text = text_arg!(self.evaluate(&args[0]));
         match text.chars().next() {
             Some(c) => EvalResult::Number(c as u32 as f64),
             None => EvalResult::Error(CellError::Value),
@@ -15764,17 +16615,54 @@ impl<'a> Evaluator<'a> {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]) {
             EvalResult::Error(e) => {
+                // EXHAUSTIVE ON PURPOSE — no `_` arm. The catch-all this
+                // replaces mapped #NULL!, #NUM! and #SPILL! to 3 (#VALUE!), so a
+                // formula that branches on ERROR.TYPE took the #VALUE! path for
+                // four different errors. The worst of those is #NULL!: the
+                // intersection operator exists to produce it, and ERROR.TYPE
+                // could not tell anyone it had. Without the exhaustive match a
+                // future `CellError` variant silently joins them; now it is a
+                // compile error that forces this decision to be made once.
                 let type_num = match e {
+                    // Excel's own table.
+                    CellError::Null => 1,
                     CellError::Div0 => 2,
                     CellError::Value => 3,
                     CellError::Ref => 4,
                     CellError::Name => 5,
+                    CellError::Num => 6,
                     CellError::NA => 7,
-                    // Excel has no #LIMIT!; the failure it reports for a
-                    // runaway LAMBDA recursion is #NUM!, whose ERROR.TYPE code
-                    // is 6. That is the closest true statement available.
+                    // 8 is #GETTING_DATA, which this engine has no variant for.
+                    CellError::Spill => 9,
+
+                    // CALCULA'S OWN ERRORS, which Excel has no code for. Each is
+                    // mapped to the Excel error a user would have to deal with
+                    // in the same way, so a workbook's existing IF(ERROR.TYPE(..)=n)
+                    // branches route them somewhere sane rather than to a
+                    // catch-all that claims they are all #VALUE!.
+                    //
+                    // #LIMIT! -> 6 (#NUM!): Excel reports #NUM! for the runaway
+                    // recursion and the too-large result that #LIMIT! covers.
                     CellError::Limit => 6,
-                    _ => 3, // Default to #VALUE! type for other errors
+                    // #CIRCULAR! -> 2 (#DIV/0!) would be a lie about arithmetic,
+                    // and 3 (#VALUE!) a lie about argument types. Excel does not
+                    // put a circular reference in a cell at all — it shows 0 and
+                    // warns — so there is no true Excel code. 7 (#N/A) is the
+                    // closest honest statement: the value is NOT AVAILABLE,
+                    // which is exactly a cycle's situation, and #N/A is the one
+                    // Excel code that means "no value here" rather than naming a
+                    // fault in the formula.
+                    CellError::Circular => 7,
+                    // #BLOCKED! -> 7 (#N/A) for the same reason and more
+                    // strongly: the user REFUSED to run the code, so the value
+                    // is unavailable by choice. It is not a defect in the
+                    // formula and must not be reported as one.
+                    CellError::Blocked => 7,
+                    // #CONFLICT! -> 3 (#VALUE!). Unlike the two above this IS a
+                    // fault in the workbook's formulas — two of them are fighting
+                    // over one UI effect — and #VALUE! is Excel's "the inputs to
+                    // this are wrong, go look at them".
+                    CellError::Conflict => 3,
                 };
                 EvalResult::Number(type_num as f64)
             }
@@ -15809,7 +16697,7 @@ impl<'a> Evaluator<'a> {
                     match &args[0] {
                         Expression::CellRef { sheet: Some(s), .. } => s.clone(),
                         _ => {
-                            let text = self.evaluate(&args[0]).as_text();
+                            let text = text_arg!(self.evaluate(&args[0]));
                             text
                         }
                     }
@@ -20918,6 +21806,16 @@ mod lambda_recursion_depth_tests {
     /// Measured in a debug build (the expensive case; release frames are much
     /// smaller): 255 levels of this body fit in 1 MiB and do NOT fit in 512 KiB.
     ///
+    /// HOW MUCH ROOM IS ACTUALLY LEFT: 999,655 bytes of the 1,048,576, measured
+    /// 2026-08-24 by recording the lowest stack address reached. That is 95% —
+    /// about 48 KB, or roughly 190 bytes per level. The aggregate collector's
+    /// direct-vs-indirect work overran it by adding ONE function call beside
+    /// the recursive `evaluate` in `collect_numbers`, which cost 248 bytes of
+    /// frame per call and 126 KB in total; passing the same information as a
+    /// parameter instead cost exactly zero. Anything added near a frame on this
+    /// path should be measured the same way rather than reasoned about — the
+    /// cost of a debug frame is not proportional to the source you can see.
+    ///
     /// IF THIS TEST EVER FAILS it will do so by ABORTING THE WHOLE TEST BINARY
     /// with STATUS_STACK_OVERFLOW (0xc00000fd) — a stack overflow is not a
     /// catchable panic. That is the point: it means evaluator frames have grown
@@ -21728,26 +22626,54 @@ mod budget_tests {
     /// plausible number 5 (the length of "Limit"). An error that silently
     /// becomes a number is the exact failure mode this whole feature exists to
     /// prevent, arriving one layer down.
+    ///
+    /// # REWRITTEN — this test used to assert the HALF-FIX
+    ///
+    /// It read `assert_eq!(eval_default("=LEN(1/0)"), Number(7.0))` and
+    /// `assert_eq!(eval_default("=UPPER(1/0)"), Text("#DIV/0!"))`, on the
+    /// reasoning that spelling the error correctly was at least better than
+    /// spelling it "Div0". It is better, and it is still wrong: 7 is a
+    /// PLAUSIBLE LENGTH, so the error was still consumed as data — just data
+    /// that looked more respectable. Excel propagates an error argument out of
+    /// every text function, and Calcula now does too. The OLD expectation was
+    /// `LEN(1/0) = 7` / `UPPER(1/0) = "#DIV/0!"`; the NEW one is `#DIV/0!` for
+    /// both. See `error_propagation_tests.rs` for the whole family.
+    ///
+    /// What survives here is the claim this test was originally written for:
+    /// `as_text` must never emit a Rust identifier. That claim is now checked
+    /// where `as_text`'s error rendering is still REACHABLE — on the method
+    /// itself, and through VALUETOTEXT, the one function whose documented job
+    /// is to render a value (an error included) as text.
     #[test]
     fn an_error_coerced_to_text_is_its_literal_not_a_rust_variant_name() {
-        let cases: &[(&str, &str)] = &[
-            ("1/0", "#DIV/0!"),
-            ("NA()", "#N/A"),
-            ("REPT(\"x\",99999999)", "#LIMIT!"),
+        let cases: &[(&str, CellError, &str)] = &[
+            ("1/0", CellError::Div0, "#DIV/0!"),
+            ("NA()", CellError::NA, "#N/A"),
+            ("REPT(\"x\",99999999)", CellError::Limit, "#LIMIT!"),
         ];
-        for (expr, literal) in cases {
-            // LEN of the coerced error is the length of the LITERAL, never of
-            // "Div0" / "NA" / "Limit".
+        for (expr, err, literal) in cases {
+            // THE PROPAGATION: the error comes out whole, with its identity
+            // intact, rather than being measured.
             assert_eq!(
                 eval_default(&format!("=LEN({expr})")),
-                EvalResult::Number(literal.len() as f64),
-                "{expr} coerced to text as something other than {literal}"
+                EvalResult::Error(err.clone()),
+                "{expr} was consumed as data by LEN instead of propagating"
+            );
+            // THE SPELLING, where it is still observable. A regression to
+            // `format!("{:?}", e)` reds here even though nothing propagates it.
+            assert_eq!(EvalResult::Error(err.clone()).as_text(), *literal);
+            assert_eq!(
+                eval_default(&format!("=VALUETOTEXT({expr})")),
+                EvalResult::Text(literal.to_string()),
+                "VALUETOTEXT is the deliberate exemption and must render the LITERAL"
             );
         }
-        // And the exact text, so a coincidental length cannot pass this.
+        // A CONTROL that must give the other answer: an ordinary argument still
+        // reaches the function body, so this pins propagation rather than a
+        // blanket refusal.
         assert_eq!(
-            eval_default("=UPPER(1/0)"),
-            EvalResult::Text("#DIV/0!".to_string())
+            eval_default("=UPPER(\"abc\")"),
+            EvalResult::Text("ABC".to_string())
         );
     }
 
@@ -21779,6 +22705,55 @@ mod budget_tests {
             Evaluator::new(&small).evaluate(&ok),
             EvalResult::Text("ab-ab-ab".to_string())
         );
+    }
+
+    /// THE TWO TEXT CEILINGS ARE DIFFERENT NUMBERS WITH DIFFERENT ERRORS, and
+    /// this test exists to stop them being "tidied" into one.
+    ///
+    /// Excel's cell limit was spelled as the bare literal `32_767` at TEXTJOIN's
+    /// guard, which is why it never spread anywhere: an unnamed number is not
+    /// findable. It is now `MAX_CELL_TEXT_LEN`. The neighbouring `MAX_TEXT_LEN`
+    /// is a 1 MiB ALLOCATION guard answering `#LIMIT!` and is deliberately set
+    /// far above Excel's ceiling so that large INTERMEDIATE values keep working
+    /// (`ordinary_concatenation_is_unaffected_by_the_text_cap`, above).
+    ///
+    /// Merging them in either direction breaks something real: raising the cell
+    /// limit to 1 MiB loses Excel parity on the result, and lowering the
+    /// allocation cap to 32,767 refuses intermediates that currently compute.
+    #[test]
+    fn the_cell_text_ceiling_and_the_allocation_ceiling_are_distinct() {
+        assert_eq!(
+            MAX_CELL_TEXT_LEN, 32_767,
+            "Excel's cell limit is 32,767 characters; it is a parity fact, not a tunable"
+        );
+        assert!(
+            MAX_TEXT_LEN as u64 > MAX_CELL_TEXT_LEN,
+            "the allocation guard must stay ABOVE the cell limit, or the \
+             intermediate values that ordinary_concatenation_is_unaffected_by_\
+             the_text_cap pins would start failing"
+        );
+
+        // The named constant is the one TEXTJOIN actually enforces, and it
+        // enforces it with Excel's error (#VALUE!), not the allocation guard's
+        // #LIMIT!. A result one character over is refused...
+        let mut over = Grid::new();
+        over.set_cell(0, 0, Cell::new_text("y".repeat(MAX_CELL_TEXT_LEN as usize + 1)));
+        let ast = parser::parse("=TEXTJOIN(\",\",TRUE,A1:A1)").expect("parses");
+        assert_eq!(
+            Evaluator::new(&over).evaluate(&ast),
+            EvalResult::Error(CellError::Value)
+        );
+
+        // ...and a result exactly AT the limit is not. An off-by-one here is
+        // the only way this guard can be wrong, so both sides of the boundary
+        // are asserted rather than just the refusal.
+        let mut at = Grid::new();
+        at.set_cell(0, 0, Cell::new_text("y".repeat(MAX_CELL_TEXT_LEN as usize)));
+        let ast_at = parser::parse("=TEXTJOIN(\",\",TRUE,A1:A1)").expect("parses");
+        match Evaluator::new(&at).evaluate(&ast_at) {
+            EvalResult::Text(t) => assert_eq!(t.len() as u64, MAX_CELL_TEXT_LEN),
+            other => panic!("a result exactly at the ceiling must be allowed, got {:?}", other),
+        }
     }
 }
 
@@ -22122,5 +23097,141 @@ mod error_value_parity_tests {
         assert_eq!(err("=DEC2HEX(5,-1)"), EvalResult::Error(CellError::Num));
         assert_eq!(err("=DEC2BIN(5,4)"), EvalResult::Text("0101".to_string()));
         assert_eq!(err("=DEC2BIN(5)"), EvalResult::Text("101".to_string()));
+    }
+
+    /// `0 ^ 0` is INDETERMINATE, and Excel says so with `#NUM!`.
+    ///
+    /// IEEE-754 defines `powf(0.0, 0.0)` as 1.0, which is a reasonable
+    /// convention for a maths library and the wrong answer for a spreadsheet:
+    /// it arrives with no error on the cell. The reachable case is not someone
+    /// typing `=0^0` — it is `=A1^B1` over two EMPTY cells, because a blank
+    /// coerces to 0 in arithmetic. An untouched model therefore reported the
+    /// plausible number 1 where Excel reports that there is nothing to compute.
+    #[test]
+    fn zero_to_the_zero_is_num_not_one() {
+        assert_eq!(err("=0^0"), EvalResult::Error(CellError::Num));
+        // BOTH SPELLINGS. POWER and `^` share `power_result`, and this asserts
+        // they cannot drift apart — a fix applied to one only would leave the
+        // product answering two different things for the same expression.
+        assert_eq!(err("=POWER(0,0)"), EvalResult::Error(CellError::Num));
+        // The reachable route: E1 holds text and Z1..Z2 are empty, so both
+        // operands coerce to 0 exactly as a blank does in Excel.
+        assert_eq!(err("=Z1^Z2"), EvalResult::Error(CellError::Num));
+
+        // CONTROLS — everything adjacent must keep its old answer, or a guard
+        // that simply refused more cases would satisfy the assertions above.
+        assert_eq!(err("=0^1"), EvalResult::Number(0.0), "0 to a positive power is 0");
+        assert_eq!(err("=1^0"), EvalResult::Number(1.0), "anything else to the 0 is 1");
+        assert_eq!(err("=2^0"), EvalResult::Number(1.0));
+        assert_eq!(err("=POWER(2,0)"), EvalResult::Number(1.0));
+        assert_eq!(err("=2^10"), EvalResult::Number(1024.0));
+        // `0 ^ negative` stays #DIV/0! — it is 1/0, a DIFFERENT error, and
+        // collapsing the two would be the easy wrong fix.
+        assert_eq!(err("=0^-1"), EvalResult::Error(CellError::Div0));
+        assert_eq!(err("=POWER(0,-2)"), EvalResult::Error(CellError::Div0));
+    }
+
+    /// A negative base with a fractional exponent leaves the reals.
+    ///
+    /// MEASURED ALREADY CORRECT before this batch — `finite_or_num` catches the
+    /// NaN `powf` returns — and pinned here because it sits one line from the
+    /// `0^0` guard that was just added and is the obvious thing to break while
+    /// editing it.
+    #[test]
+    fn a_negative_base_with_a_fractional_exponent_is_num() {
+        assert_eq!(err("=(0-8)^(1/3)"), EvalResult::Error(CellError::Num));
+        assert_eq!(err("=POWER(0-8,1/3)"), EvalResult::Error(CellError::Num));
+        assert_eq!(err("=(0-1)^0.5"), EvalResult::Error(CellError::Num));
+        // CONTROL: an INTEGER exponent over a negative base is perfectly real.
+        assert_eq!(err("=(0-8)^2"), EvalResult::Number(64.0));
+        assert_eq!(err("=(0-2)^3"), EvalResult::Number(-8.0));
+    }
+
+    /// ERROR.TYPE's codes are Excel's table, and the match over `CellError` is
+    /// EXHAUSTIVE.
+    ///
+    /// WHAT WAS SILENTLY WRONG. The arm list ended in `_ => 3`, so #NULL!,
+    /// #NUM! and #SPILL! all reported themselves as #VALUE!. A formula that
+    /// branches on ERROR.TYPE — which is the only reason the function exists —
+    /// took the #VALUE! path for four different errors and gave the user a
+    /// diagnosis of the wrong problem. #NULL! is the worst of them: the
+    /// intersection operator was built to produce it, and ERROR.TYPE was
+    /// structurally unable to say so.
+    ///
+    /// THE CATCH-ALL IS GONE, not just filled in. That is the durable half of
+    /// the fix: a `CellError` variant added later is now a COMPILE ERROR at that
+    /// match rather than a silent seventh member of the "3" class.
+    #[test]
+    fn error_type_gives_each_error_its_own_excel_code() {
+        // Excel's table, in full, each produced by a formula that genuinely
+        // raises that error rather than by a literal.
+        assert_eq!(err("=ERROR.TYPE(A1:A5 C1:C5)"), EvalResult::Number(1.0), "#NULL!");
+        assert_eq!(err("=ERROR.TYPE(1/0)"), EvalResult::Number(2.0), "#DIV/0!");
+        assert_eq!(err("=ERROR.TYPE(SQRT(0-1))"), EvalResult::Number(6.0), "#NUM!");
+        assert_eq!(err("=ERROR.TYPE(NA())"), EvalResult::Number(7.0), "#N/A");
+        assert_eq!(err("=ERROR.TYPE(NOSUCHFN())"), EvalResult::Number(5.0), "#NAME?");
+        // #VALUE! itself must still be 3 — the old catch-all's value. Without
+        // this control, a fix that renumbered everything would pass above.
+        assert_eq!(err("=ERROR.TYPE(SQRT(\"x\"))"), EvalResult::Number(3.0), "#VALUE!");
+
+        // THE THREE THAT USED TO COLLIDE, asserted as MUTUALLY DISTINCT rather
+        // than only against their expected values. This is the assertion the
+        // defect would have failed even if someone had "fixed" it by moving the
+        // collision to a different code.
+        let null = err("=ERROR.TYPE(A1:A5 C1:C5)");
+        let num = err("=ERROR.TYPE(SQRT(0-1))");
+        let value = err("=ERROR.TYPE(SQRT(\"x\"))");
+        assert_ne!(null, value, "#NULL! and #VALUE! were both 3");
+        assert_ne!(num, value, "#NUM! and #VALUE! were both 3");
+        assert_ne!(null, num, "#NULL! and #NUM! were both 3");
+
+        // A NON-error argument is #N/A, not a code. Unchanged, and asserted so
+        // the rewrite cannot have turned every value into a number.
+        assert_eq!(err("=ERROR.TYPE(1)"), EvalResult::Error(CellError::NA));
+        assert_eq!(err("=ERROR.TYPE(\"x\")"), EvalResult::Error(CellError::NA));
+    }
+
+    /// The codes chosen for Calcula's OWN errors, which Excel has no number for.
+    ///
+    /// Pinned because they are JUDGEMENT CALLS (recorded at the match arm), not
+    /// derivable facts, and an undocumented silent change to one would reroute
+    /// a user's existing `IF(ERROR.TYPE(..)=n, ...)` branches. The reasoning:
+    /// #LIMIT! -> 6 because Excel reports #NUM! for the runaway recursion and
+    /// oversized result it covers; #CIRCULAR! and #BLOCKED! -> 7 (#N/A) because
+    /// both mean "there is no value here", not "your formula is faulty" — and
+    /// for #BLOCKED! the absence is the USER'S OWN refusal to run code, which
+    /// must never be reported as a defect in their formula; #CONFLICT! -> 3
+    /// (#VALUE!) because that one IS a fault in the workbook's formulas.
+    #[test]
+    fn error_type_maps_calculas_own_errors_to_a_chosen_excel_code() {
+        // #LIMIT!, raised by asking REPT for a string past the size cap.
+        assert_eq!(err("=ERROR.TYPE(REPT(\"x\",99999999))"), EvalResult::Number(6.0));
+        // The remaining three have no formula that raises them from a bare
+        // evaluator (they come from the dependency graph, the consent gate and
+        // the UI-effect resolver), so they are asserted through the same match
+        // by way of the ERROR.TYPE arm's contract: every variant has a code, and
+        // none of them is the old catch-all by accident.
+        for (e, expected) in [
+            (CellError::Limit, 6.0),
+            (CellError::Circular, 7.0),
+            (CellError::Blocked, 7.0),
+            (CellError::Conflict, 3.0),
+            (CellError::Spill, 9.0),
+            (CellError::Null, 1.0),
+            (CellError::Num, 6.0),
+        ] {
+            let mut grid = Grid::new();
+            let mut cell = Cell::new();
+            cell.value = crate::cell::CellValue::Error(e.clone());
+            grid.set_cell(0, 0, cell);
+            let ast = parser::parse("=ERROR.TYPE(A1)").expect("parses");
+            assert_eq!(
+                Evaluator::new(&grid).evaluate(&ast),
+                EvalResult::Number(expected),
+                "{:?} must report {}",
+                e,
+                expected
+            );
+        }
     }
 }

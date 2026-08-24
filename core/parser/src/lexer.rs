@@ -187,6 +187,48 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// The RAW TEXT of a structured-reference bracket body, consumed through
+    /// its matching `]`, or `None` if end of input arrives first.
+    ///
+    /// CALLED WHEN THE PARSER'S CURRENT TOKEN IS THE OPENING `[`, which is the
+    /// one moment the body is still readable as the user typed it: the
+    /// character stream sits immediately after that `[`, and the next
+    /// `next_token` would uppercase, split and re-spell what follows. A column
+    /// name is DATA -- `Cost (USD)`, `Sales%`, `Profit-Loss`, `A:B` are all
+    /// legal Excel column names -- and reading it as tokens either mangled it
+    /// (a space appearing inside `Profit-Loss`) or refused it outright.
+    ///
+    /// The `'` escape is honoured HERE and not merely later, because it decides
+    /// where the body ENDS: in `[Cost '[USD']]` the escaped `]` must not close
+    /// the reference. The escape characters are left in the returned text so the
+    /// specifier reader can still tell a structural `,` `:` `[` `]` from one
+    /// that is part of a name; they are removed only at the leaves.
+    pub fn scan_bracket_body(&mut self) -> Option<String> {
+        let mut out = String::new();
+        let mut depth = 0usize;
+        loop {
+            let ch = self.input.next()?;
+            match ch {
+                '\'' => {
+                    out.push(ch);
+                    out.push(self.input.next()?);
+                }
+                '[' => {
+                    depth += 1;
+                    out.push(ch);
+                }
+                ']' => {
+                    if depth == 0 {
+                        return Some(out);
+                    }
+                    depth -= 1;
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            }
+        }
+    }
+
     /// Consumes whitespace and reports whether there was any.
     fn skip_whitespace(&mut self) -> bool {
         let mut saw_any = false;
@@ -254,8 +296,14 @@ impl<'a> Lexer<'a> {
             result.push(ch);
             self.input.next();
         }
-        // If we hit EOF without closing quote, return what we have.
-        Token::String(result)
+        // EOF WITH NO CLOSING QUOTE IS A REFUSAL, not a string.
+        //
+        // Returning `Token::String(result)` here -- what this did -- made `="abc`
+        // parse and EVALUATE to the text `abc`. Nothing anywhere reported that a
+        // quote was missing, so the cheapest possible typo produced a cell that
+        // looked deliberate. `read_quoted_identifier` below still has the same
+        // shape for sheet names and is a separate call.
+        Token::UnterminatedString
     }
 
     /// Reads a quoted identifier (sheet name with spaces): 'Sheet Name'

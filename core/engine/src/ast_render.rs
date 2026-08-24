@@ -565,6 +565,15 @@ fn render_value(val: &Value) -> String {
         // uppercases), so this re-lexes to the same literal and the round trip
         // is a fixed point.
         Value::Error(e) => e.clone(),
+        // AN OMITTED ARGUMENT RENDERS AS NOTHING, which is the only spelling
+        // that re-parses to the same call: `IF(TRUE,,5)` keeps its three
+        // arguments because the empty slot between the commas is still there.
+        // Rendering anything at all here -- `0`, `""` -- would show the user a
+        // formula they never typed, and because `.cala` STORES this text and
+        // re-parses it on load, the workbook would come back computing a
+        // different number (`=VLOOKUP(x,t,2,)` is exact match; the `""` it would
+        // have become is `#VALUE!`).
+        Value::Blank => String::new(),
     }
 }
 
@@ -635,9 +644,35 @@ fn needs_quoting(name: &str) -> bool {
 /// part of a multi-part specifier is ALWAYS itself bracketed, and the whole
 /// thing sits inside one outer bracket pair. `parse_nested_bracket_specifier`
 /// is the matching reader; `render_then_parse_is_a_fixed_point` pins the pair.
+/// Puts Excel's `'` escapes back on a column name.
+///
+/// THE OTHER HALF OF THE OPAQUE BRACKET BODY. Now that the parser reads a
+/// bracket body as characters, a name carrying `[`, `]` or `'` renders to text
+/// that would re-parse as STRUCTURE unless it is escaped -- a column called
+/// `Cost [USD]` would come back as a nested specifier, and because the renderer's
+/// output is what `.cala` stores and re-parses, that is a formula silently
+/// changing meaning across a save. A leading `#` or `@` needs the same
+/// protection for the same reason: they are what select the special-region and
+/// this-row forms, and only in first position.
+fn escape_column_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for (i, ch) in name.chars().enumerate() {
+        let needs = match ch {
+            '\'' | '[' | ']' => true,
+            '#' | '@' => i == 0,
+            _ => false,
+        };
+        if needs {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 pub fn render_table_specifier(spec: &TableSpecifier) -> String {
     match spec {
-        TableSpecifier::Column(name) => format!("[{}]", name),
+        TableSpecifier::Column(name) => format!("[{}]", escape_column_name(name)),
         // An EMPTY column name is the bare `[#This Row]` -- the formula's row
         // across the table, naming no column. It has no `@` spelling (`[@]` is a
         // parse error), and there was no arm for it at all: the parser aliased
@@ -645,9 +680,17 @@ pub fn render_table_specifier(spec: &TableSpecifier) -> String {
         // re-spelled the user's own `[#This Row]` as `[#Data]` -- a reference to
         // one row coming back as a reference to the whole table body.
         TableSpecifier::ThisRow(name) if name.is_empty() => "[#This Row]".to_string(),
-        TableSpecifier::ThisRow(name) => format!("[@{}]", name),
-        TableSpecifier::ColumnRange(start, end) => format!("[[{}]:[{}]]", start, end),
-        TableSpecifier::ThisRowRange(start, end) => format!("[[@{}]:[@{}]]", start, end),
+        TableSpecifier::ThisRow(name) => format!("[@{}]", escape_column_name(name)),
+        TableSpecifier::ColumnRange(start, end) => format!(
+            "[[{}]:[{}]]",
+            escape_column_name(start),
+            escape_column_name(end)
+        ),
+        TableSpecifier::ThisRowRange(start, end) => format!(
+            "[[@{}]:[@{}]]",
+            escape_column_name(start),
+            escape_column_name(end)
+        ),
         TableSpecifier::AllRows => "[#All]".to_string(),
         TableSpecifier::DataRows => "[#Data]".to_string(),
         TableSpecifier::Headers => "[#Headers]".to_string(),
@@ -656,7 +699,11 @@ pub fn render_table_specifier(spec: &TableSpecifier) -> String {
             // `render_table_specifier(special)` already carries its own outer
             // brackets (`[#Data]`), which is exactly the inner half Excel wants;
             // the column gets its own, and one more pair wraps the comma.
-            format!("[{},[{}]]", render_table_specifier(special), col)
+            format!(
+                "[{},[{}]]",
+                render_table_specifier(special),
+                escape_column_name(col)
+            )
         }
     }
 }
@@ -1114,6 +1161,59 @@ mod tests {
                 spec
             );
         }
+    }
+
+    /// A COLUMN NAME CARRYING THE STRUCTURAL CHARACTERS MUST SURVIVE A SAVE.
+    ///
+    /// The parser now reads a bracket body as CHARACTERS, so a name holding
+    /// `[`, `]`, `#`, `@` or `'` renders to text that would re-parse as
+    /// STRUCTURE unless the renderer escapes it -- `Cost [USD]` would come back
+    /// as a nested specifier, and `#Rank` as the (unknown) region `#Rank`.
+    /// Because this renderer's output is what `.cala` STORES and re-parses on
+    /// load, an unescaped name is a formula changing meaning across a save,
+    /// with no error at either end.
+    ///
+    /// The names that need NO escape are here as controls: if the escaper
+    /// started quoting everything, `[Amount]` would render `['Amount]` and this
+    /// test would still pass on the round trip -- so the rendered TEXT is
+    /// asserted too.
+    #[test]
+    fn a_column_name_with_structural_characters_round_trips() {
+        for name in [
+            "Cost [USD]",
+            "#Rank",
+            "@Owner",
+            "John's",
+            "A:B",
+            "Cost (USD)",
+            "Sales%",
+            "Profit-Loss",
+        ] {
+            let expr = Expression::TableRef {
+                table_name: "T".to_string(),
+                specifier: TableSpecifier::Column(name.to_string()),
+                ref_site_id: Default::default(),
+            };
+            let text = render_formula_raw(&expr);
+            let reparsed = parser::parse(&text)
+                .unwrap_or_else(|e| panic!("`{}` rendered {:?}, which does not parse: {}", name, text, e));
+            match reparsed {
+                Expression::TableRef { specifier: TableSpecifier::Column(got), .. } => {
+                    assert_eq!(got, name, "`{}` rendered {:?} and came back as `{}`", name, text, got)
+                }
+                other => panic!("`{}` rendered {:?}, which re-parses as {:?}", name, text, other),
+            }
+        }
+        // CONTROL: a name needing no escape is rendered UNQUOTED. Without this
+        // the test would pass on an escaper that quoted every character.
+        assert_eq!(
+            render_formula_raw(&Expression::TableRef {
+                table_name: "T".to_string(),
+                specifier: TableSpecifier::Column("Amount".to_string()),
+                ref_site_id: Default::default(),
+            }),
+            "T[Amount]"
+        );
     }
 
     /// Excel's own spellings must parse, and round-trip to themselves.

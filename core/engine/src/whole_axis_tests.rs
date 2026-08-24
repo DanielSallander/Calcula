@@ -301,3 +301,114 @@ fn a_literal_past_the_numeric_ceiling_is_num_not_infinity() {
     assert!(matches!(eval(&g, BIGNUM), EvalResult::Number(_)));
     assert_eq!(eval(&g, "=1.7E308+0"), EvalResult::Number(1.7e308));
 }
+
+// ===================================================================
+// OWNER DECISION, 2026-08-24 — A DELIBERATE DIVERGENCE FROM EXCEL.
+// ===================================================================
+
+/// `=ROWS(A:A)` ANSWERS THE USED-RANGE HEIGHT, NOT EXCEL'S 1,048,576, AND THAT
+/// IS CORRECT FOR CALCULA. Owner decision, 2026-08-24. Do not "fix" it.
+///
+/// EXCEL'S ANSWER IS 1,048,576 — the sheet's full height — regardless of what is
+/// in the column. Calcula answers the height of the sheet's used range (3 for
+/// the fixture below). This test exists because that difference looks exactly
+/// like a bug, and the next person to compare Calcula against Excel will find it
+/// and be tempted.
+///
+/// THE REASON IS PERFORMANCE, and it is structural rather than a micro-
+/// optimization. A whole-axis reference in this engine MATERIALIZES densely over
+/// `grid.max_row` / `grid.max_col` — see `eval_column_ref` — because that is
+/// what makes element `i` mean "row `i`" and lets two columns align (the defect
+/// this whole file was written for). The used range is what makes that
+/// affordable: a column of 200 rows costs 200 cells. Reporting 1,048,576 from
+/// `ROWS` while materializing 200 would be worse than either choice on its own —
+/// the two numbers describing the same reference would disagree, so
+/// `INDEX(A:A, ROWS(A:A))` would address a row that was never built. Making
+/// `ROWS` honest about the sheet height would instead require materializing the
+/// sheet height, which is the million-row allocation the used-range bound exists
+/// to avoid.
+///
+/// SO THE DIVERGENCE IS THE PRICE OF THE ALIGNMENT FIX, not an oversight, and it
+/// is CONSISTENT: every whole-axis function reports the same bound.
+///
+/// TWO EXISTING TESTS ALREADY DEFEND THIS BOUND from the other direction, and
+/// are cross-referenced rather than duplicated here:
+///
+///   * `a_whole_column_is_bounded_by_the_used_range_not_the_sheet` (this file)
+///     asserts `=ROWS(C:C)` is 3 and that the AGGREGATES agree with it.
+///   * `test_column_ref_single_column_row_order_preserved_c3a`
+///     (`evaluator.rs`, in `mod tests`) asserts that `A:A` materializes exactly
+///     `max_row` elements, holes included — the mechanism this divergence is
+///     the consequence of.
+///
+/// What THIS test adds is the statement of INTENT: the number is a decision, the
+/// decision has a date and a reason, and COLUMNS and COUNTBLANK are pinned to
+/// the same rule so nobody converts one of the three and leaves the others.
+#[test]
+fn whole_axis_dimensions_report_the_used_range_by_owner_decision_2026_08_24() {
+    // A 3x3 block: the used range is rows 1..3 and columns A..C.
+    let mut g = Grid::new();
+    for r in 0..3u32 {
+        for c in 0..3u32 {
+            g.set_cell(r, c, Cell::new_number((r * 3 + c + 1) as f64));
+        }
+    }
+
+    // ROWS over a whole column: 3, the used-range HEIGHT. Excel says 1,048,576.
+    assert_eq!(
+        num(&g, "=ROWS(A:A)"),
+        3.0,
+        "OWNER DECISION 2026-08-24: the used-range height, not Excel's 1,048,576"
+    );
+    // COLUMNS over a whole row: 3, the used-range WIDTH. Excel says 16,384.
+    assert_eq!(
+        num(&g, "=COLUMNS(1:1)"),
+        3.0,
+        "OWNER DECISION 2026-08-24: the used-range width, not Excel's 16,384"
+    );
+    // COUNTBLANK agrees with them: it counts blanks WITHIN the same bound, so a
+    // fully populated used range has none. Excel counts the sheet's remaining
+    // 1,048,573 empty rows and answers 1,048,573.
+    assert_eq!(
+        num(&g, "=COUNTBLANK(A:A)"),
+        0.0,
+        "OWNER DECISION 2026-08-24: blanks within the used range, not the sheet"
+    );
+
+    // THE THREE MUST AGREE WITH EACH OTHER, which is the property that actually
+    // has to hold. Asserting each against a literal would still pass if someone
+    // converted ROWS to Excel's answer and left COLUMNS alone.
+    assert_eq!(
+        num(&g, "=ROWS(A:A)"),
+        num(&g, "=ROWS(A:C)"),
+        "every column shares the SHEET's used range, not its own last row"
+    );
+    assert_eq!(num(&g, "=COLUMNS(1:1)"), num(&g, "=COLUMNS(1:3)"));
+
+    // AND THE BOUND MOVES WITH THE DATA. A used range that grows changes all
+    // three answers — the assertions above are not passing because the engine
+    // returns a constant 3, and a switch to Excel's fixed 1,048,576 would make
+    // this pair identical and fail.
+    let mut tall = g.clone();
+    tall.set_cell(9, 0, Cell::new_number(99.0)); // A10, extending the used range
+    assert_eq!(num(&tall, "=ROWS(A:A)"), 10.0);
+    assert_eq!(
+        num(&tall, "=COUNTBLANK(A:A)"),
+        6.0,
+        "A4:A9 are the blanks inside the grown used range"
+    );
+
+    // CONSISTENCY WITH WHAT IS ACTUALLY MATERIALIZED — the reason the divergence
+    // exists at all. ROWS must report the count the reference really produces,
+    // or INDEX would address a row that was never built.
+    assert_eq!(
+        num(&tall, "=COUNTA(A:A)") + num(&tall, "=COUNTBLANK(A:A)"),
+        num(&tall, "=ROWS(A:A)"),
+        "ROWS must equal what the whole-column reference materializes"
+    );
+    assert_eq!(
+        num(&tall, "=INDEX(A:A,ROWS(A:A))"),
+        99.0,
+        "the last row ROWS names must be reachable"
+    );
+}

@@ -25,11 +25,14 @@
 //! - Grids are identified by address (`&Grid as *const _ as usize`). Within a
 //!   pass no structural mutation occurs, so addresses are stable; entries die
 //!   with the guard, so no cross-pass reuse of a dangling identity.
-//! - Exact-match semantics differ per function family and are mirrored
-//!   bug-for-bug (see [`EqFamily`]). Epsilon number equality is NON-transitive,
-//!   so numbers live in a value-sorted vector probed by epsilon window with
-//!   per-candidate verification and smallest-flat-index (first-match) wins —
-//!   a hash map keyed on bits would be wrong.
+//! - Exact-match semantics are ONE predicate for the whole lookup family —
+//!   `Evaluator::exact_lookup_equal`, which is the `=` operator's own ladder.
+//!   [`ExactIndex`] implements exactly that and nothing else; it used to mirror
+//!   three per-function predicates "bug-for-bug", and the bugs it mirrored were
+//!   real (see that struct's doc). Numbers still live in a value-sorted vector
+//!   rather than a bit-keyed hash map so that first-match-wins is decided by
+//!   smallest flat index across an equal run, and so -0.0 and 0.0 — equal
+//!   numbers with different bits — cannot land in different buckets.
 //! - Approximate (sorted) modes only use binary search when the key vector is
 //!   HOMOGENEOUS (one comparator class) and verified sorted under that exact
 //!   comparator; anything else reports [`SortedKeys::Unusable`] and the caller
@@ -70,41 +73,27 @@ impl Rect {
     }
 }
 
-/// Equality family — one per distinct equality predicate in the evaluator.
-/// The fold/epsilon/cross-typing rules here MUST mirror the corresponding
-/// evaluator functions exactly (cited per variant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EqFamily {
-    /// `values_equal`: |a-b| < 1e-10; text ASCII-case-insensitive; bool ==;
-    /// no cross-typing. (VLOOKUP / HLOOKUP exact.)
-    Vlookup,
-    /// `eval_values_equal`: |a-b| < 1e-10; text Unicode-uppercase-insensitive;
-    /// bool ==; no cross-typing. (MATCH exact.)
-    Match,
-    /// `xlookup_values_equal`: |a-b| < f64::EPSILON; text Unicode-uppercase-
-    /// insensitive; bool ==; PLUS Number<->Text cross-typing where the text
-    /// side parses via `str::parse::<f64>()` (NO trim). (XLOOKUP exact.)
-    Xlookup,
-}
-
-impl EqFamily {
-    #[inline]
-    fn epsilon(self) -> f64 {
-        match self {
-            EqFamily::Vlookup | EqFamily::Match => 1e-10,
-            EqFamily::Xlookup => f64::EPSILON,
-        }
-    }
-
-    #[inline]
-    fn fold(self, s: &str) -> String {
-        match self {
-            // eq_ignore_ascii_case(a, b) == (a.to_ascii_uppercase() == b.to_ascii_uppercase())
-            EqFamily::Vlookup => s.to_ascii_uppercase(),
-            EqFamily::Match | EqFamily::Xlookup => s.to_uppercase(),
-        }
-    }
-}
+// THERE IS NO `EqFamily` ANY MORE, and its absence is the point.
+//
+// It used to carry three variants — `Vlookup`, `Match`, `Xlookup` — one per
+// hand-written equality predicate in the evaluator, "mirrored bug-for-bug".
+// Mirroring three predicates faithfully is only useful while there ARE three,
+// and there should never have been: `Evaluator::exact_lookup_equal` is now the
+// single exact-match rule for VLOOKUP/HLOOKUP/LOOKUP/MATCH/XLOOKUP/SWITCH, so
+// the cache has one family, which is no family at all.
+//
+// Consequences that fell out of the collapse, all wanted:
+//   - NO EPSILON WINDOW. The old `window_radius` (1e-10 / 0.0 / f64::EPSILON)
+//     existed only because two of the three predicates had a tolerance. Number
+//     equality is `==`, so the "window" is the single value and
+//     `partition_point` lands directly on it.
+//   - NO CROSS-TYPING. Only `Xlookup` parsed text keys into the number vector.
+//     Excel never matches a lookup value against a different type, so the
+//     `source_was_text` bookkeeping is gone with it.
+//   - ONE FOLD. `Vlookup` folded ASCII-only; the other two folded Unicode.
+//     Everything folds Unicode now, which is what `text_cmp::eq_ci` does.
+//   - ONE CACHE ENTRY per range instead of three. A sheet where VLOOKUP and
+//     MATCH read the same key column now builds the index once.
 
 /// Comparator family for sorted (approximate) modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -135,7 +124,9 @@ pub enum Axis {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
-    Exact { family: EqFamily, axis: Axis },
+    /// No family field: there is ONE exact-match predicate, so VLOOKUP, MATCH
+    /// and XLOOKUP over the same vector share one entry.
+    Exact { axis: Axis },
     Sorted { family: CmpFamily, axis: Axis, descending: bool },
     /// Criteria aggregates; `value` is the paired sum-range rect (SUMIF) if any.
     Criteria { axis: Axis, value: Option<Rect> },
@@ -156,23 +147,29 @@ pub struct EntryKey {
 
 /// First-match exact index over one materialized key vector.
 /// Flat indices are positions in that vector; "first match wins" = smallest.
+///
+/// THE PREDICATE IT IMPLEMENTS IS `Evaluator::exact_lookup_equal`, and every
+/// structural choice below is that predicate and nothing else: numbers keyed by
+/// exact value, text keyed by its Unicode uppercase fold, booleans keyed by the
+/// bit, and never a comparison across those three. A number needle can only
+/// reach the number vector, a text needle only the folded map, a boolean needle
+/// only `bools` — which is how "a lookup value of a different type never
+/// matches" becomes a property of the data structure rather than a rule someone
+/// has to remember to re-check here.
 pub struct ExactIndex {
-    /// folded text -> smallest flat index.
+    /// Unicode-uppercase-folded text -> smallest flat index.
     text: FxHashMap<Box<str>, u32>,
-    /// (value, flat index, source_was_text) sorted by value; NaNs excluded
-    /// (they match nothing under any family's epsilon predicate).
-    /// `source_was_text` entries exist only for EqFamily::Xlookup (cross-typed
-    /// parseable text); they may match a Number needle but not a Text needle
-    /// (Text-vs-Text equality goes through the folded map, never parsing).
-    numbers: Vec<(f64, u32, bool)>,
+    /// (value, flat index) sorted by value; NaNs excluded — a NaN is not equal
+    /// to itself, so it can never be a first match.
+    numbers: Vec<(f64, u32)>,
     /// smallest flat index holding Boolean(false) / Boolean(true).
     bools: [Option<u32>; 2],
 }
 
 impl ExactIndex {
-    pub fn build(family: EqFamily, values: &[EvalResult]) -> Self {
+    pub fn build(values: &[EvalResult]) -> Self {
         let mut text: FxHashMap<Box<str>, u32> = FxHashMap::default();
-        let mut numbers: Vec<(f64, u32, bool)> = Vec::new();
+        let mut numbers: Vec<(f64, u32)> = Vec::new();
         let mut bools: [Option<u32>; 2] = [None, None];
 
         for (i, v) in values.iter().enumerate() {
@@ -180,19 +177,11 @@ impl ExactIndex {
             match v {
                 EvalResult::Number(n) => {
                     if !n.is_nan() {
-                        numbers.push((*n, i, false));
+                        numbers.push((*n, i));
                     }
                 }
                 EvalResult::Text(s) => {
-                    text.entry(family.fold(s).into_boxed_str()).or_insert(i);
-                    if family == EqFamily::Xlookup {
-                        // xlookup_values_equal cross-types via s.parse (no trim).
-                        if let Ok(parsed) = s.parse::<f64>() {
-                            if !parsed.is_nan() {
-                                numbers.push((parsed, i, true));
-                            }
-                        }
-                    }
+                    text.entry(s.to_uppercase().into_boxed_str()).or_insert(i);
                 }
                 EvalResult::Boolean(b) => {
                     let slot = &mut bools[*b as usize];
@@ -200,7 +189,8 @@ impl ExactIndex {
                         *slot = Some(i);
                     }
                 }
-                // Errors/arrays/lists/dicts/lambdas match nothing in any family.
+                // Errors/arrays/lists/dicts/lambdas — and BLANK, which
+                // `exact_lookup_equal` gives no rung, so it matches nothing.
                 _ => {}
             }
         }
@@ -209,56 +199,37 @@ impl ExactIndex {
         ExactIndex { text, numbers, bools }
     }
 
-    /// Smallest flat index whose value equals `needle` under `family`.
+    /// Smallest flat index whose value is `exact_lookup_equal` to `needle`.
     /// Returns None when nothing matches — a DEFINITIVE no-match (the caller
     /// maps it to its usual #N/A / if_not_found handling, not to a scan).
-    pub fn first_match(&self, family: EqFamily, needle: &EvalResult) -> Option<u32> {
-        let eps = family.epsilon();
+    pub fn first_match(&self, needle: &EvalResult) -> Option<u32> {
         match needle {
-            EvalResult::Number(x) => self.window_min(*x, eps, /*allow_text_sources*/ family == EqFamily::Xlookup),
-            EvalResult::Text(s) => {
-                let text_hit = self.text.get(family.fold(s).as_str()).copied();
-                if family == EqFamily::Xlookup {
-                    // A parseable text needle can also match Number cells
-                    // (cross-typing) — but never other Text cells via parsing.
-                    let num_hit = s
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|p| !p.is_nan())
-                        .and_then(|p| self.window_min(p, eps, false));
-                    match (text_hit, num_hit) {
-                        (Some(a), Some(b)) => Some(a.min(b)),
-                        (a, b) => a.or(b),
-                    }
-                } else {
-                    text_hit
-                }
-            }
+            EvalResult::Number(x) => self.number_min(*x),
+            EvalResult::Text(s) => self.text.get(s.to_uppercase().as_str()).copied(),
             EvalResult::Boolean(b) => self.bools[*b as usize],
             // Error needles are handled by callers before probing; every other
-            // variant compares false against everything in all families.
+            // variant (Blank included) compares false against everything.
             _ => None,
         }
     }
 
-    /// Smallest flat index among number entries within the strict epsilon
-    /// window around x. `allow_text_sources` admits cross-typed text entries.
-    fn window_min(&self, x: f64, eps: f64, allow_text_sources: bool) -> Option<u32> {
+    /// Smallest flat index among number entries EXACTLY equal to `x`.
+    /// `partition_point` lands on the first entry not below `x`; the loop stops
+    /// at the first entry above it, so it visits only the equal run.
+    fn number_min(&self, x: f64) -> Option<u32> {
         if x.is_nan() {
             return None;
         }
-        let lo = self.numbers.partition_point(|e| e.0 < x - eps);
+        let lo = self.numbers.partition_point(|e| e.0 < x);
         let mut best: Option<u32> = None;
         for e in &self.numbers[lo..] {
-            if e.0 > x + eps {
+            if e.0 > x {
                 break;
             }
-            if (e.0 - x).abs() < eps && (allow_text_sources || !e.2) {
-                best = Some(match best {
-                    Some(b) => b.min(e.1),
-                    None => e.1,
-                });
-            }
+            best = Some(match best {
+                Some(b) => b.min(e.1),
+                None => e.1,
+            });
         }
         best
     }
@@ -477,7 +448,14 @@ impl CriteriaIndex {
             }
             *text_counts.entry(folded).or_insert(0) += 1;
 
-            if let Some(n) = v.as_number() {
+            // `criteria_number`, NOT `as_number`. This index answers a CRITERIA
+            // comparison, so it must bucket by the reading `matches_criteria`
+            // uses; on `as_number` it read the rich arithmetic spellings, and a
+            // text cell saying "5%" would land in `numbers` as 0.05 — counted
+            // by `=COUNTIF(rng,0.05)` when the pass cache was live and not
+            // counted when it was not. A cached answer that differs from the
+            // scanned one is the one bug this cache may never have.
+            if let Some(n) = crate::evaluator::criteria_number(v) {
                 if !n.is_nan() {
                     numbers.push(n);
                 }
@@ -758,38 +736,133 @@ mod tests {
     }
 
     #[test]
-    fn exact_index_first_match_wins_across_epsilon_and_text() {
+    fn exact_index_first_match_wins_and_folds_unicode() {
         // Duplicates: first (smallest index) must win.
-        let vals = vec![t("Apple"), n(5.0), t("apple"), n(5.0 + 1e-12)];
-        let ix = ExactIndex::build(EqFamily::Vlookup, &vals);
-        assert_eq!(ix.first_match(EqFamily::Vlookup, &t("APPLE")), Some(0));
-        assert_eq!(ix.first_match(EqFamily::Vlookup, &n(5.0)), Some(1));
-        assert_eq!(ix.first_match(EqFamily::Vlookup, &n(7.0)), None);
+        let vals = vec![t("Apple"), n(5.0), t("apple"), n(5.0)];
+        let ix = ExactIndex::build(&vals);
+        assert_eq!(ix.first_match(&t("APPLE")), Some(0));
+        assert_eq!(ix.first_match(&n(5.0)), Some(1));
+        assert_eq!(ix.first_match(&n(7.0)), None);
+        // UNICODE fold, not ASCII. This case answered None while the index was
+        // built for the "Vlookup family", whose fold was `to_ascii_uppercase`,
+        // so `=VLOOKUP("STRASSE",…,FALSE)` was #N/A over a cell holding
+        // "Straße" while MATCH, XLOOKUP, COUNTIF and `=` all matched it.
+        let ix2 = ExactIndex::build(&[t("Straße")]);
+        assert_eq!(ix2.first_match(&t("STRASSE")), Some(0));
     }
 
+    /// REWRITTEN. This test used to be `exact_index_epsilon_is_strict_and_
+    /// windowed` and asserted that 1.0 MATCHES 1.0 + 0.5e-10 — the VLOOKUP
+    /// family's 1e-10 tolerance. That tolerance is gone: exact-match lookup is
+    /// the `=` operator's predicate, and `=(1=1.00000000005)` is FALSE.
+    ///
+    /// OLD expectation: `first_match(1.0)` over `[1.0, 1.0+2e-10, 1.0+0.5e-10]`
+    /// matched indices 0 AND 2, returning 0 "because 0 < 2".
+    /// NEW expectation: it matches index 0 ONLY.
     #[test]
-    fn exact_index_epsilon_is_strict_and_windowed() {
-        let vals = vec![n(1.0), n(1.0 + 2e-10), n(1.0 + 0.5e-10)];
-        let ix = ExactIndex::build(EqFamily::Vlookup, &vals);
-        // 1.0 matches idx 0 and idx 2 (|d| < 1e-10); idx 2 > idx 0 so 0 wins.
-        assert_eq!(ix.first_match(EqFamily::Vlookup, &n(1.0)), Some(0));
-        // 1.0 + 2e-10 only matches itself.
-        assert_eq!(ix.first_match(EqFamily::Vlookup, &n(1.0 + 2e-10)), Some(1));
+    fn exact_index_numbers_are_exact_not_windowed() {
+        let vals = vec![n(1.0 + 0.5e-10), n(1.0), n(1.0 + 2e-10)];
+        let ix = ExactIndex::build(&vals);
+        // The needle is at index 1. Under the old 1e-10 window index 0 was
+        // also "equal" and, being smaller, WON — a silent wrong row. The order
+        // here is deliberate: with the tolerance restored this assertion reads
+        // Some(0), so it cannot pass by accident.
+        assert_eq!(ix.first_match(&n(1.0)), Some(1));
+        assert_eq!(ix.first_match(&n(1.0 + 2e-10)), Some(2));
+        // CONTROL: a genuine duplicate still resolves to the smallest index,
+        // so "exact" has not been mistaken for "unique".
+        let dup = ExactIndex::build(&[n(3.0), n(3.0)]);
+        assert_eq!(dup.first_match(&n(3.0)), Some(0));
     }
 
+    /// REWRITTEN. This test used to be `xlookup_cross_typing_matches_number_to_
+    /// parseable_text_only` and PINNED the cross-typing as correct. Excel never
+    /// matches a lookup value against a different type, and the divergence was
+    /// measurable: over {1, "1", TRUE, "apple"},
+    /// `=XLOOKUP("1",A1:A4,B1:B4)` returned the row of the NUMBER 1 while
+    /// MATCH, VLOOKUP, HLOOKUP and `=` all chose the row of the TEXT "1".
+    ///
+    /// OLD expectation over `["5.0", 5.0]`: `first_match(5.0)` = Some(0) (the
+    /// number needle cross-matched the parseable TEXT) and `first_match("5")` =
+    /// Some(1) (the text needle cross-matched the NUMBER).
+    /// NEW expectation: Some(1) and None — each needle sees only its own type.
     #[test]
-    fn xlookup_cross_typing_matches_number_to_parseable_text_only() {
+    fn exact_index_never_matches_across_types() {
         let vals = vec![t("5.0"), n(5.0)];
-        let ix = ExactIndex::build(EqFamily::Xlookup, &vals);
-        // Number needle matches the parseable text at 0 first (cross-typed).
-        assert_eq!(ix.first_match(EqFamily::Xlookup, &n(5.0)), Some(0));
-        // Text needle "5" does NOT match Text "5.0" (Text-Text is string
-        // equality), but DOES cross-match Number 5.0 at index 1.
-        assert_eq!(ix.first_match(EqFamily::Xlookup, &t("5")), Some(1));
-        // Vlookup family: no cross-typing at all.
-        let ix2 = ExactIndex::build(EqFamily::Vlookup, &vals);
-        assert_eq!(ix2.first_match(EqFamily::Vlookup, &t("5")), None);
-        assert_eq!(ix2.first_match(EqFamily::Vlookup, &n(5.0)), Some(1));
+        let ix = ExactIndex::build(&vals);
+        // A number needle reaches the number vector only.
+        assert_eq!(ix.first_match(&n(5.0)), Some(1));
+        // A text needle reaches the folded map only — and "5" is not "5.0".
+        assert_eq!(ix.first_match(&t("5")), None);
+        // CONTROL: the same text needle spelled exactly does match, so this is
+        // a type rule and not "text never matches".
+        assert_eq!(ix.first_match(&t("5.0")), Some(0));
+        // Booleans are their own class: TRUE is not the number 1.
+        let bx = ExactIndex::build(&[n(1.0), EvalResult::Boolean(true)]);
+        assert_eq!(bx.first_match(&n(1.0)), Some(0));
+        assert_eq!(bx.first_match(&EvalResult::Boolean(true)), Some(1));
+    }
+
+    /// THE MIRROR CONTRACT, MECHANISED. The cache exists to answer the same
+    /// question as the scan path, faster. Every previous version of that
+    /// promise was a doc comment naming an evaluator function, and all three
+    /// had drifted from it. This asserts it instead: for a corpus that crosses
+    /// every type boundary, the index's answer equals a linear scan under
+    /// `Evaluator::exact_lookup_equal` itself.
+    ///
+    /// WITHOUT THIS, a change to the predicate that forgets the index makes the
+    /// SAME formula give two answers depending on whether a recalc pass guard
+    /// happened to be held — which is invisible in a unit test (no guard) and
+    /// wrong in the app (guard held).
+    #[test]
+    fn exact_index_answers_exactly_what_the_scan_path_would() {
+        use crate::evaluator::Evaluator;
+        let corpus = vec![
+            n(1.0),
+            t("1"),
+            EvalResult::Boolean(true),
+            t("apple"),
+            t("Apple"),
+            n(-0.0),
+            n(0.0),
+            EvalResult::Blank,
+            t(""),
+            EvalResult::Boolean(false),
+            n(2e-300),
+            t("Straße"),
+            n(5.0),
+            t("5.0"),
+        ];
+        let ix = ExactIndex::build(&corpus);
+        let needles = [
+            n(1.0),
+            t("1"),
+            t("STRASSE"),
+            t("APPLE"),
+            EvalResult::Boolean(true),
+            EvalResult::Boolean(false),
+            n(0.0),
+            n(-0.0),
+            n(1e-300),
+            n(2e-300),
+            n(5.0),
+            t("5"),
+            t(""),
+            EvalResult::Blank,
+            n(99.0),
+        ];
+        for needle in &needles {
+            let scanned = corpus
+                .iter()
+                .position(|v| Evaluator::exact_lookup_equal(needle, v))
+                .map(|i| i as u32);
+            assert_eq!(
+                ix.first_match(needle),
+                scanned,
+                "index and scan disagree for needle {:?}",
+                needle
+            );
+        }
     }
 
     #[test]
@@ -825,6 +898,20 @@ mod tests {
         assert_eq!(sk.rightmost_le_number(100.0), Some(3));
     }
 
+    /// REWRITTEN 2026-08-24 — the two boolean expectations here were the CACHE
+    /// half of `=COUNTIF(rng,1)` counting TRUE. `CriteriaIndex::build` bucketed
+    /// through `criteria_number`, which reached `as_number()` and rendered TRUE
+    /// as the number 1.
+    ///
+    /// ```text
+    ///                            OLD (asserted)   NEW (asserted)
+    ///   count_greater(0.5)             3               2      (5 and "6"; not TRUE)
+    ///   count_exact_number(1.0)        1               0      (nothing IS 1)
+    /// ```
+    ///
+    /// The scan path and the cache moved together because the rule lives in
+    /// `criteria_number`, which both call — the single reason it was put there
+    /// rather than in `matches_criteria`.
     #[test]
     fn criteria_counts_and_sums_mirror_scan() {
         let range = vec![t("a"), t("A"), n(5.0), t("6"), EvalResult::Boolean(true)];
@@ -832,9 +919,13 @@ mod tests {
         let ci = CriteriaIndex::build(&range, Some(&paired));
         assert_eq!(ci.count_exact_text("A"), 2);
         assert_eq!(ci.sum_exact_text("A"), 3.0);
-        // "6" is text but coercible; TRUE coerces to 1.
-        assert_eq!(ci.count_greater(0.5), 3); // 5, 6, 1(TRUE)
-        assert_eq!(ci.count_exact_number(1.0), 1); // TRUE
+        // "6" is text but coercible — criteria DO read numeric text. TRUE is
+        // not a number and is not in the numeric bucket at all.
+        assert_eq!(ci.count_greater(0.5), 2); // 5 and "6"
+        assert_eq!(ci.count_exact_number(1.0), 0); // TRUE is not 1
+        // CONTROL: the boolean bucket still holds it, so `COUNTIF(rng,TRUE)`
+        // and `SUMIF(rng,TRUE,…)` are unaffected — this is a type rule, not a
+        // disappearance.
         assert_eq!(ci.count_exact_bool(true), 1);
         assert_eq!(ci.sum_exact_bool(true), 16.0);
         assert_eq!(ci.count_text_not_equal("A"), 3);
@@ -850,10 +941,10 @@ mod tests {
                 let key = EntryKey {
                     grid: 1,
                     rect: Rect { min_row: 0, max_row: 9, min_col: 0, max_col: 0 },
-                    kind: EntryKind::Exact { family: EqFamily::Vlookup, axis: Axis::RectCol(0) },
+                    kind: EntryKind::Exact { axis: Axis::RectCol(0) },
                 };
                 c.exact(key, [Some(key.rect), None], || {
-                    ExactIndex::build(EqFamily::Vlookup, &[n(1.0)])
+                    ExactIndex::build(&[n(1.0)])
                 })
                 .is_some()
             });

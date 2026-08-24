@@ -1103,14 +1103,16 @@ fn a_dot_separated_date_reaches_the_date_branch_only_where_the_thousands_separat
     assert_eq!(cell_number(&parse_cell_input("1.6.2020", &no)), 43983.0);
 
     // de-DE writes the same date the same way but groups thousands with '.',
-    // and parse_number runs FIRST: it strips every dot and answers 162020.
-    // That is a PRE-EXISTING silent wrong answer (nothing here made it), and
-    // the date branch never sees the string. The fix belongs in parse_number --
-    // a separator is only a grouping mark when the digits are grouped in
-    // threes, which is Excel's own rule -- and when it lands, this assertion
-    // flips to 43983.
+    // and parse_number runs FIRST. IT USED TO ANSWER 162020: it stripped every
+    // dot and parsed what was left, so a German user's 1st of June became a
+    // six-figure number and the date branch never saw the string. THE FIX
+    // PREDICTED IN THIS COMMENT HAS LANDED -- a separator is only a grouping
+    // mark when the digits are grouped in threes, which is Excel's own rule,
+    // and `number_text::groups_are_well_formed` is now the one place that rule
+    // lives -- so "1.6.2020" falls through to the date branch and this
+    // assertion has flipped from 162020 to the date.
     let de = engine::LocaleSettings::from_locale_id("de-DE");
-    assert_eq!(cell_number(&parse_cell_input("1.6.2020", &de)), 162020.0);
+    assert_eq!(cell_number(&parse_cell_input("1.6.2020", &de)), 43983.0);
     assert_eq!(
         parse_date_time_input("1.6.2020", &de).map(|(serial, _)| serial),
         Some(43983.0),
@@ -1186,10 +1188,24 @@ fn a_doubled_apostrophe_is_how_a_literal_leading_apostrophe_is_typed() {
 
 #[test]
 fn the_rest_after_an_apostrophe_keeps_the_spaces_the_user_typed() {
-    // The entry as a whole is still trimmed (it always was), but nothing trims
-    // again after the escape -- a leading space is the commonest reason to
-    // reach for the apostrophe in the first place.
-    assert_eq!(cell_text(&parse_cell_input("'  007  ", &us_locale())), "  007");
+    // REWRITTEN. The old expectation here was "  007" -- LEADING spaces kept,
+    // TRAILING spaces eaten -- because the escape was read off the already-
+    // trimmed entry. That was the old behaviour written down, not the right
+    // one: the apostrophe is the user saying "store exactly these characters",
+    // and half of them were silently thrown away. The escape is now read off
+    // the untrimmed input, so both ends survive.
+    let us = us_locale();
+    assert_eq!(cell_text(&parse_cell_input("'  007  ", &us)), "  007  ");
+    assert_eq!(cell_text(&parse_cell_input("'x ", &us)), "x ");
+    // CONTROL, and the reason `trim_start` and not the raw input: an apostrophe
+    // typed after a stray leading space is still the escape it always was, and
+    // still stores no apostrophe.
+    assert_eq!(cell_text(&parse_cell_input("  '007", &us)), "007");
+    // CONTROL: nothing else on the ladder gained whitespace. An untagged entry
+    // is trimmed exactly as before.
+    assert_eq!(cell_text(&parse_cell_input("  hello  ", &us)), "hello");
+    // CONTROL: the paste/script/CSV ladder reads the escape the same way.
+    assert_eq!(cell_text(&parse_cell_input_invariant("'  007  ", &us)), "  007  ");
 }
 
 #[test]
@@ -1200,7 +1216,12 @@ fn the_apostrophe_implies_the_text_format_only_where_it_changed_the_answer() {
     // it, and pressing Enter on an otherwise untouched cell would otherwise
     // store the number 123.
     let us = us_locale();
-    for input in ["'123", "'007", "'TRUE", "'50%", "'2020-06-01", "'=A1+1", "'-A1"] {
+    // `'#N/A` JOINED THIS LIST when the ladder grew its error rung, and it
+    // joined without a line changing in `apostrophe_implied_format` -- which is
+    // why that function asks the ladder instead of listing the cases. It used
+    // to imply nothing, because an unprefixed `#N/A` was already text and the
+    // apostrophe therefore changed nothing.
+    for input in ["'123", "'007", "'TRUE", "'50%", "'2020-06-01", "'=A1+1", "'-A1", "'#N/A"] {
         assert_eq!(
             parse_cell_input_with_format(input, &us).1,
             Some(text_format()),
@@ -1387,4 +1408,268 @@ fn the_invariant_ladder_takes_the_same_two_rungs() {
     assert!(
         matches!(parse_cell_input_invariant("42.5", &se).value, CellValue::Number(n) if (n - 42.5).abs() < 1e-12)
     );
+}
+
+// ============================================================================
+// THE TYPED-ENTRY NUMBER RUNG IS THE ENGINE'S PARSER
+// ============================================================================
+// `parse_number` used to be a SECOND, independent implementation of "what does
+// this text spell as a number", alongside `EvalResult::as_number`. Two parsers
+// meant two answers to the same question, and each of the three defects below
+// was measured in this build before the two were made one
+// (`engine::number_text::parse` under `ParsePolicy::ENTRY`).
+//
+// They are pinned HERE, at the host's entry point, and not only in the engine's
+// own suite, because the failure a user sees is "I typed this and the cell
+// holds something else" -- and because the ladder around this rung (formulas,
+// dates, the apostrophe, the Text format) is the host's, so a future
+// re-implementation would land here.
+
+#[test]
+fn a_mis_grouped_entry_is_text_and_not_a_number_ten_times_too_big() {
+    // MEASURED BEFORE THE FIX: `parse_number("1,5", en-US)` answered
+    // **15.0**. The old code stripped every group separator and parsed what was
+    // left, so a European typing one-and-a-half into an en-US workbook got
+    // fifteen -- a stored number, right-aligned, with nothing wrong on screen.
+    let us = engine::LocaleSettings::invariant();
+    assert_eq!(parse_number("1,5", &us), None, "a mis-sized group is not a group");
+    assert_eq!(parse_number("1,23", &us), None);
+    // CONTROL: a REAL grouping still parses, so the fix is a rule and not a ban.
+    assert_eq!(parse_number("1,000", &us), Some(1000.0));
+    assert_eq!(parse_number("1,234.56", &us), Some(1234.56));
+    // ...and the cell that results is TEXT, not a number, all the way through
+    // the ladder.
+    assert!(matches!(parse_cell_input("1,5", &us).value, CellValue::Text(ref t) if t == "1,5"));
+}
+
+#[test]
+fn no_entry_can_store_a_non_finite_number() {
+    // MEASURED BEFORE THE FIX: `parse_number("inf%", en-US)` answered
+    // **Some(inf)**. The percent branch was the one path that never checked
+    // `is_finite`, so `inf / 100` went straight into a cell -- a value
+    // `ISNUMBER` calls TRUE and every later comparison mis-answers. `inf` is
+    // now structurally unreachable rather than filtered out afterwards.
+    let us = engine::LocaleSettings::invariant();
+    for spelling in ["inf", "inf%", "-inf", "Infinity", "NaN", "nan%", "1e400", "1e400%"] {
+        assert_eq!(parse_number(spelling, &us), None, "{:?} must not be a number", spelling);
+        let cell = parse_cell_input(spelling, &us);
+        assert!(
+            !matches!(cell.value, CellValue::Number(n) if !n.is_finite()),
+            "{:?} stored {:?}",
+            spelling,
+            cell.value
+        );
+    }
+    // CONTROL: an ordinary percentage is untouched.
+    assert_eq!(parse_number("50%", &us), Some(0.5));
+}
+
+#[test]
+fn a_percent_sign_on_either_side_carries_the_percentage_format_onto_the_cell() {
+    // The shared parser reads the sign on either end, so the rung that decides
+    // the FORMAT has to as well -- otherwise "%5" stores 0.05 under General and
+    // the cell displays "0.05", with the percent the user typed gone.
+    let us = engine::LocaleSettings::invariant();
+    let (cell, format) = parse_cell_input_with_format("%5", &us);
+    assert!(matches!(cell.value, CellValue::Number(n) if (n - 0.05).abs() < 1e-12));
+    assert_eq!(format, Some(NumberFormat::Percentage { decimal_places: 0 }));
+    // CONTROL: the trailing spelling is unchanged, decimals and all.
+    let (cell, format) = parse_cell_input_with_format("12.5%", &us);
+    assert!(matches!(cell.value, CellValue::Number(n) if (n - 0.125).abs() < 1e-12));
+    assert_eq!(format, Some(NumberFormat::Percentage { decimal_places: 1 }));
+    // CONTROL: a plain number implies no format at all.
+    assert_eq!(parse_cell_input_with_format("5", &us).1, None);
+}
+
+#[test]
+fn the_group_separator_accepts_the_space_the_keyboard_actually_makes() {
+    // MEASURED BEFORE THE FIX: in sv-SE, `parse_number("1 000")` with an
+    // ORDINARY space answered None while the same digits with a NON-BREAKING
+    // space answered 1000. sv-SE's group separator is U+00A0 and no keyboard
+    // produces it, so the separator read off the user's own regional settings
+    // rejected every number that user types.
+    let se = engine::LocaleSettings::from_locale_id("sv-SE");
+    assert_eq!(parse_number("1 000", &se), Some(1000.0));
+    assert_eq!(parse_number("1\u{00A0}000", &se), Some(1000.0));
+    assert_eq!(parse_number("1 000,5", &se), Some(1000.5));
+    // CONTROL: the space is a group separator only BETWEEN DIGITS. "5 kr" is
+    // text (sv-SE's currency symbol is letters, and letters are never
+    // stripped), and so is a stray trailing space-separated word.
+    assert_eq!(parse_number("5 kr", &se), None);
+    assert_eq!(parse_number("1 000 kr", &se), None);
+}
+
+#[test]
+fn the_decimal_separator_at_entry_is_the_locales_own() {
+    // THE DELIBERATE NARROWING that came with the shared parser, recorded here
+    // so it is a decision and not a surprise. The old code accepted BOTH
+    // spellings in a comma-decimal locale, so sv-SE read the anglo "1.5" as
+    // 1.5; Excel reads it as TEXT, and Excel parity decides.
+    let se = engine::LocaleSettings::from_locale_id("sv-SE");
+    assert_eq!(parse_number("1,5", &se), Some(1.5));
+    assert_eq!(parse_number("1.5", &se), None);
+    // CONTROL, and the reason this narrowing is safe: scripts, CSV and every
+    // other machine-written value take the INVARIANT ladder, which tries the
+    // dot first and is unaffected.
+    assert!(matches!(
+        parse_cell_input_invariant("1.5", &se).value,
+        CellValue::Number(n) if n == 1.5
+    ));
+}
+
+// ============================================================================
+// TYPED ERROR LITERALS, AND THE BARE SIGN
+// ============================================================================
+// Two rungs of the entry ladder that were missing entirely. Both were MEASURED
+// in this build before the fix:
+//
+//   * typing `#N/A` stored `Text("#N/A")`. The cell LOOKS exactly right -- the
+//     grid paints the same eight characters either way -- and every test over
+//     it is silently false: ISNA FALSE, IFERROR passing it through, ISTEXT
+//     TRUE, COUNTA counting a string. The engine already parsed `=#N/A`
+//     correctly, so the same workbook held two different `#N/A`s depending on
+//     how each cell had been filled in.
+//   * typing a bare `+` stored `Text("=+")`. The leading-sign rung prepended an
+//     `=` without checking that anything followed it, and `Cell::new_formula`'s
+//     error arm stores the string it could not parse -- so the cell showed an
+//     equals sign the user never typed.
+
+/// The error a cell holds, or a panic naming what it holds instead.
+fn cell_error(cell: &Cell) -> CellError {
+    match &cell.value {
+        CellValue::Error(e) => e.clone(),
+        other => panic!("expected an error, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_typed_error_literal_is_the_error_and_not_a_string_that_looks_like_one() {
+    let us = us_locale();
+    // Excel's eight, spelled as Excel spells them.
+    assert_eq!(cell_error(&parse_cell_input("#N/A", &us)), CellError::NA);
+    assert_eq!(cell_error(&parse_cell_input("#DIV/0!", &us)), CellError::Div0);
+    assert_eq!(cell_error(&parse_cell_input("#VALUE!", &us)), CellError::Value);
+    assert_eq!(cell_error(&parse_cell_input("#REF!", &us)), CellError::Ref);
+    assert_eq!(cell_error(&parse_cell_input("#NAME?", &us)), CellError::Name);
+    assert_eq!(cell_error(&parse_cell_input("#NULL!", &us)), CellError::Null);
+    assert_eq!(cell_error(&parse_cell_input("#NUM!", &us)), CellError::Num);
+    assert_eq!(cell_error(&parse_cell_input("#SPILL!", &us)), CellError::Spill);
+    // Excel re-spells what you type, so case does not decide the answer.
+    assert_eq!(cell_error(&parse_cell_input("#n/a", &us)), CellError::NA);
+    assert_eq!(cell_error(&parse_cell_input("#div/0!", &us)), CellError::Div0);
+    // A typed error carries no implied format -- it is a value, not a number
+    // that needs a format to be read back the way it was entered.
+    assert_eq!(parse_cell_input_with_format("#N/A", &us).1, None);
+
+    // CONTROL -- the risky half. `CellError::from_literal` maps ANY unrecognised
+    // string to `Value`, so using it as the membership test would turn ordinary
+    // text into `#VALUE!`. The list is the lexer's, and these are not on it.
+    for text in ["#NOTANERROR", "#N/AA", "#", "#REF", "N/A", "#DIV/0", "##N/A"] {
+        assert_eq!(
+            cell_text(&parse_cell_input(text, &us)),
+            text,
+            "{:?} is text, not an error",
+            text
+        );
+    }
+    // CONTROL -- the apostrophe still wins, as it does over every rung below it.
+    assert_eq!(cell_text(&parse_cell_input("'#N/A", &us)), "#N/A");
+    // CONTROL -- so does the Text format. A column formatted as Text is how a
+    // column of error CODES (a support ticket export, say) is protected.
+    let text = text_format();
+    let (cell, implied) = parse_cell_input_in_format("#N/A", &us, Some(&text));
+    assert_eq!(cell_text(&cell), "#N/A");
+    assert_eq!(implied, None);
+}
+
+#[test]
+fn the_typed_error_literals_are_the_lexers_list_and_not_a_second_copy_of_it() {
+    // ONE TABLE, TWO ENTRY POINTS. `=#N/A` parses because of
+    // `parser::lexer::ERROR_LITERALS`; typing `#N/A` now stores an error for the
+    // same reason. A private list here would drift on the first spelling either
+    // side learned, and the drift would be invisible -- the formula and the
+    // typed cell would simply stop being the same cell.
+    let us = us_locale();
+    for literal in parser::lexer::ERROR_LITERALS {
+        let typed = parse_cell_input(literal, &us);
+        assert_eq!(
+            cell_error(&typed),
+            CellError::from_literal(literal),
+            "{} is in the lexer's list but the entry ladder refused it",
+            literal
+        );
+        // ...and it round-trips: what the grid paints for that error is exactly
+        // what was typed, so retyping a displayed value cannot change it.
+        assert_eq!(cell_error(&typed).as_literal(), literal);
+    }
+    // Calcula's own four are on that list too, deliberately. They can appear in
+    // a cell, the grid paints them, and Find searches for them, so a user who
+    // copies one back in must get the same cell -- not a string wearing its
+    // clothes.
+    assert_eq!(cell_error(&parse_cell_input("#CIRCULAR!", &us)), CellError::Circular);
+}
+
+#[test]
+fn a_pasted_error_literal_is_an_error_on_the_invariant_ladder_too() {
+    // The invariant ladder is the paste / script / CSV path, and paste is
+    // exactly where a copied error comes back as text: the clipboard carries
+    // `#N/A` as eight characters and nothing else. Storing that as text is how
+    // a pasted column of errors became a column ISNA calls FALSE.
+    let se = engine::LocaleSettings::from_locale_id("sv-SE");
+    assert_eq!(cell_error(&parse_cell_input_invariant("#N/A", &se)), CellError::NA);
+    assert_eq!(cell_error(&parse_cell_input_invariant("#div/0!", &se)), CellError::Div0);
+    // CONTROL: a script that means the STRING says so with the same escape a
+    // user types, and unrecognised text is still text.
+    assert_eq!(cell_text(&parse_cell_input_invariant("'#N/A", &se)), "#N/A");
+    assert_eq!(cell_text(&parse_cell_input_invariant("#NOTANERROR", &se)), "#NOTANERROR");
+}
+
+#[test]
+fn a_bare_sign_is_stored_as_what_was_typed_and_never_as_an_equals_sign() {
+    // MEASURED BEFORE THE FIX: `parse_cell_input("+")` answered
+    // **Text("=+")**. The rung prepended `=` unconditionally; the result does
+    // not parse; `Cell::new_formula`'s error arm keeps the string -- so the cell
+    // displayed `=+`, two characters where the user typed one, and the extra one
+    // was the character that means "formula".
+    let us = us_locale();
+    for input in ["+", "-", "+ ", " - "] {
+        let cell = parse_cell_input(input, &us);
+        assert!(!cell.has_formula(), "{:?} must not be a formula", input);
+        assert_eq!(
+            cell_text(&cell),
+            input.trim(),
+            "{:?} must store the sign that was typed, and nothing else",
+            input
+        );
+    }
+    // CONTROL -- the Lotus habit the rung exists for is untouched. Something
+    // FOLLOWS the sign in each of these, so each is still a formula.
+    for input in ["-A1", "+SUM(A1:A9)", "+A1", "-1-2"] {
+        assert!(
+            parse_cell_input(input, &us).has_formula(),
+            "{:?} is still a formula",
+            input
+        );
+    }
+    // CONTROL -- and a signed NUMBER is still a number, decided a rung earlier.
+    assert_eq!(cell_number(&parse_cell_input("-100", &us)), -100.0);
+    assert_eq!(cell_number(&parse_cell_input("+5", &us)), 5.0);
+}
+
+#[test]
+fn a_typed_percentage_answers_what_the_same_formula_answers() {
+    // ONE INPUT MUST NOT HAVE TWO ANSWERS. The old entry parser stripped EVERY
+    // trailing `%` and divided by 100 ONCE, so typing `5%%` gave 0.05 while
+    // `=5%%` gave 0.0005 -- the same characters, two values, decided by how they
+    // arrived. Both paths now run `engine::number_text::parse`, which counts the
+    // signs; this pins the agreement at the host's entry point, because that is
+    // where a re-implementation would land.
+    let us = engine::LocaleSettings::invariant();
+    assert_eq!(cell_number(&parse_cell_input("5%%", &us)), 0.0005);
+    assert_eq!(cell_number(&parse_cell_input("%%5", &us)), 0.0005);
+    assert_eq!(cell_number(&parse_cell_input("5%%%", &us)), 0.000005);
+    // CONTROL: one sign still divides exactly once.
+    assert_eq!(cell_number(&parse_cell_input("5%", &us)), 0.05);
+    // CONTROL: the paste/script ladder agrees with both.
+    assert_eq!(cell_number(&parse_cell_input_invariant("5%%", &us)), 0.0005);
 }

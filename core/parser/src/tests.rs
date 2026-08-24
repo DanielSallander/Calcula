@@ -2114,3 +2114,138 @@ fn a_column_named_e_still_parses_as_a_reference() {
     assert!(parse("E3").is_ok(), "E3 is a cell reference");
     assert!(parse("SUM(E3:E10)").is_ok(), "a range over column E must still parse");
 }
+
+// ========================================
+// PARSER-LEVEL EXCEL SYNTAX GAPS
+//
+// Five spellings Excel accepts (or refuses) that this grammar did not. Every
+// one of them was reachable by typing, and four of the five failed by storing
+// the user's text AS TEXT or by producing a value where Excel produces an
+// error -- silence, in other words, rather than a message.
+// ========================================
+
+/// THE INTERSECTION OPERATOR MUST ACCEPT PARENTHESISED OPERANDS.
+///
+/// `=SUM((A1:A3) (A2:C2))` is Excel's own spelling and was a hard parse error,
+/// while the identical unparenthesised `=SUM(A1:A3 A2:C2)` parsed and answered.
+/// A user who added parentheses to make the formula readable got their formula
+/// stored as text.
+///
+/// Asserted as SHAPE EQUALITY against the unparenthesised form rather than as
+/// "it parses": parentheses are transparent in this AST, so the two must be the
+/// SAME tree, and a fix that produced some other tree would be a second
+/// spelling that could drift.
+#[test]
+fn intersection_accepts_parenthesised_operands() {
+    let bare = parse("=SUM(A1:A3 A2:C2)").expect("the unparenthesised form has always parsed");
+    let wrapped = parse("=SUM((A1:A3) (A2:C2))").expect("the parenthesised form must parse too");
+    assert_eq!(wrapped, bare, "the parentheses changed the tree");
+
+    // Both sides, and one side at a time.
+    assert_eq!(parse("=SUM((A1:A3) A2:C2)").unwrap(), bare);
+    assert_eq!(parse("=SUM(A1:A3 (A2:C2))").unwrap(), bare);
+
+    // CONTROL: the SPACE is still what makes an intersection. Without it these
+    // are two adjacent operands, and `(A1:A3)(A2:C2)` must not quietly become
+    // an intersection just because a paren can now follow one.
+    assert!(
+        parse("=SUM((A1:A3)(A2:C2))").is_err(),
+        "adjacency without a space is not an intersection"
+    );
+}
+
+/// LAMBDA INVOCATION STILL WINS OVER INTERSECTION.
+///
+/// `parse_index_access_chain` consumes a `(` after a function call as an
+/// INVOCATION, and it runs per operand -- before the intersection level sees
+/// the token. Letting `(` start an intersection operand must not have moved
+/// that boundary, or `=LAMBDA(x,x+1) (10)` would become an intersection of a
+/// lambda and a number instead of a call returning 11.
+#[test]
+fn an_invocation_is_not_an_intersection() {
+    match parse("=LAMBDA(x,x+1) (10)").expect("a spaced invocation must still parse") {
+        Expression::FunctionCall { func, args, .. } => {
+            assert_eq!(func, BuiltinFunction::Custom("__INVOKE__".to_string()));
+            assert_eq!(args.len(), 2, "the invocation lost its argument");
+        }
+        other => panic!("a spaced lambda invocation became {other:?}"),
+    }
+}
+
+/// `={}` IS A PARSE ERROR, as it is in Excel.
+///
+/// It used to be the empty LIST -- a leftover from when `{}` was Calcula's list
+/// spelling. Once `{...}` became Excel's ARRAY CONSTANT that reading became a
+/// trap: it looks like an array to whoever typed it, and an empty rectangle has
+/// no shape to spill.
+#[test]
+fn an_empty_array_constant_is_refused() {
+    // The MESSAGE is asserted, not just the failure. `={}` would also fail if
+    // the brace production simply broke, and this test must tell the deliberate
+    // refusal apart from that.
+    let err = parse("={}").expect_err("the empty array constant must not parse");
+    assert!(
+        err.message.contains("Empty array constant"),
+        "the empty array constant was refused for the wrong reason: {}",
+        err.message
+    );
+    // CONTROLS: the non-empty constant and the dict literal are untouched, so
+    // this is not a guard that simply broke braces.
+    assert!(parse("={1,2;3,4}").is_ok(), "a real array constant must still parse");
+    assert!(parse("={\"a\": 1}").is_ok(), "a dict literal must still parse");
+    assert!(parse("=COLLECT()").is_ok(), "the empty list keeps its own spelling");
+}
+
+/// AN UNTERMINATED TEXT LITERAL IS A REFUSAL, NOT A VALUE.
+///
+/// The lexer handed back whatever it had read, so `="abc` parsed and evaluated
+/// to the text `abc` -- the cheapest possible typo producing a cell that looks
+/// deliberate. Nothing anywhere said a quote was missing.
+#[test]
+fn an_unterminated_text_literal_is_refused() {
+    assert!(parse("=\"abc").is_err(), "=\"abc must not parse");
+    assert!(parse("=1&\"abc").is_err(), "an unterminated literal mid-formula is refused too");
+    assert!(parse("=SUM(1,\"abc").is_err(), "...and inside a call");
+    // The lexer's own answer, so the refusal cannot be satisfied by some other
+    // token happening to be unacceptable to the parser.
+    let mut lexer = Lexer::new("\"abc");
+    assert_eq!(lexer.next_token(), Token::UnterminatedString);
+
+    // CONTROLS: a properly closed literal, an EMPTY one, and the doubled-quote
+    // escape all still lex as text.
+    assert_eq!(Lexer::new("\"abc\"").next_token(), Token::String("abc".to_string()));
+    assert_eq!(Lexer::new("\"\"").next_token(), Token::String(String::new()));
+    assert_eq!(Lexer::new("\"a\"\"b\"").next_token(), Token::String("a\"b".to_string()));
+}
+
+/// AN EXTERNAL-WORKBOOK PATH IS REFUSED, NOT MISREAD AS A 3-D SHEET RANGE.
+///
+/// `='C:\Reports\[Q3.xlsx]Sheet1'!A1` contains a colon -- the DRIVE LETTER's --
+/// and the 3-D branch split on it, producing the sheet range `C` .. `\Reports\
+/// [Q3.xlsx]Sheet1` and then EVALUATING it over whatever local sheets fell in
+/// that range. A link to another file came back as a NUMBER with no error
+/// anywhere. Calcula has no external links; the fix is to say so.
+#[test]
+fn an_external_workbook_reference_is_refused() {
+    for formula in [
+        "='C:\\Reports\\[Q3.xlsx]Sheet1'!A1",
+        "='[Q3.xlsx]Sheet1'!A1",
+        "='\\\\server\\share\\[Q3.xlsx]Sheet1'!A1",
+        "='C:\\Reports\\Q3.xlsx'!A1",
+    ] {
+        let err = parse(formula).expect_err(&format!("{formula} must be refused"));
+        assert!(
+            err.message.contains("External workbook"),
+            "{formula} was refused for the wrong reason: {}",
+            err.message
+        );
+    }
+
+    // CONTROLS, and they are the reason the guard tests `[ ] \ /` rather than
+    // the colon: those four characters are the ones Excel FORBIDS in a sheet
+    // name, so no legitimate sheet -- including a 3-D range, which needs its
+    // colon -- can be caught by them.
+    assert!(parse("='Jan:Dec'!A1").is_ok(), "a 3-D sheet range must still parse");
+    assert!(parse("='Q3 Results'!A1").is_ok(), "a spaced sheet name must still parse");
+    assert!(parse("='John''s Sheet'!A1").is_ok(), "an apostrophe in a name is not a path");
+}

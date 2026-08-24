@@ -402,6 +402,11 @@ pub(crate) fn value_to_display(val: &Value) -> String {
         // Unquoted: an error literal IS its own display form, and the
         // step-by-step evaluator should show `#REF!` rather than `"#REF!"`.
         Value::Error(e) => e.clone(),
+        // An OMITTED ARGUMENT shows as nothing, which is how it appears in the
+        // formula being stepped through: the Evaluate Formula dialog's whole
+        // job is to show the user their own formula, and `=IF(TRUE,,5)` with a
+        // `0` or a `""` written into the gap would be a different one.
+        Value::Blank => String::new(),
     }
 }
 

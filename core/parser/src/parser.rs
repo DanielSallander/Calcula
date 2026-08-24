@@ -344,6 +344,15 @@ impl<'a> Parser<'a> {
             Token::Identifier(_)
                 | Token::QuotedIdentifier(_)
                 | Token::Dollar
+                // A PARENTHESISED operand. `=SUM((A1:A3) (A2:C2))` is Excel's
+                // own spelling and was a hard parse error ("Expected RParen,
+                // found LParen") while the identical unparenthesised
+                // `=SUM(A1:A3 A2:C2)` answered 2 -- so a user who grouped the
+                // operands to make the formula readable got their text stored
+                // as TEXT. Parentheses are transparent in this AST (the LParen
+                // arm returns the inner expression), so the operand that
+                // reaches `reference_rect` is the same Range either way.
+                | Token::LParen
                 // A ROW reference begins with a NUMBER (`2:2`), so this is
                 // required for `A:A 2:2` to parse at all.
                 //
@@ -500,6 +509,13 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Value::String(s)))
             }
 
+            // A `"` with no closing `"`. Named here rather than left to the
+            // catch-all so the user is told which character is missing instead
+            // of "Unexpected token".
+            Token::UnterminatedString => Err(ParseError::new(
+                "Unterminated text: a closing '\"' is missing",
+            )),
+
             // Boolean literal
             Token::Boolean(b) => {
                 self.advance();
@@ -524,6 +540,22 @@ impl<'a> Parser<'a> {
             Token::QuotedIdentifier(name) => {
                 self.advance();
                 self.expect(Token::Exclamation)?;
+
+                // EXTERNAL WORKBOOK: refuse before the 3-D split can misread it.
+                //
+                // MUST COME FIRST. `'C:\Reports\[Book.xlsx]Sheet1'!A1` contains a
+                // colon -- the DRIVE LETTER's -- so the 3-D branch below split it
+                // into start sheet "C" and end sheet "\Reports\[Book.xlsx]Sheet1"
+                // and built a `Sheet3DRef` that then EVALUATED. A workbook link
+                // Calcula cannot follow came back as a NUMBER computed from
+                // whatever local sheets happened to sit in that name range: a
+                // wrong answer wearing no error at all.
+                if let Some(reason) = external_workbook_reason(&name) {
+                    return Err(ParseError::new(format!(
+                        "External workbook references are not supported: '{}' ({})",
+                        name, reason
+                    )));
+                }
 
                 // Check for 3D reference: if the quoted identifier contains ':'
                 // it is a sheet range like 'Jan:Dec'!A1 or 'Jan 2023:Dec 2023'!A1
@@ -688,12 +720,20 @@ impl<'a> Parser<'a> {
             Token::LBrace => {
                 self.advance();
 
-                // `={}` — Excel has no empty array constant, and an empty
-                // rectangle has no shape to spill. Keep it as the empty LIST it
-                // has always been rather than inventing a 0x0 array.
+                // `={}` — REFUSED, the way Excel refuses it.
+                //
+                // It used to produce the empty LIST, a leftover from when `{}`
+                // was Calcula's list spelling. Once `{…}` became Excel's ARRAY
+                // CONSTANT that reading became a trap: `={}` looks like an
+                // array to the person typing it, an empty rectangle has no
+                // shape to spill, and every array-shaped consumer then had to
+                // cope with a zero-length value that Excel can never hand it.
+                // `COLLECT()` is the empty list's remaining spelling and says
+                // what it means.
                 if self.current_token == Token::RBrace {
-                    self.advance();
-                    return Ok(Expression::ListLiteral { elements: vec![] });
+                    return Err(ParseError::new(
+                        "Empty array constant '{}' is not allowed; an array must have at least one value",
+                    ));
                 }
 
                 // Parse first element
@@ -1312,18 +1352,44 @@ impl<'a> Parser<'a> {
         }
 
         // Parse first argument
-        args.push(self.parse_expression()?);
+        args.push(self.parse_argument()?);
 
         // Parse remaining arguments separated by commas
         while self.current_token == Token::Comma {
             self.advance();
-            args.push(self.parse_expression()?);
+            args.push(self.parse_argument()?);
         }
 
         // Expect closing ')'
         self.expect(Token::RParen)?;
 
         Ok(Expression::FunctionCall { func, args, ref_site_id: RefSiteId::ZERO })
+    }
+
+    /// ONE argument of a call, which in Excel is allowed to be NOTHING.
+    ///
+    /// `=IF(TRUE,,5)`, `=XLOOKUP(x,a,b,,2)` and `=VLOOKUP(x,t,2,)` are everyday
+    /// spreadsheet text and were refused AT ENTRY -- so `update_cell` stored the
+    /// user's formula as literal TEXT, the cell showed the formula back at them,
+    /// and nothing said why.
+    ///
+    /// THE SLOT IS FILLED, NEVER SKIPPED. Returning early without pushing would
+    /// change the ARITY: `=VLOOKUP(x,t,2,)` (empty 4th argument = exact match)
+    /// would arrive at the evaluator as the three-argument `=VLOOKUP(x,t,2)`,
+    /// which means APPROXIMATE match -- the same formula answering with a
+    /// different row and no error to show for it.
+    ///
+    /// The caller has already dealt with the genuinely empty list `=SUM()`
+    /// before the first call gets here, so a lone `Blank` argument is not a
+    /// shape this grammar can produce (there is no text for it in Excel either).
+    fn parse_argument(&mut self) -> ParseResult<Expression> {
+        // An argument position that begins with the delimiter that ENDS an
+        // argument is an omitted one -- `,` for a following slot, `)` for the
+        // last. Nothing is consumed here; the caller's loop eats the delimiter.
+        if matches!(self.current_token, Token::Comma | Token::RParen) {
+            return Ok(Expression::Literal(Value::Blank));
+        }
+        self.parse_expression()
     }
 
     // ========================================================================
@@ -1346,303 +1412,32 @@ impl<'a> Parser<'a> {
     ///   [@Column]                -> This-row (table inferred from context)
     ///   [Column]                 -> Column (table inferred from context)
     fn parse_table_reference(&mut self, table_name: String) -> ParseResult<Expression> {
-        // Consume the '['
-        self.expect(Token::LBracket)?;
+        // THE BRACKET BODY IS SCANNED AS RAW TEXT, NOT AS TOKENS.
+        //
+        // `current_token` is the `[`, which means the LEXER's character stream
+        // sits exactly one character past it -- the only moment at which the
+        // body can still be read verbatim. One token later it is too late: the
+        // lexer has already uppercased an identifier, split `Cost (USD)` at the
+        // paren, and turned `Sales%` into a name plus an operator.
+        if self.current_token != Token::LBracket {
+            return Err(ParseError::new(format!(
+                "Expected [ to start a structured reference, found {:?}",
+                self.current_token
+            )));
+        }
+        let body = self.lexer.scan_bracket_body().ok_or_else(|| {
+            ParseError::new("Unterminated structured reference: a closing ']' is missing")
+        })?;
+        // The scan consumed the matching `]`, so this is the token AFTER it.
+        self.advance();
 
-        let specifier = self.parse_table_specifier()?;
-
-        // Consume the closing ']'
-        self.expect(Token::RBracket)?;
+        let specifier = parse_specifier_body(&body)?;
 
         Ok(Expression::TableRef {
             table_name,
             specifier,
             ref_site_id: RefSiteId::ZERO,
         })
-    }
-
-    /// Parses the content inside brackets for a table reference.
-    fn parse_table_specifier(&mut self) -> ParseResult<TableSpecifier> {
-        // Check for @ prefix (this-row reference)
-        if self.current_token == Token::At {
-            self.advance();
-            return self.parse_this_row_specifier();
-        }
-
-        // Check for # prefix (special specifier like #All, #Data, etc.)
-        // The # character is not a token, so it will appear as part of an identifier
-        // or we need to handle it specially. Actually in our lexer # is an Illegal char.
-        // Let's check for [#All] pattern: the lexer sees # as Illegal('#').
-        // Instead, we handle this by checking for LBracket (nested brackets).
-        if self.current_token == Token::LBracket {
-            // Nested bracket: could be [[#Specifier],[Column]] or [[Col1]:[Col2]]
-            return self.parse_nested_bracket_specifier();
-        }
-
-        // Check for Illegal('#') which starts special specifiers
-        if let Token::Hash = self.current_token {
-            self.advance();
-            return self.parse_special_specifier();
-        }
-
-        // Plain column reference: [ColumnName]
-        let col_name = self.parse_bracket_content()?;
-
-        // Check if followed by ] : [ for column range
-        if self.current_token == Token::RBracket {
-            // Peek ahead: is this ] followed by : [ for a range?
-            // No, the ] will be consumed by the caller. Just return the column.
-            return Ok(TableSpecifier::Column(col_name));
-        }
-
-        // Check for comma (special + column combo like [#Headers],[Col])
-        if self.current_token == Token::Comma {
-            // Shouldn't get here for plain column, but handle gracefully
-            return Ok(TableSpecifier::Column(col_name));
-        }
-
-        Ok(TableSpecifier::Column(col_name))
-    }
-
-    /// Parses a this-row specifier after @ has been consumed.
-    fn parse_this_row_specifier(&mut self) -> ParseResult<TableSpecifier> {
-        // After @, we could have:
-        //   @Column      -> ThisRow("Column")
-        //   @[Column]    -> ThisRow("Column")  (bracketed form)
-
-        if self.current_token == Token::LBracket {
-            // Bracketed form: @[Column]
-            self.advance(); // consume [
-            let col_name = self.parse_bracket_content()?;
-            self.expect(Token::RBracket)?; // consume inner ]
-
-            // Check for range: @[Col1]:@[Col2] or @[Col1]:[Col2]
-            if self.current_token == Token::Colon {
-                self.advance();
-                let end_col = self.parse_range_end_column()?;
-                return Ok(TableSpecifier::ThisRowRange(col_name, end_col));
-            }
-
-            return Ok(TableSpecifier::ThisRow(col_name));
-        }
-
-        // Unbracketed form: @ColumnName (identifier follows)
-        if let Token::Identifier(name) = self.current_token.clone() {
-            self.advance();
-
-            // Check for range: @Col1:@Col2
-            if self.current_token == Token::Colon {
-                self.advance();
-                let end_col = self.parse_range_end_column()?;
-                return Ok(TableSpecifier::ThisRowRange(name, end_col));
-            }
-
-            return Ok(TableSpecifier::ThisRow(name));
-        }
-
-        Err(ParseError::new("Expected column name after '@' in table reference"))
-    }
-
-    /// Parses the end column of a column range after ':' has been consumed.
-    /// Handles @[Col], @Col, [Col], and bare Col forms.
-    fn parse_range_end_column(&mut self) -> ParseResult<String> {
-        // @[Col] or @Col
-        if self.current_token == Token::At {
-            self.advance();
-        }
-
-        if self.current_token == Token::LBracket {
-            self.advance();
-            let name = self.parse_bracket_content()?;
-            self.expect(Token::RBracket)?;
-            return Ok(name);
-        }
-
-        if let Token::Identifier(name) = self.current_token.clone() {
-            self.advance();
-            return Ok(name);
-        }
-
-        Err(ParseError::new("Expected column name in table range reference"))
-    }
-
-    /// Parses nested bracket specifiers like [[#Headers],[Col]] or [[Col1]:[Col2]].
-    fn parse_nested_bracket_specifier(&mut self) -> ParseResult<TableSpecifier> {
-        self.advance(); // consume outer [
-
-        // Check for #specifier inside
-        if let Token::Hash = self.current_token {
-            self.advance();
-            let special = self.parse_special_specifier()?;
-            self.expect(Token::RBracket)?; // close the [#...]
-
-            // Check for comma followed by column
-            if self.current_token == Token::Comma {
-                self.advance();
-                // Expect [ColumnName]
-                self.expect(Token::LBracket)?;
-                let col_name = self.parse_bracket_content()?;
-                self.expect(Token::RBracket)?;
-                // `[[#This Row],[Amount]]` is Excel's long spelling of `[@Amount]`,
-                // not a special-region-plus-column pair: it names ONE cell, so it
-                // has to produce the specifier `[@Amount]` produces. Wrapping it in
-                // `SpecialColumn` is what made the two spellings disagree.
-                if let TableSpecifier::ThisRow(_) = special {
-                    return Ok(TableSpecifier::ThisRow(col_name));
-                }
-                return Ok(TableSpecifier::SpecialColumn(Box::new(special), col_name));
-            }
-
-            // Just a special specifier in nested brackets
-            return Ok(special);
-        }
-
-        // This-row range: [[@Col1]:[@Col2]] -- Excel's form for a this-row span.
-        // Without this arm the nested `@` fell into `parse_bracket_content`,
-        // which rejected it as "Empty column name", so `Sales[[@a]:[@b]]` -- the
-        // spelling Excel itself writes, and the one `render_table_specifier`
-        // now emits -- could not be read at all.
-        if self.current_token == Token::At {
-            self.advance();
-            let col1 = self.parse_bracket_content()?;
-            self.expect(Token::RBracket)?; // close [@Col1]
-
-            if self.current_token == Token::Colon {
-                self.advance();
-                self.expect(Token::LBracket)?;
-                // The trailing `@` is optional: Excel writes `[[@a]:[@b]]`, but
-                // `[[@a]:[b]]` means the same span.
-                if self.current_token == Token::At {
-                    self.advance();
-                }
-                let col2 = self.parse_bracket_content()?;
-                self.expect(Token::RBracket)?;
-                return Ok(TableSpecifier::ThisRowRange(col1, col2));
-            }
-
-            return Ok(TableSpecifier::ThisRow(col1));
-        }
-
-        // Column range: [Col1]:[Col2]
-        let col1 = self.parse_bracket_content()?;
-        self.expect(Token::RBracket)?; // close [Col1]
-
-        if self.current_token == Token::Colon {
-            self.advance();
-            self.expect(Token::LBracket)?;
-            let col2 = self.parse_bracket_content()?;
-            self.expect(Token::RBracket)?;
-            return Ok(TableSpecifier::ColumnRange(col1, col2));
-        }
-
-        // Single column in nested brackets (unusual but valid)
-        Ok(TableSpecifier::Column(col1))
-    }
-
-    /// Parses a special specifier keyword after '#' has been consumed.
-    fn parse_special_specifier(&mut self) -> ParseResult<TableSpecifier> {
-        // The text after # should be an identifier: All, Data, Headers, Totals, This Row
-        if let Token::Identifier(name) = self.current_token.clone() {
-            self.advance();
-            match name.to_uppercase().as_str() {
-                "ALL" => Ok(TableSpecifier::AllRows),
-                "DATA" => Ok(TableSpecifier::DataRows),
-                "HEADERS" => Ok(TableSpecifier::Headers),
-                "TOTALS" => Ok(TableSpecifier::Totals),
-                "THIS" => {
-                    // Expect "Row" to follow for "#This Row"
-                    if let Token::Identifier(row_word) = self.current_token.clone() {
-                        if row_word.to_uppercase() == "ROW" {
-                            self.advance();
-                            // `#This Row` IS the this-row marker, carrying no column
-                            // of its own: the column, when there is one, follows the
-                            // comma in `[[#This Row],[Amount]]` and is attached by
-                            // `parse_nested_bracket_specifier`.
-                            //
-                            // This returned `DataRows` "as a placeholder, resolved at
-                            // the use site", and no use site ever resolved it:
-                            // `Table1[[#This Row],[Amount]]` became
-                            // `SpecialColumn(DataRows, "Amount")` and evaluated over
-                            // EVERY data row, while `Table1[@Amount]` -- the same
-                            // reference, short spelling -- read the one cell. Two
-                            // spellings of one reference, two different NUMBERS, and
-                            // nothing reported.
-                            //
-                            // The empty column name is what tells the bare
-                            // `Table1[#This Row]` apart from `[#Data]`, which is the
-                            // only thing the renderer could spell it with before.
-                            return Ok(TableSpecifier::ThisRow(String::new()));
-                        }
-                    }
-                    Err(ParseError::new("Expected 'Row' after '#This' in table reference"))
-                }
-                _ => Err(ParseError::new(format!(
-                    "Unknown table specifier: #{}",
-                    name
-                ))),
-            }
-        } else {
-            Err(ParseError::new("Expected specifier name after '#'"))
-        }
-    }
-
-    /// Reads bracket content as a string until we hit ']', ',', or ':'.
-    /// This handles column names that may contain spaces or special characters.
-    fn parse_bracket_content(&mut self) -> ParseResult<String> {
-        let mut content = String::new();
-
-        loop {
-            match &self.current_token {
-                Token::RBracket | Token::Comma | Token::Colon => break,
-                Token::EOF => {
-                    return Err(ParseError::new("Unexpected end of input in table reference"));
-                }
-                Token::Identifier(s) => {
-                    if !content.is_empty() {
-                        content.push(' ');
-                    }
-                    content.push_str(s);
-                    self.advance();
-                }
-                Token::Number(n) => {
-                    if !content.is_empty() {
-                        content.push(' ');
-                    }
-                    // Format integer numbers without decimal point
-                    if *n == (*n as i64) as f64 {
-                        content.push_str(&format!("{}", *n as i64));
-                    } else {
-                        content.push_str(&format!("{}", n));
-                    }
-                    self.advance();
-                }
-                Token::String(s) => {
-                    if !content.is_empty() {
-                        content.push(' ');
-                    }
-                    content.push_str(s);
-                    self.advance();
-                }
-                // Consume other tokens as part of the column name
-                Token::Plus => { content.push('+'); self.advance(); }
-                Token::Minus => { content.push('-'); self.advance(); }
-                Token::Asterisk => { content.push('*'); self.advance(); }
-                Token::Slash => { content.push('/'); self.advance(); }
-                Token::Ampersand => { content.push('&'); self.advance(); }
-                Token::Dollar => { content.push('$'); self.advance(); }
-                Token::Exclamation => { content.push('!'); self.advance(); }
-                _ => {
-                    // Unknown token in bracket content — stop
-                    break;
-                }
-            }
-        }
-
-        if content.is_empty() {
-            return Err(ParseError::new("Empty column name in table reference"));
-        }
-
-        Ok(content)
     }
 
     /// Checks whether an identifier could be part of a valid cell reference.
@@ -1768,6 +1563,279 @@ pub fn parse(input: &str) -> ParseResult<Expression> {
     parser.parse()
 }
 
+/// Why a quoted `'...'!` prefix is an EXTERNAL WORKBOOK link rather than a
+/// sheet (or a 3-D sheet range), or `None` when it is an ordinary sheet name.
+///
+/// A GUARD, NOT A FEATURE. Calcula has no external-link resolution and this
+/// function deliberately builds none: it exists so the shapes that mean "another
+/// file" are REFUSED with a sentence the user can act on, instead of being
+/// mistaken for something local.
+///
+/// The discriminators are exactly the characters Excel FORBIDS in a worksheet
+/// name -- `[ ] \ /` -- so no legitimate sheet can be caught by them. That
+/// matters most for the colon: `'Jan:Dec'!A1` is a real 3-D range and must keep
+/// working, while `'C:\Reports\[Q3.xlsx]Sheet1'!A1` was being split on the DRIVE
+/// LETTER's colon into the sheet range `C` .. `\Reports\[Q3.xlsx]Sheet1` and
+/// evaluated over whatever local sheets fell in it.
+fn external_workbook_reason(name: &str) -> Option<&'static str> {
+    if name.contains('[') || name.contains(']') {
+        return Some("[workbook.xlsx] names another file");
+    }
+    if name.contains('\\') || name.contains('/') {
+        return Some("it is a file path");
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// STRUCTURED-REFERENCE BRACKET BODIES
+//
+// A BRACKET BODY IS DATA, NOT A TOKEN STREAM. The body used to be re-assembled
+// from whatever the lexer happened to make of it, and that lost information no
+// later stage could recover:
+//
+//   * `Sales[Profit-Loss]` came back as the column `PROFIT- LOSS` -- a SPACE
+//     inserted into the middle of a name, because the joiner put one between
+//     every pair of tokens and `-` arrived as its own token.
+//   * `Sales[Sales%]`, `Sales[Cost (USD)]` and `Sales[A:B]` did not parse AT
+//     ALL: `%`, `(` and `:` are operators to a lexer, so the reader stopped and
+//     the caller's `expect(RBracket)` failed. A column name is the user's own
+//     text, typed once in the header row; a spreadsheet that refuses to
+//     reference the column it let them name is refusing its own data.
+//   * every name was UPPERCASED, so the formula bar showed `Sales[AMOUNT]`
+//     back to a user who typed `Sales[Amount]`. The lookup is
+//     case-insensitive (`Table::get_column_index` lower-cases both sides), so
+//     nothing was gained by it.
+//
+// This file's own history is the argument for opacity: Calcula's audit found a
+// table column name shaped like a cell address being REWRITTEN by the
+// reference shifters. Bracket contents are treated the way a string literal is
+// -- scanned as characters, understood only where the grammar genuinely has
+// structure.
+//
+// WHERE THE GRAMMAR IS STILL STRUCTURE, and it is exactly Excel's: a body that
+// BEGINS with `[` is the nested form (`[[#Headers],[Amount]]`,
+// `[[a]:[b]]`), one that begins with `#` is a special region, one that begins
+// with `@` is this-row. Anything else is a column name, verbatim -- which is
+// what makes `Sales[A:B]` the column literally named "A:B" rather than a
+// range, exactly as in Excel, where a range must be written `Sales[[A]:[B]]`.
+//
+// Excel's escape is a leading `'` on the character it protects, which is how a
+// name carries a `[`, `]`, `#`, `@` or `'` at all. The escapes survive the
+// split and are removed only at the leaves, so an escaped delimiter can never
+// be mistaken for a real one.
+// ---------------------------------------------------------------------------
+
+/// Reads one structured-reference bracket body into a `TableSpecifier`.
+fn parse_specifier_body(body: &str) -> ParseResult<TableSpecifier> {
+    // The OUTER whitespace is trimmed, the inner is not. `Sales[ Amount ]` has
+    // always worked (the token joiner discarded whitespace outright) and must
+    // keep working, while `Sales[Cost of Goods]` must keep every space it has.
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err(ParseError::new("Empty column name in table reference"));
+    }
+
+    match trimmed.chars().next().unwrap() {
+        '[' => parse_nested_specifier(trimmed),
+        '#' => parse_special_region(&trimmed[1..]),
+        '@' => {
+            let rest = trimmed[1..].trim_start();
+            if rest.is_empty() {
+                // `[@]` is not a spelling of anything. The EMPTY column name is
+                // reserved for the bare `[#This Row]`, and it only works as a
+                // marker while nothing else can forge it.
+                return Err(ParseError::new("Empty column name after '@' in table reference"));
+            }
+            if rest.starts_with('[') {
+                // `[@[Amount]]`, `[@[a]:[b]]` -- the bracketed this-row forms.
+                return this_row_from_parts(rest);
+            }
+            Ok(TableSpecifier::ThisRow(column_name(rest)?))
+        }
+        // A COLUMN NAME, taken whole. No split on `:` here: that is what makes
+        // `Sales[A:B]` the column named "A:B".
+        _ => Ok(TableSpecifier::Column(column_name(trimmed)?)),
+    }
+}
+
+/// The nested form: one or more `[...]` parts joined by a structural `,` or `:`.
+fn parse_nested_specifier(body: &str) -> ParseResult<TableSpecifier> {
+    let (parts, seps) = split_specifier_parts(body);
+    let mut inners = Vec::with_capacity(parts.len());
+    for p in &parts {
+        inners.push(bracket_inner(p)?);
+    }
+
+    match (inners.len(), seps.first()) {
+        // `[[Amount]]`, `[[#This Row]]`, `[[@Amount]]` -- one part, which means
+        // the same thing it would mean without the extra brackets.
+        (1, None) => parse_specifier_body(&inners[0]),
+
+        // `[[a]:[b]]` is a column span; `[[@a]:[@b]]` is that span on THIS row.
+        // The `@` is optional on either side -- Excel writes it on both, but
+        // `[[@a]:[b]]` names the same cells, so one is enough to decide.
+        (2, Some(':')) => {
+            let this_row = inners[0].trim_start().starts_with('@')
+                || inners[1].trim_start().starts_with('@');
+            let a = strip_this_row_marker(&inners[0])?;
+            let b = strip_this_row_marker(&inners[1])?;
+            if this_row {
+                Ok(TableSpecifier::ThisRowRange(a, b))
+            } else {
+                Ok(TableSpecifier::ColumnRange(a, b))
+            }
+        }
+
+        // `[[#Headers],[Amount]]` -- a region and a column.
+        (2, Some(',')) => {
+            let special = parse_specifier_body(&inners[0])?;
+            let col = column_name(inners[1].trim())?;
+            // `[[#This Row],[Amount]]` IS `[@Amount]`: it names ONE cell, not a
+            // region-plus-column pair. Wrapping it in `SpecialColumn` is what
+            // once made the two spellings of one reference answer with
+            // different numbers.
+            if let TableSpecifier::ThisRow(_) = special {
+                return Ok(TableSpecifier::ThisRow(col));
+            }
+            Ok(TableSpecifier::SpecialColumn(Box::new(special), col))
+        }
+
+        _ => Err(ParseError::new(format!(
+            "Unsupported structured reference: [{}]",
+            body
+        ))),
+    }
+}
+
+/// The `@`-prefixed bracketed forms: `@[Amount]` and `@[a]:[b]`.
+fn this_row_from_parts(rest: &str) -> ParseResult<TableSpecifier> {
+    let (parts, seps) = split_specifier_parts(rest);
+    let mut inners = Vec::with_capacity(parts.len());
+    for p in &parts {
+        inners.push(bracket_inner(p)?);
+    }
+    match (inners.len(), seps.first()) {
+        (1, None) => Ok(TableSpecifier::ThisRow(column_name(inners[0].trim())?)),
+        (2, Some(':')) => Ok(TableSpecifier::ThisRowRange(
+            strip_this_row_marker(&inners[0])?,
+            strip_this_row_marker(&inners[1])?,
+        )),
+        _ => Err(ParseError::new(format!(
+            "Unsupported this-row reference: [@{}]",
+            rest
+        ))),
+    }
+}
+
+/// `#All`, `#Data`, `#Headers`, `#Totals`, `#This Row` -- keyword text, so this
+/// one place is NOT opaque. Case- and space-insensitive, as Excel's are.
+fn parse_special_region(rest: &str) -> ParseResult<TableSpecifier> {
+    let key: String = rest
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_uppercase();
+    match key.as_str() {
+        "ALL" => Ok(TableSpecifier::AllRows),
+        "DATA" => Ok(TableSpecifier::DataRows),
+        "HEADERS" => Ok(TableSpecifier::Headers),
+        "TOTALS" => Ok(TableSpecifier::Totals),
+        // `#This Row` IS the this-row marker and carries NO column of its own.
+        // The column, when there is one, follows the comma in
+        // `[[#This Row],[Amount]]`. The empty name is what tells this apart
+        // from `[#Data]`, which is the only thing the renderer could spell it
+        // with before it had an arm of its own.
+        "THIS ROW" => Ok(TableSpecifier::ThisRow(String::new())),
+        "" => Err(ParseError::new("Expected specifier name after '#'")),
+        _ => Err(ParseError::new(format!("Unknown table specifier: #{}", rest))),
+    }
+}
+
+/// The text between one part's own `[` and `]`.
+fn bracket_inner(part: &str) -> ParseResult<String> {
+    let p = part.trim();
+    if p.len() >= 2 && p.starts_with('[') && p.ends_with(']') {
+        return Ok(p[1..p.len() - 1].to_string());
+    }
+    Err(ParseError::new(format!(
+        "Expected a bracketed column name in a structured reference, found '{}'",
+        p
+    )))
+}
+
+/// One end of a span, with its optional `@` this-row marker removed.
+///
+/// The marker is tested on the ESCAPED text and stripped before unescaping, so
+/// a column genuinely named `@Total` -- written `['@Total]` -- keeps its `@`.
+fn strip_this_row_marker(inner: &str) -> ParseResult<String> {
+    let t = inner.trim();
+    let name = t.strip_prefix('@').unwrap_or(t);
+    column_name(name.trim())
+}
+
+/// A leaf column name: escapes removed, and never empty.
+fn column_name(raw: &str) -> ParseResult<String> {
+    let name = unescape_bracket_text(raw);
+    if name.is_empty() {
+        return Err(ParseError::new("Empty column name in table reference"));
+    }
+    Ok(name)
+}
+
+/// Splits a bracket body on the `,` and `:` that are STRUCTURE -- at bracket
+/// depth 0 and not escaped. Returns the parts and the separators between them.
+fn split_specifier_parts(body: &str) -> (Vec<String>, Vec<char>) {
+    let mut parts = Vec::new();
+    let mut seps = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                current.push(ch);
+                if let Some(esc) = chars.next() {
+                    current.push(esc);
+                }
+            }
+            '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' | ':' if depth == 0 => {
+                seps.push(ch);
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    parts.push(current);
+    (parts, seps)
+}
+
+/// Removes Excel's `'` escapes. A trailing lone `'` is kept as itself rather
+/// than dropped, so no name can be unescaped into nothing.
+fn unescape_bracket_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            match chars.next() {
+                Some(next) => out.push(next),
+                None => out.push('\''),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 //
@@ -1805,7 +1873,7 @@ mod tests {
         // Named outright, so the test still fails if BOTH spellings drift.
         assert_eq!(
             specifier_of("=Table1[[#This Row],[Amount]]"),
-            TableSpecifier::ThisRow("AMOUNT".to_string())
+            TableSpecifier::ThisRow("Amount".to_string())
         );
     }
 
@@ -1838,7 +1906,7 @@ mod tests {
     fn this_row_ignores_case() {
         assert_eq!(
             specifier_of("=Table1[[#THIS ROW],[Amount]]"),
-            TableSpecifier::ThisRow("AMOUNT".to_string())
+            TableSpecifier::ThisRow("Amount".to_string())
         );
         assert_eq!(
             specifier_of("=Table1[#this row]"),
@@ -1858,7 +1926,7 @@ mod tests {
         ] {
             assert_eq!(
                 specifier_of(formula),
-                TableSpecifier::SpecialColumn(Box::new(special), "AMOUNT".to_string()),
+                TableSpecifier::SpecialColumn(Box::new(special), "Amount".to_string()),
                 "{} changed shape",
                 formula
             );
@@ -1875,5 +1943,202 @@ mod tests {
     fn an_empty_column_name_has_no_other_spelling() {
         assert!(parse("=Table1[@]").is_err(), "[@] must not parse");
         assert!(parse("=Table1[]").is_err(), "[] must not parse");
+    }
+
+    /// A COLUMN NAME IS THE USER'S OWN TEXT, and comes back exactly as typed.
+    ///
+    /// The body used to be re-assembled from tokens, which lost information no
+    /// later stage could recover. Each row below is a real failure mode of
+    /// that: `Profit-Loss` gained a SPACE in the middle (the joiner put one
+    /// between every pair of tokens), and `Sales%`, `Cost (USD)` and `A:B` did
+    /// not parse AT ALL, because `%`, `(` and `:` are operators to a lexer. A
+    /// spreadsheet that refuses to reference the column it let the user name is
+    /// refusing its own data.
+    ///
+    /// `A:B` is the sharpest of them: opacity is what makes it the column
+    /// literally named "A:B" rather than a range, which is exactly Excel's
+    /// rule -- a column span must be written `Sales[[A]:[B]]`.
+    #[test]
+    fn a_column_name_is_taken_verbatim() {
+        for name in [
+            "Sales%",
+            "Cost (USD)",
+            "Profit-Loss",
+            "A:B",
+            "Q1 Sales",
+            "Amount $",
+            "Cost/Unit",
+            "Rate*2",
+            "Sales+Tax",
+            "A1",
+            "50%",
+            "Delta<Target",
+        ] {
+            assert_eq!(
+                specifier_of(&format!("=Table1[{}]", name)),
+                TableSpecifier::Column(name.to_string()),
+                "the column name `{}` did not survive",
+                name
+            );
+        }
+    }
+
+    /// THE CASE THE USER TYPED SURVIVES.
+    ///
+    /// Every name used to arrive uppercased, because the LEXER uppercases bare
+    /// identifiers -- so the formula bar showed `Sales[AMOUNT]` back to someone
+    /// who typed `Sales[Amount]`. Nothing was gained by it: the lookup
+    /// (`Table::get_column_index`) lower-cases both sides, so it was never
+    /// case-sensitive in the first place.
+    #[test]
+    fn a_column_name_keeps_its_case() {
+        assert_eq!(
+            specifier_of("=Table1[Amount]"),
+            TableSpecifier::Column("Amount".to_string())
+        );
+        assert_ne!(
+            specifier_of("=Table1[Amount]"),
+            TableSpecifier::Column("AMOUNT".to_string())
+        );
+        // The this-row and range forms read their names through the same leaf,
+        // so all three must agree or the renderer would re-spell some of them.
+        assert_eq!(
+            specifier_of("=Table1[@Amount]"),
+            TableSpecifier::ThisRow("Amount".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1[[Amount]:[Tax]]"),
+            TableSpecifier::ColumnRange("Amount".to_string(), "Tax".to_string())
+        );
+    }
+
+    /// The SPECIFIER KEYWORDS are the one part of a bracket body that is NOT
+    /// opaque, and they stay case-insensitive as Excel's are. This is the
+    /// counterweight to the test above: names keep their case, keywords do not
+    /// have one.
+    #[test]
+    fn specifier_keywords_are_still_case_insensitive() {
+        assert_eq!(specifier_of("=Table1[#all]"), TableSpecifier::AllRows);
+        assert_eq!(specifier_of("=Table1[#DATA]"), TableSpecifier::DataRows);
+        assert_eq!(specifier_of("=Table1[#Headers]"), TableSpecifier::Headers);
+        assert_eq!(specifier_of("=Table1[#totals]"), TableSpecifier::Totals);
+        // ...and an UNKNOWN one is still an error, so the match is not a
+        // catch-all that would swallow `[#Datta]`.
+        assert!(parse("=Table1[#Datta]").is_err(), "an unknown region must be refused");
+    }
+
+    /// EXCEL'S `'` ESCAPE lets a column name carry the very characters that
+    /// select the structural forms.
+    ///
+    /// The escape has to be honoured while the body is still being SCANNED, not
+    /// merely when the name is read: in `[Cost '[USD']]` it decides where the
+    /// reference ENDS, and an escaped `]` that closed the bracket would leave
+    /// the rest of the formula to be parsed as something else entirely.
+    #[test]
+    fn the_apostrophe_escape_protects_a_name() {
+        assert_eq!(
+            specifier_of("=Table1[Cost '[USD']]"),
+            TableSpecifier::Column("Cost [USD]".to_string())
+        );
+        // A leading `#` or `@` would otherwise SELECT a form rather than name a
+        // column, which is the whole reason Excel gives them an escape.
+        assert_eq!(
+            specifier_of("=Table1['#Rank]"),
+            TableSpecifier::Column("#Rank".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1['@Owner]"),
+            TableSpecifier::Column("@Owner".to_string())
+        );
+        // CONTROLS: unescaped, those same two characters still select their
+        // forms. Without this pair the test would pass on a parser that had
+        // simply stopped treating `#` and `@` as special.
+        assert_eq!(specifier_of("=Table1[#Data]"), TableSpecifier::DataRows);
+        assert_eq!(
+            specifier_of("=Table1[@Rank]"),
+            TableSpecifier::ThisRow("Rank".to_string())
+        );
+    }
+
+    /// The structural forms are decided by the FIRST character of the body,
+    /// exactly as in Excel, and each still produces what it always did.
+    #[test]
+    fn the_structural_forms_are_unchanged() {
+        assert_eq!(
+            specifier_of("=Table1[[#Headers],[Amount]]"),
+            TableSpecifier::SpecialColumn(Box::new(TableSpecifier::Headers), "Amount".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1[[Amount]:[Tax]]"),
+            TableSpecifier::ColumnRange("Amount".to_string(), "Tax".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1[[@Amount]:[@Tax]]"),
+            TableSpecifier::ThisRowRange("Amount".to_string(), "Tax".to_string())
+        );
+        // The trailing `@` is optional -- Excel writes it on both ends, but one
+        // is enough to say the span is on this row.
+        assert_eq!(
+            specifier_of("=Table1[[@Amount]:[Tax]]"),
+            TableSpecifier::ThisRowRange("Amount".to_string(), "Tax".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1[@[Amount]]"),
+            TableSpecifier::ThisRow("Amount".to_string())
+        );
+    }
+
+    /// THE OUTER WHITESPACE IS TRIMMED AND THE INNER IS NOT.
+    ///
+    /// `Table1[ Amount ]` has always worked (the token joiner discarded
+    /// whitespace outright) and must keep working now that the body is read as
+    /// characters; a name with spaces INSIDE it keeps every one of them.
+    #[test]
+    fn outer_whitespace_is_trimmed_inner_whitespace_is_kept() {
+        assert_eq!(
+            specifier_of("=Table1[ Amount ]"),
+            TableSpecifier::Column("Amount".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1[Cost of Goods]"),
+            TableSpecifier::Column("Cost of Goods".to_string())
+        );
+        assert_eq!(
+            specifier_of("=Table1[[#Headers], [Amount]]"),
+            TableSpecifier::SpecialColumn(Box::new(TableSpecifier::Headers), "Amount".to_string())
+        );
+    }
+
+    /// A bracket body that never closes is a REFUSAL. The raw scan runs to end
+    /// of input, so this is the one new way it can fail, and it must say which
+    /// character is missing rather than reporting some later token.
+    #[test]
+    fn an_unterminated_bracket_body_is_refused() {
+        assert!(parse("=Table1[Amount").is_err());
+        assert!(parse("=Table1[[#Headers],[Amount]").is_err());
+        // An escaped `]` does not close the body -- that is what the escape is
+        // FOR, and it is why an unterminated name can run to the end at all.
+        assert!(parse("=Table1[Cost ']").is_err());
+    }
+
+    /// The reference must END at its own bracket, so the rest of the formula is
+    /// still parsed. A raw scan that ran past the matching `]` would swallow
+    /// arguments, operators, or the whole remainder of the formula in silence.
+    #[test]
+    fn the_scan_stops_at_the_matching_bracket() {
+        match parse("=SUM(Table1[Amount],1)").expect("parses") {
+            Expression::FunctionCall { args, .. } => {
+                assert_eq!(args.len(), 2, "the scan ate the second argument");
+                assert!(matches!(args[0], Expression::TableRef { .. }));
+                assert_eq!(args[1], Expression::Literal(Value::Number(1.0)));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse("=Table1[Amount]+1").expect("parses") {
+            Expression::BinaryOp { op, .. } => assert_eq!(op, BinaryOperator::Add),
+            other => panic!("the `+1` was swallowed: {other:?}"),
+        }
+        // The NESTED form's inner brackets must not be mistaken for the end.
+        assert!(parse("=SUM(Table1[[#Headers],[Amount]],1)").is_ok());
     }
 }

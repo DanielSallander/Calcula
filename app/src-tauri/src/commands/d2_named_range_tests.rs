@@ -35,6 +35,21 @@ use engine::CellValue;
 // ---------------------------------------------------------------------------
 
 impl Workbook {
+    /// `whole`.`frac` spelled with THIS MACHINE's decimal separator.
+    ///
+    /// THE HARNESS RUNS UNDER THE REAL REGIONAL FORMAT — sv-SE on this build —
+    /// and the typed-entry ladder now applies Excel's rule that a FOREIGN
+    /// decimal spelling is text, so a literal `"0.25"` here would store the
+    /// STRING "0.25" and every assertion below would silently become an
+    /// assertion about text. These tests are about NAMES; which character
+    /// separates the decimals is the harness's problem, not theirs. Its sibling
+    /// `a_let_binding_that_shadows_a_name_earns_no_edge` already had to say the
+    /// same thing about the ARGUMENT separator, for the same reason.
+    fn decimal(&self, whole: &str, frac: &str) -> String {
+        let separator = self.state.locale.lock().unwrap().decimal_separator;
+        format!("{}{}{}", whole, separator, frac)
+    }
+
     /// Define (or repoint) a name, straight into `AppState`.
     ///
     /// The CRUD commands take `State<..>` and cannot run in-process, so the
@@ -108,7 +123,7 @@ impl Workbook {
 fn typing_a_name_stores_the_name_not_its_expansion() {
     let wb = Workbook::new(1);
     wb.define_name("RATE", "=$D$5", None);
-    wb.set(4, 3, "0.25"); // D5
+    wb.set(4, 3, &wb.decimal("0", "25")); // D5
     wb.set(0, 0, "=RATE");
 
     assert_eq!(
@@ -128,7 +143,7 @@ fn typing_a_name_stores_the_name_not_its_expansion() {
 fn the_formula_bar_round_trips_the_name() {
     let wb = Workbook::new(1);
     wb.define_name("RATE", "=$D$5", None);
-    wb.set(4, 3, "0.25");
+    wb.set(4, 3, &wb.decimal("0", "25"));
     wb.set(0, 0, "=RATE*100");
 
     // Render -> re-parse -> render must be a fixed point, or every path that
@@ -199,8 +214,8 @@ fn a_let_binding_is_not_respelled_after_a_colliding_name() {
 #[test]
 fn repointing_a_name_recalculates_every_formula_that_reads_it() {
     let wb = Workbook::new(1);
-    wb.set(4, 3, "0.25"); // D5
-    wb.set(4, 4, "0.40"); // E5
+    wb.set(4, 3, &wb.decimal("0", "25")); // D5
+    wb.set(4, 4, &wb.decimal("0", "40")); // E5
     wb.define_name("RATE", "=$D$5", None);
     wb.set(0, 0, "=RATE*100");
     wb.set(1, 0, "=RATE*200");
@@ -246,7 +261,7 @@ fn defining_a_name_repairs_the_cells_that_were_waiting_for_it() {
     // Excel: `=RATE` before RATE exists is #NAME?, and defining RATE makes it a
     // number. That needs an edge for a name that does not exist yet.
     let wb = Workbook::new(1);
-    wb.set(4, 3, "0.25");
+    wb.set(4, 3, &wb.decimal("0", "25"));
     wb.set(0, 0, "=RATE*100");
     assert_eq!(
         wb.value(0, 0, 0),
@@ -272,7 +287,7 @@ fn defining_a_name_repairs_the_cells_that_were_waiting_for_it() {
 #[test]
 fn deleting_a_name_leaves_name_error_and_keeps_the_formula_text() {
     let wb = Workbook::new(1);
-    wb.set(4, 3, "0.25");
+    wb.set(4, 3, &wb.decimal("0", "25"));
     wb.define_name("RATE", "=$D$5", None);
     wb.set(0, 0, "=RATE*100");
     assert_eq!(wb.number(0, 0, 0), 25.0);
@@ -416,7 +431,7 @@ fn retyping_a_formula_without_the_name_drops_its_edge() {
 fn a_let_binding_that_shadows_a_name_earns_no_edge() {
     let wb = Workbook::new(1);
     wb.define_name("RATE", "=$D$5", None);
-    wb.set(4, 3, "0.25");
+    wb.set(4, 3, &wb.decimal("0", "25"));
     // `;` not `,`: this harness runs under the machine's real locale (sv-SE),
     // where `parse_cell_input` delocalizes a comma as a DECIMAL separator.
     wb.set(0, 0, "=LET(rate; 2; rate*10)");
@@ -475,7 +490,7 @@ fn the_saved_formula_text_carries_the_name() {
     // live, and nothing migrates it — "Apply Names…" is the repair, exactly as
     // in Excel.
     let wb = Workbook::new(1);
-    wb.set(4, 3, "0.25");
+    wb.set(4, 3, &wb.decimal("0", "25"));
     wb.define_name("RATE", "=$D$5", None);
     wb.set(0, 0, "=RATE*100");
 

@@ -259,13 +259,21 @@ fn the_stored_specifier_is_spelled_the_way_the_table_spells_it() {
 fn a_reference_to_a_table_that_does_not_exist_is_kept_exactly_as_typed() {
     // There is no authority to re-spell it from, and inventing one would let a
     // `#NAME?` acquire a plausible-looking table name it never had.
+    //
+    // THE TWO HALVES ARE SPELLED BY DIFFERENT RULES, and the difference is the
+    // point of this row. The TABLE name comes back uppercased because the lexer
+    // uppercases bare identifiers; the COLUMN name comes back exactly as typed,
+    // because a structured reference's bracket body is now read as raw text
+    // rather than as tokens. It used to read `[AMOUNT]` here, which was the
+    // lexer leaking a spelling the user never wrote into a formula no table can
+    // correct.
     let wb = Workbook::new(1);
     wb.set(0, 2, "=SUM(NoSuchTable[Amount])");
     assert_eq!(
         wb.formula_of(0, 0, 2),
-        "SUM(NOSUCHTABLE[AMOUNT])",
-        "unchanged from the lexer, because nothing in the workbook can say how \
-         it should be spelled"
+        "SUM(NOSUCHTABLE[Amount])",
+        "the column keeps the user's spelling; only the table name is the \
+         lexer's, and nothing in the workbook can say how that should be spelled"
     );
 }
 
