@@ -181,6 +181,23 @@ fn find_next_recursive(expr: &Expression, path: &mut Vec<usize>) -> Option<NextN
             })
         }
 
+        // ArrayLiteral: recurse into every cell; the path index is the
+        // row-major position, flattened across rows
+        Expression::ArrayLiteral { rows } => {
+            for (i, cell) in rows.iter().flatten().enumerate() {
+                path.push(i);
+                if let Some(result) = find_next_recursive(cell, path) {
+                    return Some(result);
+                }
+                path.pop();
+            }
+            Some(NextNode {
+                path: path.clone(),
+                is_cell_ref: false,
+                cell_ref_info: None,
+            })
+        }
+
         // ListLiteral: recurse into all elements
         Expression::ListLiteral { elements } => {
             for (i, elem) in elements.iter().enumerate() {

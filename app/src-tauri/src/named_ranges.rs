@@ -741,14 +741,51 @@ pub fn resolve_named_range_coords(
     })
 }
 
-/// Rename a named range.
+// ============================================================================
+// RENAME — THE KEY MOVES *AND* THE FORMULAS FOLLOW IT
+// ============================================================================
+
+/// One OTHER defined name whose `refers_to` mentions the name being renamed.
 ///
-/// EXCEL'S BEHAVIOUR, DELIBERATELY: renaming in the Name Manager does NOT
-/// rewrite the formulas that use the old name — they keep saying `OLDNAME` and
-/// become `#NAME?`. (Excel's own Name Manager warns about this; only the Name
-/// Box's "rename by redefining" flow leaves formulas working.) Both names are
-/// therefore reported as changed here, so the old name's readers recalculate to
-/// `#NAME?` instead of sitting on the value they had.
+/// A name may be defined in terms of another (`DOUBLED` = `=BASE*2`), so
+/// renaming `BASE` breaks `DOUBLED` exactly the way it used to break a cell —
+/// and `DOUBLED`'s readers, which never mentioned `BASE` at all, go `#NAME?`
+/// with nothing in the document saying why. `refers_to` is stored as TEXT, so
+/// this half is a parse -> walk -> render round trip rather than an in-place AST
+/// edit like the grid half.
+struct NestedRename {
+    /// Uppercase registry key of the OTHER name.
+    key: String,
+    /// The entry as it was, for the undo record.
+    before: NamedRange,
+    /// The entry with its `refers_to` repointed.
+    after: NamedRange,
+}
+
+/// Rename a named range, carrying every formula that reads it.
+///
+/// EXCEL'S BEHAVIOUR: the Name Manager's rename REPOINTS the references. That is
+/// not a nicety here, it is the difference between a working command and a
+/// destructive one — D2 stores the NAME inside the formula and resolves it while
+/// calculating (`resolve_names_in_ast`), so moving the registry key on its own
+/// turns every formula that read the old name into `#NAME?`. This shipped that
+/// way once, behind a confirmation dialog; a warning the user can click through
+/// is not a substitute for not breaking their workbook.
+///
+/// FOUR PARTS, IN ORDER, and the order is the contract:
+///
+/// 1. every gate that can still refuse — the name is legal, it does not collide
+///    with a TABLE (one formula namespace, two registries), the old name exists,
+///    the new key is free, and every rewritten `refers_to` can be read back;
+/// 2. the registry move, under the guard the gates read through
+///    (`lock_pending` / `authorize`), so gate and mutation are one critical
+///    section and the document is dirtied only once every refusal is behind us;
+/// 3. the repoint, over the stored ASTs of every sheet in the name's SCOPE;
+/// 4. ONE undo transaction covering both, because a rename that undoes halfway
+///    is worse than one that cannot be undone at all.
+///
+/// The recalculation and the dependency rebuild are the caller's second lock
+/// phase, below.
 #[tauri::command]
 pub fn rename_named_range(
     state: State<AppState>,
@@ -760,45 +797,24 @@ pub fn rename_named_range(
     old_name: String,
     new_name: String,
 ) -> NamedRangeResult {
-    // Validate new name
-    if !NamedRange::is_valid_name(&new_name) {
-        return NamedRangeResult {
-            success: false,
-            named_range: None,
-            error: Some(format!("Invalid name '{}'. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references.", new_name)),
-        };
-    }
-
-    let effect = DocumentEffect::mutates(&file_state);
-    let mut named_ranges = state.named_ranges.write(&effect).unwrap();
-
-    let old_key = old_name.to_uppercase();
-    let new_key = new_name.to_uppercase();
-
-    // Check if old name exists
-    if !named_ranges.contains_key(&old_key) {
-        return NamedRangeResult {
-            success: false,
-            named_range: None,
-            error: Some(format!("Named range '{}' does not exist.", old_name)),
-        };
-    }
-
-    // Check if new name already exists (unless it's the same name with different case)
-    if old_key != new_key && named_ranges.contains_key(&new_key) {
-        return NamedRangeResult {
-            success: false,
-            named_range: None,
-            error: Some(format!("A named range '{}' already exists.", new_name)),
-        };
-    }
-
-    // Remove old entry and insert with new name
-    if let Some(mut nr) = named_ranges.remove(&old_key) {
-        nr.name = new_name.clone();
-        named_ranges.insert(new_key, nr.clone());
-        drop(named_ranges);
-
+    let result = rename_named_range_impl(&state, &file_state, &old_name, &new_name);
+    if result.success {
+        // PHASE B, holding nothing: both helpers take their own locks.
+        //
+        // THE EDGES ARE KEYED BY NAME. `name_dependents` files every reader
+        // under the name it read, so after the repoint every edge is filed under
+        // a name the workbook no longer has — and the next repoint of the NEW
+        // name would reach none of them, leaving exactly these cells holding the
+        // number they computed from the old definition. Rebuilding first is what
+        // makes the seeding below find them. (Same argument
+        // `apply_names_to_formulas` makes for the cells it rewrites, and
+        // `recalc_after_table_change` for a renamed table.)
+        crate::undo_commands::rebuild_all_dependencies(&state);
+        // No VALUE moves for a reader that was repointed — the same definition
+        // under a new name — but two populations do move: a cell that already
+        // said `=NEWNAME` before the name existed was `#NAME?` and is now a
+        // number, and a reader OUTSIDE a sheet-scoped name's scope keeps saying
+        // the old name. Both spellings are reported so both are reached.
         recalc_after_name_change(
             &state,
             &user_files_state,
@@ -807,18 +823,359 @@ pub fn rename_named_range(
             &ribbon_filter_state,
             &[old_name, new_name],
         );
+    }
+    result
+}
 
-        NamedRangeResult {
-            success: true,
-            named_range: Some(nr),
-            error: None,
-        }
-    } else {
+/// Command body over plain references, so the gates, the repoint and the undo
+/// transaction are unit-testable without a Tauri `State` — the same split
+/// `create_named_range_impl` uses.
+pub(crate) fn rename_named_range_impl(
+    state: &AppState,
+    file_state: &FileState,
+    old_name: &str,
+    new_name: &str,
+) -> NamedRangeResult {
+    fn refuse(message: String) -> NamedRangeResult {
         NamedRangeResult {
             success: false,
             named_range: None,
-            error: Some("Unexpected error during rename.".to_string()),
+            error: Some(message),
         }
+    }
+
+    // ---- GATE 1: the new name has to be a name. ----------------------------
+    if !NamedRange::is_valid_name(new_name) {
+        return refuse(format!("Invalid name '{}'. Names must start with a letter or underscore, contain only letters, numbers, underscores, and periods, and cannot be cell references.", new_name));
+    }
+
+    let old_key = old_name.to_uppercase();
+    let new_key = new_name.to_uppercase();
+
+    // ---- GATE 2: names and TABLES share ONE formula namespace. -------------
+    // `create_named_range` refuses a name a table already holds because which
+    // one wins otherwise depends on resolution order — names resolve first, then
+    // tables, so the same formula could mean different things down different
+    // paths. Rename skipped the check entirely, so a rename could walk a name
+    // straight into a table's name. Skipped when the KEY does not move
+    // ("total" -> "Total"): that is a re-spelling, not a new claim on the
+    // namespace.
+    if old_key != new_key {
+        if let Ok(table_names) = state.table_names.read() {
+            if table_names.contains_key(&new_key) {
+                return refuse(format!(
+                    "A table named '{}' already exists. Names and tables share one namespace — pick a different name.",
+                    new_name
+                ));
+            }
+        }
+    }
+
+    // CLONED, not held: `sheet_names` must be taken BEFORE `named_ranges`
+    // (BUG-0045 — the recalculation pass takes them in that order on a
+    // background thread and the reverse closes a cycle that hangs the app with
+    // no panic and no log line), and nothing below needs the lock itself.
+    let sheet_names: Vec<String> = match state.sheet_names.read() {
+        Ok(names) => names.clone(),
+        Err(_) => return refuse("Sheet names are unavailable.".to_string()),
+    };
+
+    // ---- GATES 3-5, under the guard the mutation will use. -----------------
+    // LOCKED BUT UNDECIDED: `DocumentEffect::mutates` dirties AT CONSTRUCTION,
+    // and three of this command's refusals are still ahead. `lock_pending` reads
+    // through the held lock and postpones the dirty decision past the last
+    // `return`, keeping the gate and the mutation in ONE critical section.
+    let pending = match state.named_ranges.lock_pending() {
+        Ok(guard) => guard,
+        Err(_) => return refuse("Named ranges are unavailable.".to_string()),
+    };
+
+    let Some(existing) = pending.get(&old_key).cloned() else {
+        return refuse(format!("Named range '{}' does not exist.", old_name));
+    };
+    if old_key != new_key && pending.contains_key(&new_key) {
+        return refuse(format!("A named range '{}' already exists.", new_name));
+    }
+    // Renaming a name to exactly what it is already called changes nothing, and
+    // a command that changes nothing must not dirty the document.
+    if existing.name == new_name {
+        return NamedRangeResult {
+            success: true,
+            named_range: Some(existing),
+            error: None,
+        };
+    }
+
+    let mut renamed = existing.clone();
+    renamed.name = new_name.to_string();
+
+    // The registry AS IT WILL BE. `plan_nested_renames` restamps the definitions
+    // it rewrites against a name table, and against the PRE-rename one a
+    // case-only rename ("total" -> "Total") would restamp its own work straight
+    // back to the old spelling.
+    let mut after_map = (*pending).clone();
+    after_map.remove(&old_key);
+    after_map.insert(new_key.clone(), renamed.clone());
+
+    let nested = match plan_nested_renames(&after_map, &sheet_names, &new_key, &old_key, new_name, &renamed)
+    {
+        Ok(planned) => planned,
+        Err(message) => return refuse(message),
+    };
+
+    // Every gate has passed; from here this command commits.
+    let effect = DocumentEffect::mutates(file_state);
+    let mut named_ranges = pending.authorize(&effect);
+
+    named_ranges.remove(&old_key);
+    named_ranges.insert(new_key.clone(), renamed.clone());
+    for entry in &nested {
+        named_ranges.insert(entry.key.clone(), entry.after.clone());
+    }
+    drop(named_ranges);
+
+    // ---- THE REPOINT. -----------------------------------------------------
+    let touched = rename_name_in_grids(state, &effect, existing.sheet_index, &old_key, new_name);
+
+    record_rename_undo(state, touched, &old_key, &new_key, &existing, &nested);
+
+    NamedRangeResult {
+        success: true,
+        named_range: Some(renamed),
+        error: None,
+    }
+}
+
+/// Repoint every OTHER name whose `refers_to` mentions the one being renamed.
+///
+/// Returns the planned rewrites, or the refusal message if one of them cannot be
+/// read back — the `apply_names_to_formulas` rule (register §3bc): a definition
+/// this command cannot re-parse is a definition it must not write, and it
+/// refuses the WHOLE rename rather than leaving the registry half repointed.
+/// Called BEFORE the `DocumentEffect` exists, so that refusal leaves the
+/// document clean.
+///
+/// SCOPE. A sheet-scoped name resolves only on its own sheet
+/// (`resolve_names_in_ast` prefers a name scoped to the evaluating sheet and
+/// falls back to the workbook-scoped one), so a workbook-scoped rename reaches
+/// every definition while a sheet-scoped one reaches only definitions with the
+/// same scope. Rewriting more than that would repoint text that never denoted
+/// this name.
+///
+/// The two RESTAMPS are the load path's, for the load path's reason: the text
+/// goes back through the lexer, which uppercases bare identifiers, so without
+/// them a rewritten `=BudgetTotal*2` would come back as `=BUDGETTOTAL*2` and
+/// `=Data!A1` as `=DATA!A1`. Purely cosmetic in both cases — every lookup on
+/// these paths compares case-insensitively — which is also why a structured
+/// reference in a `refers_to` is left to come back shouting: restamping that
+/// would mean taking `tables` and `table_names` under `named_ranges`, and the
+/// crate's two existing orders for that pair disagree.
+fn plan_nested_renames(
+    after_map: &std::collections::HashMap<String, NamedRange>,
+    sheet_names: &[String],
+    new_key: &str,
+    old_key: &str,
+    new_name: &str,
+    renamed: &NamedRange,
+) -> Result<Vec<NestedRename>, String> {
+    let mut keys: Vec<&String> = after_map.keys().collect();
+    // `after_map` is a hash map: sort so the refusal below names the same
+    // definition on every run.
+    keys.sort();
+
+    let mut planned: Vec<NestedRename> = Vec::new();
+    for key in keys {
+        // The renamed name itself: a `refers_to` that mentions the old name is a
+        // self-reference, which the resolver's cycle guard already answers.
+        if key == new_key {
+            continue;
+        }
+        let Some(other) = after_map.get(key) else { continue };
+        if renamed.sheet_index.is_some() && other.sheet_index != renamed.sheet_index {
+            continue;
+        }
+        let Ok(parsed) = parser::parse(&other.refers_to) else {
+            continue; // Unparseable already — leave exactly as it is.
+        };
+        let (mut rewritten, changed) =
+            crate::name_resolution::rename_name_in_ast(&parsed, old_key, new_name);
+        if !changed {
+            continue;
+        }
+        crate::name_resolution::restamp_name_casing(&mut rewritten, after_map);
+        crate::sheet_names::restamp_sheet_casing(&mut rewritten, sheet_names);
+        let text = format!("={}", engine::ast_render::render_formula_raw(&rewritten));
+        if let Err(e) = parser::parse(&text) {
+            crate::log_error!(
+                "NAMES",
+                "rename refused: '{}' would be rewritten to `{}` ({})",
+                other.name,
+                text,
+                e
+            );
+            return Err(format!(
+                "Cannot rename: the name '{}' refers to `{}`, which would be rewritten to `{}` and cannot be read back ({}). Nothing was changed.",
+                other.name, other.refers_to, text, e
+            ));
+        }
+        let mut after = other.clone();
+        after.refers_to = text;
+        planned.push(NestedRename {
+            key: key.clone(),
+            before: other.clone(),
+            after,
+        });
+    }
+    Ok(planned)
+}
+
+/// Point every stored formula that reads `old_key` at `new_name`, across the
+/// sheets the name's SCOPE reaches. Returns the PRE-mutation cells so the caller
+/// can make it undoable.
+///
+/// OPERATES ON THE AST DIRECTLY rather than round-tripping through formula text,
+/// for the reason `rename_table_refs_in_formulas` gives: the stored form IS the
+/// AST (`engine::Cell` has no raw formula field — `formula_string()` renders
+/// one), so there is no re-parse that could fail and silently demote a formula
+/// cell to a value cell. The text the formula bar and `.cala` show is therefore
+/// re-rendered from the rewritten tree by construction; the two cannot disagree.
+///
+/// SCOPE, as in [`plan_nested_renames`]: a sheet-scoped name resolves only on
+/// its own sheet, so `=RATE` written on another sheet is a `#NAME?` that never
+/// denoted this name and must not be rewritten into one that looks like it did.
+fn rename_name_in_grids(
+    state: &AppState,
+    effect: &DocumentEffect,
+    scope: Option<usize>,
+    old_key: &str,
+    new_name: &str,
+) -> Vec<(usize, u32, u32, Option<engine::Cell>)> {
+    let active_sheet = *state.active_sheet.read().unwrap();
+    let mut grid = state.grid.write(effect).unwrap();
+    let mut grids = state.grids.write(effect).unwrap();
+
+    // `state.grid` is the AUTHORITATIVE copy of the active sheet and
+    // `grids[active]` can lag behind it (BUG-0016) — sync before the walk, the
+    // way `rename_sheet` does, or the formula the user typed since the last
+    // sheet switch is repointed in the mirror and lost on the next swap.
+    if active_sheet < grids.len() {
+        grids[active_sheet] = grid.clone();
+    }
+
+    let mut wanted = crate::name_resolution::NameSet::default();
+    wanted.insert(old_key.to_string());
+
+    let mut touched: Vec<(usize, u32, u32, Option<engine::Cell>)> = Vec::new();
+    for (sheet_idx, sheet_grid) in grids.iter_mut().enumerate() {
+        if let Some(scope_sheet) = scope {
+            if scope_sheet != sheet_idx {
+                continue;
+            }
+        }
+        // The gate is the allocation-free, shadow-aware predicate the edge map
+        // is built from, so this walk visits exactly the cells the name reaches.
+        let candidates: Vec<(u32, u32)> = sheet_grid
+            .cells
+            .iter()
+            .filter(|&(_, cell)| crate::name_resolution::cell_reads_any_name(cell, &wanted))
+            .map(|(&coord, _)| coord)
+            .collect();
+
+        for (row, col) in candidates {
+            let Some(before) = sheet_grid.get_cell(row, col).cloned() else { continue };
+            let Some(ast) = before.get_ast() else { continue };
+            let (rewritten, changed) =
+                crate::name_resolution::rename_name_in_ast(ast, old_key, new_name);
+            if !changed {
+                continue;
+            }
+            let mut updated = before.clone();
+            updated.ast = Some(Box::new(rewritten));
+            sheet_grid.set_cell(row, col, updated);
+            touched.push((sheet_idx, row, col, Some(before)));
+        }
+    }
+
+    if active_sheet < grids.len() {
+        *grid = grids[active_sheet].clone();
+    }
+
+    // `grid.cells` is a hash map: sort so the undo record — and anything that
+    // reads this list — does not depend on hash order.
+    touched.sort_by_key(|(sheet, row, col, _)| (*sheet, *row, *col));
+    touched
+}
+
+/// Record the whole rename — registry entries AND rewritten formulas — as ONE
+/// undo transaction.
+///
+/// A rename that undoes halfway is worse than one that cannot be undone at all:
+/// putting the old name back while the formulas keep saying the new one produces
+/// `#NAME?` everywhere, which is the exact defect the repoint exists to remove.
+/// (`rename_table` learned this the same way; `rename_sheet` sidesteps it by
+/// ENDING the undo history, which Excel also does for a sheet rename and does
+/// not do for a name.)
+///
+/// CELLS ARE RECORDED FIRST so they restore LAST — a transaction is replayed in
+/// reverse — i.e. after the registry is back, which is the order that makes the
+/// restored formulas resolve.
+fn record_rename_undo(
+    state: &AppState,
+    touched: Vec<(usize, u32, u32, Option<engine::Cell>)>,
+    old_key: &str,
+    new_key: &str,
+    before: &NamedRange,
+    nested: &[NestedRename],
+) {
+    let opened = {
+        let mut undo_stack = state.undo_stack.lock().unwrap();
+        let opened = !undo_stack.has_open_transaction();
+        if opened {
+            undo_stack.begin_transaction("Rename name".to_string());
+        }
+        let mut by_sheet: std::collections::HashMap<usize, Vec<(u32, u32, Option<engine::Cell>)>> =
+            std::collections::HashMap::new();
+        for (sheet_idx, row, col, cell) in touched {
+            by_sheet.entry(sheet_idx).or_default().push((row, col, cell));
+        }
+        let mut sheets: Vec<usize> = by_sheet.keys().copied().collect();
+        sheets.sort_unstable();
+        for sheet_index in sheets {
+            let cells = by_sheet.remove(&sheet_index).unwrap_or_default();
+            undo_stack.record_custom_restore(
+                "script_grid_cells".to_string(),
+                crate::undo_commands::script_grid_cells_snapshot_bytes(sheet_index, cells),
+                "Restore formulas",
+            );
+        }
+        opened
+    };
+
+    // The registry half, through the SAME helper `create_named_range` and
+    // `delete_named_range` use — it JOINS the transaction opened above rather
+    // than opening one of its own.
+    for entry in nested {
+        crate::undo_commands::record_named_range_undo(
+            state,
+            &entry.key,
+            Some(entry.before.clone()),
+            "Rename name",
+        );
+    }
+    if old_key != new_key {
+        // The new key did not exist before this command (gate 4 refused
+        // otherwise), so undoing must REMOVE it, not restore something.
+        crate::undo_commands::record_named_range_undo(state, new_key, None, "Rename name");
+    }
+    crate::undo_commands::record_named_range_undo(
+        state,
+        old_key,
+        Some(before.clone()),
+        "Rename name",
+    );
+
+    if opened {
+        state.undo_stack.lock().unwrap().commit_transaction();
     }
 }
 
@@ -1211,5 +1568,380 @@ mod tests {
     fn the_column_ceiling_is_exact() {
         assert!(NamedRange::looks_like_cell_reference("XFD1"), "XFD = 16384 is the last column");
         assert!(!NamedRange::looks_like_cell_reference("XFE1"), "XFE = 16385 is past it");
+    }
+}
+
+/// RENAME — the key moves, the formulas follow it, and Ctrl+Z brings both back.
+///
+/// A separate module because it needs a whole `AppState` rather than the pure
+/// name-validation helpers above. The `Workbook` harness the D2 tests use is
+/// `pub(super)` inside `commands::data`, so it is not reachable from here; this
+/// fixture is the same seeding recipe reduced to what a rename touches.
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use crate::document_effect::test_seed_effect;
+    use crate::persistence::UserFilesState;
+    use std::collections::HashMap;
+
+    struct Fixture {
+        state: AppState,
+        file: FileState,
+        files: UserFilesState,
+        pivots: crate::pivot::PivotState,
+        slicer: crate::slicer::SlicerState,
+        pane: crate::pane_control::PaneControlState,
+        timelines: crate::timeline_slicer::TimelineSlicerState,
+        filters: crate::ribbon_filter::RibbonFilterState,
+    }
+
+    impl Fixture {
+        /// `sheets` sheets named Sheet1..SheetN, sheet 0 active.
+        fn new(sheets: usize) -> Self {
+            let state = crate::create_app_state();
+            for i in 1..sheets {
+                state.grids.write(&test_seed_effect()).unwrap().push(engine::Grid::new());
+                state
+                    .sheet_names
+                    .write(&test_seed_effect())
+                    .unwrap()
+                    .push(format!("Sheet{}", i + 1));
+                state.all_column_widths.write(&test_seed_effect()).unwrap().push(HashMap::new());
+                state.all_row_heights.write(&test_seed_effect()).unwrap().push(HashMap::new());
+                state.all_user_hidden_rows.write(&test_seed_effect()).unwrap().push(HashSet::new());
+                state.all_user_hidden_cols.write(&test_seed_effect()).unwrap().push(HashSet::new());
+                state
+                    .sheet_ids
+                    .write(&test_seed_effect())
+                    .unwrap()
+                    .push(identity::SheetId::from_bytes(identity::generate_uuid_v7()));
+            }
+            {
+                let mut all = state.all_merged_regions.write(&test_seed_effect()).unwrap();
+                while all.len() < sheets {
+                    all.push(HashSet::new());
+                }
+            }
+            Fixture {
+                state,
+                file: FileState::default(),
+                files: UserFilesState::default(),
+                pivots: crate::pivot::PivotState::new(),
+                slicer: crate::slicer::SlicerState::new(),
+                pane: crate::pane_control::PaneControlState::new(),
+                timelines: crate::timeline_slicer::TimelineSlicerState::new(),
+                filters: crate::ribbon_filter::RibbonFilterState::new(),
+            }
+        }
+
+        fn define(&self, name: &str, refers_to: &str, scope: Option<usize>) {
+            self.state.named_ranges.write(&test_seed_effect()).unwrap().insert(
+                name.to_uppercase(),
+                NamedRange {
+                    name: name.to_string(),
+                    sheet_index: scope,
+                    refers_to: refers_to.to_string(),
+                    comment: None,
+                    folder: None,
+                },
+            );
+        }
+
+        /// Claim a name in the TABLE registry. Only the name matters here: the
+        /// gate under test asks `table_names`, not `tables`.
+        fn declare_table(&self, name: &str) {
+            self.state.table_names.write(&test_seed_effect()).unwrap().insert(
+                name.to_uppercase(),
+                (0, identity::EntityId::from_bytes(identity::generate_uuid_v7())),
+            );
+        }
+
+        /// Put a formula cell straight into a sheet, the way a load does — no
+        /// undo entry and no cascade, so what a test asserts afterwards is the
+        /// rename's own work.
+        fn put_formula(&self, sheet: usize, row: u32, col: u32, formula: &str) {
+            let ast = parser::parse(formula).expect("test formula parses");
+            let cell = engine::Cell::new_formula_with_ast(ast);
+            let active = *self.state.active_sheet.read().unwrap();
+            self.state.grids.write(&test_seed_effect()).unwrap()[sheet]
+                .set_cell(row, col, cell.clone());
+            if sheet == active {
+                self.state.grid.write(&test_seed_effect()).unwrap().set_cell(row, col, cell);
+            }
+        }
+
+        /// The formula the FORMULA BAR would show — rendered from the stored
+        /// AST, exactly as `CellData::formula` is. A cell has no separate text
+        /// field, so this IS the stored form.
+        fn formula(&self, sheet: usize, row: u32, col: u32) -> String {
+            let active = *self.state.active_sheet.read().unwrap();
+            let cell = if sheet == active {
+                self.state.grid.read().unwrap().get_cell(row, col).cloned()
+            } else {
+                self.state.grids.read().unwrap()[sheet].get_cell(row, col).cloned()
+            };
+            cell.and_then(|c| c.formula_string()).unwrap_or_default()
+        }
+
+        fn rename(&self, old: &str, new: &str) -> NamedRangeResult {
+            rename_named_range_impl(&self.state, &self.file, old, new)
+        }
+
+        fn name_keys(&self) -> Vec<String> {
+            let mut keys: Vec<String> =
+                self.state.named_ranges.read().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        }
+
+        fn spelling(&self, key: &str) -> Option<String> {
+            self.state.named_ranges.read().unwrap().get(key).map(|n| n.name.clone())
+        }
+
+        fn refers_to(&self, key: &str) -> Option<String> {
+            self.state.named_ranges.read().unwrap().get(key).map(|n| n.refers_to.clone())
+        }
+
+        fn undo_depth(&self) -> usize {
+            self.state.undo_stack.lock().unwrap().undo_depth()
+        }
+
+        fn undo(&self) {
+            let transaction = self
+                .state
+                .undo_stack
+                .lock()
+                .unwrap()
+                .pop_undo()
+                .expect("nothing on the undo stack");
+            let _ = crate::undo_commands::apply_changes(
+                &self.state,
+                &self.file,
+                &self.files,
+                &self.pivots,
+                &self.slicer,
+                &self.filters,
+                &self.pane,
+                &self.timelines,
+                transaction,
+                true,
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. The repoint — the whole point
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_rename_repoints_a_formula_on_another_sheet() {
+        let f = Fixture::new(2);
+        f.define("RATE", "=$D$5", None);
+        f.put_formula(0, 0, 0, "=RATE*100"); // the active sheet
+        f.put_formula(1, 2, 1, "=RATE*200"); // Sheet2
+
+        let result = f.rename("RATE", "Fee");
+        assert!(result.success, "{:?}", result.error);
+
+        assert_eq!(f.formula(0, 0, 0), "Fee*100");
+        assert_eq!(
+            f.formula(1, 2, 1),
+            "Fee*200",
+            "a workbook-scoped name reaches every sheet, so the repoint must \
+             too — the off-sheet reader is exactly the cell that used to come \
+             back #NAME? with nothing in the document saying why"
+        );
+        assert_eq!(f.name_keys(), vec!["FEE".to_string()]);
+    }
+
+    #[test]
+    fn a_shadowed_let_parameter_is_not_repointed() {
+        let f = Fixture::new(1);
+        f.define("RATE", "=$D$5", None);
+        f.put_formula(0, 0, 0, "=LET(rate, 2, rate*10)");
+        f.put_formula(0, 1, 0, "=RATE*10");
+
+        assert!(f.rename("RATE", "Fee").success);
+
+        assert_eq!(
+            f.formula(0, 0, 0),
+            "LET(RATE,2,RATE*10)",
+            "the binding is a LOCAL that shadows the workbook name during \
+             evaluation; rewriting it would change what the formula COMPUTES, \
+             not merely how it reads"
+        );
+        assert_eq!(f.formula(0, 1, 0), "Fee*10", "...and the real reader still moves");
+    }
+
+    #[test]
+    fn a_sheet_scoped_rename_leaves_the_other_sheets_alone() {
+        let f = Fixture::new(2);
+        f.define("LOCAL", "=Sheet2!$A$5", Some(1));
+        f.put_formula(1, 0, 0, "=LOCAL*2"); // in scope
+        f.put_formula(0, 0, 0, "=LOCAL*3"); // out of scope: already a #NAME? cell
+
+        assert!(f.rename("LOCAL", "Fee").success);
+
+        assert_eq!(f.formula(1, 0, 0), "Fee*2");
+        assert_eq!(
+            f.formula(0, 0, 0),
+            "LOCAL*3",
+            "a sheet-scoped name is invisible from another sheet, so this \
+             reference never denoted it — rewriting it would dress a #NAME? up \
+             as a live reference to a name it never read"
+        );
+    }
+
+    #[test]
+    fn a_rename_repoints_another_names_definition() {
+        let f = Fixture::new(1);
+        f.define("BASE", "=$D$5", None);
+        f.define("DOUBLED", "=BASE*2", None);
+
+        assert!(f.rename("BASE", "Foundation").success);
+
+        assert_eq!(
+            f.refers_to("DOUBLED").as_deref(),
+            Some("=Foundation*2"),
+            "a name defined in terms of the renamed one breaks exactly the way a \
+             cell does, and its readers never mentioned BASE at all"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. A case-only change is a re-spelling, not a move
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_case_only_rename_does_not_move_the_registry_key() {
+        let f = Fixture::new(1);
+        f.define("total", "=$A$1", None);
+        f.put_formula(0, 0, 1, "=TOTAL*2");
+
+        assert!(f.rename("total", "Total").success);
+
+        assert_eq!(
+            f.name_keys(),
+            vec!["TOTAL".to_string()],
+            "the registry is UPPERCASE-keyed, so a case-only rename re-spells the \
+             entry in place — moving the key would drop the name and define a new one"
+        );
+        assert_eq!(f.spelling("TOTAL").as_deref(), Some("Total"));
+        assert_eq!(
+            f.formula(0, 0, 1),
+            "Total*2",
+            "...and the references are re-spelled with it, which is what the \
+             formula bar shows"
+        );
+    }
+
+    #[test]
+    fn renaming_a_name_to_exactly_what_it_is_called_changes_nothing() {
+        let f = Fixture::new(1);
+        f.define("Total", "=$A$1", None);
+
+        assert!(f.rename("Total", "Total").success);
+        assert!(
+            !f.file.is_dirty(),
+            "a command that changes nothing must not mark the workbook modified"
+        );
+        assert_eq!(f.undo_depth(), 0, "...and must not push an undo entry either");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. The gates
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_rename_that_would_shadow_a_table_is_refused() {
+        let f = Fixture::new(1);
+        f.define("RATE", "=$D$5", None);
+        f.put_formula(0, 0, 0, "=RATE*100");
+        f.declare_table("Sales");
+
+        let result = f.rename("RATE", "Sales");
+
+        assert!(!result.success, "names and tables share ONE formula namespace");
+        assert!(
+            result.error.unwrap_or_default().contains("table"),
+            "the refusal has to say WHY, or the user retypes the same name"
+        );
+        assert_eq!(f.name_keys(), vec!["RATE".to_string()], "the registry did not move");
+        assert_eq!(f.formula(0, 0, 0), "RATE*100", "and no formula was rewritten");
+        assert!(!f.file.is_dirty(), "a refusal leaves the document clean");
+    }
+
+    #[test]
+    fn every_refusal_leaves_the_document_clean() {
+        // `DocumentEffect::mutates` dirties AT CONSTRUCTION, so a command that
+        // builds it before its gates marks a workbook modified for a rename that
+        // never happened — the close prompt then lies in the other direction.
+        let f = Fixture::new(1);
+        f.define("RATE", "=$D$5", None);
+        f.define("FEE", "=$D$6", None);
+
+        for (old, new, why) in [
+            ("RATE", "1Total", "not a legal name"),
+            ("NOPE", "Fee2", "the old name does not exist"),
+            ("RATE", "Fee", "the new name is taken"),
+        ] {
+            let result = f.rename(old, new);
+            assert!(!result.success, "rename {} -> {} should refuse ({})", old, new, why);
+            assert!(
+                !f.file.is_dirty(),
+                "refusing `{}` still dirtied the workbook",
+                why
+            );
+        }
+        assert_eq!(f.name_keys(), vec!["FEE".to_string(), "RATE".to_string()]);
+    }
+
+    #[test]
+    fn a_successful_rename_marks_the_workbook_dirty() {
+        let f = Fixture::new(1);
+        f.define("RATE", "=$D$5", None);
+        assert!(!f.file.is_dirty(), "a fresh document starts clean");
+
+        assert!(f.rename("RATE", "Fee").success);
+        assert!(
+            f.file.is_dirty(),
+            "a rename changes saved state; without the flag the close prompt \
+             never appears and AutoRecover refuses to snapshot it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Undo — one step, both halves
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn undo_restores_the_old_name_and_the_formulas_together() {
+        let f = Fixture::new(2);
+        f.define("RATE", "=$D$5", None);
+        f.define("DOUBLED", "=RATE*2", None);
+        f.put_formula(0, 0, 0, "=RATE*100");
+        f.put_formula(1, 2, 1, "=RATE*200");
+
+        assert!(f.rename("RATE", "Fee").success);
+        assert_eq!(
+            f.undo_depth(),
+            1,
+            "the registry move and the rewritten formulas are ONE step — a \
+             rename that undoes halfway puts the old name back while every \
+             formula still says the new one, which is #NAME? everywhere"
+        );
+
+        f.undo();
+
+        assert_eq!(f.name_keys(), vec!["DOUBLED".to_string(), "RATE".to_string()]);
+        assert_eq!(f.spelling("RATE").as_deref(), Some("RATE"));
+        assert_eq!(f.refers_to("DOUBLED").as_deref(), Some("=RATE*2"));
+        assert_eq!(f.formula(0, 0, 0), "RATE*100");
+        assert_eq!(
+            f.formula(1, 2, 1),
+            "RATE*200",
+            "the off-sheet reader comes back too — it is recorded against the \
+             sheet it lives on, not the one in front of the user"
+        );
     }
 }

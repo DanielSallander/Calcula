@@ -1166,6 +1166,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("computed_properties.rs", "apply_style_change", "style_index only"),
         ("mcp/tools.rs", "apply_cell_formatting", "style_index only"),
         // -- Rewrites formula REFERENCES, not the formulas' existence --------
+        ("named_ranges.rs", "rename_name_in_grids", "re-points defined-name references at the same range; every origin keeps its formula, so no spill ORIGIN is removed or overwritten and the map cannot be orphaned. Same class as the two table renames below"),
         ("tables.rs", "rename_table_refs_in_formulas", "re-points structured refs at the same cells; every origin keeps its formula"),
         ("tables.rs", "rename_table_column_in_formulas", "re-points a COLUMN specifier at the same cells; every origin keeps its formula"),
         ("tables.rs", "rewrite_table_refs_to_ranges", "flattens structured refs to the same cells; every origin keeps its formula"),

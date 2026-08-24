@@ -3,7 +3,7 @@
 // CONTEXT: Registers dialogs and menu items for managing named ranges.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { AppEvents, emitAppEvent, onAppEvent, refreshGridData } from "@api";
+import { AppEvents, onAppEvent, refreshGridData, showDialog } from "@api";
 import { NameManagerDialog } from "./components/NameManagerDialog";
 import { NewNameDialog } from "./components/NewNameDialog";
 import { NewFunctionDialog } from "./components/NewFunctionDialog";
@@ -51,6 +51,16 @@ function activate(context: ExtensionContext): void {
     priority: 52,
   });
   cleanupFns.push(() => context.ui.dialogs.unregister("define-function"));
+
+  // Ctrl+F3 (Excel's Name Manager shortcut) is declared in DEFAULT_KEYBINDINGS
+  // and dispatches THIS command id. The Formulas-menu item calls showDialog
+  // directly, so without a registered command the shortcut would resolve to
+  // nothing and fail silently — the keybinding registry logs an unhandled
+  // command id and moves on.
+  context.commands.register("definedNames.nameManager", () => {
+    showDialog("name-manager");
+  });
+  cleanupFns.push(() => context.commands.unregister("definedNames.nameManager"));
 
   // Register menu items in the Formulas menu
   const cleanupMenus = registerDefinedNamesMenuItems(context);

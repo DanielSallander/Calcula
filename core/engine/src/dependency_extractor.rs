@@ -224,6 +224,18 @@ fn extract_recursive(expr: &Expression, deps: &mut CoordSet, bounds: GridBounds)
             extract_recursive(index, deps, bounds);
         }
 
+        // ArrayLiteral: recurse into every cell of the constant.
+        //
+        // Excel allows only literals in an array constant, so this normally
+        // finds nothing — but Calcula's parser accepts any expression there, and
+        // a constant that CAN hold a reference must register its edge or the
+        // cell would never recalculate.
+        Expression::ArrayLiteral { rows } => {
+            for elem in rows.iter().flatten() {
+                extract_recursive(elem, deps, bounds);
+            }
+        }
+
         // ListLiteral: recurse into all elements
         Expression::ListLiteral { elements } => {
             for elem in elements {
@@ -393,6 +405,14 @@ fn extract_recursive_with_sheets(
         Expression::IndexAccess { target, index } => {
             extract_recursive_with_sheets(target, deps, bounds);
             extract_recursive_with_sheets(index, deps, bounds);
+        }
+
+        // ArrayLiteral: recurse into every cell of the constant (see the note
+        // on the same arm in `extract_recursive`).
+        Expression::ArrayLiteral { rows } => {
+            for elem in rows.iter().flatten() {
+                extract_recursive_with_sheets(elem, deps, bounds);
+            }
         }
 
         // ListLiteral: recurse into all elements

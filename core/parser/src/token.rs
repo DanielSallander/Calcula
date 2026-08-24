@@ -44,6 +44,14 @@ pub enum Token {
     At,
     /// # operator for spill range references (A1#)
     Hash,
+    /// Postfix percent operator: 50%
+    Percent,
+    /// Row separator inside an ARRAY CONSTANT: `{1,2;3,4}`.
+    ///
+    /// Only ever legal between braces. Outside them a `;` is still an error —
+    /// but now a NAMED one ("Unexpected token: Semicolon") rather than
+    /// `Illegal(';')`, which is what a locale-separator mistake deserves.
+    Semicolon,
 
     // Special
     EOF,
@@ -82,6 +90,8 @@ impl std::fmt::Display for Token {
             Token::RBracket => write!(f, "]"),
             Token::LBrace => write!(f, "{{"),
             Token::RBrace => write!(f, "}}"),
+            Token::Percent => write!(f, "%"),
+            Token::Semicolon => write!(f, ";"),
             Token::EOF => write!(f, "EOF"),
             Token::Illegal(c) => write!(f, "ILLEGAL({})", c),
         }

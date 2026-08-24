@@ -7,6 +7,13 @@
 //      from capturing keystrokes and starting cell editing
 // FIX: Added merge-aware navigation - when navigating to a merged cell, expands selection
 // REFACTOR: Imports from api layer instead of core internals
+// FIX: Typing a RANGE did nothing at all. "A1:A10" missed the single-cell
+//      address regex, missed the defined-name lookup and missed `isValidName`
+//      (':' is not a name character), so Enter fell out of all three branches
+//      onto a silent revert — no selection, no navigation, no message. The
+//      accepted forms now live in ./NameBox.address, a malformed entry SAYS so,
+//      and a name is resolved by the backend (which knows the SHEET it points
+//      at) instead of by an inline regex over `refersTo` that dropped it.
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -14,40 +21,28 @@ import {
   setSelection,
   scrollToCell,
   columnToLetter,
-  letterToColumn,
   getMergeInfo,
   getNamedRangeForSelection,
   getAllNamedRanges,
   createNamedRange,
   getNamedRange,
+  getSheets,
+  setActiveSheet,
+  setActiveSheetApi,
+  primeSheetSwitch,
+  showToast,
   AppEvents,
   emitAppEvent,
   onAppEvent,
 } from "../../api";
 import type { NamedRange } from "../../api";
+import { resolveNamedRangeCoords } from "../../api/lib";
+import type { NamedRangeCoords } from "../../api/lib";
 import { setGlobalIsEditing } from "../../api/editing";
+import { parseNameBoxAddress, isAddressLike } from "./NameBox.address";
+import type { ParsedNameBoxAddress } from "./NameBox.address";
 import { NameBoxDropdown } from "./NameBoxDropdown";
 import * as S from "./NameBox.styles";
-
-function parseCellReference(ref: string): { row: number; col: number } | null {
-  const trimmed = ref.trim().toUpperCase();
-  if (!trimmed) return null;
-
-  const match = trimmed.match(/^([A-Z]+)(\d+)$/);
-  if (!match) return null;
-
-  const colLetters = match[1];
-  const rowNumber = parseInt(match[2], 10);
-
-  if (rowNumber < 1) return null;
-  const row = rowNumber - 1;
-
-  const col = letterToColumn(colLetters);
-
-  if (row > 1048575 || col > 16383) return null;
-
-  return { row, col };
-}
 
 function formatSelectionAddress(
   startRow: number,
@@ -115,8 +110,10 @@ function isValidName(name: string): boolean {
   const upper = name.toUpperCase();
   if (upper === "TRUE" || upper === "FALSE" || upper === "NULL") return false;
 
-  // Cannot be a cell reference
-  if (parseCellReference(name) !== null) return false;
+  // Cannot be a cell reference. Shares the Name Box's own parser so the two can
+  // never disagree about what an address is — a second regex here is how "A1"
+  // would end up both navigable and definable.
+  if (isAddressLike(name)) return false;
 
   return true;
 }
@@ -300,6 +297,148 @@ export function NameBox(): React.ReactElement {
     [dispatch]
   );
 
+  /** Select a block and bring its top-left into view. */
+  const selectRange = useCallback(
+    (range: {
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      type?: "cells" | "rows" | "columns";
+    }) => {
+      dispatch(
+        setSelection({
+          startRow: range.startRow,
+          startCol: range.startCol,
+          endRow: range.endRow,
+          endCol: range.endCol,
+          type: range.type ?? "cells",
+        })
+      );
+      dispatch(scrollToCell(range.startRow, range.startCol, false));
+    },
+    [dispatch]
+  );
+
+  /**
+   * Switch the active sheet, the way a sheet-tab click does.
+   *
+   * The sequence is copied from SheetTabs' normal-mode tab click on purpose:
+   * without `primeSheetSwitch` the canvas keeps painting the OLD sheet's cells
+   * under the new sheet's name for a frame (BUG-0052), and without the
+   * SHEET_CHANGED announcement the tab strip goes on highlighting the sheet the
+   * user just left, because that is what SheetTabs reloads itself from.
+   */
+  const switchToSheet = useCallback(
+    async (index: number) => {
+      window.dispatchEvent(
+        new CustomEvent("sheet:beforeSwitch", {
+          detail: {
+            oldSheetIndex: state.sheetContext.activeSheetIndex,
+            newSheetIndex: index,
+          },
+        })
+      );
+
+      const result = await setActiveSheetApi(index);
+      await primeSheetSwitch(result.activeIndex);
+      const activeName = result.sheets[result.activeIndex]?.name ?? "";
+
+      dispatch(setActiveSheet(result.activeIndex, activeName));
+      window.dispatchEvent(
+        new CustomEvent("sheet:normalSwitch", {
+          detail: { newSheetIndex: result.activeIndex, newSheetName: activeName },
+        })
+      );
+      emitAppEvent(AppEvents.SHEET_CHANGED, {
+        sheetIndex: result.activeIndex,
+        sheetName: activeName,
+      });
+    },
+    [dispatch, state.sheetContext.activeSheetIndex]
+  );
+
+  /**
+   * Go to a parsed address. Returns null on success, or the sentence to show the
+   * user — a Name Box entry that cannot be honoured must SAY so; reverting the
+   * text is indistinguishable from the app having ignored the keypress.
+   */
+  const goToAddress = useCallback(
+    async (address: ParsedNameBoxAddress): Promise<string | null> => {
+      if (address.sheetName) {
+        const { sheets } = await getSheets();
+        const index = sheets.findIndex(
+          (s) => s.name.toLowerCase() === address.sheetName!.toLowerCase()
+        );
+        if (index === -1) {
+          return `There is no sheet named "${address.sheetName}" in this workbook.`;
+        }
+        if (index !== state.sheetContext.activeSheetIndex) {
+          await switchToSheet(index);
+        }
+      }
+
+      // Merge expansion is a SINGLE-CELL behaviour. Expanding a typed range to
+      // its top-left cell's merged block would silently select something other
+      // than what the user asked for.
+      if (address.isSingleCell) {
+        await navigateToCell(address.startRow, address.startCol);
+      } else {
+        selectRange(address);
+      }
+      return null;
+    },
+    [navigateToCell, selectRange, switchToSheet, state.sheetContext.activeSheetIndex]
+  );
+
+  /**
+   * Go to a defined name. Returns null on success, or the sentence to show.
+   *
+   * Resolution is the BACKEND's (`resolve_named_range_coords`), not a regex over
+   * `refersTo` as it used to be here and in the dropdown. That regex dropped the
+   * sheet prefix, so a workbook-scoped name pointing at Sheet3 selected those
+   * coordinates on whatever sheet was active — a silent wrong answer — and when
+   * it simply did not match it closed the box having done nothing at all.
+   */
+  const goToNamedRange = useCallback(
+    async (nr: NamedRange): Promise<string | null> => {
+      let coords: NamedRangeCoords;
+      try {
+        coords = await resolveNamedRangeCoords(nr.name);
+      } catch {
+        return `"${nr.name}" does not refer to a range that can be selected (${nr.refersTo}).`;
+      }
+
+      if (coords.sheetIndex !== state.sheetContext.activeSheetIndex) {
+        const { sheets } = await getSheets();
+        if (!sheets[coords.sheetIndex]) {
+          return `"${nr.name}" refers to a sheet that is no longer in this workbook.`;
+        }
+        await switchToSheet(coords.sheetIndex);
+      }
+
+      selectRange(coords);
+      return null;
+    },
+    [selectRange, switchToSheet, state.sheetContext.activeSheetIndex]
+  );
+
+  /** Leave edit mode after an entry that was honoured. */
+  const finishEditing = useCallback(() => {
+    setIsEditing(false);
+    setGlobalIsEditing(false);
+    inputRef.current?.blur();
+  }, []);
+
+  /**
+   * Refuse out loud, and KEEP what the user typed (selected, ready to fix).
+   * The old code reverted the text and logged nothing the user could see.
+   */
+  const reportProblem = useCallback((message: string) => {
+    showToast(message, { variant: "error" });
+    inputRef.current?.select();
+  }, []);
+
   const handleKeyDown = useCallback(
     async (e: React.KeyboardEvent<HTMLInputElement>) => {
       e.stopPropagation();
@@ -307,57 +446,49 @@ export function NameBox(): React.ReactElement {
       if (e.key === "Enter") {
         e.preventDefault();
         const value = inputValue.trim();
-
-        // 1. Try as cell reference
-        const parsed = parseCellReference(value);
-        if (parsed) {
-          await navigateToCell(parsed.row, parsed.col);
-          setIsEditing(false);
-          setGlobalIsEditing(false);
-          inputRef.current?.blur();
+        if (!value) {
+          setInputValue(displayValue);
           return;
         }
 
-        // 2. Try as existing named range (navigate to it)
-        try {
-          const nr = await getNamedRange(value);
-          if (nr) {
-            // Parse the refersTo to extract coordinates and navigate
-            // For simple ranges, try to parse them out
-            const refMatch = nr.refersTo.match(
-              /^=(?:([^!]+)!)?\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/i
-            );
-            if (refMatch) {
-              const startCol = letterToColumn(refMatch[2].toUpperCase());
-              const startRow = parseInt(refMatch[3], 10) - 1;
-              const endCol = refMatch[4]
-                ? letterToColumn(refMatch[4].toUpperCase())
-                : startCol;
-              const endRow = refMatch[5]
-                ? parseInt(refMatch[5], 10) - 1
-                : startRow;
-
-              dispatch(
-                setSelection({
-                  startRow,
-                  startCol,
-                  endRow,
-                  endCol,
-                  type: "cells",
-                })
-              );
-              dispatch(scrollToCell(startRow, startCol, false));
-            }
-            setIsEditing(false);
-            setGlobalIsEditing(false);
-            inputRef.current?.blur();
+        // 1. An ADDRESS: cell or range, relative or absolute, this sheet or
+        //    another. `parseNameBoxAddress` returns null both for "not an
+        //    address" and for a malformed one, which is deliberate — a
+        //    malformed address is indistinguishable from a name until the name
+        //    lookup below has also missed.
+        const address = parseNameBoxAddress(value);
+        if (address) {
+          const problem = await goToAddress(address);
+          if (problem) {
+            reportProblem(problem);
             return;
           }
-        } catch {
-          // Ignore lookup errors
+          finishEditing();
+          return;
         }
 
-        // 3. Try to create a new named range for the current selection
+        // 2. An existing DEFINED NAME.
+        let existing: NamedRange | null = null;
+        try {
+          existing = await getNamedRange(value);
+        } catch (error) {
+          console.error("[NameBox] Failed to look up name:", error);
+        }
+        if (existing) {
+          const problem = await goToNamedRange(existing);
+          if (problem) {
+            reportProblem(problem);
+            return;
+          }
+          finishEditing();
+          return;
+        }
+
+        // 3. An UNKNOWN name defines itself over the current selection. Excel
+        //    does this without asking and so does Calcula; what changed is that
+        //    a refusal (duplicate name, name that shadows a table) now reaches
+        //    the user instead of console.warn, where a rejected definition
+        //    looked exactly like a successful one.
         if (isValidName(value) && state.selection) {
           const sel = state.selection;
           const refersTo = buildRefersTo(
@@ -370,22 +501,25 @@ export function NameBox(): React.ReactElement {
 
           try {
             const result = await createNamedRange(value, null, refersTo);
-            if (result.success) {
-              setMatchedName(value);
-              emitAppEvent(AppEvents.NAMED_RANGES_CHANGED);
-            } else {
-              console.warn("[NameBox] Failed to create name:", result.error);
+            if (!result.success) {
+              reportProblem(result.error ?? `Could not define the name "${value}".`);
+              return;
             }
+            setMatchedName(value);
+            emitAppEvent(AppEvents.NAMED_RANGES_CHANGED);
           } catch (error) {
             console.error("[NameBox] Failed to create named range:", error);
+            reportProblem(`Could not define the name "${value}": ${String(error)}`);
+            return;
           }
 
-          setIsEditing(false);
-          setGlobalIsEditing(false);
-          inputRef.current?.blur();
+          finishEditing();
         } else {
-          // Invalid input - revert
-          setInputValue(displayValue);
+          reportProblem(
+            `"${value}" is not a valid cell reference or defined name. ` +
+              "Type an address (A1, A1:B10, Sheet2!A1) or a name that starts " +
+              "with a letter or underscore."
+          );
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -395,7 +529,16 @@ export function NameBox(): React.ReactElement {
         inputRef.current?.blur();
       }
     },
-    [inputValue, displayValue, navigateToCell, state.selection, state.sheetContext, dispatch]
+    [
+      inputValue,
+      displayValue,
+      goToAddress,
+      goToNamedRange,
+      finishEditing,
+      reportProblem,
+      state.selection,
+      state.sheetContext,
+    ]
   );
 
   const handleChange = useCallback(
@@ -434,36 +577,16 @@ export function NameBox(): React.ReactElement {
   );
 
   const handleDropdownSelect = useCallback(
-    (nr: NamedRange) => {
+    async (nr: NamedRange) => {
       setShowDropdown(false);
-
-      // Parse refersTo and navigate
-      const refMatch = nr.refersTo.match(
-        /^=(?:([^!]+)!)?\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/i
-      );
-      if (refMatch) {
-        const startCol = letterToColumn(refMatch[2].toUpperCase());
-        const startRow = parseInt(refMatch[3], 10) - 1;
-        const endCol = refMatch[4]
-          ? letterToColumn(refMatch[4].toUpperCase())
-          : startCol;
-        const endRow = refMatch[5]
-          ? parseInt(refMatch[5], 10) - 1
-          : startRow;
-
-        dispatch(
-          setSelection({
-            startRow,
-            startCol,
-            endRow,
-            endCol,
-            type: "cells",
-          })
-        );
-        dispatch(scrollToCell(startRow, startCol, false));
-      }
+      // Same resolution as typing the name: the backend knows which SHEET the
+      // name lives on. The regex this replaced ignored the sheet prefix, so
+      // picking a name defined on another sheet selected those coordinates on
+      // the sheet you were already looking at.
+      const problem = await goToNamedRange(nr);
+      if (problem) reportProblem(problem);
     },
-    [dispatch]
+    [goToNamedRange, reportProblem]
   );
 
   const handleDropdownClose = useCallback(() => {

@@ -198,7 +198,7 @@ impl<'a> Parser<'a> {
 
     /// Parses multiplicative expressions (* and /).
     fn parse_multiplicative(&mut self) -> ParseResult<Expression> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_power()?;
 
         loop {
             let op = match &self.current_token {
@@ -208,7 +208,7 @@ impl<'a> Parser<'a> {
             };
 
             self.advance();
-            let right = self.parse_unary()?;
+            let right = self.parse_power()?;
 
             left = Expression::BinaryOp {
                 left: Box::new(left),
@@ -220,36 +220,82 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// Parses unary expressions (negation).
+    /// Parses power/exponentiation expressions (^).
+    ///
+    /// LEFT-associative, and it did not used to be. Excel folds equal-priority
+    /// operators left to right with no exception for `^`, so `=2^3^2` is
+    /// `(2^3)^2` = 64; recursing into the unary level for the right operand
+    /// made it `2^(3^2)` = 512. Right-associativity is the mathematical
+    /// convention and the wrong answer here.
+    ///
+    /// Its OPERANDS are the unary level, which is one rank TIGHTER — so `=-2^2`
+    /// raises the already-negated -2 and answers 4, as Excel does. (Both of
+    /// these were pinned by passing tests asserting the other answer; the tests
+    /// moved with the code.)
+    fn parse_power(&mut self) -> ParseResult<Expression> {
+        let mut left = self.parse_unary()?;
+
+        while self.current_token == Token::Caret {
+            self.advance();
+            let right = self.parse_unary()?;
+
+            left = Expression::BinaryOp {
+                left: Box::new(left),
+                op: BinaryOperator::Power,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    /// Parses prefix expressions: negation `-x` and Lotus-compatibility `+x`.
+    ///
+    /// Right-recursive, so `--x` nests as `Negate(Negate(x))` — the DOUBLE
+    /// UNARY idiom — and mixed runs like `=-+-5` parse.
     fn parse_unary(&mut self) -> ParseResult<Expression> {
-        if self.current_token == Token::Minus {
+        let op = match self.current_token {
+            Token::Minus => Some(UnaryOperator::Negate),
+            // `=+A1`. Excel accepts a leading plus everywhere a value is
+            // expected, because typing `+` to start a formula is a habit it
+            // inherited from Lotus 1-2-3 and never dropped. Without this arm the
+            // token fell through to `parse_primary` and every `=+...` formula —
+            // including ones imported verbatim from a real .xlsx — was a parse
+            // error stored as `#VALUE!`.
+            Token::Plus => Some(UnaryOperator::Plus),
+            _ => None,
+        };
+
+        if let Some(op) = op {
             self.advance();
             let operand = self.parse_unary()?;
             return Ok(Expression::UnaryOp {
-                op: UnaryOperator::Negate,
+                op,
                 operand: Box::new(operand),
             });
         }
 
-        self.parse_power()
+        self.parse_percent()
     }
 
-    /// Parses power/exponentiation expressions (^).
-    fn parse_power(&mut self) -> ParseResult<Expression> {
-        let left = self.parse_intersection()?;
+    /// Parses the POSTFIX percent operator: `=50%`, `=A1%`, `=(B1-C1)%`.
+    ///
+    /// A real operator rather than number-literal syntax, which is why it lives
+    /// at its own precedence level instead of inside the lexer's number reader:
+    /// Excel applies it to any expression, so `=SUM(A1:A9)%` and `=(1+1)%` are
+    /// both legal. Repeats fold, so `=50%%` is 0.005.
+    fn parse_percent(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.parse_intersection()?;
 
-        if self.current_token == Token::Caret {
+        while self.current_token == Token::Percent {
             self.advance();
-            let right = self.parse_unary()?;
-
-            return Ok(Expression::BinaryOp {
-                left: Box::new(left),
-                op: BinaryOperator::Power,
-                right: Box::new(right),
-            });
+            expr = Expression::UnaryOp {
+                op: UnaryOperator::Percent,
+                operand: Box::new(expr),
+            };
         }
 
-        Ok(left)
+        Ok(expr)
     }
 
     /// Excel's INTERSECTION operator: a SPACE between two references.
@@ -584,11 +630,23 @@ impl<'a> Parser<'a> {
                 Ok(expr)
             }
 
-            // Curly-brace literal: list {1, 2, 3} or dict {"a": 1, "b": 2}
+            // Curly braces: Excel's ARRAY CONSTANT {1,2;3,4}, or Calcula's dict
+            // literal {"a": 1, "b": 2}.
+            //
+            // WHICH ONE IS DECIDED BY A COLON after the first element, and the
+            // two can never be confused: Excel's array constants hold literals
+            // only, and `:` inside braces has no meaning there at all.
+            //
+            // Braces used to build a Python-style LIST — a contained value that
+            // does not spill. Excel's meaning wins the syntax (a spreadsheet
+            // that reads `={1;2;3}` as anything but a 3-row array is broken for
+            // its users), and `COLLECT(…)` is the list's remaining spelling.
             Token::LBrace => {
                 self.advance();
 
-                // Empty braces → empty list
+                // `={}` — Excel has no empty array constant, and an empty
+                // rectangle has no shape to spill. Keep it as the empty LIST it
+                // has always been rather than inventing a 0x0 array.
                 if self.current_token == Token::RBrace {
                     self.advance();
                     return Ok(Expression::ListLiteral { elements: vec![] });
@@ -618,20 +676,51 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RBrace)?;
                     Ok(Expression::DictLiteral { entries })
                 } else {
-                    // List mode
-                    let mut elements = vec![first];
+                    // ARRAY CONSTANT. `,` separates COLUMNS within a row and
+                    // `;` starts a new ROW — the invariant (en-US) spelling,
+                    // which is the only one that reaches the parser.
+                    let mut rows: Vec<Vec<Expression>> = Vec::new();
+                    let mut row: Vec<Expression> = vec![first];
 
-                    while self.current_token == Token::Comma {
-                        self.advance();
-                        // Allow trailing comma before }
-                        if self.current_token == Token::RBrace {
-                            break;
+                    loop {
+                        match self.current_token {
+                            Token::Comma => {
+                                self.advance();
+                                // A trailing separator before `}` ends the
+                                // constant rather than adding a blank cell —
+                                // the same tolerance the list literal had.
+                                if self.current_token == Token::RBrace {
+                                    break;
+                                }
+                                row.push(self.parse_expression()?);
+                            }
+                            Token::Semicolon => {
+                                self.advance();
+                                if self.current_token == Token::RBrace {
+                                    break;
+                                }
+                                rows.push(std::mem::take(&mut row));
+                                row.push(self.parse_expression()?);
+                            }
+                            _ => break,
                         }
-                        elements.push(self.parse_expression()?);
                     }
+                    rows.push(row);
 
                     self.expect(Token::RBrace)?;
-                    Ok(Expression::ListLiteral { elements })
+
+                    // RECTANGULARITY. Excel refuses a ragged constant at entry
+                    // ("the formula you typed contains an error") rather than
+                    // padding it, because a ragged array has no honest shape and
+                    // every consumer downstream would have to invent one.
+                    let width = rows[0].len();
+                    if rows.iter().any(|r| r.len() != width) {
+                        return Err(ParseError::new(
+                            "An array constant must be rectangular: every row needs the same number of values",
+                        ));
+                    }
+
+                    Ok(Expression::ArrayLiteral { rows })
                 }
             }
 

@@ -342,6 +342,14 @@ export function NameManagerDialog(
       ]);
       setNames(allNames);
       setSheetNamesList(sheetsResult.sheets.map((s) => s.name));
+      // A RENAME retires the selected row's name. Everything below acts on
+      // `selectedName` by string, so a stale one leaves Edit doing nothing and
+      // Delete calling the backend with a name that no longer exists — a button
+      // that reports success by staying quiet. Drop a selection the reload no
+      // longer knows about.
+      setSelectedName((current) =>
+        current && allNames.some((nr) => nr.name === current) ? current : null
+      );
     } catch (error) {
       console.error("[NameManager] Failed to load data:", error);
     }

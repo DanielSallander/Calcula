@@ -133,6 +133,31 @@ pub fn align_ast(old: &Expression, new: &mut Expression, registry: &mut IdRegist
         }
 
         (
+            Expression::ArrayLiteral { rows: old_rows },
+            Expression::ArrayLiteral { rows: new_rows },
+        ) => {
+            // Align cell-by-cell over the overlapping rectangle; anything the
+            // edit ADDED (a wider row, an extra row) gets fresh ids.
+            for (r, new_row) in new_rows.iter_mut().enumerate() {
+                match old_rows.get(r) {
+                    Some(old_row) => {
+                        for (c, new_cell) in new_row.iter_mut().enumerate() {
+                            match old_row.get(c) {
+                                Some(old_cell) => align_ast(old_cell, new_cell, registry),
+                                None => mint_all_ids(new_cell, registry),
+                            }
+                        }
+                    }
+                    None => {
+                        for new_cell in new_row.iter_mut() {
+                            mint_all_ids(new_cell, registry);
+                        }
+                    }
+                }
+            }
+        }
+
+        (
             Expression::ListLiteral { elements: old_elems },
             Expression::ListLiteral { elements: new_elems },
         ) => {
@@ -231,6 +256,11 @@ pub fn mint_all_ids(expr: &mut Expression, registry: &mut IdRegistry) {
             mint_all_ids(target, registry);
             mint_all_ids(index, registry);
         }
+        Expression::ArrayLiteral { rows } => {
+            for elem in rows.iter_mut().flatten() {
+                mint_all_ids(elem, registry);
+            }
+        }
         Expression::ListLiteral { elements } => {
             for elem in elements.iter_mut() {
                 mint_all_ids(elem, registry);
@@ -278,6 +308,9 @@ pub fn all_ids_assigned(expr: &Expression) -> bool {
         Expression::UnaryOp { operand, .. } => all_ids_assigned(operand),
         Expression::IndexAccess { target, index } => {
             all_ids_assigned(target) && all_ids_assigned(index)
+        }
+        Expression::ArrayLiteral { rows } => {
+            rows.iter().flatten().all(all_ids_assigned)
         }
         Expression::ListLiteral { elements } => {
             elements.iter().all(all_ids_assigned)
@@ -335,6 +368,11 @@ fn collect_ids_recursive(expr: &Expression, ids: &mut Vec<RefSiteId>) {
         Expression::IndexAccess { target, index } => {
             collect_ids_recursive(target, ids);
             collect_ids_recursive(index, ids);
+        }
+        Expression::ArrayLiteral { rows } => {
+            for elem in rows.iter().flatten() {
+                collect_ids_recursive(elem, ids);
+            }
         }
         Expression::ListLiteral { elements } => {
             for elem in elements {

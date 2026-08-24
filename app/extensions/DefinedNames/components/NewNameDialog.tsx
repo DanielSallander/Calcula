@@ -8,11 +8,11 @@ import type { DialogProps } from "@api/uiTypes";
 import {
   createNamedRange,
   updateNamedRange,
+  renameNamedRange,
   getSheets,
   useGridState,
   AppEvents,
   emitAppEvent,
-  columnToLetter,
   isFormulaAutocompleteVisible,
   AutocompleteEvents,
 } from "@api";
@@ -307,8 +307,36 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
 
     try {
       if (mode === "edit" && editName) {
+        const targetName = name.trim();
+
+        // A RENAME IS A SEPARATE BACKEND OPERATION. `update_named_range` looks
+        // the entry up by the UPPERCASED name and refuses an unknown key, so
+        // passing a new name here would just fail with "does not exist"; the
+        // key has to be moved first. A case-only change ("total" -> "Total")
+        // keeps the same key, so it needs no rename — the update below stores
+        // the new spelling on its own.
+        //
+        // NO CONFIRMATION. There used to be one, warning that formulas would
+        // break and that undo would not reverse the rename. Both statements
+        // were true of the command as it then was and both are now false:
+        // `rename_named_range` repoints every formula that reads the name
+        // (across sheets, and inside other names' definitions) and records the
+        // whole thing as ONE undo step. A dialog that states consequences the
+        // product no longer has is worse than no dialog — it teaches the user
+        // to click through warnings.
+        if (targetName.toUpperCase() !== editName.toUpperCase()) {
+          const renamed = await renameNamedRange(editName, targetName);
+          if (!renamed.success) {
+            setValidationError(renamed.error ?? "Failed to rename named range.");
+            setIsSubmitting(false);
+            return;
+          }
+        }
+
+        // From here the entry is keyed by the NEW name, so every remaining edit
+        // (scope, refers to, comment, folder) must be addressed to it.
         const result = await updateNamedRange(
-          editName,
+          targetName,
           scopeIndex,
           refersTo.trim(),
           comment || undefined,
@@ -368,7 +396,6 @@ export function NewNameDialog(props: DialogProps): React.ReactElement | null {
                 setName(e.target.value);
                 setValidationError(null);
               }}
-              disabled={mode === "edit"}
               autoFocus
               onKeyDown={(e) => e.stopPropagation()}
             />

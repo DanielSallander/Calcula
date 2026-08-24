@@ -777,6 +777,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         // -- Rewrites a formula's TEXT without moving any value -------------
         ("named_ranges.rs", "apply_names_to_formulas", "substitutes a defined name for the reference it already denoted: the same cell, so no value moves (it does rebuild the name dependency edges)"),
         ("sheets.rs", "rename_sheet_inner", "a rename rewrites references to spell the new name; every reference still denotes the same cell, so no value moves (it does re-key the cross-sheet dependency maps and rebuild the single-sheet ones). The `rename_sheet` command is now a one-line delegation here (testability split) and writes nothing itself"),
+        ("named_ranges.rs", "rename_name_in_grids", "the DEFINED-NAME twin of rename_sheet_inner above: it rewrites `NamedRef` nodes to spell the new name, and every one still denotes the same range, so no value moves. Its caller `rename_named_range_impl` does run a phase B (`rebuild_all_dependencies` then `recalc_after_name_change`) — necessary because the name dependency edges are keyed BY NAME and would otherwise all be filed under a name the workbook no longer has, not because a value changed"),
         // -- Own evaluation loop over the cells it writes -------------------
         ("data_tables.rs", "data_table_one_var", "what-if table: evaluates each substitution itself"),
         ("data_tables.rs", "data_table_two_var", "what-if table: evaluates each substitution itself"),

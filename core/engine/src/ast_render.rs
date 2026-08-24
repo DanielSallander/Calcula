@@ -10,7 +10,7 @@
 //! - Absolute reference markers ($) are preserved
 //! - Sheet names with spaces or apostrophes are quoted
 
-use parser::ast::{BinaryOperator, BuiltinFunction, Expression, TableSpecifier, Value};
+use parser::ast::{BinaryOperator, BuiltinFunction, Expression, TableSpecifier, UnaryOperator, Value};
 use std::collections::HashMap;
 use std::fmt::Write;
 
@@ -36,17 +36,24 @@ const PREC_COMPARE: u8 = 1;
 const PREC_CONCAT: u8 = 2;
 const PREC_ADD: u8 = 3;
 const PREC_MUL: u8 = 4;
-const PREC_UNARY: u8 = 5;
-const PREC_POWER: u8 = 6;
+/// `^`. Now LOOSER than the prefix unaries, which is the reverse of what it was:
+/// Excel's `=-2^2` is 4, so `parse_power` takes both operands from
+/// `parse_unary`. These constants mirror the descent chain and had to be
+/// renumbered with it.
+const PREC_POWER: u8 = 5;
+const PREC_UNARY: u8 = 6;
+/// Excel's POSTFIX `%`, one rank tighter than the prefix unaries so `=-2%`
+/// renders back with the negation outside.
+const PREC_PERCENT: u8 = 7;
 /// Excel's SPACE intersection operator, which binds tighter than `^` because the
 /// reference operators bind before arithmetic. Renumbered `PREC_ATOM` when this
 /// was added — the header states these mirror the parser's descent chain, so they
 /// move with it, and leaving intersection sharing `PREC_ATOM` would render a
 /// programmatically-built `Intersect(A1, Add(B1, C1))` without the parentheses it
 /// needs to parse back the same way.
-const PREC_INTERSECT: u8 = 7;
+const PREC_INTERSECT: u8 = 8;
 /// Anything that parses as a primary and can never need guarding.
-const PREC_ATOM: u8 = 8;
+const PREC_ATOM: u8 = 9;
 
 fn binding_power(op: &BinaryOperator) -> u8 {
     match op {
@@ -69,6 +76,9 @@ fn binding_power(op: &BinaryOperator) -> u8 {
 fn precedence(expr: &Expression) -> u8 {
     match expr {
         Expression::BinaryOp { op, .. } => binding_power(op),
+        // POSTFIX `%` binds tighter than a PREFIX `-`, so the two unary
+        // spellings do not share a rank.
+        Expression::UnaryOp { op: UnaryOperator::Percent, .. } => PREC_PERCENT,
         Expression::UnaryOp { .. } => PREC_UNARY,
         // A negative number literal renders with a leading `-`, so in text it
         // behaves exactly like a unary negation: `-5^2` would re-parse as
@@ -240,15 +250,12 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
 
         Expression::BinaryOp { left, op, right } => {
             let p = binding_power(op);
-            // `^` is the one RIGHT-associative operator, and `parse_power` takes
-            // its LEFT operand from `parse_primary` rather than `parse_unary`,
-            // so anything carrying its own operator on the left of a `^` must be
-            // parenthesised or it re-parses as something else.
-            let (left_min, right_min) = if *op == BinaryOperator::Power {
-                (PREC_ATOM, p)
-            } else {
-                (p, p + 1)
-            };
+            // EVERY binary operator is left-associative now, `^` included —
+            // Excel folds equal priority left to right with no exception, so
+            // `=2^3^2` is 64. The old special case existed because `^` was
+            // right-associative and took its left operand from `parse_primary`;
+            // both of those are gone.
+            let (left_min, right_min) = (p, p + 1);
             ctx.enter(0);
             render_child_into(left, left_min, ctx, out);
             ctx.leave();
@@ -258,9 +265,18 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             ctx.leave();
         }
 
+        // POSTFIX, and it has to be rendered before the prefix arm below or the
+        // `%` would come out in front of its operand.
+        Expression::UnaryOp { op: op @ UnaryOperator::Percent, operand } => {
+            ctx.enter(0);
+            render_child_into(operand, PREC_PERCENT, ctx, out);
+            ctx.leave();
+            let _ = write!(out, "{}", op);
+        }
+
         Expression::UnaryOp { op, operand } => {
             // `parse_unary`'s operand is itself `parse_unary`, so a nested unary
-            // or a `^` needs no parentheses; anything looser does.
+            // or a `%` needs no parentheses; anything looser does.
             let _ = write!(out, "{}", op);
             ctx.enter(0);
             render_child_into(operand, PREC_UNARY, ctx, out);
@@ -323,15 +339,38 @@ fn render_into(expr: &Expression, ctx: &mut RenderCtx<'_>, out: &mut String) {
             out.push(']');
         }
 
-        Expression::ListLiteral { elements } => {
+        // Excel's ARRAY CONSTANT. `,` between columns, `;` between rows, and NO
+        // space after either: this is the INVARIANT spelling that has to parse
+        // back byte-identically, and `formula_locale` is what turns it into the
+        // user's separators for display.
+        Expression::ArrayLiteral { rows } => {
             out.push('{');
+            for (r, row) in rows.iter().enumerate() {
+                if r > 0 { out.push(';'); }
+                for (c, e) in row.iter().enumerate() {
+                    if c > 0 { out.push(','); }
+                    // Step path stays row-major so the Evaluate-Formula walker
+                    // can address a cell of the constant.
+                    ctx.enter(r * row.len() + c);
+                    render_into(e, ctx, out);
+                    ctx.leave();
+                }
+            }
+            out.push('}');
+        }
+
+        // COLLECT(...), not `{...}`. Braces are Excel's array constant now, so
+        // rendering a List with them would round-trip it into an ARRAY — a
+        // contained value silently becoming a spilling one.
+        Expression::ListLiteral { elements } => {
+            out.push_str("COLLECT(");
             for (i, e) in elements.iter().enumerate() {
-                if i > 0 { out.push_str(", "); }
+                if i > 0 { out.push(','); }
                 ctx.enter(i);
                 render_into(e, ctx, out);
                 ctx.leave();
             }
-            out.push('}');
+            out.push(')');
         }
 
         Expression::DictLiteral { entries } => {
@@ -842,16 +881,33 @@ mod tests {
     }
 
     #[test]
-    fn a_negative_number_literal_is_guarded_where_a_unary_minus_would_be() {
-        // The parser can never build this node -- `-5` parses as a negation of
-        // `5` -- but a script or a folding pass can, and rendered flat it would
-        // re-parse as `-(5^2)`: 25 becomes -25.
+    fn a_negative_number_literal_left_of_a_power_no_longer_needs_guarding() {
+        // THIS TEST ASSERTED `(-5)^2` UNTIL THE PRECEDENCE MOVED, and the
+        // parenthesis it demanded was load-bearing at the time: `^` used to take
+        // its left operand from `parse_primary`, so a flat `-5^2` re-parsed as
+        // `-(5^2)` and 25 became -25.
+        //
+        // `parse_power` now takes BOTH operands from `parse_unary`, because
+        // Excel's `=-2^2` is 4 — negation binds tighter than `^`. Under that
+        // rule `-5^2` re-parses as `(-5)^2` on its own, so the guard is dead
+        // weight rather than protection. The property it existed to protect is
+        // the one asserted here: the VALUE survives the round trip.
         let expr = Expression::BinaryOp {
             left: Box::new(Expression::Literal(Value::Number(-5.0))),
             op: BinaryOperator::Power,
             right: Box::new(Expression::Literal(Value::Number(2.0))),
         };
-        assert_eq!(render_formula_raw(&expr), "(-5)^2");
+        let rendered = render_formula_raw(&expr);
+        assert_eq!(rendered, "-5^2");
+
+        let reparsed = parser::parse(&rendered).expect("rendered text must re-parse");
+        let grid = crate::grid::Grid::new();
+        assert_eq!(
+            crate::evaluator::Evaluator::new(&grid).evaluate(&reparsed),
+            crate::evaluator::EvalResult::Number(25.0),
+            "`{}` must still be 25, not -25",
+            rendered
+        );
     }
 
     #[test]

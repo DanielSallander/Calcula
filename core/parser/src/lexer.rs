@@ -60,6 +60,8 @@ impl<'a> Lexer<'a> {
             Some(']') => Token::RBracket,
             Some('{') => Token::LBrace,
             Some('}') => Token::RBrace,
+            Some('%') => Token::Percent,
+            Some(';') => Token::Semicolon,
 
             // Handle = and potentially other operators starting with =
             Some('=') => Token::Equals,

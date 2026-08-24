@@ -18,6 +18,20 @@ mod blank_semantics_tests;
 /// layer moved.
 #[cfg(test)]
 mod intersection_tests;
+
+/// Excel's implicit ARRAY semantics — lifting, broadcasting, array constants and
+/// the two operators (`%`, unary `+`) that did not exist. Same reasoning again:
+/// the rule spans the lexer, the parser, the locale translator, the renderer and
+/// the evaluator, and three of the defects it pins were WRONG NUMBERS rather
+/// than errors.
+#[cfg(test)]
+mod array_semantics_tests;
+/// Excel's implicit array semantics — the shape algebra behind "array
+/// operation", "lifting", "pairwise lifting" and "broadcasting". Its own file
+/// for the reason `blank_semantics_tests` has one: the rule spans the binary
+/// operators, the unary operators and the function dispatch, and a failure
+/// needs to say WHICH shape moved.
+pub mod array_lift;
 pub mod budget;
 pub mod cell;
 pub mod control_values;
@@ -41,6 +55,12 @@ pub mod style;
 pub mod text_cmp;
 pub mod theme;
 pub mod undo;
+/// Which built-ins are VOLATILE (recalculate on every worksheet change, not
+/// only on F9) and whether a stored AST calls one. Its own file rather than a
+/// helper in `dependency_extractor`: volatility is precisely the property the
+/// dependency graph CANNOT express, so keeping it next to the extractor that
+/// cannot see it would invite the two to be confused for one another.
+pub mod volatility;
 
 // Re-export commonly used types at the crate root
 pub use budget::{

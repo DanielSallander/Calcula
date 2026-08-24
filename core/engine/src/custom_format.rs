@@ -1604,9 +1604,32 @@ fn format_datetime_section(value: f64, section: &FormatSection, locale: &LocaleS
     let minutes = (total_seconds % 3600) / 60;
     let seconds = total_seconds % 60;
 
-    // For elapsed time formats
-    let total_minutes = total_seconds / 60;
-    let total_hours = total_seconds / 3600;
+    // ELAPSED tokens measure a DURATION, so they count the WHOLE serial, days
+    // included. `[h]`/`[m]`/`[s]` exist for exactly one reason -- a timesheet
+    // that totals more than a day -- and all three used to be derived from
+    // `total_seconds` above, i.e. from the day FRACTION alone. 1.5 under
+    // `[h]:mm` came out "12:00" instead of "36:00", and `[h]:mm:ss` turned the
+    // 1.25 that `xlsx_reader::converts_from_1904` goes out of its way to carry
+    // across date systems ("thirty hours in both") into "06:00:00". Nothing
+    // errored and nothing was flagged: the cell showed a plausible, wrong
+    // number, one whole day short per day worked.
+    //
+    // ROUNDED, not truncated, and rounded the same way the clock components
+    // above are, so `[s]` and `mm:ss` can never disagree about which second the
+    // value is in.
+    let elapsed_seconds = (value.abs() * 86400.0).round() as u64;
+    let elapsed_minutes = elapsed_seconds / 60;
+    let elapsed_hours = elapsed_seconds / 3600;
+    // The sign rides on the elapsed count, the way this file already signs
+    // negative numbers, scientific values and fractions -- the clock fields
+    // have nowhere to put it. A value that ROUNDS to zero seconds is not a
+    // negative on screen, so it gets no sign, the same reasoning that keeps
+    // `format_number_with_color` from painting `$0.00` red. (Excel's own answer
+    // to a negative duration in the 1900 date system is `#####`, which is a
+    // width-independent RENDERER refusal tracked as BUG-0066; this layer
+    // returns a string and cannot make that call for the renderer.)
+    let elapsed_negative = value < 0.0 && elapsed_seconds > 0;
+    let mut elapsed_sign_emitted = false;
 
     // Date components
     let date_parts = if days >= 1 {
@@ -1704,13 +1727,28 @@ fn format_datetime_section(value: f64, section: &FormatSection, locale: &LocaleS
                 result.push_str(if is_pm { "PM" } else { "AM" });
             }
             FormatToken::ElapsedHours => {
-                result.push_str(&total_hours.to_string());
+                push_elapsed(
+                    &mut result,
+                    elapsed_hours,
+                    elapsed_negative,
+                    &mut elapsed_sign_emitted,
+                );
             }
             FormatToken::ElapsedMinutes => {
-                result.push_str(&total_minutes.to_string());
+                push_elapsed(
+                    &mut result,
+                    elapsed_minutes,
+                    elapsed_negative,
+                    &mut elapsed_sign_emitted,
+                );
             }
             FormatToken::ElapsedSeconds => {
-                result.push_str(&total_seconds.to_string());
+                push_elapsed(
+                    &mut result,
+                    elapsed_seconds,
+                    elapsed_negative,
+                    &mut elapsed_sign_emitted,
+                );
             }
             FormatToken::Literal(s) => {
                 result.push_str(s);
@@ -1741,6 +1779,19 @@ fn format_datetime_section(value: f64, section: &FormatSection, locale: &LocaleS
         color: section.color,
         accounting: None,
     }
+}
+
+/// Emit one elapsed count, carrying the duration's sign on the FIRST elapsed
+/// token only.
+///
+/// A duration has one sign, not one per field: signing every token would render
+/// -1.5 under `[h]:[mm]` as "-36:-2160".
+fn push_elapsed(out: &mut String, count: u64, negative: bool, sign_emitted: &mut bool) {
+    if negative && !*sign_emitted {
+        out.push('-');
+    }
+    *sign_emitted = true;
+    out.push_str(&count.to_string());
 }
 
 /// Convert an Excel serial date number to (year, month, day).
@@ -2425,6 +2476,81 @@ mod tests {
             format_custom_value(45306.0, "mmmmm", &LocaleSettings::invariant()).text,
             "J"
         );
+    }
+
+    // ---- Elapsed time ([h]/[m]/[s]) tests ----
+    //
+    // The bracketed tokens are the whole reason Excel can total a timesheet:
+    // they do NOT wrap at the natural boundary. This engine derived all three
+    // from the day FRACTION, so every duration of a day or more came out short
+    // by whole days -- a SILENT WRONG ANSWER, not an error: "36:00" printed as
+    // "12:00" and nothing anywhere flagged it.
+
+    #[test]
+    fn elapsed_tokens_count_the_whole_serial_including_the_days() {
+        let us = LocaleSettings::invariant();
+        assert_eq!(format_custom_value(1.5, "[h]:mm", &us).text, "36:00");
+        assert_eq!(format_custom_value(2.0, "[h]", &us).text, "48");
+        // 1.5 hours: `[m]` is 90 minutes, not 30 past the hour.
+        assert_eq!(format_custom_value(0.0625, "[m]", &us).text, "90");
+        assert_eq!(format_custom_value(1.5, "[s]", &us).text, "129600");
+        // The exact value `xlsx_reader::converts_from_1904` refuses to shift
+        // because it is a duration -- "thirty hours in both date systems".
+        assert_eq!(format_custom_value(1.25, "[h]:mm:ss", &us).text, "30:00:00");
+        assert_eq!(format_custom_value(3.25, "[h]:mm:ss", &us).text, "78:00:00");
+        // A date serial IS a duration under an elapsed format: 45306 * 24.
+        assert_eq!(format_custom_value(45306.0, "[h]", &us).text, "1087344");
+        // Sub-day durations were already right and stay right.
+        assert_eq!(format_custom_value(0.5625, "[h]:mm:ss", &us).text, "13:30:00");
+    }
+
+    /// CONTROL for the fix above: the UNBRACKETED clock tokens must still wrap.
+    /// A change that made `h` behave like `[h]` would break every clock format
+    /// in the product -- `hh:mm` on any dated timestamp would print the serial's
+    /// age in hours.
+    #[test]
+    fn unbracketed_time_tokens_still_wrap_at_their_natural_boundary() {
+        let us = LocaleSettings::invariant();
+        assert_eq!(format_custom_value(1.5, "h:mm", &us).text, "12:00");
+        assert_eq!(format_custom_value(1.5, "hh:mm:ss", &us).text, "12:00:00");
+        assert_eq!(format_custom_value(2.0, "h", &us).text, "0");
+        // Same serial, same field, one bracket apart.
+        assert_eq!(format_custom_value(0.0625, "mm:ss", &us).text, "30:00");
+        assert_eq!(format_custom_value(0.0625, "[m]:ss", &us).text, "90:00");
+        // A real timestamp still renders as a time of day.
+        assert_eq!(format_custom_value(45306.5625, "hh:mm:ss", &us).text, "13:30:00");
+    }
+
+    /// A negative duration keeps its minus, the way every other numeric emitter
+    /// in this file signs a negative (numbers, scientific, fractions). Excel's
+    /// 1900 date system answers `#####` instead, but that is a renderer refusal
+    /// (BUG-0066) and this layer returns a string; dropping the sign here is
+    /// what the date/time path already does and is the lie BUG-0066 is about.
+    #[test]
+    fn negative_elapsed_durations_keep_their_sign() {
+        let us = LocaleSettings::invariant();
+        assert_eq!(format_custom_value(-0.5, "[h]:mm", &us).text, "-12:00");
+        assert_eq!(format_custom_value(-1.5, "[h]", &us).text, "-36");
+        assert_eq!(format_custom_value(-0.0625, "[m]", &us).text, "-90");
+        assert_eq!(format_custom_value(-1.5, "[s]", &us).text, "-129600");
+        // One sign for the duration, not one per field.
+        assert_eq!(format_custom_value(-1.5, "[h]:[mm]", &us).text, "-36:2160");
+        // A value that ROUNDS to zero seconds is not a negative on screen.
+        assert_eq!(format_custom_value(-1e-9, "[s]", &us).text, "0");
+    }
+
+    /// Elapsed seconds ROUND, like the clock components they sit beside, so the
+    /// two can never disagree about which second the value is in. Truncating
+    /// would print 129600 here while `mm:ss` in the same cell said ":01".
+    #[test]
+    fn elapsed_seconds_round_and_agree_with_the_clock_components() {
+        let us = LocaleSettings::invariant();
+        // 1.5 days + 0.6 seconds.
+        let v = 129600.6 / 86400.0;
+        assert_eq!(format_custom_value(v, "[s]", &us).text, "129601");
+        assert_eq!(format_custom_value(v, "[h]:mm:ss", &us).text, "36:00:01");
+        // 36*3600 + 0*60 + 1 == 129601: the elapsed count and the clock fields
+        // describe the same instant.
     }
 
     // ---- Fraction format tests ----

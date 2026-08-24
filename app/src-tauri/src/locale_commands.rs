@@ -40,6 +40,10 @@ pub fn set_locale(state: State<AppState>, locale_id: String) -> LocaleSettingsDa
         LocaleSettings::from_locale_id(&locale_id)
     };
     let data = LocaleSettingsData::from(&new_locale);
+    // Publish to the evaluator's mirror BEFORE dropping the value into state,
+    // so the two writes stay adjacent and neither can be added without the
+    // other catching the eye. `TEXT(value, format)` reads this.
+    crate::eval_budget::set_formula_locale(new_locale.clone());
     *state.locale.lock().unwrap() = new_locale;
     data
 }

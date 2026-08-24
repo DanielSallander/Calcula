@@ -55,9 +55,10 @@
 //! Cancel keeps working all the way down.
 
 use std::cell::RefCell;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use engine::{BudgetPolicy, CancelToken, Evaluator, BATCH_FUEL, DEFAULT_CELL_FUEL};
+use engine::{BudgetPolicy, CancelToken, Evaluator, LocaleSettings, BATCH_FUEL, DEFAULT_CELL_FUEL};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -321,6 +322,38 @@ pub fn apply(evaluator: &mut Evaluator<'_>) {
             }
         }
     });
+    if let Some(locale) = formula_locale() {
+        evaluator.set_locale(locale);
+    }
+}
+
+/// The locale `TEXT(value, format)` formats against.
+///
+/// PROCESS-WIDE, not per-operation, and not per-document — unlike the governor
+/// above. The locale is the user's REGIONAL FORMAT (see `os_locale.rs`), an
+/// application preference that describes the machine, so it is the same for
+/// every workbook open in it and must survive File > New. Mirroring it here
+/// rather than threading it is the same argument this module's header makes for
+/// the budget: `TEXT` is one function, and the alternative is a parameter on the
+/// ~19 `evaluate_formula*` wrappers and their ~78 callers.
+///
+/// FAILS SAFE. Unset — in a unit test, or before `AppState` is built — every
+/// `Evaluator` keeps the engine's own invariant default, which formats with `.`
+/// and `,`. A forgotten install costs the separators, never the answer.
+static FORMULA_LOCALE: RwLock<Option<LocaleSettings>> = RwLock::new(None);
+
+/// Publish the application's locale to every `Evaluator` built from now on.
+///
+/// Called from `AppState` construction and from the `set_locale` command — the
+/// two places that write `state.locale` — so the mirror cannot drift from it.
+pub fn set_formula_locale(locale: LocaleSettings) {
+    if let Ok(mut slot) = FORMULA_LOCALE.write() {
+        *slot = Some(locale);
+    }
+}
+
+fn formula_locale() -> Option<LocaleSettings> {
+    FORMULA_LOCALE.read().ok().and_then(|slot| slot.clone())
 }
 
 /// The aggregate ceiling for ONE call that evaluates a caller-supplied list.

@@ -126,6 +126,11 @@ pub fn collect_table_names(ast: &Expression, out: &mut TableSet) {
             collect_table_names(target, out);
             collect_table_names(index, out);
         }
+        Expression::ArrayLiteral { rows } => {
+            for e in rows.iter().flatten() {
+                collect_table_names(e, out);
+            }
+        }
         Expression::ListLiteral { elements } => {
             for e in elements {
                 collect_table_names(e, out);
@@ -194,6 +199,7 @@ fn reads_any(ast: &Expression, wanted: &TableSet) -> bool {
         Expression::IndexAccess { target, index } => {
             reads_any(target, wanted) || reads_any(index, wanted)
         }
+        Expression::ArrayLiteral { rows } => rows.iter().flatten().any(|e| reads_any(e, wanted)),
         Expression::ListLiteral { elements } => elements.iter().any(|e| reads_any(e, wanted)),
         Expression::DictLiteral { entries } => entries
             .iter()
@@ -386,6 +392,11 @@ fn restamp(ast: &mut Expression, tables: &TableStorage, table_names: &TableNameR
             restamp(target, tables, table_names);
             restamp(index, tables, table_names);
         }
+        Expression::ArrayLiteral { rows } => {
+            for e in rows.iter_mut().flatten() {
+                restamp(e, tables, table_names);
+            }
+        }
         Expression::ListLiteral { elements } => {
             for e in elements {
                 restamp(e, tables, table_names);
@@ -509,6 +520,11 @@ fn rename_col_walk(
         Expression::IndexAccess { target, index } => {
             rename_col_walk(target, table_upper, old_upper, new_name, include_bare, changed);
             rename_col_walk(index, table_upper, old_upper, new_name, include_bare, changed);
+        }
+        Expression::ArrayLiteral { rows } => {
+            for e in rows.iter_mut().flatten() {
+                rename_col_walk(e, table_upper, old_upper, new_name, include_bare, changed);
+            }
         }
         Expression::ListLiteral { elements } => {
             for e in elements {

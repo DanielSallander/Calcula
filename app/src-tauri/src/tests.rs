@@ -792,3 +792,328 @@ fn test_go_to_special_empty_grid() {
     let errors = run_go_to_special(&state, "errors", Some((0, 0, 2, 2)));
     assert!(errors.is_empty());
 }
+
+// ============================================================================
+// TYPED DATES AND TIMES (parse_cell_input)
+// ============================================================================
+// Typing "2020-06-01" used to store the STRING "2020-06-01": no error anywhere,
+// but every date function, every date axis and every sort saw text, and the
+// cell right-aligned like text. The tests below pin both halves of the fix --
+// what is now a date, and what deliberately still is not, because a wrong date
+// is worse than no date: nothing on screen says the part number "1-2-3" was
+// read as the 2nd of January 2003.
+
+fn us_locale() -> engine::LocaleSettings {
+    engine::LocaleSettings::invariant()
+}
+
+fn se_locale() -> engine::LocaleSettings {
+    engine::LocaleSettings::from_locale_id("sv-SE")
+}
+
+fn cell_number(cell: &Cell) -> f64 {
+    match &cell.value {
+        CellValue::Number(n) => *n,
+        other => panic!("expected a number, got {:?}", other),
+    }
+}
+
+fn assert_stays_text(input: &str, locale: &engine::LocaleSettings) {
+    let cell = parse_cell_input(input, locale);
+    assert!(
+        matches!(&cell.value, CellValue::Text(s) if s == input),
+        "{:?} must stay text, got {:?}",
+        input,
+        cell.value
+    );
+}
+
+#[test]
+fn typed_iso_dates_become_date_serials_instead_of_text() {
+    // 43983 is Excel's own serial for 2020-06-01 -- hard-coded here so the test
+    // pins the conversion end to end rather than restating date_to_serial.
+    for locale in [us_locale(), se_locale()] {
+        let cell = parse_cell_input("2020-06-01", &locale);
+        assert_eq!(cell_number(&cell), 43983.0, "locale {}", locale.locale_id);
+    }
+    // One-digit month and day, still year-first, still a date.
+    assert_eq!(cell_number(&parse_cell_input("2020-6-1", &se_locale())), 43983.0);
+}
+
+#[test]
+fn a_year_first_date_is_read_as_year_first_in_every_locale() {
+    // No short-date pattern anywhere starts with a four-digit day or month, so
+    // the leading component settles the order without consulting the locale.
+    for id in ["en-US", "en-GB", "de-DE", "sv-SE", "ja-JP"] {
+        let locale = engine::LocaleSettings::from_locale_id(id);
+        let (serial, _) = parse_date_time_input("2024-01-15", &locale).expect(id);
+        assert_eq!(serial, 45306.0, "{} read a year-first date some other way", id);
+    }
+}
+
+#[test]
+fn the_locale_short_date_pattern_decides_whether_06_01_is_june_or_january() {
+    // The same eleven characters are two different days. Reading them the US
+    // way on a British or Swedish machine is the silent-wrong-answer case this
+    // whole feature has to avoid.
+    let us = parse_cell_input("06/01/2020", &us_locale());
+    assert_eq!(cell_number(&us), 43983.0, "en-US short date is MM/DD/YYYY");
+
+    let gb = parse_cell_input("06/01/2020", &engine::LocaleSettings::from_locale_id("en-GB"));
+    assert_eq!(cell_number(&gb), 43836.0, "en-GB short date is DD/MM/YYYY");
+}
+
+#[test]
+fn a_numeric_date_is_refused_where_the_locale_writes_its_short_date_year_first() {
+    // sv-SE's short date is YYYY-MM-DD, so nothing in the regional settings
+    // says whether "6/1/2020" is June 1st or January 6th. Guessing would be
+    // wrong for half the users; text is wrong for none of them.
+    assert_stays_text("6/1/2020", &se_locale());
+    assert_stays_text("6.1.2020", &se_locale());
+}
+
+#[test]
+fn two_digit_years_follow_excels_1930_2029_window() {
+    // NOT the DATE() function's rule. `fn_date` adds 1900 to a small year
+    // ARGUMENT, which would date "6/1/20" to 1920; typed text uses the OS
+    // short-date window instead, where 29 is still the future and 30 is not.
+    let us = us_locale();
+    for (input, expected) in [
+        ("6/1/29", (2029, 6, 1)),
+        ("6/1/30", (1930, 6, 1)),
+        ("6/1/00", (2000, 6, 1)),
+        ("6/1/99", (1999, 6, 1)),
+    ] {
+        let serial = cell_number(&parse_cell_input(input, &us));
+        assert_eq!(
+            engine::date_serial::serial_to_date(serial as i64),
+            expected,
+            "{} landed in the wrong century",
+            input
+        );
+    }
+}
+
+#[test]
+fn month_names_are_read_in_the_locales_own_language() {
+    let us = us_locale();
+    assert_eq!(cell_number(&parse_cell_input("1 Jun 2020", &us)), 43983.0);
+    assert_eq!(cell_number(&parse_cell_input("June 1, 2020", &us)), 43983.0);
+    assert_eq!(cell_number(&parse_cell_input("1-Jun-2020", &us)), 43983.0);
+
+    let se = se_locale();
+    assert_eq!(cell_number(&parse_cell_input("1 juni 2020", &se)), 43983.0);
+    assert_eq!(cell_number(&parse_cell_input("1 JUNI 2020", &se)), 43983.0);
+    // An English month name on a Swedish machine is a WORD, not a month --
+    // accepting every language's names would make one locale's month collide
+    // with another locale's ordinary vocabulary.
+    assert_stays_text("1 June 2020", &se);
+}
+
+#[test]
+fn typed_times_become_fractions_of_a_day() {
+    let se = se_locale();
+    let quarter_to_two = 49500.0 / 86400.0; // 13h45m
+    assert!((cell_number(&parse_cell_input("13:45", &se)) - quarter_to_two).abs() < 1e-12);
+    assert!(
+        (cell_number(&parse_cell_input("13:45:30", &se)) - 49530.0 / 86400.0).abs() < 1e-12
+    );
+}
+
+#[test]
+fn a_meridiem_time_is_only_a_time_where_the_locale_has_a_meridiem() {
+    // en-US's OS time pattern carries AM/PM; sv-SE's ("hh:mm:ss") does not, so
+    // "1:45 PM" is not a Swedish time and must not silently become 13:45.
+    let afternoon = 49500.0 / 86400.0;
+    assert!((cell_number(&parse_cell_input("1:45 PM", &us_locale())) - afternoon).abs() < 1e-12);
+    assert!((cell_number(&parse_cell_input("1:45PM", &us_locale())) - afternoon).abs() < 1e-12);
+    assert_eq!(cell_number(&parse_cell_input("12:00 AM", &us_locale())), 0.0);
+    assert!((cell_number(&parse_cell_input("12:00 PM", &us_locale())) - 0.5).abs() < 1e-12);
+    assert_stays_text("1:45 PM", &se_locale());
+}
+
+#[test]
+fn a_date_and_a_time_in_one_entry_make_one_serial() {
+    let se = se_locale();
+    let expected = 43983.0 + 49500.0 / 86400.0;
+    for input in ["2020-06-01 13:45", "2020-06-01T13:45:00", "2020-06-01t13:45"] {
+        let serial = cell_number(&parse_cell_input(input, &se));
+        assert!((serial - expected).abs() < 1e-9, "{} gave {}", input, serial);
+    }
+}
+
+#[test]
+fn a_typed_date_carries_the_number_format_the_entry_implies() {
+    // The parser cannot APPLY a format (a Cell holds a style index and this
+    // function cannot reach the StyleRegistry), so it reports one. Without the
+    // caller wiring it in, a typed date displays as the bare serial 43983.
+    let se = se_locale();
+    let (_, date_format) = parse_cell_input_with_format("2020-06-01", &se);
+    assert_eq!(
+        date_format,
+        Some(NumberFormat::Date {
+            format: "YYYY-MM-DD".to_string()
+        })
+    );
+
+    // Seconds typed, seconds shown; none typed, none shown.
+    let (_, short_time) = parse_cell_input_with_format("13:45", &se);
+    assert_eq!(
+        short_time,
+        Some(NumberFormat::Time {
+            format: "hh:mm".to_string()
+        })
+    );
+    let (_, long_time) = parse_cell_input_with_format("13:45:30", &se);
+    assert_eq!(
+        long_time,
+        Some(NumberFormat::Time {
+            format: "hh:mm:ss".to_string()
+        })
+    );
+
+    let (_, combined) = parse_cell_input_with_format("2020-06-01 13:45", &se);
+    assert_eq!(
+        combined,
+        Some(NumberFormat::Date {
+            format: "YYYY-MM-DD hh:mm".to_string()
+        })
+    );
+}
+
+#[test]
+fn the_implied_format_renders_the_serial_back_as_what_was_typed() {
+    // The end-to-end property the implied format exists for: type a date, see
+    // that date. This is what the caller wiring buys, and what its absence
+    // costs (the cell shows 43983 today).
+    for (locale, input) in [
+        (se_locale(), "2020-06-01"),
+        (us_locale(), "06/01/2020"),
+        (se_locale(), "13:45"),
+        (se_locale(), "2020-06-01 13:45"),
+        (us_locale(), "1:45 PM"),
+    ] {
+        let (cell, format) = parse_cell_input_with_format(input, &locale);
+        let style = CellStyle::new().with_number_format(format.expect(input));
+        assert_eq!(format_cell_value(&cell.value, &style, &locale), input);
+    }
+}
+
+#[test]
+fn a_typed_percentage_reports_the_percentage_format_it_implies() {
+    // The same gap as dates, and older: "50%" has always stored 0.5 and shown
+    // "0.5" unless the cell already carried a percentage format.
+    let (cell, format) = parse_cell_input_with_format("50%", &us_locale());
+    assert!((cell_number(&cell) - 0.5).abs() < 1e-12);
+    assert_eq!(format, Some(NumberFormat::Percentage { decimal_places: 0 }));
+
+    let (cell, format) = parse_cell_input_with_format("12.5%", &us_locale());
+    assert!((cell_number(&cell) - 0.125).abs() < 1e-12);
+    assert_eq!(format, Some(NumberFormat::Percentage { decimal_places: 1 }));
+
+    // The decimal separator is the locale's, not '.'.
+    let (cell, format) = parse_cell_input_with_format("12,5%", &se_locale());
+    assert!((cell_number(&cell) - 0.125).abs() < 1e-12);
+    assert_eq!(format, Some(NumberFormat::Percentage { decimal_places: 1 }));
+
+    // An ordinary number implies nothing.
+    assert_eq!(parse_cell_input_with_format("42", &us_locale()).1, None);
+}
+
+#[test]
+fn an_impossible_calendar_day_stays_text_because_date_to_serial_would_roll_it_silently() {
+    // date_to_serial validates NOTHING: it would answer the serial for March
+    // 2nd for "2020-02-31" and for January of the next year for month 13 --
+    // a wrong date with no error anywhere, which is exactly the failure this
+    // parser exists to avoid.
+    for input in ["2020-02-31", "2021-02-29", "2020-13-01", "2020-06-00", "2020-04-31"] {
+        assert_stays_text(input, &se_locale());
+    }
+    // The honest leap day is a date.
+    assert_eq!(cell_number(&parse_cell_input("2020-02-29", &se_locale())), 43890.0);
+}
+
+#[test]
+fn excels_phantom_1900_leap_day_is_accepted_the_way_excel_accepts_it() {
+    // 1900 was not a leap year, but Excel says it was and serial 60 is that
+    // day. days_in_month gives the honest 28, so the one date where the
+    // calendar and date_to_serial disagree is spelled out in valid_ymd.
+    assert_eq!(cell_number(&parse_cell_input("1900-02-29", &se_locale())), 60.0);
+    assert_eq!(cell_number(&parse_cell_input("1900-02-28", &se_locale())), 59.0);
+}
+
+#[test]
+fn dates_outside_excels_range_stay_text() {
+    // Excel's epoch is 1900-01-01; there is no serial for anything earlier.
+    assert_stays_text("1899-12-31", &se_locale());
+    assert_stays_text("10000-01-01", &se_locale());
+    assert_eq!(cell_number(&parse_cell_input("1900-01-01", &se_locale())), 1.0);
+}
+
+#[test]
+fn part_numbers_phone_numbers_and_year_less_dates_stay_text() {
+    // The refusals matter as much as the acceptances. A date parser that
+    // swallows these is worse than none.
+    let us = us_locale();
+    for input in [
+        "3/4",          // a fraction, a score, or March 4th -- Excel guesses the
+        "1-2",          // current year, which changes meaning every January 1st
+        "12/25",
+        "555-1234",     // phone number
+        "1-800-555",
+        "1-2-3",        // part number: a one-digit year is refused
+        "1/2/345",      // and so is a three-digit one
+        "2020-06",
+        "2020-06-01-02",
+        "A-B-C",
+        "2020/06-01",   // mixed separators
+    ] {
+        assert_stays_text(input, &us);
+    }
+}
+
+#[test]
+fn text_that_merely_contains_a_colon_stays_text() {
+    // The date/time split hunts for the separator before the first ':'. The 't'
+    // of "Meeting" must not act as the 'T' of an ISO timestamp.
+    let us = us_locale();
+    for input in ["Meeting: 5", "A1:B2", "Note: see below", "25:00", "12:60", "1:2:3:4"] {
+        assert_stays_text(input, &us);
+    }
+}
+
+#[test]
+fn a_leading_minus_that_is_not_a_date_is_still_a_formula() {
+    // Ordering guard: date recognition sits between the number check and the
+    // Lotus leading +/- rule, and must not steal either one.
+    let us = us_locale();
+    assert!(
+        parse_cell_input("-1-2", &us).has_formula(),
+        "a leading minus whose components look date-shaped is still a formula"
+    );
+    assert!(parse_cell_input("-A1", &us).has_formula());
+    assert_eq!(cell_number(&parse_cell_input("-100", &us)), -100.0);
+}
+
+#[test]
+fn a_dot_separated_date_reaches_the_date_branch_only_where_the_thousands_separator_is_not_a_dot() {
+    // nb-NO writes DD.MM.YYYY and groups thousands with a non-breaking space,
+    // so its own short date arrives intact.
+    let no = engine::LocaleSettings::from_locale_id("nb-NO");
+    assert_eq!(cell_number(&parse_cell_input("1.6.2020", &no)), 43983.0);
+
+    // de-DE writes the same date the same way but groups thousands with '.',
+    // and parse_number runs FIRST: it strips every dot and answers 162020.
+    // That is a PRE-EXISTING silent wrong answer (nothing here made it), and
+    // the date branch never sees the string. The fix belongs in parse_number --
+    // a separator is only a grouping mark when the digits are grouped in
+    // threes, which is Excel's own rule -- and when it lands, this assertion
+    // flips to 43983.
+    let de = engine::LocaleSettings::from_locale_id("de-DE");
+    assert_eq!(cell_number(&parse_cell_input("1.6.2020", &de)), 162020.0);
+    assert_eq!(
+        parse_date_time_input("1.6.2020", &de).map(|(serial, _)| serial),
+        Some(43983.0),
+        "the date branch itself reads a German date correctly"
+    );
+}

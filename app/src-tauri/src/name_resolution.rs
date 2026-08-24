@@ -255,6 +255,7 @@ fn walk_needs(ast: &Expression, nr: &HashMap<String, NamedRange>) -> bool {
         Expression::Range { start, end, .. } => walk_needs(start, nr) || walk_needs(end, nr),
         Expression::Sheet3DRef { reference, .. } => walk_needs(reference, nr),
         Expression::IndexAccess { target, index } => walk_needs(target, nr) || walk_needs(index, nr),
+        Expression::ArrayLiteral { rows } => rows.iter().flatten().any(|e| walk_needs(e, nr)),
         Expression::ListLiteral { elements } => elements.iter().any(|e| walk_needs(e, nr)),
         Expression::DictLiteral { entries } => entries
             .iter()
@@ -347,6 +348,11 @@ fn collect_with_shadows(ast: &Expression, shadows: &[String], out: &mut NameSet)
         Expression::IndexAccess { target, index } => {
             collect_with_shadows(target, shadows, out);
             collect_with_shadows(index, shadows, out);
+        }
+        Expression::ArrayLiteral { rows } => {
+            for e in rows.iter().flatten() {
+                collect_with_shadows(e, shadows, out);
+            }
         }
         Expression::ListLiteral { elements } => {
             for e in elements {
@@ -528,6 +534,11 @@ fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[St
             restamp(target, nr, shadows);
             restamp(index, nr, shadows);
         }
+        Expression::ArrayLiteral { rows } => {
+            for e in rows.iter_mut().flatten() {
+                restamp(e, nr, shadows);
+            }
+        }
         Expression::ListLiteral { elements } => {
             for e in elements {
                 restamp(e, nr, shadows);
@@ -541,6 +552,181 @@ fn restamp(ast: &mut Expression, nr: &HashMap<String, NamedRange>, shadows: &[St
         }
         Expression::SpillRef { cell, .. } => restamp(cell, nr, shadows),
         Expression::ImplicitIntersection { operand } => restamp(operand, nr, shadows),
+    }
+}
+
+// ============================================================================
+// RENAMING A DEFINED NAME — THE REPOINT
+// ============================================================================
+
+/// Rewrite every reference to `old_name` as `new_name`, and report whether
+/// anything moved.
+///
+/// WHY THIS EXISTS. `rename_named_range` used to move the registry key and
+/// nothing else. D2 stores the NAME inside the formula and resolves it while
+/// calculating, so the instant the key moved, every formula that read the old
+/// name resolved to nothing and showed `#NAME?` — a rename broke the workbook,
+/// and the product's answer was a confirmation dialog the user could click
+/// through. Excel's Name Manager carries the references with the rename; so does
+/// this now.
+///
+/// IT IS [`restamp`] WITH A DIFFERENT AUTHORITY, deliberately, function for
+/// function: the same walk, the same shadow rules, and the same treatment of a
+/// name in FUNCTION position (`=myLambda(5)` parses as a `Custom` call whose
+/// callee is a name, and a named LAMBDA is renamed from the Name Manager like
+/// any other name). Keeping the two the same shape is what stops them
+/// disagreeing about what counts as a reference to a defined name — and this
+/// walk must agree with [`collect_names`] exactly, because that is the walk that
+/// decides which cells the name's dependency edge reaches. A cell the edge
+/// counts as a reader and this walk does not rewrite is a cell that recalculates
+/// to `#NAME?` after the rename.
+///
+/// SHADOWING IS NOT COSMETIC HERE. `restamp` re-spells, so getting a LET binding
+/// wrong there misleads a reader; this REPOINTS, so getting it wrong changes
+/// what the formula COMPUTES. `=LET(rate, 2, rate*10)` binds a local that
+/// shadows a workbook name called `rate` during evaluation (that is what
+/// `a_let_binding_that_shadows_a_name_earns_no_edge` pins), so rewriting it
+/// would silently bind the formula to a name it never read.
+///
+/// `__INVOKE__` is the already-expanded named-LAMBDA marker, never a user name.
+/// It is skipped for the reason [`collect_names`] skips it: it earns no edge, so
+/// it must not earn a rewrite either.
+///
+/// A reference already spelled `new_name` reports NO change, so a case-only
+/// rename ("total" -> "Total") only touches the cells whose spelling actually
+/// moves.
+pub fn rename_name_in_ast(ast: &Expression, old_name: &str, new_name: &str) -> (Expression, bool) {
+    let mut out = ast.clone();
+    let mut changed = false;
+    rename_walk(&mut out, &old_name.to_uppercase(), new_name, &[], &mut changed);
+    (out, changed)
+}
+
+fn rename_walk(
+    ast: &mut Expression,
+    old_upper: &str,
+    new_name: &str,
+    shadows: &[String],
+    changed: &mut bool,
+) {
+    match ast {
+        Expression::NamedRef { name, .. } => {
+            let key = name.to_uppercase();
+            if shadows.contains(&key) || key != old_upper || name == new_name {
+                return;
+            }
+            // The name is written in the USER'S SPELLING, the same thing
+            // `restamp` puts there. It does not survive a bare render ->
+            // re-parse — the lexer uppercases every identifier — and it does not
+            // need to: `restamp_name_casing` runs on the reload path for exactly
+            // that reason, and is what makes `=Fee*100` come home spelled `Fee`.
+            *name = new_name.to_string();
+            *changed = true;
+        }
+        Expression::Literal(_)
+        | Expression::CellRef { .. }
+        | Expression::ColumnRef { .. }
+        | Expression::RowRef { .. }
+        | Expression::TableRef { .. } => {}
+        Expression::BinaryOp { left, right, .. } => {
+            rename_walk(left, old_upper, new_name, shadows, changed);
+            rename_walk(right, old_upper, new_name, shadows, changed);
+        }
+        Expression::UnaryOp { operand, .. } => {
+            rename_walk(operand, old_upper, new_name, shadows, changed)
+        }
+        Expression::FunctionCall { func, args, .. } => {
+            // Binding positions first, so the body sees the right shadow set —
+            // the identical shape `restamp` uses.
+            let (skip_head, bound): (usize, Vec<String>) = match func {
+                BuiltinFunction::Lambda if args.len() >= 2 => (
+                    args.len() - 1,
+                    args[..args.len() - 1]
+                        .iter()
+                        .filter_map(|a| match a {
+                            Expression::NamedRef { name, .. } => Some(name.to_uppercase()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                BuiltinFunction::Let if args.len() >= 3 && args.len() % 2 == 1 => (
+                    0,
+                    (0..(args.len() - 1) / 2)
+                        .filter_map(|i| match &args[i * 2] {
+                            Expression::NamedRef { name, .. } => Some(name.to_uppercase()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => {
+                    if let BuiltinFunction::Custom(name) = func {
+                        let key = name.to_uppercase();
+                        if key != "__INVOKE__"
+                            && !shadows.contains(&key)
+                            && key == old_upper
+                            && name != new_name
+                        {
+                            *func = BuiltinFunction::Custom(new_name.to_string());
+                            *changed = true;
+                        }
+                    }
+                    (0, Vec::new())
+                }
+            };
+            let inner: Vec<String> = if bound.is_empty() {
+                shadows.to_vec()
+            } else {
+                let mut v = shadows.to_vec();
+                v.extend(bound);
+                v
+            };
+            let is_let = matches!(func, BuiltinFunction::Let) && !inner.is_empty();
+            let arg_count = args.len();
+            for (idx, arg) in args.iter_mut().enumerate() {
+                // LAMBDA: the leading params are bindings. LET: the even
+                // positions before the final calculation are bindings.
+                if skip_head > 0 && idx < skip_head {
+                    continue;
+                }
+                if is_let && idx % 2 == 0 && idx < arg_count - 1 {
+                    continue;
+                }
+                rename_walk(arg, old_upper, new_name, &inner, changed);
+            }
+        }
+        Expression::Range { start, end, .. } => {
+            rename_walk(start, old_upper, new_name, shadows, changed);
+            rename_walk(end, old_upper, new_name, shadows, changed);
+        }
+        Expression::Sheet3DRef { reference, .. } => {
+            rename_walk(reference, old_upper, new_name, shadows, changed)
+        }
+        Expression::IndexAccess { target, index } => {
+            rename_walk(target, old_upper, new_name, shadows, changed);
+            rename_walk(index, old_upper, new_name, shadows, changed);
+        }
+        Expression::ArrayLiteral { rows } => {
+            for e in rows.iter_mut().flatten() {
+                rename_walk(e, old_upper, new_name, shadows, changed);
+            }
+        }
+        Expression::ListLiteral { elements } => {
+            for e in elements {
+                rename_walk(e, old_upper, new_name, shadows, changed);
+            }
+        }
+        Expression::DictLiteral { entries } => {
+            for (k, v) in entries {
+                rename_walk(k, old_upper, new_name, shadows, changed);
+                rename_walk(v, old_upper, new_name, shadows, changed);
+            }
+        }
+        Expression::SpillRef { cell, .. } => {
+            rename_walk(cell, old_upper, new_name, shadows, changed)
+        }
+        Expression::ImplicitIntersection { operand } => {
+            rename_walk(operand, old_upper, new_name, shadows, changed)
+        }
     }
 }
 
@@ -652,6 +838,9 @@ fn reads_any(ast: &Expression, wanted: &NameSet, shadows: &[String]) -> bool {
         Expression::Sheet3DRef { reference, .. } => reads_any(reference, wanted, shadows),
         Expression::IndexAccess { target, index } => {
             reads_any(target, wanted, shadows) || reads_any(index, wanted, shadows)
+        }
+        Expression::ArrayLiteral { rows } => {
+            rows.iter().flatten().any(|e| reads_any(e, wanted, shadows))
         }
         Expression::ListLiteral { elements } => elements.iter().any(|e| reads_any(e, wanted, shadows)),
         Expression::DictLiteral { entries } => entries
@@ -787,5 +976,201 @@ mod tests {
         update_name_dependencies((0, 0), NameSet::default(), &mut deps, &mut dependents);
         assert!(dependents.get("RATE").is_none(), "an emptied bucket is dropped");
         assert!(deps.get(&(0, 0)).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // The repoint
+    // -----------------------------------------------------------------------
+
+    /// Render a formula after renaming `old` to `new`, or `None` when the walk
+    /// reports nothing moved.
+    fn renamed(formula: &str, old: &str, new: &str) -> Option<String> {
+        let (out, changed) = rename_name_in_ast(&ast(formula), old, new);
+        changed.then(|| format!("={}", engine::ast_render::render_formula_raw(&out)))
+    }
+
+    #[test]
+    fn a_rename_repoints_every_reference_to_the_old_name() {
+        assert_eq!(renamed("=RATE", "RATE", "Fee").as_deref(), Some("=Fee"));
+        assert_eq!(
+            renamed("=RATE*B2+SUM(RATE)", "RATE", "Fee").as_deref(),
+            Some("=Fee*B2+SUM(Fee)"),
+            "every occurrence, not the first one"
+        );
+    }
+
+    #[test]
+    fn a_rename_matches_the_old_name_without_regard_to_case() {
+        // The registry is UPPERCASE-keyed and the lexer uppercases bare
+        // identifiers, but a quoted or restamped tree can hold any spelling.
+        assert_eq!(renamed("=rate*2", "RATE", "Fee").as_deref(), Some("=Fee*2"));
+        assert_eq!(renamed("=Rate*2", "rate", "Fee").as_deref(), Some("=Fee*2"));
+    }
+
+    #[test]
+    fn a_rename_leaves_every_other_name_alone() {
+        assert_eq!(
+            renamed("=RATE+OTHER", "RATE", "Fee").as_deref(),
+            Some("=Fee+OTHER")
+        );
+        assert!(
+            renamed("=OTHER*2", "RATE", "Fee").is_none(),
+            "a formula naming nothing that moved must report unchanged, or every \
+             cell in the workbook would be rewritten and recorded for undo"
+        );
+    }
+
+    #[test]
+    fn a_name_in_function_position_is_repointed_too() {
+        // `=myLambda(5)` is a Custom call whose CALLEE is the name — a named
+        // LAMBDA is renamed from the Name Manager like any other name, and
+        // leaving the callee behind would turn the call into #NAME?.
+        assert_eq!(
+            renamed("=myLambda(5)", "MYLAMBDA", "Doubler").as_deref(),
+            Some("=Doubler(5)")
+        );
+    }
+
+    #[test]
+    fn a_shadowed_let_or_lambda_parameter_is_not_repointed() {
+        // The binding is a LOCAL that shadows the workbook name during
+        // evaluation, so rewriting it would change what the formula COMPUTES.
+        assert!(
+            renamed("=LET(rate, 2, rate*10)", "RATE", "Fee").is_none(),
+            "both the binding position and the body reference are the local"
+        );
+        assert!(
+            renamed("=LAMBDA(rate, rate*2)", "RATE", "Fee").is_none(),
+            "a LAMBDA parameter shadows the name in the body too"
+        );
+        // ...but a real reference beside the shadow still moves. (The binding
+        // itself comes back from the lexer in capitals — restamping a LOCAL is
+        // exactly what `restamp` refuses to do, and this walk inherits that.)
+        assert_eq!(
+            renamed("=LET(rate, 2, rate*RATE2)", "RATE2", "Fee").as_deref(),
+            Some("=LET(RATE,2,RATE*Fee)")
+        );
+    }
+
+    #[test]
+    fn a_reference_already_spelled_the_new_way_reports_no_change() {
+        // WHAT THIS CANNOT ASSERT, and the earlier version of it did: that
+        // `=Total*2` and `=TOTAL*2` behave differently. They are the SAME TREE.
+        // The lexer uppercases every bare identifier (core/parser/src/lexer.rs),
+        // so both parse to `NamedRef { name: "TOTAL" }`, and no rule could give
+        // one input two answers.
+        assert_eq!(ast("=Total*2"), ast("=TOTAL*2"));
+
+        // What DOES hold: a reference whose stored spelling already matches the
+        // new name reports no change, so the walk records no undo entry that
+        // would restore nothing. Only reachable when something put the
+        // user-cased spelling there — `restamp_name_casing` on entry or reload.
+        let mut already = ast("=TOTAL*2");
+        let mut registry: HashMap<String, NamedRange> = HashMap::new();
+        registry.insert("TOTAL".to_string(), NamedRange {
+            name: "Total".to_string(),
+            sheet_index: None,
+            refers_to: "=$A$1".to_string(),
+            comment: None,
+            folder: None,
+        });
+        restamp_name_casing(&mut already, &registry);
+        let (_, changed) = rename_name_in_ast(&already, "TOTAL", "Total");
+        assert!(!changed, "a spelling that is already the new one has not moved");
+
+        // And a spelling that HAS moved is rewritten.
+        assert_eq!(
+            renamed("=TOTAL*2", "TOTAL", "Total").as_deref(),
+            Some("=Total*2")
+        );
+    }
+
+    #[test]
+    fn the_expanded_invoke_marker_is_never_renamed() {
+        // `__INVOKE__` is the already-expanded named-LAMBDA marker, never a user
+        // name. `collect_names` gives it no edge, so it must earn no rewrite —
+        // rewriting it would destroy the call.
+        assert!(renamed("=__INVOKE__(\"F\", 1)", "__INVOKE__", "Fee").is_none());
+    }
+
+    /// The repoint walk and the EDGE walk must agree cell for cell. A cell the
+    /// edge counts as a reader but the repoint skips is a cell that recalculates
+    /// to `#NAME?` the moment the name is renamed — which is the whole defect the
+    /// repoint exists to remove. Pinned over every shape either one treats
+    /// specially, in both directions.
+    #[test]
+    fn the_repoint_moves_exactly_what_the_edge_walk_counts_as_a_reader() {
+        for formula in [
+            "=RATE",
+            "=RATE*B2",
+            "=A1+B2",
+            "=SUM(SalesData)",
+            "=myLambda(5)",
+            "=LET(x, 5, x+1)",
+            "=LET(rate, 5, rate*RATE)",
+            "=LAMBDA(a, b, a+b)",
+            "=IF(A1>0, RATE, OTHER)",
+            "=SUM(Sheet2!A1:A9)",
+            "=INDEX(SalesData, 2)",
+            "={1,2,3}",
+            "=\"RATE\"",
+        ] {
+            let tree = ast(formula);
+            let mut collected = NameSet::default();
+            collect_names(&tree, &mut collected);
+
+            for probe in ["RATE", "SALESDATA", "MYLAMBDA", "OTHER", "X", "A", "NOPE"] {
+                let (_, changed) = rename_name_in_ast(&tree, probe, "RenamedZ");
+                assert_eq!(
+                    changed,
+                    collected.contains(probe),
+                    "`{}` vs probe {}: the repoint walk and the edge walk disagree \
+                     about whether this formula reads the name",
+                    formula,
+                    probe
+                );
+            }
+        }
+    }
+
+    /// The rewritten tree has to survive the renderer, because that is what the
+    /// formula bar shows and what `.cala` saves. A cell stores only its AST
+    /// (`engine::Cell` has no raw formula field), so the text is DERIVED — but a
+    /// text that cannot be read back would come home from a reload as a value
+    /// cell with an empty formula bar.
+    ///
+    /// STABILITY IS MEASURED THROUGH `restamp_name_casing`, because that is the
+    /// product's actual reload path and the reason the AST may carry a spelling
+    /// the lexer cannot reproduce. Rendering `=Fee*100` and re-parsing it gives
+    /// `FEE` — the lexer uppercases every bare identifier — and `restamp` is
+    /// what puts `Fee` back, on entry AND on load, from the one registry that
+    /// knows how the name is spelled. A version of this test that omitted the
+    /// restamp step asserted a property the product does not have and does not
+    /// need, and it failed for that reason rather than finding a defect.
+    #[test]
+    fn the_repointed_tree_still_round_trips_through_the_renderer() {
+        let mut registry: HashMap<String, NamedRange> = HashMap::new();
+        registry.insert("FEE".to_string(), NamedRange {
+            name: "Fee".to_string(),
+            sheet_index: None,
+            refers_to: "=$A$1".to_string(),
+            comment: None,
+            folder: None,
+        });
+
+        for formula in ["=RATE*100", "=SUM(RATE)+RATE", "=myLambda(RATE)"] {
+            let (out, changed) = rename_name_in_ast(&ast(formula), "RATE", "Fee");
+            assert!(changed, "`{}` should have moved", formula);
+            let rendered = format!("={}", engine::ast_render::render_formula_raw(&out));
+            let mut reparsed = parser::parse(&rendered)
+                .unwrap_or_else(|e| panic!("`{}` rendered `{}` which does not lex: {}", formula, rendered, e));
+            restamp_name_casing(&mut reparsed, &registry);
+            assert_eq!(
+                format!("={}", engine::ast_render::render_formula_raw(&reparsed)),
+                rendered,
+                "`{}` keeps changing every time it goes through the serialiser",
+                formula
+            );
+        }
     }
 }

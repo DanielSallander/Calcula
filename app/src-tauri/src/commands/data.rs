@@ -13,6 +13,7 @@ use crate::{
     evaluate_formula_raw_with_files_and_pivot,
     extract_all_references, format_cell_value, get_column_row_dependents,
     get_recalculation_order, parse_cell_input, parse_cell_input_invariant,
+    parse_cell_input_with_format,
     update_column_dependencies, update_cross_sheet_dependencies,
     update_dependencies, update_row_dependencies, AppState, log_perf
 };
@@ -274,6 +275,135 @@ pub(crate) fn origins_blocked_by(
     // iteration, or two identical workbooks recalculate differently.
     origins.sort_unstable();
     origins
+}
+
+/// The ACTIVE SHEET's VOLATILE cells: every cell whose stored formula calls
+/// NOW, TODAY, RAND, RANDBETWEEN, RANDARRAY, OFFSET, INDIRECT or CELL.
+/// `engine::volatility` names them and records WHY each one qualifies (the
+/// clock/RNG reason and the untrackable-target reason are different reasons).
+///
+/// WHY THIS IS A SCAN AND NOT A LOOKUP. Volatility is precisely the property
+/// the dependency maps CANNOT express: `=NOW()` reads no cell, so it has no
+/// entry in `dependents` at all, and `=OFFSET(A1,B1,0)` has one that names the
+/// wrong cells. There is nothing to look it up in, so it is read back off the
+/// stored ASTs.
+///
+/// COST — the whole difficulty of this feature, and the reason PERF-19 was
+/// deferred rather than forgotten. Per edit, in automatic mode only:
+///   - **No volatile formula anywhere:** one pass over the active sheet's cell
+///     map. `cell.ast` is `None` for every data cell (one branch), and a
+///     formula that opens with a non-volatile call returns false at its root.
+///     The result `Vec` stays empty, so nothing reaches the heap.
+///   - **A handful:** the same pass, plus those cells and everything downstream
+///     of them joining the cascade the edit was already running.
+///
+/// This is the SOUND answer, not the cheap one, and the difference is worth
+/// stating. The cheap answer is a registry maintained wherever a formula is
+/// written, so a workbook with no volatile function pays literally nothing —
+/// the way `udf_volatile_cells` is `None` for a workbook with no volatile UDF.
+/// That registry cannot be built from this file: formulas enter the grid from a
+/// dozen others (`lib.rs`, `tables.rs`, `commands/structure.rs`,
+/// `named_ranges.rs`, `scripting/commands.rs`, `commands/nav.rs`, ...), and a
+/// registry only some of them update is STALE — which restores the frozen
+/// `=NOW()` for exactly the cells nobody thought about, silently. A scan that
+/// costs is better than an index that lies.
+///
+/// ACTIVE SHEET ONLY, matching `udf_volatile_cells` (whose coordinates cross
+/// the wire as active-sheet cells). A volatile cell on another sheet still
+/// refreshes only on a full pass.
+fn volatile_cells_on_active_sheet(grid: &Grid) -> Vec<(u32, u32)> {
+    // THIS SCANS THE ACTIVE SHEET ON EVERY EDIT, and the cost is deliberate
+    // rather than overlooked. Roughly 0.05-0.1 ms on a 10k-cell sheet and
+    // 5-10 ms on a millon-cell one: one branch per data cell, one AST walk that
+    // returns false at the root per formula cell, no allocation when nothing is
+    // volatile.
+    //
+    // A CACHE WAS TRIED AND REMOVED, because every cheap key for it is unsound.
+    // Keying on a grid write-epoch looks right and is not: `grids[i].cells =
+    // other.cells.clone()` and `*current_grid = grids[i].clone()` replace a
+    // sheet's contents WITHOUT going through any `Grid` mutator, and they are
+    // how sheet switch, undo, file open and pivot refresh all work
+    // (`sheets.rs`, `undo_commands.rs`, `persistence.rs`, `pivot/commands.rs` —
+    // 16 sites). A cache keyed that way serves the previous sheet's answer for
+    // the new one, and the symptom is `=NOW()` silently freezing again — the
+    // exact defect this splice exists to fix, reintroduced somewhere nobody
+    // would look.
+    //
+    // The two designs that ARE sound, if this ever shows up in a profile:
+    // maintain the set beside the DEPENDENCY maps (a formula not registered
+    // there does not recalculate anyway, so the invariant is self-enforcing),
+    // or give `Grid` a private cell map so no assignment can bypass a stamp.
+    // Both are larger than this function.
+    let mut cells: Vec<(u32, u32)> = grid
+        .cells
+        .iter()
+        .filter(|(_, cell)| {
+            cell.ast
+                .as_deref()
+                .is_some_and(engine::volatility::contains_volatile_call)
+        })
+        .map(|(&coord, _)| coord)
+        .collect();
+    // Deterministic order, for the reason `origins_blocked_by` sorts: the
+    // cascade's shape must not depend on HashMap iteration order, or two
+    // identical workbooks recalculate differently.
+    cells.sort_unstable();
+    cells
+}
+
+/// Splice the active sheet's volatile cells — and everything downstream of them
+/// — into a cascade root set that has already been ordered for the edit itself.
+///
+/// WHY EVERY EDIT AND NOT JUST F9. "Recalculates on every worksheet change" is
+/// the definition of a volatile function, not an optimisation of it. Without
+/// this splice a `=NOW()` cell sat FROZEN while the user typed around it, and
+/// froze showing a plausible timestamp rather than an error — a wrong answer
+/// that looks authoritative. Same for a `=RAND()` column and for an `=OFFSET()`
+/// window whose base moved.
+///
+/// DEPENDENTS TOO. `A1 = NOW()` refreshing while `B1 = A1+1` does not leaves B1
+/// disagreeing with the cell it reads, which is worse than both being stale.
+/// The roots go through `recalc_order_from_seeds` as ORDERING MEMBERS, so the
+/// whole volatile closure comes back topologically ordered from the one shared
+/// helper — never a hand-rolled walk, which is how three copies of the
+/// cross-sheet cascade drifted apart. Whole-column/row readers (`=SUM(A:A)`
+/// over a RAND column) live in the stripe maps instead of `dependents` and are
+/// appended the same way the edit path appends them for the edited cell.
+///
+/// `already_evaluated` is the single-cell edit's own cell: `update_cell`
+/// evaluates it before the cascade starts and its convention is that it is not
+/// a member of the recalc order. The batch path passes `None` — its cells ARE
+/// members of the ordering.
+///
+/// No dirty decision belongs here. This runs inside a cascade the user's own
+/// edit already owns; refreshing NOW() is not itself a document mutation (see
+/// `CleanReason::RecalcCompanion`, which exists because a workbook holding
+/// NOW()/RAND() must not prompt to save merely for being looked at).
+fn splice_volatile_cascade_roots(
+    grid: &Grid,
+    dependents_map: &crate::DependencyMap,
+    column_dependents_map: &crate::StripeDependentsMap,
+    row_dependents_map: &crate::StripeDependentsMap,
+    already_evaluated: Option<(u32, u32)>,
+    recalc_order: &mut Vec<(u32, u32)>,
+    recalc_set: &mut crate::CoordSet,
+) {
+    let roots = volatile_cells_on_active_sheet(grid);
+    if roots.is_empty() {
+        return;
+    }
+    for cell in crate::recalc_order_from_seeds(&roots, dependents_map, true) {
+        if Some(cell) != already_evaluated && recalc_set.insert(cell) {
+            recalc_order.push(cell);
+        }
+    }
+    for &root in &roots {
+        for dep in get_column_row_dependents(root, column_dependents_map, row_dependents_map) {
+            if Some(dep) != already_evaluated && recalc_set.insert(dep) {
+                recalc_order.push(dep);
+            }
+        }
+    }
 }
 
 /// [`take_spills_where`] for a RECTANGLE of origins — the shape every clear and
@@ -1789,12 +1919,29 @@ fn update_cell_impl(
         perf_t2_parsed = Instant::now();
         perf_t3_stored = Instant::now();
     } else {
-        // Parse the input
-        let mut cell = parse_cell_input(&value, &locale);
+        // Parse the input, and take the NUMBER FORMAT the entry implies with it.
+        //
+        // Typing "6/1/2020" or "50%" produces a plain number — a date serial,
+        // or 0.5 — and without the implied format the cell shows `43983` and
+        // `0.5`. Excel applies the format the entry implied, which is what makes
+        // a typed date look like the date the user typed.
+        let (mut cell, implied_format) = parse_cell_input_with_format(&value, &locale);
 
         // Preserve existing style
         if let Some(existing) = grid.get_cell(row, col) {
             cell.style_index = existing.style_index;
+        }
+
+        // ONLY OVER `General`. A cell the user has already formatted keeps that
+        // format: typing a date into a cell explicitly set to Text, or into one
+        // already carrying a chosen date format, must not silently re-format it.
+        // `General` is the "nobody has said otherwise" state, and it is the only
+        // one an implied format may claim.
+        if let Some(fmt) = implied_format {
+            if styles.get(cell.style_index).number_format == engine::NumberFormat::General {
+                let restyled = styles.get(cell.style_index).clone().with_number_format(fmt);
+                cell.style_index = styles.get_or_create(restyled);
+            }
         }
 
         // If it's a formula, evaluate it using multi-sheet context
@@ -2055,6 +2202,20 @@ fn update_cell_impl(
                 }
             }
         }
+        // VOLATILE BUILT-INS (NOW/TODAY/RAND/RANDBETWEEN/RANDARRAY/OFFSET/
+        // INDIRECT/CELL). The same rule as the volatile UDF above, for the
+        // functions Excel makes volatile itself; the difference is only that
+        // nobody sends the backend a list, so the cells are read back off the
+        // stored ASTs. See `splice_volatile_cascade_roots` for the cost.
+        splice_volatile_cascade_roots(
+            &grid,
+            &dependents_map,
+            &column_dependents_map,
+            &row_dependents_map,
+            Some((row, col)),
+            &mut recalc_order,
+            &mut recalc_set,
+        );
         // ARRAYS THIS EDIT UNBLOCKED. A dynamic array blocked by an occupied
         // cell is `#SPILL!`, and clearing the obstruction is the remedy the
         // error names -- but the origin does not DEPEND on the cell that was in
@@ -3134,7 +3295,12 @@ pub(crate) fn update_cells_batch_core(
     let sheet_names = state.sheet_names.read().unwrap();
     let user_files = user_files_state.files.lock().unwrap();
     let active_sheet = *state.active_sheet.read().unwrap();
-    let styles = state.style_registry.read().unwrap();
+    // WRITE, not read: a typed date or percentage interns the number format
+    // its entry implies, exactly as `update_cell_impl` does. Same lock in the
+    // same position of the canonical order, just exclusive — and it has to be
+    // taken that way HERE, because `Persisted<T>` wraps a std `Mutex` and is
+    // not reentrant, so upgrading it mid-loop would deadlock.
+    let mut styles = state.style_registry.write(&effect).unwrap();
     let mut dependents_map = state.dependents.lock().unwrap();
     let mut dependencies_map = state.dependencies.lock().unwrap();
     let mut column_dependents_map = state.column_dependents.lock().unwrap();
@@ -3290,10 +3456,15 @@ pub(crate) fn update_cells_batch_core(
         }
 
         // Parse the input. When invariant=true, skip delocalization (formula already in US format).
-        let mut cell = if update.invariant.unwrap_or(false) {
-            parse_cell_input_invariant(value, &locale)
+        //
+        // The INVARIANT branch takes no implied format: it is a script's typed
+        // write in canonical US form, and a script that means to write a date
+        // says so with a format of its own rather than having one inferred from
+        // the string it passed.
+        let (mut cell, implied_format) = if update.invariant.unwrap_or(false) {
+            (parse_cell_input_invariant(value, &locale), None)
         } else {
-            parse_cell_input(value, &locale)
+            parse_cell_input_with_format(value, &locale)
         };
 
         // Apply explicit style from input if provided, otherwise preserve existing
@@ -3301,6 +3472,17 @@ pub(crate) fn update_cells_batch_core(
             cell.style_index = explicit_style;
         } else if let Some(existing) = grid.get_cell(row, col) {
             cell.style_index = existing.style_index;
+        }
+
+        // The implied format claims only a `General` cell, and never one the
+        // caller styled explicitly — see the same rule in `update_cell_impl`.
+        if let Some(fmt) = implied_format {
+            if update.style_index.is_none()
+                && styles.get(cell.style_index).number_format == engine::NumberFormat::General
+            {
+                let restyled = styles.get(cell.style_index).clone().with_number_format(fmt);
+                cell.style_index = styles.get_or_create(restyled);
+            }
         }
 
         // If it's a formula, evaluate it
@@ -3524,6 +3706,19 @@ pub(crate) fn update_cells_batch_core(
                 }
             }
         }
+
+        // VOLATILE BUILT-INS: the same splice as `update_cell_impl`, once for
+        // the whole batch. A paste is a worksheet change like any other, so the
+        // volatile cells refresh with it.
+        splice_volatile_cascade_roots(
+            &grid,
+            &dependents_map,
+            &column_dependents_map,
+            &row_dependents_map,
+            None,
+            &mut all_recalc_order,
+            &mut recalc_set,
+        );
 
         // Lock table state for cascade recalculation
         let batch_tables = state.tables.read().unwrap();
@@ -8251,6 +8446,213 @@ mod typed_range_tests {
         let (k, v) = typed_cell_value(&CellValue::Number(f64::NAN), "NaN");
         assert_eq!(k, "number");
         assert_eq!(v, serde_json::Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod volatile_builtin_cascade_tests {
+    //! VOLATILE BUILT-INS on the per-edit cascade (PERF-19 / glossary term
+    //! "volatile-function").
+    //!
+    //! Excel recalculates NOW, TODAY, RAND, RANDBETWEEN, RANDARRAY, OFFSET,
+    //! INDIRECT and CELL on EVERY worksheet change — that is what the term
+    //! means. Calcula recalculated them only on an explicit full pass, so a
+    //! `=NOW()` cell sat FROZEN while the user edited around it. The failure was
+    //! a SILENT WRONG ANSWER, not an error: the cell went on displaying a
+    //! plausible timestamp, and nothing on screen said it was hours old.
+    //!
+    //! Which functions are volatile is pinned next to the predicate
+    //! (`engine::volatility`). What is pinned here is the ROOT SET the edit
+    //! cascade is seeded with, and — as a source tripwire — that both apply
+    //! paths still splice it.
+
+    use super::*;
+    use engine::{Cell, Grid};
+
+    /// A grid from `(row, col, text)` triples; text starting with `=` becomes a
+    /// formula cell (parsed to an AST, which is what the scan reads).
+    fn grid_with(cells: &[(u32, u32, &str)]) -> Grid {
+        let mut grid = Grid::new();
+        for &(row, col, text) in cells {
+            let cell = if text.starts_with('=') {
+                Cell::new_formula(text.to_string())
+            } else {
+                Cell::new_text(text.to_string())
+            };
+            grid.set_cell(row, col, cell);
+        }
+        grid
+    }
+
+    fn dependents(edges: &[((u32, u32), (u32, u32))]) -> crate::DependencyMap {
+        let mut map = crate::DependencyMap::default();
+        for &(precedent, dependent) in edges {
+            map.entry(precedent).or_default().insert(dependent);
+        }
+        map
+    }
+
+    fn stripe(edges: &[(u32, (u32, u32))]) -> crate::StripeDependentsMap {
+        let mut map = crate::StripeDependentsMap::default();
+        for &(index, dependent) in edges {
+            map.entry(index).or_default().insert(dependent);
+        }
+        map
+    }
+
+    #[test]
+    fn a_sheet_with_no_volatile_formula_produces_no_roots() {
+        let grid = grid_with(&[
+            (0, 0, "42"),
+            (1, 0, "=SUM(A1:A1)"),
+            (2, 0, "=IF(A1>0,A1,0)"),
+            (3, 0, "text"),
+        ]);
+        assert!(volatile_cells_on_active_sheet(&grid).is_empty());
+    }
+
+    #[test]
+    fn every_volatile_builtin_is_found_wherever_it_sits_in_the_formula() {
+        let grid = grid_with(&[
+            (0, 0, "=NOW()"),
+            (1, 0, "=1+RAND()"),           // nested under an operator
+            (2, 0, "=ROUND(TODAY(),0)"),   // nested under a call
+            (3, 0, "=OFFSET(B1,1,0)"),
+            (4, 0, "=SUM(B1:B9)"),         // not volatile
+            (5, 0, "100"),                 // not a formula at all
+        ]);
+        assert_eq!(
+            volatile_cells_on_active_sheet(&grid),
+            vec![(0, 0), (1, 0), (2, 0), (3, 0)],
+        );
+    }
+
+    #[test]
+    fn the_roots_come_back_sorted_so_the_cascade_shape_is_deterministic() {
+        // Hash iteration order must not decide which cell recalculates first,
+        // or two identical workbooks recalculate differently.
+        let grid = grid_with(&[
+            (9, 3, "=RAND()"),
+            (0, 0, "=NOW()"),
+            (4, 1, "=TODAY()"),
+        ]);
+        assert_eq!(
+            volatile_cells_on_active_sheet(&grid),
+            vec![(0, 0), (4, 1), (9, 3)],
+        );
+    }
+
+    #[test]
+    fn the_splice_adds_the_volatile_cell_and_everything_downstream_of_it() {
+        // A1 = NOW(), A2 = A1+1. Refreshing A1 without A2 would leave A2
+        // disagreeing with the cell it reads — worse than both being stale.
+        let grid = grid_with(&[(0, 0, "=NOW()"), (1, 0, "=A1+1")]);
+        let deps = dependents(&[((0, 0), (1, 0))]);
+        let mut order: Vec<(u32, u32)> = Vec::new();
+        let mut set = crate::CoordSet::default();
+
+        splice_volatile_cascade_roots(
+            &grid,
+            &deps,
+            &crate::StripeDependentsMap::default(),
+            &crate::StripeDependentsMap::default(),
+            None,
+            &mut order,
+            &mut set,
+        );
+
+        assert_eq!(order, vec![(0, 0), (1, 0)], "precedent before dependent");
+    }
+
+    #[test]
+    fn the_cell_the_edit_already_evaluated_is_not_added_again() {
+        // `update_cell` evaluates the edited cell before the cascade starts and
+        // its convention is that the cell is NOT a member of the recalc order.
+        let grid = grid_with(&[(0, 0, "=NOW()"), (1, 0, "=A1+1")]);
+        let deps = dependents(&[((0, 0), (1, 0))]);
+        let mut order: Vec<(u32, u32)> = Vec::new();
+        let mut set = crate::CoordSet::default();
+
+        splice_volatile_cascade_roots(
+            &grid,
+            &deps,
+            &crate::StripeDependentsMap::default(),
+            &crate::StripeDependentsMap::default(),
+            Some((0, 0)),
+            &mut order,
+            &mut set,
+        );
+
+        assert_eq!(order, vec![(1, 0)]);
+    }
+
+    #[test]
+    fn a_whole_column_reader_of_a_volatile_cell_is_appended_too() {
+        // `=SUM(A:A)` over a RAND column has no per-cell edge — the stripe maps
+        // carry it, and they are consulted for the edited cell already.
+        let grid = grid_with(&[(0, 0, "=RAND()"), (0, 5, "=SUM(A:A)")]);
+        let mut order: Vec<(u32, u32)> = Vec::new();
+        let mut set = crate::CoordSet::default();
+
+        splice_volatile_cascade_roots(
+            &grid,
+            &crate::DependencyMap::default(),
+            &stripe(&[(0, (0, 5))]),
+            &crate::StripeDependentsMap::default(),
+            None,
+            &mut order,
+            &mut set,
+        );
+
+        assert_eq!(order, vec![(0, 0), (0, 5)]);
+    }
+
+    #[test]
+    fn a_sheet_with_no_volatile_formula_leaves_the_cascade_exactly_as_it_was() {
+        // The zero-result path must not disturb an order the edit already built.
+        let grid = grid_with(&[(0, 0, "1"), (1, 0, "=A1+1")]);
+        let mut order = vec![(1, 0)];
+        let mut set: crate::CoordSet = order.iter().copied().collect();
+
+        splice_volatile_cascade_roots(
+            &grid,
+            &dependents(&[((0, 0), (1, 0))]),
+            &crate::StripeDependentsMap::default(),
+            &crate::StripeDependentsMap::default(),
+            Some((0, 0)),
+            &mut order,
+            &mut set,
+        );
+
+        assert_eq!(order, vec![(1, 0)]);
+    }
+
+    #[test]
+    fn both_apply_paths_still_splice_the_volatile_roots() {
+        // A source tripwire, for the reason the writeback wiring test below has
+        // one: these are the two places an edit becomes a cascade, they have
+        // drifted apart before, and a volatile splice missing from ONE of them
+        // means "NOW() refreshes when you type but not when you paste" — which
+        // nothing in the UI would report.
+        const DATA_RS: &str = include_str!("data.rs");
+        for func in ["fn update_cell_impl(", "fn update_cells_batch_core("] {
+            let start = DATA_RS
+                .find(func)
+                .unwrap_or_else(|| panic!("no `{}` in source", func));
+            let rest = &DATA_RS[start + func.len()..];
+            let end = rest
+                .find("\n#[tauri::command]")
+                .into_iter()
+                .chain(rest.find("\n#[cfg(test)]"))
+                .min()
+                .unwrap_or(rest.len());
+            assert!(
+                rest[..end].contains("splice_volatile_cascade_roots("),
+                "`{}` builds a cascade root set without splicing the volatile \
+                 built-ins — NOW()/RAND()/OFFSET() go stale through that path",
+                func,
+            );
+        }
     }
 }
 

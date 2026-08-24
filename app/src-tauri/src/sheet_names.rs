@@ -256,6 +256,7 @@ fn has_sheet_qualifier(ast: &parser::ast::Expression) -> bool {
         E::IndexAccess { target, index } => {
             has_sheet_qualifier(target) || has_sheet_qualifier(index)
         }
+        E::ArrayLiteral { rows } => rows.iter().flatten().any(has_sheet_qualifier),
         E::ListLiteral { elements } => elements.iter().any(has_sheet_qualifier),
         E::DictLiteral { entries } => entries
             .iter()
@@ -317,6 +318,11 @@ fn restamp(ast: &mut parser::ast::Expression, sheet_names: &[String]) {
         E::IndexAccess { target, index } => {
             restamp(target, sheet_names);
             restamp(index, sheet_names);
+        }
+        E::ArrayLiteral { rows } => {
+            for e in rows.iter_mut().flatten() {
+                restamp(e, sheet_names);
+            }
         }
         E::ListLiteral { elements } => {
             for e in elements {

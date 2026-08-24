@@ -1461,6 +1461,7 @@ fn child_exprs(expr: &Expression) -> Vec<&Expression> {
         Expression::Range { start, end, .. } => vec![start, end],
         Expression::Sheet3DRef { reference, .. } => vec![reference],
         Expression::IndexAccess { target, index } => vec![target, index],
+        Expression::ArrayLiteral { rows } => rows.iter().flatten().collect(),
         Expression::ListLiteral { elements } => elements.iter().collect(),
         Expression::DictLiteral { entries } => {
             entries.iter().flat_map(|(k, v)| [k, v]).collect()

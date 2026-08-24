@@ -203,6 +203,11 @@ fn walk_control_names(expr: &Expression, scan: &mut ControlNameScan) {
         Expression::ImplicitIntersection { operand } => walk_control_names(operand, scan),
         Expression::Sheet3DRef { reference, .. } => walk_control_names(reference, scan),
         Expression::SpillRef { cell, .. } => walk_control_names(cell, scan),
+        Expression::ArrayLiteral { rows } => {
+            for e in rows.iter().flatten() {
+                walk_control_names(e, scan);
+            }
+        }
         Expression::ListLiteral { elements } => {
             for e in elements {
                 walk_control_names(e, scan);

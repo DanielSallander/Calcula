@@ -465,19 +465,22 @@ fn parser_respects_precedence_power_before_multiply() {
 }
 
 #[test]
-fn parser_power_is_right_associative() {
-    // 2 ^ 3 ^ 2 should be parsed as 2 ^ (3 ^ 2) = 2 ^ 9 = 512
+fn parser_power_is_left_associative_like_every_other_excel_operator() {
+    // ASSERTED THE OPPOSITE UNTIL 2026-08-23, and the opposite was wrong.
+    // Right-associativity is the MATHEMATICAL convention, but Excel folds
+    // equal-priority operators left to right with no exception for `^`:
+    // `=2^3^2` is `(2^3)^2` = 64, not `2^(3^2)` = 512.
     let result = parse("=2 ^ 3 ^ 2").unwrap();
     assert_eq!(
         result,
         Expression::BinaryOp {
-            left: Box::new(Expression::Literal(Value::Number(2.0))),
-            op: BinaryOperator::Power,
-            right: Box::new(Expression::BinaryOp {
-                left: Box::new(Expression::Literal(Value::Number(3.0))),
+            left: Box::new(Expression::BinaryOp {
+                left: Box::new(Expression::Literal(Value::Number(2.0))),
                 op: BinaryOperator::Power,
-                right: Box::new(Expression::Literal(Value::Number(2.0)))
-            })
+                right: Box::new(Expression::Literal(Value::Number(3.0)))
+            }),
+            op: BinaryOperator::Power,
+            right: Box::new(Expression::Literal(Value::Number(2.0)))
         }
     );
 }
@@ -614,18 +617,21 @@ fn parser_parses_negation_in_expression() {
 }
 
 #[test]
-fn parser_parses_negation_with_power() {
-    // -2 ^ 2 should be parsed as -(2 ^ 2) = -4 (unary binds tighter than power)
+fn parser_parses_negation_as_binding_tighter_than_power() {
+    // ASSERTED `-(2^2)` = -4 UNTIL 2026-08-23. Excel answers 4: negation binds
+    // TIGHTER than `^`, so the -2 is raised. (The old comment said "unary binds
+    // tighter than power" while the code did the reverse — the comment was
+    // right about Excel and the tree was not.)
     let result = parse("=-2 ^ 2").unwrap();
     assert_eq!(
         result,
-        Expression::UnaryOp {
-            op: UnaryOperator::Negate,
-            operand: Box::new(Expression::BinaryOp {
-                left: Box::new(Expression::Literal(Value::Number(2.0))),
-                op: BinaryOperator::Power,
-                right: Box::new(Expression::Literal(Value::Number(2.0)))
-            })
+        Expression::BinaryOp {
+            left: Box::new(Expression::UnaryOp {
+                op: UnaryOperator::Negate,
+                operand: Box::new(Expression::Literal(Value::Number(2.0)))
+            }),
+            op: BinaryOperator::Power,
+            right: Box::new(Expression::Literal(Value::Number(2.0)))
         }
     );
 }
@@ -949,9 +955,146 @@ fn parser_error_on_trailing_operator() {
 }
 
 #[test]
-fn parser_error_on_double_operator() {
-    let result = parse("=1 + + 2");
-    assert!(result.is_err());
+fn a_second_plus_is_a_unary_plus_not_an_error() {
+    // This asserted `is_err()` while `+` had no prefix form. Excel accepts
+    // `=1 + + 2` and answers 3: the second `+` is the Lotus-compatibility unary
+    // plus applied to 2. Refusing it was the defect, not the tolerance.
+    assert_eq!(
+        parse("=1 + + 2").unwrap(),
+        Expression::BinaryOp {
+            left: Box::new(Expression::Literal(Value::Number(1.0))),
+            op: BinaryOperator::Add,
+            right: Box::new(Expression::UnaryOp {
+                op: UnaryOperator::Plus,
+                operand: Box::new(Expression::Literal(Value::Number(2.0)))
+            })
+        }
+    );
+
+    // A doubled operator with no operand after it is still an error.
+    assert!(parse("=1 * * 2").is_err());
+    assert!(parse("=1 +").is_err());
+}
+
+#[test]
+fn a_leading_plus_starts_a_formula_the_way_excel_allows() {
+    // `=+A1` is everywhere in real workbooks — typing `+` to begin a formula is
+    // a habit Excel inherited from Lotus 1-2-3 — and it used to be a hard parse
+    // error, so an imported .xlsx using it opened as #VALUE!.
+    assert_eq!(
+        parse("=+A1").unwrap(),
+        Expression::UnaryOp {
+            op: UnaryOperator::Plus,
+            operand: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
+            })
+        }
+    );
+    assert!(parse("=+SUM(A1:A3)").is_ok());
+    assert!(parse("=-+-5").is_ok());
+}
+
+#[test]
+fn percent_is_a_postfix_operator_on_any_expression() {
+    // Not number-literal syntax: Excel applies `%` to whatever precedes it, so
+    // `=A1%` and `=(1+1)%` are both legal.
+    assert_eq!(
+        parse("=50%").unwrap(),
+        Expression::UnaryOp {
+            op: UnaryOperator::Percent,
+            operand: Box::new(Expression::Literal(Value::Number(50.0)))
+        }
+    );
+    assert!(parse("=A1%").is_ok());
+    assert!(parse("=(1+1)%").is_ok());
+    assert!(parse("=SUM(A1:A9)%").is_ok());
+
+    // Binds tighter than `*`, so `=A1*20%` multiplies by 0.2 rather than
+    // taking a percent of the product.
+    assert_eq!(
+        parse("=A1*20%").unwrap(),
+        Expression::BinaryOp {
+            left: Box::new(Expression::CellRef {
+                sheet: None,
+                col: "A".to_string(),
+                row: 1,
+                col_absolute: false,
+                row_absolute: false,
+                ref_site_id: Default::default(),
+            }),
+            op: BinaryOperator::Multiply,
+            right: Box::new(Expression::UnaryOp {
+                op: UnaryOperator::Percent,
+                operand: Box::new(Expression::Literal(Value::Number(20.0)))
+            })
+        }
+    );
+}
+
+#[test]
+fn an_array_constant_separates_columns_with_a_comma_and_rows_with_a_semicolon() {
+    // `,` is the COLUMN break and `;` the ROW break, in the invariant spelling
+    // the parser always sees. `={1,2,3}` is one row of three; `={1;2;3}` is
+    // three rows of one. Getting these the wrong way round transposes every
+    // array constant in the workbook.
+    assert_eq!(
+        parse("={1,2,3}").unwrap(),
+        Expression::ArrayLiteral {
+            rows: vec![vec![
+                Expression::Literal(Value::Number(1.0)),
+                Expression::Literal(Value::Number(2.0)),
+                Expression::Literal(Value::Number(3.0)),
+            ]]
+        }
+    );
+    assert_eq!(
+        parse("={1;2;3}").unwrap(),
+        Expression::ArrayLiteral {
+            rows: vec![
+                vec![Expression::Literal(Value::Number(1.0))],
+                vec![Expression::Literal(Value::Number(2.0))],
+                vec![Expression::Literal(Value::Number(3.0))],
+            ]
+        }
+    );
+    assert_eq!(
+        parse("={1,2;3,4}").unwrap(),
+        Expression::ArrayLiteral {
+            rows: vec![
+                vec![
+                    Expression::Literal(Value::Number(1.0)),
+                    Expression::Literal(Value::Number(2.0)),
+                ],
+                vec![
+                    Expression::Literal(Value::Number(3.0)),
+                    Expression::Literal(Value::Number(4.0)),
+                ],
+            ]
+        }
+    );
+
+    // Text, booleans and mixed types are all legal members.
+    assert!(parse("={\"a\",\"b\";TRUE,FALSE}").is_ok());
+
+    // A RAGGED constant is refused at entry, as Excel refuses it — a ragged
+    // array has no honest shape for anything downstream to spill.
+    assert!(parse("={1,2;3}").is_err());
+
+    // A colon after the first element still means DICT, so Calcula's own
+    // key-value literal is untouched by the brace reclamation.
+    assert!(matches!(
+        parse("={\"a\": 1, \"b\": 2}").unwrap(),
+        Expression::DictLiteral { .. }
+    ));
+
+    // A semicolon OUTSIDE braces is still an error — it is a locale-separator
+    // mistake, and accepting it would silently change what a formula means.
+    assert!(parse("=SUM(A1;A2)").is_err());
 }
 
 // ========================================

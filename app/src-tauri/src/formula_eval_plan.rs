@@ -177,7 +177,15 @@ fn assign_ids_recursive(
                 id: id.clone(),
                 node_type: "unary".to_string(),
                 label: op_str.to_string(),
-                subtitle: "negate".to_string(),
+                // Names the operator rather than saying "negate" for all three:
+                // the step-by-step evaluator exists to tell the user what each
+                // step DID, and `%` does not negate anything.
+                subtitle: match op {
+                    engine::UnaryOperator::Negate => "negate",
+                    engine::UnaryOperator::Plus => "unary plus",
+                    engine::UnaryOperator::Percent => "percent",
+                }
+                .to_string(),
                 children: vec![child_id],
                 path: current_path.to_vec(),
                 is_leaf: false,
@@ -256,6 +264,27 @@ fn assign_ids_recursive(
                 label: "[]".to_string(),
                 subtitle: "index access".to_string(),
                 children: vec![target_id, index_id],
+                path: current_path.to_vec(),
+                is_leaf: false,
+            });
+        }
+
+        // Array constant: cells are numbered row-major, so the flattened position
+        // is the child index (r * row_width + c).
+        Expression::ArrayLiteral { rows } => {
+            let mut child_ids = Vec::new();
+            for (i, elem) in rows.iter().flatten().enumerate() {
+                let mut child_path = current_path.to_vec();
+                child_path.push(i);
+                let child_id = assign_ids_recursive(elem, &child_path, nodes, path_to_id, counter);
+                child_ids.push(child_id);
+            }
+            nodes.push(NodeInfo {
+                id: id.clone(),
+                node_type: "literal".to_string(),
+                label: format!("{{...{}}}", rows.iter().map(|r| r.len()).sum::<usize>()),
+                subtitle: "array literal".to_string(),
+                children: child_ids,
                 path: current_path.to_vec(),
                 is_leaf: false,
             });
@@ -402,6 +431,10 @@ fn binary_op_str(op: &BinaryOperator) -> &'static str {
 fn unary_op_str(op: &engine::UnaryOperator) -> &'static str {
     match op {
         engine::UnaryOperator::Negate => "-",
+        engine::UnaryOperator::Plus => "+",
+        // POSTFIX. This is the symbol only; the caller places it, exactly as it
+        // does for the prefix forms.
+        engine::UnaryOperator::Percent => "%",
     }
 }
 
@@ -813,6 +846,8 @@ fn get_node_by_path<'a>(ast: &'a Expression, path: &[usize]) -> &'a Expression {
                 if idx == 0 { target.as_ref() } else { index.as_ref() }
             }
             Expression::Sheet3DRef { reference, .. } => reference.as_ref(),
+            // Row-major child index, as assigned in assign_ids_recursive.
+            Expression::ArrayLiteral { rows } => rows.iter().flatten().nth(idx).unwrap_or(current),
             Expression::ListLiteral { elements } => &elements[idx],
             Expression::DictLiteral { entries } => {
                 let entry_idx = idx / 2;

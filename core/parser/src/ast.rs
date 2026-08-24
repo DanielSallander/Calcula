@@ -159,8 +159,33 @@ pub enum Expression {
         index: Box<Expression>,
     },
 
-    /// List literal: ={1, 2, 3}
-    /// Creates an EvalResult::List from comma-separated expressions.
+    /// Excel's ARRAY CONSTANT: `={1,2,3}`, `={1;2;3}`, `={1,2;3,4}`.
+    ///
+    /// `rows` is row-major: the outer Vec is rows, the inner is the cells of
+    /// that row. `={1,2,3}` is ONE row of three (it spills ACROSS), `={1;2;3}`
+    /// is three rows of one (it spills DOWN) — the distinction the `,`/`;`
+    /// separator pair exists to make, and the reason a flat Vec would not do.
+    ///
+    /// Stored in INVARIANT form, always: `,` between columns and `;` between
+    /// rows. In a `;`-list-separator locale such as sv-SE the user types `\`
+    /// for the column break instead, and `formula_locale` translates at the
+    /// input/output boundary — see the brace-awareness note there, because a
+    /// blind `;`->`,` rewrite silently FLATTENS a 2-D constant into one row.
+    ///
+    /// Excel allows only literals here — numbers, text, booleans and errors, no
+    /// references and no nested constants ("array of arrays" is a term for what
+    /// Excel does NOT have). The parser accepts any expression and the
+    /// evaluator resolves it, which is a superset; nothing depends on refusing.
+    #[serde(rename = "array_literal")]
+    ArrayLiteral {
+        rows: Vec<Vec<Expression>>,
+    },
+
+    /// List literal: `=COLLECT(1, 2, 3)`
+    /// Creates an EvalResult::List — a CONTAINED collection that does not spill.
+    ///
+    /// No longer has a brace spelling: `{…}` is Excel's array constant now. The
+    /// variant stays because `COLLECT()` builds one and cells persist it.
     #[serde(rename = "list_literal")]
     ListLiteral {
         elements: Vec<Expression>,
@@ -301,6 +326,10 @@ pub enum BuiltinFunction {
     Lower,
     Trim,
     Concatenate,
+    /// Excel 2019's range-aware join. A DISTINCT variant from `Concatenate`:
+    /// CONCATENATE takes scalars, CONCAT walks ranges, and sharing one variant
+    /// made `=CONCAT(A1:A3)` answer only the first cell.
+    Concat,
     Left,
     Right,
     Mid,
@@ -651,6 +680,13 @@ pub enum BuiltinFunction {
     Sinh,
     Cosh,
     Tanh,
+    // The INVERSES: given a point on the unit hyperbola, recover the hyperbolic
+    // angle. ATANH was reachable only under another name (FISHER); the other
+    // three had no route at all.
+    Asinh,
+    Acosh,
+    Atanh,
+    Acoth,
     Cot,
     Coth,
     Csc,
@@ -881,7 +917,12 @@ impl BuiltinFunction {
             "UPPER" => BuiltinFunction::Upper,
             "LOWER" => BuiltinFunction::Lower,
             "TRIM" => BuiltinFunction::Trim,
-            "CONCATENATE" | "CONCAT" => BuiltinFunction::Concatenate,
+            "CONCATENATE" => BuiltinFunction::Concatenate,
+            // NOT AN ALIAS OF CONCATENATE, and folding it into one was the
+            // defect: joining a RANGE is the entire reason CONCAT exists over
+            // CONCATENATE, and CONCATENATE takes scalars. `=CONCAT(A1:A3)`
+            // answered "a" — the first cell — with no error.
+            "CONCAT" => BuiltinFunction::Concat,
             "LEFT" => BuiltinFunction::Left,
             "RIGHT" => BuiltinFunction::Right,
             "MID" => BuiltinFunction::Mid,
@@ -1231,6 +1272,10 @@ impl BuiltinFunction {
             "SINH" => BuiltinFunction::Sinh,
             "COSH" => BuiltinFunction::Cosh,
             "TANH" => BuiltinFunction::Tanh,
+            "ASINH" => BuiltinFunction::Asinh,
+            "ACOSH" => BuiltinFunction::Acosh,
+            "ATANH" => BuiltinFunction::Atanh,
+            "ACOTH" => BuiltinFunction::Acoth,
             "COT" => BuiltinFunction::Cot,
             "COTH" => BuiltinFunction::Coth,
             "CSC" => BuiltinFunction::Csc,
@@ -1453,6 +1498,7 @@ impl BuiltinFunction {
             BuiltinFunction::Lower => "LOWER",
             BuiltinFunction::Trim => "TRIM",
             BuiltinFunction::Concatenate => "CONCATENATE",
+            BuiltinFunction::Concat => "CONCAT",
             BuiltinFunction::Left => "LEFT",
             BuiltinFunction::Right => "RIGHT",
             BuiltinFunction::Mid => "MID",
@@ -1742,6 +1788,10 @@ impl BuiltinFunction {
             BuiltinFunction::Sinh => "SINH",
             BuiltinFunction::Cosh => "COSH",
             BuiltinFunction::Tanh => "TANH",
+            BuiltinFunction::Asinh => "ASINH",
+            BuiltinFunction::Acosh => "ACOSH",
+            BuiltinFunction::Atanh => "ATANH",
+            BuiltinFunction::Acoth => "ACOTH",
             BuiltinFunction::Cot => "COT",
             BuiltinFunction::Coth => "COTH",
             BuiltinFunction::Csc => "CSC",
@@ -1948,6 +1998,10 @@ impl BuiltinFunction {
             FunctionMeta::new("SINH", "Math", "SINH(number)", "Returns the hyperbolic sine of a number"),
             FunctionMeta::new("COSH", "Math", "COSH(number)", "Returns the hyperbolic cosine of a number"),
             FunctionMeta::new("TANH", "Math", "TANH(number)", "Returns the hyperbolic tangent of a number"),
+            FunctionMeta::new("ASINH", "Math", "ASINH(number)", "Returns the inverse hyperbolic sine of a number"),
+            FunctionMeta::new("ACOSH", "Math", "ACOSH(number)", "Returns the inverse hyperbolic cosine of a number (number must be 1 or greater)"),
+            FunctionMeta::new("ATANH", "Math", "ATANH(number)", "Returns the inverse hyperbolic tangent of a number (between -1 and 1, exclusive)"),
+            FunctionMeta::new("ACOTH", "Math", "ACOTH(number)", "Returns the inverse hyperbolic cotangent of a number (absolute value greater than 1)"),
             FunctionMeta::new("COT", "Math", "COT(number)", "Returns the cotangent of an angle"),
             FunctionMeta::new("COTH", "Math", "COTH(number)", "Returns the hyperbolic cotangent of a number"),
             FunctionMeta::new("CSC", "Math", "CSC(number)", "Returns the cosecant of an angle"),
@@ -1990,6 +2044,7 @@ impl BuiltinFunction {
             // Text functions
             // ================================================================
             FunctionMeta::new("CONCATENATE", "Text", "CONCATENATE(text1, [text2], ...)", "Joins text strings"),
+            FunctionMeta::new("CONCAT", "Text", "CONCAT(text1, [text2], ...)", "Joins text strings, including whole ranges"),
             FunctionMeta::new("LEFT", "Text", "LEFT(text, [num_chars])", "Returns leftmost characters"),
             FunctionMeta::new("RIGHT", "Text", "RIGHT(text, [num_chars])", "Returns rightmost characters"),
             FunctionMeta::new("MID", "Text", "MID(text, start_num, num_chars)", "Returns characters from middle"),
@@ -2467,7 +2522,6 @@ impl BuiltinFunction {
             FunctionMeta::alias("CEIL", "Math"),
             FunctionMeta::alias("POW", "Math"),
             FunctionMeta::alias("FACTORIAL", "Math"),
-            FunctionMeta::alias("CONCAT", "Text"),
             FunctionMeta::alias("FILE.READ", "File"),
             FunctionMeta::alias("FILE.LINES", "File"),
             FunctionMeta::alias("FILE.EXISTS", "File"),
@@ -2604,6 +2658,23 @@ pub enum BinaryOperator {
 #[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum UnaryOperator {
     Negate, // -
+    /// Lotus-compatibility unary plus: `=+A1`, `=+SUM(...)`.
+    ///
+    /// Not decoration. Typing `+` to begin a formula is a habit Excel has
+    /// honoured since 1-2-3, so real workbooks are FULL of `=+...` — and
+    /// without this variant every one of them was a parse error whose formula
+    /// was then stored as literal text.
+    ///
+    /// It evaluates as a NO-OP, not as a numeric coercion: Excel's `=+"abc"` is
+    /// `"abc"` while `=-"abc"` is `#VALUE!`.
+    Plus,
+    /// Postfix percent: `=50%`, `=A1*20%`.
+    ///
+    /// Binds tighter than `^` and looser than the reference operators, and it
+    /// is a real OPERATOR rather than number-literal syntax — `=A1%` and
+    /// `=(1+1)%` are both legal in Excel, so absorbing a `%` suffix in the
+    /// lexer's number reader would have covered only the easy third of it.
+    Percent,
 }
 
 impl std::fmt::Display for BinaryOperator {
@@ -2633,6 +2704,10 @@ impl std::fmt::Display for UnaryOperator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UnaryOperator::Negate => write!(f, "-"),
+            UnaryOperator::Plus => write!(f, "+"),
+            // POSTFIX. This `Display` is the operator's symbol, not its
+            // placement — `ast_render` is what knows `%` follows its operand.
+            UnaryOperator::Percent => write!(f, "%"),
         }
     }
 }

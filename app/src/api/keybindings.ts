@@ -143,6 +143,13 @@ const DEFAULT_KEYBINDINGS: KeyBinding[] = [
   { id: "ext.autofilter.toggle", combo: "Ctrl+Shift+L", commandId: "autofilter.toggle", label: "Toggle AutoFilter", category: "Data", source: "built-in" },
   { id: "ext.flashFill", combo: "Ctrl+E", commandId: "flashFill.execute", label: "Flash Fill", category: "Data", source: "built-in" },
 
+  // Names. Excel's Ctrl+F3. BARE F3 IS NOT TAKEN BY THIS: the app's only other
+  // F3 handler is Find Next inside the Find and Replace dialog, which tests
+  // `e.key === "F3"` without looking at ctrlKey — but the dispatcher below stops
+  // a matched event in the CAPTURE phase, so a Ctrl+F3 never reaches React's
+  // root container and the two cannot both fire.
+  { id: "ext.definedNames.nameManager", combo: "Ctrl+F3", commandId: "definedNames.nameManager", label: "Name Manager", category: "Formulas", source: "built-in" },
+
   // Print
   { id: "ext.print", combo: "Ctrl+P", commandId: "print.preview", label: "Print", category: "File", source: "built-in" },
 

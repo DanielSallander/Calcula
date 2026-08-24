@@ -18,6 +18,7 @@
 //!              LOWER, TRIM, CONCATENATE, LEFT, RIGHT, MID
 //!
 
+use crate::array_lift;
 use crate::budget::{BudgetPolicy, CancelToken, EvalBudget, LAMBDA_CALL_FUEL, MAX_ARRAY_ELEMENTS, MAX_TEXT_LEN};
 use crate::cell::{CellError, CellValue, DictKey};
 use crate::control_values::ControlValue;
@@ -26,6 +27,7 @@ use crate::cube::{cube_call_key, CubeBinding, CubeCallResult, CubePrefetch, Cube
 use crate::date_serial;
 use crate::dependency_extractor::{BinaryOperator, BuiltinFunction, Expression, UnaryOperator, Value};
 use crate::grid::Grid;
+use crate::locale::LocaleSettings;
 use crate::lookup_cache;
 use crate::row_visibility::HiddenScope;
 use crate::style::StyleRegistry;
@@ -139,6 +141,17 @@ fn nlogn_units(n: u64) -> u64 {
 /// the budget is exhausted (or the pass was cancelled). Used for work measured
 /// in "node equivalents": range materialization, array element production,
 /// per-element `EvalResult` handling.
+/// Reserved scope slots for ARRAY LIFTING (`call_with_values`).
+///
+/// Each begins with a SPACE, which the lexer's `is_letter` never accepts as the
+/// start of an identifier, so no user name, defined name or LAMBDA parameter can
+/// ever collide with one. Eight is above the arity of every liftable builtin;
+/// `eval_function` declines to lift beyond it rather than silently dropping
+/// arguments.
+const LIFT_SLOTS: [&str; 8] = [
+    " LIFT0", " LIFT1", " LIFT2", " LIFT3", " LIFT4", " LIFT5", " LIFT6", " LIFT7",
+];
+
 macro_rules! charge {
     ($self:expr, $units:expr) => {
         if $self.budget.charge(fuel_units($units)).is_err() {
@@ -720,6 +733,24 @@ pub struct Evaluator<'a> {
     /// the pre-fetch in app/src-tauri scripting/udf). `None` => the name is not a
     /// (pre-fetched) UDF and evaluation falls through to #NAME?.
     udf_fn: Option<&'a dyn Fn(&str, &[EvalResult]) -> Option<EvalResult>>,
+    /// The locale whose separators and month names `TEXT(value, format)` uses.
+    ///
+    /// The ONLY formula that formats for display, which is why this is the only
+    /// place the evaluator needs a locale at all — every other value it produces
+    /// is formatted later, by the cell's own number format. Defaults to the
+    /// invariant locale so an evaluator built for a test or an internal
+    /// expression needs no ceremony; production callers set it from the
+    /// workbook's locale.
+    ///
+    /// BOXED, AND THAT IS NOT AN OPTIMISATION. `LocaleSettings` carries six
+    /// `String`s; storing it inline grew `Evaluator` by enough to overflow a
+    /// 1 MiB stack at `MAX_LAMBDA_DEPTH`, and
+    /// `the_deepest_allowed_recursion_fits_in_half_the_smallest_thread_stack`
+    /// caught it on the next run. Boxing moved the growth to the heap and the
+    /// test back to green — measured both ways, not assumed. Whatever is added
+    /// to this struct next is subject to the same ceiling: keep `Evaluator`
+    /// small.
+    locale: Box<LocaleSettings>,
     /// Scope for LAMBDA/LET name bindings. Names are stored uppercased.
     /// Uses RefCell for interior mutability so evaluate() can stay &self.
     scope: RefCell<HashMap<String, EvalResult>>,
@@ -828,6 +859,7 @@ impl<'a> Evaluator<'a> {
             pivot_data_fn: None,
             gather_fn: None,
             udf_fn: None,
+            locale: Box::new(LocaleSettings::invariant()),
             scope: RefCell::new(HashMap::new()),
             lambda_depth: std::cell::Cell::new(0),
             // METERED BY DEFAULT. See BudgetPolicy for why the asymmetry (safe
@@ -840,6 +872,15 @@ impl<'a> Evaluator<'a> {
     /// For single-sheet evaluation.
     pub fn new(grid: &'a Grid) -> Self {
         Self::base(grid)
+    }
+
+    /// Sets the locale `TEXT(value, format)` formats against.
+    ///
+    /// Optional by design: leaving it unset formats with `.` and `,` rather
+    /// than refusing, which is the right failure for a caller that has no
+    /// workbook (a script preview, a unit test, an internal expression).
+    pub fn set_locale(&mut self, locale: LocaleSettings) {
+        self.locale = Box::new(locale);
     }
 
     /// Creates a new Evaluator with multi-sheet support.
@@ -1122,6 +1163,7 @@ impl<'a> Evaluator<'a> {
             Expression::IndexAccess { target, index } => {
                 self.eval_index_access(target, index)
             }
+            Expression::ArrayLiteral { rows } => self.eval_array_literal(rows),
             Expression::ListLiteral { elements } => {
                 self.eval_list_literal(elements)
             }
@@ -1368,8 +1410,18 @@ impl<'a> Evaluator<'a> {
                 rows.push(EvalResult::Array(row));
             }
             EvalResult::Array(rows)
+        } else if num_rows == 1 && num_cols > 1 {
+            // A SINGLE-ROW RANGE IS ONE ROW, and it used to come back flat —
+            // which every shape reader in the engine, `spill_dimensions`
+            // included, takes to mean a COLUMN. Two consequences, both silent:
+            // `=D1:F1` spilled DOWN the sheet instead of across it, and
+            // `=D1:F1*A1:A3` paired the two vectors off element-by-element
+            // instead of broadcasting them into the 3x3 matrix Excel produces.
+            // Nesting it is the only spelling that says "one row".
+            EvalResult::Array(vec![EvalResult::Array(flat)])
         } else {
-            // Single-row or single-column range → flat 1D array
+            // Single-column (or single-cell) range → flat 1D array, which IS
+            // the column spelling.
             EvalResult::Array(flat)
         }
     }
@@ -1537,6 +1589,35 @@ impl<'a> Evaluator<'a> {
     /// - Array: 0-based integer index into flat array
     /// - Other: #VALUE!
     /// Evaluates a list literal: {1, 2, 3} → EvalResult::List
+    /// Evaluates Excel's ARRAY CONSTANT: `={1,2;3,4}` → a 2x2 `EvalResult::Array`.
+    ///
+    /// Errors are kept PER ELEMENT rather than short-circuiting the whole
+    /// constant, unlike the list literal above: `={1,#N/A;3,4}` is a legal
+    /// Excel array whose second cell is `#N/A`, and collapsing it to a bare
+    /// `#N/A` would lose the other three values and the shape with them.
+    fn eval_array_literal(&self, rows: &[Vec<Expression>]) -> EvalResult {
+        let n_rows = rows.len();
+        let n_cols = rows.first().map(|r| r.len()).unwrap_or(0);
+        if n_rows == 0 || n_cols == 0 {
+            return EvalResult::Error(CellError::Value);
+        }
+        let cells = (n_rows as u64).saturating_mul(n_cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
+
+        let mut out = Vec::with_capacity(cells as usize);
+        for row in rows {
+            for elem in row {
+                out.push(self.evaluate(elem));
+            }
+        }
+        // `pack`, not a hand-rolled nesting: `={1,2,3}` must come back as ONE
+        // ROW so it spills across, and a flat `Array` would read as a column.
+        array_lift::pack(n_rows, n_cols, out)
+    }
+
     fn eval_list_literal(&self, elements: &[Expression]) -> EvalResult {
         let mut items = Vec::with_capacity(elements.len());
         for elem in elements {
@@ -1873,13 +1954,45 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(e.clone());
         }
 
+        // ARRAY LIFTING, before the scalar helpers see the operands. Every one
+        // of them reduces through `as_number()`/`as_text()`, which have no
+        // Array arm — `as_number` answers None (so `=A1:A3+1` was #VALUE!) and
+        // `as_text` answers the FIRST ELEMENT (so `=A1:A3&"x"` answered "1x",
+        // a wrong value with no error on it). Reshaping here, once, is what
+        // makes all five arithmetic operators, `&` and all six comparisons
+        // array-aware together instead of one at a time.
+        if array_lift::lifts(&left_val) || array_lift::lifts(&right_val) {
+            return self.lift_binary_op(&left_val, op, &right_val);
+        }
+
+        self.apply_binary_values(&left_val, op, &right_val)
+    }
+
+    /// One scalar application of a binary operator. Split out of
+    /// `eval_binary_op` so the lifted path and the scalar path can never
+    /// disagree about what `*` means.
+    fn apply_binary_values(
+        &self,
+        left_val: &EvalResult,
+        op: &BinaryOperator,
+        right_val: &EvalResult,
+    ) -> EvalResult {
+        // An error ELEMENT inside an array propagates to its own cell only —
+        // the whole-operand case was already handled by the caller.
+        if let EvalResult::Error(e) = left_val {
+            return EvalResult::Error(e.clone());
+        }
+        if let EvalResult::Error(e) = right_val {
+            return EvalResult::Error(e.clone());
+        }
+
         match op {
             // Arithmetic operations
-            BinaryOperator::Add => self.eval_add(&left_val, &right_val),
-            BinaryOperator::Subtract => self.eval_subtract(&left_val, &right_val),
-            BinaryOperator::Multiply => self.eval_multiply(&left_val, &right_val),
-            BinaryOperator::Divide => self.eval_divide(&left_val, &right_val),
-            BinaryOperator::Power => self.eval_power(&left_val, &right_val),
+            BinaryOperator::Add => self.eval_add(left_val, right_val),
+            BinaryOperator::Subtract => self.eval_subtract(left_val, right_val),
+            BinaryOperator::Multiply => self.eval_multiply(left_val, right_val),
+            BinaryOperator::Divide => self.eval_divide(left_val, right_val),
+            BinaryOperator::Power => self.eval_power(left_val, right_val),
 
             // UNREACHABLE BY CONSTRUCTION: `eval_node` intercepts Intersect above,
             // because by the time control reaches here both operands have been
@@ -1889,16 +2002,56 @@ impl<'a> Evaluator<'a> {
             BinaryOperator::Intersect => EvalResult::Error(CellError::Null),
 
             // String concatenation
-            BinaryOperator::Concat => self.eval_concat(&left_val, &right_val),
+            BinaryOperator::Concat => self.eval_concat(left_val, right_val),
 
             // Comparison operations
-            BinaryOperator::Equal => self.eval_equal(&left_val, &right_val),
-            BinaryOperator::NotEqual => self.eval_not_equal(&left_val, &right_val),
-            BinaryOperator::LessThan => self.eval_less_than(&left_val, &right_val),
-            BinaryOperator::GreaterThan => self.eval_greater_than(&left_val, &right_val),
-            BinaryOperator::LessEqual => self.eval_less_equal(&left_val, &right_val),
-            BinaryOperator::GreaterEqual => self.eval_greater_equal(&left_val, &right_val),
+            BinaryOperator::Equal => self.eval_equal(left_val, right_val),
+            BinaryOperator::NotEqual => self.eval_not_equal(left_val, right_val),
+            BinaryOperator::LessThan => self.eval_less_than(left_val, right_val),
+            BinaryOperator::GreaterThan => self.eval_greater_than(left_val, right_val),
+            BinaryOperator::LessEqual => self.eval_less_equal(left_val, right_val),
+            BinaryOperator::GreaterEqual => self.eval_greater_equal(left_val, right_val),
         }
+    }
+
+    /// Applies a binary operator element-wise over the broadcast shape of its
+    /// operands. See `array_lift` for the shape rule; this is only the loop.
+    fn lift_binary_op(
+        &self,
+        left_val: &EvalResult,
+        op: &BinaryOperator,
+        right_val: &EvalResult,
+    ) -> EvalResult {
+        let (rows, cols) = match array_lift::broadcast_shape(&[left_val, right_val]) {
+            // An EMPTY array has no element to compute. Excel has no empty
+            // array constant either, so this is a malformed operand, not a
+            // zero-cell answer.
+            Some((0, _)) | Some((_, 0)) => return EvalResult::Error(CellError::Value),
+            Some(shape) => shape,
+            // Unreachable — the caller only enters on an array operand — but a
+            // scalar fallback is cheaper than an unwrap that could panic in the
+            // renderer's process.
+            None => return self.apply_binary_values(left_val, op, right_val),
+        };
+
+        let cells = (rows as u64).saturating_mul(cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        // Charge the whole rectangle BEFORE allocating it: an outer product of
+        // two long columns is quadratic, and the per-element charge below would
+        // only notice after the Vec had already been reserved.
+        charge!(self, cells);
+
+        let mut out = Vec::with_capacity(cells as usize);
+        for r in 0..rows {
+            for c in 0..cols {
+                let l = array_lift::at(left_val, r, c);
+                let rt = array_lift::at(right_val, r, c);
+                out.push(self.apply_binary_values(&l, op, &rt));
+            }
+        }
+        array_lift::pack(rows, cols, out)
     }
 
     fn eval_add(&self, left: &EvalResult, right: &EvalResult) -> EvalResult {
@@ -2109,17 +2262,331 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(e.clone());
         }
 
+        // ARRAY LIFTING. This is what makes the DOUBLE UNARY idiom work:
+        // `--(A1:A10="x")` is the canonical way to turn an array of booleans
+        // into an array of 1s and 0s for SUMPRODUCT, and it needs BOTH negations
+        // to lift. Without this the inner one collapsed to #VALUE! and the
+        // idiom — which is the reason the operator has a name — was unusable.
+        if array_lift::lifts(&val) {
+            let (rows, cols) = match array_lift::broadcast_shape(&[&val]) {
+                Some((0, _)) | Some((_, 0)) => return EvalResult::Error(CellError::Value),
+                Some(shape) => shape,
+                None => (1, 1),
+            };
+            let cells = (rows as u64).saturating_mul(cols as u64);
+            if cells > MAX_ARRAY_ELEMENTS as u64 {
+                return EvalResult::Error(CellError::Limit);
+            }
+            charge!(self, cells);
+            let mut out = Vec::with_capacity(cells as usize);
+            for r in 0..rows {
+                for c in 0..cols {
+                    out.push(self.apply_unary_value(op, &array_lift::at(&val, r, c)));
+                }
+            }
+            return array_lift::pack(rows, cols, out);
+        }
+
+        self.apply_unary_value(op, &val)
+    }
+
+    /// One scalar application of a unary operator, shared by the lifted and the
+    /// scalar path so they cannot disagree about what `-` means.
+    fn apply_unary_value(&self, op: &UnaryOperator, val: &EvalResult) -> EvalResult {
+        if let EvalResult::Error(e) = val {
+            return EvalResult::Error(e.clone());
+        }
         match op {
             UnaryOperator::Negate => match val.as_number() {
                 Some(n) => EvalResult::Number(-n),
                 None => EvalResult::Error(CellError::Value),
             },
+            // Excel's Lotus-compatibility unary plus, and it is a NO-OP rather
+            // than a numeric coercion — the asymmetry with `-` is real and
+            // deliberate on Excel's side. `=+"abc"` is "abc" while `=-"abc"` is
+            // #VALUE!; `=+TRUE` is TRUE, not 1. Coercing here would have been
+            // the tidier rule and the wrong one.
+            UnaryOperator::Plus => val.clone(),
+            // Excel's postfix `%` divides by 100 and is a numeric operation:
+            // `="5"%` is 0.05 because "5" coerces, and `="x"%` is #VALUE!.
+            UnaryOperator::Percent => match val.as_number() {
+                Some(n) => finite_or_num(n / 100.0),
+                None => EvalResult::Error(CellError::Value),
+            },
         }
+    }
+
+    /// Evaluates a function call, lifting it over any array arguments first.
+    fn eval_function(&self, func: &BuiltinFunction, args: &[Expression]) -> EvalResult {
+        if Self::lifts_over_arrays(func) && args.len() <= LIFT_SLOTS.len() {
+            return self.eval_lifted_function(func, args);
+        }
+        self.dispatch_function(func, args)
+    }
+
+    /// Whether every parameter of `func` is a SCALAR, so an ARRAY argument
+    /// lifts element-wise. exceljet calls this "lifting", and it is what makes
+    /// `=SQRT({1;2;3})` three roots instead of `#VALUE!`.
+    ///
+    /// AN ALLOWLIST, DELIBERATELY. Lifting a function that means to consume a
+    /// whole range — SUM, the COUNTIF family, INDEX/MATCH and the lookups —
+    /// would run one aggregate PER CELL and change what it computes, quietly.
+    /// A function joins this list only once its parameters are known to be
+    /// single values.
+    ///
+    /// Two kinds can never join it:
+    /// - Functions that read their argument's REFERENCE rather than its value
+    ///   (ROW, COLUMN, CELL, OFFSET, INDIRECT, ISFORMULA). The lifter hands them
+    ///   a bound VALUE and the reference is gone.
+    /// - Functions whose answer is ABOUT the array. TYPE is the example: Excel
+    ///   answers 64 for an array, and lifting it would answer 1 three times.
+    fn lifts_over_arrays(func: &BuiltinFunction) -> bool {
+        matches!(
+            func,
+            // Math and trigonometry
+            BuiltinFunction::Abs
+                | BuiltinFunction::Sqrt
+                | BuiltinFunction::Int
+                | BuiltinFunction::Round
+                | BuiltinFunction::RoundUp
+                | BuiltinFunction::RoundDown
+                | BuiltinFunction::Trunc
+                | BuiltinFunction::Sign
+                | BuiltinFunction::Exp
+                | BuiltinFunction::Ln
+                | BuiltinFunction::Log
+                | BuiltinFunction::Log10
+                | BuiltinFunction::Mod
+                | BuiltinFunction::Power
+                | BuiltinFunction::Ceiling
+                | BuiltinFunction::Floor
+                | BuiltinFunction::Even
+                | BuiltinFunction::Odd
+                | BuiltinFunction::Fact
+                | BuiltinFunction::Degrees
+                | BuiltinFunction::Radians
+                | BuiltinFunction::Sin
+                | BuiltinFunction::Cos
+                | BuiltinFunction::Tan
+                | BuiltinFunction::Asin
+                | BuiltinFunction::Acos
+                | BuiltinFunction::Atan
+                | BuiltinFunction::Atan2
+                | BuiltinFunction::Sinh
+                | BuiltinFunction::Cosh
+                | BuiltinFunction::Tanh
+                | BuiltinFunction::Asinh
+                | BuiltinFunction::Acosh
+                | BuiltinFunction::Atanh
+                | BuiltinFunction::Acoth
+                | BuiltinFunction::Sec
+                | BuiltinFunction::Csc
+                | BuiltinFunction::Cot
+                | BuiltinFunction::Sech
+                | BuiltinFunction::Csch
+                | BuiltinFunction::Coth
+                | BuiltinFunction::Quotient
+                | BuiltinFunction::Combin
+                | BuiltinFunction::Permut
+                // Text
+                | BuiltinFunction::Len
+                | BuiltinFunction::Left
+                | BuiltinFunction::Right
+                | BuiltinFunction::Mid
+                | BuiltinFunction::Upper
+                | BuiltinFunction::Lower
+                | BuiltinFunction::Proper
+                | BuiltinFunction::Trim
+                | BuiltinFunction::Text
+                | BuiltinFunction::ValueFn
+                | BuiltinFunction::Substitute
+                | BuiltinFunction::Replace
+                | BuiltinFunction::Rept
+                | BuiltinFunction::Find
+                | BuiltinFunction::Search
+                | BuiltinFunction::Exact
+                | BuiltinFunction::Char
+                | BuiltinFunction::Code
+                | BuiltinFunction::Unichar
+                | BuiltinFunction::Unicode
+                | BuiltinFunction::Clean
+                | BuiltinFunction::NumberValue
+                | BuiltinFunction::Fixed
+                | BuiltinFunction::TFn
+                | BuiltinFunction::TextBefore
+                | BuiltinFunction::TextAfter
+                // Logical and information
+                | BuiltinFunction::Not
+                | BuiltinFunction::IsBlank
+                | BuiltinFunction::IsNumber
+                | BuiltinFunction::IsText
+                | BuiltinFunction::IsNonText
+                | BuiltinFunction::IsError
+                | BuiltinFunction::IsErr
+                | BuiltinFunction::IsNa
+                | BuiltinFunction::IsLogical
+                | BuiltinFunction::IsEven
+                | BuiltinFunction::IsOdd
+                | BuiltinFunction::NFn
+                | BuiltinFunction::ErrorType
+                | BuiltinFunction::IfError
+                | BuiltinFunction::IfNa
+                // Date and time
+                | BuiltinFunction::Year
+                | BuiltinFunction::Month
+                | BuiltinFunction::Day
+                | BuiltinFunction::Hour
+                | BuiltinFunction::Minute
+                | BuiltinFunction::Second
+                | BuiltinFunction::Weekday
+                | BuiltinFunction::WeekNum
+                | BuiltinFunction::DateValue
+                | BuiltinFunction::TimeValue
+                | BuiltinFunction::Date
+                | BuiltinFunction::Time
+                | BuiltinFunction::EDate
+                | BuiltinFunction::EOMonth
+        )
+    }
+
+    /// Evaluates a liftable function, broadcasting over any array arguments.
+    ///
+    /// Arguments are evaluated ONCE and reach the function through synthetic
+    /// SCOPE BINDINGS rather than being rebuilt as literal expressions. Every
+    /// `fn_*` reads its arguments with `self.evaluate(&args[i])`, and a scope
+    /// binding is the one substitution that mechanism already understands — it
+    /// is how LAMBDA passes parameters. Rebuilding literals instead would lose
+    /// error values and blanks, neither of which `Value` can express.
+    /// THIS FRAME IS ON THE DEEP RECURSION PATH, so it is kept deliberately
+    /// small. A recursive LAMBDA that calls a liftable builtin — the shape
+    /// `the_deepest_allowed_recursion_fits_in_half_the_smallest_thread_stack`
+    /// measures — evaluates its arguments HERE, so every live local in this
+    /// function is paid for `MAX_LAMBDA_DEPTH` times over. The broadcast loop
+    /// therefore lives in `lift_over_broadcast`, out of line: it is the rare
+    /// branch and its locals must not sit on the recursive frame.
+    #[inline(never)]
+    fn eval_lifted_function(&self, func: &BuiltinFunction, args: &[Expression]) -> EvalResult {
+        let vals = self.eval_args_once(args);
+
+        if vals.iter().any(array_lift::lifts) {
+            return self.lift_over_broadcast(func, &vals);
+        }
+        // Nothing to lift — but still go through the BOUND call, never a second
+        // evaluation of `args`. Re-evaluating would double the work of every
+        // nested call and turn a recursive lambda into an exponential one.
+        self.call_with_values(func, &vals)
+    }
+
+    /// Evaluates each argument exactly once.
+    ///
+    /// THE FRAME THE RECURSION ACTUALLY SITS ON, hence its own function with
+    /// nothing else in it. A recursive LAMBDA reaches its next level through
+    /// this loop, so anything else living here would be multiplied by
+    /// `MAX_LAMBDA_DEPTH`. Both this and its callers are `#[inline(never)]`:
+    /// with the frames merged, the deepest legal recursion overflowed a 1 MiB
+    /// stack, which is what `the_deepest_allowed_recursion_fits_in_half_the_
+    /// smallest_thread_stack` measures.
+    #[inline(never)]
+    fn eval_args_once(&self, args: &[Expression]) -> Vec<EvalResult> {
+        let mut vals = Vec::with_capacity(args.len());
+        for a in args {
+            vals.push(self.evaluate(a));
+        }
+        vals
+    }
+
+    /// The broadcast loop for a lifted function. Out of line from
+    /// `eval_lifted_function` so its locals stay off the recursive frame.
+    #[inline(never)]
+    fn lift_over_broadcast(&self, func: &BuiltinFunction, vals: &[EvalResult]) -> EvalResult {
+        let refs: Vec<&EvalResult> = vals.iter().collect();
+        let (rows, cols) = match array_lift::broadcast_shape(&refs) {
+            Some((0, _)) | Some((_, 0)) => return EvalResult::Error(CellError::Value),
+            Some(shape) => shape,
+            None => return self.call_with_values(func, vals),
+        };
+
+        let cells = (rows as u64).saturating_mul(cols as u64);
+        if cells > MAX_ARRAY_ELEMENTS as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+        charge!(self, cells);
+
+        let mut out = Vec::with_capacity(cells as usize);
+        let mut slice: Vec<EvalResult> = Vec::with_capacity(vals.len());
+        for r in 0..rows {
+            for c in 0..cols {
+                slice.clear();
+                slice.extend(vals.iter().map(|v| array_lift::at(v, r, c)));
+                out.push(self.call_with_values(func, &slice));
+            }
+        }
+        array_lift::pack(rows, cols, out)
+    }
+
+    /// Calls a builtin with already-evaluated argument VALUES.
+    ///
+    /// Binds each value to a reserved scope name, hands the function a
+    /// `NamedRef` per argument, and restores the scope afterwards. The names
+    /// begin with a SPACE, which no identifier can, so a user name — or a
+    /// LAMBDA parameter — can never collide with a slot.
+    ///
+    /// `#[inline(never)]` for the same stack reason as its callers: inlined, its
+    /// save/restore temporaries land on the recursive frame.
+    #[inline(never)]
+    fn call_with_values(&self, func: &BuiltinFunction, vals: &[EvalResult]) -> EvalResult {
+        let mut saved: Vec<(&'static str, Option<EvalResult>)> = Vec::with_capacity(vals.len());
+        {
+            let mut scope = self.scope.borrow_mut();
+            for (slot, val) in LIFT_SLOTS.iter().zip(vals) {
+                saved.push((slot, scope.get(*slot).cloned()));
+                scope.insert((*slot).to_string(), val.clone());
+            }
+        }
+
+        let bound: Vec<Expression> = LIFT_SLOTS
+            .iter()
+            .take(vals.len())
+            .map(|slot| Expression::NamedRef {
+                name: (*slot).to_string(),
+                ref_site_id: Default::default(),
+            })
+            .collect();
+
+        // Straight to the DISPATCH, never back through `eval_function`: the
+        // bound values are scalars, so the lift gate would re-enter this
+        // function forever.
+        let result = self.dispatch_function(func, &bound);
+
+        {
+            let mut scope = self.scope.borrow_mut();
+            for (slot, prev) in saved.into_iter().rev() {
+                match prev {
+                    Some(v) => {
+                        scope.insert(slot.to_string(), v);
+                    }
+                    None => {
+                        scope.remove(slot);
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Evaluates a function call via fast enum dispatch.
     /// No heap allocations or string comparisons - just integer matching.
-    fn eval_function(&self, func: &BuiltinFunction, args: &[Expression]) -> EvalResult {
+    ///
+    /// `#[inline(never)]` IS LOad-BEARING, not a hint. This match is the single
+    /// largest frame in the evaluator, and it is NOT on the deep recursion path
+    /// for a liftable function — `eval_lifted_function` evaluates the arguments
+    /// (where the recursion happens) and only then calls this. Let the optimizer
+    /// inline it back into `eval_function` and that separation is undone: the
+    /// giant frame rejoins the recursive path and
+    /// `the_deepest_allowed_recursion_fits_in_half_the_smallest_thread_stack`
+    /// overflows. It did, which is how this attribute got here.
+    #[inline(never)]
+    fn dispatch_function(&self, func: &BuiltinFunction, args: &[Expression]) -> EvalResult {
         match func {
             // Aggregate functions
             BuiltinFunction::Sum => self.fn_sum(args),
@@ -2200,6 +2667,7 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Lower => self.fn_lower(args),
             BuiltinFunction::Trim => self.fn_trim(args),
             BuiltinFunction::Concatenate => self.fn_concatenate(args),
+            BuiltinFunction::Concat => self.fn_concat(args),
             BuiltinFunction::Left => self.fn_left(args),
             BuiltinFunction::Right => self.fn_right(args),
             BuiltinFunction::Mid => self.fn_mid(args),
@@ -2552,6 +3020,10 @@ impl<'a> Evaluator<'a> {
             BuiltinFunction::Tanh => self.fn_tanh(args),
             BuiltinFunction::Cot => self.fn_cot(args),
             BuiltinFunction::Coth => self.fn_coth(args),
+            BuiltinFunction::Asinh => self.fn_asinh(args),
+            BuiltinFunction::Acosh => self.fn_acosh(args),
+            BuiltinFunction::Atanh => self.fn_atanh(args),
+            BuiltinFunction::Acoth => self.fn_acoth(args),
             BuiltinFunction::Csc => self.fn_csc(args),
             BuiltinFunction::Csch => self.fn_csch(args),
             BuiltinFunction::Sec => self.fn_sec(args),
@@ -3261,6 +3733,10 @@ impl<'a> Evaluator<'a> {
                 Self::ast_calls_nested_aggregate(target, nested)
                     || Self::ast_calls_nested_aggregate(index, nested)
             }
+            Expression::ArrayLiteral { rows } => rows
+                .iter()
+                .flatten()
+                .any(|e| Self::ast_calls_nested_aggregate(e, nested)),
             Expression::ListLiteral { elements } => elements
                 .iter()
                 .any(|e| Self::ast_calls_nested_aggregate(e, nested)),
@@ -3434,6 +3910,56 @@ impl<'a> Evaluator<'a> {
         let condition = self.evaluate(&args[0]);
         if let EvalResult::Error(e) = condition {
             return EvalResult::Error(e);
+        }
+
+        // AN ARRAY CONDITION LIFTS — this is the classic `=SUM(IF(range>x,
+        // range))` idiom, and the reason IF is not simply listed with the other
+        // liftable functions: a SCALAR condition must keep its SHORT CIRCUIT.
+        // `=IF(A1=0,0,1/A1)` must not evaluate `1/A1` at all, and the generic
+        // lifter evaluates every argument before it knows whether it needs to.
+        // So the split is made here, after the condition and before the branches.
+        if array_lift::lifts(&condition) {
+            let (rows, cols) = match array_lift::broadcast_shape(&[&condition]) {
+                Some((0, _)) | Some((_, 0)) => return EvalResult::Error(CellError::Value),
+                Some(shape) => shape,
+                None => (1, 1),
+            };
+            // Both branches are evaluated ONCE and then indexed, not
+            // re-evaluated per element: `=IF(A1:A1000>0, SUM(B:B), 0)` would
+            // otherwise run the aggregate a thousand times.
+            let when_true = self.evaluate(&args[1]);
+            let when_false = if args.len() == 3 {
+                self.evaluate(&args[2])
+            } else {
+                EvalResult::Boolean(false)
+            };
+            let (rows, cols) = {
+                let (tr, tc) = array_lift::shape(&when_true);
+                let (fr, fc) = array_lift::shape(&when_false);
+                (rows.max(tr).max(fr), cols.max(tc).max(fc))
+            };
+            let cells = (rows as u64).saturating_mul(cols as u64);
+            if cells > MAX_ARRAY_ELEMENTS as u64 {
+                return EvalResult::Error(CellError::Limit);
+            }
+            charge!(self, cells);
+            let mut out = Vec::with_capacity(cells as usize);
+            for r in 0..rows {
+                for c in 0..cols {
+                    let test = array_lift::at(&condition, r, c);
+                    if let EvalResult::Error(e) = test {
+                        out.push(EvalResult::Error(e));
+                        continue;
+                    }
+                    let branch = if test.as_boolean().unwrap_or(false) {
+                        &when_true
+                    } else {
+                        &when_false
+                    };
+                    out.push(array_lift::at(branch, r, c));
+                }
+            }
+            return array_lift::pack(rows, cols, out);
         }
 
         let is_true = condition.as_boolean().unwrap_or(false);
@@ -3765,6 +4291,46 @@ impl<'a> Evaluator<'a> {
         EvalResult::Text(result)
     }
 
+    /// Excel 2019's CONCAT: like CONCATENATE, but it WALKS RANGES.
+    ///
+    /// That is the whole difference, and it is why CONCAT cannot share
+    /// `fn_concatenate`: that one calls `as_text()` per argument, and `as_text`
+    /// on an Array returns the FIRST ELEMENT — so `=CONCAT(A1:A3)` answered "a"
+    /// where Excel answers "abc". A wrong string, with no error on it.
+    ///
+    /// Built on `textjoin_collect`, the same range walker TEXTJOIN uses: it
+    /// reads cells directly (so a whole-column argument is charged for its area
+    /// rather than materialized) and tells a blank cell from a zero. CONCAT
+    /// keeps every empty — `ignore_empty = false` — because unlike TEXTJOIN it
+    /// has no delimiter, so an empty contributes nothing either way, and Excel
+    /// offers no flag to drop them.
+    fn fn_concat(&self, args: &[Expression]) -> EvalResult {
+        let mut parts: Vec<String> = Vec::new();
+        for arg in args {
+            // An error ANYWHERE propagates, as it does for CONCATENATE and `&`.
+            // `textjoin_collect` pushes an error's literal text, which would
+            // launder `#DIV/0!` into the string — the one thing this file's own
+            // comment at `as_text` condemns.
+            if let EvalResult::Error(e) = self.evaluate(arg) {
+                return EvalResult::Error(e);
+            }
+            self.textjoin_collect(arg, false, &mut parts);
+        }
+
+        // Size cap BEFORE the join, for the reason spelled out in fn_textjoin:
+        // `join` is one allocation, so measuring its output is measuring the
+        // thing the guard exists to prevent.
+        let joined_len = parts
+            .iter()
+            .map(|p| p.len() as u64)
+            .fold(0u64, |a, b| a.saturating_add(b));
+        if joined_len > MAX_TEXT_LEN as u64 {
+            return EvalResult::Error(CellError::Limit);
+        }
+
+        EvalResult::Text(parts.concat())
+    }
+
     fn fn_left(&self, args: &[Expression]) -> EvalResult {
         if args.is_empty() || args.len() > 2 {
             return EvalResult::Error(CellError::Value);
@@ -3863,11 +4429,43 @@ impl<'a> Evaluator<'a> {
         }
 
         let value = self.evaluate(&args[0]);
-        let _format = self.evaluate(&args[1]).as_text();
+        if let EvalResult::Error(e) = value {
+            return EvalResult::Error(e);
+        }
+        let format = match self.evaluate(&args[1]) {
+            EvalResult::Error(e) => return EvalResult::Error(e),
+            other => other.as_text(),
+        };
 
-        // Simplified TEXT function - just converts to string
-        // Full implementation would parse format codes
-        EvalResult::Text(value.as_text())
+        // THIS USED TO IGNORE THE FORMAT ENTIRELY. The body was two lines —
+        // `let _format = ...` and `value.as_text()` — under a comment saying a
+        // full implementation would parse format codes. So `=TEXT(1234.567,
+        // "0.00")` answered "1234.567" and `=TEXT(B3,"mmmm d")` answered the raw
+        // serial "45306". Both are silent wrong answers on one of the most-used
+        // functions in Excel, and TEXT is the third of exceljet's three worked
+        // concatenation examples.
+        //
+        // The formatter already existed — `custom_format::format_custom_value`
+        // is what paints every formatted cell. Nothing had ever routed TEXT to
+        // it.
+        //
+        // An EMPTY format string is Excel's "" and yields "", not General.
+        if format.is_empty() {
+            return EvalResult::Text(String::new());
+        }
+
+        // TEXT ignores the colour and accounting parts of a format section:
+        // its result is a string in a formula, not a painted cell.
+        match value.as_number() {
+            Some(n) => EvalResult::Text(
+                crate::custom_format::format_custom_value(n, &format, &self.locale).text,
+            ),
+            // Not a number — Excel applies the format's TEXT section (the
+            // fourth, `;;;@`-style one) and otherwise passes the string through.
+            None => EvalResult::Text(
+                crate::custom_format::format_custom_text(&value.as_text(), &format).text,
+            ),
+        }
     }
 
     // ==================== Information Functions ====================
@@ -5523,18 +6121,70 @@ impl<'a> Evaluator<'a> {
 
     // ==================== Hyperbolic & Reciprocal Trig Functions ====================
 
+    // `finite_or_num`, not a bare `Number`: SINH and COSH overflow f64 above
+    // about 710, and Excel answers #NUM! there. Returning a raw infinity let it
+    // travel into a sum or a chart as a value.
     fn fn_sinh(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.sinh()), None => EvalResult::Error(CellError::Value) }
+        match self.evaluate(&args[0]).as_number() { Some(n) => finite_or_num(n.sinh()), None => EvalResult::Error(CellError::Value) }
     }
     fn fn_cosh(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
-        match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.cosh()), None => EvalResult::Error(CellError::Value) }
+        match self.evaluate(&args[0]).as_number() { Some(n) => finite_or_num(n.cosh()), None => EvalResult::Error(CellError::Value) }
     }
     fn fn_tanh(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() { Some(n) => EvalResult::Number(n.tanh()), None => EvalResult::Error(CellError::Value) }
     }
+    // ---- INVERSE hyperbolics ----
+    //
+    // The half of the family that RECOVERS a hyperbolic angle from a point on
+    // the unit hyperbola — which is what the term "hyperbolic angle" names, and
+    // the half that was missing entirely: no variant, no evaluator arm, and not
+    // one `.asinh()` call anywhere in the repo. `=ASINH(1)` was `#NAME?`.
+    //
+    // Each carries Excel's DOMAIN, and the domain is the reason these are not
+    // one-liners like their forward counterparts: an argument outside it is the
+    // RIGHT TYPE and the WRONG VALUE, so it is `#NUM!` and not `#VALUE!` — the
+    // same line `fn_sqrt` draws for a negative.
+    fn fn_asinh(&self, args: &[Expression]) -> EvalResult {
+        // Defined for every real number; no domain guard needed.
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            Some(n) => finite_or_num(n.asinh()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_acosh(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            // Excel: "Number must be greater than or equal to 1."
+            Some(n) if n < 1.0 => EvalResult::Error(CellError::Num),
+            Some(n) => finite_or_num(n.acosh()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_atanh(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            // Excel: strictly between -1 and 1. The endpoints are infinities,
+            // not values, so they are #NUM! rather than a raw f64 infinity.
+            Some(n) if n <= -1.0 || n >= 1.0 => EvalResult::Error(CellError::Num),
+            Some(n) => finite_or_num(n.atanh()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+    fn fn_acoth(&self, args: &[Expression]) -> EvalResult {
+        if args.len() != 1 { return EvalResult::Error(CellError::Value); }
+        match self.evaluate(&args[0]).as_number() {
+            // Excel: |number| must be greater than 1 — ACOTH is ATANH(1/x), and
+            // 1/x lands inside ATANH's domain exactly when |x| > 1.
+            Some(n) if n.abs() <= 1.0 => EvalResult::Error(CellError::Num),
+            Some(n) => finite_or_num((1.0 / n).atanh()),
+            None => EvalResult::Error(CellError::Value),
+        }
+    }
+
     fn fn_cot(&self, args: &[Expression]) -> EvalResult {
         if args.len() != 1 { return EvalResult::Error(CellError::Value); }
         match self.evaluate(&args[0]).as_number() {
@@ -6742,7 +7392,26 @@ impl<'a> Evaluator<'a> {
                     (rows, cols)
                 } else { (1, 1) }
             }
-            _ => (1, 1),
+            // NOT A LITERAL RECTANGLE — so ask the VALUE for its shape.
+            //
+            // This used to answer (1, 1) for everything else, which is what made
+            // `=FILTER(A1:A10, B1:B10>5)` — the single commonest dynamic-array
+            // idiom there is — return #VALUE!: the syntactic reading saw a
+            // BinaryOp rather than a Range, called the condition 1x1, and
+            // failed FILTER's "include must match a dimension" check before any
+            // filtering happened. Now that operators LIFT, the condition is a
+            // real array at runtime and its shape is a property of the value.
+            //
+            // Costs one extra evaluation, and only on the shapes that used to be
+            // answered wrongly: a literal `A1:B10` still never evaluates here.
+            other => {
+                let v = self.evaluate(other);
+                if array_lift::lifts(&v) {
+                    array_lift::shape(&v)
+                } else {
+                    (1, 1)
+                }
+            }
         }
     }
 
@@ -15097,6 +15766,132 @@ mod tests {
         grid.set_cell(1, 1, Cell::new_number(15.0));
         grid.set_cell(2, 1, Cell::new_text("Hello".to_string()));
         grid
+    }
+
+    /// Evaluate a formula against an empty grid. (The `eval` of the same shape
+    /// further down this file lives in a nested module and is not in scope.)
+    fn eval_bare(formula: &str) -> EvalResult {
+        let grid = Grid::new();
+        let ast = parser::parse(formula).expect("formula parses");
+        Evaluator::new(&grid).evaluate(&ast)
+    }
+
+    // ---- TEXT: it never applied the format at all ----
+
+    #[test]
+    fn text_applies_the_format_code_it_was_given() {
+        // THE DEFECT. `fn_text` bound its format argument to `let _format`,
+        // threw it away and returned `value.as_text()`, under a comment saying
+        // a full implementation would parse format codes. So every one of these
+        // answered the raw value — a silent wrong answer on one of the
+        // most-used functions in the product, and one of exceljet's three
+        // worked concatenation examples.
+        assert_eq!(eval_bare("=TEXT(1234.567,\"0.00\")"), EvalResult::Text("1234.57".into()));
+        assert_eq!(eval_bare("=TEXT(0.25,\"0%\")"), EvalResult::Text("25%".into()));
+        assert_eq!(eval_bare("=TEXT(1234567,\"#,##0\")"), EvalResult::Text("1,234,567".into()));
+        // A date serial through a date format — the case that used to answer
+        // "45306".
+        assert_eq!(eval_bare("=TEXT(45306,\"mmmm d\")"), EvalResult::Text("January 15".into()));
+        // The negative section of a multi-part format.
+        assert_eq!(eval_bare("=TEXT(-5,\"0.0;(0.0)\")"), EvalResult::Text("(5.0)".into()));
+    }
+
+    #[test]
+    fn text_passes_a_non_number_through_and_propagates_an_error() {
+        assert_eq!(eval_bare("=TEXT(\"abc\",\"0.00\")"), EvalResult::Text("abc".into()));
+        // Excel's `=TEXT(x,"")` is the empty string, not General.
+        assert_eq!(eval_bare("=TEXT(1234,\"\")"), EvalResult::Text(String::new()));
+        // An error must not be laundered into its literal text.
+        assert_eq!(eval_bare("=TEXT(1/0,\"0.00\")"), EvalResult::Error(CellError::Div0));
+    }
+
+    // ---- CONCAT: the range-aware join (glossary term "concatenation") ----
+
+    #[test]
+    fn concat_joins_a_whole_range_where_concatenate_cannot() {
+        let mut grid = Grid::new();
+        for (i, s) in ["a", "b", "c"].iter().enumerate() {
+            grid.set_cell(i as u32, 0, Cell::new_text((*s).to_string()));
+        }
+        let run = |f: &str| {
+            let ast = parser::parse(f).expect("parses");
+            Evaluator::new(&grid).evaluate(&ast)
+        };
+
+        // THE DEFECT. CONCAT was folded into CONCATENATE, whose per-argument
+        // `as_text()` answers the FIRST ELEMENT of an array — so this returned
+        // "a". A wrong string, with nothing on screen to say so.
+        assert_eq!(run("=CONCAT(A1:A3)"), EvalResult::Text("abc".into()));
+        assert_eq!(run("=CONCAT(A1:A3,\"!\")"), EvalResult::Text("abc!".into()));
+        assert_eq!(run("=CONCAT(\"x\",A1:A3)"), EvalResult::Text("xabc".into()));
+
+        // CONCATENATE keeps its own scalar-only meaning — it is not an alias in
+        // either direction.
+        assert_eq!(run("=CONCATENATE(\"a\",\"b\")"), EvalResult::Text("ab".into()));
+
+        // An error propagates rather than being laundered into the string.
+        assert_eq!(run("=CONCAT(A1:A3,1/0)"), EvalResult::Error(CellError::Div0));
+    }
+
+    #[test]
+    fn concat_keeps_its_own_name_through_a_render_round_trip() {
+        // Sharing a variant with CONCATENATE meant a formula the user typed as
+        // CONCAT came back spelled CONCATENATE — a different function now that
+        // the two behave differently.
+        let ast = parser::parse("=CONCAT(A1:A3)").expect("parses");
+        assert_eq!(crate::ast_render::render_formula_raw(&ast), "CONCAT(A1:A3)");
+    }
+
+    // ---- Inverse hyperbolics (glossary term "hyperbolic angle") ----
+
+    #[test]
+    fn the_inverse_hyperbolic_functions_exist_and_invert_their_forward_pairs() {
+        // All four were #NAME? — no variant, no arm, and not one `.asinh()`
+        // call in the repository.
+        for (f, x) in [("ASINH", 2.5f64), ("ACOSH", 2.5), ("ATANH", 0.5), ("ACOTH", 2.5)] {
+            let forward = match f {
+                "ASINH" => x.sinh(),
+                "ACOSH" => x.cosh(),
+                "ATANH" => x.tanh(),
+                _ => 1.0 / x.tanh(),
+            };
+            let got = eval_bare(&format!("={}({})", f, forward));
+            match got {
+                EvalResult::Number(n) => assert!(
+                    (n - x).abs() < 1e-9,
+                    "{}({}) = {}, expected {}",
+                    f,
+                    forward,
+                    n,
+                    x
+                ),
+                other => panic!("{} returned {:?}", f, other),
+            }
+        }
+    }
+
+    #[test]
+    fn each_inverse_hyperbolic_refuses_the_arguments_outside_its_domain() {
+        // #NUM! and not #VALUE!: the argument is the RIGHT TYPE and the WRONG
+        // VALUE, which is the line this file draws everywhere else (fn_sqrt).
+        assert_eq!(eval_bare("=ACOSH(0.5)"), EvalResult::Error(CellError::Num));
+        assert_eq!(eval_bare("=ATANH(1)"), EvalResult::Error(CellError::Num));
+        assert_eq!(eval_bare("=ATANH(-1)"), EvalResult::Error(CellError::Num));
+        assert_eq!(eval_bare("=ACOTH(1)"), EvalResult::Error(CellError::Num));
+        assert_eq!(eval_bare("=ACOTH(0.5)"), EvalResult::Error(CellError::Num));
+        // ASINH is defined on the whole real line, so nothing is refused.
+        assert!(matches!(eval_bare("=ASINH(-1000)"), EvalResult::Number(_)));
+        // A non-numeric argument is still #VALUE!.
+        assert_eq!(eval_bare("=ASINH(\"x\")"), EvalResult::Error(CellError::Value));
+    }
+
+    #[test]
+    fn the_forward_hyperbolics_report_overflow_instead_of_returning_infinity() {
+        // SINH/COSH overflow f64 above about 710. They used to hand back a raw
+        // infinity, which then travelled into sums and charts as a value.
+        assert_eq!(eval_bare("=SINH(1000)"), EvalResult::Error(CellError::Num));
+        assert_eq!(eval_bare("=COSH(1000)"), EvalResult::Error(CellError::Num));
+        assert!(matches!(eval_bare("=SINH(1)"), EvalResult::Number(_)));
     }
 
     // ---- User-defined function (UDF) hook (Wave 3 / C1) ----
