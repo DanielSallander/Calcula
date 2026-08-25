@@ -21,6 +21,7 @@ vi.mock("../lib/authorRunner", () => ({ runAuthor: (...a: unknown[]) => runAutho
 vi.mock("@api", () => ({ showToast: vi.fn() }));
 
 const { AuthorStatusItem } = await import("../components/AuthorStatusItem");
+const { registerJobViewOpener, onJobViewRequested, __resetJobFocus } = await import("../lib/jobFocus");
 const { startAuthorJob, __resetJobs, runningJobs, allJobs } = await import("../lib/authorJobs");
 
 let container: HTMLDivElement;
@@ -51,6 +52,7 @@ async function flush(): Promise<void> {
 
 beforeEach(() => {
   __resetJobs();
+  __resetJobFocus();
   runAuthor.mockReset();
 });
 
@@ -142,5 +144,71 @@ describe("the derived views have STABLE identity", () => {
     // publishes nothing — but the step log still grows, so exactly one wake.
     phase!("same");
     expect(woke).toBe(1);
+  });
+});
+
+describe("it is legible on the status bar, and it is a way back", () => {
+  // Reported 2026-08-25: the first cut was BLUE-ON-GREEN and barely readable.
+  // The status bar is Excel green (#217346) with white text — see
+  // src/shell/StatusBar.tsx — so everything here is expressed against that.
+  async function showRunning(): Promise<void> {
+    runAuthor.mockReturnValue(new Promise(() => {}));
+    await render();
+    await act(async () => { startAuthorJob(REQ); });
+    await flush();
+  }
+
+  /** jsdom normalises any colour to `rgb(r, g, b)`, so compare on that form. */
+  const WHITE = "rgb(255, 255, 255)";
+
+  it("draws its text in white, not the pane's blue", async () => {
+    await showRunning();
+    expect(container.querySelector("button")!.style.color).toBe(WHITE);
+  });
+
+  it("draws the dot in white too", async () => {
+    await showRunning();
+    const dot = [...container.querySelectorAll("span")]
+      .find((s) => (s as HTMLElement).style.animation?.includes("calcula-aichat-pulse")) as HTMLElement;
+    expect(dot.style.background).toBe(WHITE);
+  });
+
+  it("is a real button, so it is keyboard reachable", async () => {
+    await showRunning();
+    const button = container.querySelector("button");
+    expect(button, "a clickable div is not reachable by keyboard").toBeTruthy();
+    expect(button!.getAttribute("type")).toBe("button");
+  });
+
+  it("opens the pane AND asks for the guided screen when clicked", async () => {
+    const opened: string[] = [];
+    const focused: string[] = [];
+    registerJobViewOpener(() => opened.push("pane"));
+    onJobViewRequested(() => focused.push("view"));
+
+    await showRunning();
+    await act(async () => {
+      container.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    // Both halves: only the extension can raise a pane, only ChatView can
+    // switch its own mode.
+    expect(opened).toEqual(["pane"]);
+    expect(focused).toEqual(["view"]);
+  });
+
+  it("does not throw when nothing has registered an opener", async () => {
+    // The status bar can outlive a deactivated extension; a click that quietly
+    // does nothing beats an exception in the shell's own chrome.
+    await showRunning();
+    await act(async () => {
+      expect(() =>
+        container.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+      ).not.toThrow();
+    });
+  });
+
+  it("says what clicking will do", async () => {
+    await showRunning();
+    expect(container.querySelector("button")!.title).toContain("Click to open");
   });
 });

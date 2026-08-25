@@ -68,6 +68,14 @@ export interface ActivityDotProps {
   /** Pixel diameter of the dot itself. The ring scales with it. */
   size?: number;
   title?: string;
+  /**
+   * Override the status colour.
+   *
+   * The status bar is Excel green with white text, so the blue that reads well
+   * in the pane is nearly invisible there. The CALLER knows what it is sitting
+   * on; this component does not.
+   */
+  color?: string;
 }
 
 /** A pulsing dot inside a rotating ring while running; a still dot otherwise. */
@@ -75,7 +83,7 @@ export function ActivityDot(props: ActivityDotProps): React.ReactElement {
   useKeyframes();
   const size = props.size ?? 10;
   const ring = size * 2;
-  const colour = COLOUR[props.status];
+  const colour = props.color ?? COLOUR[props.status];
   const running = props.status === "running";
 
   return React.createElement(

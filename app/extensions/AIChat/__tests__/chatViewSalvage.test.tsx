@@ -44,6 +44,8 @@ vi.mock("@api", () => ({
   AppEvents: { SELECTION_CHANGED: "app:selection-changed" },
   onAppEvent: () => () => {},
   a1Rect: (r1: number, c1: number, r2: number, c2: number) => `R${r1}C${c1}:R${r2}C${c2}`,
+  // The job strip subscribes to the real job store, which toasts on completion.
+  showToast: vi.fn(),
 }));
 
 // The gate needs a Worker realm it does not have here; it is proved separately
@@ -51,9 +53,12 @@ vi.mock("@api", () => ({
 vi.mock("../lib/draftGate", () => ({ gateToolCall: async () => ({ allow: true }) }));
 
 // ScriptAuthor is reachable from the chat now; its own suite proves it.
-vi.mock("../lib/authorRunner", () => ({ runAuthor: async () => ({ ok: true, source: "", summary: "", rounds: [] }) }));
+vi.mock("../lib/authorRunner", () => ({ runAuthor: () => new Promise(() => {}) }));
 
 const { ChatView } = await import("../components/ChatView");
+// The REAL job store: the strip below is a view of it, and doubling it would
+// test the double rather than the wiring.
+const { startAuthorJob, __resetJobs } = await import("../lib/authorJobs");
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -933,5 +938,49 @@ describe("the chat offers the guided path instead of guessing", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(container.textContent).toContain("authoring a script");
+  });
+});
+
+describe("a running script job is visible from the chat", () => {
+  // Reported 2026-08-24: clicking "Back to chat" mid-run left NO trace anywhere
+  // that the work was still going. The job outlives the screen, so the chat has
+  // to say so — and be a way back to it.
+  function strip(): HTMLElement | undefined {
+    return [...container.querySelectorAll("div")]
+      .find((d) => d.textContent?.startsWith("Writing a script —")) as HTMLElement | undefined;
+  }
+
+  afterEach(() => __resetJobs());
+
+  it("shows a strip naming the current phase while a job runs", async () => {
+    invoke.mockImplementation(async () => textReply("ok"));
+    await render();
+    await act(async () => {
+      startAuthorJob({ intent: "colour the cells", objectType: "button", providerId: "ollama", model: "qwen2.5:7b" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container.textContent).toContain("Writing a script");
+  });
+
+  it("clicking it returns to the run", async () => {
+    invoke.mockImplementation(async () => textReply("ok"));
+    await render();
+    await act(async () => {
+      startAuthorJob({ intent: "colour the cells", objectType: "button", providerId: "ollama", model: "qwen2.5:7b" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const s = strip();
+    expect(s, "the strip must exist to be clicked").toBeTruthy();
+    await act(async () => {
+      s!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container.textContent).toContain("authoring a script");
+  });
+
+  it("shows nothing when no job has ever run", async () => {
+    invoke.mockImplementation(async () => textReply("ok"));
+    await render();
+    expect(container.textContent).not.toContain("Writing a script");
   });
 });

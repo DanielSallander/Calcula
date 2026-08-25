@@ -36,7 +36,7 @@
 //          tier and audit trail; the extra confirmation below is about the
 //          PROVENANCE OF THE PARSE, not about reach.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import type { TaskPaneViewProps } from "@api";
 import { listenTauriEvent, confirmAsync, hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
 import { aiChatBackend } from "../lib/aiChatBackend";
@@ -57,6 +57,9 @@ import {
   type Bubble,
 } from "../lib/toolTimeline";
 import { detectScriptIntent, guessObjectType } from "../lib/scriptIntent";
+import { subscribeToJobs, latestJob, formatElapsed, type AuthorJob } from "../lib/authorJobs";
+import { onJobViewRequested } from "../lib/jobFocus";
+import { ActivityDot } from "./ActivityDot";
 import { ModelPicker } from "./ModelPicker";
 import { ScriptAuthor } from "./ScriptAuthor";
 
@@ -92,6 +95,20 @@ function summarizeToolCall(name: string, input: unknown): string {
     return `draft_object_script("${args.name}" -> ${target}, ${lines} lines) — for review, not mounted`;
   }
   return `${name}(${truncate(JSON.stringify(args), 160)})`;
+}
+
+/**
+ * How long a finished job keeps its strip in the chat.
+ *
+ * A completed run is the thing the user most wants to click, so it must not
+ * vanish the instant it finishes — the toast is easy to miss and the pane may
+ * not even be open. Five minutes is long enough to come back from another task
+ * and short enough that yesterday's run is not still advertising itself.
+ */
+const FINISHED_STRIP_MS = 5 * 60 * 1000;
+
+function justFinished(job: AuthorJob): boolean {
+  return job.state === "done" && job.endedAt !== undefined && Date.now() - job.endedAt < FINISHED_STRIP_MS;
 }
 
 /** Why a call is being second-guessed, or null when it is not. */
@@ -151,6 +168,22 @@ const activityStyle: React.CSSProperties = { alignSelf: "flex-start", padding: "
 /** Model thinking. Dimmer still, and visibly not the answer. */
 const thinkingStyle: React.CSSProperties = { alignSelf: "flex-start", maxWidth: "90%", padding: "6px 10px", borderRadius: 8, background: "#F7F5FA", border: "1px solid #E4DEEC", color: "#6B6478", fontFamily: "Consolas, monospace", fontSize: 11, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto" };
 const openDraftBtn: React.CSSProperties = { marginTop: 6, padding: "3px 10px", fontSize: 11, border: "1px solid #0078D4", borderRadius: 4, background: "#FFF", color: "#0078D4", cursor: "pointer" };
+/**
+ * The strip that says a script is being written elsewhere.
+ *
+ * Sits directly under the header rather than in the message log: it is not part
+ * of the conversation, and a job started three messages ago must not scroll out
+ * of sight. Reported 2026-08-24 — clicking "Back to chat" mid-run left no trace
+ * anywhere that the work was still going.
+ */
+const jobStripStyle: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 8,
+  padding: "5px 10px", borderBottom: "1px solid #CBDCEE", background: "#EEF4FB",
+  color: "#24547E", fontSize: 11, cursor: "pointer",
+};
+const jobStripPhase: React.CSSProperties = {
+  flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+};
 /** The "this looks like a script" offer. Distinct from every message colour. */
 const offerStyle: React.CSSProperties = { alignSelf: "stretch", padding: "10px 12px", borderRadius: 8, background: "#FFF8E6", border: "1px solid #EBD9A8", color: "#6B5A1E", fontSize: 12, lineHeight: 1.45 };
 const offerGoStyle: React.CSSProperties = { padding: "4px 12px", fontSize: 11, border: "none", borderRadius: 4, background: "#0078D4", color: "#FFF", cursor: "pointer" };
@@ -182,6 +215,11 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
    * looks like script work rather than silently rerouting.
    */
   const [mode, setMode] = useState<"chat" | "author">("chat");
+  /**
+   * The background authoring run, if any. Subscribed here as well as in the
+   * guided screen so "Back to chat" mid-run does not lose sight of it.
+   */
+  const authorJob = useSyncExternalStore(subscribeToJobs, latestJob, latestJob);
   /** Prefill carried across when the user accepts the chat's offer. */
   const [authorSeed, setAuthorSeed] = useState<{ intent?: string; objectType?: string }>({});
   /** The standing "this looks like a script" offer, or null. */
@@ -229,6 +267,10 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [bubbles, streaming, thinking, activity]);
+
+  // The status bar's indicator opens this pane; switching it to the guided
+  // screen is the half only this component can do.
+  useEffect(() => onJobViewRequested(() => setMode("author")), []);
 
   // Selection tracking for the pane's lifetime. Without it the model has no way
   // to know what "the selected cells" means and invents a range.
@@ -300,6 +342,16 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
       dispose?.();
     };
   }, []);
+
+  // The job strip's clock. The store only publishes on real changes, and a
+  // phase can legitimately last a minute on a local model — without this the
+  // elapsed time would sit still and undo the point of showing it.
+  const [, setJobTick] = useState(0);
+  useEffect(() => {
+    if (authorJob?.state !== "running") return;
+    const id = setInterval(() => setJobTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [authorJob?.state]);
 
   // The elapsed counter. One interval for the whole turn, cleared with it.
   useEffect(() => {
@@ -741,6 +793,27 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
       }, "Write a script"),
       h("button", { key: "c", style: linkBtn, onClick: () => setPicking(true) }, "Change model"),
     ),
+    // A script being written elsewhere. Clicking it goes back to the run.
+    authorJob && (authorJob.state === "running" || justFinished(authorJob))
+      ? h("div", {
+          key: "jobstrip",
+          style: jobStripStyle,
+          title: `${authorJob.intent}\nClick to return to the script`,
+          onClick: () => setMode("author"),
+        },
+          h(ActivityDot, { key: "d", status: authorJob.state === "running" ? "running" : (authorJob.result?.ok ? "done" : "failed"), size: 7 }),
+          h("span", { key: "p", style: jobStripPhase },
+            authorJob.state === "running"
+              ? `Writing a script — ${authorJob.phase}`
+              : authorJob.result?.ok
+                ? "Your script is ready to review"
+                : "The script could not be written",
+          ),
+          h("span", { key: "t", style: { color: "#5C7FA3", fontVariantNumeric: "tabular-nums" } },
+            formatElapsed((authorJob.endedAt ?? Date.now()) - authorJob.startedAt)),
+          h("span", { key: "go", style: { ...linkBtn, fontSize: 11 } }, "Show"),
+        )
+      : null,
     h("div", { key: "log", ref: logRef, style: log },
       bubbles.length === 0
         ? h("div", { key: "empty", style: { color: "#999", textAlign: "center", marginTop: 20 } },

@@ -500,3 +500,57 @@ describe("the give-up message does not overclaim", () => {
     expect(res.summary).toContain("through all 3 attempts");
   });
 });
+
+describe("the assisted template matches the object it targets", () => {
+  // Reported 2026-08-24 from a real run: a qwen3.5:9b draft passed every static
+  // check and then failed the dry run with `context.onClick is not a function`,
+  // because the target was not a button and the template had told it to call a
+  // hook that object does not have. The assisted tier exists to narrow what a
+  // weak model must invent, so a WRONG template is worse than none — the model
+  // follows it exactly.
+  const ASSISTED = { tier: "assisted" as const, surfaceBudgetTokens: 3000, repairRounds: 1, rationale: "" };
+
+  async function systemFor(objectType: string): Promise<string> {
+    const complete = scripted(GOOD);
+    await authorScript({ intent: "x", objectType, plan: ASSISTED, complete });
+    return complete.mock.calls[0][0] as string;
+  }
+
+  it("teaches a button its click hook", async () => {
+    expect(await systemFor("button")).toContain("context.onClick(async () =>");
+  });
+
+  it("does NOT teach a workbook a click hook it does not have", async () => {
+    const system = await systemFor("workbook");
+    expect(system, "the exact failure reported").not.toContain("context.onClick(async () =>");
+  });
+
+  it("names the hooks the type actually has, or says it has none", async () => {
+    const { objectHooksFor } = await import("../../scriptPreview/objectHooks");
+    for (const type of ["button", "workbook", "sheet", "chart", "slicer", "textbox"]) {
+      const system = await systemFor(type);
+      const hooks = objectHooksFor(type);
+      if (hooks.length === 0) {
+        expect(system, `${type} has no hooks and must be told so`).toContain("no event hooks of its own");
+      } else {
+        expect(system, `${type} should be taught ${hooks[0]}`).toContain(`context.${hooks[0]}(async () =>`);
+      }
+    }
+  });
+
+  it("still teaches a setup entry point whichever shape it picks", async () => {
+    for (const type of ["button", "workbook"]) {
+      expect(await systemFor(type)).toContain("export function setup(context)");
+    }
+  });
+
+  it("leaves the non-assisted tiers alone", async () => {
+    // The template is the assisted tier's narrowing; a capable model gets the
+    // rules and writes its own shape.
+    const complete = scripted(GOOD);
+    await authorScript({ intent: "x", objectType: "workbook", plan: PLAN, complete });
+    const system = complete.mock.calls[0][0] as string;
+    expect(system).not.toContain("Follow this shape exactly");
+    expect(system).not.toContain("no event hooks of its own");
+  });
+});

@@ -1717,3 +1717,131 @@ mirror images:
 
 So every mutation replaces the array AND the job, and `runningJobs()` / `allJobs()` are memoised
 against the array's identity. Both traps are pinned: reverting either one reds a test.
+### 13.9 The 405 that was not the bug — 2026-08-25
+
+Reported against a local qwen3.5:9b run:
+
+```
+0s      Writing the script with qwen3.5:9b (attempt 1 of 7)
+1m 12s  qwen3.5:9b replied (41 lines)
+1m 12s  [OK] Attempt 1: passed every check
+1m 12s  It failed when run — context.onClick is not a function
+1m 12s  Writing the script with qwen3.5:9b (attempt 2 of 7)
+4m 12s  [!] Request to Ollama failed: error sending request for url (...)
+```
+
+...and, reasonably, the reporter opened that URL in a browser, got `405 method not allowed`, and
+asked why. **The 405 is correct and irrelevant**: `/v1/chat/completions` is POST-only and a browser
+sends GET. Two real bugs were hiding behind it.
+
+**1. The request budget was too small, and the error hid that.** 1m12s + exactly 3m00s = 4m12s, and
+`REQUEST_TIMEOUT_SECS` was 180. A REPAIR round is the worst case for that budget — its prompt
+carries the API surface AND the previous attempt AND the errors, several times the first prompt, on
+the slowest component in the system. Raised to 600.
+
+The reason it sent someone hunting a server problem is more interesting than the number:
+`format!("{}", e)` on a `reqwest::Error` renders only the OUTERMOST layer and drops the source
+chain, so a timeout and an unreachable host produce the same sentence. `describe_request_error` now
+classifies with reqwest's own `is_connect()` / `is_timeout()` and appends the whole chain.
+
+**THE ORDER OF THOSE TWO CHECKS IS LOAD-BEARING, and the obvious order is wrong.** Both flags can be
+true at once: on Windows a connection to a dead port is not refused, it stalls until the CONNECT
+timeout elapses, and reqwest reports `is_connect() && is_timeout()`. Asking about the timeout first
+told the user "the model did not answer within 600 seconds" about a request that gave up after two —
+wrong number, wrong stage, wrong fix. Caught by a test that drives a REAL socket (one that accepts
+and never answers, and one on a dead port), because a hand-built error would only have proved that
+my model of reqwest agreed with itself — and my model of it was exactly what was wrong.
+
+**2. The assisted template taught a hook the object did not have.** `context.onClick is not a
+function` was not the model's invention: `ASSISTED_SYSTEM` hardcoded the button shape and handed it
+to every object type. The assisted tier exists to narrow what a weak model must invent, so it
+follows the template exactly — which makes a WRONG template worse than none. `assistedSystemFor`
+now builds the shape from `objectHooksFor`, the same generated per-type table the preview fires
+hooks from, so the template and the realm cannot disagree; a type with no hooks of its own is told
+so and given a `setup`-only shape rather than a borrowed one.
+
+This is the FOURTH instance of the same defect family in this programme — `context.expose('onClick')`
+that mounts and never fires, `export function setup` that could not mount, the preview that judged
+every draft as a button, and now a template that teaches a hook by type. Every one of them is
+TEACHING that drifted from the production form, and every one was invisible to tests that doubled
+the layer that would have told.
+
+### 13.10 A job you can walk away from has to be visible from where you walked to
+
+Reported the same day: clicking "Back to chat" mid-run left no trace anywhere that the work was
+still going. The job store already outlived the pane; the chat simply never looked at it.
+
+A strip under the chat header now shows the live phase, the elapsed clock and an `ActivityDot`, and
+clicking it returns to the run. It sits under the header rather than in the message log on purpose:
+it is not part of the conversation, and a job started three messages ago must not scroll out of
+sight. It survives five minutes past completion — the toast is easy to miss and the pane may not
+even have been open — because a finished run is the thing the user most wants to click.
+
+### 13.11 The stale-binary trap, again
+
+The Rust runs earlier in this session were executed against a hardcoded
+`app_lib-bb7e4017d7e4813a.exe` — **yesterday's binary**. Cargo re-links to a new content hash, the
+old exe stays on disk, and it passes yesterday's tests perfectly. The new tests simply were not in
+it, which is what made it visible: `--list` did not contain them.
+
+`scratchpad/rusttest.ps1` now resolves the newest `app_lib-*.exe` by mtime and PRINTS which one it
+is running, with its build time. Two notes for anyone copying it: `$ErrorActionPreference = "Stop"`
+aborts on cargo's stderr (it writes "Compiling" there), and `fix-test-manifest.ps1` must run after
+the final link or the embedded manifest is discarded.
+### 13.12 "Is this something we just have to accept?" — 2026-08-25
+
+A qwen3.5:9b run, reported in full:
+
+```
+0s      Writing the script with qwen3.5:9b (attempt 1 of 7)
+6m 35s  qwen3.5:9b replied (73 lines)
+6m 35s  [OK] Attempt 1: passed every check
+6m 35s  It ran, changing 0 cells
+6m 35s  Writing the script with qwen3.5:9b (attempt 2 of 7)
+16m 35s [!] did not answer within 600 seconds
+```
+
+**The generation speed we do have to accept.** 6m35s for 73 lines from a 9B on CPU is the hardware
+and the model; nothing in Calcula changes it. **Everything else in that log we did not.**
+
+**Attempt 2 should never have happened.** Attempt 1 was statically valid, ran cleanly, and the ONLY
+thing that sent it back was `expectsWrites: true` plus `totalChanges === 0`. `AuthorRequest`'s own
+documentation says that flag is the CALLER's judgement and warns about precisely this — "against an
+empty sheet, a correct 'sort rows 2-500' changes nothing and must not be marked wrong for it" — and
+the guided path set it unconditionally. The preview runs against a copy of whatever workbook happens
+to be open, and the reported task (colour each cell whose content is a hex code) legitimately
+changes nothing when no cell contains one. So a probably-correct script was thrown away and ten
+minutes were spent failing to "fix" it.
+
+Now `expectsWrites: false` in the guided path, and the observation is surfaced instead:
+`changedNothing` puts an amber note on the result telling the user to check it against real data.
+The eval corpus still passes `true`, because there the fixture IS known — which is exactly the
+distinction the flag was designed around.
+
+**Six minutes of silence is now six minutes of visible work.** The authoring completion goes through
+`ai_chat_complete_stream` rather than `ai_chat_complete`. Nothing in the loop needs the deltas — the
+return value is still the whole text — but they drive a throttled `onLiveProgress` that reports
+"qwen3.5:9b is writing... 41 lines so far". The listener is registered per CALL rather than per
+module: a run makes at most seven of these, minutes apart, and a listener that outlived its request
+would count another pane's tokens. It is removed in a `finally`, so a thrown attempt cannot leak one.
+
+`job.live` carries that reading separately from `job.phase`, and is deliberately NOT appended to the
+step log — a log full of "41 lines... 42 lines..." would bury the steps that matter. `setPhase`
+clears it, or a stale token count would sit under the next phase still claiming the model is writing.
+
+### 13.13 Blue on green
+
+The status-bar indicator was styled for the pane's white background and put on the shell's Excel
+green (`#217346`, `src/shell/StatusBar.tsx`), which made it nearly unreadable. It is now expressed
+against that green — white text, a white dot (`ActivityDot` gained a `color` override, because the
+CALLER knows what it is sitting on and the component does not), and a translucent-white hover.
+
+It was also inert: proving a job is alive without offering a way to reach it just moves the work to
+the user. The whole strip is a `<button>` now — keyboard reachable, unlike a clickable div — and
+clicking it needs two things that live in different places, which is what `lib/jobFocus.ts` exists
+for. Only the extension's `activate` holds the `ExtensionContext` that can raise a task pane, so it
+registers an opener; only ChatView knows its own mode, so it subscribes and switches to the guided
+screen. Deliberately NOT folded into `authorJobs.ts`: that module is the state of a run, and this is
+navigation — mixing them would mean a job's data could not be read without dragging in the UI's
+routing. `requestJobView()` is safe with nothing registered, because the status bar can outlive a
+deactivated extension and a click that quietly does nothing beats an exception in the shell's chrome.

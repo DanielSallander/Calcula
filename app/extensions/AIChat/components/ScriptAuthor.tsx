@@ -49,6 +49,8 @@ const stepRow: React.CSSProperties = { display: "flex", gap: 6, padding: "1px 0"
 const stepTime: React.CSSProperties = { color: "#9AA7B2", flexShrink: 0, minWidth: 44, textAlign: "right" };
 const okBox: React.CSSProperties = { background: "#EDF7ED", border: "1px solid #C6E7C6", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#245C24", lineHeight: 1.45 };
 const badBox: React.CSSProperties = { background: "#FDECEA", border: "1px solid #F5C6C2", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#A1241B", lineHeight: 1.45 };
+/** Amber, not red: "changed nothing" is something to check, not a failure. */
+const warnBox: React.CSSProperties = { background: "#FFF8E6", border: "1px solid #EBD9A8", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#6B5A1E", lineHeight: 1.45 };
 const srcBox: React.CSSProperties = { background: "#FFF", border: "1px solid #E0E0E0", borderRadius: 6, padding: "8px 10px", fontFamily: "Consolas, monospace", fontSize: 11, whiteSpace: "pre", overflowX: "auto", maxHeight: 200, overflowY: "auto", color: "#222" };
 
 const h = React.createElement;
@@ -203,7 +205,8 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
           // static label would look wedged.
           h("div", { style: liveStyle },
             h(ActivityDot, { status: statusOf(job), title: job.phase }),
-            h("span", { style: { flex: 1 } }, job.phase),
+            h("span", { style: { flex: 1 } },
+              job.live ? `${job.phase} — ${job.live}` : job.phase),
             h("span", { style: { color: "#5C7FA3", fontVariantNumeric: "tabular-nums" } },
               formatElapsed(elapsed)),
           ),
@@ -248,6 +251,16 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
                 result.deliveryError
                   ? h("div", { style: badBox },
                       `The script was written but could not be queued for review: ${result.deliveryError}`)
+                  : null,
+                // Reported, not acted on: the preview runs against a copy of
+                // whatever workbook is open, and a correct script legitimately
+                // matches nothing in it. Sending this back for a repair round
+                // cost a reporter ten minutes and a timeout on 2026-08-25.
+                result.changedNothing
+                  ? h("div", { style: warnBox },
+                      "It ran without error against a copy of your workbook but changed no cells. " +
+                      "That is expected if the open sheet has nothing for it to act on — check it " +
+                      "against real data before relying on it.")
                   : null,
                 result.source
                   ? h(React.Fragment, null,

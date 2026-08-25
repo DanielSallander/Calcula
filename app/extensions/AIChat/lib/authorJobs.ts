@@ -42,6 +42,13 @@ export interface AuthorJob {
   state: JobState;
   /** What is happening RIGHT NOW, for the live line and the status bar. */
   phase: string;
+  /**
+   * A volatile reading from inside the current phase, e.g. how many lines the
+   * model has produced so far. REPLACES itself and is never appended to the
+   * step log — it exists to prove liveness during a six-minute generation, and
+   * a log full of "41 lines... 42 lines..." would bury the steps that matter.
+   */
+  live?: string;
   steps: JobStep[];
   rounds: AuthorRound[];
   result?: AuthorRunResult;
@@ -146,7 +153,9 @@ function push(id: string, step: Omit<JobStep, "at">): void {
 }
 
 function setPhase(id: string, phase: string): void {
-  update(id, (j) => (j.phase === phase ? j : { ...j, phase }));
+  // Clearing `live` is load-bearing: a token count left over from the previous
+  // phase would sit under the new one claiming the model is still writing.
+  update(id, (j) => (j.phase === phase && j.live === undefined ? j : { ...j, phase, live: undefined }));
 }
 
 let counter = 0;
@@ -194,6 +203,9 @@ export function startAuthorJob(req: StartJobRequest): string {
         onPhase: (phase, detail) => {
           setPhase(id, phase);
           push(id, { kind: "info", text: phase, detail });
+        },
+        onLiveProgress: (text) => {
+          update(id, (j) => (j.live === text ? j : { ...j, live: text }));
         },
         onRound: (round) => {
           update(id, (j) => ({

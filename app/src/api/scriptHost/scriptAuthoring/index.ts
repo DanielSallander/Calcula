@@ -20,6 +20,7 @@
 import { repairPrompt, validateScriptSource, type ValidationReport } from "../scriptValidation";
 import { buildSurfacePrompt } from "../scriptPrompt";
 import { extractScript } from "../scriptEval";
+import { objectHooksFor } from "../scriptPreview/objectHooks";
 import type { CompleteFn, TierPlan } from "../modelProfile";
 
 export interface AuthorRequest {
@@ -137,19 +138,54 @@ const BASE_SYSTEM = [
  * correct code" and "can fill in a shape", and the latter is what a small model
  * does reliably.
  */
-const ASSISTED_SYSTEM = [
-  "",
-  "Follow this shape exactly, replacing only the body (for a button; other",
-  "objects register their own hooks the same way):",
-  "",
-  "```javascript",
-  "export function setup(context) {",
-  "  context.onClick(async () => {",
-  "    // your code here",
-  "  });",
-  "}",
-  "```",
-].join("\n");
+/**
+ * The worked template, built for the OBJECT TYPE the draft actually targets.
+ *
+ * IT USED TO HARDCODE `context.onClick`. Reported 2026-08-24 from a real run: a
+ * qwen3.5:9b draft passed every static check and then failed the dry run with
+ * `context.onClick is not a function`, because the target was not a button and
+ * the template had told it to call a hook that object does not have. The
+ * assisted tier exists to narrow what a weak model must invent — so a wrong
+ * template is worse here than no template, since the model follows it exactly.
+ *
+ * `objectHooksFor` is the same generated per-type table the preview fires
+ * hooks from, so the template and the realm cannot disagree. A type with no
+ * hooks of its own gets an honest `setup`-only shape rather than a borrowed one.
+ */
+function assistedSystemFor(objectType: string): string {
+  const hooks = objectHooksFor(objectType);
+  if (hooks.length === 0) {
+    return [
+      "",
+      `A "${objectType}" script has no event hooks of its own: put the work directly`,
+      "in `setup`, which runs when the script is mounted.",
+      "",
+      "```javascript",
+      "export function setup(context) {",
+      "  // your code here",
+      "}",
+      "```",
+    ].join("\n");
+  }
+  const primary = hooks[0];
+  const others =
+    hooks.length > 1
+      ? ` This object can also fire: ${hooks.slice(1).join(", ")}.`
+      : "";
+  return [
+    "",
+    `Follow this shape exactly, replacing only the body. A "${objectType}" reacts`,
+    `through \`context.${primary}\`.${others}`,
+    "",
+    "```javascript",
+    "export function setup(context) {",
+    `  context.${primary}(async () => {`,
+    "    // your code here",
+    "  });",
+    "}",
+    "```",
+  ].join("\n");
+}
 
 /**
  * How many times the SAME error set may repeat before the loop gives up.
@@ -183,7 +219,7 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
     hints: [...(req.hints ?? []), req.intent],
   });
 
-  const system = BASE_SYSTEM + (req.plan.tier === "assisted" ? ASSISTED_SYSTEM : "");
+  const system = BASE_SYSTEM + (req.plan.tier === "assisted" ? assistedSystemFor(req.objectType) : "");
   const task = `# Task (the script is attached to a "${req.objectType}")\n${req.intent}`;
 
   const attempts: AuthorAttempt[] = [];

@@ -42,8 +42,23 @@ use providers::{ProviderDef, ProviderKind};
 use wire::{ChatRequest, ChatResponse};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Cloud round trips can be slow; a local model on a cold load can be slower.
-const REQUEST_TIMEOUT_SECS: u64 = 180;
+/// How long one completion may take, end to end.
+///
+/// WAS 180, AND THAT WAS TOO SHORT. Reported 2026-08-24 driving the guided
+/// authoring loop against a local qwen3.5:9b: attempt 1 took 1m12s, attempt 2
+/// started, and the run died at exactly 4m12s — 180 seconds later, to the
+/// second. A repair round is the WORST case for this budget, because its prompt
+/// carries the API surface AND the previous attempt AND the errors, so it is
+/// several times the size of the first, on a model that is already the slowest
+/// thing in the system.
+///
+/// Ten minutes is chosen against the machine this was measured on rather than
+/// against a feeling: a 9B on CPU at the observed rate needs low single-digit
+/// minutes for a long repair prompt, and a cloud model never comes close to any
+/// of this. The cost of the ceiling being too HIGH is that a genuinely wedged
+/// request holds one slot for longer — and Stop already exists for that, which
+/// is what makes the generous number affordable.
+const REQUEST_TIMEOUT_SECS: u64 = 600;
 /// How long to wait for the TCP/TLS handshake alone.
 ///
 /// Separate from the overall timeout because the two failures are nothing alike.
@@ -52,6 +67,74 @@ const REQUEST_TIMEOUT_SECS: u64 = 180;
 /// worst case of the dead air this module now reports on. A generous ten seconds
 /// still covers a cold cloud TLS handshake on a bad connection.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Turn a reqwest failure into something that names what actually went wrong.
+///
+/// WHY THIS EXISTS. `format!("{}", e)` on a `reqwest::Error` renders only the
+/// OUTERMOST layer — "error sending request for url (http://127.0.0.1:11434/...)"
+/// — and drops the source chain that says *why*. So a request that hit the
+/// timeout reported the same sentence as one that could not connect at all. The
+/// reporter on 2026-08-24 reasonably read that as a server problem, went to the
+/// URL in a browser, got `405 method not allowed` (which is CORRECT: the
+/// endpoint is POST-only and a browser sends GET) and was sent hunting a bug
+/// that did not exist. The real cause was the 180-second ceiling above.
+///
+/// `is_timeout()` / `is_connect()` are asked instead of matching on a string,
+/// because they are reqwest's own classification; the chain is walked after so
+/// nothing is hidden regardless.
+///
+/// THE ORDER IS LOAD-BEARING, and the obvious order is wrong. Both flags can be
+/// TRUE at once: on Windows a connection to a dead port does not get refused,
+/// it stalls until `CONNECT_TIMEOUT_SECS` elapses, and reqwest then reports
+/// `is_connect() && is_timeout()`. Asking about the timeout first told the user
+/// "the model did not answer within 600 seconds" about a request that gave up
+/// after ten — naming the wrong number, the wrong stage and the wrong fix. This
+/// was caught by the test below, which is why it drives a real socket rather
+/// than a hand-built error: a fabricated one would only have proved that my
+/// model of reqwest agreed with itself.
+fn describe_request_error(label: &str, url: &str, e: &reqwest::Error) -> String {
+    let cause = error_chain(e);
+    if e.is_connect() {
+        return format!(
+            "Could not reach {} at {} (gave up after {} seconds). Check the runtime is running \
+             and the base URL is right. ({})",
+            label, url, CONNECT_TIMEOUT_SECS, cause,
+        );
+    }
+    if e.is_timeout() {
+        return format!(
+            "{} accepted the request but did not answer within {} seconds. A local model writing \
+             a long script can legitimately need minutes — the connection was still open when \
+             Calcula gave up, so this is slowness, not a server that is down. Try a smaller task, \
+             a faster model, or check the runtime is not swapping. ({})",
+            label, REQUEST_TIMEOUT_SECS, cause,
+        );
+    }
+    format!("Request to {} failed: {}", label, cause)
+}
+
+/// Every layer of an error, outermost first.
+///
+/// `std::error::Error::source` is a chain and Display shows one link of it. A
+/// timeout arrives as `Request -> TimedOut`, and the second link is the entire
+/// information content.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut cursor = e.source();
+    // Bounded: a cyclic source chain would otherwise hang the formatter, and
+    // nothing here is worth trusting to be acyclic.
+    while let Some(next) = cursor {
+        let text = next.to_string();
+        if !parts.contains(&text) {
+            parts.push(text);
+        }
+        if parts.len() >= 6 {
+            break;
+        }
+        cursor = next.source();
+    }
+    parts.join(": ")
+}
 
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -275,7 +358,7 @@ pub async fn ai_chat_complete(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Request to {} failed: {}", def.label, e))?;
+        .map_err(|e| describe_request_error(&def.label, &url, &e))?;
 
     let status = resp.status();
     let text = resp
@@ -453,7 +536,7 @@ pub async fn ai_chat_complete_stream(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Request to {} failed: {}", def.label, e))?;
+        .map_err(|e| describe_request_error(&def.label, &url, &e))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -592,6 +675,128 @@ mod tests {
     fn the_connect_timeout_is_far_shorter_than_the_request_timeout() {
         // "Ollama is not running" used to present as three minutes of silence.
         assert!(CONNECT_TIMEOUT_SECS < REQUEST_TIMEOUT_SECS / 10);
+    }
+
+    #[test]
+    fn the_request_budget_survives_a_slow_local_repair_round() {
+        // Measured 2026-08-24: qwen3.5:9b on CPU took 1m12s for a FIRST attempt.
+        // A repair round carries the API surface, the previous attempt and the
+        // errors, so it is several times that prompt on the same model — and the
+        // old 180s ceiling killed exactly that request, at 4m12s on the nose.
+        assert!(
+            REQUEST_TIMEOUT_SECS >= 480,
+            "a repair round on a local model needs minutes, not seconds",
+        );
+    }
+
+    /// A real reqwest timeout, produced by a socket that accepts and never
+    /// answers. Asserting against a HAND-BUILT error would only prove that my
+    /// model of reqwest matches itself — and my model of it is exactly what was
+    /// wrong: `{}` on the error hides the cause, which is why a timeout read as
+    /// a connection failure.
+    #[tokio::test]
+    async fn a_timeout_is_reported_as_a_timeout_and_not_as_a_dead_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept and hold: no response is ever written, so the client can only
+        // end this by timing out.
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                // Held for the life of the task; dropping it would let the
+                // client see a clean close instead of a stall.
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                drop(stream);
+            }
+        });
+
+        let url = format!("http://{}/v1/chat/completions", addr);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(400))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = client
+            .post(&url)
+            .json(&serde_json::json!({ "hello": "world" }))
+            .send()
+            .await
+            .expect_err("a server that never answers must not produce a response");
+
+        assert!(err.is_timeout(), "reqwest should classify this as a timeout");
+        assert!(!err.is_connect(), "the connection itself SUCCEEDED");
+
+        let message = describe_request_error("Ollama", &url, &err);
+        assert!(message.contains("did not answer within"), "got: {}", message);
+        assert!(
+            !message.contains("Could not reach"),
+            "a slow answer must never be reported as an unreachable server: {}",
+            message,
+        );
+        // And the underlying cause survives, which plain Display drops.
+        assert!(
+            message.to_lowercase().contains("timed out") || message.to_lowercase().contains("timeout"),
+            "the cause must not be swallowed: {}",
+            message,
+        );
+    }
+
+    /// An unreachable endpoint must be reported as unreachable, even though
+    /// reqwest ALSO marks it as a timeout.
+    ///
+    /// THE CASE THAT CORRECTED THE IMPLEMENTATION. On Windows a connection to a
+    /// dead port is not refused — it stalls until the CONNECT timeout elapses,
+    /// and the resulting error has `is_connect()` AND `is_timeout()` both true.
+    /// Checking the timeout first (the obvious order) produced "the model did
+    /// not answer within 600 seconds" for a request that gave up after two:
+    /// wrong number, wrong stage, wrong fix.
+    #[tokio::test]
+    async fn an_unreachable_endpoint_is_not_reported_as_a_slow_model() {
+        let url = "http://127.0.0.1:1/v1/chat/completions";
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let err = client
+            .post(url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+
+        assert!(err.is_connect(), "expected a connect failure, got: {}", err);
+        let message = describe_request_error("Ollama", url, &err);
+        assert!(message.contains("Could not reach Ollama"), "got: {}", message);
+        assert!(message.contains(url), "the URL is what the user has to check: {}", message);
+        assert!(
+            !message.contains("did not answer within"),
+            "a connect failure must not quote the RESPONSE budget: {}",
+            message,
+        );
+    }
+
+    #[test]
+    fn the_error_chain_keeps_every_layer_and_terminates() {
+        #[derive(Debug)]
+        struct Layer(&'static str, Option<Box<Layer>>);
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+        impl std::error::Error for Layer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|l| l as &(dyn std::error::Error + 'static))
+            }
+        }
+
+        let e = Layer("outer", Some(Box::new(Layer("middle", Some(Box::new(Layer("inner", None)))))));
+        assert_eq!(error_chain(&e), "outer: middle: inner");
+
+        // A duplicated message is not repeated — several reqwest layers stringify
+        // identically and "x: x: x" tells the reader nothing.
+        let dup = Layer("same", Some(Box::new(Layer("same", None))));
+        assert_eq!(error_chain(&dup), "same");
     }
 
     #[test]

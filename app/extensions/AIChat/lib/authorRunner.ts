@@ -25,8 +25,9 @@
 //          the "NOT mounted, NOT running" invariant. Nothing here mounts or runs
 //          anything.
 
+import { listenTauriEvent } from "@api";
 import { aiChatBackend } from "./aiChatBackend";
-import type { ChatResponse } from "./aiTypes";
+import { AI_STREAM_EVENT, type ChatResponse, type StreamEvent } from "./aiTypes";
 import { readProfile } from "./probeRunner";
 
 /** One repair round, as the UI shows it. */
@@ -56,6 +57,15 @@ export interface AuthorRunRequest {
    * driven by, and should not have to.
    */
   onPhase?: (phase: string, detail?: string) => void;
+  /**
+   * The current attempt is still producing text.
+   *
+   * Distinct from `onPhase`: a phase is a STEP that happened and belongs in the
+   * log, while this is a volatile "still going" reading that replaces itself.
+   * Measured 2026-08-25: a 9B took 6m35s for one attempt, which without this is
+   * six and a half minutes of nothing.
+   */
+  onLiveProgress?: (text: string) => void;
   /** Polled between rounds so the user can abandon a long run. */
   isCancelled?: () => boolean;
 }
@@ -70,6 +80,15 @@ export interface AuthorRunResult {
   draftId?: string;
   /** Set when queueing the draft failed, even though authoring succeeded. */
   deliveryError?: string;
+  /**
+   * The script ran cleanly against the workbook copy and changed NOTHING.
+   *
+   * Surfaced rather than acted on: it no longer triggers a repair round (see
+   * the `expectsWrites` note below), because the preview runs against whatever
+   * workbook is open and a correct script can legitimately match no cells in
+   * it. It is still the single most useful thing to tell the user to check.
+   */
+  changedNothing?: boolean;
 }
 
 /**
@@ -117,6 +136,15 @@ async function load() {
   };
 }
 
+/**
+ * How often a live token count may update the UI.
+ *
+ * A token-by-token update would push hundreds of lines into the job log and
+ * tell the reader nothing a line count does not; a second is fast enough to
+ * prove liveness and slow enough to stay readable.
+ */
+const LIVE_PROGRESS_MS = 1000;
+
 /** Error messages from a validation report, trimmed for a progress line. */
 function problemsOf(report: { findings: Array<{ severity: string; message: string }> }): string[] {
   return report.findings
@@ -140,38 +168,76 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
   let attempt = 0;
   const totalAttempts = plan.repairRounds + 1;
 
-  /** One completion through the user's selected provider. */
+  /**
+   * One completion through the user's selected provider, STREAMED.
+   *
+   * WHY STREAMED, when nothing here needs the deltas. Measured 2026-08-25 on a
+   * local qwen3.5:9b: a single attempt took SIX MINUTES AND THIRTY-FIVE SECONDS
+   * to produce 73 lines. Non-streaming, that is one progress line at the start
+   * and nothing until it lands — and there is no way for the user to tell it
+   * apart from a hang, which is exactly what they asked about. The return value
+   * is still the whole text and the loop is unchanged; the deltas only drive
+   * `onLiveProgress`.
+   *
+   * The listener is registered per call rather than once for the module: an
+   * authoring run makes at most seven of these, minutes apart, and a listener
+   * that outlived its request would keep counting another pane's tokens.
+   */
   const complete = async (system: string, user: string): Promise<string> => {
     if (req.isCancelled?.()) throw new Error("cancelled");
     attempt += 1;
+    const label = `attempt ${attempt} of ${totalAttempts}`;
     phase(
-      `Writing the script with ${req.model} (attempt ${attempt} of ${totalAttempts})`,
+      `Writing the script with ${req.model} (${label})`,
       attempt === 1 ? undefined : "Correcting the previous attempt",
     );
-    const resp = await aiChatBackend.invoke<ChatResponse>("ai_chat_complete", {
-      request: {
-        providerId: req.providerId,
-        model: req.model,
-        system,
-        messages: [{ role: "user", content: [{ type: "text", text: user }] }],
-        tools: [],
-        // Code generation, like tool selection, is not a creative decision here:
-        // the repair loop is a far better recovery mechanism than a lucky sample.
-        temperature: 0,
-      },
-      baseUrlOverride: req.baseUrl || null,
+
+    const streamId = `author-${Date.now()}-${attempt}`;
+    let streamed = "";
+    let lastReport = 0;
+    const off = await listenTauriEvent<StreamEvent>(AI_STREAM_EVENT, (event) => {
+      if (!event || event.streamId !== streamId || event.type !== "textDelta") return;
+      streamed += event.text;
+      // Throttled: a token-by-token phase update would push hundreds of lines
+      // into the job log and tell the reader nothing a line count does not.
+      const now = Date.now();
+      if (now - lastReport < LIVE_PROGRESS_MS) return;
+      lastReport = now;
+      req.onLiveProgress?.(`${req.model} is writing... ${streamed.split("\n").length} lines so far`);
     });
-    const text = resp.blocks
-      .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
-    phase(
-      `${req.model} replied (${text.split("\n").length} lines)`,
-    );
-    phase("Checking it against Calcula's API");
-    return text;
+
+    try {
+      const resp = await aiChatBackend.invoke<ChatResponse>("ai_chat_complete_stream", {
+        request: {
+          providerId: req.providerId,
+          model: req.model,
+          system,
+          messages: [{ role: "user", content: [{ type: "text", text: user }] }],
+          tools: [],
+          // Code generation, like tool selection, is not a creative decision
+          // here: the repair loop is a far better recovery mechanism than a
+          // lucky sample.
+          temperature: 0,
+        },
+        streamId,
+        baseUrlOverride: req.baseUrl || null,
+      });
+      const text = resp.blocks
+        .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+        .map((b) => b.text)
+        .join("\n");
+      phase(`${req.model} replied (${text.split("\n").length} lines)`);
+      phase("Checking it against Calcula's API");
+      return text;
+    } finally {
+      // Always: a run that threw must not leave a listener counting deltas for
+      // a stream id nobody will ever emit again.
+      off();
+    }
   };
 
+  /** The last preview report, for the warning below. */
+  let lastDryRun: { ok: boolean; applicable?: boolean; totalChanges: number } | null = null;
   const rounds: AuthorRound[] = [];
   const result = await authorScript({
     intent: req.intent,
@@ -188,6 +254,8 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       const report = await previewObjectScript({
         source, objectType: req.objectType, tier: "restricted",
       });
+      // Remembered for the RESULT, since it no longer drives a repair round.
+      lastDryRun = report;
       phase(
         report.applicable === false
           ? "The preview could not judge this script"
@@ -202,10 +270,23 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       );
       return report;
     },
-    // The user asked for something that changes the workbook. Without this a
-    // script that mounts cleanly and does nothing scores as a success — the
-    // quietest failure this system has.
-    expectsWrites: true,
+    // NOT `true`, and this was a real cost. Reported 2026-08-25: a qwen3.5:9b
+    // draft passed every static check, ran cleanly, changed 0 cells — and was
+    // sent back for a repair round that then burned ten minutes and timed out.
+    //
+    // `AuthorRequest` says this is the CALLER's judgement and warns about
+    // exactly that case ("against an empty sheet, a correct 'sort rows 2-500'
+    // changes nothing"), and the guided path genuinely CANNOT judge it. The
+    // preview runs against a copy of whatever workbook happens to be open, and
+    // the reported task — colour each cell whose content is a hex code —
+    // legitimately changes nothing when no cell contains one. So "changed
+    // nothing" here is weak evidence bought at minutes per round on a local
+    // model.
+    //
+    // It is not DISCARDED: `changedNothing` below carries it to the user as a
+    // warning on the result, where they can check their own data against it.
+    // The eval corpus still sets this true, because there the fixture IS known.
+    expectsWrites: false,
     onAttempt: (round: number, report: { findings: Array<{ severity: string; message: string }> }) => {
       const entry: AuthorRound = {
         round,
@@ -217,10 +298,14 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     },
   });
 
+  /** True only when the preview actually RAN and reported no changes. */
+  const ranButChangedNothing = (): boolean =>
+    lastDryRun !== null && lastDryRun.applicable !== false && lastDryRun.ok && lastDryRun.totalChanges === 0;
+
   if (!result.ok) {
     // The best attempt is returned even on failure: a script that is 90% right
     // is worth showing, and the editor is where a person fixes the rest.
-    return { ok: false, source: result.source, summary: result.summary, rounds };
+    return { ok: false, source: result.source, summary: result.summary, rounds, changedNothing: ranButChangedNothing() };
   }
 
   // Delivered through the ordinary review path — same store, same audit, same
@@ -237,7 +322,7 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       },
     });
     const id = /\(id=(draft-[0-9a-fA-F]+)\)/.exec(text)?.[1];
-    return { ok: true, source: result.source, summary: result.summary, rounds, draftId: id };
+    return { ok: true, source: result.source, summary: result.summary, rounds, draftId: id, changedNothing: ranButChangedNothing() };
   } catch (e) {
     // Authoring SUCCEEDED; only delivery failed. Reported separately so the user
     // is not told their script is broken when it is sitting right there.
@@ -247,6 +332,7 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       summary: result.summary,
       rounds,
       deliveryError: `${e}`,
+      changedNothing: ranButChangedNothing(),
     };
   }
 }

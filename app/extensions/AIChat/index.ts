@@ -14,6 +14,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { ChatView } from "./components/ChatView";
 import { AuthorStatusItem } from "./components/AuthorStatusItem";
 import { aiChatBackend } from "./lib/aiChatBackend";
+import { registerJobViewOpener } from "./lib/jobFocus";
 
 const AI_CHAT_PANE_ID = "ai-chat";
 const AI_CHAT_LLM_PANE_ID = "ai-chat-llm";
@@ -74,6 +75,16 @@ function activate(context: ExtensionContext): void {
     priority: 85,
   });
   cleanupFns.push(() => context.ui.statusBar.unregister(AUTHOR_STATUS_ITEM_ID));
+
+  // ...and make that indicator a way BACK. Only this function has the context
+  // that can raise a task pane, so it registers the action; ChatView listens
+  // separately for the half it owns (switching to the guided screen).
+  cleanupFns.push(
+    registerJobViewOpener(() => {
+      context.ui.taskPanes.open(AI_CHAT_LLM_PANE_ID);
+      context.ui.taskPanes.showContainer();
+    }),
+  );
 
   // Add menu item under Developer menu
   context.ui.menus.registerItem("developer", {
