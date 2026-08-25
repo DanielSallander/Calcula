@@ -12,10 +12,12 @@ import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { IconServer, IconAIChat } from "@api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChatView } from "./components/ChatView";
+import { AuthorStatusItem } from "./components/AuthorStatusItem";
 import { aiChatBackend } from "./lib/aiChatBackend";
 
 const AI_CHAT_PANE_ID = "ai-chat";
 const AI_CHAT_LLM_PANE_ID = "ai-chat-llm";
+const AUTHOR_STATUS_ITEM_ID = "ai-chat:authoring";
 
 // ============================================================================
 // State
@@ -61,6 +63,17 @@ function activate(context: ExtensionContext): void {
     closable: true,
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(AI_CHAT_LLM_PANE_ID));
+
+  // A running authoring job is visible from anywhere in the app, not only from
+  // the pane that started it — otherwise "close this and carry on working"
+  // means "lose sight of it". Renders nothing when nothing is running.
+  context.ui.statusBar.register({
+    id: AUTHOR_STATUS_ITEM_ID,
+    component: AuthorStatusItem,
+    alignment: "right",
+    priority: 85,
+  });
+  cleanupFns.push(() => context.ui.statusBar.unregister(AUTHOR_STATUS_ITEM_ID));
 
   // Add menu item under Developer menu
   context.ui.menus.registerItem("developer", {

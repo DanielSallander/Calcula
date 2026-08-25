@@ -1,5 +1,6 @@
 //! FILENAME: app/extensions/AIChat/components/ScriptAuthor.tsx
-// PURPOSE: The GUIDED path: two fields, then the built authoring pipeline.
+// PURPOSE: The GUIDED path: two fields, then a background job you can walk away
+//          from and come back to.
 // CONTEXT: 2026-08-24, after three rounds of trying to make free chat produce a
 //          script on a local model. The measured failure is TOOL SELECTION —
 //          "is this a script?" and "which of two dozen tools?" — not code
@@ -10,26 +11,45 @@
 //          a form for "what should it do" is a worse text box. Only ONE thing
 //          needs to be a control: the object type, because it decides which API
 //          slice the model is shown and `draftGate` currently has to guess it
-//          silently. Here the guess is visible and correctable, which is the
-//          whole improvement.
+//          silently. Here the guess is visible and correctable.
+//
+//          THE SCREEN OWNS NOTHING. The run lives in `lib/authorJobs.ts`, and
+//          this is a VIEW of it: closing the pane, or switching to another one,
+//          no longer abandons a job that has spent minutes of a slow model's
+//          time. Reported the same day — along with the layout below, where the
+//          form, the log and the result all competed for one scrolling column
+//          and the result ended up in a two-line slot. Once a job exists the
+//          form collapses to a summary line and the progress gets the space.
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useSyncExternalStore } from "react";
 import { DRAFT_OBJECT_TYPES } from "../lib/chatTools";
-import { runAuthor, type AuthorRound } from "../lib/authorRunner";
+import {
+  startAuthorJob, cancelJob, subscribeToJobs, latestJob, formatElapsed,
+  type AuthorJob, type JobStep,
+} from "../lib/authorJobs";
+import { ActivityDot, type ActivityStatus } from "./ActivityDot";
 import { hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
 
-const wrap: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 10, padding: 12, overflowY: "auto", flex: 1 };
+const wrap: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 10, padding: 12, flex: 1, minHeight: 0 };
 const label: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: "#444" };
 const hint: React.CSSProperties = { fontSize: 11, color: "#777", margin: 0, lineHeight: 1.45 };
 const area: React.CSSProperties = { resize: "vertical", padding: 6, border: "1px solid #CCC", borderRadius: 4, fontFamily: "inherit", fontSize: 12, minHeight: 64 };
 const select: React.CSSProperties = { padding: "5px 8px", border: "1px solid #CCC", borderRadius: 4, fontSize: 12, background: "#FFF", color: "#333" };
 const btn: React.CSSProperties = { padding: "6px 14px", border: "none", borderRadius: 4, background: "#0078D4", color: "#FFF", cursor: "pointer", fontSize: 12 };
 const stopBtn: React.CSSProperties = { ...btn, background: "#C62828" };
+const ghostBtn: React.CSSProperties = { padding: "5px 12px", fontSize: 11, border: "1px solid #CCC", borderRadius: 4, background: "#FFF", color: "#555", cursor: "pointer" };
 const openBtn: React.CSSProperties = { padding: "5px 12px", fontSize: 11, border: "1px solid #0078D4", borderRadius: 4, background: "#FFF", color: "#0078D4", cursor: "pointer" };
-const logBox: React.CSSProperties = { background: "#F0F4F8", border: "1px solid #D6E2EE", borderRadius: 6, padding: "8px 10px", fontFamily: "Consolas, monospace", fontSize: 11, color: "#456", whiteSpace: "pre-wrap", maxHeight: 220, overflowY: "auto" };
-const okBox: React.CSSProperties = { background: "#EDF7ED", border: "1px solid #C6E7C6", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#245C24" };
-const badBox: React.CSSProperties = { background: "#FDECEA", border: "1px solid #F5C6C2", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#A1241B" };
-const srcBox: React.CSSProperties = { background: "#FFF", border: "1px solid #E0E0E0", borderRadius: 6, padding: "8px 10px", fontFamily: "Consolas, monospace", fontSize: 11, whiteSpace: "pre", overflowX: "auto", maxHeight: 240, overflowY: "auto", color: "#222" };
+/** The recap of what was asked for, once the form is out of the way. */
+const recapStyle: React.CSSProperties = { background: "#F3F6F9", border: "1px solid #DDE5EC", borderRadius: 6, padding: "8px 10px", fontSize: 11, color: "#455", lineHeight: 1.5 };
+/** The live line. Given its own emphasis because it is the anti-hang signal. */
+const liveStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 6, background: "#EEF4FB", border: "1px solid #CBDCEE", fontSize: 12, color: "#24547E" };
+/** THE LOG GETS THE SPARE ROOM — flex:1 + minHeight:0, not a fixed maxHeight. */
+const logBox: React.CSSProperties = { flex: 1, minHeight: 90, overflowY: "auto", background: "#FFF", border: "1px solid #E2E8EE", borderRadius: 6, padding: "6px 8px", fontFamily: "Consolas, monospace", fontSize: 11, color: "#456" };
+const stepRow: React.CSSProperties = { display: "flex", gap: 6, padding: "1px 0", whiteSpace: "pre-wrap", wordBreak: "break-word" };
+const stepTime: React.CSSProperties = { color: "#9AA7B2", flexShrink: 0, minWidth: 44, textAlign: "right" };
+const okBox: React.CSSProperties = { background: "#EDF7ED", border: "1px solid #C6E7C6", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#245C24", lineHeight: 1.45 };
+const badBox: React.CSSProperties = { background: "#FDECEA", border: "1px solid #F5C6C2", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#A1241B", lineHeight: 1.45 };
+const srcBox: React.CSSProperties = { background: "#FFF", border: "1px solid #E0E0E0", borderRadius: 6, padding: "8px 10px", fontFamily: "Consolas, monospace", fontSize: 11, whiteSpace: "pre", overflowX: "auto", maxHeight: 200, overflowY: "auto", color: "#222" };
 
 const h = React.createElement;
 
@@ -43,48 +63,85 @@ export interface ScriptAuthorProps {
   onBackToChat: () => void;
 }
 
-/** One progress line per round. ASCII markers, per CLAUDE.md. */
-function roundLine(r: AuthorRound): string {
-  const head = `[${r.ok ? "OK" : "..."}] round ${r.round + 1}`;
-  return r.problems.length ? `${head} — ${r.problems.join(" | ")}` : head;
+const STEP_MARK: Record<JobStep["kind"], string> = {
+  info: "   ",
+  roundOk: "[OK]",
+  roundBad: "[!] ",
+  done: "[OK]",
+  error: "[!] ",
+};
+
+const STEP_COLOUR: Record<JobStep["kind"], string> = {
+  info: "#556",
+  roundOk: "#2E7D32",
+  roundBad: "#B4690E",
+  done: "#2E7D32",
+  error: "#A1241B",
+};
+
+function statusOf(job: AuthorJob | undefined): ActivityStatus {
+  if (!job) return "idle";
+  if (job.state === "running") return "running";
+  if (job.state === "failed") return "failed";
+  if (job.state === "cancelled") return "idle";
+  return job.result?.ok ? "done" : "failed";
+}
+
+/**
+ * Subscribe to the job store.
+ *
+ * `useSyncExternalStore` rather than a `useEffect` + `useState` pair: the store
+ * changes several times per second during a run, and this is the hook built for
+ * an external mutable source — it cannot tear, and it re-reads on mount, which
+ * is what makes re-opening the pane mid-run show the CURRENT state rather than
+ * whatever was there when the component last died.
+ */
+function useLatestJob(): AuthorJob | undefined {
+  return useSyncExternalStore(
+    subscribeToJobs,
+    latestJob,
+    // Server snapshot: the pane never server-renders, but the hook requires a
+    // stable callee and a missing one throws in strict mode.
+    latestJob,
+  );
+}
+
+/** Re-render once a second while a job runs, so the elapsed clock moves. */
+function useTicker(active: boolean): void {
+  const [, setTick] = useState(0);
+  React.useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [active]);
 }
 
 export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
+  const job = useLatestJob();
+  const running = job?.state === "running";
+  useTicker(running);
+
   const [intent, setIntent] = useState(props.initialIntent ?? "");
   const [objectType, setObjectType] = useState(props.initialObjectType ?? "button");
-  const [busy, setBusy] = useState(false);
-  const [rounds, setRounds] = useState<AuthorRound[]>([]);
-  const [result, setResult] = useState<null | { ok: boolean; summary: string; source: string; draftId?: string; deliveryError?: string }>(null);
+  /** Set when the user asks to change the request after a run. */
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState("");
-  const cancelRef = useRef(false);
 
-  const author = useCallback(async () => {
+  const showForm = editing || !job;
+
+  const start = useCallback(() => {
     const task = intent.trim();
-    if (!task || busy) return;
-    setBusy(true);
-    setRounds([]);
-    setResult(null);
+    if (!task) return;
     setError("");
-    cancelRef.current = false;
-    try {
-      const res = await runAuthor({
-        intent: task,
-        objectType,
-        providerId: props.providerId,
-        model: props.model,
-        baseUrl: props.baseUrl,
-        onRound: (r) => setRounds((prev) => [...prev, r]),
-        isCancelled: () => cancelRef.current,
-      });
-      setResult(res);
-    } catch (e) {
-      // A cancelled run reads as an error from the pipeline's point of view; it
-      // is not one from the user's.
-      setError(cancelRef.current ? "" : `${e}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [intent, objectType, busy, props.providerId, props.model, props.baseUrl]);
+    setEditing(false);
+    startAuthorJob({
+      intent: task,
+      objectType,
+      providerId: props.providerId,
+      model: props.model,
+      baseUrl: props.baseUrl,
+    });
+  }, [intent, objectType, props.providerId, props.model, props.baseUrl]);
 
   const openDraft = useCallback(async (draftId: string) => {
     try {
@@ -94,67 +151,110 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
     }
   }, []);
 
+  const elapsed = job ? (job.endedAt ?? Date.now()) - job.startedAt : 0;
+  const result = job?.result;
+
   return h("div", { style: wrap },
-    h("p", { key: "lede", style: hint },
-      "Describe what the script should do and what it attaches to. Calcula shows the model " +
-      "Calcula's own API, checks what it writes, runs it against a copy of your workbook, and " +
-      "sends anything wrong back to be corrected — then hands you the result to review. " +
-      "Nothing is saved or run until you approve it in the editor."),
-
-    h("label", { key: "l1", style: label }, "What should it do?"),
-    h("textarea", {
-      key: "intent", style: area, rows: 3, value: intent, disabled: busy,
-      placeholder: "e.g. Set each selected cell's background colour to the colour written in that cell",
-      onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setIntent(e.target.value),
-    }),
-
-    h("label", { key: "l2", style: label }, "What should it attach to?"),
-    h("select", {
-      key: "type", style: select, value: objectType, disabled: busy,
-      onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setObjectType(e.target.value),
-    }, DRAFT_OBJECT_TYPES.map((t) => h("option", { key: t, value: t }, t))),
-    h("p", { key: "typehint", style: hint },
-      "This decides which parts of the API the model is shown, and which events the script can " +
-      "react to. A button script runs when the button is clicked."),
-
-    h("div", { key: "actions", style: { display: "flex", gap: 8, alignItems: "center" } },
-      busy
-        ? h("button", { key: "stop", style: stopBtn, onClick: () => { cancelRef.current = true; } }, "Stop")
-        : h("button", {
-            key: "go", style: { ...btn, opacity: intent.trim() ? 1 : 0.5 },
-            disabled: !intent.trim(), onClick: () => void author(),
-          }, "Author the script"),
-      h("button", { key: "back", style: { ...openBtn, borderColor: "#CCC", color: "#555" }, onClick: props.onBackToChat, disabled: busy }, "Back to chat"),
-    ),
-
-    rounds.length > 0
-      ? h("div", { key: "log", style: logBox }, rounds.map(roundLine).join("\n"))
+    showForm
+      ? h(React.Fragment, { key: "form" },
+          h("p", { style: hint },
+            "Describe what the script should do and what it attaches to. Calcula shows the model " +
+            "Calcula's own API, checks what it writes, runs it against a copy of your workbook, and " +
+            "sends anything wrong back to be corrected. Nothing is saved or run until you approve " +
+            "it in the editor."),
+          h("label", { style: label }, "What should it do?"),
+          h("textarea", {
+            style: area, rows: 3, value: intent,
+            placeholder: "e.g. Set each selected cell's background colour to the colour written in that cell",
+            onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setIntent(e.target.value),
+          }),
+          h("label", { style: label }, "What should it attach to?"),
+          h("select", {
+            style: select, value: objectType,
+            onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setObjectType(e.target.value),
+          }, DRAFT_OBJECT_TYPES.map((t) => h("option", { key: t, value: t }, t))),
+          h("p", { style: hint },
+            "This decides which parts of the API the model is shown, and which events the script " +
+            "can react to. A button script runs when the button is clicked."),
+          h("div", { style: { display: "flex", gap: 8 } },
+            h("button", {
+              style: { ...btn, opacity: intent.trim() ? 1 : 0.5 },
+              disabled: !intent.trim(), onClick: start,
+            }, job ? "Start again" : "Author the script"),
+            job
+              ? h("button", { style: ghostBtn, onClick: () => setEditing(false) }, "Cancel")
+              : null,
+            h("button", { style: ghostBtn, onClick: props.onBackToChat }, "Back to chat"),
+          ),
+        )
       : null,
 
-    busy
-      ? h("p", { key: "busy", style: hint },
-          `Working with ${props.model}. A local model may take a minute or more per round — ` +
-          "each round writes a whole script and has it checked.")
-      : null,
+    // --- The run ---
+    job && !showForm
+      ? h(React.Fragment, { key: "job" },
+          // What was asked for, compact, so the form is not in the way.
+          h("div", { style: recapStyle },
+            h("div", { style: { fontWeight: 600, marginBottom: 2 } }, job.intent),
+            h("div", null, `attached to a ${job.objectType} — ${job.model}`),
+          ),
 
-    error ? h("div", { key: "err", style: badBox }, error) : null,
+          // THE LIVE LINE. The dot keeps moving on the compositor, so it stays
+          // alive even while the main thread is busy — which is exactly when a
+          // static label would look wedged.
+          h("div", { style: liveStyle },
+            h(ActivityDot, { status: statusOf(job), title: job.phase }),
+            h("span", { style: { flex: 1 } }, job.phase),
+            h("span", { style: { color: "#5C7FA3", fontVariantNumeric: "tabular-nums" } },
+              formatElapsed(elapsed)),
+          ),
 
-    result
-      ? h("div", { key: "res", style: { display: "flex", flexDirection: "column", gap: 8 } },
-          h("div", { style: result.ok ? okBox : badBox }, result.summary),
-          result.deliveryError
-            ? h("div", { style: badBox }, `The script was written but could not be queued for review: ${result.deliveryError}`)
+          h("div", { style: logBox },
+            job.steps.length === 0
+              ? h("div", { style: { color: "#9AA7B2" } }, "Starting...")
+              : job.steps.map((s, i) =>
+                  h("div", { key: i, style: stepRow },
+                    h("span", { style: stepTime }, formatElapsed(s.at)),
+                    h("span", { style: { color: STEP_COLOUR[s.kind] } },
+                      `${STEP_MARK[s.kind]} ${s.text}${s.detail ? ` — ${s.detail}` : ""}`),
+                  ),
+                ),
+          ),
+
+          running
+            ? h("p", { style: hint },
+                "You can close this pane and carry on working — the job keeps running and you will " +
+                "be told when it finishes.")
             : null,
-          result.ok && result.draftId && hasScriptEditorProvider()
-            ? h("button", {
-                style: openBtn,
-                onClick: () => void openDraft(result.draftId as string),
-              }, "Open in Object Script Editor")
-            : null,
-          result.source
+
+          h("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+            running
+              ? h("button", { style: stopBtn, onClick: () => cancelJob(job.id) }, "Stop")
+              : h("button", { style: btn, onClick: () => setEditing(true) }, "New script"),
+            result?.ok && result.draftId && hasScriptEditorProvider()
+              ? h("button", {
+                  style: openBtn,
+                  onClick: () => void openDraft(result.draftId as string),
+                }, "Open in Object Script Editor")
+              : null,
+            h("button", { style: ghostBtn, onClick: props.onBackToChat }, "Back to chat"),
+          ),
+
+          error ? h("div", { style: badBox }, error) : null,
+          job.error ? h("div", { style: badBox }, job.error) : null,
+
+          result
             ? h(React.Fragment, null,
-                h("div", { style: label }, result.ok ? "The script" : "Best attempt (not accepted)"),
-                h("div", { style: srcBox }, result.source),
+                h("div", { style: result.ok ? okBox : badBox }, result.summary),
+                result.deliveryError
+                  ? h("div", { style: badBox },
+                      `The script was written but could not be queued for review: ${result.deliveryError}`)
+                  : null,
+                result.source
+                  ? h(React.Fragment, null,
+                      h("div", { style: label }, result.ok ? "The script" : "Best attempt (not accepted)"),
+                      h("div", { style: srcBox }, result.source),
+                    )
+                  : null,
               )
             : null,
         )

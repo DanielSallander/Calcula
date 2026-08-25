@@ -45,6 +45,17 @@ export interface AuthorRunRequest {
   baseUrl?: string;
   /** Called as each round completes, so a slow local run is not a frozen dialog. */
   onRound?: (round: AuthorRound) => void;
+  /**
+   * Called at every observable step INSIDE a round.
+   *
+   * A round on a CPU-bound 7B is a minute or more, and `onRound` fires only at
+   * the end of one — so a screen driven by rounds alone shows nothing at all for
+   * minutes and reads as a hang. The steps come from the two callbacks this
+   * module OWNS (`complete` and `dryRun`), which is what makes them available
+   * without changing the shared pipeline: it does not know what it is being
+   * driven by, and should not have to.
+   */
+  onPhase?: (phase: string, detail?: string) => void;
   /** Polled between rounds so the user can abandon a long run. */
   isCancelled?: () => boolean;
 }
@@ -115,12 +126,28 @@ function problemsOf(report: { findings: Array<{ severity: string; message: strin
 }
 
 export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult> {
+  const phase = (text: string, detail?: string) => req.onPhase?.(text, detail);
+
+  phase("Loading Calcula's script API");
   const { authorScript, planFor, previewObjectScript } = await load();
   const plan = planFor(profileFor(req.providerId, req.model));
+  phase(
+    `Plan: ${plan.tier} — up to ${plan.repairRounds} corrections`,
+    plan.rationale,
+  );
+
+  /** Which attempt `complete` is serving. It is called once per round, in order. */
+  let attempt = 0;
+  const totalAttempts = plan.repairRounds + 1;
 
   /** One completion through the user's selected provider. */
   const complete = async (system: string, user: string): Promise<string> => {
     if (req.isCancelled?.()) throw new Error("cancelled");
+    attempt += 1;
+    phase(
+      `Writing the script with ${req.model} (attempt ${attempt} of ${totalAttempts})`,
+      attempt === 1 ? undefined : "Correcting the previous attempt",
+    );
     const resp = await aiChatBackend.invoke<ChatResponse>("ai_chat_complete", {
       request: {
         providerId: req.providerId,
@@ -134,10 +161,15 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       },
       baseUrlOverride: req.baseUrl || null,
     });
-    return resp.blocks
+    const text = resp.blocks
       .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
       .map((b) => b.text)
       .join("\n");
+    phase(
+      `${req.model} replied (${text.split("\n").length} lines)`,
+    );
+    phase("Checking it against Calcula's API");
+    return text;
   };
 
   const rounds: AuthorRound[] = [];
@@ -151,8 +183,25 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     // L3, in the realm the script will actually mount into, at the tier it will
     // actually mount at. A preview that cannot run DECLINES rather than guessing
     // — `authorScript` reads `applicable` and does not treat that as a failure.
-    dryRun: (source: string) =>
-      previewObjectScript({ source, objectType: req.objectType, tier: "restricted" }),
+    dryRun: async (source: string) => {
+      phase("Running it against a copy of your workbook");
+      const report = await previewObjectScript({
+        source, objectType: req.objectType, tier: "restricted",
+      });
+      phase(
+        report.applicable === false
+          ? "The preview could not judge this script"
+          : report.ok
+            ? `It ran, changing ${report.totalChanges} cell${report.totalChanges === 1 ? "" : "s"}`
+            : "It failed when run",
+        report.applicable === false
+          ? report.declinedReason ?? undefined
+          : report.ok
+            ? undefined
+            : report.error ?? undefined,
+      );
+      return report;
+    },
     // The user asked for something that changes the workbook. Without this a
     // script that mounts cleanly and does nothing scores as a success — the
     // quietest failure this system has.
@@ -176,6 +225,7 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
 
   // Delivered through the ordinary review path — same store, same audit, same
   // "NOT mounted" invariant as a draft the chat's tool loop produces.
+  phase("Queueing the script for your review");
   try {
     const text = await aiChatBackend.invoke<string>("ai_chat_run_tool", {
       name: "draft_object_script",

@@ -1663,3 +1663,57 @@ The single-shot path through the tool schema outperformed the dedicated repair l
 which is the opposite of the design's expectation and is worth investigating before claiming either
 number. What is NOT in doubt: the product now fails visibly and safely instead of silently and
 destructively, and the guided path removes the decision local models measurably cannot make.
+### 13.7 The run became a background job — 2026-08-24
+
+Three things reported against the first cut of the guided screen, all correct:
+
+1. **The result was squeezed into a two-line slot.** The form, the progress log and the result all
+   competed for one scrolling column, and the box carrying the actual verdict was the loser.
+2. **The run died with the pane.** It lived in component state, so closing the task pane — or
+   switching to another — abandoned a job that had already spent minutes of a CPU-bound model's
+   time, with no way to get it back.
+3. **Progress was one line per completed ROUND.** On a 7B that is a blank screen for a minute or
+   more at a stretch, which is indistinguishable from a hang.
+
+**`lib/authorJobs.ts` is the fix for (2) and (3).** A module-level store outside React: the screen
+SUBSCRIBES to a job rather than owning one, so the two have independent lifetimes. That is the whole
+of "let me go and do something else while it works". Not persisted and not backend state — a run is
+a few minutes of one session, and reloading the app mid-run has no run to resume anyway.
+
+**Finer progress came from the callbacks the runner already owns.** `authorScript` reports only at
+the end of a round, and it should not have to know what is driving it — but `complete` and `dryRun`
+are `authorRunner`'s own functions, so wrapping them yields the steps for free: *loading the API*,
+*plan: assisted — up to 6 corrections*, *writing the script with X (attempt N of M)*, *X replied (N
+lines)*, *checking it against Calcula's API*, *running it against a copy of your workbook*, *it ran,
+changing 3 cells*, *queueing for review*. Each step is stamped with the time it happened, so a long
+gap is visible AS a gap rather than as an absence of activity.
+
+**(1) is fixed by letting the job own the screen.** Once a run exists the form collapses to a
+one-line recap and the log takes `flex: 1`, so the space goes to what is actually happening.
+
+**`ActivityDot` is the "alive" icon**, asked for by name. CSS keyframes, not an interval driving
+React state: an interval re-renders the pane several times a second for a decoration AND freezes at
+exactly the moment it matters most — when the main thread is busy. A compositor animation keeps
+moving through a busy tick, which is the honest signal. There is deliberately no percentage: the run
+ends when a draft passes, which may be attempt 1 or attempt 7, and a bar that crawls to 90% and sits
+there is a worse lie than no bar. `prefers-reduced-motion` is respected; the keyframes are injected
+per-document by id, because the Object Script Editor is a separate window with its own `document`.
+
+A `showToast` on completion and an `AuthorStatusItem` in the status bar close the loop: the user can
+leave and still be told, and can see it is still working without going back to look. The status item
+renders `null` when nothing is running, so a user who never authors a script pays one empty span.
+
+### 13.8 Two React-store traps, both found by testing rather than by reading
+
+`useSyncExternalStore` compares snapshots with `Object.is`, and the two ways to get that wrong are
+mirror images:
+
+- **Mutating a job in place** and returning the same reference means React concludes nothing changed
+  and never re-renders. The first cut did exactly this, and the symptom was Stop appearing to do
+  nothing — the step it logged was written into the store and never drawn.
+- **A derived getter that builds a fresh array every call** (`jobs.filter(...)`) fails the identity
+  check every time and re-renders FOREVER. Sabotaging the memoisation produces "Maximum update depth
+  exceeded" in six tests, which is what that failure actually looks like.
+
+So every mutation replaces the array AND the job, and `runningJobs()` / `allJobs()` are memoised
+against the array's identity. Both traps are pinned: reverting either one reds a test.

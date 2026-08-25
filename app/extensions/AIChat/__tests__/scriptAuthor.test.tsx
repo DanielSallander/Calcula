@@ -1,68 +1,58 @@
 //! FILENAME: app/extensions/AIChat/__tests__/scriptAuthor.test.tsx
-// PURPOSE: The guided path: two fields, the built pipeline, and a draft the user
-//          can click through to.
-// CONTEXT: 2026-08-24. Three rounds of trying to make free chat produce a script
-//          on a local model established that the failure is TOOL SELECTION, not
-//          code generation. This screen deletes the choice. `authorScript` (M7)
-//          already did everything below it and had zero UI callers.
+// PURPOSE: The guided screen: two fields, a background job you can walk away
+//          from, and a draft you can click through to.
+// CONTEXT: 2026-08-24. The failure that motivated the screen is TOOL SELECTION,
+//          not code generation, so it deletes the choice. The failure that
+//          motivated the JOB is that the run lived in component state — closing
+//          the pane abandoned minutes of a slow model's work — and that the only
+//          progress shown was one line per round, which reads as a hang.
+//
+//          `authorJobs` is REAL here and `authorRunner` is doubled: the seam
+//          worth testing is screen <-> job store, and the store's own suite
+//          proves the rest.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-// --- Backend -----------------------------------------------------------------
-const invoke = vi.fn();
-vi.mock("../lib/aiChatBackend", () => ({
-  aiChatBackend: { invoke: (...a: unknown[]) => invoke(...a) },
-}));
-
-// --- The pipeline, doubled ----------------------------------------------------
-// `authorScript` is proved by its own suite and the eval corpus; what THIS file
-// tests is that the screen drives it with the right inputs and renders what it
-// returns. The real one needs a Worker realm jsdom does not have.
-const authorScript = vi.fn();
-const previewObjectScript = vi.fn(async () => ({ ok: true, applicable: true, totalChanges: 3 }));
-vi.mock("@api/scriptHost/scriptAuthoring", () => ({ authorScript: (...a: unknown[]) => authorScript(...a) }));
-vi.mock("@api/scriptHost/scriptPreview", () => ({ previewObjectScript: (...a: unknown[]) => previewObjectScript(...(a as [])) }));
-vi.mock("@api/scriptHost/modelProfile", () => ({
-  planFor: (p: { canaryScore: number }) => ({
-    tier: p.canaryScore >= 0.5 ? "standard" : "assisted",
-    surfaceBudgetTokens: 3686,
-    repairRounds: p.canaryScore >= 0.5 ? 3 : 6,
-    rationale: "test plan",
-  }),
-}));
+const runAuthor = vi.fn();
+vi.mock("../lib/authorRunner", () => ({ runAuthor: (...a: unknown[]) => runAuthor(...a) }));
 
 const openDraftInEditor = vi.fn(async () => {});
-const store = new Map<string, string>();
+const showToast = vi.fn();
 vi.mock("@api", () => ({
-  getSetting: (ext: string, k: string, d: string) => store.get(`${ext}:${k}`) ?? d,
-  setSetting: (ext: string, k: string, v: string) => void store.set(`${ext}:${k}`, String(v)),
+  showToast: (...a: unknown[]) => showToast(...a),
   hasScriptEditorProvider: () => true,
   requireScriptEditorProvider: () => ({ openDraftInEditor, openMacroInEditor: async () => {} }),
 }));
 
 const { ScriptAuthor } = await import("../components/ScriptAuthor");
+const { __resetJobs } = await import("../lib/authorJobs");
 
-// ---------------------------------------------------------------------------
+const GOOD_SOURCE = "export function setup(context) {\n  context.onClick(async () => {});\n}";
 
 let container: HTMLDivElement;
 let root: Root;
 
-const GOOD_SOURCE = "export function setup(context) {\n  context.onClick(async () => {});\n}";
-
 function btn(text: string): HTMLButtonElement | undefined {
-  return [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(text)) as HTMLButtonElement | undefined;
+  return [...container.querySelectorAll("button")]
+    .find((b) => b.textContent?.includes(text)) as HTMLButtonElement | undefined;
+}
+
+async function flush(): Promise<void> {
+  await act(async () => {
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+  });
 }
 
 async function click(text: string): Promise<void> {
   const b = btn(text);
-  if (!b) throw new Error(`no button matching "${text}"`);
+  if (!b) throw new Error(`no button matching "${text}" — have: ${[...container.querySelectorAll("button")].map((x) => x.textContent).join(", ")}`);
   await act(async () => {
     b.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 0));
   });
-  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  await flush();
 }
 
 async function type(value: string): Promise<void> {
@@ -88,96 +78,146 @@ async function render(props: Record<string, unknown> = {}): Promise<void> {
 }
 
 beforeEach(() => {
-  invoke.mockReset();
-  authorScript.mockReset();
+  __resetJobs();
+  runAuthor.mockReset();
   openDraftInEditor.mockClear();
-  store.clear();
+  showToast.mockReset();
 });
 
 afterEach(async () => {
   if (root) await act(async () => root.unmount());
   container?.remove();
+  __resetJobs();
 });
 
-describe("the guided screen asks only what the model cannot infer", () => {
+describe("the screen asks only what the model cannot infer", () => {
   it("offers every object type the backend will accept", async () => {
     await render();
     const options = [...container.querySelectorAll("option")].map((o) => o.getAttribute("value"));
-    // The one input that decides which API slice the model is shown, and which
-    // draftGate currently has to guess silently.
     expect(options).toContain("button");
     expect(options).toContain("sheet");
-    expect(options).toContain("chart");
     expect(options.length).toBeGreaterThanOrEqual(16);
   });
 
   it("prefills from the chat's offer", async () => {
-    await render({ initialIntent: "colour each selected cell by its content", initialObjectType: "sheet" });
-    expect((container.querySelector("textarea") as HTMLTextAreaElement).value)
-      .toBe("colour each selected cell by its content");
+    await render({ initialIntent: "colour each selected cell", initialObjectType: "sheet" });
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("colour each selected cell");
     expect((container.querySelector("select") as HTMLSelectElement).value).toBe("sheet");
   });
 
-  it("will not author an empty intent", async () => {
+  it("will not start on an empty intent", async () => {
     await render();
     expect(btn("Author the script")?.disabled).toBe(true);
   });
-});
 
-describe("it drives the pipeline with the user's answers", () => {
-  it("passes the intent, the object type, and a dry run at the MOUNTED tier", async () => {
-    authorScript.mockResolvedValue({ ok: true, source: GOOD_SOURCE, report: { ok: true, findings: [] }, attempts: [], summary: "Done." });
-    invoke.mockResolvedValue('Drafted object script "x" (id=draft-abc123) for button.');
-
-    await render();
+  it("passes the user's answers straight through to the pipeline", async () => {
+    runAuthor.mockReturnValue(new Promise(() => {}));
+    await render({ initialObjectType: "sheet" });
     await type("colour each selected cell by its content");
     await click("Author the script");
-
-    expect(authorScript).toHaveBeenCalledTimes(1);
-    const req = authorScript.mock.calls[0][0] as Record<string, unknown>;
+    const req = runAuthor.mock.calls[0][0] as Record<string, unknown>;
     expect(req.intent).toBe("colour each selected cell by its content");
-    expect(req.objectType).toBe("button");
-    // Without this a script that mounts cleanly and does nothing scores as a
-    // success — the quietest failure this system has.
-    expect(req.expectsWrites).toBe(true);
-    expect(req.dryRun, "L3 must be wired, or the loop cannot see a runtime failure").toBeTypeOf("function");
-
-    // And the dry run must judge it at the tier a draft actually mounts at.
-    await (req.dryRun as (s: string) => Promise<unknown>)(GOOD_SOURCE);
-    expect(previewObjectScript.mock.calls[0][0]).toMatchObject({ tier: "restricted", objectType: "button" });
+    expect(req.objectType).toBe("sheet");
+    expect(req.model).toBe("qwen2.5:7b");
   });
+});
 
-  it("uses the ASSISTED plan for a model nobody has probed", async () => {
-    authorScript.mockResolvedValue({ ok: true, source: GOOD_SOURCE, report: { ok: true, findings: [] }, attempts: [], summary: "Done." });
-    invoke.mockResolvedValue("(id=draft-abc123)");
+describe("the run is visible, and looks alive", () => {
+  /** Start a run and hold it open at a given phase. */
+  async function startAndHold(phase = "Writing the script with qwen2.5:7b (attempt 1 of 7)") {
+    runAuthor.mockImplementation((r: { onPhase?: (p: string, d?: string) => void }) => {
+      r.onPhase?.(phase);
+      return new Promise(() => {});
+    });
     await render();
-    await type("do a thing");
+    await type("colour the cells");
     await click("Author the script");
-    const plan = (authorScript.mock.calls[0][0] as { plan: { tier: string; repairRounds: number } }).plan;
-    expect(plan.tier).toBe("assisted");
-    expect(plan.repairRounds, "an unmeasured local model gets the most repair rounds").toBe(6);
+  }
+
+  it("shows the current phase, not just finished rounds", async () => {
+    await startAndHold();
+    expect(container.textContent).toContain("Writing the script with qwen2.5:7b (attempt 1 of 7)");
   });
 
-  it("delivers through the ordinary review path, not a second route", async () => {
-    authorScript.mockResolvedValue({ ok: true, source: GOOD_SOURCE, report: { ok: true, findings: [] }, attempts: [], summary: "Done." });
-    invoke.mockResolvedValue('Drafted object script "x" (id=draft-abc123) for button.');
+  it("renders an animated indicator while running", async () => {
+    await startAndHold();
+    // A CSS animation, so it keeps moving even while the main thread is busy —
+    // which is exactly when a static label would look wedged.
+    const animated = [...container.querySelectorAll("span")]
+      .filter((s) => (s as HTMLElement).style.animation?.includes("calcula-aichat-pulse"));
+    expect(animated.length, "the dot must actually be animated").toBeGreaterThan(0);
+    expect(document.getElementById("calcula-aichat-activity-keyframes")).toBeTruthy();
+  });
+
+  it("logs each step with the time it happened", async () => {
+    runAuthor.mockImplementation((r: { onPhase?: (p: string) => void; onRound?: (x: unknown) => void }) => {
+      r.onPhase?.("Loading Calcula's script API");
+      r.onPhase?.("Running it against a copy of your workbook");
+      r.onRound?.({ round: 0, ok: false, problems: ["`context.formatCellBackgroundColor` is not part of the object-script API"] });
+      return new Promise(() => {});
+    });
     await render();
     await type("colour the cells");
     await click("Author the script");
 
-    // draft_object_script through ai_chat_run_tool: same Rust store, same audit
-    // entry, same "NOT mounted" invariant as any other draft.
-    const call = invoke.mock.calls.find((c) => c[0] === "ai_chat_run_tool");
-    expect(call, "the draft must go out the same door as every other one").toBeTruthy();
-    expect((call![1] as { name: string }).name).toBe("draft_object_script");
-    expect((call![1] as { input: { source: string } }).input.source).toBe(GOOD_SOURCE);
+    expect(container.textContent).toContain("Loading Calcula's script API");
+    expect(container.textContent).toContain("Running it against a copy of your workbook");
+    expect(container.textContent).toContain("Attempt 1");
+    expect(container.textContent).toContain("formatCellBackgroundColor");
+  });
+
+  it("tells the user they can leave", async () => {
+    await startAndHold();
+    expect(container.textContent).toContain("close this pane and carry on working");
+  });
+
+  it("collapses the form once a run exists, so the log gets the room", async () => {
+    // The reported layout problem: the form, the log and the result all fought
+    // for one scrolling column and the result ended up in a two-line slot.
+    await startAndHold();
+    expect(container.querySelector("textarea"), "the form is out of the way").toBeNull();
+    // ...and what was asked for is still on screen, compactly.
+    expect(container.textContent).toContain("colour the cells");
+    expect(container.textContent).toContain("attached to a button");
+  });
+
+  it("can be stopped", async () => {
+    await startAndHold();
+    await click("Stop");
+    expect(container.textContent).toContain("Stop requested.");
   });
 });
 
-describe("what the user sees", () => {
+describe("a job survives the screen", () => {
+  it("re-attaches to a run in flight when the pane is re-opened", async () => {
+    // THE point of the job store. Unmounting is the pane closing.
+    let phase: ((p: string) => void) | undefined;
+    runAuthor.mockImplementation((r: { onPhase?: (p: string) => void }) => {
+      phase = r.onPhase;
+      r.onPhase?.("Writing the script with qwen2.5:7b (attempt 1 of 7)");
+      return new Promise(() => {});
+    });
+    await render();
+    await type("colour the cells");
+    await click("Author the script");
+
+    await act(async () => root.unmount());
+    container.remove();
+
+    // ...work continues while nothing is watching...
+    phase!("Running it against a copy of your workbook");
+
+    await render();
+    await flush();
+    expect(container.textContent, "the re-opened pane shows the CURRENT phase")
+      .toContain("Running it against a copy of your workbook");
+    expect(runAuthor, "and it was never restarted").toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("what the user gets at the end", () => {
   it("shows a click-through to the editor once the draft is queued", async () => {
-    authorScript.mockResolvedValue({ ok: true, source: GOOD_SOURCE, report: { ok: true, findings: [] }, attempts: [], summary: "Wrote it in 2 rounds." });
-    invoke.mockResolvedValue('Drafted object script "x" (id=draft-abc123) for button.');
+    runAuthor.mockResolvedValue({ ok: true, source: GOOD_SOURCE, summary: "Wrote it in 2 rounds.", rounds: [], draftId: "draft-abc123" });
     await render();
     await type("colour the cells");
     await click("Author the script");
@@ -187,56 +227,49 @@ describe("what the user sees", () => {
     expect(openDraftInEditor).toHaveBeenCalledWith("draft-abc123");
   });
 
-  it("reports each repair round as it lands, not only at the end", async () => {
-    authorScript.mockImplementation(async (req: { onAttempt?: (r: number, rep: unknown) => void }) => {
-      req.onAttempt?.(0, { findings: [{ severity: "error", message: "api.setCellValu does not exist" }] });
-      req.onAttempt?.(1, { findings: [] });
-      return { ok: true, source: GOOD_SOURCE, report: { ok: true, findings: [] }, attempts: [], summary: "Done." };
-    });
-    invoke.mockResolvedValue("(id=draft-abc123)");
-    await render();
-    await type("colour the cells");
-    await click("Author the script");
-
-    expect(container.textContent).toContain("round 1");
-    expect(container.textContent).toContain("api.setCellValu does not exist");
-    expect(container.textContent).toContain("round 2");
-  });
-
-  it("still shows the best attempt when authoring FAILED", async () => {
-    // A script that is 90% right is worth showing; the editor is where a person
-    // fixes the rest.
-    authorScript.mockResolvedValue({
+  it("still shows the best attempt when authoring failed", async () => {
+    runAuthor.mockResolvedValue({
       ok: false, source: "export function setup(context) { /* half-written */ }",
-      report: { ok: false, findings: [] }, attempts: [], summary: "Gave up after 6 rounds.",
+      summary: "qwen2.5:7b repeated the same mistake on 3 attempts in a row.", rounds: [],
     });
     await render();
     await type("something hard");
     await click("Author the script");
-    expect(container.textContent).toContain("Gave up after 6 rounds.");
+    expect(container.textContent).toContain("repeated the same mistake");
     expect(container.textContent).toContain("Best attempt (not accepted)");
     expect(container.textContent).toContain("half-written");
-    // Nothing was queued for review.
-    expect(invoke.mock.calls.some((c) => c[0] === "ai_chat_run_tool")).toBe(false);
   });
 
   it("separates 'the script is broken' from 'it could not be queued'", async () => {
-    authorScript.mockResolvedValue({ ok: true, source: GOOD_SOURCE, report: { ok: true, findings: [] }, attempts: [], summary: "Done." });
-    invoke.mockRejectedValue(new Error("Script Security refused"));
+    runAuthor.mockResolvedValue({
+      ok: true, source: GOOD_SOURCE, summary: "Done.", rounds: [],
+      deliveryError: "Script Security refused",
+    });
     await render();
     await type("colour the cells");
     await click("Author the script");
     expect(container.textContent).toContain("could not be queued for review");
     expect(container.textContent).toContain("Script Security refused");
-    // The summary still reports success, because authoring DID succeed.
     expect(container.textContent).toContain("Done.");
   });
 
   it("surfaces a pipeline failure rather than a silent dead end", async () => {
-    authorScript.mockRejectedValue(new Error("Ollama error 500"));
+    runAuthor.mockRejectedValue(new Error("Ollama error 500"));
     await render();
     await type("colour the cells");
     await click("Author the script");
     expect(container.textContent).toContain("Ollama error 500");
+  });
+
+  it("offers a fresh start that brings the form back", async () => {
+    runAuthor.mockResolvedValue({ ok: true, source: GOOD_SOURCE, summary: "Done.", rounds: [], draftId: "d1" });
+    await render();
+    await type("colour the cells");
+    await click("Author the script");
+    expect(container.querySelector("textarea")).toBeNull();
+
+    await click("New script");
+    expect(container.querySelector("textarea"), "the form comes back").toBeTruthy();
+    expect(btn("Start again")).toBeTruthy();
   });
 });

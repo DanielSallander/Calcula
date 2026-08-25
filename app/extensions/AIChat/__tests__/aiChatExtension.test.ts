@@ -23,6 +23,8 @@ describe("AIChat Extension Module", () => {
   const mockUnregisterMenuItem = vi.fn();
   const mockOpenTaskPane = vi.fn();
   const mockShowContainer = vi.fn();
+  const mockRegisterStatusBar = vi.fn();
+  const mockUnregisterStatusBar = vi.fn();
 
   function createMockContext() {
     return {
@@ -32,6 +34,12 @@ describe("AIChat Extension Module", () => {
           unregister: mockUnregisterTaskPane,
           open: mockOpenTaskPane,
           showContainer: mockShowContainer,
+        },
+        // A running authoring job is surfaced here, so the double has to carry
+        // it or activation throws before any pane is registered.
+        statusBar: {
+          register: mockRegisterStatusBar,
+          unregister: mockUnregisterStatusBar,
         },
         menus: {
           registerItem: vi.fn((_menu: string, item: { action: () => void }) => {
@@ -104,6 +112,21 @@ describe("AIChat Extension Module", () => {
     expect(mockRegisterTaskPane).toHaveBeenCalledTimes(2);
   });
 
+  it("surfaces a running authoring job in the status bar", () => {
+    // The job outlives the pane (lib/authorJobs.ts). Without a global
+    // indicator, "close this and carry on working" means losing sight of it.
+    extension.activate(createMockContext());
+    expect(mockRegisterStatusBar).toHaveBeenCalledTimes(1);
+    const def = mockRegisterStatusBar.mock.calls[0][0] as { id: string; component: unknown };
+    expect(def.id).toBe("ai-chat:authoring");
+    expect(def.component).toBeTypeOf("function");
+  });
+
+  it("unregisters the status bar item on deactivate", () => {
+    extension.activate(createMockContext());
+    extension.deactivate();
+    expect(mockUnregisterStatusBar).toHaveBeenCalledWith("ai-chat:authoring");
+  });
   it("cleans up on deactivate", () => {
     const ctx = createMockContext();
     extension.activate(ctx);
