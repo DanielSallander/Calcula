@@ -17,11 +17,23 @@
 //          loop that returned its last attempt as though it had succeeded would
 //          hand a broken script to the reviewer with a clean bill of health.
 
-import { repairPrompt, validateScriptSource, type ValidationReport } from "../scriptValidation";
+import { analyzeScript, repairPrompt, validateScriptSource, type ValidationReport } from "../scriptValidation";
 import { buildSurfacePrompt } from "../scriptPrompt";
 import { extractScript } from "../scriptEval";
 import { objectHooksFor } from "../scriptPreview/objectHooks";
 import type { CompleteFn, TierPlan } from "../modelProfile";
+
+/**
+ * EDIT MODE. The script exists and works; the task is a CHANGE to it.
+ *
+ * Absent means author from nothing, and every string `authorScript` builds is
+ * then byte-identical to what it built before edit mode existed — which is the
+ * property the CREATE-mode snapshot test guards.
+ */
+export interface EditBasis {
+  /** The code as it stands ON SCREEN — not the stored copy, not an attempt. */
+  baseSource: string;
+}
 
 export interface AuthorRequest {
   /** What the user asked for, in their words. */
@@ -34,6 +46,8 @@ export interface AuthorRequest {
   hints?: string[];
   /** Model name, used only to make a give-up message name what gave up. */
   model?: string;
+  /** Set to EDIT an existing script rather than author a new one. */
+  edit?: EditBasis;
   /**
    * L3: run the draft against a CLONE of the workbook and report what it would
    * change (`ai_dry_run_script`). Optional because the loop is useful without a
@@ -102,6 +116,15 @@ export interface AuthorResult {
    * more useful one: more patience would not have helped.
    */
   stalled?: boolean;
+  /**
+   * EDIT MODE only: the model returned the base source unchanged.
+   *
+   * NOT a failure — `EDIT_SYSTEM` explicitly licenses it — but reporting plain
+   * success would be the same small lie as claiming a repair round that never
+   * happened. It must never trigger a repair: the model may simply be right,
+   * and a round on a local model is minutes.
+   */
+  unchanged?: boolean;
   /** The best draft produced. Present even on failure — see the header. */
   source: string;
   report: ValidationReport;
@@ -188,6 +211,89 @@ function assistedSystemFor(objectType: string): string {
 }
 
 /**
+ * The edit contract. Every line is a measured failure mode, not manners.
+ *
+ * "Return the WHOLE script": `extractScript` takes a fenced block and
+ * `validateScriptSource` validates a whole file. There is no patch applier
+ * anywhere in this pipeline, so a diff-shaped reply fails L0 as a parse error —
+ * and the model would have been doing what it was asked.
+ *
+ * The `// @capability` clause: an UNDECLARED capability is an ERROR, but
+ * declared-and-unused is only a NOTICE, and the repair prompt carries errors
+ * ONLY. So a model that strips a pragma while "tidying" breaks the script in a
+ * way this loop can report after the fact but never prevent — which makes
+ * saying it up front the only defence.
+ *
+ * "Return it unchanged" is licensed deliberately: a model that cannot find
+ * anything to change should say so by doing nothing, not by inventing a change.
+ * `unchanged` on the result reports that honestly instead of claiming work.
+ */
+const EDIT_SYSTEM = [
+  "",
+  "You are EDITING a script that already exists and already works.",
+  "Return the WHOLE script, including every part you did not change: your reply REPLACES the file, so anything you leave out is deleted.",
+  "Change only what the task asks for. Keep every other line byte for byte — the same function names, the same hooks, the same `// @capability` lines, the same comments, in the same order.",
+  "Do not restyle working code, do not rename anything you were not asked to rename, and do not delete code you do not understand.",
+  "If the script already does what the task asks, return it unchanged.",
+].join("\n");
+
+/**
+ * The smallest API surface an edit may be left with.
+ *
+ * A surface trimmed to nothing is worse than a tight one: the model then has no
+ * reference at all and invents members from memory, which is the exact failure
+ * `scriptPrompt`'s header describes. Below roughly this, `buildSurfacePrompt`
+ * starts dropping members the core teaching depends on.
+ */
+const MIN_EDIT_SURFACE_TOKENS = 1200;
+
+/**
+ * Rough token count for a piece of source.
+ *
+ * Mirrors `buildSurfacePrompt`'s own `length / 3.6` heuristic ON PURPOSE: the
+ * two numbers are subtracted from each other, so they must be wrong in the same
+ * direction. The module exports no estimator to borrow.
+ */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 3.6);
+}
+
+/**
+ * The `context.*` members a script already calls, for surface RANKING.
+ *
+ * From the real AST walk rather than a regex, because one already exists and is
+ * what the validator itself trusts. A parse failure yields nothing, which is
+ * correct: an unparseable base source has no calls to preserve, and the ranker
+ * simply falls back to the intent.
+ */
+function calledMembers(source: string): string[] {
+  try {
+    const analysis = analyzeScript(source);
+    if (!analysis.parsed) return [];
+    // The LEAF of each chain is the useful hint: `api.setRangeFormat` ranks on
+    // "setRangeFormat", and the full dotted chain matches nothing in the
+    // ranker's term list.
+    const terms = new Set<string>();
+    for (const call of analysis.calls) {
+      for (const part of call.chain.split(".")) {
+        if (part.length > 2) terms.add(part);
+      }
+    }
+    return [...terms];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether two sources are the same script, ignoring line endings and trailing
+ * whitespace — the differences a model round-trip introduces for free.
+ */
+function sameScript(a: string, b: string): boolean {
+  return a.replace(/\r\n/g, "\n").trimEnd() === b.replace(/\r\n/g, "\n").trimEnd();
+}
+
+/**
  * How many times the SAME error set may repeat before the loop gives up.
  *
  * Two, not one: a single repetition can be a model that fixed one of two errors
@@ -215,15 +321,49 @@ function errorSignature(report: ValidationReport): string {
 export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
   const surface = buildSurfacePrompt({
     objectType: req.objectType,
-    budgetTokens: req.plan.surfaceBudgetTokens,
-    hints: [...(req.hints ?? []), req.intent],
+    // In EDIT mode the script itself occupies part of the context on every
+    // round, so the surface must give ground or the two together overrun a
+    // small window — and an overrun truncates the surface at whatever byte the
+    // server stopped reading, which is the failure `scriptPrompt`'s own header
+    // calls the worst one. Floored, because a surface trimmed to nothing is
+    // worse than a tight one: the model then invents members from memory.
+    budgetTokens: req.edit
+      ? Math.max(MIN_EDIT_SURFACE_TOKENS, req.plan.surfaceBudgetTokens - estimateTokens(req.edit.baseSource))
+      : req.plan.surfaceBudgetTokens,
+    // The members the script ALREADY calls are ranking hints: without them a
+    // budget-trimmed surface can omit the very API the script depends on, and
+    // the model cannot see how to keep working code working. Taken from the
+    // real AST walk, not a regex — `analyzeScript` is what the validator uses.
+    hints: [...(req.hints ?? []), req.intent, ...(req.edit ? calledMembers(req.edit.baseSource) : [])],
   });
 
-  const system = BASE_SYSTEM + (req.plan.tier === "assisted" ? assistedSystemFor(req.objectType) : "");
-  const task = `# Task (the script is attached to a "${req.objectType}")\n${req.intent}`;
+  // NEVER BOTH. `assistedSystemFor` is a worked template with an EMPTY body and
+  // the instruction "Follow this shape exactly, replacing only the body" — which,
+  // handed to a model alongside the user's working script, is an instruction to
+  // throw that script away. The assisted tier is the DEFAULT for any unprobed
+  // model, i.e. the common local path, so this is not an edge case.
+  const system =
+    BASE_SYSTEM +
+    (req.edit ? EDIT_SYSTEM : req.plan.tier === "assisted" ? assistedSystemFor(req.objectType) : "");
+
+  const task = req.edit
+    ? `# Task (edit the script above, which is attached to a "${req.objectType}")\n${req.intent}`
+    : `# Task (the script is attached to a "${req.objectType}")\n${req.intent}`;
+
+  /**
+   * The current script, shown BEFORE the task so the instruction is the last
+   * thing read — the same ordering discipline the repair block already uses by
+   * putting `fixes` last. Empty in CREATE mode, which keeps every string this
+   * function builds byte-identical to what it built before edit mode existed.
+   */
+  const baseBlock = req.edit
+    ? ["# The script as it is now", "```javascript", req.edit.baseSource.trimEnd(), "```", ""]
+    : [];
 
   const attempts: AuthorAttempt[] = [];
-  let user = `${surface.text}\n\n${task}`;
+  let user = req.edit
+    ? [surface.text, "", ...baseBlock, task].join("\n")
+    : `${surface.text}\n\n${task}`;
   /** The previous round's error set, for stall detection (see the loop). */
   let lastSignature = "";
   let repeatedSignatures = 0;
@@ -266,15 +406,22 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
     }
 
     if (report.ok && !behaviouralFix) {
+      const unchanged = req.edit ? sameScript(source, req.edit.baseSource) : undefined;
       return {
         ok: true,
         source,
         report,
         attempts,
-        summary:
-          round === 0
-            ? "Drafted and validated on the first attempt."
-            : `Drafted and validated after ${round} correction${round === 1 ? "" : "s"}.`,
+        unchanged,
+        summary: unchanged
+          ? "The model returned the script unchanged — it judged that no edit was needed."
+          : req.edit
+            ? round === 0
+              ? "Edited and validated on the first attempt."
+              : `Edited and validated after ${round} correction${round === 1 ? "" : "s"}.`
+            : round === 0
+              ? "Drafted and validated on the first attempt."
+              : `Drafted and validated after ${round} correction${round === 1 ? "" : "s"}.`,
       };
     }
 
@@ -313,6 +460,11 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
     user = [
       `${surface.text}`,
       "",
+      // Spliced into every repair round too, or round 1 loses the very thing it
+      // was told to preserve. "# Your previous attempt" below stays honest from
+      // round 1 onward — that source IS the model's attempt; only round 0
+      // needed a different heading.
+      ...baseBlock,
       task,
       "",
       "# Your previous attempt",
@@ -355,6 +507,7 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
     report: last.report,
     attempts,
     stalled,
+    unchanged: req.edit ? sameScript(last.source, req.edit.baseSource) : undefined,
     summary: `${howItEnded} ${why}`,
   };
 }

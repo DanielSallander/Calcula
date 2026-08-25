@@ -2390,6 +2390,26 @@ export {
 export type { ScriptEditorProvider } from "./scriptEditorService";
 
 // ============================================================================
+// Script Assistant Service (IoC: ask an AI to edit the script on screen)
+// ============================================================================
+// The mirror of the block above: that seam lets AIChat open the editor, this one
+// lets the editor reach AIChat. Neither extension names the other.
+
+export {
+  registerScriptAssistantProvider,
+  hasScriptAssistantProvider,
+  requireScriptAssistantProvider,
+  resetScriptAssistantProvider,
+} from "./scriptAssistantService";
+
+export type {
+  ScriptAssistantProvider,
+  ScriptEditRequest,
+  ScriptEditResult,
+  ScriptDocumentKind,
+} from "./scriptAssistantService";
+
+// ============================================================================
 // Chart Mark Registry (IoC for built-in + extension chart types)
 // ============================================================================
 

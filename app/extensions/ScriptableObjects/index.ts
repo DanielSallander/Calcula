@@ -61,12 +61,14 @@ import type { DialogProps } from "@api/uiTypes";
 import { openObjectScriptEditor, openMacroInEditor } from "./lib/openObjectScriptWindow";
 import { registerScriptEditorProvider } from "@api/scriptEditorService";
 import { installScriptDraftReview, openRememberedDraft } from "./lib/scriptDrafts";
+import { installAiEditBridge, replayAiEditResults } from "./lib/aiEditBridge";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
 import {
   onSaveAndApply,
   onRegisterScript,
   onToggleAccess,
   onEditorClosed,
+  onEditorReady,
   emitConsoleOutput,
   emitScriptError,
   emitScriptsChanged,
@@ -873,6 +875,23 @@ async function activate(context: ExtensionContext): Promise<void> {
   // listener that makes that sentence true. It notifies and opens the editor on
   // the draft; it never saves, registers or mounts it.
   cleanupFunctions.push(installScriptDraftReview());
+
+  // ---- "Edit with AI" (the editor window asks; this window answers) ----
+  // The editor activates no extensions and its AI backend commands are
+  // window-guarded to the MAIN window, so the run has to happen here. It is the
+  // whole of that: hear the request, drive the @api seam, send the proposal
+  // back. It never applies anything — the user accepts or rejects a diff.
+  cleanupFunctions.push(installAiEditBridge());
+
+  // An editor that was closed mid-run missed its result; re-send on READY, the
+  // same rule the initial open payload follows.
+  cleanupFunctions.push(
+    (() => {
+      let off: (() => void) | null = null;
+      void onEditorReady(() => replayAiEditResults()).then((fn) => { off = fn; });
+      return () => { off?.(); };
+    })(),
+  );
 
   // Breakpoints are workbook state (extension-data key calcula.objectScripts.debug).
   // Load this workbook's set now, and re-load whenever the open workbook changes,

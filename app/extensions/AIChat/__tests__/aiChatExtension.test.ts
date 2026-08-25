@@ -11,6 +11,17 @@ vi.mock("../components/ChatPanel", () => ({
 // Mock @api/contract (needed for type imports but not actual runtime)
 vi.mock("@api/contract", () => ({}));
 
+// The script-assistant seam. Doubled here so activation can be observed without
+// dragging in the real job store, which the lifecycle tests do not exercise.
+const unregisterAssistant = vi.fn();
+const registerScriptAssistantProvider = vi.fn(() => unregisterAssistant);
+vi.mock("@api", () => ({
+  IconServer: () => null,
+  IconAIChat: () => null,
+  registerScriptAssistantProvider: (...a: unknown[]) =>
+    (registerScriptAssistantProvider as unknown as (...x: unknown[]) => unknown)(...a),
+}));
+
 // We need to test the extension module's activate/deactivate cycle.
 // Since the module uses module-level state, we must re-import for isolation.
 
@@ -149,5 +160,24 @@ describe("AIChat Extension Module", () => {
 
     // Two panes per activation, across two activations.
     expect(mockRegisterTaskPane).toHaveBeenCalledTimes(4);
+  });
+
+
+  it("registers the script-assistant seam, so the editor can reach AI", () => {
+    // The editor is a SEPARATE window that activates no extensions and whose
+    // AI backend commands are window-guarded to `main`. This registration is
+    // the only route it has.
+    extension.activate(createMockContext());
+    expect(registerScriptAssistantProvider).toHaveBeenCalledTimes(1);
+    const provider = registerScriptAssistantProvider.mock.calls[0][0] as Record<string, unknown>;
+    for (const method of ["isConfigured", "modelLabel", "startScriptEdit", "cancelScriptEdit", "showJob"]) {
+      expect(provider[method], `${method} must be provided`).toBeTypeOf("function");
+    }
+  });
+
+  it("unregisters the assistant on deactivate", () => {
+    extension.activate(createMockContext());
+    extension.deactivate();
+    expect(unregisterAssistant).toHaveBeenCalled();
   });
 });

@@ -4,7 +4,7 @@
 //          via Tauri events for script mounting/unmounting. Calls backend directly
 //          for CRUD operations.
 
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef, useEffect, useSyncExternalStore } from "react";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import type { editor as monacoEditor } from "monaco-editor";
 import * as monaco from "monaco-editor";
@@ -58,6 +58,18 @@ import {
   type LivePersistOutcome,
 } from "../lib/liveModuleBuffer";
 import { editorDocumentKind, liveEditPolicyFor } from "../lib/liveEditPolicy";
+import {
+  aiEditStateFor,
+  askAiToEdit,
+  cancelAiEdit,
+  clearAiEdit,
+  installAiEditClient,
+  rejectAiEdit,
+  subscribeToAiEdits,
+} from "../lib/aiEditClient";
+import AiEditStrip from "./AiEditStrip";
+import { ActivityDot } from "../../_shared/components/ActivityDot";
+import AiEditDiff from "./AiEditDiff";
 import {
   breakpointShift,
   DebugPanel,
@@ -1234,6 +1246,76 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   /** True when the open document's debug session is running pre-edit code. */
   const activeSessionStale = !!activeScriptId && staleSessionDocs.includes(activeScriptId);
 
+  // ==========================================================================
+  // Edit with AI
+  // ==========================================================================
+  // The run happens in the MAIN window: every AI backend command is
+  // window-guarded to it, and this window activates no extensions. What lives
+  // here is the ask, the progress, and the decision.
+  //
+  // THE PROPOSAL NEVER TOUCHES THE BUFFER ON ITS OWN. It arrives, a diff opens,
+  // and only the Accept button writes. That is the whole point for a recorded
+  // macro, which auto-persists about a second after any buffer change: an
+  // auto-applied proposal would be SAVED over the author's version before they
+  // had read a line of it.
+  const [showAiEdit, setShowAiEdit] = useState(false);
+  useEffect(() => installAiEditClient(), []);
+  const aiEdit = useSyncExternalStore(
+    subscribeToAiEdits,
+    // Returns the SHARED idle object when there is nothing, never a fresh
+    // literal: a new object per call is a new snapshot every render, which this
+    // hook answers with "Maximum update depth exceeded".
+    () => aiEditStateFor(activeScriptId),
+  );
+
+  /** Send the text ON SCREEN — not the stored copy — with the instruction. */
+  const handleAskAi = useCallback(
+    (instruction: string) => {
+      if (!activeScript || !activeScriptId) return;
+      askAiToEdit({
+        documentId: activeScriptId,
+        documentName: activeScript.name,
+        objectType: activeScript.objectType,
+        documentKind: docKind === "module" ? "module" : "object",
+        currentSource: editorRef.current?.getValue() ?? sourceRef.current,
+        instruction,
+      });
+    },
+    [activeScript, activeScriptId, docKind],
+  );
+
+  /**
+   * Put the proposal in the buffer, as ONE undoable edit.
+   *
+   * Through Monaco rather than setSource, deliberately: it goes on the undo
+   * stack (Ctrl+Z takes the author straight back), and it fires the change
+   * handler, so dirty-marking and the module live-save path behave exactly as
+   * they do for typing. A direct setSource would bypass both.
+   */
+  const handleAcceptAi = useCallback(() => {
+    if (!activeScriptId) return;
+    const proposal = aiEditStateFor(activeScriptId).proposal;
+    const ed = editorRef.current;
+    const model = ed?.getModel();
+    if (ed && model) {
+      ed.pushUndoStop();
+      ed.executeEdits("ai-edit", [{ range: model.getFullModelRange(), text: proposal }]);
+      ed.pushUndoStop();
+      ed.focus();
+    } else {
+      // No editor mounted (a test, or a window mid-teardown). The buffer is
+      // still the source of truth for a save, so it must not be skipped.
+      setSource(proposal);
+      setIsDirty(true);
+    }
+    clearAiEdit(activeScriptId);
+  }, [activeScriptId]);
+
+  const handleRejectAi = useCallback(() => {
+    if (activeScriptId) rejectAiEdit(activeScriptId);
+  }, [activeScriptId]);
+
+
   // Point `ObjectScriptContext` at THIS script's context interface, so
   // `@param {ObjectScriptContext} context` resolves to (say) SlicerContext —
   // on BOTH lanes, because JSDoc types only apply to a .js model and real
@@ -2058,6 +2140,38 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           }}>{errorCount}</span>}
         </button>
 
+        {/* Edit with AI. Offered for every document kind INCLUDING a recorded
+            macro — a macro is the case where hand-editing is most tedious and
+            AI help is worth the most. Never for a distributed script, which is
+            read-only in this window. */}
+        {activeScript && !isReadOnly && (
+          <button
+            className="ose-btn"
+            data-testid="ai-edit-toggle"
+            onClick={() => setShowAiEdit((v) => !v)}
+            style={
+              aiEdit.phase === "running" || aiEdit.phase === "proposed"
+                ? { color: "#9CDCFE" }
+                : undefined
+            }
+            title="Describe a change in words; review a diff before anything is written"
+          >
+            <ActivityDot
+              status={
+                aiEdit.phase === "running"
+                  ? "running"
+                  : aiEdit.phase === "proposed"
+                    ? "done"
+                    : aiEdit.phase === "error"
+                      ? "failed"
+                      : "idle"
+              }
+              size={6}
+            />
+            Edit with AI
+          </button>
+        )}
+
         <button className="ose-btn" onClick={() => setShowSidebar(!showSidebar)}>
           <IconBook /> Docs
         </button>
@@ -2188,6 +2302,20 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         </div>
       )}
 
+      {/* The AI edit composer. Opened from the toolbar, and forced open
+          whenever a run is live or has failed, so a result can never arrive
+          somewhere the author cannot see it. */}
+      {activeScript && !isReadOnly && (showAiEdit || aiEdit.phase === "running" || aiEdit.phase === "error") && (
+        <AiEditStrip
+          state={aiEdit}
+          documentName={activeScript.name}
+          onAsk={handleAskAi}
+          onStop={() => activeScriptId && cancelAiEdit(activeScriptId)}
+          onDismissError={handleRejectAi}
+          onClose={() => setShowAiEdit(false)}
+        />
+      )}
+
       {/* AI draft review banner. The MCP tool tells the agent its draft is
           "queued for the user to review"; this is what the user is shown, and
           it must state the two facts the agent cannot: nothing was saved, and
@@ -2226,6 +2354,24 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             <div style={{ marginTop: 2, opacity: 0.85 }}>{draftDoc.draft.description}</div>
           )}
         </div>
+      )}
+
+      {/* The decision. Rendered off the phase alone: a proposal that arrives
+          while the author is in another script waits, and opens when they come
+          back to it — rather than being lost or hijacking the window. */}
+      {activeScript && aiEdit.phase === "proposed" && (
+        <AiEditDiff
+          key={activeScriptId ?? "none"}
+          documentName={activeScript.name}
+          documentKind={docKind === "module" ? "module" : "object"}
+          original={source}
+          proposed={aiEdit.proposal}
+          language={language}
+          summary={aiEdit.summary}
+          unchanged={aiEdit.unchanged}
+          onAccept={handleAcceptAi}
+          onReject={handleRejectAi}
+        />
       )}
 
       {/* A module the store could not give us. The editor still opens ON it —

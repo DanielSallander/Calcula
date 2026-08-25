@@ -58,6 +58,23 @@ export const ObjectScriptEditorEvents = {
    * a freshly-created window is deterministic rather than timing-dependent.
    */
   EDITOR_READY: "objscript:editor-ready",
+  /**
+   * Editor -> Main: "ask the AI to change this script".
+   *
+   * The editor CANNOT run the model itself, and this is not a style choice.
+   * Every AI backend command is window-guarded to the MAIN window
+   * (`ai_chat_complete_stream`, `ai_chat_run_tool`, `ai_dry_run_script` all call
+   * `require_label(&window, MAIN)`), and this window activates no extensions at
+   * all — so it has no AIChat, no model selection and no job store. It sends the
+   * instruction and the buffer, and waits.
+   */
+  AI_EDIT_REQUEST: "objscript:ai-edit-request",
+  /** Main -> Editor: the proposed script. NEVER applied automatically. */
+  AI_EDIT_RESULT: "objscript:ai-edit-result",
+  /** Main -> Editor: a phase line, so a six-minute local model is not silent. */
+  AI_EDIT_PROGRESS: "objscript:ai-edit-progress",
+  /** Editor -> Main: abandon a running edit. */
+  AI_EDIT_CANCEL: "objscript:ai-edit-cancel",
 } as const;
 
 // ============================================================================
@@ -258,4 +275,93 @@ export function onEditorClosed(
 /** Main: listen for the editor announcing its listeners are registered. */
 export function onEditorReady(callback: () => void): Promise<UnlistenFn> {
   return listenTauriEvent(ObjectScriptEditorEvents.EDITOR_READY, callback);
+}
+
+// ============================================================================
+// AI editing (Editor <-> Main)
+// ============================================================================
+//
+// The editor window owns the code and the review; the main window owns the
+// model. These four channels are the whole of the conversation between them.
+
+/** Which store the document lives in. Decides what APPLYING will mean. */
+export type AiEditDocumentKind = "module" | "objectScript" | "aiDraft";
+
+export interface AiEditRequestPayload {
+  /** Correlates the reply. The editor refuses a result for anything else. */
+  documentId: string;
+  documentName: string;
+  objectType: string;
+  documentKind: AiEditDocumentKind;
+  /**
+   * The code ON SCREEN, not the stored copy.
+   *
+   * The user may have typed since the last save, and editing anything else
+   * would silently discard that.
+   */
+  currentSource: string;
+  instruction: string;
+}
+
+export interface AiEditResultPayload {
+  documentId: string;
+  jobId: string;
+  ok: boolean;
+  /** The proposed WHOLE script. Present even on failure — the best attempt. */
+  source: string;
+  summary: string;
+  /** The model judged that no change was needed. Not a failure. */
+  unchanged?: boolean;
+}
+
+export interface AiEditProgressPayload {
+  documentId: string;
+  jobId: string;
+  phase: string;
+  /** A volatile reading inside the phase, e.g. "41 lines so far". */
+  live?: string;
+}
+
+export interface AiEditCancelPayload {
+  jobId: string;
+}
+
+export async function emitAiEditRequest(payload: AiEditRequestPayload): Promise<void> {
+  await emitTauriEvent(ObjectScriptEditorEvents.AI_EDIT_REQUEST, payload);
+}
+
+export async function emitAiEditResult(payload: AiEditResultPayload): Promise<void> {
+  await emitTauriEvent(ObjectScriptEditorEvents.AI_EDIT_RESULT, payload);
+}
+
+export async function emitAiEditProgress(payload: AiEditProgressPayload): Promise<void> {
+  await emitTauriEvent(ObjectScriptEditorEvents.AI_EDIT_PROGRESS, payload);
+}
+
+export async function emitAiEditCancel(payload: AiEditCancelPayload): Promise<void> {
+  await emitTauriEvent(ObjectScriptEditorEvents.AI_EDIT_CANCEL, payload);
+}
+
+export function onAiEditRequest(
+  callback: (payload: AiEditRequestPayload) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<AiEditRequestPayload>(ObjectScriptEditorEvents.AI_EDIT_REQUEST, callback);
+}
+
+export function onAiEditResult(
+  callback: (payload: AiEditResultPayload) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<AiEditResultPayload>(ObjectScriptEditorEvents.AI_EDIT_RESULT, callback);
+}
+
+export function onAiEditProgress(
+  callback: (payload: AiEditProgressPayload) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<AiEditProgressPayload>(ObjectScriptEditorEvents.AI_EDIT_PROGRESS, callback);
+}
+
+export function onAiEditCancel(
+  callback: (payload: AiEditCancelPayload) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<AiEditCancelPayload>(ObjectScriptEditorEvents.AI_EDIT_CANCEL, callback);
 }

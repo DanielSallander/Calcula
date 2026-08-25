@@ -1,4 +1,4 @@
-//! FILENAME: app/extensions/AIChat/components/ActivityDot.tsx
+//! FILENAME: app/extensions/_shared/components/ActivityDot.tsx
 // PURPOSE: An indicator that is visibly ALIVE, so a slow local model reads as
 //          working rather than wedged.
 // CONTEXT: 2026-08-24, asked for directly: "it would be cool to have an icon
@@ -17,6 +17,12 @@
 //          would freeze at exactly the moment it matters most: when the main
 //          thread is busy. A CSS animation runs on the compositor and keeps
 //          moving through a busy tick, which is the honest signal.
+//
+//          IN _shared BECAUSE TWO EXTENSIONS SHOW IT. AIChat drives it from the
+//          job store; the Object Script Editor (ScriptableObjects) shows the
+//          same signal for the same runs, in a different window. Extensions may
+//          not import each other, and a copy would drift the moment one of them
+//          is retuned.
 
 import React, { useEffect } from "react";
 

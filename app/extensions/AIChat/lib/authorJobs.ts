@@ -32,8 +32,14 @@ export interface JobStep {
 
 export type JobState = "running" | "done" | "failed" | "cancelled";
 
+/** What the job is FOR. An edit reports differently and delivers differently. */
+export type JobKind = "create" | "edit";
+
 export interface AuthorJob {
   id: string;
+  kind: JobKind;
+  /** EDIT: the document being changed, so the toast can name it. */
+  documentName?: string;
   intent: string;
   objectType: string;
   model: string;
@@ -166,6 +172,20 @@ export interface StartJobRequest {
   providerId: string;
   model: string;
   baseUrl?: string;
+  /** EDIT MODE: the script on screen. Its presence switches the whole run. */
+  baseSource?: string;
+  /** EDIT MODE: the document name, for the toast. */
+  documentName?: string;
+  /** Called once when the run ends, however it ends. Used by the editor bridge. */
+  onDone?: (result: AuthorRunResult) => void;
+  /**
+   * Progress, forwarded to a caller that cannot subscribe to this store.
+   *
+   * The guided screen reads the job directly; the Object Script Editor is a
+   * SEPARATE WINDOW with its own JS realm, so for it the store may as well not
+   * exist. This is how a six-minute run stays visible over there.
+   */
+  onPhaseForCaller?: (phase: string, live?: string) => void;
 }
 
 /**
@@ -179,6 +199,8 @@ export function startAuthorJob(req: StartJobRequest): string {
   const id = `job-${Date.now()}-${counter++}`;
   const job: AuthorJob = {
     id,
+    kind: req.baseSource !== undefined ? "edit" : "create",
+    documentName: req.documentName,
     intent: req.intent,
     objectType: req.objectType,
     model: req.model,
@@ -196,6 +218,7 @@ export function startAuthorJob(req: StartJobRequest): string {
       const result = await runAuthor({
         intent: req.intent,
         objectType: req.objectType,
+        baseSource: req.baseSource,
         providerId: req.providerId,
         model: req.model,
         baseUrl: req.baseUrl,
@@ -203,9 +226,11 @@ export function startAuthorJob(req: StartJobRequest): string {
         onPhase: (phase, detail) => {
           setPhase(id, phase);
           push(id, { kind: "info", text: phase, detail });
+          req.onPhaseForCaller?.(phase);
         },
         onLiveProgress: (text) => {
           update(id, (j) => (j.live === text ? j : { ...j, live: text }));
+          req.onPhaseForCaller?.(jobById(id)?.phase ?? "", text);
         },
         onRound: (round) => {
           update(id, (j) => ({
@@ -236,13 +261,14 @@ export function startAuthorJob(req: StartJobRequest): string {
       // The whole point of a background job is that the user is elsewhere. A
       // toast is what tells them it is worth coming back.
       if (!wasCancelled) {
-        showToast(
-          result.ok
-            ? `Script ready for review: "${shortIntent(req.intent)}"`
-            : `Could not write "${shortIntent(req.intent)}" — open AI Chat for details.`,
-          { type: result.ok ? "success" : "warning" },
-        );
+        showToast(toastFor(req, result), {
+          type: result.ok ? (result.unchanged ? "info" : "success") : "warning",
+        });
       }
+      // The bridge's only way home: the editor window is not subscribed to this
+      // store and never can be. Fired AFTER the state is published so a handler
+      // that reads the job sees the finished one.
+      req.onDone?.(result);
     } catch (e) {
       const wasCancelled = cancelled.has(id);
       update(id, (j) => ({
@@ -260,12 +286,40 @@ export function startAuthorJob(req: StartJobRequest): string {
       if (!wasCancelled) {
         showToast(`Script authoring failed: ${e}`, { type: "error" });
       }
+      // Fired on EVERY ending, including this one. A bridge that only heard
+      // about success would leave the editor showing a spinner forever.
+      req.onDone?.({
+        ok: false,
+        source: "",
+        summary: wasCancelled ? "Stopped at your request." : `${e}`,
+        rounds: [],
+      });
     } finally {
       cancelled.delete(id);
     }
   })();
 
   return id;
+}
+
+/**
+ * The completion toast, in terms of what the job actually was.
+ *
+ * An EDIT names the document, because the user started it from that document
+ * and "ready for review" without saying WHICH script is the kind of message
+ * that sends someone hunting.
+ */
+function toastFor(req: StartJobRequest, result: AuthorRunResult): string {
+  const what = req.documentName ? `"${shortIntent(req.documentName)}"` : `"${shortIntent(req.intent)}"`;
+  if (req.baseSource !== undefined) {
+    if (!result.ok) return `Could not edit ${what} — open the script editor for details.`;
+    return result.unchanged
+      ? `${what} needed no change, according to the model.`
+      : `A change to ${what} is ready for you to review.`;
+  }
+  return result.ok
+    ? `Script ready for review: ${what}`
+    : `Could not write ${what} — open AI Chat for details.`;
 }
 
 /** A few words of the intent, for a toast that has to fit on one line. */

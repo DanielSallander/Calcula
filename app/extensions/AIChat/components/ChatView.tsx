@@ -59,7 +59,7 @@ import {
 import { detectScriptIntent, guessObjectType } from "../lib/scriptIntent";
 import { subscribeToJobs, latestJob, formatElapsed, type AuthorJob } from "../lib/authorJobs";
 import { onJobViewRequested } from "../lib/jobFocus";
-import { ActivityDot } from "./ActivityDot";
+import { ActivityDot } from "../../_shared/components/ActivityDot";
 import { ModelPicker } from "./ModelPicker";
 import { ScriptAuthor } from "./ScriptAuthor";
 

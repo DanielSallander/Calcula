@@ -9,12 +9,13 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { IconServer, IconAIChat } from "@api";
+import { IconServer, IconAIChat, registerScriptAssistantProvider } from "@api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChatView } from "./components/ChatView";
 import { AuthorStatusItem } from "./components/AuthorStatusItem";
 import { aiChatBackend } from "./lib/aiChatBackend";
 import { registerJobViewOpener } from "./lib/jobFocus";
+import { buildScriptAssistant } from "./lib/scriptAssistant";
 
 const AI_CHAT_PANE_ID = "ai-chat";
 const AI_CHAT_LLM_PANE_ID = "ai-chat-llm";
@@ -85,6 +86,12 @@ function activate(context: ExtensionContext): void {
       context.ui.taskPanes.showContainer();
     }),
   );
+
+  // The Object Script Editor reaches AI through this seam when the user presses
+  // "Edit with AI". It must be registered HERE and the run must happen HERE:
+  // every AI backend command is window-guarded to the MAIN window, and the
+  // editor is a separate window that activates no extensions at all.
+  cleanupFns.push(registerScriptAssistantProvider(buildScriptAssistant()));
 
   // Add menu item under Developer menu
   context.ui.menus.registerItem("developer", {

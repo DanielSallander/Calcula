@@ -19,7 +19,7 @@
 import React, { useState, useSyncExternalStore } from "react";
 import { subscribeToJobs, runningJobs, formatElapsed } from "../lib/authorJobs";
 import { requestJobView } from "../lib/jobFocus";
-import { ActivityDot } from "./ActivityDot";
+import { ActivityDot } from "../../_shared/components/ActivityDot";
 
 /** The status bar's own text colour. Anything dimmer disappears on the green. */
 const ON_GREEN = "#FFFFFF";

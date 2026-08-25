@@ -57,6 +57,12 @@ vi.mock("../lib/crossWindowEvents", () => ({
   onConsoleOutput: async () => () => {},
   onScriptError: async () => () => {},
   onScriptsChanged: async () => () => {},
+  // "Edit with AI" channels. The editor subscribes to these on mount; a partial
+  // mock without them throws inside the mount effect and takes the window down.
+  emitAiEditRequest: async () => {},
+  emitAiEditCancel: async () => {},
+  onAiEditProgress: async () => () => {},
+  onAiEditResult: async () => () => {},
 }));
 
 // --- The workbook's MODULE store ---------------------------------------------

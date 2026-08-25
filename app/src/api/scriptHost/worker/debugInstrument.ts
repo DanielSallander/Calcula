@@ -965,10 +965,38 @@ export interface TopLevelFunction {
   endLine: number;
 }
 
-/** Whether a preceding token lets a `function` here begin a DECLARATION (not an expression). */
+/**
+ * Whether a preceding token lets a `function` here begin a DECLARATION (not an
+ * expression).
+ *
+ * `export` AND `default` ARE ANCHORS, and leaving them out was a live defect for
+ * the single most common shape in the product. `export function setup(context)`
+ * is what the docs teach, what the generated typings show, what every corpus
+ * reference uses and what the AI authoring pipeline emits — and with only
+ * punctuation accepted here, the token before `function` was the WORD `export`,
+ * so the scan skipped it and `topLevelFunctions` returned an empty list.
+ *
+ * The user-visible symptom (reported 2026-08-25, immediately after the AI wrote
+ * its first working script): pressing Run/F5 in the Object Script Editor said
+ * "Put the cursor inside a top-level function to run it. This script has no
+ * single function to fall back to" — about a script whose only top-level
+ * function was sitting right there under the cursor. `resolveRunTarget` falls
+ * back to `setup` by name, so an empty list is the only way to reach that
+ * message.
+ *
+ * This is the FIFTH instance of one family in this feature: `export function
+ * setup` could not mount, the debug mount stripped it in the wrong order, the
+ * preview judged every draft as a button, the assisted template taught a hook by
+ * type, and now the run-target scanner could not see it. Every one is a tool
+ * that disagreed with the form the product actually teaches.
+ */
 function isDeclarationAnchor(tok: Tok | undefined): boolean {
   if (!tok) return true; // start of source
-  return tok.kind === "punc" && (tok.text === ";" || tok.text === "{" || tok.text === "}");
+  if (tok.kind === "punc") return tok.text === ";" || tok.text === "{" || tok.text === "}";
+  // `export function f(){}` and `export default function f(){}`. Both are
+  // statement position by construction — neither word can precede a function
+  // EXPRESSION in valid JavaScript, so this cannot admit a false run-target.
+  return tok.kind === "word" && (tok.text === "export" || tok.text === "default");
 }
 
 /** Forward index of the `)` matching the `(` at `openIdx`, or -1. */

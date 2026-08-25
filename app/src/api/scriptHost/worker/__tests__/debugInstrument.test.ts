@@ -563,3 +563,76 @@ describe("enclosingTopLevelFunction", () => {
     expect(enclosingTopLevelFunction(RECORDED_MACRO, 5)).toBeNull(); // blank line
   });
 });
+
+describe("an EXPORTED declaration is a run-target", () => {
+  // Reported 2026-08-25, minutes after the AI authored its first working
+  // script: pressing Run/F5 said "This script has no single function to fall
+  // back to" about a script whose only top-level function was under the cursor.
+  // `topLevelFunctions` returned [] because the token before `function` was the
+  // WORD `export`, and only punctuation was accepted as a declaration anchor.
+  //
+  // `export function setup(context)` is what the docs teach, what the generated
+  // typings show, what every corpus reference uses, and what the AI pipeline
+  // emits — so this was broken for the shape the product is built around.
+
+  it("finds a plain declaration", () => {
+    expect(topLevelFunctions("function setup(context) {\n  context.log('x');\n}\n").map((f) => f.name))
+      .toEqual(["setup"]);
+  });
+
+  it("finds an EXPORTED declaration", () => {
+    expect(topLevelFunctions("export function setup(context) {\n  context.log('x');\n}\n").map((f) => f.name))
+      .toEqual(["setup"]);
+  });
+
+  it("finds an exported ASYNC declaration", () => {
+    // The async branch reads two tokens back, so `export` has to be accepted
+    // there as well.
+    expect(topLevelFunctions("export async function run(api) {\n  await api.x();\n}\n").map((f) => f.name))
+      .toEqual(["run"]);
+  });
+
+  it("finds an export-default declaration", () => {
+    expect(topLevelFunctions("export default function main() {\n  return 1;\n}\n").map((f) => f.name))
+      .toEqual(["main"]);
+  });
+
+  it("keeps the arity, so Run can still refuse a wrong-arity target", () => {
+    const [fn] = topLevelFunctions("export function setup(context) {\n}\n");
+    expect(fn.arity).toBe(1);
+    expect(fn.isAsync).toBe(false);
+    const [afn] = topLevelFunctions("export async function go() {\n}\n");
+    expect(afn.isAsync).toBe(true);
+    expect(afn.arity).toBe(0);
+  });
+
+  it("reports the real line span of an exported function", () => {
+    // The editor maps a cursor line to its enclosing function with this.
+    const src = "// a comment\nexport function setup(context) {\n  context.log('x');\n}\n";
+    const [fn] = topLevelFunctions(src);
+    expect(fn.startLine).toBe(2);
+    expect(fn.endLine).toBe(4);
+  });
+
+  it("still excludes function EXPRESSIONS", () => {
+    // The whole point of the anchor check: an expression is not something a
+    // user can run on its own, and admitting one would offer a bogus target.
+    expect(topLevelFunctions("const f = function () {};\n")).toEqual([]);
+    expect(topLevelFunctions("const g = async function () {};\n")).toEqual([]);
+    expect(topLevelFunctions("register(function inner() {});\n")).toEqual([]);
+  });
+
+  it("finds both halves of the shape the AI actually writes", () => {
+    const src = [
+      "export function setup(context) {",
+      "  context.onClick(async () => {",
+      "    await context.api.setRangeFormat(0, 0, 0, 0, { backgroundColor: '#FFFF00' });",
+      "  });",
+      "}",
+      "",
+      "export function helper(v) { return v; }",
+    ].join("\n");
+    // The arrow inside onClick is NOT top-level and must not be offered.
+    expect(topLevelFunctions(src).map((f) => f.name)).toEqual(["setup", "helper"]);
+  });
+});

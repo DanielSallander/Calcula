@@ -218,3 +218,60 @@ describe("the phases a user actually sees", () => {
     expect(invoke.mock.calls.some((c) => c[0] === "ai_chat_complete_stream")).toBe(false);
   });
 });
+
+describe("EDIT mode", () => {
+  // 2026-08-25: the owner asked for "Edit with AI" inside the Object Script
+  // Editor. An edit runs the same pipeline but must NOT end in the draft queue.
+
+  it("passes the on-screen source into the pipeline as an edit basis", async () => {
+    authorScript.mockResolvedValue({ ...OK_RESULT, unchanged: false });
+    await runAuthor({ ...REQ, baseSource: "export function setup(c) { c.log('hi'); }" });
+    const call = authorScript.mock.calls[0][0] as { edit?: { baseSource: string } };
+    expect(call.edit?.baseSource).toBe("export function setup(c) { c.log('hi'); }");
+  });
+
+  it("does NOT set an edit basis when creating", async () => {
+    authorScript.mockResolvedValue(OK_RESULT);
+    await runAuthor({ ...REQ });
+    expect((authorScript.mock.calls[0][0] as { edit?: unknown }).edit).toBeUndefined();
+  });
+
+  it("NEVER queues an edit as a draft", async () => {
+    // draft_object_script mints a NEW id; saving that would APPEND a second
+    // script instead of updating the one the user is editing.
+    authorScript.mockResolvedValue({ ...OK_RESULT, unchanged: false });
+    const res = await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
+    expect(res.ok).toBe(true);
+    expect(
+      invoke.mock.calls.some((c) => c[0] === "ai_chat_run_tool"),
+      "an edit belongs to a script that already exists",
+    ).toBe(false);
+    expect(res.draftId).toBeUndefined();
+  });
+
+  it("still queues a CREATE as a draft", async () => {
+    // The control: without it the assertion above passes for a broken runner.
+    authorScript.mockResolvedValue(OK_RESULT);
+    invoke.mockResolvedValue('Drafted (id=draft-abc123) for button.');
+    const res = await runAuthor({ ...REQ });
+    expect(invoke.mock.calls.some((c) => c[0] === "ai_chat_run_tool")).toBe(true);
+    expect(res.draftId).toBe("draft-abc123");
+  });
+
+  it("carries `unchanged` through to the caller", async () => {
+    authorScript.mockResolvedValue({ ...OK_RESULT, unchanged: true });
+    const res = await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
+    expect(res.unchanged, "the model judging no change is worth saying").toBe(true);
+  });
+
+  it("returns the best attempt when an edit fails", async () => {
+    authorScript.mockResolvedValue({
+      ok: false, source: "half edited", report: { ok: false, findings: [] },
+      attempts: [], summary: "Gave up.", unchanged: false,
+    });
+    const res = await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
+    expect(res.ok).toBe(false);
+    expect(res.source).toBe("half edited");
+    expect(invoke.mock.calls.some((c) => c[0] === "ai_chat_run_tool")).toBe(false);
+  });
+});

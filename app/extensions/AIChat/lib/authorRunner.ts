@@ -41,6 +41,14 @@ export interface AuthorRound {
 export interface AuthorRunRequest {
   intent: string;
   objectType: string;
+  /**
+   * EDIT MODE: the script as it stands on screen.
+   *
+   * Its presence switches the whole run from "write me a script" to "change
+   * this script" — a different system prompt, a different task line, and NO
+   * draft delivery, because an edit belongs to a script that already exists.
+   */
+  baseSource?: string;
   providerId: string;
   model: string;
   baseUrl?: string;
@@ -89,6 +97,8 @@ export interface AuthorRunResult {
    * it. It is still the single most useful thing to tell the user to check.
    */
   changedNothing?: boolean;
+  /** EDIT MODE: the model judged that no change was needed. Not a failure. */
+  unchanged?: boolean;
 }
 
 /**
@@ -246,6 +256,7 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     complete,
     // Only so a give-up message can name what gave up.
     model: req.model,
+    ...(req.baseSource ? { edit: { baseSource: req.baseSource } } : {}),
     // L3, in the realm the script will actually mount into, at the tier it will
     // actually mount at. A preview that cannot run DECLINES rather than guessing
     // — `authorScript` reads `applicable` and does not treat that as a failure.
@@ -305,7 +316,25 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
   if (!result.ok) {
     // The best attempt is returned even on failure: a script that is 90% right
     // is worth showing, and the editor is where a person fixes the rest.
-    return { ok: false, source: result.source, summary: result.summary, rounds, changedNothing: ranButChangedNothing() };
+    return {
+      ok: false, source: result.source, summary: result.summary, rounds,
+      changedNothing: ranButChangedNothing(), unchanged: result.unchanged,
+    };
+  }
+
+  // AN EDIT IS NOT A DRAFT, and must not be queued as one.
+  //
+  // `draft_object_script` mints a NEW review-queue entry with a fresh id. For an
+  // edit that is wrong twice over: the user is changing a script that already
+  // exists and has its own identity, and saving the resulting "draft" would
+  // APPEND a second script rather than update theirs. The edited text goes back
+  // to whoever asked for it — the editor — which then offers accept or discard.
+  if (req.baseSource !== undefined) {
+    phase(result.unchanged ? "No change was needed" : "Ready for you to review the change");
+    return {
+      ok: true, source: result.source, summary: result.summary, rounds,
+      changedNothing: ranButChangedNothing(), unchanged: result.unchanged,
+    };
   }
 
   // Delivered through the ordinary review path — same store, same audit, same

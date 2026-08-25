@@ -27,7 +27,7 @@ import {
   startAuthorJob, cancelJob, subscribeToJobs, latestJob, formatElapsed,
   type AuthorJob, type JobStep,
 } from "../lib/authorJobs";
-import { ActivityDot, type ActivityStatus } from "./ActivityDot";
+import { ActivityDot, type ActivityStatus } from "../../_shared/components/ActivityDot";
 import { hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
 
 const wrap: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 10, padding: 12, flex: 1, minHeight: 0 };
