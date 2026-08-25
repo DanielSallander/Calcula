@@ -428,9 +428,7 @@ impl Expression {
     pub fn contains_negated_membership(&self) -> bool {
         let here = match self {
             Expression::InList { negated, .. } => *negated,
-            Expression::Keep { in_predicates, .. } => {
-                in_predicates.iter().any(|p| p.negated)
-            }
+            Expression::Keep { in_predicates, .. } => in_predicates.iter().any(|p| p.negated),
             Expression::KeepIn { predicates, .. } => predicates.iter().any(|p| p.negated),
             _ => false,
         };

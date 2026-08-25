@@ -17,6 +17,7 @@ Verbs:
   delete <kind> <name>         delete (wildcards allowed, asks first)
   refresh table <name>         re-fetch an InMemory table from its source
   materialize calctable <name> materialize a calculated table now
+  transform table <name> …     edit a table's applied steps (see 'help transform')
   validate                     model consistency check
   import tables|sql …          import source tables / a SQL query table
   connect source <name> …      wire a catalog source live
@@ -59,6 +60,8 @@ const TOPICS: Record<string, string> = {
   rename table <old> <new>        (sets the DISPLAY name)
   delete table <pattern>          (drops relationships that reference it)
   refresh table <pattern>         (re-fetch rows now)
+  transform table <name> …        (applied steps — see 'help transform')
+  'show table <name>' lists the applied steps, numbered from 1.
   New tables come from: import tables, import sql, add calctable, add source.`,
   column: `Columns:
   ls columns [Table] | ls columns Table[pattern]
@@ -204,6 +207,35 @@ first. Multi-deletes run as one undo step and roll back wholesale on error.
 source now. Not undoable (data, not model).`,
   materialize: `materialize calctable <name> — write a non-dynamic calculated
 table's rows into its derived model table now.`,
+  transform: `Applied steps (Power Query-style table transformations):
+  transform table <name> add <stepType> [key=value …] [= <expression>] [at=<n>]
+  transform table <name> remove <n>          transform table <name> move <n> <to>
+  transform table <name> rename <n> <name>   transform table <name> clear
+  ls: 'show table <name>' prints the pipeline, numbered from 1 — the SAME
+  numbers every subaction takes. No wildcards: a step number means something
+  different in each table's list. The table must be bound to a data source,
+  and a transformed table is forced to InMemory storage.
+
+Step types and their options:
+  removeColumns columns=A,B        selectColumns columns=A,B   (also reorders)
+  renameColumn column=Old newname=New
+  changeType column=Qty type=Int64 [onerror=fail|null]   (or columns=A,B)
+  filterRows = <row condition>
+  addColumn name=Margin [type=Float64] = <expression>
+  splitColumn column=Name delimiter="," parts=2 [keeporiginal=true]
+  replaceValues column=Region find="x" [replace="y"] [matchentire=true]
+  textTransform columns=A,B operation=trim|clean|upper|lower
+  fillDown columns=A,B             removeDuplicates [columns=A,B]
+  sort by=Amount,-Date             (also Col:desc / Col:asc)
+  groupBy groupby=Region agg=sum:Amount:Total agg=countrows::Rows
+  keepRows range=first:100         removeRows range=range:0:10
+  unpivot columns=Jan,Feb namecolumn=Month valuecolumn=Amount
+  pivot namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb
+
+  Each edit rewrites the WHOLE pipeline in one call, so it is one undo step.
+  'rename <n> <name>' renames the OUTPUT NAME the step introduces (addColumn's
+  column, or a one-column renameColumn's target) — the engine's steps carry no
+  display label, so a step with no such name refuses rather than losing it.`,
   validate: `validate — run the engine's model consistency checks.`,
   import: `import tables schema.table,schema.other [schema=<default>]
 import sql <TableName> = SELECT … — both need a connected source.`,

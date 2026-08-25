@@ -11,6 +11,7 @@ pub mod hierarchy;
 pub mod kpi;
 pub mod perspective;
 pub mod relationship;
+pub mod rest;
 pub mod schema;
 pub mod security_role;
 pub mod source;
@@ -31,6 +32,11 @@ pub use hierarchy::{Hierarchy, HierarchyLevel, RaggedBehavior};
 pub use kpi::{Kpi, KpiStatus, KpiTarget, StatusBand};
 pub use perspective::Perspective;
 pub use relationship::{Cardinality, FilterPropagation, JoinCondition, JoinOperator, Relationship};
+pub use rest::{
+    is_loopback_host, validate_absolute_url, RestAuthSpec, RestEndpoint, RestField, RestHeader,
+    RestMethod, RestPagination, RestSourceConfig, DEFAULT_REST_MAX_RESPONSE_BYTES,
+    DEFAULT_REST_TIMEOUT_SECS, MAX_REST_PAGE_LIMIT, MAX_REST_RESPONSE_BYTES, MAX_REST_TIMEOUT_SECS,
+};
 pub use schema::{DataModel, DataModelBuilder};
 pub use security_role::SecurityRole;
 pub use source::{

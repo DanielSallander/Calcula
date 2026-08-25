@@ -189,6 +189,59 @@ pub(crate) async fn apply_filters(
     }
 }
 
+/// Apply a fetch request's **projection and row limit** to batches that have
+/// already been through [`apply_filters`].
+///
+/// The two halves are separate because they are separately optional: the
+/// in-memory / CSV / Parquet connectors are scan-with-filters sources whose
+/// callers project locally, while a connector that cannot push *anything* to
+/// its source (the REST connector) must honor the entire [`FetchRequest`]
+/// contract itself. Sharing this keeps one implementation of "what `columns`
+/// and `limit` mean" rather than a second one per such connector.
+///
+/// `columns` names the projection in request order; a name the batch does not
+/// have is an error rather than a dropped column, because silently returning a
+/// narrower result than asked for is a wrong answer. An empty `columns` means
+/// "all columns". `limit` is applied across the batch sequence, so the total
+/// row count never exceeds it.
+pub(crate) fn apply_projection_and_limit(
+    batches: Vec<RecordBatch>,
+    request: &FetchRequest,
+) -> ConnectorResult<Vec<RecordBatch>> {
+    let mut out = Vec::with_capacity(batches.len());
+    let mut remaining = request.limit;
+
+    for batch in batches {
+        let projected = if request.columns.is_empty() {
+            batch
+        } else {
+            let mut indices = Vec::with_capacity(request.columns.len());
+            for name in &request.columns {
+                let index = batch.schema().index_of(name).map_err(|_| {
+                    ConnectorError::QueryFailed(format!(
+                        "requested column '{name}' is not present in the fetched rows"
+                    ))
+                })?;
+                indices.push(index);
+            }
+            batch
+                .project(&indices)
+                .map_err(|e| ConnectorError::QueryFailed(e.to_string()))?
+        };
+
+        match remaining.as_mut() {
+            None => out.push(projected),
+            Some(0) => break,
+            Some(left) => {
+                let take = (*left).min(projected.num_rows());
+                *left -= take;
+                out.push(projected.slice(0, take));
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl Connector for InMemoryConnector {
     async fn list_tables(&self) -> ConnectorResult<Vec<SourceTable>> {
         Ok(self

@@ -565,6 +565,25 @@ fn upsert_payload(
                 "value": after.extension_data().get(name),
             })
         }
+        // A pipeline is one ordered list, so the replayable payload is the
+        // WHOLE list after the edit rather than the single step the user
+        // touched — replaying it reproduces the table's shape exactly, which
+        // an incremental "add step 3" could not if the recording is replayed
+        // against a table whose pipeline differs.
+        "transform" => {
+            let steps = after
+                .table(name)
+                .ok()
+                .and_then(|t| t.source_binding())
+                .map(|b| {
+                    b.transformations
+                        .iter()
+                        .filter_map(|s| serde_json::to_value(s).ok())
+                        .collect::<Vec<Value>>()
+                })
+                .unwrap_or_default();
+            json!({ "table": name, "steps": steps })
+        }
         // dateTable/metadata go through scalar_capture; anything else here is
         // a coverage bug the tests catch by this marker.
         other => return Err(format!("UNSUPPORTED_KIND: {}", other)),
@@ -578,6 +597,9 @@ fn delete_payload(kind: &str, name: &str, before: &bi_engine::DataModel) -> Resu
     Ok(match kind {
         "culture" => json!({ "locale": name }),
         "extensionData" => json!({ "key": name }),
+        // Clearing a pipeline: the gateway's `transform` delete takes only the
+        // table (it is the same call as an upsert with no steps).
+        "transform" => json!({ "table": name }),
         // The recorded event cannot see the user's cascade choice; false is
         // the conservative replay (fail loudly if references remain).
         "calculatedTable" => json!({ "name": name, "cascade": false }),

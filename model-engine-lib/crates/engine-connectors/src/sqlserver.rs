@@ -140,6 +140,14 @@ impl SqlServerConnector {
             ResolvedCredentials::UsernamePassword { username, password } => {
                 ResolvedSqlServerAuth::SqlServer { username, password }
             }
+            ResolvedCredentials::Secrets => {
+                return Err(ConnectorError::AuthMethodNotSupported(
+                    "Named secret slots (AuthMethod::Secrets) are a REST/Web source concept; \
+                     the SQL Server connector takes AuthMethod::Integrated, \
+                     AuthMethod::UsernamePassword, or AuthMethod::EnvironmentVariable"
+                        .to_string(),
+                ));
+            }
         };
 
         Ok(SqlServerConnectionSettings {

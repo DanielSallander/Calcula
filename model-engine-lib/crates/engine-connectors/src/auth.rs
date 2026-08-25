@@ -78,6 +78,20 @@ pub enum AuthMethod {
         /// Environment variable name that holds the password.
         password_var: String,
     },
+
+    /// A map of **named secret slots** to their resolved values.
+    ///
+    /// Used by sources whose credentials are not a single username/password
+    /// pair — today the REST/Web connector, whose configuration may declare a
+    /// bearer token, a custom header value, a query-string key, or a Basic
+    /// password, each referenced by slot *name*. The model file records only
+    /// the names (see `engine_core::model::RestAuthSpec`); the host resolves
+    /// them from its own vault and supplies the values here, at wiring time.
+    ///
+    /// Like every other variant this is **never serialized**. A connector that
+    /// declares a slot the map does not contain must fail closed rather than
+    /// issue an unauthenticated request.
+    Secrets(std::collections::HashMap<String, String>),
 }
 
 /// Describes a database server to connect to — the "what", not the "how".
@@ -187,6 +201,9 @@ pub enum AuthMethodKind {
     UsernamePassword,
     /// Environment-variable-based credential lookup.
     EnvironmentVariable,
+    /// A map of named secret slots resolved by the host (see
+    /// [`AuthMethod::Secrets`]).
+    SecretMap,
 }
 
 impl AuthMethod {
@@ -196,7 +213,22 @@ impl AuthMethod {
             AuthMethod::Integrated => AuthMethodKind::Integrated,
             AuthMethod::UsernamePassword { .. } => AuthMethodKind::UsernamePassword,
             AuthMethod::EnvironmentVariable { .. } => AuthMethodKind::EnvironmentVariable,
+            AuthMethod::Secrets(_) => AuthMethodKind::SecretMap,
         }
+    }
+
+    /// Build a [`AuthMethod::Secrets`] map from name/value pairs.
+    pub fn secrets<K, V>(entries: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        AuthMethod::Secrets(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        )
     }
 }
 
@@ -295,6 +327,17 @@ pub(crate) enum ResolvedCredentials {
     },
     /// OS-level integrated authentication — no embedded credentials.
     Integrated,
+    /// A host-supplied map of named secret slots.
+    ///
+    /// Carries **no payload on purpose**. Only a connector whose own
+    /// configuration declares slot names can make sense of the values (today
+    /// the REST/Web connector, which matches its `RestAuthSpec` against the map
+    /// itself and reports a missing slot by name). Every connector that routes
+    /// through this resolver is a database connector and rejects the method
+    /// outright, so passing the values on would be handing them to code that
+    /// can only drop them. The variant exists so that each such connector is
+    /// *forced* to declare that stance.
+    Secrets,
 }
 
 /// Resolve an [`AuthMethod`] into concrete [`ResolvedCredentials`].
@@ -316,10 +359,34 @@ pub(crate) fn resolve_credentials(auth: AuthMethod) -> ConnectorResult<ResolvedC
             resolve_env_var(&username_var)?,
             resolve_env_var(&password_var)?,
         ),
+        AuthMethod::Secrets(map) => {
+            // Slot values are opaque here; apply the same NUL rule every other
+            // credential goes through, then report only the discriminant — see
+            // `ResolvedCredentials::Secrets`.
+            validate_secret_map(&map)?;
+            return Ok(ResolvedCredentials::Secrets);
+        }
     };
     validate_no_nul("username", &username)?;
     validate_no_nul("password", &password)?;
     Ok(ResolvedCredentials::UsernamePassword { username, password })
+}
+
+/// Validate a host-supplied secret map: no slot value may contain an embedded
+/// NUL byte.
+///
+/// The same rule [`resolve_credentials`] applies to a username/password, in one
+/// place so a connector that resolves its own slots (the REST/Web connector,
+/// which matches slot names against its configuration and therefore does not
+/// route through [`resolve_credentials`]) gets it too rather than re-deriving
+/// it. Reports the offending **slot name**, never its value.
+pub fn validate_secret_map(
+    secrets: &std::collections::HashMap<String, String>,
+) -> ConnectorResult<()> {
+    for (name, value) in secrets {
+        validate_no_nul(name, value)?;
+    }
+    Ok(())
 }
 
 /// Read a required environment variable, mapping an unset variable to a
@@ -381,6 +448,7 @@ mod tests {
             AuthMethodKind::Integrated,
             AuthMethodKind::UsernamePassword,
             AuthMethodKind::EnvironmentVariable,
+            AuthMethodKind::SecretMap,
         ] {
             let json = serde_json::to_string(&kind).unwrap();
             let restored: AuthMethodKind = serde_json::from_str(&json).unwrap();
@@ -415,6 +483,40 @@ mod tests {
             err,
             ConnectorError::InvalidConnectionParameter { ref parameter, .. }
                 if parameter == "password"
+        ));
+    }
+
+    #[test]
+    fn secret_map_resolves_to_the_named_slots() {
+        let auth = AuthMethod::secrets([("token", "t0p"), ("key", "k3y")]);
+        assert_eq!(auth.kind(), AuthMethodKind::SecretMap);
+        assert!(matches!(
+            resolve_credentials(auth).unwrap(),
+            ResolvedCredentials::Secrets
+        ));
+    }
+
+    #[test]
+    fn validate_secret_map_accepts_clean_values_and_names_a_bad_slot() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("token".to_string(), "t0p".to_string());
+        assert!(validate_secret_map(&map).is_ok());
+        map.insert("bad".to_string(), format!("a{}b", char::from(0u8)));
+        let err = validate_secret_map(&map).unwrap_err();
+        match err {
+            ConnectorError::InvalidConnectionParameter { parameter, .. } => {
+                assert_eq!(parameter, "bad");
+            }
+            other => panic!("unexpected error {other}"),
+        }
+    }
+
+    #[test]
+    fn secret_map_rejects_an_embedded_nul_byte() {
+        let auth = AuthMethod::secrets([("token", "t\0p")]);
+        assert!(matches!(
+            resolve_credentials(auth),
+            Err(ConnectorError::InvalidConnectionParameter { .. })
         ));
     }
 

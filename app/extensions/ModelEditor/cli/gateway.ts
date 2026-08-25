@@ -43,6 +43,8 @@ import {
   biModelSetTableRefresh,
   biModelSetTableSourceBinding,
   biModelSetTableStorageMode,
+  biModelTransformGet,
+  biModelTransformSet,
   biModelUndo,
   biModelUpdateColumn,
   biModelUpdateTable,
@@ -93,6 +95,12 @@ export interface CliGateway {
   setTableSourceBinding: typeof biModelSetTableSourceBinding;
   setTableRefresh: typeof biModelSetTableRefresh;
   refreshTable: typeof biModelRefreshTable;
+  /** A table's saved transformation pipeline + the source schema it derives
+   *  from. The overview already carries `transformSteps`, so the CLI reads
+   *  this only when it needs the source columns or the `bound` verdict. */
+  transformGet: typeof biModelTransformGet;
+  /** Replace a table's pipeline — ONE model edit, so one undo step. */
+  transformSet: typeof biModelTransformSet;
   updateColumn: typeof biModelUpdateColumn;
   upsertModelColumn: typeof biModelUpsertModelColumn;
   deleteCalcColumn: typeof biModelDeleteCalcColumn;
@@ -163,6 +171,8 @@ export function createLiveGateway(): CliGateway {
     setTableSourceBinding: biModelSetTableSourceBinding,
     setTableRefresh: biModelSetTableRefresh,
     refreshTable: biModelRefreshTable,
+    transformGet: biModelTransformGet,
+    transformSet: biModelTransformSet,
     updateColumn: biModelUpdateColumn,
     upsertModelColumn: biModelUpsertModelColumn,
     deleteCalcColumn: biModelDeleteCalcColumn,

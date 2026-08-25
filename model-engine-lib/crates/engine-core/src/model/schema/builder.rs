@@ -2084,6 +2084,25 @@ impl DataModelBuilder {
             )?;
         }
 
+        // 13b. Validate transformation pipelines. Like the refresh filter
+        // above, a pipeline travels inside a shared model file and is executed
+        // against a live source on every refresh, so it is checked here rather
+        // than at refresh time. This also establishes the invariant that a
+        // table's declared columns are exactly what its own steps produce —
+        // without which a model could claim a shape its refresh never
+        // delivers. See `validation::validate_table_transformations`.
+        for table in &self.tables {
+            super::validation::validate_table_transformations(table)?;
+        }
+
+        // 13c. Validate REST sources. A REST configuration is turned into live
+        // HTTP requests on every refresh, so its transport posture is
+        // established here (once) rather than discovered mid-fetch; and a table
+        // bound to a REST source must be InMemory, because DirectQuery would
+        // re-walk every page of a remote API on every query. See
+        // `validation::validate_rest_sources`.
+        super::validation::validate_rest_sources(&self.sources, &self.tables)?;
+
         // 14. Validate calculation groups. Each group is a set of measure
         // templates ("calculation items"); their item expressions are
         // author-written and travel inside shared model files, so they are

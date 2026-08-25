@@ -446,6 +446,7 @@ export function ModelEditorApp(): React.ReactElement {
       return (
         <ImportSection
           connectionId={connectionId}
+          overview={overview}
           readOnly={readOnly}
           applyOverview={applyOverview}
           reportError={reportError}

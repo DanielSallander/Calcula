@@ -400,7 +400,8 @@ export type BiModelChangeDomain =
   | "measure" | "calcColumn" | "relationship" | "hierarchy" | "kpi"
   | "calcGroup" | "scriptFunction" | "table" | "context" | "contextColumn"
   | "variable" | "calculatedTable" | "perspective" | "culture" | "role"
-  | "writebackColumn" | "source" | "extensionData" | "metadata" | "bulk";
+  | "writebackColumn" | "source" | "extensionData" | "metadata" | "transform"
+  | "bulk";
 
 /** Payload of AppEvents.BI_MODEL_CHANGED (metadata-only, never expressions). */
 export interface BiModelChangedPayload {

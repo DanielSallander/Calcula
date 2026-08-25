@@ -457,8 +457,34 @@ use crate::model::writeback_column::WritebackColumn;
 ///   silently drop the new item field on resave) — so the
 ///   [`ModelFormatTooNew`] gate refuses v23 files on a pre-v23 engine.
 ///
+/// - `24` — table transformations and persisted SQL-source bindings:
+///   [`TableSourceBinding`](crate::model::TableSourceBinding) gained
+///   `transformations` (an ordered
+///   [`TransformStep`](crate::transform::TransformStep) pipeline applied to
+///   fetched rows before they land), `source_columns` (the source's own
+///   pre-transform schema, the anchor for offline schema derivation), and
+///   `source_query` (a SQL `SELECT` the table's rows come from, which
+///   previously existed only at runtime and in host-side storage).
+///   A pre-v24 engine would drop the pipeline and load the table as though
+///   its raw source rows were its content — a table that looks refreshed
+///   while being unfiltered, unrenamed, and untyped, which is a wrong answer
+///   rather than a cosmetic loss — so the [`ModelFormatTooNew`] gate refuses
+///   v24 files on a pre-v24 engine.
+///
+///   v24 also carries the built-in **REST/Web source**:
+///   [`SourceKind`](crate::model::SourceKind) gained `Rest`,
+///   [`PersistedAuthKind`](crate::model::PersistedAuthKind) gained
+///   `SecretMap`, and [`PersistedSource`](crate::model::PersistedSource)
+///   gained `rest` — a
+///   [`RestSourceConfig`](crate::model::RestSourceConfig) holding the base
+///   URL, default headers, endpoint declarations (path, method, query, body,
+///   rows path, fields, pagination) and an auth spec that records **secret
+///   slot names only**, never credential values. Both new enum values fail to
+///   deserialize on a pre-v24 engine, so such a model refuses to open there
+///   rather than loading a source it cannot reach.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 23;
+pub const MODEL_FORMAT_VERSION: u32 = 24;
 
 /// A data model consisting of tables and relationships between them.
 ///

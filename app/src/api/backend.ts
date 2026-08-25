@@ -3765,6 +3765,94 @@ export interface ModelTableInfo {
   refreshStrategies: RefreshStrategyDto[];
   /** Incremental-refresh filter (re-fetch only volatile rows), or null. */
   incrementalRefresh: string | null;
+  /** The table's transformation pipeline ("applied steps"), in order. Empty
+   *  for an ordinary table. */
+  transformSteps: TransformStepDto[];
+  /** The source's own schema, before the steps run. Empty when the table has
+   *  no pipeline; the step editor shows this as the "Source" row. */
+  sourceColumns: ModelColumnInfo[];
+}
+
+/**
+ * One applied transformation step.
+ *
+ * Deliberately a flat `type`-discriminated interface rather than a TS union
+ * (the `RefreshStrategyDto` precedent above): the engine owns the step
+ * vocabulary, and a union here would have to be re-edited every time the
+ * engine gains a step, for no type safety the editor actually uses.
+ *
+ * Serialized shape mirrors the engine's `TransformStep` exactly — internally
+ * tagged on `type`, camelCase fields. Only the fields belonging to `type` are
+ * present.
+ */
+export interface TransformStepDto {
+  /** "removeColumns" | "selectColumns" | "renameColumns" | "changeType"
+   *  | "filterRows" | "addColumn" | "splitColumn" | "replaceValues"
+   *  | "textTransform" | "fillDown" | "removeDuplicates" | "sort"
+   *  | "groupBy" | "keepRows" | "removeRows" | "unpivot" | "pivot" */
+  type: string;
+  columns?: string[];
+  renames?: Array<{ from: string; to: string }>;
+  changes?: Array<{ column: string; newType: string }>;
+  onError?: "fail" | "null";
+  condition?: string;
+  name?: string;
+  expression?: string;
+  dataType?: string;
+  column?: string;
+  delimiter?: string;
+  parts?: number;
+  keepOriginal?: boolean;
+  find?: string;
+  replace?: string;
+  matchEntireValue?: boolean;
+  operation?: "trim" | "clean" | "upper" | "lower";
+  by?: Array<{ column: string; descending?: boolean }>;
+  groupBy?: string[];
+  aggregates?: Array<{ column?: string; function: string; alias: string }>;
+  range?: { kind: "firstN" | "lastN" | "range"; count?: number; offset?: number };
+  nameColumn?: string;
+  valueColumn?: string;
+  aggregate?: string;
+  valueNames?: string[];
+}
+
+/** One diagnostic against a step, by index. Mirrors the chart-transform
+ *  diagnostic shape so the step editor reuses that presentation. */
+export interface TransformDiagnosticDto {
+  index: number;
+  stepType: string;
+  severity: "error" | "warning";
+  message: string;
+}
+
+/** The columns a candidate pipeline would produce, without committing it. */
+export interface TransformSchemaResult {
+  columns: ModelColumnInfo[];
+  /** Empty when the pipeline is valid. */
+  diagnostics: TransformDiagnosticDto[];
+}
+
+/** A row-limited preview of a candidate pipeline as of a given step. */
+export interface TransformPreviewResult {
+  columns: string[];
+  rows: Array<Array<string | null>>;
+  rowCount: number;
+  /** The sample hit the row cap, so more source rows exist. */
+  truncated: boolean;
+  /** A step in the previewed prefix aggregates or reorders across the whole
+   *  table, so this sample is indicative rather than final. */
+  sampled: boolean;
+  diagnostics: TransformDiagnosticDto[];
+}
+
+/** A table's saved pipeline and the source schema it derives from. */
+export interface TransformDefinition {
+  steps: TransformStepDto[];
+  sourceColumns: ModelColumnInfo[];
+  /** False when the table is not bound to a data source, so it cannot carry
+   *  a pipeline at all. */
+  bound: boolean;
 }
 
 export interface RelationshipConditionDto {
@@ -4069,6 +4157,90 @@ export interface ModelSourceInfo {
   sslMode: string | null;
   /** How many model tables bind to this source. */
   tableCount: number;
+  /** REST/Web configuration, or null for every other source kind. Carries
+   *  secret slot NAMES only — never a credential value. */
+  rest: RestSourceConfigDto | null;
+}
+
+/** One request header sent with every REST endpoint call. Literal values only:
+ *  these persist into the model file, so a token belongs in a secret slot. */
+export interface RestHeaderDto {
+  name: string;
+  value: string;
+}
+
+/** How a REST source authenticates. Every variant names a SLOT, never a value;
+ *  the host resolves slot names against the OS credential store at wire time. */
+export interface RestAuthSpecDto {
+  /** "none" | "bearerSecret" | "headerSecret" | "querySecret" | "basicSecret" */
+  type: string;
+  slot?: string;
+  header?: string;
+  param?: string;
+  username?: string;
+  passwordSlot?: string;
+}
+
+/** One output column of a REST endpoint: a dotted path into the row object,
+ *  the column name, and the declared engine type. */
+export interface RestFieldDto {
+  path: string;
+  name: string;
+  /** "Boolean" | "Int64" | "Float64" | "String" | "Date" | "Timestamp" | ... */
+  dataType: string;
+}
+
+/** How to walk past the first page. Every mode is bounded by `maxPages` and by
+ *  the source's cumulative `maxResponseBytes`. */
+export interface RestPaginationDto {
+  /** "none" | "pageSize" | "offset" | "cursor" | "linkHeader" */
+  mode: string;
+  pageParam?: string;
+  sizeParam?: string;
+  size?: number;
+  offsetParam?: string;
+  limitParam?: string;
+  limit?: number;
+  cursorParam?: string;
+  cursorPath?: string;
+  maxPages?: number;
+}
+
+/** One endpoint, which becomes one source table. */
+export interface RestEndpointDto {
+  /** The source-table name this endpoint is listed and imported under. */
+  name: string;
+  /** Joined to `baseUrl`; may not carry a scheme, a host, or a `..` segment. */
+  path: string;
+  /** "get" | "post" */
+  method?: string;
+  query?: Array<[string, string]>;
+  body?: string | null;
+  /** Dotted path to the rows array in the response ("" = the root). */
+  rowsPath?: string;
+  /** Declared columns. Empty means "infer from the first page", which only
+   *  infers Boolean/Int64/Float64/String — dates and decimals must be declared. */
+  fields?: RestFieldDto[];
+  pagination?: RestPaginationDto;
+}
+
+/** A REST/Web source, described entirely by data so it saves into the model
+ *  file and reconnects on reopen like any other source. */
+export interface RestSourceConfigDto {
+  /** https:// only, except a loopback host (for local development). */
+  baseUrl: string;
+  defaultHeaders?: RestHeaderDto[];
+  auth?: RestAuthSpecDto;
+  endpoints: RestEndpointDto[];
+  timeoutSecs?: number;
+  maxResponseBytes?: number;
+}
+
+/** One secret slot a source declares, and whether a value is stored for it.
+ *  There is deliberately no way to read the value back. */
+export interface SourceSecretSlot {
+  slot: string;
+  isSet: boolean;
 }
 
 export interface SourceTableInfo {
@@ -4614,6 +4786,95 @@ export async function biModelRefreshTable(
 // on any model, including package-subscribed (read-only) ones.
 
 /** Read one extension-data entry (null when absent). */
+// --- Table transformations ("applied steps") ---
+//
+// All four go through the one multiplexed `bi_model_transform` command (the
+// backend's dispatch frame has a fixed stack budget, so the repo prefers one
+// op-command over four).
+
+/** A table's saved pipeline and the source schema it derives from. */
+export async function biModelTransformGet(
+  connectionId: string,
+  table: string,
+): Promise<TransformDefinition> {
+  return invoke<TransformDefinition>("bi_model_transform", {
+    connectionId,
+    op: "get",
+    table,
+    steps: null,
+    asOfStep: null,
+    rowLimit: null,
+    queryId: null,
+  });
+}
+
+/**
+ * Replace a table's pipeline. One model edit, so one undo step; passing an
+ * empty `steps` clears it. The engine re-derives the table's columns and
+ * revalidates the whole model — a refused edit changes nothing.
+ */
+export async function biModelTransformSet(
+  connectionId: string,
+  table: string,
+  steps: TransformStepDto[],
+): Promise<ModelOverview> {
+  return invoke<ModelOverview>("bi_model_transform", {
+    connectionId,
+    op: "set",
+    table,
+    steps,
+    asOfStep: null,
+    rowLimit: null,
+    queryId: null,
+  });
+}
+
+/**
+ * The columns a CANDIDATE pipeline would produce, plus per-step diagnostics.
+ * No mutation, no undo entry, and no I/O — cheap enough to run on every edit.
+ */
+export async function biModelTransformDeriveSchema(
+  connectionId: string,
+  table: string,
+  steps: TransformStepDto[],
+): Promise<TransformSchemaResult> {
+  return invoke<TransformSchemaResult>("bi_model_transform", {
+    connectionId,
+    op: "deriveSchema",
+    table,
+    steps,
+    asOfStep: null,
+    rowLimit: null,
+    queryId: null,
+  });
+}
+
+/**
+ * Run a candidate pipeline over a bounded source sample.
+ *
+ * `asOfStep` stops after that many steps; `-1` is the step list's "Source"
+ * row. Pass a `queryId` and cancel with `biModelCancelQuery(queryId)` — the
+ * same registry the Testing Ground uses.
+ */
+export async function biModelTransformPreview(params: {
+  connectionId: string;
+  table: string;
+  steps: TransformStepDto[];
+  asOfStep?: number | null;
+  rowLimit?: number | null;
+  queryId?: string | null;
+}): Promise<TransformPreviewResult> {
+  return invoke<TransformPreviewResult>("bi_model_transform", {
+    connectionId: params.connectionId,
+    op: "previewStep",
+    table: params.table,
+    steps: params.steps,
+    asOfStep: params.asOfStep ?? null,
+    rowLimit: params.rowLimit ?? null,
+    queryId: params.queryId ?? null,
+  });
+}
+
 export async function biModelExtensionDataGet(
   connectionId: string,
   key: string,
@@ -4965,6 +5226,8 @@ export interface UpsertSourceParams {
   /** "integrated" | "usernamePassword" | "environmentVariable" */
   preferredAuth: string;
   displayName?: string | null;
+  /** Required when `kind` is "rest", refused otherwise. */
+  rest?: RestSourceConfigDto | null;
 }
 
 /** Add or update (by id) a persisted data source in the model's catalog. */
@@ -4981,6 +5244,58 @@ export async function biModelUpsertSource(params: UpsertSourceParams): Promise<M
     sslMode: params.sslMode ?? null,
     preferredAuth: params.preferredAuth,
     displayName: params.displayName ?? null,
+    rest: params.rest ?? null,
+  });
+}
+
+// --- Secret slots for a model source (today: REST/Web) ---
+//
+// Same posture as the script-connector secrets: `list` reports only WHETHER a
+// slot is set, `set`/`delete` are write-only, and no op returns a value. The
+// resolve path stays server-side, inside the wiring code.
+
+/** The source's declared slots, each with whether a value is stored. */
+export async function biModelSourceSecretsList(
+  connectionId: string,
+  sourceId: string,
+): Promise<SourceSecretSlot[]> {
+  return invoke<SourceSecretSlot[]>("bi_model_source_secrets", {
+    connectionId,
+    op: "list",
+    sourceId,
+    slot: null,
+    value: null,
+  });
+}
+
+/** Store a value for one declared slot. Write-only — it cannot be read back. */
+export async function biModelSourceSecretsSet(
+  connectionId: string,
+  sourceId: string,
+  slot: string,
+  value: string,
+): Promise<void> {
+  await invoke<unknown>("bi_model_source_secrets", {
+    connectionId,
+    op: "set",
+    sourceId,
+    slot,
+    value,
+  });
+}
+
+/** Forget the stored value for one slot. */
+export async function biModelSourceSecretsDelete(
+  connectionId: string,
+  sourceId: string,
+  slot: string,
+): Promise<void> {
+  await invoke<unknown>("bi_model_source_secrets", {
+    connectionId,
+    op: "delete",
+    sourceId,
+    slot,
+    value: null,
   });
 }
 

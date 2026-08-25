@@ -14,6 +14,7 @@ pub mod parquet_connector;
 pub mod planner;
 pub mod registry;
 pub mod request;
+pub mod rest_connector;
 
 pub use csv_connector::CsvConnector;
 pub use error::{QueryError, QueryResult};
@@ -28,3 +29,4 @@ pub use request::{
     LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
     GROUPING_ID_COLUMN,
 };
+pub use rest_connector::{RestConnector, REST_SOURCE_SCHEMA};

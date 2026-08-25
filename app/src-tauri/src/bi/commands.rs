@@ -452,7 +452,11 @@ pub fn batches_to_result(batches: &[arrow::record_batch::RecordBatch]) -> BiQuer
 }
 
 /// Extract a single cell from an Arrow array as an `Option<String>`.
-fn arrow_value_to_string(array: &dyn Array, idx: usize) -> Option<String> {
+///
+/// Shared with the transformation-preview path (`bi::model_editor`) so a
+/// preview grid renders values exactly as a query result does — a second
+/// formatter would drift and show the same value two ways.
+pub(super) fn arrow_value_to_string(array: &dyn Array, idx: usize) -> Option<String> {
     if array.is_null(idx) {
         return None;
     }

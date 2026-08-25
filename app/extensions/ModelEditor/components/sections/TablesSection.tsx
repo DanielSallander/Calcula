@@ -36,6 +36,7 @@ import type { SectionCtx } from "../editorShared";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
 import { WritebackColumnModal } from "./WritebackColumnModal";
 import { SqlEditorModal } from "../SqlEditorModal";
+import { TransformEditorModal, summarizeSteps } from "../transform";
 import { confirmAsync } from "@api/dialogs";
 
 export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
@@ -48,6 +49,7 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
   const [writebackEdit, setWritebackEdit] = useState<{
     existing: ModelWritebackColumnInfo | null;
   } | null>(null);
+  const [transformOpen, setTransformOpen] = useState(false);
 
   // Keep the selection valid when the table set changes (e.g. a table was just
   // deleted or imported) — the render-time "adjust state on prop change" pattern
@@ -55,7 +57,11 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
   const selectionValid = selectedName !== null && tables.some((t) => t.name === selectedName);
   if (!selectionValid) {
     const next = tables[0]?.name ?? null;
-    if (next !== selectedName) setSelectedName(next);
+    if (next !== selectedName) {
+      setSelectedName(next);
+      // The transform editor is per-table; it must never survive onto another.
+      setTransformOpen(false);
+    }
   }
 
   const table = tables.find((t) => t.name === selectedName) ?? null;
@@ -131,12 +137,20 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
               ...styles.listRow,
               background: t.name === selectedName ? SELECTION_BG : undefined,
             }}
-            onClick={() => setSelectedName(t.name)}
+            onClick={() => {
+              setSelectedName(t.name);
+              setTransformOpen(false);
+            }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
               <strong>{t.name}</strong>
               {t.isHidden && <Badge tone="warn">hidden</Badge>}
               <Badge tone={t.bound ? "ok" : "neutral"}>{t.bound ? "bound" : "unbound"}</Badge>
+              {t.transformSteps.length > 0 && (
+                <Badge tone="ok">
+                  {t.transformSteps.length} step{t.transformSteps.length === 1 ? "" : "s"}
+                </Badge>
+              )}
             </div>
             <div style={{ ...styles.muted, fontSize: 11 }}>
               {t.displayName ? `${t.displayName} · ` : ""}
@@ -179,6 +193,8 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
                 reportError={reportError}
               />
             )}
+
+            <TransformCard table={table} onEdit={() => setTransformOpen(true)} />
 
             <div style={{ ...styles.sectionHeader, marginTop: 12, marginBottom: 8 }}>
               <span style={styles.sectionTitle}>
@@ -367,6 +383,71 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
           }}
         />
       )}
+      {table && transformOpen && (
+        <TransformEditorModal
+          connectionId={connectionId}
+          table={table}
+          overview={overview}
+          readOnly={readOnly}
+          onClose={() => setTransformOpen(false)}
+          onApplied={applyOverview}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Transformation pipeline card ("applied steps")
+// ============================================================================
+// A summary and a door. The pipeline itself is edited in a modal because it is
+// per-table state with its own draft, preview and single commit — see
+// components/transform/.
+
+function TransformCard({
+  table,
+  onEdit,
+}: {
+  table: ModelTableInfo;
+  onEdit: () => void;
+}): React.ReactElement {
+  // The pipeline lives on the table's SOURCE BINDING, which `sourceId` reports
+  // exactly; `bound` is looser (a live app binding counts) and would offer the
+  // editor to tables that cannot carry steps.
+  const canCarrySteps = table.sourceId !== null;
+  return (
+    <div style={{ ...styles.card, marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontWeight: 600, flex: 1 }}>Transformations</span>
+        {table.transformSteps.length > 0 && (
+          <Badge tone="ok">
+            {table.transformSteps.length} step{table.transformSteps.length === 1 ? "" : "s"}
+          </Badge>
+        )}
+        <button
+          style={styles.btn}
+          disabled={!canCarrySteps}
+          title={
+            canCarrySteps
+              ? "Shape the rows the source returns before the model sees them"
+              : "Bind this table to a data source first — steps transform what a connector returns"
+          }
+          onClick={onEdit}
+        >
+          Edit transforms&hellip;
+        </button>
+      </div>
+      <div style={{ ...styles.hint, marginBottom: table.transformSteps.length > 0 ? 6 : 0 }}>
+        {canCarrySteps
+          ? summarizeSteps(table.transformSteps)
+          : "Unbound tables have nothing to transform."}
+      </div>
+      {table.transformSteps.length > 0 && (
+        <div style={styles.hint}>
+          Re-evaluated from scratch on every refresh. A transformed table is loaded in memory, so it
+          cannot use DirectQuery.
+        </div>
+      )}
     </div>
   );
 }
@@ -553,6 +634,10 @@ function TableMetaForm({
     }
   };
 
+  // A pipeline forces the table in-memory: the steps run over the rows the
+  // source returned, which DirectQuery never materializes.
+  const transformed = table.transformSteps.length > 0;
+
   const deleteTable = async () => {
     if (
       !(await confirmAsync(
@@ -579,6 +664,11 @@ function TableMetaForm({
           <select
             style={{ ...styles.input, fontSize: 12 }}
             disabled={readOnly || busy}
+            title={
+              transformed
+                ? "This table has transformation steps. The steps run over the rows the source returns, so a transformed table is loaded in memory — DirectQuery is unavailable until the steps are cleared."
+                : undefined
+            }
             value={STORAGE_MODES.includes(table.storageMode) ? table.storageMode : ""}
             onChange={(e) => void changeStorageMode(e.target.value)}
           >
@@ -586,8 +676,9 @@ function TableMetaForm({
               <option value="">{table.storageMode}</option>
             )}
             {STORAGE_MODES.map((m) => (
-              <option key={m} value={m}>
+              <option key={m} value={m} disabled={transformed && m === "DirectQuery"}>
                 {m}
+                {transformed && m === "DirectQuery" ? " (not for transformed tables)" : ""}
               </option>
             ))}
           </select>

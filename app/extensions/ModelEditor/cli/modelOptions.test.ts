@@ -9,7 +9,13 @@
 //          (which stays untouched).
 
 import { describe, expect, it } from "vitest";
-import type { ModelMeasureInfo, ModelOverview, ModelRelationshipInfo, ModelTableInfo } from "@api";
+import type {
+  ModelMeasureInfo,
+  ModelOverview,
+  ModelRelationshipInfo,
+  ModelTableInfo,
+  TransformStepDto,
+} from "@api";
 import { parseScript, usedOptKeys } from "./parse";
 import type { Kind } from "./parse";
 import { createSession, executeRun, planRun } from "./execute";
@@ -27,15 +33,22 @@ import {
 // set/rename/delete targets resolve at plan time)
 // ---------------------------------------------------------------------------
 
-function table(name: string, cols: string[], calc: string[] = []): ModelTableInfo {
+function table(
+  name: string,
+  cols: string[],
+  calc: string[] = [],
+  opts: { bound?: boolean; transformSteps?: TransformStepDto[] } = {},
+): ModelTableInfo {
   return {
     name,
     displayName: null,
     description: null,
     isHidden: false,
     storageMode: "InMemory",
-    bound: false,
+    bound: opts.bound ?? false,
     sourceId: null,
+    transformSteps: opts.transformSteps ?? [],
+    sourceColumns: [],
     columns: [
       ...cols.map((c) => ({
         name: c,
@@ -104,6 +117,16 @@ function fixtureOverview(): ModelOverview {
       table("Sales", ["Id", "Amount", "CustomerId", "Region"], ["Margin"]),
       table("Customer", ["Id", "Name"]),
       table("Orders", ["Id", "CustomerId"]),
+      // Source-bound WITH a pipeline: the only shape `transform` accepts.
+      table("Web", ["Id", "Status", "Qty"], [], {
+        bound: true,
+        transformSteps: [
+          // Step 1 is renameable (it introduces an output name); step 2 is not
+          // — both shapes the `transform … rename` row exercises.
+          { type: "renameColumns", renames: [{ from: "amount", to: "net" }] },
+          { type: "filterRows", condition: "1 = 1" },
+        ],
+      }),
     ],
     relationships: [rel("Sales_Customer", "Sales", "CustomerId", "Customer", "Id")],
     hierarchies: [{ name: "Geo", table: "Customer", levels: [{ column: "Name" }] }],
@@ -318,9 +341,42 @@ const MATRIX: Array<[kind: string, verb: string, cmd: string]> = [
   ["sql", "import", "import sql BigCustomers = SELECT 1"],
 ];
 
+// `transform table` is the ONE verb whose options are not a single flat set a
+// single command can carry: the accepted keys depend on the step type being
+// added, and transformSteps.ts refuses a key that means nothing to that step.
+// So its audit runs over a GROUP of commands whose union must equal the spec
+// row exactly — the same teeth (nothing declared that no command uses, nothing
+// used that is not declared), one row per legal shape instead of one row.
+const TRANSFORM_MATRIX: string[] = [
+  "transform table Web add removeColumns columns=Notes at=1",
+  "transform table Web add selectColumns columns=Id,Status",
+  "transform table Web add renameColumn column=Status newname=OrderStatus",
+  "transform table Web add changeType column=Qty type=Int64 onerror=null",
+  "transform table Web add addColumn name=Margin = [Qty] * 2",
+  'transform table Web add splitColumn column=Status delimiter="-" parts=2 keeporiginal=true',
+  'transform table Web add replaceValues column=Status find="a" replace="b" matchentire=true',
+  "transform table Web add textTransform columns=Status operation=trim",
+  "transform table Web add fillDown columns=Status",
+  "transform table Web add removeDuplicates",
+  "transform table Web add sort by=Qty,-Id",
+  "transform table Web add groupBy groupby=Status agg=sum:Qty:Total",
+  "transform table Web add keepRows range=first:10",
+  "transform table Web add removeRows range=range:0:5",
+  "transform table Web add unpivot columns=Jan,Feb namecolumn=Month valuecolumn=Amount",
+  "transform table Web add pivot namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb",
+  "transform table Web remove 2",
+  "transform table Web move 2 1",
+  "transform table Web rename 1 Kept",
+  "transform table Web clear",
+];
+
 describe("model option schema — table/matrix integrity", () => {
   it("the matrix covers every kind+verb entry in the option tables", () => {
     const covered = new Set(MATRIX.map(([kind, verb]) => `${kind}:${verb}`));
+    for (const text of TRANSFORM_MATRIX) {
+      const cmd = parseScript(text)[0];
+      covered.add(`${cmd.kind}:${cmd.verb}`);
+    }
     for (const [kind, verbTable] of Object.entries(MODEL_OPTION_TABLES)) {
       for (const verb of Object.keys(verbTable)) {
         expect(covered.has(`${kind}:${verb}`), `no matrix row for '${verb} ${kind}'`).toBe(true);
@@ -336,10 +392,27 @@ describe("model option schema — table/matrix integrity", () => {
     const specs = MODEL_OPTION_TABLES[kind as Kind]?.[verb] ?? [];
     expect([...usedOptKeys(cmd)].sort()).toEqual(specs.map((s) => s.key).sort());
   });
+
+  it("the transform group's option keys are exactly the 'transform table' spec row", () => {
+    const used = new Set<string>();
+    for (const text of TRANSFORM_MATRIX) {
+      const cmd = parseScript(text)[0];
+      expect(cmd.verb).toBe("transform");
+      expect(cmd.kind).toBe("table");
+      for (const key of usedOptKeys(cmd)) used.add(key);
+    }
+    const specs = MODEL_OPTION_TABLES.table?.transform ?? [];
+    expect([...used].sort()).toEqual(specs.map((s) => s.key).sort());
+  });
 });
 
 describe("model option schema — strict planning", () => {
   it.each(MATRIX)("plans '%s %s' without an unknown-option error", (_kind, _verb, text) => {
+    const { session } = makeSession();
+    expect(() => planRun(text, session)).not.toThrow();
+  });
+
+  it.each(TRANSFORM_MATRIX)("plans '%s' without an option error", (text) => {
     const { session } = makeSession();
     expect(() => planRun(text, session)).not.toThrow();
   });

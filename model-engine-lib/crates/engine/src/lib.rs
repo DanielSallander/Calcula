@@ -87,6 +87,9 @@ mod model_io;
 mod query_cache;
 mod refresh;
 mod source_wiring;
+mod transform_apply;
+mod transform_edit;
+mod transform_preview;
 mod writeback;
 
 #[cfg(test)]
@@ -126,6 +129,8 @@ mod test_fixtures;
 #[cfg(test)]
 mod topn_tests;
 #[cfg(test)]
+mod transform_tests;
+#[cfg(test)]
 mod writeback_tests;
 
 use std::sync::Arc;
@@ -139,6 +144,8 @@ use auto_tier::AutoTierState;
 pub use auto_tier::AutoTierConfig;
 pub use query_cache::{QueryCacheConfig, QueryCacheStats};
 pub use refresh::{RefreshFailure, RefreshReport, SourceQueryPolicy};
+pub use transform_edit::SourceSchemaDiff;
+pub use transform_preview::{TransformPreview, TransformPreviewRequest, MAX_PREVIEW_ROWS};
 
 /// Cancellation token for [`Engine::query_with_cancellation`] (re-exported
 /// from `tokio_util` so hosts don't need a direct dependency).
@@ -182,12 +189,21 @@ pub use engine_core::model::{
     FilterPropagation, GlobalVariable, Hierarchy, HierarchyLevel, IncrementalRefresh,
     JoinCondition, JoinOperator, Kpi, KpiStatus, KpiTarget, NameTranslation, PathSpec,
     PersistedAuthKind, PersistedConnection, PersistedSource, Perspective, RaggedBehavior,
-    RefreshStrategy, Relationship, SecurityRole, SourceKind, StatusBand, StorageMode, Table,
+    RefreshStrategy, Relationship, RestAuthSpec, RestEndpoint, RestField, RestHeader, RestMethod,
+    RestPagination, RestSourceConfig, SecurityRole, SourceKind, StatusBand, StorageMode, Table,
     TableSourceBinding, TableVariable, WritebackColumn, WritebackColumnKind, WritebackConstraints,
-    WritebackProjection, WRITEBACK_RESERVED_COLUMNS,
+    WritebackProjection, DEFAULT_REST_MAX_RESPONSE_BYTES, DEFAULT_REST_TIMEOUT_SECS,
+    MAX_REST_PAGE_LIMIT, MAX_REST_RESPONSE_BYTES, MAX_REST_TIMEOUT_SECS,
+    WRITEBACK_RESERVED_COLUMNS,
 };
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
+pub use engine_core::transform::{
+    apply_steps, conform_to_declared, derive_pipeline_schema, derive_step_schema,
+    pipeline_fingerprint, schemas_match, validate_steps, with_table_transformations,
+    CastErrorPolicy, ColumnRename, GroupAggregate, RowRange, SortKey, TextOp, TransformStep,
+    TypeChange,
+};
 pub use engine_core::types::{DataType, TableColumn, Value};
 pub use function_docs::{function_docs, FunctionDoc};
 
@@ -216,6 +232,7 @@ pub use engine_query::request::{
     InFilter, LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy,
     ResultColumn, ResultColumnKind, TopN, TotalsMode, GROUPING_ID_COLUMN,
 };
+pub use engine_query::rest_connector::{RestConnector, REST_SOURCE_SCHEMA};
 pub use engine_query::{
     effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner,
     QueryExecutor, QueryPlan,
@@ -1254,6 +1271,20 @@ impl Engine {
     /// be served).
     pub fn clear_query_cache(&self) {
         self.query_cache.lock().invalidate_all();
+    }
+
+    /// Drop one table's cached rows and invalidate dependent query results.
+    ///
+    /// Returns `true` if the table had cached rows. Distinct from marking a
+    /// table stale: this is for a **definition** change that makes the cached
+    /// rows the wrong rows rather than merely old ones — editing a table's
+    /// transformation pipeline, for instance. The next query re-fetches.
+    pub fn drop_table_cache(&mut self, table_name: &str) -> bool {
+        let removed = self.cache.remove(table_name);
+        if removed {
+            self.query_cache.lock().invalidate_all();
+        }
+        removed
     }
 
     /// Register a PostgreSQL data source and return its connector index.

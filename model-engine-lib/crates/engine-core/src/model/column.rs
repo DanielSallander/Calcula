@@ -155,6 +155,39 @@ impl Column {
         }
     }
 
+    /// Rename this column, keeping every other property.
+    ///
+    /// Used by transformation-pipeline schema derivation
+    /// ([`crate::transform`]), where a rename step must preserve the column's
+    /// type, nullability, and presentation metadata. The caller owns reference
+    /// integrity — a column referenced by a measure, relationship, or
+    /// `sort_by_column` must be fixed up (model validation reports the
+    /// dangling reference otherwise).
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Re-type this column, keeping every other property.
+    ///
+    /// Used by transformation-pipeline schema derivation
+    /// ([`crate::transform`]) for a cast step.
+    pub fn with_data_type(mut self, data_type: DataType) -> Self {
+        self.data_type = data_type;
+        self
+    }
+
+    /// Set this column's nullability, keeping every other property.
+    ///
+    /// Used by transformation-pipeline schema derivation
+    /// ([`crate::transform`]): a step that can introduce nulls (a
+    /// null-on-error cast, an outer position in a derived column) must widen
+    /// the column to nullable so the declared schema stays honest.
+    pub fn with_nullable(mut self, nullable: bool) -> Self {
+        self.nullable = nullable;
+        self
+    }
+
     /// Set the lookup resolution expression for this column.
     ///
     /// When this column is used as a lookup (post-aggregation) in a query,
@@ -406,6 +439,46 @@ mod tests {
         assert!(!json.contains("\"date_role\""));
         let restored: Column = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.date_role(), None);
+    }
+
+    #[test]
+    fn with_name_renames_and_keeps_every_other_property() {
+        let col = Column::non_nullable("amount", DataType::Float64)
+            .with_display_name("Amount")
+            .with_description("Sale amount")
+            .with_default_aggregation(AggregateOp::Sum)
+            .hidden()
+            .with_name("net_amount");
+
+        assert_eq!(col.name(), "net_amount");
+        assert_eq!(col.data_type(), &DataType::Float64);
+        assert!(!col.nullable());
+        assert_eq!(col.display_name(), Some("Amount"));
+        assert_eq!(col.description(), Some("Sale amount"));
+        assert_eq!(col.default_aggregation(), Some(AggregateOp::Sum));
+        assert!(col.is_hidden());
+    }
+
+    #[test]
+    fn with_data_type_retypes_and_keeps_every_other_property() {
+        let col = Column::non_nullable("qty", DataType::String)
+            .with_display_name("Quantity")
+            .with_data_type(DataType::Int64);
+
+        assert_eq!(col.data_type(), &DataType::Int64);
+        assert_eq!(col.name(), "qty");
+        assert!(!col.nullable());
+        assert_eq!(col.display_name(), Some("Quantity"));
+    }
+
+    #[test]
+    fn with_nullable_widens_and_narrows() {
+        let col = Column::non_nullable("id", DataType::Int64);
+        assert!(!col.nullable());
+        let widened = col.clone().with_nullable(true);
+        assert!(widened.nullable());
+        assert_eq!(widened.name(), "id");
+        assert!(!widened.with_nullable(false).nullable());
     }
 
     #[test]

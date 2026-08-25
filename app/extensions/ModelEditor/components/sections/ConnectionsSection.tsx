@@ -18,7 +18,13 @@ import {
   biModelSourceSavedUser,
   biModelUpsertSource,
 } from "@api";
-import type { ModelSourceInfo, ModelTableInfo } from "@api";
+import type { ModelSourceInfo, ModelTableInfo, RestSourceConfigDto } from "@api";
+import {
+  RestSecretsCard,
+  RestSourceForm,
+  emptyRestConfig,
+  restConfigProblems,
+} from "./RestSourceForm";
 import { Badge, Field, Modal, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
@@ -29,6 +35,7 @@ const KINDS = [
   { value: "csv", label: "CSV folder" },
   { value: "parquet", label: "Parquet folder" },
   { value: "inMemory", label: "In-memory" },
+  { value: "rest", label: "Web / REST API" },
 ];
 const AUTHS = [
   { value: "usernamePassword", label: "Username & password" },
@@ -48,6 +55,9 @@ const SSL_MODES = [
 
 const isFileKind = (k: string) => k === "csv" || k === "parquet";
 const isDbKind = (k: string) => k === "postgres" || k === "sqlServer";
+/** A REST source is described entirely by its own config — host/port/database
+ *  and the database auth picker mean nothing for it. */
+const isRestKind = (k: string) => k === "rest";
 const kindLabel = (k: string) => KINDS.find((o) => o.value === k)?.label ?? k;
 
 /** Which SSL_MODES preset matches an (sslMode, trust) pair. */
@@ -69,6 +79,8 @@ type SourceDraft = {
   sslMode: string;
   preferredAuth: string;
   displayName: string;
+  /** Only meaningful when `kind` is "rest". */
+  rest: RestSourceConfigDto;
 };
 
 function emptyDraft(): SourceDraft {
@@ -84,6 +96,7 @@ function emptyDraft(): SourceDraft {
     sslMode: "",
     preferredAuth: "usernamePassword",
     displayName: "",
+    rest: emptyRestConfig(),
   };
 }
 
@@ -100,6 +113,7 @@ function draftFrom(s: ModelSourceInfo): SourceDraft {
     sslMode: s.sslMode ?? "",
     preferredAuth: s.preferredAuth,
     displayName: s.displayName ?? "",
+    rest: s.rest ?? emptyRestConfig(),
   };
 }
 
@@ -285,19 +299,40 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
                     )}
                   </div>
                   <div style={{ ...styles.muted, fontSize: 12 }}>
-                    {isFileKind(s.kind)
-                      ? s.database || "(no path)"
-                      : s.kind === "inMemory"
-                        ? "in-process data (host-supplied)"
-                        : `${s.host || "?"}${s.port ? `:${s.port}` : ""}/${s.database || "?"}`}
+                    {isRestKind(s.kind)
+                      ? `${s.rest?.baseUrl ?? "(no base URL)"} · ${
+                          s.rest?.endpoints.length ?? 0
+                        } endpoint${(s.rest?.endpoints.length ?? 0) === 1 ? "" : "s"}`
+                      : isFileKind(s.kind)
+                        ? s.database || "(no path)"
+                        : s.kind === "inMemory"
+                          ? "in-process data (host-supplied)"
+                          : `${s.host || "?"}${s.port ? `:${s.port}` : ""}/${s.database || "?"}`}
                   </div>
                 </div>
                 {s.kind !== "inMemory" && (
                   <button
                     style={styles.smallBtn}
                     disabled={readOnly || busy}
-                    title="Connect this source with your credentials"
-                    onClick={() => setConnectFor(s)}
+                    title={
+                      isRestKind(s.kind)
+                        ? "Connect this source. Its credentials come from the secret slots below."
+                        : "Connect this source with your credentials"
+                    }
+                    onClick={() => {
+                      // A REST source authenticates with named slots resolved
+                      // server-side, so there is nothing to prompt for — asking
+                      // for a username here would be asking the wrong question.
+                      if (isRestKind(s.kind)) {
+                        void run(async () => {
+                          applyOverview(
+                            await biModelConnectSource(connectionId, s.id, "", false),
+                          );
+                        });
+                      } else {
+                        setConnectFor(s);
+                      }
+                    }}
                   >
                     Connect
                   </button>
@@ -320,6 +355,14 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
 
               {open && (
                 <div style={{ borderTop: "1px solid #eee", padding: "6px 10px" }}>
+                  {isRestKind(s.kind) && (
+                    <RestSecretsCard
+                      connectionId={connectionId}
+                      source={s}
+                      readOnly={readOnly || busy}
+                      reportError={reportError}
+                    />
+                  )}
                   {bound.length === 0 && (
                     <div style={{ ...styles.muted, fontSize: 12 }}>
                       No tables bound to this source.
@@ -405,6 +448,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
                   sslMode: isDbKind(d.kind) ? d.sslMode || null : null,
                   preferredAuth: d.preferredAuth,
                   displayName: d.displayName || null,
+                  rest: isRestKind(d.kind) ? d.rest : null,
                 }),
               );
               setEdit(null);
@@ -526,7 +570,10 @@ function SourceModal({
   const set = <K extends keyof SourceDraft>(k: K, v: SourceDraft[K]) =>
     setD((p) => ({ ...p, [k]: v }));
   const idClash = !isEdit && existingIds.includes(d.id.trim());
-  const canSave = d.id.trim() !== "" && !idClash;
+  // A REST source is refused by the engine if its config does not validate, so
+  // the form says why here rather than letting Save fail with the same message.
+  const restProblems = isRestKind(d.kind) ? restConfigProblems(d.rest) : [];
+  const canSave = d.id.trim() !== "" && !idClash && restProblems.length === 0;
 
   return (
     <Modal
@@ -578,6 +625,19 @@ function SourceModal({
           onChange={(e) => set("displayName", e.target.value)}
         />
       </Field>
+
+      {isRestKind(d.kind) && (
+        <>
+          <RestSourceForm config={d.rest} onChange={(next) => set("rest", next)} />
+          {restProblems.length > 0 && (
+            <ul style={{ fontSize: 12, color: "#a4262c", margin: "8px 0 0 0", paddingLeft: 18 }}>
+              {restProblems.map((problem, i) => (
+                <li key={i}>{problem}</li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
 
       {isDbKind(d.kind) && (
         <>

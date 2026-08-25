@@ -19,12 +19,19 @@
 //          reads stay lenient. No model verb reads options while
 //          cmd.kind === null, so the kindless table is EMPTY: a stray option
 //          there errors as "takes no options here".
+// UPDATE:  2026-08-25. `transform table` joined the table kind. Its specs are
+//          NOT re-typed here: TRANSFORM_STEP_OPTIONS lives next to the builder
+//          that reads them (transformSteps.ts), so the audit is structural
+//          rather than a re-reading. Same for DATA_TYPE_VALUES, which now
+//          derives from dataTypes.ts instead of being a third hand copy.
 
 import { mergeVocabulary } from "../../_shared/cli/registry";
 import { validateOptions } from "../../_shared/cli/optionSchema";
 import type { CliOptionSpec, CliOptionTable } from "../../_shared/cli/optionSchema";
 import { MODEL_VOCABULARY_CONTRIBUTION } from "./parse";
 import type { Command, Kind } from "./parse";
+import { DATA_TYPE_NAMES } from "./dataTypes";
+import { TRANSFORM_STEP_OPTIONS } from "./transformSteps";
 
 // ---------------------------------------------------------------------------
 // Shared spec lists (add/set accept the same keys for most kinds)
@@ -39,7 +46,8 @@ const MEASURE_PROPS: CliOptionSpec[] = [
   { key: "detailrows", type: "list", help: "DETAILROWS projection T[c1],T[c2] (empty clears)" },
 ];
 
-const DATA_TYPE_VALUES = ["String", "Int32", "Int64", "Float64", "Boolean", "Date", "Timestamp"];
+/** The engine's own spellings, from the ONE table that also parses them. */
+const DATA_TYPE_VALUES: string[] = [...DATA_TYPE_NAMES];
 
 const RELATIONSHIP_SET_PROPS: CliOptionSpec[] = [
   {
@@ -160,6 +168,12 @@ export const MODEL_OPTION_TABLES: Partial<Record<Kind, CliOptionTable>> = {
     delete: [],
     refresh: [],
     import: [{ key: "schema", type: "string", help: "default schema for unqualified table names" }],
+    // `transform table <T> add <stepType> …` — ONE flat row, because the
+    // kernel validates options per VERB, not per positional subaction. The
+    // specs are declared beside the builder that reads them
+    // (transformSteps.ts), which also refuses a key that means nothing to the
+    // step type actually being added.
+    transform: TRANSFORM_STEP_OPTIONS,
   },
   column: {
     add: [

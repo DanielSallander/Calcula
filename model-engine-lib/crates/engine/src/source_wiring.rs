@@ -25,14 +25,30 @@ use engine_connectors::auth::{AuthMethod, AuthMethodKind, ConnectionTarget};
 use engine_connectors::ConnectorError;
 use engine_core::error::{EngineError, EngineResult};
 use engine_core::model::{
-    PersistedAuthKind, PersistedConnection, PersistedSource, SourceKind, Table, TableSourceBinding,
+    PersistedAuthKind, PersistedConnection, PersistedSource, RestSourceConfig, SourceKind, Table,
+    TableSourceBinding,
 };
 use engine_query::registry::{AnyConnector, SourceBinding};
 
 use crate::{
-    CsvConnector, Engine, InMemoryConnector, ParquetConnector, PostgresConnector,
+    CsvConnector, Engine, InMemoryConnector, ParquetConnector, PostgresConnector, RestConnector,
     SqlServerConnector,
 };
+
+/// Build the live binding a persisted binding describes.
+///
+/// A table whose rows come from a SQL `SELECT` must be re-wired as a *query*
+/// binding, not as `schema.table` — the schema/table pair on such a binding is
+/// only a label. Before the persisted binding carried `source_query`, a model
+/// with a SQL-source table could not be reopened without the host re-supplying
+/// the query from its own storage; going through this function is what keeps
+/// wiring faithful to what was saved.
+fn runtime_binding(persisted: &TableSourceBinding) -> SourceBinding {
+    match &persisted.source_query {
+        Some(sql) => SourceBinding::new_query(&persisted.table, sql),
+        None => SourceBinding::new(&persisted.schema, &persisted.table),
+    }
+}
 
 /// How the host supplies a connector for a persisted source when wiring.
 ///
@@ -41,9 +57,12 @@ use crate::{
 /// persisted descriptor), such a source can only be wired with
 /// [`SourceCredential::Connector`].
 pub enum SourceCredential {
-    /// Build the connector from the persisted connection target using this
-    /// auth. Valid for `Postgres`/`SqlServer` (connect) and `Csv`/`Parquet`
-    /// (open the directory). Supplying this for an `InMemory` source is an error.
+    /// Build the connector from the persisted descriptor using this auth. Valid
+    /// for `Postgres`/`SqlServer` (connect), `Csv`/`Parquet` (open the
+    /// directory) and `Rest` (build from the source's `rest` configuration,
+    /// resolving its declared secret slots out of an
+    /// [`AuthMethod::Secrets`] map). Supplying this for an `InMemory` source is
+    /// an error.
     Auth(AuthMethod),
     /// Use this already-built connector as-is. Required for `InMemory` sources
     /// (the host owns the data); also an escape hatch for custom connector setup.
@@ -109,6 +128,7 @@ fn auth_kind_to_persisted(kind: AuthMethodKind) -> PersistedAuthKind {
         AuthMethodKind::Integrated => PersistedAuthKind::Integrated,
         AuthMethodKind::UsernamePassword => PersistedAuthKind::UsernamePassword,
         AuthMethodKind::EnvironmentVariable => PersistedAuthKind::EnvironmentVariable,
+        AuthMethodKind::SecretMap => PersistedAuthKind::SecretMap,
     }
 }
 
@@ -222,6 +242,39 @@ impl Engine {
         )
     }
 
+    /// Register a REST/Web source under a stable `id`, record its (secret-free)
+    /// configuration in the model's persisted catalog, and return its connector
+    /// index.
+    ///
+    /// `config` is validated before anything is recorded, and every secret slot
+    /// it declares must be present in `auth` (an
+    /// [`AuthMethod::Secrets`] map, or [`AuthMethod::Integrated`] for a source
+    /// that declares none) — a missing slot is refused here rather than turning
+    /// into an unauthenticated request at refresh time.
+    ///
+    /// What is persisted is the configuration **plus the slot names**; the
+    /// values never reach the model file, so on reopen the host re-supplies
+    /// them through [`wire_sources`](Self::wire_sources). Synchronous: no
+    /// request is issued until a table bound to this source is refreshed.
+    ///
+    /// A table bound to a REST source must be [`StorageMode::InMemory`]; model
+    /// validation refuses DirectQuery over one, because a REST endpoint is
+    /// fetched and paginated in full and DirectQuery would re-walk the whole
+    /// API on every query.
+    ///
+    /// [`StorageMode::InMemory`]: engine_core::model::StorageMode::InMemory
+    pub fn add_rest_source(
+        &mut self,
+        id: impl Into<String>,
+        config: RestSourceConfig,
+        auth: AuthMethod,
+    ) -> EngineResult<usize> {
+        let id = id.into();
+        self.ensure_unique_source_id(&id)?;
+        let connector = RestConnector::from_config(config.clone(), auth).map_err(map_conn_err)?;
+        self.push_persisted_source(PersistedSource::rest(id, config), connector.into())
+    }
+
     /// Register an in-process [`InMemoryConnector`] under a stable `id` and
     /// record it in the catalog. The persisted descriptor carries no connection
     /// (the data lives in the host), so on reopen the host must re-supply the
@@ -324,17 +377,33 @@ impl Engine {
             })?;
             connector.list_tables().await.map_err(map_conn_err)?
         };
+        // A table this method CREATES for a REST source is stamped InMemory:
+        // `StorageMode` defaults to DirectQuery, which model validation refuses
+        // over a REST source (a REST endpoint is fetched and paginated in full,
+        // so DirectQuery re-walks the whole API on every query). InMemory is the
+        // only legal mode there, so choosing it is not a guess — and without it
+        // discovery would fail for every REST source. An EXISTING table is left
+        // alone: its storage mode is the author's, and a wrong one is reported
+        // by validation rather than silently changed underneath them.
+        let is_rest_source = self
+            .model
+            .source(source_id)
+            .is_some_and(|s| s.kind == SourceKind::Rest);
+
         let mut introspected: Vec<Table> = Vec::new();
         for st in &source_tables {
             if self.model.table(&st.name).is_err() {
                 let connector = self.registry.connector_by_index(idx).ok_or_else(|| {
                     EngineError::InvalidData(format!("data source '{source_id}' is not registered"))
                 })?;
-                let table = connector
+                let mut table = connector
                     .introspect_table(&st.schema, &st.name)
                     .await
                     .map_err(map_conn_err)?
                     .with_source_binding(TableSourceBinding::new(source_id, &st.schema, &st.name));
+                if is_rest_source {
+                    table.set_storage_mode(engine_core::model::StorageMode::InMemory);
+                }
                 introspected.push(table);
             }
         }
@@ -419,11 +488,9 @@ impl Engine {
                     .registry
                     .connector_index_by_source_id(&binding.source_id)
                 {
-                    Some(idx) => to_bind.push((
-                        table.name().to_string(),
-                        idx,
-                        SourceBinding::new(&binding.schema, &binding.table),
-                    )),
+                    Some(idx) => {
+                        to_bind.push((table.name().to_string(), idx, runtime_binding(binding)))
+                    }
                     None => report.unbound_tables.push(table.name().to_string()),
                 }
             }
@@ -447,7 +514,11 @@ impl Engine {
     ) -> EngineResult<WireReport> {
         self.wire_sources(|src| match src.kind {
             SourceKind::InMemory => SourceCredential::Skip,
-            SourceKind::Csv | SourceKind::Parquet => match auth.get(&src.id) {
+            // Csv/Parquet: local files, so the process identity is the auth.
+            // Rest: `Integrated` means "no credential", which is correct for a
+            // public API and fails closed (naming the missing slots) for one
+            // that declares secret slots.
+            SourceKind::Csv | SourceKind::Parquet | SourceKind::Rest => match auth.get(&src.id) {
                 Some(a) => SourceCredential::Auth(a.clone()),
                 None => SourceCredential::Auth(AuthMethod::Integrated),
             },
@@ -493,12 +564,23 @@ impl Engine {
         preferred_auth: PersistedAuthKind,
         connector: AnyConnector,
     ) -> EngineResult<usize> {
-        self.model.push_source(PersistedSource::new(
-            id.clone(),
-            kind,
-            connection,
-            preferred_auth,
-        ))?;
+        self.push_persisted_source(
+            PersistedSource::new(id, kind, connection, preferred_auth),
+            connector,
+        )
+    }
+
+    /// Push an already-built [`PersistedSource`] into the catalog and register
+    /// its connector under the same id. The one place both the
+    /// connection-target sources and the REST source (whose descriptor is not
+    /// built from a [`ConnectionTarget`]) land.
+    fn push_persisted_source(
+        &mut self,
+        source: PersistedSource,
+        connector: AnyConnector,
+    ) -> EngineResult<usize> {
+        let id = source.id.clone();
+        self.model.push_source(source)?;
         // Adding a source to the catalog has no effect on query results, so we
         // do not invalidate the result cache (unlike set_model).
         Ok(self.registry.add_connector_with_id(Some(id), connector))
@@ -525,6 +607,20 @@ async fn build_connector(src: &PersistedSource, auth: AuthMethod) -> EngineResul
         SourceKind::Parquet => ParquetConnector::from_target(target, auth)
             .map_err(map_conn_err)?
             .into(),
+        SourceKind::Rest => {
+            // A REST source's whole description lives in `src.rest`, not in the
+            // (empty) connection target; a `Rest` source without one is a
+            // corrupt catalog entry, which model validation also rejects.
+            let config = src.rest.clone().ok_or_else(|| {
+                EngineError::InvalidData(format!(
+                    "REST data source '{}' carries no configuration; it cannot be wired",
+                    src.id
+                ))
+            })?;
+            RestConnector::from_config(config, auth)
+                .map_err(map_conn_err)?
+                .into()
+        }
         SourceKind::InMemory => {
             return Err(EngineError::InvalidData(format!(
                 "in-memory data source '{}' cannot be rebuilt from persisted auth; \

@@ -165,6 +165,27 @@ impl InMemoryCache {
         self.entries.get(table_name).map(|e| &e.batch)
     }
 
+    /// Drop a table's cached data, releasing its share of the budget.
+    ///
+    /// Returns `true` if the table had cached data. Used when a definition
+    /// change makes the cached rows the *wrong* rows rather than merely stale
+    /// — editing a table's transformation pipeline, for instance — so the next
+    /// query re-fetches instead of serving data the new definition would never
+    /// have produced.
+    ///
+    /// Fingerprints go with the entry: they record what the source looked like
+    /// when these rows were fetched, and keeping them would let a later
+    /// staleness poll conclude "unchanged" about data that is no longer here.
+    pub fn remove(&mut self, table_name: &str) -> bool {
+        match self.entries.remove(table_name) {
+            Some(entry) => {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.size_bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Returns when the table was last refreshed, if cached.
     pub fn last_refreshed(&self, table_name: &str) -> Option<Instant> {
         self.entries.get(table_name).map(|e| e.last_refreshed)
@@ -480,6 +501,38 @@ mod tests {
 
         let cached = cache.get("products").unwrap();
         assert_eq!(cached.num_rows(), 100);
+    }
+
+    #[test]
+    fn remove_drops_the_entry_and_releases_its_bytes() {
+        let mut cache = InMemoryCache::new();
+        cache.store("t", make_test_batch(100)).unwrap();
+        let with_entry = cache.total_bytes();
+        assert!(with_entry > 0);
+        assert!(cache.contains("t"));
+
+        assert!(cache.remove("t"));
+        assert!(!cache.contains("t"));
+        assert_eq!(
+            cache.total_bytes(),
+            0,
+            "removing the only entry must release its bytes back to the budget"
+        );
+        // Removing again is a no-op, not an accounting error.
+        assert!(!cache.remove("t"));
+        assert_eq!(cache.total_bytes(), 0);
+    }
+
+    #[test]
+    fn remove_then_store_reuses_the_budget() {
+        // If remove leaked its bytes, a table repeatedly re-cached after a
+        // definition change would eventually exhaust the budget.
+        let mut cache = InMemoryCache::with_budget(batch_memory_size(&make_test_batch(100)) * 2);
+        for _ in 0..10 {
+            cache.store("t", make_test_batch(100)).unwrap();
+            cache.remove("t");
+        }
+        assert!(cache.store("t", make_test_batch(100)).is_ok());
     }
 
     #[test]

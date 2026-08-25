@@ -56,6 +56,7 @@ add   measure [Margin]          format="0.0%"        = DIVIDE([P], [R])
 | [delete](delete.md) | delete objects (patterns allowed) |
 | refresh | re-fetch an InMemory [table](table.md)'s rows |
 | materialize | materialize a [calculated table](calctable.md) now |
+| [transform](transform.md) | edit a [table](table.md)'s applied steps |
 | validate | model consistency check (see [model](model.md)) |
 | import | import [source](source.md) tables or a SQL query table |
 | connect | wire a [source](source.md) live |
@@ -258,6 +259,11 @@ show model
 Prints every stored property of the object, including full formulas,
 role filters, KPI bands, hierarchy levels, and (for tables) the column list.
 
+A [table](table.md) that carries a transformation pipeline also prints its
+**applied steps**, numbered from 1 — the same numbers
+[transform](transform.md) addresses. This is the read half of that verb; there
+is no \`ls steps\`.
+
 \`\`\`
 show measure [Total Sales]
 show table Sales
@@ -389,6 +395,85 @@ Notes:
   everything bound to its materialized table.`,
   },
   {
+    id: "transform",
+    title: "transform — applied steps",
+    group: "Verbs",
+    summary: "Edit a table's transformation pipeline: add, remove, move, rename, clear.",
+    markdown: `# transform
+
+\`\`\`
+transform table <name> add <stepType> [key=value …] [= <expression>] [at=<n>]
+transform table <name> remove <n>
+transform table <name> move <n> <to>
+transform table <name> rename <n> <new output name>
+transform table <name> clear
+\`\`\`
+
+A **pipeline** ("applied steps") turns the rows a connector returned into the
+rows the [table](table.md) declares — the same idea as Power Query's applied
+steps. \`transform\` is the write half; the read half is
+[\`show table <name>\`](show.md), which prints the steps as a numbered list.
+
+- Step numbers are **1-based** — exactly the numbers \`show table\` prints.
+- **No [wildcards](wildcards.md).** A pipeline is per-table state addressed by
+  position, so fanning a reorder out over a pattern would be meaningless. The
+  table name must be exact.
+- The table must be **bound to a data source**; a transformed table is forced
+  to \`InMemory\` storage.
+- Every subaction rewrites the whole pipeline in ONE call, so it is **one undo
+  step** — inside a script it also joins that script's single batch (see
+  [scripts](scripts.md)).
+
+\`\`\`
+transform table Sales add filterRows = [Status] <> "Cancelled"
+transform table Sales add renameColumn column=Status newname=OrderStatus at=2
+transform table Sales add changeType column=Qty type=Int64 onerror=null
+transform table Sales add removeColumns columns=Notes,Internal
+transform table Sales move 3 1
+transform table Sales rename 4 NetAmount
+transform table Sales remove 3
+transform table Sales clear
+\`\`\`
+
+## Step types
+
+| Step | Options |
+| --- | --- |
+| \`removeColumns\` | \`columns=A,B\` |
+| \`selectColumns\` | \`columns=A,B\` (keeps them, **in this order**) |
+| \`renameColumn\` | \`column=Old newname=New\` |
+| \`changeType\` | \`column=Qty\` (or \`columns=A,B\`) \`type=Int64\` \`[onerror=fail\\|null]\` |
+| \`filterRows\` | \`= <row condition>\` |
+| \`addColumn\` | \`name=Margin [type=Float64] = <expression>\` |
+| \`splitColumn\` | \`column=Name delimiter="," parts=2 [keeporiginal=true]\` |
+| \`replaceValues\` | \`column=Region find="x" [replace="y"] [matchentire=true]\` |
+| \`textTransform\` | \`columns=A,B operation=trim\\|clean\\|upper\\|lower\` |
+| \`fillDown\` | \`columns=A,B\` |
+| \`removeDuplicates\` | \`[columns=A,B]\` (omit = every column) |
+| \`sort\` | \`by=Amount,-Date\` (also \`Col:desc\` / \`Col:asc\`) |
+| \`groupBy\` | \`groupby=Region agg=sum:Amount:Total agg=countrows::Rows\` |
+| \`keepRows\` / \`removeRows\` | \`range=first:100\` \\| \`last:50\` \\| \`range:OFFSET:COUNT\` |
+| \`unpivot\` | \`columns=Jan,Feb namecolumn=Month valuecolumn=Amount\` |
+| \`pivot\` | \`namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb\` |
+
+Options that do not belong to the step type being added are refused by name —
+a \`filterRows\` step never silently swallows a \`column=\`.
+
+## Renaming a step
+
+\`rename <n> <name>\` renames the **output name the step introduces**:
+\`addColumn\`'s new column, or a one-column \`renameColumn\`'s target. The
+engine's steps carry no display label, so any other step type refuses the
+rename rather than accepting a name that would be dropped on the next save.
+
+## Aggregates
+
+\`agg=\` takes \`function:column:alias\`, repeatable; \`countrows\` takes no
+input column (\`countrows::Rows\`). Functions: \`sum\`, \`count\`,
+\`countrows\`, \`distinctcount\`, \`avg\`, \`min\`, \`max\`, \`median\`,
+\`stdev\`, \`stdevpop\`, \`var\`, \`varpop\`, \`anyvalue\`, \`mode\`.`,
+  },
+  {
     id: "undo_redo",
     title: "undo / redo",
     group: "Verbs",
@@ -469,6 +554,7 @@ set table <name> source=<source>|none [schema=…] [sourcetable=…]
 rename table <old> <new>            # sets the DISPLAY name
 delete table <pattern>
 refresh table <pattern>
+transform table <name> …            # applied steps
 \`\`\`
 
 | Option | Value | Effect |
@@ -493,6 +579,10 @@ set table Sales refresh=interval:900,daily:06:00 incremental="[Date] >= TODAY()-
 
 \`refresh table <pattern>\` re-fetches rows **now** (data, not model — it is
 not an undo step).
+
+**Applied steps.** A bound table can carry a transformation pipeline — see
+[transform](transform.md) to edit it. \`show table <name>\` prints the steps as
+a numbered list, and those 1-based numbers are what \`transform\` addresses.
 
 New tables come from \`import tables\` / \`import sql\` (see
 [source](source.md)), [calculated tables](calctable.md), or

@@ -2284,10 +2284,13 @@ name = "engine-query"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "chrono",
  "datafusion",
  "engine-connectors",
  "engine-core",
  "futures",
+ "reqwest",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

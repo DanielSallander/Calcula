@@ -149,6 +149,14 @@ impl PostgresConnector {
                     "Integrated (SSPI/Kerberos) authentication is not supported by the PostgreSQL connector".to_string(),
                 ));
             }
+            ResolvedCredentials::Secrets => {
+                return Err(ConnectorError::AuthMethodNotSupported(
+                    "Named secret slots (AuthMethod::Secrets) are a REST/Web source concept; \
+                     the PostgreSQL connector takes AuthMethod::UsernamePassword or \
+                     AuthMethod::EnvironmentVariable"
+                        .to_string(),
+                ));
+            }
         };
 
         let mut options = PgConnectOptions::new()

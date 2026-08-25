@@ -78,6 +78,13 @@ impl CsvConnector {
                         .into(),
                 ));
             }
+            AuthMethod::Secrets(_) => {
+                return Err(ConnectorError::AuthMethodNotSupported(
+                    "CSV connector: named secret slots are a REST/Web source concept and are not \
+                     applicable to local files; use AuthMethod::Integrated"
+                        .into(),
+                ));
+            }
             // `AuthMethod` is `#[non_exhaustive]`: any future credential method
             // is likewise not applicable to local files.
             _ => {

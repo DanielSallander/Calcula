@@ -116,10 +116,48 @@ dialect.
   serialized shape carries no vendor-specific fields, so adding a vendor needs no
   `MODEL_FORMAT_VERSION` bump.
 
+## When a source is not a database (the REST connector's shape)
+
+`ConnectionTarget` describes a *server*: host, port, database, schema. A source
+whose identity is a URL, a set of endpoints and a field mapping cannot be
+squeezed into it, and inventing a base URL from `host`/`database` would point
+the source somewhere the model never declared. The REST connector is the worked
+example of the alternative:
+
+- Its configuration is its own **persisted, secret-free** type in `engine-core`
+  (`model::rest::RestSourceConfig`), reached from `PersistedSource::rest`. It is
+  types + `validate()` only — no I/O in `engine-core`.
+- It is built with `RestConnector::from_config(config, auth)`. `from_target`
+  still exists (the checklist requires it) and returns a `ConnectorError`
+  explaining why, so the impossible construction is refused rather than guessed.
+- Credentials that are not a username/password pair use
+  `AuthMethod::Secrets(HashMap<String, String>)` (`AuthMethodKind::SecretMap`):
+  the model records **slot names**, the host resolves them at wiring time, and a
+  declared slot the host does not supply is a hard error — never an
+  unauthenticated request.
+- Everything else is the ordinary checklist: `ConnectorAuth`, one line in
+  `define_any_connector!`, a matching `SourceKind` variant, and an
+  `Engine::add_rest_source` facade method.
+
+Because it can push nothing to its source, it is also the clearest illustration
+of the universal floor: `fetch_data` fetches the endpoint's rows and then
+applies the **entire** `FetchRequest` restriction contract locally — `filters`,
+`in_filters`, `or_groups`, plus `columns` and `limit` — through the same shared
+`apply_filters` / `apply_projection_and_limit` helpers the in-memory, CSV and
+Parquet connectors use.
+
 ## Status
 
-PostgreSQL is the only connector with full expression pushdown today
-(`PostgresDialect` + `ExpressionDialect`). SQL Server, CSV, Parquet, and the
-in-memory connector are fetch-only and compute compound/JOIN queries locally.
-Giving SQL Server pushdown is now "implement a `SqlServerDialect` (engine-core)
-+ `ExpressionDialect`, return the capability" — no planner or builder changes.
+| Connector | Auth methods | Pushdown |
+|---|---|---|
+| PostgreSQL | UsernamePassword, EnvironmentVariable | full expression pushdown (`PostgresDialect` + `ExpressionDialect`) |
+| SQL Server | Integrated, UsernamePassword, EnvironmentVariable | fetch-only |
+| CSV | Integrated (process file access) | fetch-only |
+| Parquet | Integrated (process file access) | fetch-only |
+| In-memory | none (built from in-process data) | fetch-only |
+| **Rest** | **SecretMap, Integrated (= no auth)** | **fetch-only; the full restriction contract is applied locally** |
+
+PostgreSQL is the only connector with full expression pushdown today. The rest
+are fetch-only and compute compound/JOIN queries locally. Giving SQL Server
+pushdown is now "implement a `SqlServerDialect` (engine-core) +
+`ExpressionDialect`, return the capability" — no planner or builder changes.

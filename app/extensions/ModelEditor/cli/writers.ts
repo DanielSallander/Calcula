@@ -17,6 +17,7 @@ import type {
   RefreshStrategyDto,
   RoleFilterDto,
   ScriptParamDto,
+  TransformStepDto,
 } from "@api";
 import { CliError } from "./lex";
 import type { ValueTok } from "./lex";
@@ -28,6 +29,16 @@ import { isPattern, matchColumns, matchNamed, matchRelationships, matchTables, r
 import type { ColumnMatch } from "./resolve";
 import { relationshipTarget, sourceLabel } from "./readers";
 import { plural } from "./format";
+import { dataType } from "./dataTypes";
+import {
+  buildTransformStep,
+  describeTransformStep,
+  normalizeStepType,
+  renameStepOutput,
+  stepIndexArg,
+  stepInsertPosition,
+  TRANSFORM_STEP_TYPES,
+} from "./transformSteps";
 
 // ---------------------------------------------------------------------------
 // Small shared helpers
@@ -89,28 +100,9 @@ function requireExpr(cmd: Command, usage: string): string {
   return cmd.expr;
 }
 
-const DATA_TYPES: Record<string, string> = {
-  string: "String",
-  text: "String",
-  int: "Int64",
-  int32: "Int32",
-  int64: "Int64",
-  float: "Float64",
-  float64: "Float64",
-  double: "Float64",
-  number: "Float64",
-  boolean: "Boolean",
-  bool: "Boolean",
-  date: "Date",
-  timestamp: "Timestamp",
-  datetime: "Timestamp",
-};
-
-function dataType(s: string, line: number): string {
-  const t = DATA_TYPES[s.toLowerCase()];
-  if (!t) fail(`Unknown data type '${s}' (String, Int32, Int64, Float64, Boolean, Date, Timestamp)`, line);
-  return t;
-}
+// The data-type spelling table moved to dataTypes.ts — `transform table …
+// add changeType type=…` reads the SAME table, and modelOptions.ts derives
+// its completion enum from it instead of keeping a third hand copy.
 
 // The m:1 / 1:m shorthands are user-facing CLI spellings, not identifiers.
 /* eslint-disable @typescript-eslint/naming-convention */
@@ -349,6 +341,10 @@ export function previewWriteCommand(cmd: Command, s: CliSession): WritePreview |
       return { labels: [cmd.raw.trim().split("\n")[0]], wildcard: false };
     case "connect":
       return { labels: [`connect source ${cmd.pos[0]?.text ?? ""}`], wildcard: false };
+    case "transform":
+      // A pipeline is per-table state addressed by step NUMBER, so fanning a
+      // reorder out over a pattern is incoherent: no wildcards, ever.
+      return { labels: [planTransform(cmd, s).label], wildcard: false };
     case "set":
     case "rename":
     case "delete":
@@ -411,6 +407,14 @@ export async function runWrite(cmd: Command, s: CliSession, io: CliIo): Promise<
       }
       return;
     }
+    case "transform": {
+      // Re-plan against the CURRENT overview: an earlier command in the same
+      // run may already have changed this table's steps.
+      const p = planTransform(cmd, s);
+      await mutOverview(s, () => s.gateway.transformSet(s.connectionId, p.table, p.steps));
+      io.print(p.message, "info");
+      return;
+    }
     case "import":
       await runImport(cmd, s, io);
       return;
@@ -425,6 +429,149 @@ export async function runWrite(cmd: Command, s: CliSession, io: CliIo): Promise<
     }
     default:
       fail(`Unhandled command '${cmd.verb}'`, cmd.line);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// transform — a table's applied-steps pipeline
+// ---------------------------------------------------------------------------
+
+const TRANSFORM_USAGE =
+  "transform table <name> add|remove|move|rename|clear …  (see 'help transform')";
+
+/** One planned pipeline rewrite: the WHOLE new step list for one table.
+ *  Every subaction is read-modify-write over the table's current steps and
+ *  commits with a single `transformSet`, which is one model edit and so one
+ *  undo entry. */
+interface TransformPlan {
+  table: string;
+  steps: TransformStepDto[];
+  /** Confirm-card label. */
+  label: string;
+  /** What the run prints on success. */
+  message: string;
+}
+
+/**
+ * Resolve `transform table …` against the CURRENT session overview.
+ *
+ * Called from previewWrite (so a bad step number fails before the confirm
+ * card) and again from runWrite (so an earlier command in the same run is
+ * accounted for). Step numbers are 1-BASED everywhere the user sees them —
+ * exactly the numbering `show table <name>` prints — and are converted to
+ * array indices here, in one place.
+ */
+function planTransform(cmd: Command, s: CliSession): TransformPlan {
+  if (cmd.kind !== "table") fail(`Usage: ${TRANSFORM_USAGE}`, cmd.line);
+  const target = primary(cmd, TRANSFORM_USAGE);
+  if (isPattern(target.text)) {
+    fail(
+      "transform edits ONE table's pipeline — wildcards are not allowed, because a step " +
+        "number means something different in every table's list",
+      cmd.line,
+    );
+  }
+  const t = requireTable(s.overview, target.text, cmd.line);
+  if (!t.bound) {
+    fail(
+      `Table '${t.name}' is not bound to a data source, so it cannot carry transformation ` +
+        `steps (bind it first: set table ${t.name} source=<source> sourcetable=<name>)`,
+      cmd.line,
+    );
+  }
+  const current: TransformStepDto[] = t.transformSteps ?? [];
+  const actionTok = cmd.pos[1];
+  if (!actionTok) fail(`Usage: ${TRANSFORM_USAGE}`, cmd.line);
+  const action = actionTok.text.toLowerCase();
+  const head = `transform table ${t.name}`;
+
+  switch (action) {
+    case "add": {
+      const typeTok = cmd.pos[2];
+      if (!typeTok) {
+        fail(
+          `Usage: transform table ${t.name} add <stepType> [key=value …] [= <expression>]\n` +
+            `Step types: ${TRANSFORM_STEP_TYPES.join(", ")}`,
+          cmd.line,
+        );
+      }
+      const type = normalizeStepType(typeTok.text);
+      if (!type) {
+        fail(
+          `Unknown step type '${typeTok.text}' (${TRANSFORM_STEP_TYPES.join(", ")})`,
+          cmd.line,
+        );
+      }
+      const step = buildTransformStep(cmd, type);
+      const at = optNum(cmd, "at");
+      const index =
+        at === undefined ? current.length : stepInsertPosition(at, current.length, cmd.line);
+      const steps = [...current];
+      steps.splice(index, 0, step);
+      return {
+        table: t.name,
+        steps,
+        label: `${head}: add step ${index + 1} ${type}`,
+        message: `Added step ${index + 1} (${type}) to ${t.name}: ${describeTransformStep(step)}`,
+      };
+    }
+    case "remove":
+    case "delete": {
+      const index = stepIndexArg(cmd.pos[2], current.length, "removed", t.name, cmd.line);
+      const removed = current[index];
+      return {
+        table: t.name,
+        steps: current.filter((_, i) => i !== index),
+        label: `${head}: remove step ${index + 1} (${removed.type})`,
+        message: `Removed step ${index + 1} (${removed.type}) from ${t.name}.`,
+      };
+    }
+    case "move": {
+      const from = stepIndexArg(cmd.pos[2], current.length, "moved", t.name, cmd.line);
+      const to = stepIndexArg(cmd.pos[3], current.length, "destination", t.name, cmd.line);
+      if (from === to) {
+        fail(`Step ${from + 1} is already at position ${to + 1} in ${t.name}`, cmd.line);
+      }
+      const steps = [...current];
+      const [moved] = steps.splice(from, 1);
+      steps.splice(to, 0, moved);
+      return {
+        table: t.name,
+        steps,
+        label: `${head}: move step ${from + 1} -> ${to + 1}`,
+        message: `Moved step ${from + 1} (${moved.type}) to position ${to + 1} in ${t.name}.`,
+      };
+    }
+    case "rename": {
+      const index = stepIndexArg(cmd.pos[2], current.length, "renamed", t.name, cmd.line);
+      const nameTok = cmd.pos[3];
+      if (!nameTok) {
+        fail(`Usage: transform table ${t.name} rename <step> <new output name>`, cmd.line);
+      }
+      const renamed = renameStepOutput(current[index], nameTok.text, index + 1, cmd.line);
+      const steps = [...current];
+      steps[index] = renamed;
+      return {
+        table: t.name,
+        steps,
+        label: `${head}: rename step ${index + 1} output to ${nameTok.text}`,
+        message: `Step ${index + 1} (${renamed.type}) in ${t.name} now reads: ${describeTransformStep(renamed)}`,
+      };
+    }
+    case "clear": {
+      if (current.length === 0) fail(`'${t.name}' has no transformation steps to clear`, cmd.line);
+      return {
+        table: t.name,
+        steps: [],
+        label: `${head}: clear ${plural(current.length, "step")}`,
+        message: `Cleared ${plural(current.length, "step")} from ${t.name}.`,
+      };
+    }
+    default:
+      fail(
+        `Unknown transform action '${actionTok.text}' (add, remove, move, rename, clear)`,
+        cmd.line,
+      );
   }
 }
 

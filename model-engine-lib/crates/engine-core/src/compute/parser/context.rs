@@ -443,9 +443,7 @@ impl Parser {
         let column = match self.advance()?.clone() {
             Token::Ident(s) => s,
             tok => {
-                return Err(
-                    self.parse_err_prev(format!("KEEP: expected column name, got {tok:?}"))
-                );
+                return Err(self.parse_err_prev(format!("KEEP: expected column name, got {tok:?}")));
             }
         };
         self.expect(&Token::RBracket)?;
@@ -1022,11 +1020,8 @@ mod tests {
 
     #[test]
     fn parse_context_keep_dynamic_username() {
-        let ctx = parse_context(
-            "own_rows",
-            "KEEP(dim_user, dim_user[login] = USERNAME())",
-        )
-        .unwrap();
+        let ctx =
+            parse_context("own_rows", "KEEP(dim_user, dim_user[login] = USERNAME())").unwrap();
         match &ctx.operations()[0] {
             ContextOp::Keep(filters) => {
                 assert_eq!(
@@ -1075,8 +1070,18 @@ mod tests {
             vec![
                 ContextOp::Inherit("ctx_base".into()),
                 ContextOp::Keep(vec![
-                    FilterPredicate::new("dim_product", "categoryname", ComparisonOp::Equal, "Bikes"),
-                    FilterPredicate::new("dim_date", "year", ComparisonOp::GreaterThanOrEqual, "2024"),
+                    FilterPredicate::new(
+                        "dim_product",
+                        "categoryname",
+                        ComparisonOp::Equal,
+                        "Bikes",
+                    ),
+                    FilterPredicate::new(
+                        "dim_date",
+                        "year",
+                        ComparisonOp::GreaterThanOrEqual,
+                        "2024",
+                    ),
                     FilterPredicate::username("dim_user", "login", ComparisonOp::Equal),
                     FilterPredicate::custom_data("dim_tenant", "key", ComparisonOp::Equal),
                 ]),

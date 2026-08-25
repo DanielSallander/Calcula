@@ -63,9 +63,11 @@ fn model_format_version_is_current() {
     // calculation-item format_string_expression, NOT IN / QUERY TOP /
     // CROSSFILTER / PREVIOUSDAY-NEXTDAY / FIRSTNONBLANK-LASTNONBLANK
     // expression forms, and Day granularity.
+    // v24 added table transformations (TableSourceBinding transformations /
+    // source_columns) and the persisted SQL source_query.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 23);
+    assert_eq!(MODEL_FORMAT_VERSION, 24);
 }
 
 #[test]

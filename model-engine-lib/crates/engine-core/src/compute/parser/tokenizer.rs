@@ -341,22 +341,33 @@ mod tests {
 
         // Empty string, and a quote at each end.
         assert_eq!(
-            tokenize(r#""""#).unwrap().iter().filter_map(|(t, _)| match t {
-                Token::StringLit(s) => Some(s.clone()),
-                _ => None,
-            }).collect::<Vec<_>>(),
+            tokenize(r#""""#)
+                .unwrap()
+                .iter()
+                .filter_map(|(t, _)| match t {
+                    Token::StringLit(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
             vec![String::new()]
         );
         assert_eq!(
-            tokenize(r#""""x""""#).unwrap().iter().filter_map(|(t, _)| match t {
-                Token::StringLit(s) => Some(s.clone()),
-                _ => None,
-            }).collect::<Vec<_>>(),
+            tokenize(r#""""x""""#)
+                .unwrap()
+                .iter()
+                .filter_map(|(t, _)| match t {
+                    Token::StringLit(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
             vec![r#""x""#.to_string()]
         );
 
         // An unterminated literal is still an error, not a silent truncation.
         assert!(tokenize(r#""a"#).is_err());
-        assert!(tokenize(r#""a"""#).is_err(), "trailing escape leaves it open");
+        assert!(
+            tokenize(r#""a"""#).is_err(),
+            "trailing escape leaves it open"
+        );
     }
 }

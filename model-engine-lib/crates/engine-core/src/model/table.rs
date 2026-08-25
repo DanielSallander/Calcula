@@ -606,12 +606,22 @@ impl Table {
             .collect()
     }
 
-    /// Compute a deterministic hash of this table's schema (column names,
-    /// types, and nullability in order).
+    /// Compute a deterministic hash of this table's **cache identity**: its
+    /// column names, types, and nullability in order, plus anything else that
+    /// decides whether previously cached rows are still the right rows.
     ///
     /// Used to detect whether cached data on disk is still compatible with the
-    /// current model. A different hash means the schema has changed and the
-    /// cached data should be discarded.
+    /// current model. A different hash means the cached data should be
+    /// discarded.
+    ///
+    /// # Why the pipeline is part of it
+    ///
+    /// A transformation step that changes only *values* — a trim, a replace, a
+    /// tightened filter — leaves the column list byte-for-byte identical while
+    /// making every cached row wrong. Hashing the pipeline (and the source
+    /// query, for the same reason) is what stops yesterday's cache from being
+    /// served after such an edit. A table with neither hashes exactly as it
+    /// did before those fields existed.
     pub fn schema_hash(&self) -> String {
         use std::collections::hash_map::DefaultHasher;
 
@@ -622,6 +632,16 @@ impl Table {
             // identifies each variant including Decimal(p, s).
             format!("{:?}", col.data_type()).hash(&mut hasher);
             col.nullable().hash(&mut hasher);
+        }
+        if let Some(binding) = &self.source_binding {
+            if let Some(fingerprint) =
+                crate::transform::pipeline_fingerprint(&binding.transformations)
+            {
+                fingerprint.hash(&mut hasher);
+            }
+            if let Some(sql) = &binding.source_query {
+                sql.hash(&mut hasher);
+            }
         }
         format!("{:016x}", hasher.finish())
     }
@@ -1033,6 +1053,62 @@ mod tests {
         let with_inc = make_table("t").with_incremental_refresh(IncrementalRefresh::new("id > 0"));
         // The refresh filter is not part of the data schema.
         assert_eq!(plain.schema_hash(), with_inc.schema_hash());
+    }
+
+    #[test]
+    fn a_values_only_pipeline_edit_changes_the_schema_hash() {
+        use crate::transform::TransformStep;
+
+        let base = |condition: &str| {
+            make_table("t")
+                .with_storage_mode(StorageMode::InMemory)
+                .with_source_binding(
+                    TableSourceBinding::new("s", "sales", "orders")
+                        .with_source_columns(vec![Column::new("id", DataType::Int64)])
+                        .with_transformations(vec![TransformStep::FilterRows {
+                            condition: condition.to_string(),
+                        }]),
+                )
+        };
+        let before = base("id > 0");
+        let after = base("id > 100");
+
+        // The premise: the COLUMNS are identical, so only the pipeline can
+        // distinguish these two tables' cached data.
+        let names = |t: &Table| {
+            t.columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&before), names(&after));
+        assert_ne!(
+            before.schema_hash(),
+            after.schema_hash(),
+            "a stale disk cache would outlive this edit"
+        );
+    }
+
+    #[test]
+    fn changing_a_source_query_changes_the_schema_hash() {
+        let base = |sql: &str| {
+            make_table("t")
+                .with_source_binding(TableSourceBinding::new("s", "", "q").with_source_query(sql))
+        };
+        assert_ne!(
+            base("SELECT * FROM a").schema_hash(),
+            base("SELECT * FROM b").schema_hash()
+        );
+    }
+
+    #[test]
+    fn a_table_without_a_pipeline_hashes_as_it_always_did() {
+        // Adding the pipeline to the identity must not invalidate every
+        // existing cache: an ordinary table, bound or not, is unaffected.
+        let plain = make_table("t");
+        let bound =
+            make_table("t").with_source_binding(TableSourceBinding::new("s", "sales", "orders"));
+        assert_eq!(plain.schema_hash(), bound.schema_hash());
     }
 
     #[test]

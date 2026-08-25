@@ -16,7 +16,7 @@ It is the authoritative hand-off surface between the engine and its hosts. It is
 The shared model file carries a `format_version: u32` field (serde key `format_version`, defaults to `0` for legacy files). The engine's current maximum is:
 
 ```rust
-pub const MODEL_FORMAT_VERSION: u32 = 23; // engine-core::model::schema
+pub const MODEL_FORMAT_VERSION: u32 = 24; // engine-core::model::schema
 ```
 
 Opening a model whose `format_version` is **higher** than the engine supports fails closed with:
@@ -57,8 +57,300 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `21` | Writeback columns — model `writeback_columns`, `Table::is_writeback_store`, `CalculatedColumn::generated_by`. |
 | `22` | Open model metadata — model `extension_data` (namespaced opaque JSON for host applications/extensions). |
 | `23` | Expression-language batch — calc-group introspection (`IsSelectedMeasure`/`SelectedMeasureName`/`SelectedMeasureFormatString` variants), `CalculationItem.format_string_expression`, `NOT IN` (`InList`/`InPredicate` `negated`), Day granularity + `PREVIOUSDAY`/`NEXTDAY`/`FIRSTNONBLANK`/`LASTNONBLANK` (`SemiAdditiveBalance` `shift_days`/`non_blank`), `QUERY ... TOP` (`Query.top`). |
+| `24` | Table transformations — `TableSourceBinding` gained `transformations` (an ordered `TransformStep` pipeline), `source_columns` (the pre-transform source schema), and `source_query` (a SQL `SELECT` the table's rows come from, previously runtime-only). Built-in REST/Web source — `SourceKind` gained `Rest`, `PersistedAuthKind` gained `SecretMap`, and `PersistedSource` gained `rest` (a `RestSourceConfig`: base URL, headers, endpoints, pagination, and **secret slot names only**). |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
+
+---
+
+## Table transformations — applied steps, and persisted SQL-source bindings (format version 24)
+
+A model table bound to a data source can now carry an ordered list of **transformation steps** that turn the rows a connector returned into the rows the table declares — the engine's answer to "I can import this table, but I cannot reshape it". Steps are **declarative data, not code**: they serialize into the model file, a host renders them as an editable list, and the resulting columns are derived without reading a single row.
+
+Because every connector returns Arrow batches through one trait and every in-memory table lands through one store, the pipeline is applied in the gap between those two facts — so it works identically for PostgreSQL, SQL Server, CSV, Parquet, in-memory, and host-fed sources, and for any connector added later, with **no per-connector work**.
+
+- **Model JSON (`format_version` 24, additive).** `TableSourceBinding` gained three fields, all `#[serde(default, skip_serializing_if)]`:
+  - `transformations: Vec<TransformStep>` — the pipeline, applied in order on every refresh.
+  - `source_columns: Vec<Column>` — the schema **as the source presents it**, before the steps run. This is the anchor that makes schema derivation an offline operation; it is non-empty exactly when `transformations` is.
+  - `source_query: Option<String>` — a SQL `SELECT` the table's rows come from instead of `schema.table`. The runtime binding always had this; the persisted one did not, so a model with a SQL-source table could not be reopened without the host re-supplying the query from its own storage. `wire_sources` now restores it.
+  
+  A table with no pipeline serializes byte-for-byte as it did before. **The version gate is warranted rather than cosmetic:** a pre-v24 engine would drop the pipeline and load the table as though its raw source rows were its content — a table that looks refreshed while being unfiltered, unrenamed, and untyped. That is a wrong answer, not a visible loss.
+- **The step catalog (17 steps).** `removeColumns`, `selectColumns`, `renameColumns`, `changeType`, `filterRows`, `addColumn`, `splitColumn`, `replaceValues`, `textTransform`, `fillDown`, `removeDuplicates`, `sort`, `groupBy`, `keepRows`, `removeRows`, `unpivot`, `pivot`. `TransformStep` is internally tagged on `type` with camelCase tags and field names (e.g. `{"type":"filterRows","condition":"status <> \"cancelled\""}`). An unknown tag **fails the load** rather than being skipped — that is what the version gate protects.
+- **Expressions are the existing language.** `filterRows` and `addColumn` carry the author's expression **source text** (the `IncrementalRefresh.refresh_filter` precedent), parsed with the condition grammar so both a top-level comparison and a plain value expression work. Validation is an **allowlist**: a step may use column references, literals, arithmetic, comparisons, boolean logic, `IF`/`SWITCH`/`COALESCE`/`IFERROR`/`GREATEST`/`LEAST`/`IN`, the text/date/math function families, and `Call` (model script functions — the escape hatch for logic the catalog cannot express). Everything else — aggregations, measure references, `QUERY`, context operations, window functions, table references — is rejected, and a variant added to `Expression` later is rejected by default rather than silently admitted.
+- **Two rules enforced at model build.** A table with steps must be `StorageMode::InMemory` (DirectQuery pushes source SQL using the table's *declared* column names, which the steps have already changed), and it may not also carry `incremental_refresh` (which splices freshly fetched source-shaped rows into a cache of transformed rows). Both surface as `EngineError::InvalidTransform`.
+- **The load-bearing invariant.** `DataModel::validate()` asserts that a transformed table's **declared columns are exactly what its own steps produce**, so a model file can never claim a shape its refresh will not deliver. The error prints both schemas.
+- **Public API — new types** (engine-core `transform` module, re-exported from `bi_engine`): `TransformStep`, `ColumnRename`, `TypeChange`, `CastErrorPolicy`, `TextOp`, `SortKey`, `RowRange`, `GroupAggregate`; `TransformPreviewRequest`, `TransformPreview`, `SourceSchemaDiff`, `MAX_PREVIEW_ROWS`.
+- **Public API — new functions:** `derive_pipeline_schema` / `derive_step_schema` (pure: input schema → output schema, no data), `validate_steps`, `schemas_match`, `pipeline_fingerprint`, `apply_steps`, `conform_to_declared`, and **`with_table_transformations(&DataModel, table, steps) -> EngineResult<DataModel>`** — the model half of a step edit, I/O-free, so a host can compute the edit inside its own model-mutation funnel without standing up an `Engine`. (`Engine::set_table_transformations` is that function plus validation and cache invalidation.) Also `Column::with_name` / `with_data_type` / `with_nullable` (rename and re-type while preserving presentation metadata), `TableSourceBinding::with_source_query` / `with_source_columns` / `with_transformations` / `has_transformations`, and `InMemoryCache::remove`.
+- **Public API — new facade methods:** `Engine::set_table_transformations(table, steps)` (re-derives the table's columns, revalidates the whole model, installs it, and drops the table's cache — a refused edit changes nothing), `table_transformations`, `table_source_columns`, `refresh_source_schema(table)` (re-introspect and adopt source drift, returning a `SourceSchemaDiff`), `preview_transformations(&request, &cancel)` (run **candidate** steps over a bounded sample, `upto_step` reproducing the pipeline as of a given step), and `drop_table_cache(table)`.
+- **Behavior — refresh.** The pipeline runs between fetch and store on `refresh_table`, `refresh_table_explained`, and `refresh_all_in_memory`, then the result is **conformed to the declared columns** (selected by name, cast, ordered). Selecting by name is what turns a source that changed shape into a named error instead of a cache of silently mismatched columns. Auto-tiering is structurally unaffected (it only considers DirectQuery dimensions).
+- **Behavior — cache identity.** `Table::schema_hash()` now folds a hash of the pipeline and the source query. Without this, a values-only step edit (a trim, a tightened filter) would leave the column list identical and a stale on-disk cache would outlive the edit that invalidated it. **A table with neither hashes exactly as before**, so existing caches are not invalidated by the upgrade.
+- **Errors the host can observe (new).** `EngineError::InvalidTransform { table, step_index, reason }` — a static defect in the pipeline (unknown column, name collision, unsupported type, non-row-level expression, or a declared/derived schema mismatch). `EngineError::TransformFailed { table, step_index, reason }` — a valid pipeline the *data* defeated (a cast the values do not survive, a source column that vanished). **Both carry the zero-based step index**, so a host anchors the message to a row of its step list; a reason without an index is not actionable in an editor.
+- **Preview is a sample, not the answer.** `preview_transformations` fetches at most `MAX_PREVIEW_ROWS` (10 000) source rows and returns a `TransformPreview { batch, source_rows, source_truncated }`. The source counts are returned rather than left to the caller **because a caller cannot infer them**: a pipeline that filters rows out leaves an output far under the cap even when the source was truncated, so judging "is this a sample?" from the output row count under-reports exactly when an aggregate is most likely to mislead. Combine `source_truncated` with `TransformStep::changes_row_count()` to decide whether to label a preview indicative rather than final.
+- **Calcula action.** Stamp `format_version >= 24` when a table carries `transformations` or a persisted `source_query`. Drive the step editor with `derive_pipeline_schema` (live column list + per-step diagnostics, no I/O) and `preview_transformations` (data, cancellable). Commit with `set_table_transformations` — it is one model edit, so it batches into one undo entry. Migrate SQL-source imports to persist `source_query` on the binding rather than in host-side storage. Surface `InvalidTransform` / `TransformFailed` against the step their `step_index` names.
+
+---
+
+## Built-in REST/Web source (format version 24)
+
+A JSON-over-HTTP API is now a **first-class data source**, described entirely by
+data. A `RestSourceConfig` names a base URL and a set of endpoints; each endpoint
+becomes one source table. Nothing about it is code, so it saves into the model
+file, a host renders it as an editable form, and it reconnects on reopen like any
+other source. Because every connector returns Arrow batches through one trait, a
+REST table also gets **table transformations for free** — the v24 pipeline runs in
+the same gap between fetch and store.
+
+The connector advertises **no pushdown**, which is the whole point of the
+universal floor: it fetches the endpoint's rows and then applies the **entire**
+`FetchRequest` restriction contract locally — `filters` **and** `in_filters`
+**and** `or_groups`, plus `columns` and `limit` — through the same shared
+DataFusion helpers the in-memory / CSV / Parquet connectors use. Dropping any of
+them would over-return rows, which is both a wrong aggregate and a row-level
+security leak.
+
+### Model JSON (`format_version` 24, additive)
+
+- **`SourceKind` gained `Rest`** (serialized `"rest"`).
+- **`PersistedAuthKind` gained `SecretMap`** (serialized `"secret_map"`) — the
+  hint for "this source's credentials are named slots the host resolves".
+- **`PersistedSource` gained `rest: Option<RestSourceConfig>`**
+  (`#[serde(default, skip_serializing_if = "Option::is_none")]`). Present exactly
+  when `kind == "rest"`; a non-REST source serializes byte-for-byte as before.
+  A `Rest` source without it — or a non-`Rest` source with it — is refused at
+  model build.
+- `RestSourceConfig` and its sub-types serialize in **camelCase**
+  (`baseUrl`, `defaultHeaders`, `maxResponseBytes`, `rowsPath`, `dataType`,
+  `pageParam`, `maxPages`, `passwordSlot`, …). `RestAuthSpec` is tagged on
+  `type`, `RestPagination` on `mode`.
+
+```jsonc
+{
+  "id": "web", "kind": "rest", "preferred_auth": "secret_map",
+  "rest": {
+    "baseUrl": "https://api.example.com/v1",
+    "defaultHeaders": [{ "name": "Accept", "value": "application/json" }],
+    "auth": { "type": "bearerSecret", "slot": "orders_token" },
+    "endpoints": [{
+      "name": "orders", "path": "orders", "method": "get",
+      "rowsPath": "data.items",
+      "fields": [
+        { "path": "id", "name": "id", "dataType": "Int64" },
+        { "path": "customer.name", "name": "customer", "dataType": "String" }
+      ],
+      "pagination": { "mode": "pageSize", "pageParam": "page",
+                      "sizeParam": "size", "size": 100, "maxPages": 50 }
+    }],
+    "timeoutSecs": 30,
+    "maxResponseBytes": 33554432
+  }
+}
+```
+
+### No secrets — slot names only
+
+`RestAuthSpec` records the **name of a secret slot**, never a value:
+`none` | `bearerSecret{slot}` | `headerSecret{header, slot}` |
+`querySecret{param, slot}` | `basicSecret{username, passwordSlot}`. The host
+resolves the names at wiring time and supplies the values through the new
+`AuthMethod::Secrets`, which — like every `AuthMethod` variant — is **never
+serialized**. A declared slot the host does not supply is a **hard error**: the
+connector never falls back to an unauthenticated request.
+
+`defaultHeaders` and an endpoint's `query` hold literal values and *are*
+persisted, so they are for non-secret request shaping only (`Accept`, a version
+pin). Putting a token in a default header writes it into every copy of the model
+file.
+
+### Pagination — four modes, all bounded
+
+`none` | `pageSize{pageParam, sizeParam, size, maxPages}` |
+`offset{offsetParam, limitParam, limit, maxPages}` |
+`cursor{cursorParam, cursorPath, maxPages}` (next cursor read out of the
+response body) | `linkHeader{maxPages}` (RFC 5988 `rel="next"`).
+
+`pageSize`/`offset` stop on a short page; `cursor` stops when the path is absent,
+null, empty, or repeats the previous cursor; `linkHeader` stops when there is no
+`rel="next"`. Every mode is additionally bounded by `maxPages` (1 …
+`MAX_REST_PAGE_LIMIT` = 10 000) **and** by the source's cumulative
+`maxResponseBytes`, which is charged across *all* pages. Reaching `maxPages` is a
+stop; exceeding the byte budget is a **refusal** (returning a truncated table
+silently would be a wrong answer).
+
+### Field mapping and type inference
+
+Each `RestField` is `{ path, name, dataType }`, where `path` is a dotted path
+into the row object (`customer.name`). An absent path or a JSON `null` becomes an
+**Arrow null**; a value that cannot be represented at all is an error naming the
+column, not a silent null.
+
+An endpoint with **no** declared `fields` has its schema **inferred by sampling
+its first page**, and inference is deliberately narrow: **`Boolean`, `Int64`,
+`Float64` and `String` only**. An ISO-8601 string is inferred as `String` — a
+product code like `2026-08-25` is a perfectly good string, and guessing wrong
+turns a working column into a parse error on some future row. **`Date`,
+`Timestamp` and `Decimal` columns must be declared explicitly**, as must any
+value nested inside an object or array. Declared `Date`/`Timestamp` columns
+accept ISO-8601 **strings** only (a bare epoch number is refused: days vs seconds
+vs milliseconds cannot be told apart). Declared `Decimal` columns parse from the
+value's decimal *text*, so money does not take a binary-float round trip; more
+fractional digits than the column's scale is an error, not a truncation.
+
+### Security posture (enforced, not advisory)
+
+- **`https://` only**, except a **loopback** host (`localhost`, `127.0.0.0/8`,
+  `[::1]`), which may use plain `http://` for local development and tests.
+- **No credentials in the URL** (a `user:pass@` userinfo is refused).
+- **An endpoint `path` may not carry a scheme, a host, or a `..` segment** — one
+  endpoint cannot silently target a server the model does not declare.
+- **Redirects are refused, never followed** (`redirect::Policy::none()`); a `3xx`
+  is reported as an error naming the `Location`. A followed redirect could move
+  an authenticated request onto an undeclared host.
+- **No cookie jar** (the feature is not compiled in).
+- **A per-request timeout** (`timeoutSecs`, default 30, max 600).
+- **A response-size cap enforced while streaming** (`maxResponseBytes`, default
+  32 MiB, max 512 MiB) — the `Content-Length` is checked before the first byte
+  and every chunk is counted, so an oversized or endless body is aborted rather
+  than buffered.
+- A `Link: rel="next"` URL is re-validated against the same https-or-loopback
+  rule before it is followed.
+- **Secrets never appear in `Debug` output or in any error message.** Errors are
+  constructed locally (never forwarded from the HTTP client with a URL attached,
+  since a `querySecret` lives in the query string) and every message is passed
+  through a redactor that replaces each resolved secret value with `***` — so
+  even an API that echoes the credential back in its 401 body cannot write it
+  into an engine error.
+
+### Public API — new types
+
+Re-exported from `bi_engine` (defined in `engine_core::model::rest`):
+
+- `RestSourceConfig`, `RestHeader`, `RestAuthSpec`, `RestMethod`, `RestField`,
+  `RestPagination`, `RestEndpoint`.
+- Constants: `DEFAULT_REST_TIMEOUT_SECS` (30), `MAX_REST_TIMEOUT_SECS` (600),
+  `DEFAULT_REST_MAX_RESPONSE_BYTES` (32 MiB), `MAX_REST_RESPONSE_BYTES`
+  (512 MiB), `MAX_REST_PAGE_LIMIT` (10 000).
+- Functions: `RestSourceConfig::validate() -> EngineResult<()>` (offline; no
+  I/O), `validate_absolute_url(url, what)`, `is_loopback_host(host)` — the same
+  rule the connector applies to a `Link` header's `next` URL.
+- Builders: `RestSourceConfig::new/with_header/with_auth/with_endpoint/`
+  `with_timeout_secs/with_max_response_bytes/endpoint`,
+  `RestEndpoint::new/with_method/with_query/with_body/with_rows_path/`
+  `with_fields/with_pagination`, `RestHeader::new`, `RestField::new`,
+  `RestAuthSpec::declared_slots()`, `RestPagination::max_pages()`,
+  `RestMethod::as_str()`.
+- `PersistedSource::rest(id, config)` — builds the catalog entry, deriving
+  `preferred_auth` from the config (`SecretMap` when a slot is declared,
+  `Integrated` when none is).
+- `bi_engine::RestConnector` / `AnyConnector::Rest`, and
+  `bi_engine::REST_SOURCE_SCHEMA` (`"rest"`, the synthetic schema every endpoint
+  is listed under).
+- `RestConnector::from_config(config, auth)`, `RestConnector::config()`.
+  `RestConnector::from_target(...)` exists (the connector checklist requires it)
+  and always returns a `ConnectorError` explaining that a REST source has no
+  host/port/database target.
+
+### Public API — auth
+
+- **`AuthMethod::Secrets(HashMap<String, String>)`** and
+  **`AuthMethodKind::SecretMap`** (`engine_connectors::auth`, re-exported from
+  `bi_engine`). Helper: `AuthMethod::secrets([(name, value), …])`.
+- **`engine_connectors::auth::validate_secret_map(&HashMap<String, String>)`** —
+  the shared NUL-byte rule applied to a secret map; reports the offending **slot
+  name**, never its value.
+- `AuthMethod` is `#[non_exhaustive]`, so a host matching on it exhaustively must
+  add an arm. Every existing connector rejects the new variant with
+  `ConnectorError::AuthMethodNotSupported` and a message pointing at the method
+  it does take.
+
+### Public API — new facade method
+
+```rust
+Engine::add_rest_source(id, config: RestSourceConfig, auth: AuthMethod)
+    -> EngineResult<usize>
+```
+
+Validates the config, resolves every declared secret slot, registers the
+connector under `id`, and records a secret-free `PersistedSource` in the model's
+catalog. **Synchronous — it opens no connection**; the first request happens on
+refresh. Bind endpoints with `bind_source_table(id, "rest", "<endpoint>", …)` or
+`bind_source_tables(id)`.
+
+### Behavior
+
+- **`wire_sources` / `wire_sources_with_auth` handle `SourceKind::Rest`.** The
+  connector is rebuilt from the persisted `rest` config plus a host-supplied
+  `SourceCredential::Auth(AuthMethod::Secrets(…))`. In
+  `wire_sources_with_auth`, a REST source with no entry in the map falls back to
+  `AuthMethod::Integrated` (= no credential), which is correct for a public API
+  and **fails closed, naming the missing slot**, for one that declares secrets.
+- **A table bound to a REST source must be `StorageMode::InMemory`**, enforced at
+  model build. A REST endpoint is fetched and paginated in full, so DirectQuery
+  would re-walk the whole API on every query, and the connector advertises no
+  pushdown, so nothing would be saved by it. `bind_source_tables` therefore
+  stamps `InMemory` on the tables **it creates** for a REST source; an existing
+  table's storage mode is left alone and a wrong one is reported rather than
+  silently changed.
+- **`list_tables` issues no request** (the endpoint list is declarative), and
+  **`introspect_table` issues no request for an endpoint with declared
+  `fields`** — only inference needs a sample.
+- **`execute_query`, `row_count` and `execute_join_aggregation` are refused**
+  with `ConnectorError::UnsupportedOperation`. `row_count` in particular would
+  mean walking every page, i.e. the same cost as fetching, so it refuses rather
+  than hiding a full scan behind a name that promises a cheap count.
+- **Transformations compose.** A REST table can carry a v24 `transformations`
+  pipeline; it runs between fetch and store exactly as for any other connector.
+
+### Errors the host can observe
+
+- `EngineError::InvalidData("REST source: …")` — a configuration that does not
+  validate (non-loopback plain `http://`, credentials in the URL, a scheme or
+  host in an endpoint path, a duplicate/empty endpoint name, header or query
+  injection, a `GET` with a body, a non-JSON `POST` body, `maxPages` out of
+  range, a timeout or byte budget out of range). At model build the message is
+  prefixed with the offending source id.
+- `EngineError::InvalidData("table '…' is bound to REST source '…' but is not
+  InMemory: …")`.
+- `ConnectorError::AuthMethodNotSupported` — a database auth method handed to the
+  REST connector, or `Integrated` where slots are declared.
+- `ConnectorError::ConnectionFailed("REST source declares secret slot '…' but the
+  host supplied no value for it")`.
+- `ConnectorError::QueryFailed` — a non-success status (with a **redacted** body
+  snippet), a refused redirect, a timeout, the response-size refusal, a body that
+  is not JSON, a `rowsPath` that is missing or does not name an array, or an
+  unknown endpoint (the message lists the declared ones).
+- `ConnectorError::ArrowConversion` — a value that cannot be decoded as its
+  declared type, naming the endpoint and the column.
+- `ConnectorError::IntrospectionFailed` — inference with no rows, a non-object
+  row, or an endpoint whose values are all nested (declare `fields`).
+
+### Build note
+
+`engine-query` gained `reqwest` (with `serde_json` and `chrono`). It is pinned to
+`default-features = false` + **`default-tls`** — i.e. native-tls, which is
+schannel on Windows and the same backend `engine-connectors` already pins for
+sqlx, so the workspace resolves to **one** TLS stack. rustls was evaluated first
+and rejected: reqwest's `rustls-tls` selects the *ring* provider, whose build
+script requires clang on `aarch64-pc-windows-msvc` and fails there.
+
+### Calcula action
+
+- Stamp `format_version >= 24` when a model carries a `"rest"` source (it already
+  needs it for `transformations` / `source_query`).
+- Add a "Web / REST" source type to the Model Editor's source dialog: base URL,
+  optional non-secret default headers, an auth picker that collects **slot
+  names**, and a per-endpoint form (path, method, optional JSON body, static
+  query params, rows path, pagination mode, and either declared fields or
+  "infer"). `RestSourceConfig::validate()` is I/O-free, so the dialog can
+  validate on every keystroke and show exactly the message the engine would.
+- Resolve slot names against the app's credential store (the
+  `project_model_source_saved_signin` path) and pass them as
+  `AuthMethod::Secrets` at `add_rest_source` and at `wire_sources` time. **Never
+  write a resolved value anywhere near the model file.**
+- Mark REST-bound tables as in-memory in the UI and hide the DirectQuery toggle
+  for them — the engine refuses it, and the reason ("we would re-walk the whole
+  API on every click") is worth showing.
+- Present `maxResponseBytes` / `maxPages` / `timeoutSecs` as the guard rails they
+  are; the refusal messages name them so the fix is discoverable.
 
 ---
 

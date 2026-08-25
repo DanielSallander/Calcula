@@ -13,9 +13,10 @@ import {
   biRefreshWritebackData,
 } from "@api";
 import type { ConnectionInfo, ModelOverview, SourceTableInfo, WritebackTableInfo } from "@api";
-import { styles } from "../editorShared";
+import { Badge, styles } from "../editorShared";
 import { NewModelDialog } from "../NewModelDialog";
 import { SqlEditorModal } from "../SqlEditorModal";
+import { TransformEditorModal, summarizeSteps } from "../transform";
 
 /** First non-empty line of a query, truncated for an inline preview. */
 function firstLine(sql: string): string {
@@ -25,12 +26,17 @@ function firstLine(sql: string): string {
 
 export function ImportSection({
   connectionId,
+  overview,
   readOnly,
   applyOverview,
   reportError,
   onModelCreated,
 }: {
   connectionId: string;
+  /** The current model, or null when no connection is selected. Feeds the
+   *  post-import "Transform…" affordance (and the expression editor inside
+   *  it); this section is the one section reachable without a model. */
+  overview: ModelOverview | null;
   readOnly: boolean;
   applyOverview: (overview: ModelOverview) => void;
   reportError: (err: unknown) => void;
@@ -60,6 +66,13 @@ export function ImportSection({
   // ── New model dialog ──────────────────────────────────────────────────────
   const [showNew, setShowNew] = useState(false);
 
+  // ── Just-imported tables (the "shape it now" hand-off) ────────────────────
+  // Model table names, in import order. An import is exactly the moment the
+  // rows a connector returns first meet the model, so it is the moment to
+  // offer the step editor — without making the user go find the table again.
+  const [justImported, setJustImported] = useState<string[]>([]);
+  const [transformTable, setTransformTable] = useState<string | null>(null);
+
   useEffect(() => {
     setSource(null);
     setSourceError(null);
@@ -70,6 +83,8 @@ export function ImportSection({
     setShowSqlEditor(false);
     setWbChecked(new Set());
     setWbError(null);
+    setJustImported([]);
+    setTransformTable(null);
   }, [connectionId]);
 
   // Writeback datasets are local registry reads (no database connection), so
@@ -110,7 +125,22 @@ export function ImportSection({
     if (tables.length === 0) return;
     setImporting(true);
     try {
-      applyOverview(await biModelImportTables(connectionId, tables));
+      const imported = await biModelImportTables(connectionId, tables);
+      applyOverview(imported);
+      // Resolve what the model actually called each table: a table imported
+      // from a schema is named "<schema>.<table>", but a source that exposes no
+      // schema lands under the bare name. Ask the returned overview rather than
+      // rebuilding the naming rule here.
+      setJustImported(
+        tables
+          .map((t) => {
+            const qualified = `${t.schema}.${t.name}`;
+            if (imported.tables.some((x) => x.name === qualified)) return qualified;
+            if (imported.tables.some((x) => x.name === t.name)) return t.name;
+            return null;
+          })
+          .filter((name): name is string => name !== null),
+      );
       // Mark the imported tables locally instead of re-hitting the database.
       setSource(
         (prev) => prev?.map((t) => (checked.has(keyOf(t)) ? { ...t, imported: true } : t)) ?? null,
@@ -125,10 +155,15 @@ export function ImportSection({
 
   const importSqlSource = async () => {
     if (!sqlName.trim() || !sqlText.trim()) return;
+    const name = sqlName.trim();
     setSqlImporting(true);
     setSqlError(null);
     try {
-      applyOverview(await biModelImportSqlSource(connectionId, sqlName.trim(), sqlText));
+      const imported = await biModelImportSqlSource(connectionId, name, sqlText);
+      applyOverview(imported);
+      if (imported.tables.some((t) => t.name === name)) {
+        setJustImported((prev) => (prev.includes(name) ? prev : [...prev, name]));
+      }
       setSqlName("");
       setSqlText("");
     } catch (err: unknown) {
@@ -282,6 +317,63 @@ export function ImportSection({
           </div>
         )}
       </div>
+
+      {/* ── Card: shape what was just imported ───────────────────────────── */}
+      {justImported.length > 0 && (
+        <div style={{ ...styles.card, maxWidth: 560 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <span style={{ fontWeight: 600, flex: 1 }}>Just imported</span>
+            <button style={styles.smallBtn} onClick={() => setJustImported([])}>
+              Dismiss
+            </button>
+          </div>
+          <div style={{ ...styles.hint, marginBottom: 8 }}>
+            Shape the rows these tables return before the model sees them — remove columns, change
+            types, filter, group. Steps are re-evaluated from scratch on every refresh.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {justImported.map((name) => {
+              const t = overview?.tables.find((x) => x.name === name) ?? null;
+              return (
+                <div key={name} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: 12,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={t ? summarizeSteps(t.transformSteps) : name}
+                  >
+                    {name}
+                  </span>
+                  {t && t.transformSteps.length > 0 && (
+                    <Badge tone="ok">
+                      {t.transformSteps.length} step{t.transformSteps.length === 1 ? "" : "s"}
+                    </Badge>
+                  )}
+                  <button
+                    style={styles.btn}
+                    disabled={readOnly || t === null || t.sourceId === null}
+                    title={
+                      t === null
+                        ? "This table is no longer in the model"
+                        : t.sourceId === null
+                          ? "Bind this table to a data source first"
+                          : "Edit this table's transformation steps"
+                    }
+                    onClick={() => setTransformTable(name)}
+                  >
+                    Transform&hellip;
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── Card: Writeback data (only when the workbook can see any) ─────── */}
       {writeback.length > 0 && (
@@ -454,6 +546,23 @@ export function ImportSection({
           }}
         />
       )}
+
+      {transformTable !== null &&
+        overview !== null &&
+        (() => {
+          const t = overview.tables.find((x) => x.name === transformTable);
+          if (!t) return null;
+          return (
+            <TransformEditorModal
+              connectionId={connectionId}
+              table={t}
+              overview={overview}
+              readOnly={readOnly}
+              onClose={() => setTransformTable(null)}
+              onApplied={applyOverview}
+            />
+          );
+        })()}
 
       {showSqlEditor && (
         <SqlEditorModal

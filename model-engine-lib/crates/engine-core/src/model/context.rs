@@ -118,8 +118,9 @@ impl ContextOp {
                 let parts: Vec<String> = preds.iter().map(in_predicate_to_text).collect();
                 Some(format!("KEEP({}, {})", first.table, parts.join(", ")))
             }
-            ContextOp::Clear(targets) => (!targets.is_empty())
-                .then(|| format!("CLEAR({})", clear_targets_to_text(targets))),
+            ContextOp::Clear(targets) => {
+                (!targets.is_empty()).then(|| format!("CLEAR({})", clear_targets_to_text(targets)))
+            }
             ContextOp::ClearInner(targets) => (!targets.is_empty())
                 .then(|| format!("CLEAR_INNER({})", clear_targets_to_text(targets))),
             ContextOp::ClearOuter(targets) => (!targets.is_empty())

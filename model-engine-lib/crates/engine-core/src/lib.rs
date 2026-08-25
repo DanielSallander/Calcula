@@ -35,4 +35,5 @@ pub mod error;
 pub mod model;
 pub mod optimize;
 pub mod store;
+pub mod transform;
 pub mod types;

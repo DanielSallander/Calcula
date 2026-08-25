@@ -3199,7 +3199,7 @@ export const BI_MODEL_SCRIPTABLE_KINDS: ReadonlySet<string> = new Set([
   "measure", "calcColumn", "relationship", "hierarchy", "kpi", "calcGroup",
   "perspective", "culture", "scriptFunction", "calculatedTable",
   "tableVariable", "context", "contextColumn", "writebackColumn", "metadata",
-  "dateTable", "extensionData",
+  "dateTable", "extensionData", "transform",
 ]);
 
 /** The read-only DIAGNOSTIC actions of the bi.model gateway that carry no

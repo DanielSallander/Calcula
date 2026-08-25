@@ -79,6 +79,11 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     // write/delete-only from the frontend; the resolve path lives inside the
     // Rust net-fetch gate and never returns a value to any caller.
     "connector_secrets",
+    // Secret slots for a MODEL source (today: REST/Web), configured by the user
+    // in the Model Editor. Same posture as `connector_secrets`: list reports
+    // only whether a slot is set, set/delete are write-only, and no op returns
+    // a value — the resolve path stays server-side, inside the wiring code.
+    "bi_model_source_secrets",
     // AI provider keys, one Credential Manager slot per provider. Same shape as
     // the keychain_* family above and denylisted for the same reason: a stored
     // secret must never be reachable through a governed third-party door.
@@ -159,6 +164,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "bi_model_set_table_refresh",
     "bi_model_refresh_table",
     "bi_model_extension_data",
+    "bi_model_transform",
     // Script-gateway doors: reachable by scripts ONLY through the broker's
     // consent-gated methods (cap.biModel* / cap.connector*); the Rust gates
     // re-check the grants authoritatively.

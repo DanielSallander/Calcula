@@ -498,6 +498,75 @@ pub(super) enum EntityChangeKind {
 /// disagree about what changed. Deriving the change from the models — instead
 /// of threading it through every command — keeps emission exactly-once at the
 /// choke points with no per-call-site bookkeeping to forget.
+/// If the ONLY difference between the two table lists is one table's
+/// transformation pipeline, return that table's name.
+///
+/// Deliberately conservative: it returns `Some` only when the table sets match,
+/// exactly one table differs, and that table is identical once its pipeline is
+/// normalized away. Anything else — a renamed table, two changed tables, a
+/// column edit alongside a step edit — returns `None` and falls through to the
+/// generic `table` domain. Reporting `transform` for a change that was really
+/// something else would hide a table edit from every listener, which is a worse
+/// failure than reporting `table` for a step edit.
+fn transform_only_table_change(
+    before: &bi_engine::DataModel,
+    after: &bi_engine::DataModel,
+) -> Option<String> {
+    if before.tables().len() != after.tables().len() {
+        return None;
+    }
+
+    /// A table's JSON with its pipeline fields blanked out, so two tables that
+    /// differ ONLY in their pipeline compare equal.
+    fn without_pipeline(table: &bi_engine::Table) -> Option<serde_json::Value> {
+        let mut value = serde_json::to_value(table).ok()?;
+        if let Some(binding) = value.get_mut("source_binding").and_then(|b| b.as_object_mut())
+        {
+            binding.remove("transformations");
+            binding.remove("source_columns");
+        }
+        // A pipeline edit re-derives the table's columns, so the column list is
+        // expected to move with it and must not count as a separate change.
+        value.as_object_mut()?.remove("columns");
+        Some(value)
+    }
+
+    let mut differing: Option<String> = None;
+    for after_table in after.tables() {
+        // A table that is new or renamed makes this a table-list change, not a
+        // pipeline edit.
+        let before_table = before.table(after_table.name()).ok()?;
+
+        let before_steps = before_table
+            .source_binding()
+            .map(|b| b.transformations.clone())
+            .unwrap_or_default();
+        let after_steps = after_table
+            .source_binding()
+            .map(|b| b.transformations.clone())
+            .unwrap_or_default();
+
+        if before_steps == after_steps {
+            // No pipeline change on this table, so compare it WHOLE — columns
+            // included. Blanking the column list here would let a column edit
+            // on one table hide behind a pipeline edit on another.
+            if serde_json::to_value(before_table).ok()? != serde_json::to_value(after_table).ok()? {
+                return None;
+            }
+            continue;
+        }
+        // The pipeline changed. Its derived columns are expected to move with
+        // it, so those are excluded from the comparison — but nothing else
+        // about the table may differ, and no second table may differ at all.
+        if without_pipeline(before_table)? != without_pipeline(after_table)? || differing.is_some()
+        {
+            return None;
+        }
+        differing = Some(after_table.name().to_string());
+    }
+    differing
+}
+
 pub(super) fn diff_entity_lists(
     before: &bi_engine::DataModel,
     after: &bi_engine::DataModel,
@@ -581,7 +650,25 @@ pub(super) fn diff_entity_lists(
     list_diff(&mut c, "kpi", before.kpis(), after.kpis(), |k| k.name().to_string());
     list_diff(&mut c, "calcGroup", before.calculation_groups(), after.calculation_groups(), |g| g.name().to_string());
     list_diff(&mut c, "scriptFunction", before.script_functions(), after.script_functions(), |f| f.name().to_string());
-    list_diff(&mut c, "table", before.tables(), after.tables(), |t| t.name().to_string());
+    // Tables carry two independently-interesting things: their own definition
+    // and their transformation pipeline. Report a pipeline-only edit as its own
+    // domain so listeners (and the macro recorder, which cannot replay a
+    // generic "table" edit) can tell the two apart. Checked BEFORE the generic
+    // table diff, and only when the pipelines are the sole difference.
+    let transform_only = transform_only_table_change(before, after);
+    match transform_only {
+        Some(name) => c.push(EntityChange {
+            domain: "transform",
+            name: Some(name),
+            original_name: None,
+            change: EntityChangeKind::Edited,
+        }),
+        None => {
+            list_diff(&mut c, "table", before.tables(), after.tables(), |t| {
+                t.name().to_string()
+            });
+        }
+    }
     list_diff(&mut c, "context", before.contexts(), after.contexts(), |x| x.name().to_string());
     list_diff(&mut c, "contextColumn", before.context_columns(), after.context_columns(), |x| x.name().to_string());
     list_diff(&mut c, "variable", before.table_variables(), after.table_variables(), |v| v.name().to_string());
@@ -1338,6 +1425,18 @@ pub struct ModelTableInfo {
     pub refresh_strategies: Vec<RefreshStrategyDto>,
     /// Incremental-refresh filter (re-fetch only volatile rows), or null.
     pub incremental_refresh: Option<String>,
+    /// The table's transformation pipeline ("applied steps"), in order. Empty
+    /// for an ordinary table.
+    ///
+    /// Carried in full rather than as a count so the step editor, the CLI, and
+    /// the table list all read one overview instead of each fetching the steps
+    /// again. Each entry is the engine's `TransformStep` as serialized —
+    /// `type`-tagged, camelCase — so the shape stays in lockstep with the
+    /// engine by construction rather than by a hand-maintained mirror.
+    pub transform_steps: Vec<serde_json::Value>,
+    /// The source's own schema, before the steps run. Empty when the table has
+    /// no pipeline. The step editor shows this as the pipeline's "Source" row.
+    pub source_columns: Vec<ModelColumnInfo>,
 }
 
 /// One InMemory refresh strategy, flattened into a `type`-discriminated struct
@@ -1797,6 +1896,11 @@ pub struct ModelSourceInfo {
     pub ssl_mode: Option<String>,
     /// How many model tables bind to this source.
     pub table_count: usize,
+    /// The REST/Web configuration (base URL, endpoints, pagination, and secret
+    /// slot NAMES), or null for every other source kind. Serialized straight
+    /// from the engine's own type so the editor round-trips it without a
+    /// hand-maintained mirror that could drop a field on save.
+    pub rest: Option<serde_json::Value>,
 }
 
 /// Wire string for an engine [`bi_engine::SourceKind`].
@@ -1807,6 +1911,7 @@ fn source_kind_str(kind: bi_engine::SourceKind) -> &'static str {
         bi_engine::SourceKind::InMemory => "inMemory",
         bi_engine::SourceKind::Csv => "csv",
         bi_engine::SourceKind::Parquet => "parquet",
+        bi_engine::SourceKind::Rest => "rest",
     }
 }
 
@@ -1818,6 +1923,7 @@ fn source_kind_from_str(s: &str) -> Result<bi_engine::SourceKind, String> {
         "inmemory" | "in-memory" => Ok(bi_engine::SourceKind::InMemory),
         "csv" => Ok(bi_engine::SourceKind::Csv),
         "parquet" => Ok(bi_engine::SourceKind::Parquet),
+        "rest" | "web" | "http" => Ok(bi_engine::SourceKind::Rest),
         other => Err(format!("Unknown data source kind '{}'", other)),
     }
 }
@@ -1828,6 +1934,11 @@ fn persisted_auth_str(kind: bi_engine::PersistedAuthKind) -> &'static str {
         bi_engine::PersistedAuthKind::Integrated => "integrated",
         bi_engine::PersistedAuthKind::UsernamePassword => "usernamePassword",
         bi_engine::PersistedAuthKind::EnvironmentVariable => "environmentVariable",
+        // A REST source authenticates with NAMED SECRET SLOTS: the model
+        // records the slot names, and the host resolves their values out of
+        // the OS credential store at wire time. No credential is ever part of
+        // this hint, which is the same promise every other variant makes.
+        bi_engine::PersistedAuthKind::SecretMap => "secretMap",
     }
 }
 
@@ -1838,6 +1949,7 @@ fn persisted_auth_from_str(s: &str) -> bi_engine::PersistedAuthKind {
         "environmentvariable" | "environment" | "env" => {
             bi_engine::PersistedAuthKind::EnvironmentVariable
         }
+        "secretmap" | "secrets" => bi_engine::PersistedAuthKind::SecretMap,
         _ => bi_engine::PersistedAuthKind::UsernamePassword,
     }
 }
@@ -1861,6 +1973,7 @@ fn build_source_infos(base: &bi_engine::DataModel) -> Vec<ModelSourceInfo> {
                 .iter()
                 .filter(|t| t.source_binding().map(|b| b.source_id == s.id).unwrap_or(false))
                 .count(),
+            rest: s.rest.as_ref().and_then(|r| serde_json::to_value(r).ok()),
         })
         .collect()
 }
@@ -2195,6 +2308,41 @@ pub(super) fn build_overview(
                 incremental_refresh: t
                     .incremental_refresh()
                     .map(|i| i.refresh_filter().to_string()),
+                transform_steps: t
+                    .source_binding()
+                    .map(|b| {
+                        b.transformations
+                            .iter()
+                            // Serializing the engine enum is what keeps this
+                            // in lockstep with it; a step shape that fails to
+                            // serialize is dropped rather than failing the
+                            // whole overview, since the overview also feeds
+                            // surfaces that have nothing to do with steps.
+                            .filter_map(|s| serde_json::to_value(s).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                source_columns: t
+                    .source_binding()
+                    .map(|b| {
+                        b.source_columns
+                            .iter()
+                            .map(|c| ModelColumnInfo {
+                                name: c.name().to_string(),
+                                data_type: format!("{:?}", c.data_type()),
+                                display_name: c.display_name().map(|s| s.to_string()),
+                                description: c.description().map(|s| s.to_string()),
+                                is_hidden: c.is_hidden(),
+                                is_calculated: false,
+                                is_dynamic: false,
+                                formula: None,
+                                lookup_resolution: None,
+                                sort_by_column: None,
+                                format_string: None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -5462,6 +5610,548 @@ pub async fn bi_model_extension_data(
 }
 
 // ---------------------------------------------------------------------------
+// Table transformations ("applied steps")
+// ---------------------------------------------------------------------------
+
+/// One diagnostic against a step of a transformation pipeline.
+///
+/// Mirrors the chart-transform diagnostic shape the frontend already renders
+/// (`index`, `stepType`, `severity`, `message`), so the step editor reuses that
+/// presentation instead of inventing a second one.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformDiagnosticDto {
+    /// Zero-based index of the offending step.
+    pub index: usize,
+    /// The step's `type` tag, or empty when the failure is not step-specific.
+    pub step_type: String,
+    /// "error" | "warning".
+    pub severity: String,
+    /// What is wrong, and where possible how to fix it.
+    pub message: String,
+}
+
+/// The result of deriving a candidate pipeline's schema without committing it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformSchemaResult {
+    /// The columns the pipeline produces, or the columns derived up to the
+    /// first failing step.
+    pub columns: Vec<ModelColumnInfo>,
+    /// Empty when the pipeline is valid.
+    pub diagnostics: Vec<TransformDiagnosticDto>,
+}
+
+/// A row-limited preview of a candidate pipeline as of a given step.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformPreviewResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub row_count: usize,
+    /// True when the sample hit the row cap, so more source rows exist.
+    pub truncated: bool,
+    /// True when some step in the previewed prefix aggregates or reorders
+    /// across the whole table, making this sample indicative rather than
+    /// final. The editor should say so rather than presenting a sampled total
+    /// as the number the refresh will produce.
+    pub sampled: bool,
+    pub diagnostics: Vec<TransformDiagnosticDto>,
+}
+
+/// Rows sampled per preview. Deliberately smaller than `MAX_TEST_ROWS`: a
+/// preview is a feedback loop for someone editing steps, not a report.
+const MAX_PREVIEW_ROWS: usize = 500;
+
+/// Deserialize a JSON step array into engine steps, naming the offending
+/// element so a hand-built payload fails legibly.
+fn parse_transform_steps(
+    value: Option<Vec<serde_json::Value>>,
+) -> Result<Vec<bi_engine::TransformStep>, String> {
+    let raw = value.unwrap_or_default();
+    raw.into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            serde_json::from_value::<bi_engine::TransformStep>(item).map_err(|e| {
+                format!("Step {index} is not a valid transformation step: {e}")
+            })
+        })
+        .collect()
+}
+
+/// Turn an engine error into a step-anchored diagnostic.
+///
+/// The engine's transformation errors carry the index of the step that failed;
+/// preserving it is what lets the editor highlight that row rather than
+/// showing a message with no home.
+fn transform_diagnostic(
+    error: &bi_engine::EngineError,
+    steps: &[bi_engine::TransformStep],
+) -> TransformDiagnosticDto {
+    let (index, message) = match error {
+        bi_engine::EngineError::InvalidTransform {
+            step_index, reason, ..
+        }
+        | bi_engine::EngineError::TransformFailed {
+            step_index, reason, ..
+        } => (*step_index, reason.clone()),
+        other => (0, other.to_string()),
+    };
+    TransformDiagnosticDto {
+        index,
+        step_type: steps
+            .get(index)
+            .map(|s| s.type_name().to_string())
+            .unwrap_or_default(),
+        severity: "error".to_string(),
+        message,
+    }
+}
+
+/// Render engine columns as the frontend's column DTO.
+fn transform_columns_to_dto(columns: &[bi_engine::Column]) -> Vec<ModelColumnInfo> {
+    columns
+        .iter()
+        .map(|c| ModelColumnInfo {
+            name: c.name().to_string(),
+            data_type: format!("{:?}", c.data_type()),
+            display_name: c.display_name().map(|s| s.to_string()),
+            description: c.description().map(|s| s.to_string()),
+            is_hidden: c.is_hidden(),
+            is_calculated: false,
+            is_dynamic: false,
+            formula: None,
+            lookup_resolution: None,
+            sort_by_column: None,
+            format_string: None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Secret slots for built-in sources (today: REST/Web)
+// ---------------------------------------------------------------------------
+
+/// Credential-store key half for a MODEL source's secret slots.
+///
+/// Deliberately distinct from `script_source`'s `connector/<id>` namespace: that
+/// one is reachable only for `script:`-prefixed ids and is MAIN-window-only,
+/// because a sandboxed script owns those bindings. These belong to a source the
+/// USER configured in the Model Editor, so they live under their own prefix and
+/// are managed from that window.
+fn source_secret_key(source_id: &str) -> String {
+    format!("source/{}", source_id)
+}
+
+/// Read one of a model source's secret slot values.
+///
+/// Server-side only — no command returns a slot's value, and nothing here ever
+/// crosses to the frontend. Used when wiring a source that authenticates with
+/// named slots.
+pub(super) fn resolve_source_secret(source_id: &str, slot: &str) -> Option<String> {
+    super::credential_cache::get_credentials(&source_secret_key(source_id), slot)
+        .map(|(_user, secret)| secret)
+}
+
+/// The secret slots a persisted source DECLARES, in declaration order.
+///
+/// The source's own config is the authority on which slots exist, so a slot the
+/// user never declared cannot be written and a declared one cannot be missed.
+fn declared_secret_slots(source: &bi_engine::PersistedSource) -> Vec<String> {
+    source
+        .rest
+        .as_ref()
+        .map(|r| {
+            r.auth
+                .declared_slots()
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Manage a model source's secret slots — PRIVILEGED, user-UI only.
+///
+/// `list` returns the source's DECLARED slots with an `isSet` flag. There is
+/// deliberately **no op that reads a value out**: the values exist so the host
+/// can inject them when wiring a connector, never so a UI can display them.
+#[tauri::command]
+pub fn bi_model_source_secrets(
+    bi_state: State<'_, BiState>,
+    connection_id: ConnectionId,
+    op: String,
+    source_id: String,
+    slot: Option<String>,
+    value: Option<String>,
+    window: tauri::Window,
+) -> Result<serde_json::Value, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+
+    let source = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        let base = conn
+            .base_model
+            .as_ref()
+            .ok_or("This connection has no model loaded")?;
+        base.source(&source_id)
+            .cloned()
+            .ok_or_else(|| format!("Data source '{}' is not in the model", source_id))?
+    };
+    let declared = declared_secret_slots(&source);
+
+    match op.as_str() {
+        "list" => {
+            let entries: Vec<serde_json::Value> = declared
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "slot": s,
+                        "isSet": resolve_source_secret(&source_id, s).is_some(),
+                    })
+                })
+                .collect();
+            Ok(serde_json::Value::Array(entries))
+        }
+        "set" => {
+            let slot = slot.ok_or("'set' requires a slot")?;
+            // Only a DECLARED slot may be written. Without this, a stale form
+            // could leave a credential in the store under a name nothing reads
+            // and nothing will ever clean up.
+            if !declared.iter().any(|d| d == &slot) {
+                return Err(format!(
+                    "Source '{}' declares no secret slot '{}' (declared: {})",
+                    source_id,
+                    slot,
+                    if declared.is_empty() {
+                        "none".to_string()
+                    } else {
+                        declared.join(", ")
+                    }
+                ));
+            }
+            let value = value.ok_or("'set' requires a value")?;
+            if value.is_empty() {
+                return Err("A secret value cannot be empty — use 'delete' to clear it".to_string());
+            }
+            super::credential_cache::save_credentials(
+                &source_secret_key(&source_id),
+                &slot,
+                "secret",
+                &value,
+            );
+            crate::log_info!(
+                "BI",
+                "model editor: set secret slot '{}' on source '{}'",
+                slot,
+                source_id
+            );
+            Ok(serde_json::Value::Null)
+        }
+        "delete" => {
+            let slot = slot.ok_or("'delete' requires a slot")?;
+            super::credential_cache::delete_credentials(&source_secret_key(&source_id), &slot);
+            Ok(serde_json::Value::Null)
+        }
+        other => Err(format!(
+            "Unknown secret op '{}' (expected list|set|delete)",
+            other
+        )),
+    }
+}
+
+/// Replace a table's pipeline and return the resulting overview.
+///
+/// Shared by the Tauri command and the script gateway so the two can never
+/// diverge on what an edit does. **It returns the full `ModelOverview`, which
+/// carries privileged fields** (security roles, source connection targets) —
+/// the gateway must project it through `overview_value`, never serialize it
+/// directly. The command is window-guarded and may return it whole.
+async fn set_transformations_inner(
+    bi_state: &BiState,
+    file_state: &FileState,
+    connection_id: ConnectionId,
+    table: &str,
+    steps: Vec<bi_engine::TransformStep>,
+) -> Result<ModelOverview, String> {
+    let table_for_edit = table.to_string();
+
+    // `mutate_and_overview` is the sanctioned edit path: it checks the model is
+    // editable, funnels through `apply_model_edit` (undo, model mirroring, the
+    // `bi:model-changed` event, macro capture), marks the document dirty, and
+    // returns a fresh overview.
+    //
+    // The ENGINE owns re-deriving the table's columns from the steps — passing
+    // steps IS the schema change, and re-deriving it here would be a second
+    // source of truth — but that half is I/O-free and model-level, so the
+    // closure calls it directly rather than standing up a scratch engine.
+    let overview = mutate_and_overview(
+        bi_state,
+        file_state,
+        connection_id,
+        move |base, _calculated| {
+            bi_engine::with_table_transformations(base, &table_for_edit, steps.clone())
+                .map_err(|e| e.to_string())
+        },
+    )
+    .await?;
+
+    crate::log_info!(
+        "BI",
+        "model editor: set transformations on '{}' (conn {})",
+        table,
+        connection_id
+    );
+
+    // The scratch engine dropped ITS cache; the live engine still holds rows
+    // the PREVIOUS pipeline produced, which are the wrong rows now. Drop them
+    // or a stale batch answers the next query.
+    let engine_arc = {
+        let conns = bi_state.connections.lock().unwrap();
+        conns.get(&connection_id).and_then(|c| c.engine.clone())
+    };
+    if let Some(engine_arc) = engine_arc {
+        let mut engine = engine_arc.lock().await;
+        engine.drop_table_cache(table);
+    }
+
+    Ok(overview)
+}
+
+/// The one door to a table's transformation pipeline.
+///
+/// Multiplexed on `op` rather than split into four commands: `lib.rs`'s
+/// `generate_handler!` dispatch frame sits on the OS main thread with a fixed
+/// stack budget, so the repo's standing rule is one op-command over N
+/// commands (`bi_model_extension_data`, `bi_script_source`,
+/// `connector_secrets` are the precedents).
+///
+/// - `get` — the table's saved steps and the source schema they derive from.
+/// - `set` — replace the pipeline. ONE model edit, so it is one undo step; the
+///   table's columns are re-derived by the engine and the whole model is
+///   revalidated before anything is installed. Passing `steps: []` clears it.
+/// - `deriveSchema` — dry run: the columns a **candidate** pipeline would
+///   produce, plus diagnostics. No model mutation, no undo entry, no I/O.
+/// - `previewStep` — run a candidate pipeline over a bounded source sample,
+///   optionally stopping after `asOfStep` steps. Cancel with
+///   `bi_model_cancel_query` using the same `queryId`.
+#[tauri::command]
+pub async fn bi_model_transform(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    op: String,
+    table: String,
+    steps: Option<Vec<serde_json::Value>>,
+    as_of_step: Option<i64>,
+    row_limit: Option<usize>,
+    query_id: Option<String>,
+    window: tauri::Window,
+) -> Result<serde_json::Value, String> {
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+
+    match op.as_str() {
+        "get" => {
+            let base = {
+                let conns = bi_state.connections.lock().unwrap();
+                let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+                conn.base_model
+                    .clone()
+                    .ok_or("This connection has no model loaded")?
+            };
+            let t = base
+                .table(&table)
+                .map_err(|_| format!("Table '{table}' not found"))?;
+            let binding = t.source_binding();
+            let steps: Vec<serde_json::Value> = binding
+                .map(|b| {
+                    b.transformations
+                        .iter()
+                        .filter_map(|s| serde_json::to_value(s).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let source_columns = binding
+                .map(|b| transform_columns_to_dto(&b.source_columns))
+                .unwrap_or_default();
+            serde_json::to_value(serde_json::json!({
+                "steps": steps,
+                "sourceColumns": source_columns,
+                "bound": binding.is_some(),
+            }))
+            .map_err(|e| e.to_string())
+        }
+
+        "set" => {
+            let overview = set_transformations_inner(
+                &bi_state,
+                &file_state,
+                connection_id,
+                &table,
+                parse_transform_steps(steps)?,
+            )
+            .await?;
+            serde_json::to_value(overview).map_err(|e| e.to_string())
+        }
+
+        "deriveSchema" => {
+            let base = {
+                let conns = bi_state.connections.lock().unwrap();
+                let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+                conn.base_model
+                    .clone()
+                    .ok_or("This connection has no model loaded")?
+            };
+            let t = base
+                .table(&table)
+                .map_err(|_| format!("Table '{table}' not found"))?;
+            let parsed = parse_transform_steps(steps)?;
+
+            // A table with no pipeline yet has no recorded source schema; its
+            // current columns ARE what the source delivers.
+            let source_columns = t
+                .source_binding()
+                .filter(|b| !b.source_columns.is_empty())
+                .map(|b| b.source_columns.clone())
+                .unwrap_or_else(|| t.columns().to_vec());
+
+            let result = match bi_engine::validate_steps(&table, &source_columns, &parsed) {
+                Ok(columns) => TransformSchemaResult {
+                    columns: transform_columns_to_dto(&columns),
+                    diagnostics: Vec::new(),
+                },
+                Err(error) => {
+                    let diagnostic = transform_diagnostic(&error, &parsed);
+                    // Show the columns the pipeline reaches BEFORE the bad
+                    // step, so the editor keeps a live column list while the
+                    // user is mid-edit instead of blanking.
+                    let partial = bi_engine::derive_pipeline_schema(
+                        &table,
+                        &source_columns,
+                        &parsed[..diagnostic.index.min(parsed.len())],
+                    )
+                    .unwrap_or_else(|_| source_columns.clone());
+                    TransformSchemaResult {
+                        columns: transform_columns_to_dto(&partial),
+                        diagnostics: vec![diagnostic],
+                    }
+                }
+            };
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+
+        "previewStep" => {
+            let parsed = parse_transform_steps(steps)?;
+            let upto = match as_of_step {
+                // -1 is the step list's "Source" row: the raw sample.
+                Some(n) if n < 0 => Some(0usize),
+                Some(n) => Some(n as usize),
+                None => None,
+            };
+            let cap = row_limit.unwrap_or(MAX_PREVIEW_ROWS).min(MAX_PREVIEW_ROWS);
+
+            let engine_arc = {
+                let conns = bi_state.connections.lock().unwrap();
+                let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+                conn.engine
+                    .clone()
+                    .ok_or("This connection has no engine loaded")?
+            };
+
+            let token = bi_engine::CancellationToken::new();
+            if let Some(qid) = query_id.as_ref() {
+                if let Ok(mut map) = query_tokens().lock() {
+                    map.insert(qid.clone(), token.clone());
+                }
+            }
+
+            let mut request =
+                bi_engine::TransformPreviewRequest::new(table.as_str(), parsed.clone())
+                    .with_row_limit(cap);
+            if let Some(upto) = upto {
+                request = request.upto(upto);
+            }
+
+            let outcome = {
+                let engine = engine_arc.lock().await;
+                engine.preview_transformations(&request, &token).await
+            };
+
+            if let Some(qid) = query_id.as_ref() {
+                if let Ok(mut map) = query_tokens().lock() {
+                    map.remove(qid);
+                }
+            }
+
+            let preview = match outcome {
+                Ok(preview) => preview,
+                Err(error) => {
+                    let result = TransformPreviewResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        row_count: 0,
+                        truncated: false,
+                        sampled: false,
+                        diagnostics: vec![transform_diagnostic(&error, &parsed)],
+                    };
+                    return serde_json::to_value(result).map_err(|e| e.to_string());
+                }
+            };
+
+            let batch = &preview.batch;
+            let columns: Vec<String> = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect();
+            let shown = batch.num_rows().min(cap);
+            let rows: Vec<Vec<Option<String>>> = (0..shown)
+                .map(|row| {
+                    batch
+                        .columns()
+                        .iter()
+                        .map(|array| {
+                            super::commands::arrow_value_to_string(array.as_ref(), row)
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // "Sampled" means the numbers on screen are not the numbers the
+            // refresh will produce. That is true when the pipeline saw only
+            // part of the source AND some previewed step aggregates or
+            // reorders across the whole table. The engine reports the first
+            // half — the output row count cannot, because a filter can leave a
+            // small output over a truncated source.
+            let previewed = upto.unwrap_or(parsed.len()).min(parsed.len());
+            let result = TransformPreviewResult {
+                columns,
+                row_count: rows.len(),
+                rows,
+                truncated: preview.source_truncated || batch.num_rows() > cap,
+                sampled: preview.source_truncated
+                    && parsed[..previewed].iter().any(|s| s.changes_row_count()),
+                diagnostics: Vec::new(),
+            };
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+
+        other => Err(format!(
+            "Unknown transform op '{}' (expected get|set|deriveSchema|previewStep)",
+            other
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Script gateway (design: docs/design/model-extensibility.md §6) — the ONE
 // broker-reachable door for consented model work. The bi_model_* commands stay
 // on the biData denylist; sandboxed scripts and distributed extensions reach
@@ -5657,6 +6347,12 @@ pub(super) const GATEWAY_MUTABLE_KINDS: &[&str] = &[
     "metadata",
     "dateTable",
     "extensionData",
+    // A table's transformation pipeline is a data-SHAPE definition, the same
+    // kind of thing as a calculated table or a calculated column — both of
+    // which already change a table's column set from here. What stays out of
+    // script reach is unchanged: security roles, connections and credentials,
+    // and the storage-mode / refresh knobs.
+    "transform",
 ];
 
 /// Replacement text for any diagnostic message that would name a privileged
@@ -6532,6 +7228,31 @@ pub async fn script_bi_model(
                     )
                     .await
                 }
+                // Transformation pipelines. `upsert` replaces the whole
+                // pipeline (it is one ordered list, so there is no meaningful
+                // per-step upsert), and `delete` clears it — which is the same
+                // call with an empty list.
+                //
+                // NOTE the `overview_value` projection on both arms: the
+                // helper returns the FULL overview (security roles, source
+                // connection targets), which a script must never see.
+                ("transform", "upsert") => {
+                    let table: String = gateway_field(&p, "table")?;
+                    let raw: Vec<serde_json::Value> = gateway_field(&p, "steps")?;
+                    overview_value(
+                        set_transformations_inner(
+                            &bs, &fs, conn, &table,
+                            parse_transform_steps(Some(raw))?,
+                        )
+                        .await?,
+                    )
+                }
+                ("transform", "delete") => {
+                    let table: String = gateway_field(&p, "table")?;
+                    overview_value(
+                        set_transformations_inner(&bs, &fs, conn, &table, Vec::new()).await?,
+                    )
+                }
                 // A script that can build a whole model must be able to build
                 // its DATA-COLLECTION schema too — the writeback columns are a
                 // model definition like any other, and the sanitized info
@@ -7121,6 +7842,9 @@ pub async fn bi_model_upsert_source(
     ssl_mode: Option<String>,
     preferred_auth: String,
     display_name: Option<String>,
+    // `rest` is required when `kind` is "rest" and refused otherwise. It
+    // carries slot NAMES for its credentials, never values.
+    rest: Option<serde_json::Value>,
     window: tauri::Window,
 ) -> Result<ModelOverview, String> {
     crate::security::window_guard::require_label(
@@ -7132,6 +7856,28 @@ pub async fn bi_model_upsert_source(
         return Err("A data source id is required".to_string());
     }
     let kind = source_kind_from_str(&kind)?;
+
+    // Parse and validate the REST config up front. `validate()` is I/O-free,
+    // so the editor gets the engine's own message — the same one the engine
+    // would raise at model build — rather than a second, drifting copy of the
+    // rules living in the host.
+    let rest_config: Option<bi_engine::RestSourceConfig> = match (&kind, rest) {
+        (bi_engine::SourceKind::Rest, Some(value)) => {
+            let config: bi_engine::RestSourceConfig = serde_json::from_value(value)
+                .map_err(|e| format!("Invalid REST source configuration: {}", e))?;
+            config.validate().map_err(|e| format!("{}", e))?;
+            Some(config)
+        }
+        (bi_engine::SourceKind::Rest, None) => {
+            return Err("A Web/REST source needs a base URL and at least one endpoint".to_string());
+        }
+        (_, Some(_)) => {
+            return Err("REST configuration was supplied for a source that is not a Web/REST source"
+                .to_string());
+        }
+        (_, None) => None,
+    };
+
     mutate_and_overview(&bi_state, &file_state, connection_id, move |base, _| {
         let connection = bi_engine::PersistedConnection {
             host: host.clone().unwrap_or_default(),
@@ -7141,12 +7887,19 @@ pub async fn bi_model_upsert_source(
             trust_server_certificate,
             ssl_mode: ssl_mode.clone().filter(|s| !s.trim().is_empty()),
         };
-        let mut src = bi_engine::PersistedSource::new(
-            id.clone(),
-            kind,
-            connection,
-            persisted_auth_from_str(&preferred_auth),
-        );
+        // A REST source's whole description lives in its config, and the
+        // engine's own builder derives the right auth hint from it (SecretMap
+        // when a slot is declared, Integrated when none is) — so the host does
+        // not second-guess that mapping.
+        let mut src = match &rest_config {
+            Some(config) => bi_engine::PersistedSource::rest(id.clone(), config.clone()),
+            None => bi_engine::PersistedSource::new(
+                id.clone(),
+                kind,
+                connection,
+                persisted_auth_from_str(&preferred_auth),
+            ),
+        };
         if let Some(dn) = display_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             src = src.with_display_name(dn.to_string());
         }
@@ -7390,6 +8143,30 @@ async fn wire_source_with_auth(
                 }
                 match s.kind {
                     bi_engine::SourceKind::InMemory => bi_engine::SourceCredential::Skip,
+                    // A REST source's credentials are NAMED SLOTS, resolved
+                    // here from the OS credential store. The values are built
+                    // into an `AuthMethod`, which is never serialized, so they
+                    // reach the connector without ever touching the model.
+                    // A slot with nothing stored is left out deliberately: the
+                    // connector then fails closed naming it, which is a better
+                    // answer than a silently unauthenticated request.
+                    bi_engine::SourceKind::Rest => {
+                        let slots = declared_secret_slots(s);
+                        if slots.is_empty() {
+                            bi_engine::SourceCredential::Auth(bi_engine::AuthMethod::Integrated)
+                        } else {
+                            let resolved: std::collections::HashMap<String, String> = slots
+                                .iter()
+                                .filter_map(|slot| {
+                                    resolve_source_secret(&s.id, slot)
+                                        .map(|value| (slot.clone(), value))
+                                })
+                                .collect();
+                            bi_engine::SourceCredential::Auth(bi_engine::AuthMethod::Secrets(
+                                resolved,
+                            ))
+                        }
+                    }
                     bi_engine::SourceKind::Csv | bi_engine::SourceKind::Parquet => {
                         bi_engine::SourceCredential::Auth(bi_engine::AuthMethod::Integrated)
                     }
@@ -8351,6 +9128,166 @@ mod tests {
             .unwrap()
     }
 
+    // --- Transformation pipelines ---
+
+    /// `base_model()`'s Sales table, bound to a source and carrying `steps`.
+    fn model_with_steps(steps: Vec<bi_engine::TransformStep>) -> DataModel {
+        let source_columns = vec![
+            Column::new("country", DataType::String),
+            Column::new("amount", DataType::Float64),
+        ];
+        let derived =
+            bi_engine::derive_pipeline_schema("Sales", &source_columns, &steps).unwrap();
+        let mut binding = bi_engine::TableSourceBinding::new("src", "public", "sales");
+        if !steps.is_empty() {
+            binding = binding
+                .with_source_columns(source_columns)
+                .with_transformations(steps);
+        }
+        DataModel::builder()
+            .add_source(bi_engine::PersistedSource::new(
+                "src",
+                bi_engine::SourceKind::InMemory,
+                bi_engine::PersistedConnection::default(),
+                bi_engine::PersistedAuthKind::Integrated,
+            ))
+            .add_table(
+                Table::new("Sales", derived)
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory)
+                    .with_source_binding(binding),
+            )
+            .build()
+            .unwrap()
+    }
+
+    /// A pipeline-only edit must report its own domain — the macro recorder
+    /// cannot replay a generic "table" edit, so mislabelling one silently
+    /// drops it from a recording.
+    #[test]
+    fn a_pipeline_only_edit_reports_the_transform_domain() {
+        let before = model_with_steps(vec![]);
+        let after = model_with_steps(vec![bi_engine::TransformStep::FilterRows {
+            condition: "amount > 0".into(),
+        }]);
+        let (domain, name) = changed_domain(&before, &after);
+        assert_eq!(domain, "transform");
+        assert_eq!(name.as_deref(), Some("Sales"));
+    }
+
+    /// Changing the steps AND something else about the table is not a
+    /// pipeline-only edit — it must fall through to "table" rather than hide
+    /// the other change.
+    #[test]
+    fn a_pipeline_edit_plus_a_table_edit_reports_the_table_domain() {
+        let before = model_with_steps(vec![]);
+        let mut after = model_with_steps(vec![bi_engine::TransformStep::FilterRows {
+            condition: "amount > 0".into(),
+        }]);
+        let mut tables = after.tables().to_vec();
+        tables[0].set_display_name(Some("Sales Orders".to_string()));
+        after = after.with_tables(tables);
+
+        let (domain, _) = changed_domain(&before, &after);
+        assert_eq!(domain, "table");
+    }
+
+    /// A pipeline edit on one table must not hide a column edit on another.
+    /// The pipeline-blanked comparison exists so a table's OWN derived columns
+    /// do not count as a separate change; applying it to every table would
+    /// swallow a real edit elsewhere.
+    #[test]
+    fn a_pipeline_edit_does_not_hide_a_change_to_another_table() {
+        let with_second = |steps: Vec<bi_engine::TransformStep>, second_cols: Vec<Column>| {
+            let source_columns = vec![
+                Column::new("country", DataType::String),
+                Column::new("amount", DataType::Float64),
+            ];
+            let derived =
+                bi_engine::derive_pipeline_schema("Sales", &source_columns, &steps).unwrap();
+            let mut binding = bi_engine::TableSourceBinding::new("src", "public", "sales");
+            if !steps.is_empty() {
+                binding = binding
+                    .with_source_columns(source_columns)
+                    .with_transformations(steps);
+            }
+            DataModel::builder()
+                .add_source(bi_engine::PersistedSource::new(
+                    "src",
+                    bi_engine::SourceKind::InMemory,
+                    bi_engine::PersistedConnection::default(),
+                    bi_engine::PersistedAuthKind::Integrated,
+                ))
+                .add_table(
+                    Table::new("Sales", derived)
+                        .unwrap()
+                        .with_storage_mode(StorageMode::InMemory)
+                        .with_source_binding(binding),
+                )
+                .add_table(Table::new("Other", second_cols).unwrap())
+                .build()
+                .unwrap()
+        };
+
+        let before = with_second(vec![], vec![Column::new("a", DataType::Int64)]);
+        let after = with_second(
+            vec![bi_engine::TransformStep::FilterRows {
+                condition: "amount > 0".into(),
+            }],
+            // `Other` gained a column at the same time.
+            vec![
+                Column::new("a", DataType::Int64),
+                Column::new("b", DataType::String),
+            ],
+        );
+
+        let (domain, _) = changed_domain(&before, &after);
+        assert_eq!(
+            domain, "table",
+            "a second table's column change must not be swallowed by the pipeline edit"
+        );
+    }
+
+    /// An ordinary table edit is unaffected by the new discrimination.
+    #[test]
+    fn a_plain_table_edit_still_reports_the_table_domain() {
+        let before = model_with_steps(vec![]);
+        let mut after = model_with_steps(vec![]);
+        let mut tables = after.tables().to_vec();
+        tables[0].set_description(Some("One row per order".to_string()));
+        after = after.with_tables(tables);
+
+        let (domain, _) = changed_domain(&before, &after);
+        assert_eq!(domain, "table");
+    }
+
+    /// A model with no pipelines anywhere must diff exactly as it always did.
+    #[test]
+    fn a_model_without_pipelines_diffs_unchanged() {
+        let before = base_model();
+        let after = base_model();
+        assert!(diff_entity_lists(&before, &after).is_empty());
+    }
+
+    /// The gateway must project the overview it returns — the helper hands
+    /// back the FULL one, which carries security roles and source targets.
+    #[test]
+    fn the_transform_gateway_arm_is_wired_to_the_sanitizer() {
+        // A structural check on the source: both `transform` gateway arms must
+        // pass through `overview_value`. Serializing the helper's return value
+        // directly would leak privileged fields to every consented script.
+        let source = include_str!("model_editor.rs");
+        let arm = source
+            .split("(\"transform\", \"upsert\")")
+            .nth(1)
+            .expect("the transform upsert arm must exist");
+        let arm_body: String = arm.chars().take(400).collect();
+        assert!(
+            arm_body.contains("overview_value"),
+            "the transform gateway arm must sanitize its overview; got: {arm_body}"
+        );
+    }
+
     /// The column-routing discriminator: bracketed-bare `[Name]` is a MEASURE
     /// reference (dynamic column); bare and `Table[column]` refs are not.
     #[test]
@@ -8659,6 +9596,7 @@ mod tests {
                 },
                 preferred_auth: bi_engine::PersistedAuthKind::Integrated,
                 display_name: Some("Finance Warehouse".to_string()),
+                rest: None,
             })
             .add_table(
                 Table::new(

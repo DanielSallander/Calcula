@@ -14,6 +14,28 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+serde_json = { workspace = true }
+# Date/timestamp parsing for REST fields declared as Date / Timestamp (an
+# ISO-8601 string is the only form the connector accepts for those).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# REST/Web connector transport. `default-features = false` drops the charset
+# decoder, HTTP/2 and the system-proxy probe; the connector parses response
+# bytes as JSON itself and never needs them.
+#
+# TLS backend: `default-tls` = native-tls, which is **schannel** on Windows and
+# is already the backend `engine-connectors` pins for sqlx (`tls-native-tls`),
+# so the whole workspace resolves to one TLS stack. rustls was evaluated first
+# and rejected: reqwest's `rustls-tls` selects the *ring* provider, whose build
+# script requires clang on `aarch64-pc-windows-msvc` (a supported build host for
+# this workspace) and fails there.
+#
+# The cookie store is deliberately NOT enabled — the REST connector is
+# stateless by design (see `rest_connector::http`).
+reqwest = { version = "0.12", default-features = false, features = [
+    "default-tls",
+    "json",
+    "stream",
+] }
 
 [dev-dependencies]
 tokio = { workspace = true }

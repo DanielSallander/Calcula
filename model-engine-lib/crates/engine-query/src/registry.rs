@@ -13,6 +13,7 @@ use engine_core::model::Table;
 use crate::csv_connector::CsvConnector;
 use crate::in_memory_connector::InMemoryConnector;
 use crate::parquet_connector::ParquetConnector;
+use crate::rest_connector::RestConnector;
 
 use crate::error::{QueryError, QueryResult};
 
@@ -165,6 +166,9 @@ define_any_connector! {
     Csv => CsvConnector,
     /// File-backed connector serving Apache Parquet files from a directory. See [`ParquetConnector`].
     Parquet => ParquetConnector,
+    /// JSON-over-HTTP (REST/Web) connector serving declared endpoints as source
+    /// tables. See [`RestConnector`].
+    Rest => RestConnector,
 }
 
 impl AnyConnector {

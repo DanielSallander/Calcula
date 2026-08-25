@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import { CLI_REFERENCE } from "./referenceDocs";
 import { KINDS } from "./parse";
 import type { Kind } from "./parse";
+import { TRANSFORM_STEP_TYPES } from "./transformSteps";
+import { helpText } from "./help";
 
 describe("CLI reference guide", () => {
   const ids = new Set(CLI_REFERENCE.map((t) => t.id));
@@ -39,6 +41,28 @@ describe("CLI reference guide", () => {
       sourcetable: "source",
     };
     const missing = KINDS.filter((k) => !ids.has(foldedInto[k] ?? k));
+    expect(missing).toEqual([]);
+  });
+
+  it("documents the transform verb, and names every step type it accepts", () => {
+    const topic = CLI_REFERENCE.find((t) => t.id === "transform");
+    expect(topic, "no 'transform' reference topic").toBeDefined();
+    expect(topic!.group).toBe("Verbs");
+    // A step type the reference never names is a step type nobody can find.
+    // `renameColumns` is documented under its singular CLI spelling.
+    const documented = topic!.markdown;
+    const missing = TRANSFORM_STEP_TYPES.filter(
+      (t) => !documented.includes(t) && !documented.includes(t.replace(/s$/, "")),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  it("the in-panel 'help transform' topic exists and matches the verb", () => {
+    const text = helpText(["transform"]);
+    expect(text).toContain("transform table <name>");
+    const missing = TRANSFORM_STEP_TYPES.filter(
+      (t) => !text.includes(t) && !text.includes(t.replace(/s$/, "")),
+    );
     expect(missing).toEqual([]);
   });
 

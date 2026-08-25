@@ -15,6 +15,7 @@ import type { Command } from "./parse";
 import type { CliIo, CliSession } from "./execute";
 import { detailBlock, plural, textTable, yesNo } from "./format";
 import { filterNames, globToRegex, matchColumns, matchNamed, matchRelationships, matchTables, requireOne } from "./resolve";
+import { describeTransformStep } from "./transformSteps";
 
 export async function runRead(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
   if (cmd.verb === "validate") {
@@ -347,10 +348,12 @@ async function runShow(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
           ["refresh", t.refreshStrategies.map(describeRefresh).join("; ") || null],
           ["incremental", t.incrementalRefresh],
           ["columns", String(t.columns.length)],
+          ["applied steps", t.transformSteps.length > 0 ? String(t.transformSteps.length) : null],
         ]),
       );
       const rows = t.columns.map((c) => [c.name, c.dataType, columnKind(c), yesNo(c.isHidden), c.formatString ?? ""]);
       printTable(io, ["column", "type", "kind", "hidden", "format"], rows, "(no columns)");
+      printTransformPipeline(io, t);
       return;
     }
     case "column": {
@@ -586,6 +589,34 @@ async function runShow(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
     }
     default:
       throw new CliError(`'show' does not support '${cmd.kind}' (try 'help show')`, cmd.line);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transformation pipeline listing (the read half of the `transform` verb)
+// ---------------------------------------------------------------------------
+
+/** Print a table's applied steps, numbered the way `transform` addresses them:
+ *  1-BASED, matching the step editor's list. Silent when there is no pipeline,
+ *  so an ordinary table's `show` is unchanged. */
+function printTransformPipeline(io: CliIo, t: ModelTableInfo): void {
+  if (t.transformSteps.length === 0) return;
+  io.print(`Applied steps (${plural(t.transformSteps.length, "step")}):`, "info");
+  io.print(
+    textTable(
+      ["#", "step", "detail"],
+      t.transformSteps.map((step, i) => [
+        String(i + 1),
+        step.type,
+        describeTransformStep(step),
+      ]),
+    ),
+  );
+  if (t.sourceColumns.length > 0) {
+    io.print(
+      `Source columns before the steps: ${t.sourceColumns.map((c) => c.name).join(", ")}`,
+      "info",
+    );
   }
 }
 

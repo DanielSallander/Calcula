@@ -149,6 +149,7 @@ impl Engine {
         }
 
         let batches = Self::fetch_table_batches(&self.registry, table_name).await?;
+        let batches = self.apply_table_transforms(table_name, batches).await?;
         self.store_refreshed_table(table_name, batches)
     }
 
@@ -174,6 +175,24 @@ impl Engine {
         table_name: &str,
         refresh_filter: &str,
     ) -> EngineResult<OptimizationStats> {
+        // Defence in depth: model validation rejects a table that combines a
+        // pipeline with incremental refresh, because this path splices
+        // freshly fetched SOURCE-shaped rows into a cache holding TRANSFORMED
+        // rows. Library code does not assume validation ran — a hand-edited
+        // model file has not been through it.
+        if let Some(binding) = self.model.table(table_name)?.source_binding() {
+            if binding.has_transformations() {
+                return Err(EngineError::InvalidTransform {
+                    table: table_name.to_string(),
+                    step_index: 0,
+                    reason: "incremental refresh cannot be combined with \
+                             transformation steps: it splices source-shaped rows \
+                             into a cache of transformed rows"
+                        .to_string(),
+                });
+            }
+        }
+
         // Single refresh-time snapshot of "now" in local time (captured inside
         // engine-core) — shared by the source fetch and the cache retention so
         // they agree on the boundary.
@@ -316,9 +335,11 @@ impl Engine {
             .collect()
             .await;
 
-        // Phase 2: store sequentially (cache insertion needs `&mut self`).
+        // Phase 2: transform and store sequentially. Both need `&self` /
+        // `&mut self`, so they cannot join phase 1's concurrent fetches.
         for (name, result) in fetched {
-            self.store_refreshed_table(&name, result?)?;
+            let batches = self.apply_table_transforms(&name, result?).await?;
+            self.store_refreshed_table(&name, batches)?;
         }
         Ok(())
     }

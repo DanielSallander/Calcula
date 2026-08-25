@@ -43,7 +43,8 @@ export type Verb =
   | "materialize"
   | "validate"
   | "import"
-  | "connect";
+  | "connect"
+  | "transform";
 
 /** Model-domain verbs beyond the shared core (fed to the kernel merge). */
 export const MODEL_VERB_SPECS: CliVerbSpec[] = [
@@ -52,6 +53,10 @@ export const MODEL_VERB_SPECS: CliVerbSpec[] = [
   { verb: "validate", kindless: true },
   { verb: "import" },
   { verb: "connect" },
+  // `transform` is WRITE-ONLY: every subaction edits a table's pipeline.
+  // Listing the steps is `show table <name>`, which keeps the domain's
+  // verb-granular read/write split (MODEL_READ_VERBS) honest.
+  { verb: "transform", aliases: ["steps"] },
 ];
 
 /** Canonical verbs in completion/help display order (unchanged list). */
@@ -64,6 +69,7 @@ export const VERBS: Verb[] = [
   "delete",
   "refresh",
   "materialize",
+  "transform",
   "validate",
   "import",
   "connect",

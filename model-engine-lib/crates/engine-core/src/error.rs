@@ -384,6 +384,43 @@ pub enum EngineError {
         column_type: String,
     },
 
+    /// A table's transformation pipeline is invalid: a step cannot apply to
+    /// the schema reaching it (unknown column, name collision, unsupported
+    /// type), or its expression is not a row-level expression over that
+    /// table's own columns.
+    ///
+    /// Raised by [`validate_steps`](crate::transform::validate_steps), by
+    /// schema derivation, and by model build-time validation. `step_index` is
+    /// the zero-based position of the offending step so a host can highlight
+    /// the exact row of its step list — a reason without an index is not
+    /// actionable in an editor.
+    #[error("Invalid transformation on table '{table}', step {step_index}: {reason}")]
+    InvalidTransform {
+        /// The model table whose pipeline is invalid.
+        table: String,
+        /// Zero-based index of the offending step.
+        step_index: usize,
+        /// What is wrong, and where possible how to fix it.
+        reason: String,
+    },
+
+    /// Applying a table's transformation pipeline failed while evaluating it
+    /// over real data.
+    ///
+    /// Distinct from [`InvalidTransform`](Self::InvalidTransform), which is a
+    /// static defect in the pipeline: this one means the pipeline was valid
+    /// but the data defeated it — a cast the source's values do not survive,
+    /// or a source whose shape drifted away from what the model records.
+    #[error("Transformation of table '{table}' failed at step {step_index}: {reason}")]
+    TransformFailed {
+        /// The model table being refreshed.
+        table: String,
+        /// Zero-based index of the step that failed.
+        step_index: usize,
+        /// What went wrong.
+        reason: String,
+    },
+
     /// An error from the Arrow library.
     #[error("Arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
