@@ -114,7 +114,14 @@ describe("the repair loop", () => {
 
   it("spends exactly repairRounds corrections after the first attempt", async () => {
     // Off-by-one here silently halves a weak tier's budget.
-    const complete = scripted(INVENTED);
+    //
+    // Each round must invent a DIFFERENT member. Feeding one constant script
+    // makes every round's error set identical, which is the stall case — the
+    // loop would correctly cut it short and this test would be measuring stall
+    // detection instead of the round budget it exists to guard.
+    const wrong = (member: string) =>
+      ["```javascript", `export function setup(context) { context.${member}(); }`, "```"].join("\n");
+    const complete = scripted(wrong("nopeOne"), wrong("nopeTwo"), wrong("nopeThree"), wrong("nopeFour"));
     await authorScript({
       intent: "x",
       objectType: "button",
@@ -371,5 +378,125 @@ describe("the probe", () => {
       now: clock(),
     });
     expect(bad.canaryScore).toBeLessThan(good.canaryScore);
+  });
+});
+
+describe("the loop stops when it has stopped learning", () => {
+  // MEASURED 2026-08-24, qwen2.5:7b, assisted tier, live Ollama, driving the
+  // real loop: rounds 3, 4, 5 and 6 returned the BYTE-IDENTICAL error set
+  // (`context.selection.getActiveRanges` is not part of the object-script API).
+  // The model had settled into a Google Apps Script idiom and the same repair
+  // text was never going to move it. Each of those rounds rewrote a whole script
+  // and re-validated it — minutes of a CPU-bound user's life, buying nothing,
+  // and reading to them as a hang.
+
+  const PLAN = { tier: "assisted" as const, surfaceBudgetTokens: 3000, repairRounds: 6, rationale: "test" };
+  const APPS_SCRIPT = "export function setup(context) {\n  context.onClick(() => { context.selection.getActiveRanges(); });\n}";
+
+  it("gives up after the same errors repeat, instead of burning every round", async () => {
+    let calls = 0;
+    const res = await authorScript({
+      intent: "colour the selected cells",
+      objectType: "button",
+      plan: PLAN,
+      model: "qwen2.5:7b",
+      complete: async () => { calls++; return "```javascript\n" + APPS_SCRIPT + "\n```"; },
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.stalled).toBe(true);
+    // 1 attempt + 2 identical repeats = 3. NOT the full 7.
+    expect(calls, "the remaining rounds must be skipped").toBe(3);
+    expect(res.attempts).toHaveLength(3);
+  });
+
+  it("names the model, so the user knows what to change", async () => {
+    const res = await authorScript({
+      intent: "colour the selected cells", objectType: "button", plan: PLAN, model: "qwen2.5:7b",
+      complete: async () => "```javascript\n" + APPS_SCRIPT + "\n```",
+    });
+    expect(res.summary).toContain("qwen2.5:7b");
+    expect(res.summary).toContain("same mistake");
+    // And it still says what is actually wrong.
+    expect(res.summary).toContain("getActiveRanges");
+  });
+
+  it("does NOT give up while the model is still making progress", async () => {
+    // Different errors each round means the repair text IS landing.
+    const bad = (member: string) =>
+      "```javascript\nexport function setup(context) {\n  context.onClick(() => { context." + member + "(); });\n}\n```";
+    const members = ["nopeOne", "nopeTwo", "nopeThree", "nopeFour", "nopeFive", "nopeSix", "nopeSeven"];
+    let i = 0;
+    const res = await authorScript({
+      intent: "x", objectType: "button", plan: PLAN,
+      complete: async () => bad(members[i++] ?? "nopeLast"),
+    });
+    expect(res.stalled).toBeFalsy();
+    expect(res.attempts, "every round is spent when each one is different").toHaveLength(7);
+  });
+
+  it("tolerates one repetition before giving up", async () => {
+    // A model that fixes one of two errors and reintroduces it is not stuck.
+    const seq = ["alpha", "beta", "alpha", "gamma", "delta", "epsilon", "zeta"];
+    let i = 0;
+    const res = await authorScript({
+      intent: "x", objectType: "button", plan: PLAN,
+      complete: async () => {
+        const m = seq[i++] ?? "omega";
+        return "```javascript\nexport function setup(context) {\n  context.onClick(() => { context." + m + "(); });\n}\n```";
+      },
+    });
+    expect(res.stalled).toBeFalsy();
+  });
+
+  it("a successful round is never mistaken for a stall", async () => {
+    // errorSignature("") must not count as a repeat, or a run failing only its
+    // BEHAVIOURAL check would stall out immediately.
+    const good = "```javascript\nexport function setup(context) {\n  context.onClick(async () => { await context.api.setCellValue(0, 0, 'x'); });\n}\n```";
+    let calls = 0;
+    const res = await authorScript({
+      intent: "write a cell", objectType: "button", plan: PLAN,
+      complete: async () => { calls++; return good; },
+      expectsWrites: true,
+      // Valid every time, but reports no writes: the behavioural rung keeps
+      // sending it back, and the error signature is empty on every round.
+      dryRun: async () => ({
+        ok: true, error: null, durationMs: 1, changes: [], truncated: false,
+        totalChanges: 0, output: [], readBack: [], applicable: true, declinedReason: null,
+      }),
+    });
+    expect(res.ok).toBe(false);
+    expect(res.stalled, "an empty error set is not a repeated error set").toBeFalsy();
+    expect(calls).toBe(7);
+  });
+});
+
+describe("the give-up message does not overclaim", () => {
+  // Caught by running the real loop against a live Ollama on 2026-08-24: the
+  // stall was detected on the FINAL round, and the summary still said "the
+  // remaining corrections were skipped" when there were none remaining.
+  const APPS_SCRIPT = "export function setup(context) {\n  context.onClick(() => { context.selection.getActiveRanges(); });\n}";
+  const reply = "```javascript\n" + APPS_SCRIPT + "\n```";
+
+  it("says how many rounds it actually saved", async () => {
+    const res = await authorScript({
+      intent: "x", objectType: "button", model: "m",
+      plan: { tier: "assisted", surfaceBudgetTokens: 3000, repairRounds: 6, rationale: "" },
+      complete: async () => reply,
+    });
+    // 1 attempt + 2 repeats = 3 used, so 4 of the 7 were skipped.
+    expect(res.summary).toContain("remaining 4 corrections were skipped");
+  });
+
+  it("claims nothing was skipped when the stall lands on the last round", async () => {
+    // repairRounds 2 => 3 attempts total, which is exactly the stall threshold.
+    const res = await authorScript({
+      intent: "x", objectType: "button", model: "m",
+      plan: { tier: "assisted", surfaceBudgetTokens: 3000, repairRounds: 2, rationale: "" },
+      complete: async () => reply,
+    });
+    expect(res.stalled).toBe(true);
+    expect(res.summary).not.toContain("skipped");
+    expect(res.summary).toContain("through all 3 attempts");
   });
 });

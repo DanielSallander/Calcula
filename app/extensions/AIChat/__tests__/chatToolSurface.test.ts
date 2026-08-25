@@ -25,7 +25,7 @@ import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import {
-  TOOLS, DRAFT_OBJECT_TYPES, TOOL_NAMES, SALVAGE_AUTORUN, SYSTEM_PROMPT,
+  TOOLS, DRAFT_OBJECT_TYPES, TOOL_NAMES, AUTORUN_TOOLS, SYSTEM_PROMPT,
   CORE_TOOLS, CORE_TOOL_NAMES, buildSystemPrompt,
 } from "../lib/chatTools";
 
@@ -329,7 +329,7 @@ describe("SYSTEM_PROMPT teaches the mechanism and the closed set", () => {
 
 describe("the salvage auto-run allowlist is a subset of the real surface", () => {
   it("names only tools that exist", () => {
-    for (const name of SALVAGE_AUTORUN) {
+    for (const name of AUTORUN_TOOLS) {
       expect(TOOL_NAMES, `${name} is allowlisted for auto-run but is not a tool`).toContain(name);
     }
   });
@@ -343,7 +343,7 @@ describe("the salvage auto-run allowlist is a subset of the real surface", () =>
     expect(writesOrExecutes.length, "the mutating set must not be empty or this is vacuous")
       .toBeGreaterThanOrEqual(6);
     for (const name of writesOrExecutes) {
-      expect(SALVAGE_AUTORUN.has(name), `${name} mutates and must never auto-run from prose`).toBe(false);
+      expect(AUTORUN_TOOLS.has(name), `${name} mutates and must never auto-run from prose`).toBe(false);
     }
   });
 });

@@ -392,22 +392,35 @@ export const CORE_TOOL_NAMES: readonly string[] = [
 export const CORE_TOOLS: ChatToolDef[] = TOOLS.filter((t) => CORE_TOOL_NAMES.includes(t.name));
 
 /**
- * Tool calls that may be SALVAGED from prose and run without asking the user.
+ * Tools that run without asking, even when the model has given us a reason to
+ * doubt this particular call.
  *
- * Read-only tools plus `draft_object_script`. A salvaged call is the model's
- * intent recovered by a heuristic rather than delivered by the transport, and a
- * heuristic is exactly the wrong thing to have sole authority over a silent edit
- * — so anything that mutates the document or executes code is confirmed with the
- * user first (`confirmAsync`, awaited). `draft_object_script` is here because it
- * neither mounts nor runs anything: its whole output is a review queue entry that
- * a human must then approve in the editor.
+ * TWO TRIGGERS ask for confirmation, and both are about TRUST IN THIS TURN
+ * rather than about reach — every call, confirmed or not, goes through the same
+ * `ai_chat_run_tool` with the same window guard, script-security tier and audit:
+ *
+ *   1. The call was SALVAGED from prose. It is the model's intent recovered by a
+ *      heuristic rather than delivered by the transport, and a heuristic must
+ *      not be the sole authority for a silent edit.
+ *   2. The model has already INVENTED A TOOL NAME during this message. Observed
+ *      2026-08-24 on qwen2.5:7b: it called `format_selected_cells` (which does
+ *      not exist), was told what does, and one turn later called
+ *      `apply_formatting` over B2:D6 — a range the user had not selected —
+ *      setting a white background, bold, right alignment and a "0.00" number
+ *      format that nobody asked for, then reported success. A model that has
+ *      just proved it is guessing should not silently reformat fifteen cells on
+ *      its next guess.
+ *
+ * The exempt set is the same for both: reads cannot damage a workbook, and
+ * `draft_object_script` neither mounts nor runs anything — its whole output is a
+ * review-queue entry a human must then approve in the editor.
  *
  * FAIL-CLOSED: membership is required to auto-run, so a tool added to `TOOLS`
  * later is confirmed by default until someone deliberately adds it here.
  * `__tests__/chatToolSurface.test.ts` pins that every member exists and that no
  * mutating tool is in the set.
  */
-export const SALVAGE_AUTORUN: ReadonlySet<string> = new Set<string>([
+export const AUTORUN_TOOLS: ReadonlySet<string> = new Set<string>([
   "get_sheet_summary",
   "read_cell_range",
   "list_charts",

@@ -31,6 +31,8 @@ export interface AuthorRequest {
   complete: CompleteFn;
   /** Extra ranking terms beyond the intent itself. */
   hints?: string[];
+  /** Model name, used only to make a give-up message name what gave up. */
+  model?: string;
   /**
    * L3: run the draft against a CLONE of the workbook and report what it would
    * change (`ai_dry_run_script`). Optional because the loop is useful without a
@@ -93,6 +95,12 @@ export interface AuthorAttempt {
 
 export interface AuthorResult {
   ok: boolean;
+  /**
+   * The loop stopped because the model kept returning the SAME errors, not
+   * because it ran out of rounds. A different fact about the model, and the
+   * more useful one: more patience would not have helped.
+   */
+  stalled?: boolean;
   /** The best draft produced. Present even on failure — see the header. */
   source: string;
   report: ValidationReport;
@@ -143,6 +151,31 @@ const ASSISTED_SYSTEM = [
   "```",
 ].join("\n");
 
+/**
+ * How many times the SAME error set may repeat before the loop gives up.
+ *
+ * Two, not one: a single repetition can be a model that fixed one of two errors
+ * and reintroduced it. Two consecutive identical sets means the repair text is
+ * not landing and another round of it will not land either.
+ */
+const STALLED_AFTER_REPEATS = 2;
+
+/**
+ * A stable fingerprint of a round's errors, for detecting a loop going nowhere.
+ *
+ * Sorted, so two rounds reporting the same problems in a different order are
+ * recognised as the same problems. Empty when the round had no errors — which
+ * must never count as a repeat, or a run failing only its BEHAVIOURAL check
+ * (valid script, changes nothing) would stall out immediately.
+ */
+function errorSignature(report: ValidationReport): string {
+  return report.findings
+    .filter((f) => f.severity === "error")
+    .map((f) => f.message)
+    .sort()
+    .join("");
+}
+
 export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
   const surface = buildSurfacePrompt({
     objectType: req.objectType,
@@ -155,6 +188,10 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
 
   const attempts: AuthorAttempt[] = [];
   let user = `${surface.text}\n\n${task}`;
+  /** The previous round's error set, for stall detection (see the loop). */
+  let lastSignature = "";
+  let repeatedSignatures = 0;
+  let stalled = false;
 
   // rounds + 1: the first pass is the ATTEMPT, `repairRounds` is how many
   // corrections follow it. Off-by-one here silently halves a weak tier's budget.
@@ -205,6 +242,34 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
       };
     }
 
+    // STOP WHEN THE LOOP HAS STOPPED LEARNING.
+    //
+    // Measured 2026-08-24, qwen2.5:7b, assisted tier (6 repair rounds), driving
+    // this loop against a live Ollama: rounds 3, 4, 5 and 6 returned the
+    // BYTE-IDENTICAL error set — `context.selection.getActiveRanges` is not part
+    // of the object-script API — because the model had settled into a Google
+    // Apps Script idiom and the same repair text was not going to move it. Those
+    // four rounds each rewrote a whole script and re-validated it: on a CPU-bound
+    // local model that is minutes of the user's life buying nothing, and it
+    // reads to them as a hang.
+    //
+    // Two identical consecutive repairs is the signal. One repetition can be
+    // noise (a model that fixed one of two errors and reintroduced it); two
+    // means the prompt is not landing, and no further round of the SAME prompt
+    // will land either. The result is unchanged — this draft was going to fail
+    // anyway — so the only thing given up is the waiting.
+    const signature = errorSignature(report);
+    if (signature && signature === lastSignature) {
+      repeatedSignatures += 1;
+    } else {
+      repeatedSignatures = 0;
+      lastSignature = signature;
+    }
+    if (repeatedSignatures >= STALLED_AFTER_REPEATS) {
+      stalled = true;
+      break;
+    }
+
     // The repair prompt carries ERRORS ONLY. Feeding it the notices would teach
     // the model to strip capability declarations it cannot prove it needs, which
     // is the opposite of what §11.2 decided.
@@ -233,14 +298,28 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
     : last.dryRun && !last.dryRun.ok
       ? `It passes every static check but fails when run: ${last.dryRun.error ?? "unknown error"}`
       : "It passes every static check but does not do what was asked.";
+  // "Ran out of rounds" and "kept making the same mistake" are different facts
+  // about the model, and the second one is the more useful of the two: it tells
+  // the user that more patience would not have helped and a different model
+  // might.
+  // "Skipped the rest" is only true when there WAS a rest. A stall detected on
+  // the final round has saved nothing, and claiming otherwise is the same kind
+  // of small lie as reporting success for an edit that did not happen.
+  const roundsSkipped = req.plan.repairRounds + 1 - attempts.length;
+  const howItEnded = stalled
+    ? `${req.model ?? "The model"} repeated the same mistake on ${STALLED_AFTER_REPEATS + 1} attempts in a row` +
+      (roundsSkipped > 0
+        ? `, so the remaining ${roundsSkipped} correction${roundsSkipped === 1 ? " was" : "s were"} skipped.`
+        : `, through all ${attempts.length} attempts.`) +
+      ` Trying a larger model, or rewording the task, is more likely to help than running it again.`
+    : `Could not produce a valid script in ${attempts.length} attempt${attempts.length === 1 ? "" : "s"}.`;
   return {
     ok: false,
     source: last.source,
     report: last.report,
     attempts,
-    summary:
-      `Could not produce a valid script in ${attempts.length} attempt${attempts.length === 1 ? "" : "s"}. ` +
-      why,
+    stalled,
+    summary: `${howItEnded} ${why}`,
   };
 }
 

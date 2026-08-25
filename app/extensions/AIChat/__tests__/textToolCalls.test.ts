@@ -13,7 +13,7 @@ import {
   stripSpans,
   unknownToolMessage,
 } from "../lib/textToolCalls";
-import { TOOL_NAMES, SALVAGE_AUTORUN, TOOLS } from "../lib/chatTools";
+import { TOOL_NAMES, AUTORUN_TOOLS, TOOLS } from "../lib/chatTools";
 
 /** The real surface, so a rename of any tool reds these tests rather than
  *  leaving them asserting against a vocabulary the product no longer has. */
@@ -180,7 +180,7 @@ describe("stripSpans", () => {
 
 describe("the auto-run allowlist is fail-closed", () => {
   it("names only tools that exist", () => {
-    for (const name of SALVAGE_AUTORUN) {
+    for (const name of AUTORUN_TOOLS) {
       expect(KNOWN, `${name} is allowlisted but not in TOOLS`).toContain(name);
     }
   });
@@ -195,7 +195,7 @@ describe("the auto-run allowlist is fail-closed", () => {
     for (const name of MUTATING) {
       expect(KNOWN, `${name} should still exist`).toContain(name);
       expect(
-        SALVAGE_AUTORUN.has(name),
+        AUTORUN_TOOLS.has(name),
         `${name} mutates and must be confirmed with the user, never auto-run from prose`,
       ).toBe(false);
     }
@@ -207,7 +207,7 @@ describe("the auto-run allowlist is fail-closed", () => {
     expect(TOOLS.length).toBeGreaterThanOrEqual(20);
     const reads = KNOWN.filter((n) => n.startsWith("list_") || n.startsWith("get_") || n.startsWith("cube_"));
     for (const n of reads) {
-      expect(SALVAGE_AUTORUN.has(n), `${n} is read-only and should not need a dialog`).toBe(true);
+      expect(AUTORUN_TOOLS.has(n), `${n} is read-only and should not need a dialog`).toBe(true);
     }
   });
 });

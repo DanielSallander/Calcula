@@ -50,6 +50,9 @@ vi.mock("@api", () => ({
 // in draftGate.test.ts. Allow everything so this file tests only the wiring.
 vi.mock("../lib/draftGate", () => ({ gateToolCall: async () => ({ allow: true }) }));
 
+// ScriptAuthor is reachable from the chat now; its own suite proves it.
+vi.mock("../lib/authorRunner", () => ({ runAuthor: async () => ({ ok: true, source: "", summary: "", rounds: [] }) }));
+
 const { ChatView } = await import("../components/ChatView");
 
 // ---------------------------------------------------------------------------
@@ -98,6 +101,10 @@ async function ask(text: string): Promise<void> {
     await new Promise((r) => setTimeout(r, 0));
   });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+}
+
+async function render(): Promise<void> {
+  await act(async () => { root.render(React.createElement(ChatView, {} as never)); });
 }
 
 beforeEach(async () => {
@@ -575,6 +582,10 @@ describe("the tool surface shrinks when the model cannot hold it", () => {
       return "formatted";
     });
 
+    // The model invented a name, so its later mutating calls are now
+    // confirmed (see the safety guard). Grant it: this test is about the
+    // narrowing, not about the confirmation.
+    confirmAsync.mockReturnValue(Promise.resolve(true));
     await ask("colour the selected cells by their content");
 
     const first = toolsSent(0);
@@ -738,5 +749,189 @@ describe("the narrowing is remembered for the session", () => {
     const second = toolCounts();
     expect(second, "the second message must not re-learn it").toHaveLength(1);
     expect(second[0], "and must start narrowed").toBeLessThan(afterFirst[0]);
+  });
+});
+
+describe("a model that has started guessing does not get to edit silently", () => {
+  // THE 2026-08-24 REPORT. qwen2.5:7b invented `format_selected_cells`, was told
+  // what exists, and on the very next turn called the real `apply_formatting`
+  // over B2:D6 — a range the user had not selected — setting a white
+  // background, bold, right alignment and a "0.00" number format that nobody
+  // asked for. Then: "Great! The formatting has been applied." Silently wrong
+  // plus a false success claim is the worst outcome in this whole feature.
+
+  /** Turn 1 invents a name; turn 2 calls a real mutating tool. */
+  function inventThenMutate() {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "format_selected_cells", input: {} }],
+            stopReason: "toolUse", model: "qwen2.5:7b",
+          } as ChatResponse;
+        }
+        if (nth === 2) {
+          return {
+            blocks: [{
+              type: "toolUse", id: "c2", name: "apply_formatting",
+              input: { start_row: 1, start_col: 1, end_row: 5, end_col: 3, background_color: "#FFFFFF", bold: true },
+            }],
+            stopReason: "toolUse", model: "qwen2.5:7b",
+          } as ChatResponse;
+        }
+        return textReply("Great! The formatting has been applied.");
+      }
+      return "Applied formatting to 15 cell(s) (B2:D6)";
+    });
+  }
+
+  it("asks before the fabricated edit, naming why", async () => {
+    inventThenMutate();
+    confirmAsync.mockReturnValue(Promise.resolve(true));
+    await ask("create a script that colours each selected cell by its content");
+
+    expect(confirmAsync).toHaveBeenCalledTimes(1);
+    const asked = String(confirmAsync.mock.calls[0][0]);
+    expect(asked, "the reason must be stated, not just 'are you sure'")
+      .toContain("already called a tool that does not exist");
+    // The SELECTED model, which is what the user can act on — not whatever
+    // name the provider echoed back in the response.
+    expect(asked).toContain("qwen2.5-coder:3b");
+    expect(asked, "and what it would actually do").toContain("apply_formatting");
+  });
+
+  it("does NOT touch the workbook when the user says no", async () => {
+    inventThenMutate();
+    confirmAsync.mockReturnValue(Promise.resolve(false));
+    await ask("create a script that colours each selected cell by its content");
+    expect(runToolCalls(), "the 15-cell reformat must not happen").toEqual([]);
+  });
+
+  it("fails CLOSED if the dialog cannot be shown", async () => {
+    inventThenMutate();
+    confirmAsync.mockImplementation(() => Promise.reject(new Error("no dialog")));
+    await ask("create a script that colours each selected cell by its content");
+    expect(runToolCalls()).toEqual([]);
+  });
+
+  it("tells the model not to retry, so it stops rather than looping", async () => {
+    inventThenMutate();
+    confirmAsync.mockReturnValue(Promise.resolve(false));
+    await ask("create a script that colours each selected cell by its content");
+    expect(JSON.stringify(sentMessages(2))).toContain("Do not retry it");
+  });
+
+  it("still never asks about a READ, however much the model has misbehaved", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "madeUp", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        if (nth === 2) {
+          return {
+            blocks: [{ type: "toolUse", id: "c2", name: "read_cell_range", input: { start_row: 0, start_col: 0, end_row: 2, end_col: 0 } }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("Here is what I found.");
+      }
+      return "1,2,3";
+    });
+    await ask("what is in the selection?");
+    expect(confirmAsync).not.toHaveBeenCalled();
+    expect(runToolCalls().map((c) => c.name)).toEqual(["read_cell_range"]);
+  });
+
+  it("a well-behaved model is never second-guessed", async () => {
+    // The confirmation must not become something users click through by habit.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "apply_formatting", input: { start_row: 0, start_col: 0, end_row: 2, end_col: 0, background_color: "#FFFF00" } }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("Done.");
+      }
+      return "ok";
+    });
+    await ask("make A1:A3 yellow");
+    expect(confirmAsync).not.toHaveBeenCalled();
+    expect(runToolCalls().map((c) => c.name)).toEqual(["apply_formatting"]);
+  });
+});
+
+describe("the chat offers the guided path instead of guessing", () => {
+  // The bridge. Asked for "a script that formats each selected cell by its
+  // content", the model reached for `apply_formatting` — which takes ONE range
+  // and ONE set of properties and cannot express a per-cell colour at all.
+  // There is no correct choice among the non-script tools, so the chat says so.
+
+  function offerButton(): HTMLButtonElement | undefined {
+    return [...container.querySelectorAll("button")]
+      .find((b) => b.textContent?.includes("Write it as a script")) as HTMLButtonElement | undefined;
+  }
+
+  it("offers after a message that reads like script work", async () => {
+    invoke.mockImplementation(async () => textReply("Here is what I would do..."));
+    await ask("create a script that colours each selected cell by its content");
+    expect(container.textContent).toContain("reads like a request for a script");
+    expect(offerButton(), "and it must be actionable").toBeTruthy();
+  });
+
+  it("stays silent for a plain request the tool loop handles well", async () => {
+    invoke.mockImplementation(async () => textReply("Done."));
+    await ask("make A1:A3 yellow");
+    expect(container.textContent).not.toContain("reads like a request for a script");
+    expect(offerButton()).toBeUndefined();
+  });
+
+  it("does not pre-empt the answer — it appears after the turn, not instead of it", async () => {
+    invoke.mockImplementation(async () => textReply("I can do that."));
+    await ask("write a macro to total the columns");
+    // The model still got to answer.
+    expect(container.textContent).toContain("I can do that.");
+    expect(offerButton()).toBeTruthy();
+  });
+
+  it("switches to the guided screen, carrying the message across", async () => {
+    invoke.mockImplementation(async () => textReply("ok"));
+    await ask("create a script that colours each selected cell by its content");
+    await act(async () => {
+      offerButton()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // The guided screen, prefilled with what the user already typed.
+    expect(container.textContent).toContain("authoring a script");
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(ta.value).toBe("create a script that colours each selected cell by its content");
+  });
+
+  it("can be dismissed and stays dismissed", async () => {
+    invoke.mockImplementation(async () => textReply("ok"));
+    await ask("write a macro for this");
+    const no = [...container.querySelectorAll("button")].find((b) => b.textContent === "Not now")!;
+    await act(async () => {
+      no.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(offerButton()).toBeUndefined();
+  });
+
+  it("reaches the guided screen directly from the header, with no offer needed", async () => {
+    await render();
+    const write = [...container.querySelectorAll("button")].find((b) => b.textContent === "Write a script")!;
+    await act(async () => {
+      write.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container.textContent).toContain("authoring a script");
   });
 });

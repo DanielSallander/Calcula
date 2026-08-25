@@ -1555,3 +1555,111 @@ same model once per message is a round trip for no information.
 What is still honestly unknown: whether a frontier cloud model handles 24 tools here. Nothing in
 this session measured one, and the narrowing never fires for a model that does not invent, so the
 cost of being wrong about that is zero.
+## 13. The guided path — 2026-08-24
+
+### 13.1 The failure that ended the free-chat-only design
+
+Third report, qwen2.5:7b, same request. The narrowing and the repair both worked: it invented
+`format_selected_cells`, was told what exists, and retried on the 10-tool core. Then it called
+`apply_formatting` with `background_color: #FFFFFF`, `bold: true`, `number_format: "0.00"`,
+`text_align: right` over **B2:D6** — a range the user had not selected, with four properties nobody
+asked for — and said *"Great! The formatting has been applied."*
+
+Two facts make this the end of the road for the free-chat-only shape:
+
+1. **Silently wrong plus a false success claim** is worse than doing nothing, which is what the
+   first two rounds produced. Undoable, but only if the user notices.
+2. **`apply_formatting` structurally cannot do the task.** Its params are one range plus one set of
+   properties (`ApplyFormattingParams`, mcp/server.rs). "Each cell coloured by its own content" is
+   per-cell. There is no correct choice among the non-script tools — the request needs a script, and
+   the model was doomed the moment it went looking for a tool.
+
+Free chat asks the model to chain four decisions: parse intent -> decide script vs. direct action ->
+pick one of N tools -> produce arguments or code. Everything measured across three rounds says local
+models fail at the middle two and are GOOD at the fourth. The product was testing them on their
+worst step.
+
+### 13.2 The guided mode already existed
+
+`authorScript` (M7, `scriptHost/scriptAuthoring/`) takes an **intent** plus an **objectType** and
+runs generate -> validate -> dry-run -> repair, tier-aware, with the API surface prefixed and an
+`expectsWrites` check. **There is no tool-selection step anywhere in it.** A repo-wide grep found
+ZERO UI callers; the only mention in any extension was a comment in `draftGate` explaining why it
+had NOT been bolted into the chat's tool loop. The pipeline was built, graded by the eval corpus,
+and never given a door.
+
+So the answer to "should we design a guided mode?" was: it is written, wire it up.
+
+**What shipped** (`AIChat/components/ScriptAuthor.tsx`, `lib/authorRunner.ts`, `lib/scriptIntent.ts`):
+- Two fields, not a form. The intent is free text — a form there is a worse text box. Only the
+  object type is a control, because it decides which API slice the model sees and `draftGate`
+  currently has to guess it silently; here the guess is visible and correctable.
+- Reachable directly ("Write a script" in the pane header) and by OFFER: when a message contains
+  script intent, the chat shows a card after the turn. Offered, never automatic — the detector is a
+  word list, it will be wrong at the margins, and the user decides. An explicit "just do it now"
+  suppresses it.
+- The draft goes out the SAME DOOR as any other: `draft_object_script` through `ai_chat_run_tool`,
+  so it reuses the Rust store, the audit entry, the `mcp:script-draft` event, the editor hand-off
+  and the "NOT mounted, NOT running" invariant. No second delivery route.
+- Free chat keeps the front door for reading, summarising and explicit one-off edits, which is where
+  the tool loop demonstrably works.
+
+### 13.3 Honest result: the guided path did NOT succeed on this task either
+
+Driving the real pipeline against the live Ollama with the reporter's request, qwen2.5:7b, assisted
+tier (6 repair rounds), surface budget 3,686 tokens:
+
+```
+round 0-2: context.selection.getRange / getActiveCell / getActiveCells   -- all invented
+round 3-6: context.selection.getActiveRanges + context.cell.getRange     -- identical, four times
+RESULT ok=false, 7 attempts
+```
+
+The model had settled into a **Google Apps Script idiom** and never left it, despite being shown
+Calcula's surface (which did include `api.getSelection` and `api.setRangeFormat` at that budget) and
+being told each round exactly which member did not exist. It also reached for
+`context.expose(name, fn)` + `context.onClick(formatCellBackgroundColor)` — where that identifier is
+not even bound — i.e. a new variant of the `expose`-does-not-fire defect this programme has now hit
+three times.
+
+**Nothing wrong reached the user**: the validator caught every invention and the run reported
+failure with its best attempt. That is the pipeline working as designed. But the guided path is
+better STRUCTURE, not a fix for a model that does not know the API.
+
+### 13.4 What that run bought: the loop was burning rounds on a settled model
+
+Rounds 3-6 returned the same errors. Each rewrote a whole script and re-validated it; on a CPU-bound
+local model that is minutes per round, buying nothing, and reading to the user as a hang.
+
+`authorScript` now stops after `STALLED_AFTER_REPEATS` (2) consecutive identical error sets and says
+so: *"qwen2.5:7b repeated the same mistake on 3 attempts in a row..."* Two, not one, because a single
+repetition can be a model that fixed one of two errors and reintroduced it. The signature is sorted
+and ignores empty error sets, so a run failing only its BEHAVIOURAL check does not stall out
+instantly.
+
+A second live run then caught an overclaim in that very message: the stall was detected on the FINAL
+round, and the summary still said "the remaining corrections were skipped" when there were none. Now
+counted, and it says "through all 3 attempts" when nothing was saved.
+
+### 13.5 The safety guard
+
+A mutating call is now confirmed when anything in the message has given cause to doubt the model:
+the call was salvaged from prose, OR **the model has already invented a tool name during this
+message**. The second trigger is exactly the reported transcript — invented a name, then reformatted
+fifteen cells on its next guess. `AUTORUN_TOOLS` (renamed from `SALVAGE_AUTORUN`, which was now a
+misnomer) exempts reads and `draft_object_script`; everything else asks, naming the model and the
+reason. A well-behaved model is never second-guessed, or the dialog becomes something users click
+through by habit.
+
+### 13.6 Where this leaves the local-model claim
+
+Measured, on this machine, for THIS task:
+- Free chat, 24 tools: invents a name (3b and 7b alike).
+- Free chat, 10 tools + API docs: real tool names; the 7b produced valid drafts through
+  `draft_object_script` 2 times in 3.
+- Guided pipeline, assisted tier: 0 in 1 — settled on Apps Script idiom and never recovered.
+
+The single-shot path through the tool schema outperformed the dedicated repair loop on this task,
+which is the opposite of the design's expectation and is worth investigating before claiming either
+number. What is NOT in doubt: the product now fails visibly and safely instead of silently and
+destructively, and the guided path removes the decision local models measurably cannot make.

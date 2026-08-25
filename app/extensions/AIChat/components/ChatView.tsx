@@ -17,7 +17,7 @@
 //            1. A TEXTUAL TOOL CALL IS RECOVERED (lib/textToolCalls.ts). When a
 //               turn produces no native tool call, the prose is searched for one.
 //               Read-only tools and draft_object_script run; anything that
-//               mutates the document asks the user first (SALVAGE_AUTORUN).
+//               mutates the document asks the user first (AUTORUN_TOOLS).
 //            2. A DRAFT IS REACHABLE FROM HERE. The bubble for a
 //               draft_object_script call carries the draft id and an "Open in
 //               editor" button, through the @api scriptEditorService seam. The
@@ -41,7 +41,7 @@ import type { TaskPaneViewProps } from "@api";
 import { listenTauriEvent, confirmAsync, hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
 import { aiChatBackend } from "../lib/aiChatBackend";
 import {
-  TOOLS, TOOL_NAMES, CORE_TOOLS, CORE_TOOL_NAMES, SALVAGE_AUTORUN, buildSystemPrompt,
+  TOOLS, TOOL_NAMES, CORE_TOOLS, CORE_TOOL_NAMES, AUTORUN_TOOLS, buildSystemPrompt,
 } from "../lib/chatTools";
 import {
   AI_STREAM_EVENT, STREAM_CANCELLED, TOOL_USE_TEMPERATURE,
@@ -56,7 +56,9 @@ import {
   startTool, finishTool, failTool, settleRunning, formatToolBubble, truncate, draftIdFromResult,
   type Bubble,
 } from "../lib/toolTimeline";
+import { detectScriptIntent, guessObjectType } from "../lib/scriptIntent";
 import { ModelPicker } from "./ModelPicker";
+import { ScriptAuthor } from "./ScriptAuthor";
 
 const MAX_TOOL_TURNS = 8;
 
@@ -92,18 +94,45 @@ function summarizeToolCall(name: string, input: unknown): string {
   return `${name}(${truncate(JSON.stringify(args), 160)})`;
 }
 
+/** Why a call is being second-guessed, or null when it is not. */
+type DoubtReason = "salvaged" | "invented-a-name";
+
 /**
- * Whether a salvaged call may run without asking.
+ * Whether this call has to be confirmed with the user first.
  *
- * A NATIVE call is never subject to this — the model emitted it through the
- * interface built for the purpose and the user chose the model. A SALVAGED one
- * was recovered from prose by a heuristic, and a heuristic must not be the sole
- * authority for a silent edit to someone's workbook. Reads and drafting are
- * exempt because neither can damage anything: `draft_object_script` produces a
- * review-queue entry a human must then approve in the editor.
+ * NOT about reach — every call goes through the same `ai_chat_run_tool`, guard,
+ * tier and audit either way. It is about whether anything in THIS message has
+ * given us cause to doubt the model's next move:
+ *
+ *   - `salvaged`: the call was recovered from prose by a heuristic rather than
+ *     delivered by the transport.
+ *   - `misbehaved`: the model already called a tool that does not exist during
+ *     this message. Observed on qwen2.5:7b — it invented `format_selected_cells`,
+ *     was told what exists, and then reformatted fifteen cells the user had not
+ *     selected, with properties nobody asked for, and reported success.
+ *
+ * An ordinary native call from a model that has behaved is never second-guessed:
+ * the user chose the model, and a confirmation on every write would train them
+ * to click through it.
  */
-function needsConfirmation(name: string, salvaged: boolean): boolean {
-  return salvaged && !SALVAGE_AUTORUN.has(name);
+function doubtAbout(name: string, salvaged: boolean, misbehaved: boolean): DoubtReason | null {
+  if (AUTORUN_TOOLS.has(name)) return null;
+  if (salvaged) return "salvaged";
+  if (misbehaved) return "invented-a-name";
+  return null;
+}
+
+/** What the user is asked, in terms of what actually happened. */
+function confirmationText(reason: DoubtReason, model: string, name: string, input: unknown): string {
+  const preamble =
+    reason === "salvaged"
+      ? `${model} wrote this call as text rather than emitting it, so Calcula recovered it.`
+      : `${model} has already called a tool that does not exist in this conversation, so this call is being double-checked.`;
+  return (
+    `${preamble}\n\n` +
+    `It changes the workbook:\n\n  ${summarizeToolCall(name, input)}\n\n` +
+    `Run it?`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +151,10 @@ const activityStyle: React.CSSProperties = { alignSelf: "flex-start", padding: "
 /** Model thinking. Dimmer still, and visibly not the answer. */
 const thinkingStyle: React.CSSProperties = { alignSelf: "flex-start", maxWidth: "90%", padding: "6px 10px", borderRadius: 8, background: "#F7F5FA", border: "1px solid #E4DEEC", color: "#6B6478", fontFamily: "Consolas, monospace", fontSize: 11, whiteSpace: "pre-wrap", maxHeight: 160, overflowY: "auto" };
 const openDraftBtn: React.CSSProperties = { marginTop: 6, padding: "3px 10px", fontSize: 11, border: "1px solid #0078D4", borderRadius: 4, background: "#FFF", color: "#0078D4", cursor: "pointer" };
+/** The "this looks like a script" offer. Distinct from every message colour. */
+const offerStyle: React.CSSProperties = { alignSelf: "stretch", padding: "10px 12px", borderRadius: 8, background: "#FFF8E6", border: "1px solid #EBD9A8", color: "#6B5A1E", fontSize: 12, lineHeight: 1.45 };
+const offerGoStyle: React.CSSProperties = { padding: "4px 12px", fontSize: 11, border: "none", borderRadius: 4, background: "#0078D4", color: "#FFF", cursor: "pointer" };
+const offerDismissStyle: React.CSSProperties = { padding: "4px 12px", fontSize: 11, border: "1px solid #CCC", borderRadius: 4, background: "#FFF", color: "#555", cursor: "pointer" };
 
 function bubbleStyle(kind: Bubble["kind"]): React.CSSProperties {
   const base: React.CSSProperties = { padding: "6px 10px", borderRadius: 8, maxWidth: "90%", whiteSpace: "pre-wrap", wordBreak: "break-word" };
@@ -139,6 +172,20 @@ const h = React.createElement;
 export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
   const [selection, setSelection] = useState(readSelection);
   const [picking, setPicking] = useState(false);
+  /**
+   * Which of the two paths the pane is showing.
+   *
+   * The chat's tool loop is genuinely good at reading, summarising and explicit
+   * one-off edits. It is measurably bad at deciding that a request needs a
+   * SCRIPT and then picking the tool for it. So the guided path is a separate
+   * screen the user can reach directly, and the chat OFFERS it when a message
+   * looks like script work rather than silently rerouting.
+   */
+  const [mode, setMode] = useState<"chat" | "author">("chat");
+  /** Prefill carried across when the user accepts the chat's offer. */
+  const [authorSeed, setAuthorSeed] = useState<{ intent?: string; objectType?: string }>({});
+  /** The standing "this looks like a script" offer, or null. */
+  const [offer, setOffer] = useState<null | { intent: string; objectType?: string; matched: string }>(null);
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -302,6 +349,17 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     if (!text || busy) return;
     setInput("");
     addBubble({ kind: "user", text });
+
+    // THE BRIDGE. Offered, never automatic: the detector is a word list and it
+    // will be wrong at the margins, so the user decides. It exists because the
+    // model demonstrably cannot make this call itself — asked for "a script
+    // that formats each selected cell by its content" it reached for
+    // `apply_formatting`, which takes ONE range and ONE set of properties and
+    // therefore cannot express a per-cell colour at all.
+    const scriptish = detectScriptIntent(text);
+    if (scriptish.looksLikeScript) {
+      setOffer({ intent: text, objectType: guessObjectType(text) ?? undefined, matched: scriptish.matched ?? "" });
+    }
     setBusy(true);
     stoppedRef.current = false;
     draftIdsRef.current = [];
@@ -322,6 +380,16 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
      * watches a column of red is worse than an honest verdict about the model.
      */
     let inventedStreak = 0;
+    /**
+     * The model has called a tool that does not exist during THIS message.
+     *
+     * Scoped to the message, not the turn, because the harm lands on the turn
+     * AFTER: on 2026-08-24 qwen2.5:7b invented `format_selected_cells`, was told
+     * what exists, and then called the real `apply_formatting` over a range the
+     * user had not selected with four properties nobody asked for — and reported
+     * success. From here on, its mutating calls are confirmed.
+     */
+    let misbehaved = false;
     /**
      * Whether the tool surface has been cut down to `CORE_TOOLS` for this turn
      * onward.
@@ -472,6 +540,11 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
           // performs the fix — the same mechanism draftGate uses.
           if (!TOOL_NAMES.includes(tu.name)) {
             unknownThisTurn++;
+            // Remembered for the REST OF THE MESSAGE, not just this turn: the
+            // damage observed on 2026-08-24 happened on the turn AFTER the
+            // invention, once the model had been told what exists and picked a
+            // real tool with fabricated arguments.
+            misbehaved = true;
             setBubbles((prev) =>
               failTool(prev, tu.id, `No tool named "${tu.name}". Told the model what exists.`, performance.now() - started),
             );
@@ -485,21 +558,22 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
           }
 
           try {
-            // A recovered call that would MUTATE the workbook is confirmed with
-            // the user first. `confirmAsync` is awaited and fails CLOSED — a
-            // dialog that cannot be shown is a refusal, never consent.
-            if (needsConfirmation(tu.name, salvaged)) {
+            // A call we have cause to doubt, and which would MUTATE the
+            // workbook, is confirmed first. `confirmAsync` is awaited and fails
+            // CLOSED — a dialog that cannot be shown is a refusal, never consent.
+            const doubt = doubtAbout(tu.name, salvaged, misbehaved);
+            if (doubt) {
               const ok = await confirmAsync(
-                `The model wrote this call as text rather than emitting it, so Calcula recovered it:\n\n` +
-                  `  ${tu.name}\n\n` +
-                  `It changes the workbook. Run it?`,
+                confirmationText(doubt, selection.model, tu.name, tu.input),
               );
               if (!ok) {
                 setBubbles((prev) => failTool(prev, tu.id, "Declined by the user.", performance.now() - started));
                 results.push({
                   type: "toolResult",
                   toolUseId: tu.id,
-                  content: "The user declined to run this recovered tool call.",
+                  content:
+                    "The user declined to run this call. Do not retry it — explain what you " +
+                    "intended to do and ask them what they want instead.",
                   isError: true,
                 });
                 continue;
@@ -632,11 +706,39 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     );
   }
 
+  // --- The GUIDED path ---
+  // A separate screen rather than a mode the chat pretends to be in: the two
+  // do genuinely different things, and the measured reason this exists is that
+  // asking a local model to choose between them is what fails.
+  if (mode === "author") {
+    return h("div", { style: container },
+      h("div", { key: "bar", style: bar },
+        h("span", { key: "m" }, `${selection.model} — authoring a script`),
+        h("button", { key: "c", style: linkBtn, onClick: () => setPicking(true) }, "Change model"),
+      ),
+      h(ScriptAuthor, {
+        key: "author",
+        providerId: selection.providerId,
+        model: selection.model,
+        baseUrl: selection.baseUrl,
+        initialIntent: authorSeed.intent,
+        initialObjectType: authorSeed.objectType,
+        onBackToChat: () => setMode("chat"),
+      }),
+    );
+  }
+
   const canOpenEditor = hasScriptEditorProvider();
 
   return h("div", { style: container },
     h("div", { key: "bar", style: bar },
       h("span", { key: "m" }, selection.model),
+      h("span", { key: "sp", style: { flex: 1 } }),
+      h("button", {
+        key: "author",
+        style: linkBtn,
+        onClick: () => { setAuthorSeed({ intent: input.trim() || undefined, objectType: undefined }); setMode("author"); },
+      }, "Write a script"),
       h("button", { key: "c", style: linkBtn, onClick: () => setPicking(true) }, "Change model"),
     ),
     h("div", { key: "log", ref: logRef, style: log },
@@ -672,6 +774,28 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
       busy
         ? h("div", { key: "activity", style: activityStyle },
             `[${elapsed}s] ${activity || (streaming ? "Writing the answer..." : "Working...")}`,
+          )
+        : null,
+      // The offer. Shown after the turn so it does not pre-empt an answer the
+      // chat might have given perfectly well.
+      offer && !busy
+        ? h("div", { key: "offer", style: offerStyle },
+            h("div", { key: "t", style: { marginBottom: 6 } },
+              `That reads like a request for a script ("${offer.matched}"). ` +
+              "Writing one through the guided path is far more reliable: it shows the model " +
+              "Calcula's API, checks what it writes and corrects it, instead of asking it to " +
+              "pick a tool."),
+            h("div", { key: "b", style: { display: "flex", gap: 8 } },
+              h("button", {
+                style: offerGoStyle,
+                onClick: () => {
+                  setAuthorSeed({ intent: offer.intent, objectType: offer.objectType });
+                  setOffer(null);
+                  setMode("author");
+                },
+              }, "Write it as a script"),
+              h("button", { style: offerDismissStyle, onClick: () => setOffer(null) }, "Not now"),
+            ),
           )
         : null,
     ),

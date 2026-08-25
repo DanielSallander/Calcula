@@ -40,7 +40,7 @@
 //               a JavaScript object literal is not recovered, on purpose.
 //
 //          Authority is decided by the CALLER, not here: this module reports what
-//          it found and ChatView applies `SALVAGE_AUTORUN` (chatTools.ts), which
+//          it found and ChatView applies `AUTORUN_TOOLS` (chatTools.ts), which
 //          confirms every mutating call with the user before running it. This
 //          file is pure — text in, findings out — which is what makes the rules
 //          above testable without a model, a Worker or a backend.
