@@ -32,6 +32,8 @@ import {
 
 interface TableOpts {
   bound?: boolean;
+  /** The PERSISTED source binding a pipeline lives on. `bound` is looser. */
+  sourceId?: string | null;
   transformSteps?: TransformStepDto[];
 }
 
@@ -48,7 +50,7 @@ function table(
     isHidden: false,
     storageMode: "InMemory",
     bound: opts.bound ?? false,
-    sourceId: null,
+    sourceId: opts.sourceId ?? null,
     transformSteps: opts.transformSteps ?? [],
     sourceColumns: [],
     columns: [
@@ -120,8 +122,11 @@ function fixtureOverview(): ModelOverview {
       table("Customer", ["Id", "Name"]),
       table("Orders", ["Id", "CustomerId"]),
       // A source-bound table WITH a pipeline: the `transform` verb's subject.
+      // It carries a real `sourceId` because that — not the looser `bound` —
+      // is what a pipeline hangs off.
       table("Web", ["Id", "Status", "Qty", "Notes", "amount"], [], {
         bound: true,
+        sourceId: "11111111-2222-3333-4444-555555555555",
         transformSteps: [
           { type: "removeColumns", columns: ["Notes"] },
           { type: "renameColumns", renames: [{ from: "amount", to: "net" }] },
@@ -644,6 +649,26 @@ describe("transform — guards", () => {
     expect(() => planRun("transform table Sales clear", session)).toThrow(
       /not bound to a data source/,
     );
+  });
+
+  it("gates on the SOURCE BINDING, not the looser `bound` flag", () => {
+    // `bound` is also true for a live app-side bind that carries no persisted
+    // binding — and a pipeline lives on the binding, so such a table cannot
+    // hold steps. Gating on `bound` let the CLI plan a `transformSet` the
+    // backend then refused. `sourceId` is the test the modal itself applies.
+    const overview = fixtureOverview();
+    overview.tables = overview.tables.map((t) =>
+      t.name === "Web" ? { ...t, bound: true, sourceId: null } : t,
+    );
+    const { session } = transformSession(overview);
+    expect(() => planRun("transform table Web clear", session)).toThrow(
+      /not bound to a data source/,
+    );
+  });
+
+  it("accepts a table whose source binding is recorded", () => {
+    const { session } = transformSession();
+    expect(() => planRun("transform table Web clear", session)).not.toThrow();
   });
 
   it("rejects an undeclared option, naming the valid keys", () => {

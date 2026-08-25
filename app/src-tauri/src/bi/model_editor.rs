@@ -827,12 +827,60 @@ pub(crate) fn emit_refresh_completed(
 /// Install a base model on the connection's shared engine and mirror it onto
 /// every connection sharing that model. Shared by undo and redo (does NOT touch
 /// the undo stacks). Lock order engine -> connections, as elsewhere.
+/// The identity of a table's data-SHAPING definition: its transformation
+/// pipeline and its SQL source query.
+///
+/// Two tables with the same columns but different pipelines hold different
+/// rows, which is exactly what a column-name comparison cannot see.
+fn pipeline_identity(table: &bi_engine::Table) -> (Option<String>, Option<String>) {
+    match table.source_binding() {
+        Some(binding) => (
+            bi_engine::pipeline_fingerprint(&binding.transformations),
+            binding.source_query.clone(),
+        ),
+        None => (None, None),
+    }
+}
+
+/// Drop cached rows for every table whose shaping definition changed between
+/// `before` and `after`, **while the engine lock is still held**.
+///
+/// Installing a model does NOT invalidate the per-table batch cache — only the
+/// query-result cache — so a table whose pipeline changed would keep answering
+/// from rows the OLD pipeline produced. Two paths reach that state and both
+/// come through here:
+///
+/// * an edit that changes a pipeline, and
+/// * undo / redo / batch-rollback, which reinstall an earlier model wholesale.
+///
+/// Doing it under the caller's guard is the load-bearing part: releasing the
+/// lock first, emitting `bi:model-changed`, and dropping the cache afterwards
+/// leaves a window in which a listener re-queries the NEW model against the OLD
+/// rows — a wrong answer, or an error about a column the pipeline renamed.
+fn drop_caches_for_reshaped_tables(
+    engine: &mut bi_engine::Engine,
+    before: &bi_engine::DataModel,
+    after: &bi_engine::DataModel,
+) {
+    for table in after.tables() {
+        let previous = match before.table(table.name()) {
+            Ok(previous) => pipeline_identity(previous),
+            // A table that did not exist before has nothing cached under that
+            // name worth keeping either.
+            Err(_) => (None, None),
+        };
+        if previous != pipeline_identity(table) {
+            engine.drop_table_cache(table.name());
+        }
+    }
+}
+
 async fn install_base_model(
     bi_state: &BiState,
     connection_id: &ConnectionId,
     new_base: &bi_engine::DataModel,
 ) -> Result<(), String> {
-    let (engine_arc, calculated, model_key) = {
+    let (engine_arc, calculated, model_key, previous) = {
         let conns = bi_state.connections.lock().unwrap();
         let conn = conns.get(connection_id).ok_or("Connection not found")?;
         (
@@ -841,11 +889,18 @@ async fn install_base_model(
                 .ok_or("No model loaded for this connection")?,
             conn.calculated_measures.clone(),
             conn.model_key.clone(),
+            conn.base_model.clone(),
         )
     };
     let mut guard = engine_arc.lock().await;
     let combined = build_combined_model(new_base, &calculated)?;
     guard.set_model(combined).map_err(|e| format!("{}", e))?;
+    // Undo, redo and batch rollback all land here with a WHOLESALE earlier
+    // model. If that model shapes a table differently, the rows cached under
+    // the model being replaced are the wrong rows now.
+    if let Some(previous) = previous.as_ref() {
+        drop_caches_for_reshaped_tables(&mut guard, previous, new_base);
+    }
     {
         let mut conns = bi_state.connections.lock().unwrap();
         for c in conns.values_mut() {
@@ -904,6 +959,10 @@ where
     let new_base = edit(&base, &calculated)?;
     let combined = build_combined_model(&new_base, &calculated)?;
     guard.set_model(combined).map_err(|e| format!("{}", e))?;
+    // Under the SAME guard as the install, so no query can see the new model
+    // against the old pipeline's rows — and before `bi:model-changed` is
+    // emitted below, so a listener that re-queries immediately cannot either.
+    drop_caches_for_reshaped_tables(&mut guard, &base, &new_base);
 
     {
         let mut conns = bi_state.connections.lock().unwrap();
@@ -5661,7 +5720,7 @@ pub struct TransformPreviewResult {
 
 /// Rows sampled per preview. Deliberately smaller than `MAX_TEST_ROWS`: a
 /// preview is a feedback loop for someone editing steps, not a report.
-const MAX_PREVIEW_ROWS: usize = 500;
+const HOST_PREVIEW_ROW_CAP: usize = 500;
 
 /// Deserialize a JSON step array into engine steps, naming the offending
 /// element so a hand-built payload fails legibly.
@@ -5739,8 +5798,25 @@ fn transform_columns_to_dto(columns: &[bi_engine::Column]) -> Vec<ModelColumnInf
 /// because a sandboxed script owns those bindings. These belong to a source the
 /// USER configured in the Model Editor, so they live under their own prefix and
 /// are managed from that window.
-fn source_secret_key(source_id: &str) -> String {
-    format!("source/{}", source_id)
+fn source_secret_key(source_id: &str, authority: Option<&str>) -> String {
+    // The AUTHORITY is part of the key, not decoration. A credential-manager
+    // entry is machine-global, so keying on the source id alone means any model
+    // that declares a source with the same id — including one a user was sent —
+    // resolves this secret and ships it to whatever base URL THAT model names.
+    // Binding the entry to the host it was stored for makes such a model get
+    // nothing instead.
+    match authority {
+        Some(authority) if !authority.is_empty() => format!("source/{source_id}@{authority}"),
+        _ => format!("source/{source_id}"),
+    }
+}
+
+/// The `host:port` a source's requests go to, which scopes its secret slots.
+fn source_authority(source: &bi_engine::PersistedSource) -> Option<String> {
+    source
+        .rest
+        .as_ref()
+        .and_then(|rest| bi_engine::authority_of(&rest.base_url))
 }
 
 /// Read one of a model source's secret slot values.
@@ -5748,8 +5824,12 @@ fn source_secret_key(source_id: &str) -> String {
 /// Server-side only — no command returns a slot's value, and nothing here ever
 /// crosses to the frontend. Used when wiring a source that authenticates with
 /// named slots.
-pub(super) fn resolve_source_secret(source_id: &str, slot: &str) -> Option<String> {
-    super::credential_cache::get_credentials(&source_secret_key(source_id), slot)
+pub(super) fn resolve_source_secret(
+    source_id: &str,
+    authority: Option<&str>,
+    slot: &str,
+) -> Option<String> {
+    super::credential_cache::get_credentials(&source_secret_key(source_id, authority), slot)
         .map(|(_user, secret)| secret)
 }
 
@@ -5803,6 +5883,7 @@ pub fn bi_model_source_secrets(
             .ok_or_else(|| format!("Data source '{}' is not in the model", source_id))?
     };
     let declared = declared_secret_slots(&source);
+    let authority = source_authority(&source);
 
     match op.as_str() {
         "list" => {
@@ -5811,7 +5892,7 @@ pub fn bi_model_source_secrets(
                 .map(|s| {
                     serde_json::json!({
                         "slot": s,
-                        "isSet": resolve_source_secret(&source_id, s).is_some(),
+                        "isSet": resolve_source_secret(&source_id, authority.as_deref(), s).is_some(),
                     })
                 })
                 .collect();
@@ -5838,12 +5919,19 @@ pub fn bi_model_source_secrets(
             if value.is_empty() {
                 return Err("A secret value cannot be empty — use 'delete' to clear it".to_string());
             }
-            super::credential_cache::save_credentials(
-                &source_secret_key(&source_id),
+            // Report a failed write rather than returning Ok: Windows rejects
+            // an over-long credential blob, and "stored" followed by a connect
+            // that says no value was supplied is a confusing way to learn that.
+            if !super::credential_cache::save_credentials(
+                &source_secret_key(&source_id, authority.as_deref()),
                 &slot,
                 "secret",
                 &value,
-            );
+            ) {
+                return Err(format!(
+                    "Windows Credential Manager refused to store the value for slot '{slot}'.                      A very long secret (over about 2.5 KB) is the usual cause."
+                ));
+            }
             crate::log_info!(
                 "BI",
                 "model editor: set secret slot '{}' on source '{}'",
@@ -5854,7 +5942,10 @@ pub fn bi_model_source_secrets(
         }
         "delete" => {
             let slot = slot.ok_or("'delete' requires a slot")?;
-            super::credential_cache::delete_credentials(&source_secret_key(&source_id), &slot);
+            super::credential_cache::delete_credentials(
+                &source_secret_key(&source_id, authority.as_deref()),
+                &slot,
+            );
             Ok(serde_json::Value::Null)
         }
         other => Err(format!(
@@ -5907,18 +5998,9 @@ async fn set_transformations_inner(
         connection_id
     );
 
-    // The scratch engine dropped ITS cache; the live engine still holds rows
-    // the PREVIOUS pipeline produced, which are the wrong rows now. Drop them
-    // or a stale batch answers the next query.
-    let engine_arc = {
-        let conns = bi_state.connections.lock().unwrap();
-        conns.get(&connection_id).and_then(|c| c.engine.clone())
-    };
-    if let Some(engine_arc) = engine_arc {
-        let mut engine = engine_arc.lock().await;
-        engine.drop_table_cache(table);
-    }
-
+    // The stale-cache drop is NOT done here: `apply_model_edit` does it under
+    // the same engine lock it installs the model with, so there is no window in
+    // which the new model could be queried against the old pipeline's rows.
     Ok(overview)
 }
 
@@ -6055,7 +6137,7 @@ pub async fn bi_model_transform(
                 Some(n) => Some(n as usize),
                 None => None,
             };
-            let cap = row_limit.unwrap_or(MAX_PREVIEW_ROWS).min(MAX_PREVIEW_ROWS);
+            let cap = row_limit.unwrap_or(HOST_PREVIEW_ROW_CAP).min(HOST_PREVIEW_ROW_CAP);
 
             let engine_arc = {
                 let conns = bi_state.connections.lock().unwrap();
@@ -6079,6 +6161,13 @@ pub async fn bi_model_transform(
                 request = request.upto(upto);
             }
 
+            // Held across the source fetch, deliberately: one engine mutex per
+            // connection is this module's concurrency model, and every query
+            // path holds it over its round-trip the same way (see
+            // `bi_execute_sql`). Diverging here would buy nothing — the fetch
+            // goes through the registry this guard protects. What keeps a slow
+            // preview from wedging the editor is the pair below it: the row cap
+            // and a `queryId` the user can cancel from the UI.
             let outcome = {
                 let engine = engine_arc.lock().await;
                 engine.preview_transformations(&request, &token).await
@@ -7593,10 +7682,21 @@ pub async fn bi_model_import_tables(
     // Append the introspected tables, stamping each with its persisted source
     // binding (source id + physical schema/table) so the model self-describes
     // where its data comes from and survives save/export/publish.
+    // A REST endpoint is fetched and paginated in FULL on every query, and the
+    // connector advertises no pushdown, so DirectQuery would re-walk the whole
+    // API for each click and save nothing by it — the engine refuses the
+    // combination outright. Introspection returns the default (DirectQuery),
+    // so without this stamp `validate()` below rejects every REST import and
+    // the source is unusable from the app.
+    let rest_source = persisted_source.kind == bi_engine::SourceKind::Rest;
     for (src, table) in tables.iter().zip(introspected.iter()) {
-        model_tables.push(table.clone().with_source_binding(
+        let mut table = table.clone().with_source_binding(
             bi_engine::TableSourceBinding::new(&source_id, &src.schema, &src.name),
-        ));
+        );
+        if rest_source {
+            table.set_storage_mode(bi_engine::StorageMode::InMemory);
+        }
+        model_tables.push(table);
     }
     let mut new_base = base.with_tables(model_tables);
     // Record the source in the model's persisted catalog (idempotent — a repeat
@@ -7770,6 +7870,24 @@ pub async fn bi_model_import_sql_source(
     let mut new_table =
         bi_engine::Table::new(&table_name, columns).map_err(|e| format!("{}", e))?;
     new_table.set_storage_mode(bi_engine::StorageMode::InMemory);
+
+    // Record the query in the MODEL, not only in host-side state. The persisted
+    // binding gained `source_query` in v24 precisely so a SQL-source table
+    // self-describes: without a writer the field was a read path with nothing
+    // to read, and the model needed the workbook's own binding list beside it
+    // to be understood. Stamped only when the connector's source is in the
+    // catalog, since a binding must name a declared source to validate.
+    let catalog_source_id = base
+        .sources()
+        .iter()
+        .find(|s| guard.registry().connector_index_by_source_id(&s.id) == Some(connector_index))
+        .map(|s| s.id.clone());
+    if let Some(source_id) = catalog_source_id {
+        new_table = new_table.with_source_binding(
+            bi_engine::TableSourceBinding::new(source_id, "", &table_name)
+                .with_source_query(&source_sql),
+        );
+    }
 
     let mut model_tables = base.tables().to_vec();
     model_tables.push(new_table);
@@ -8158,7 +8276,11 @@ async fn wire_source_with_auth(
                             let resolved: std::collections::HashMap<String, String> = slots
                                 .iter()
                                 .filter_map(|slot| {
-                                    resolve_source_secret(&s.id, slot)
+                                    resolve_source_secret(
+                                        &s.id,
+                                        source_authority(s).as_deref(),
+                                        slot,
+                                    )
                                         .map(|value| (slot.clone(), value))
                                 })
                                 .collect();
@@ -8285,7 +8407,7 @@ pub async fn bi_model_connect_source(
     if remember.unwrap_or(false) {
         if let bi_engine::AuthMethod::UsernamePassword { ref username, ref password } = auth {
             for (server, db) in source_credential_keys(&source) {
-                super::credential_cache::save_credentials(&server, &db, username, password);
+                let _ = super::credential_cache::save_credentials(&server, &db, username, password);
             }
         }
     }
@@ -9126,6 +9248,31 @@ mod tests {
             .add_measure(sum_measure("Revenue", "Sales", "amount"))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn a_source_secret_is_scoped_to_the_host_it_was_stored_for() {
+        // REGRESSION: the key was "source/<id>" with no host, and a Credential
+        // Manager entry is machine-global — so any model declaring a source
+        // with the SAME id (including one a user was sent) resolved this
+        // secret and shipped it to whatever base URL that model named.
+        let ours = source_secret_key("orders", Some("api.example.com"));
+        let theirs = source_secret_key("orders", Some("evil.example.com"));
+        assert_ne!(
+            ours, theirs,
+            "the same source id on a different host must not share a secret"
+        );
+        assert!(ours.contains("api.example.com"), "got {ours}");
+
+        // The port is part of the identity: a credential granted for one
+        // endpoint was not granted for another on the same name.
+        assert_ne!(
+            source_secret_key("orders", Some("api.example.com")),
+            source_secret_key("orders", Some("api.example.com:8443"))
+        );
+
+        // A source with no REST config (no authority) still gets a stable key.
+        assert_eq!(source_secret_key("orders", None), "source/orders");
     }
 
     // --- Transformation pipelines ---

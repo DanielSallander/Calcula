@@ -14,6 +14,7 @@
 //! wrong answer.
 
 use engine_connectors::{ConnectorError, ConnectorResult};
+use engine_core::model::rest::require_same_authority;
 use engine_core::model::{validate_absolute_url, RestEndpoint, RestPagination};
 use serde_json::Value;
 
@@ -65,8 +66,15 @@ pub(crate) async fn fetch_all_rows(
             Advance::Stop => break,
             Advance::SameUrl => {}
             Advance::NewUrl(next) => {
-                validate_absolute_url(&next, "the Link header's rel=\"next\" URL")
-                    .map_err(ConnectorError::Engine)?;
+                let what = "the Link header's rel=\"next\" URL";
+                validate_absolute_url(&next, what).map_err(ConnectorError::Engine)?;
+                // PIN THE HOST. The scheme check alone lets a server name any
+                // https host, and the transport attaches this source's resolved
+                // credential to every request it makes — so an unpinned `next`
+                // hands the secret to whoever the server chose. This is the same
+                // attack `redirect::Policy::none()` refuses; a Link header is
+                // just a redirect the body asks for politely.
+                require_same_authority(&next, base_url, what).map_err(ConnectorError::Engine)?;
                 url = next;
             }
         }

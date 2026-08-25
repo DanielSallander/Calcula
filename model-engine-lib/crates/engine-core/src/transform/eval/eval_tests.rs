@@ -960,3 +960,171 @@ async fn derived_and_declared_schemas_agree_for_a_realistic_pipeline() {
     );
     assert_eq!(conformed.num_rows(), 2, "north and south");
 }
+
+// --- Regressions for the adversarial review -------------------------------
+
+/// Build a one-column batch plus its model schema, for the narrow numeric
+/// regressions below.
+fn numeric_fixture(name: &str, values: Vec<f64>) -> (RecordBatch, Vec<Column>) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("g", ArrowType::Utf8, true),
+        Field::new(name, ArrowType::Float64, true),
+    ]));
+    let groups: Vec<&str> = values.iter().map(|_| "g1").collect();
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(groups)) as ArrayRef,
+            Arc::new(Float64Array::from(values)) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let columns = vec![
+        Column::new("g", DataType::String),
+        Column::new(name, DataType::Float64),
+    ];
+    (batch, columns)
+}
+
+#[tokio::test]
+async fn pivot_with_count_rows_counts_each_value_not_the_whole_group() {
+    // REGRESSION: `render_sql` discards its operand for CountRows and emits a
+    // bare COUNT(*), so every pivoted column used to receive the group's TOTAL
+    // row count. Plausible numbers, no error — the worst kind of wrong.
+    let steps = [
+        TransformStep::SelectColumns {
+            columns: vec!["region".into(), "status".into(), "amount".into()],
+        },
+        TransformStep::Pivot {
+            name_column: "status".into(),
+            value_column: "amount".into(),
+            aggregate: AggregateOp::CountRows,
+            value_names: vec!["open".into(), "closed".into()],
+        },
+    ];
+    let batch = run_checked(&steps).await;
+
+    let regions = strings(&batch, "region");
+    let open = ints(&batch, "open");
+    let closed = ints(&batch, "closed");
+
+    let south = regions
+        .iter()
+        .position(|r| r.as_deref() == Some("south"))
+        .unwrap();
+    assert_eq!(open[south], Some(1), "south has exactly one open row");
+    assert_eq!(closed[south], Some(1), "south has exactly one closed row");
+
+    let north = regions
+        .iter()
+        .position(|r| r.as_deref() == Some("north"))
+        .unwrap();
+    assert_eq!(open[north], Some(1), "north has one exactly-'open' row");
+    assert_eq!(
+        closed[north], None,
+        "north has no closed row — an absent combination is blank, not the group size"
+    );
+}
+
+#[tokio::test]
+async fn change_type_refuses_to_round_under_the_failing_policy() {
+    // REGRESSION: arrow's `safe: false` converts float->int through NumCast,
+    // which TRUNCATES toward zero and errors only on NaN/overflow. 10.7 became
+    // 10 with no complaint, under the one policy whose contract is to stop.
+    let (batch, columns) = numeric_fixture("v", vec![10.7, 2.0]);
+    let steps = [TransformStep::ChangeType {
+        changes: vec![TypeChange::new("v", DataType::Int64)],
+        on_error: CastErrorPolicy::Fail,
+    }];
+    let error = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains('v'), "must name the column: {message}");
+    assert!(message.contains("rounding"), "must say why: {message}");
+}
+
+#[tokio::test]
+async fn change_type_blanks_unroundable_values_under_the_null_policy() {
+    // The other half of the contract: "cannot be represented" becomes blank.
+    let (batch, columns) = numeric_fixture("v", vec![10.7, 2.0]);
+    let steps = [TransformStep::ChangeType {
+        changes: vec![TypeChange::new("v", DataType::Int64)],
+        on_error: CastErrorPolicy::Null,
+    }];
+    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        ints(&out, "v"),
+        vec![None, Some(2)],
+        "10.7 is not a whole number; 2.0 exactly is"
+    );
+}
+
+#[tokio::test]
+async fn an_exact_float_to_int_cast_still_succeeds() {
+    // The guard must not turn a legitimate, lossless cast into an error.
+    let (batch, columns) = numeric_fixture("v", vec![10.0, -3.0, 0.0]);
+    let steps = [TransformStep::ChangeType {
+        changes: vec![TypeChange::new("v", DataType::Int64)],
+        on_error: CastErrorPolicy::Fail,
+    }];
+    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
+        .await
+        .unwrap();
+    assert_eq!(ints(&out, "v"), vec![Some(10), Some(-3), Some(0)]);
+}
+
+#[tokio::test]
+async fn median_over_integers_is_not_truncated_by_integer_arithmetic() {
+    // REGRESSION: DataFusion's `median` returns its INPUT type and averages the
+    // two middle values with that type's arithmetic, so the median of 1 and 2
+    // over Int64 came back 1 — and the terminal cast to the derived Float64
+    // made the wrong number look deliberate.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("g", ArrowType::Utf8, true),
+        Field::new("n", ArrowType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["g1", "g1"])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![1_i64, 2])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let columns = vec![
+        Column::new("g", DataType::String),
+        Column::new("n", DataType::Int64),
+    ];
+    let steps = [TransformStep::GroupBy {
+        group_by: vec!["g".into()],
+        aggregates: vec![GroupAggregate::new("n", AggregateOp::Median, "mid")],
+    }];
+    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        floats(&out, "mid"),
+        vec![Some(1.5)],
+        "the median of 1 and 2 is 1.5, and the column was DERIVED as Float64"
+    );
+}
+
+#[tokio::test]
+async fn whole_value_replace_on_a_numeric_column_rewrites_only_that_value() {
+    // The positive control for the typed-literal rendering: the numeric branch
+    // must still work now that it renders a parsed value instead of raw text.
+    let (batch, columns) = numeric_fixture("v", vec![1.0, 2.0]);
+    let steps = [TransformStep::ReplaceValues {
+        column: "v".into(),
+        find: "1".into(),
+        replace: "9".into(),
+        match_entire_value: true,
+    }];
+    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
+        .await
+        .unwrap();
+    assert_eq!(floats(&out, "v"), vec![Some(9.0), Some(2.0)]);
+}

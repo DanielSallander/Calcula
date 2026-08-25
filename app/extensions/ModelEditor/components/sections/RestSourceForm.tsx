@@ -28,6 +28,7 @@ import type {
   RestAuthSpecDto,
   RestEndpointDto,
   RestFieldDto,
+  RestPaginationDto,
   RestSourceConfigDto,
   SourceSecretSlot,
 } from "@api";
@@ -70,6 +71,76 @@ const MAX_TIMEOUT_SECS = 600;
 const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 512 * 1024 * 1024;
 
+/** Rows requested per page, seeded into a freshly chosen paginating mode. */
+const DEFAULT_PAGE_SIZE = 100;
+/** The page ceiling seeded into a freshly chosen paginating mode. */
+const DEFAULT_MAX_PAGES = 50;
+/** `MAX_REST_PAGE_LIMIT` in the engine — the largest ceiling it accepts. */
+const MAX_PAGES_LIMIT = 10000;
+
+/**
+ * The full field set a pagination mode requires, with real defaults.
+ *
+ * The engine's `RestPagination` is an internally tagged enum whose paginating
+ * variants declare their operands as PLAIN (non-`Option`, no `serde(default)`)
+ * fields, so a DTO that carries only `{ "mode": "pageSize" }` does not
+ * deserialize at all — the save fails with a raw `missing field 'size'`. The
+ * mode picker therefore seeds the whole variant rather than letting the inputs
+ * show defaults they never wrote down.
+ */
+export function defaultPagination(mode: string): RestPaginationDto {
+  switch (mode) {
+    case "pageSize":
+      return {
+        mode,
+        pageParam: "page",
+        sizeParam: "per_page",
+        size: DEFAULT_PAGE_SIZE,
+        maxPages: DEFAULT_MAX_PAGES,
+      };
+    case "offset":
+      return {
+        mode,
+        offsetParam: "offset",
+        limitParam: "limit",
+        limit: DEFAULT_PAGE_SIZE,
+        maxPages: DEFAULT_MAX_PAGES,
+      };
+    case "cursor":
+      // The cursor PATH cannot be guessed — it is response-shaped — so it is
+      // seeded empty and reported as a problem until the author names it.
+      return { mode, cursorParam: "cursor", cursorPath: "", maxPages: DEFAULT_MAX_PAGES };
+    case "linkHeader":
+      return { mode, maxPages: DEFAULT_MAX_PAGES };
+    default:
+      // "none" is a unit variant: carrying another mode's leftovers would be
+      // dead weight in the model file, so the rest is cleared.
+      return { mode: "none" };
+  }
+}
+
+/**
+ * The full field set an auth type requires, with empty (but PRESENT) names.
+ *
+ * Same reason as `defaultPagination`: `RestAuthSpec`'s variants declare plain
+ * `String` fields. `{ "type": "basicSecret" }` with an untouched username box
+ * is `missing field 'username'` at the serde boundary, not a form error.
+ */
+export function defaultAuth(type: string): RestAuthSpecDto {
+  switch (type) {
+    case "bearerSecret":
+      return { type, slot: "" };
+    case "headerSecret":
+      return { type, header: "", slot: "" };
+    case "querySecret":
+      return { type, param: "", slot: "" };
+    case "basicSecret":
+      return { type, username: "", passwordSlot: "" };
+    default:
+      return { type: "none" };
+  }
+}
+
 /** A config for a source that has not been configured yet. */
 export function emptyRestConfig(): RestSourceConfigDto {
   return {
@@ -80,6 +151,31 @@ export function emptyRestConfig(): RestSourceConfigDto {
     timeoutSecs: DEFAULT_TIMEOUT_SECS,
     maxResponseBytes: DEFAULT_MAX_RESPONSE_BYTES,
   };
+}
+
+/**
+ * A request body normalized to what the engine will accept.
+ *
+ * `body: Option<String>` carries `#[serde(default)]`, so JSON `""` arrives as
+ * `Some("")` — and the engine refuses `(Get, Some(_))` outright. A textarea the
+ * author cleared must therefore drop the KEY, not leave an empty string behind.
+ */
+export function normalizeBody(raw: string): string | undefined {
+  return raw.trim() === "" ? undefined : raw;
+}
+
+/**
+ * The endpoint with its HTTP method switched.
+ *
+ * Switching to GET DROPS the body rather than merely hiding its box: the
+ * engine's `validate_endpoint` refuses `(Get, Some(_))` whatever the body says,
+ * so a body left over from a POST — including an empty string, which
+ * deserializes as `Some("")` — makes the source unsaveable with no visible
+ * cause, because the textarea is no longer on screen.
+ */
+export function withMethod(endpoint: RestEndpointDto, method: string): RestEndpointDto {
+  if (method === "get") return { ...endpoint, method, body: undefined };
+  return { ...endpoint, method };
 }
 
 /** `true` for a host the engine lets use plain `http://` (local development). */
@@ -143,6 +239,64 @@ export function declaredSlots(auth: RestAuthSpecDto | undefined): string[] {
   }
 }
 
+/**
+ * Why an endpoint's pagination would be refused, or an empty list.
+ *
+ * Mirrors the engine's `validate_pagination`: every paginating mode needs its
+ * parameter names, a page size of at least 1 where it takes one, and a ceiling
+ * between 1 and `MAX_REST_PAGE_LIMIT`. Without this the Save gate passed a
+ * half-built mode straight into `serde_json::from_value`, and the author met a
+ * raw `missing field 'size'` instead of a sentence.
+ */
+export function paginationProblems(
+  endpointName: string,
+  pagination: RestPaginationDto | undefined,
+): string[] {
+  const mode = pagination?.mode ?? "none";
+  if (!pagination || mode === "none") return [];
+  const where = `Endpoint '${endpointName || "(unnamed)"}'`;
+  const problems: string[] = [];
+  const requireName = (value: string | undefined, what: string) => {
+    if ((value ?? "").trim() === "") problems.push(`${where}: ${what} is required to paginate.`);
+  };
+  const requireCount = (value: number | undefined, what: string) => {
+    if (value === undefined || !Number.isFinite(value) || value < 1) {
+      problems.push(`${where}: ${what} must be at least 1.`);
+    }
+  };
+
+  switch (mode) {
+    case "pageSize":
+      requireName(pagination.pageParam, "a page parameter");
+      requireName(pagination.sizeParam, "a size parameter");
+      requireCount(pagination.size, "the page size");
+      break;
+    case "offset":
+      requireName(pagination.offsetParam, "an offset parameter");
+      requireName(pagination.limitParam, "a limit parameter");
+      requireCount(pagination.limit, "the page size");
+      break;
+    case "cursor":
+      requireName(pagination.cursorParam, "a cursor parameter");
+      requireName(pagination.cursorPath, "a path to the next cursor");
+      break;
+    case "linkHeader":
+      break;
+    default:
+      // A mode this build does not know: report it rather than validating the
+      // wrong field set and calling it fine.
+      return [`${where}: '${mode}' is not a pagination mode this build understands.`];
+  }
+
+  const maxPages = pagination.maxPages;
+  if (maxPages === undefined || !Number.isFinite(maxPages) || maxPages < 1) {
+    problems.push(`${where}: the page ceiling must be at least 1.`);
+  } else if (maxPages > MAX_PAGES_LIMIT) {
+    problems.push(`${where}: the page ceiling cannot exceed ${MAX_PAGES_LIMIT}.`);
+  }
+  return problems;
+}
+
 /** Every reason this config would be refused, most important first. */
 export function restConfigProblems(config: RestSourceConfigDto): string[] {
   const problems: string[] = [];
@@ -167,6 +321,7 @@ export function restConfigProblems(config: RestSourceConfigDto): string[] {
     if ((endpoint.method ?? "get") === "get" && (endpoint.body ?? "").trim() !== "") {
       problems.push(`Endpoint '${name}': a GET request cannot carry a body.`);
     }
+    problems.push(...paginationProblems(name, endpoint.pagination));
   }
 
   const auth = config.auth;
@@ -178,6 +333,12 @@ export function restConfigProblems(config: RestSourceConfigDto): string[] {
   }
   if (auth?.type === "querySecret" && !(auth.param ?? "").trim()) {
     problems.push("Name the query parameter the API key is sent in.");
+  }
+  if (auth?.type === "basicSecret" && !(auth.username ?? "").trim()) {
+    // Stricter than the engine, which only rejects control characters here —
+    // deliberately. HTTP Basic with no username is a half-filled form, and an
+    // ABSENT username is `missing field 'username'` at the serde boundary.
+    problems.push("Name the Basic-auth username this source signs in as.");
   }
 
   const timeout = config.timeoutSecs ?? DEFAULT_TIMEOUT_SECS;
@@ -255,7 +416,7 @@ function EndpointCard({
           <select
             style={styles.input}
             value={method}
-            onChange={(e) => set("method", e.target.value)}
+            onChange={(e) => onChange(withMethod(endpoint, e.target.value))}
           >
             {REST_METHODS.map((m) => (
               <option key={m.value} value={m.value}>
@@ -285,7 +446,7 @@ function EndpointCard({
             style={{ ...styles.input, minHeight: 60, fontFamily: "Consolas, monospace" }}
             value={endpoint.body ?? ""}
             placeholder='{"filter":"all"}'
-            onChange={(e) => set("body", e.target.value)}
+            onChange={(e) => set("body", normalizeBody(e.target.value))}
           />
         </Field>
       )}
@@ -295,7 +456,10 @@ function EndpointCard({
         <select
           style={styles.input}
           value={pagination.mode}
-          onChange={(e) => set("pagination", { ...pagination, mode: e.target.value })}
+          // Seed the WHOLE variant. Every paginating mode's operands are
+          // mandatory in the engine's enum, so a mode change that wrote only
+          // the tag produced a config that could not be deserialized at all.
+          onChange={(e) => set("pagination", defaultPagination(e.target.value))}
         >
           {PAGINATION_MODES.map((m) => (
             <option key={m.value} value={m.value}>
@@ -327,7 +491,7 @@ function EndpointCard({
               <Field label="Page size" flex={1}>
                 <input
                   style={styles.input}
-                  value={pagination.size ?? 100}
+                  value={pagination.size ?? ""}
                   onChange={(e) =>
                     set("pagination", { ...pagination, size: Number(e.target.value) || 0 })
                   }
@@ -356,7 +520,7 @@ function EndpointCard({
               <Field label="Page size" flex={1}>
                 <input
                   style={styles.input}
-                  value={pagination.limit ?? 100}
+                  value={pagination.limit ?? ""}
                   onChange={(e) =>
                     set("pagination", { ...pagination, limit: Number(e.target.value) || 0 })
                   }
@@ -387,7 +551,7 @@ function EndpointCard({
           <Field label="Max pages" flex={1}>
             <input
               style={styles.input}
-              value={pagination.maxPages ?? 50}
+              value={pagination.maxPages ?? ""}
               onChange={(e) =>
                 set("pagination", { ...pagination, maxPages: Number(e.target.value) || 0 })
               }
@@ -487,7 +651,10 @@ export function RestSourceForm({
         <select
           style={styles.input}
           value={auth.type}
-          onChange={(e) => set("auth", { type: e.target.value })}
+          // Seed the WHOLE variant, for the same reason the pagination picker
+          // does: `basicSecret` without a `username` KEY is a serde failure,
+          // not a form error, and the username box only writes onChange.
+          onChange={(e) => set("auth", defaultAuth(e.target.value))}
         >
           {REST_AUTHS.map((a) => (
             <option key={a.value} value={a.value}>

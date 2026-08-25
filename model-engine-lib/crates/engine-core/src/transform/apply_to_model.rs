@@ -7,8 +7,33 @@
 //! wrapper that adds only the cache invalidation an engine actually owns.
 
 use crate::error::{EngineError, EngineResult};
-use crate::model::{Column, DataModel, Table};
+use crate::model::{Column, DataModel, StorageMode, Table};
 use crate::transform::{derive_pipeline_schema, TransformStep};
+
+/// Carry the CURRENT table's per-column presentation metadata onto the newly
+/// derived columns, matched by name.
+///
+/// Derivation works from the recorded source schema, so on its own it produces
+/// columns wearing whatever metadata the SOURCE had when the pipeline was first
+/// created. Everything the user set afterwards — a display name, a format
+/// string, a sort-by, a hidden flag — lives only on the model table, and would
+/// therefore be reverted to that anchor-time snapshot by the next steps edit.
+///
+/// The derived TYPE always wins: a step that retyped a column means it, and the
+/// old column's type is not metadata.
+fn carry_column_metadata(derived: Vec<Column>, current: &[Column]) -> Vec<Column> {
+    derived
+        .into_iter()
+        .map(|column| {
+            let Some(previous) = current.iter().find(|c| c.name() == column.name()) else {
+                return column;
+            };
+            let mut merged = previous.clone().with_data_type(column.data_type().clone());
+            merged = merged.with_nullable(column.nullable());
+            merged
+        })
+        .collect()
+}
 
 /// Return a copy of `model` with `table`'s transformation pipeline replaced.
 ///
@@ -58,6 +83,9 @@ pub fn with_table_transformations(
     } else {
         derive_pipeline_schema(table, &binding.source_columns, &steps)?
     };
+    // Keep the presentation work the user did on the model table; only the
+    // shape comes from derivation.
+    let derived = carry_column_metadata(derived, existing.columns());
 
     // With no steps there is nothing to anchor, and keeping the recorded
     // source schema would leave a stale copy of it in the model file forever.
@@ -73,8 +101,21 @@ pub fn with_table_transformations(
             if t.name() != table {
                 return Ok(t.clone());
             }
+            // A transformed table IS an in-memory table: the pipeline produces
+            // rows that exist nowhere but the cache, and model validation
+            // refuses any other storage mode outright. Stamping it here is
+            // therefore not a preference being overridden — it is the only
+            // mode the edit could have succeeded with, and leaving the caller
+            // to discover that through a validation error makes a legal edit
+            // look like a mistake. Clearing the steps does NOT switch back:
+            // by then the mode is the user's to keep.
+            let storage_mode = if binding.transformations.is_empty() {
+                t.storage_mode().clone()
+            } else {
+                StorageMode::InMemory
+            };
             let mut replacement = Table::new(t.name(), derived.clone())?
-                .with_storage_mode(t.storage_mode().clone())
+                .with_storage_mode(storage_mode)
                 .with_source_binding(binding.clone());
             if let Some(display) = t.display_name() {
                 replacement = replacement.with_display_name(display);
@@ -202,6 +243,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names(&twice, "Orders"), vec!["id", "amount"]);
+    }
+
+    #[test]
+    fn setting_steps_makes_the_table_in_memory() {
+        // REGRESSION: an imported table is DirectQuery by default, and model
+        // validation refuses a transformed DirectQuery table — so without this
+        // the very first pipeline a user saves on a freshly imported table was
+        // rejected, with nothing in the UI explaining what to change.
+        let direct = {
+            let base = model();
+            let mut tables = base.tables().to_vec();
+            tables[0].set_storage_mode(StorageMode::DirectQuery);
+            base.with_tables(tables)
+        };
+        assert_eq!(
+            direct.table("Orders").unwrap().storage_mode(),
+            &StorageMode::DirectQuery
+        );
+
+        let updated = with_table_transformations(
+            &direct,
+            "Orders",
+            vec![TransformStep::RemoveColumns {
+                columns: vec!["status".into()],
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            updated.table("Orders").unwrap().storage_mode(),
+            &StorageMode::InMemory
+        );
+        // And the result is a model that actually validates.
+        updated.validate().expect("a transformed table must build");
+    }
+
+    #[test]
+    fn clearing_the_steps_leaves_the_storage_mode_alone() {
+        // The reverse is NOT automatic: once in memory, staying there is the
+        // user's call, not something clearing a filter should undo.
+        let shaped = with_table_transformations(
+            &model(),
+            "Orders",
+            vec![TransformStep::RemoveColumns {
+                columns: vec!["status".into()],
+            }],
+        )
+        .unwrap();
+        let cleared = with_table_transformations(&shaped, "Orders", vec![]).unwrap();
+        assert_eq!(
+            cleared.table("Orders").unwrap().storage_mode(),
+            &StorageMode::InMemory
+        );
     }
 
     #[test]

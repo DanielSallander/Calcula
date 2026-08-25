@@ -7,7 +7,9 @@
 use arrow::record_batch::RecordBatch;
 use engine_connectors::traits::FetchRequest;
 use engine_core::error::{EngineError, EngineResult};
-use engine_core::transform::{apply_steps, validate_steps, TransformStep};
+use engine_core::transform::{
+    apply_steps, conform_to_declared, derive_pipeline_schema, validate_steps, TransformStep,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::Engine;
@@ -199,6 +201,7 @@ impl Engine {
         }
 
         let upto = request.upto_step.unwrap_or(request.steps.len());
+        let previewed = &request.steps[..upto.min(request.steps.len())];
         let batch = apply_steps(
             &request.table,
             input,
@@ -208,6 +211,19 @@ impl Engine {
             self.effective_udfs.as_ref(),
         )
         .await?;
+
+        // Conform to the schema these steps DERIVE, exactly as a refresh
+        // conforms to the table's declared columns. Without it a preview can
+        // render a value the refresh would store differently (a generated
+        // aggregate coming back wider than the step declares), which makes the
+        // preview a worse guide the more the user relies on it.
+        let derived = derive_pipeline_schema(&request.table, &source_columns, previewed)?;
+        let batch = conform_to_declared(
+            &request.table,
+            previewed.len().saturating_sub(1),
+            &batch,
+            &derived,
+        )?;
 
         Ok(TransformPreview {
             batch,

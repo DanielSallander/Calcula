@@ -115,6 +115,36 @@ pub(crate) fn one_of_every_step() -> Vec<TransformStep> {
     ]
 }
 
+/// Compile-time proof that [`one_of_every_step`] is complete.
+///
+/// The count assertion below can only compare the fixture against ITSELF, so on
+/// its own a new `TransformStep` variant would slip past every catalog-wide
+/// test while they all stayed green. This match is exhaustive with no wildcard
+/// arm, so adding a variant makes the crate FAIL TO COMPILE here — pointing at
+/// the fixture that has to grow — instead of quietly reducing coverage.
+#[cfg(test)]
+fn _every_variant_is_represented(step: &TransformStep) {
+    match step {
+        TransformStep::RemoveColumns { .. }
+        | TransformStep::SelectColumns { .. }
+        | TransformStep::RenameColumns { .. }
+        | TransformStep::ChangeType { .. }
+        | TransformStep::FilterRows { .. }
+        | TransformStep::AddColumn { .. }
+        | TransformStep::SplitColumn { .. }
+        | TransformStep::ReplaceValues { .. }
+        | TransformStep::TextTransform { .. }
+        | TransformStep::FillDown { .. }
+        | TransformStep::RemoveDuplicates { .. }
+        | TransformStep::Sort { .. }
+        | TransformStep::GroupBy { .. }
+        | TransformStep::KeepRows { .. }
+        | TransformStep::RemoveRows { .. }
+        | TransformStep::Unpivot { .. }
+        | TransformStep::Pivot { .. } => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +167,11 @@ mod tests {
             17,
             "the catalog has 17 steps; add the new one to one_of_every_step()"
         );
+        // The count above compares the fixture with a literal — both sides are
+        // this file. `_every_variant_is_represented` is what actually ties the
+        // fixture to the enum: it stops compiling when a variant is added.
+        for step in &steps {
+            _every_variant_is_represented(step);
+        }
     }
 }

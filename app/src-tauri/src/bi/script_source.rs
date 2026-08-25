@@ -740,7 +740,7 @@ pub fn connector_secrets(
             if slot.trim().is_empty() {
                 return Err("Slot names cannot be empty".to_string());
             }
-            super::credential_cache::save_credentials(
+            let _ = super::credential_cache::save_credentials(
                 &secret_server_key(&source_id),
                 &slot,
                 "secret",

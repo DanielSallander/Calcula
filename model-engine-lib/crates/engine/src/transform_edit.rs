@@ -88,13 +88,19 @@ impl Engine {
         // model, and cache invalidation.
         let new_model = with_table_transformations(&self.model, table, steps)?;
         new_model.validate()?;
-        self.set_model(new_model)?;
+
+        // `set_model` INSTALLS the model and only then returns any deferred
+        // script-build error (a model script colliding with a native UDF name).
+        // A `?` here would therefore leave the new pipeline installed over the
+        // OLD pipeline's cached rows while telling the caller the edit failed —
+        // the worst of both. Finish the transaction, then surface the error.
+        let deferred = self.set_model(new_model);
 
         // The cached rows were produced by the OLD pipeline, so they are the
         // wrong rows now. Dropping them is what makes the edit take effect on
         // the next query rather than at some later refresh.
         self.drop_table_cache(table);
-        Ok(())
+        deferred
     }
 
     /// Returns `table`'s transformation pipeline.
@@ -152,8 +158,17 @@ impl Engine {
             .map_err(|e| EngineError::InvalidData(e.to_string()))?;
         let fresh = introspected.columns().to_vec();
 
-        let diff = diff_schemas(&binding.source_columns, &fresh);
-        if diff.is_empty() && !binding.source_columns.is_empty() {
+        // For a table with NO pipeline the anchor is empty by convention
+        // (there is nothing to anchor), so diffing against it would report
+        // every column as newly added. What such a table can meaningfully be
+        // compared against is what it currently declares.
+        let baseline: Vec<Column> = if binding.source_columns.is_empty() {
+            self.model.table(table)?.columns().to_vec()
+        } else {
+            binding.source_columns.clone()
+        };
+        let diff = diff_schemas(&baseline, &fresh);
+        if diff.is_empty() {
             return Ok(diff);
         }
 
@@ -186,6 +201,18 @@ impl Engine {
                 replacement = replacement
                     .with_storage_mode(t.storage_mode().clone())
                     .with_source_binding(updated_binding.clone());
+                // Presentation metadata is the user's work, not the source's:
+                // adopting a schema change must not quietly discard it. Mirrors
+                // `with_table_transformations`, which is pinned by its own test.
+                if let Some(display) = t.display_name() {
+                    replacement = replacement.with_display_name(display);
+                }
+                if let Some(description) = t.description() {
+                    replacement = replacement.with_description(description);
+                }
+                if t.is_hidden() {
+                    replacement = replacement.hidden();
+                }
                 replacement.set_refresh_strategies(t.refresh_strategies().to_vec());
                 replacement.set_incremental_refresh(t.incremental_refresh().cloned());
                 replacement
@@ -194,8 +221,10 @@ impl Engine {
 
         let new_model = self.model.with_tables(updated);
         new_model.validate()?;
-        self.set_model(new_model)?;
+        // Same ordering rule as `set_table_transformations`: install, finish,
+        // then surface any deferred script error.
+        let deferred = self.set_model(new_model);
         self.drop_table_cache(table);
-        Ok(diff)
+        deferred.map(|()| diff)
     }
 }

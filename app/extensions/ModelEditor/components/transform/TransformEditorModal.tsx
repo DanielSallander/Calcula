@@ -15,7 +15,7 @@
 //     screen are indicative and must be presented that way, never as the total
 //     a refresh will produce.
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   biModelCancelQuery,
   biModelTransformDeriveSchema,
@@ -104,7 +104,34 @@ export function TransformEditorModal({
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewNonce, setPreviewNonce] = useState(0);
-  const runningQueryId = useRef<string | null>(null);
+
+  // EVERY backend query this modal has in flight, by id — the preview AND the
+  // pivot "detect values" sample. Both hold the backend engine, so both must be
+  // reachable from unmount and from the Cancel button; the detect sample used
+  // to mint a query id nothing ever recorded, so closing the modal mid-sample
+  // left it running.
+  const runningQueryIds = useRef<Set<string>>(new Set());
+  // The in-flight PREVIEW specifically. A newer preview supersedes it — which
+  // must not disturb a detect sample running alongside it.
+  const runningPreviewId = useRef<string | null>(null);
+
+  /** Register a new query id as in flight, with its own de-registration. */
+  const startQuery = useCallback((): { queryId: string; done: () => void } => {
+    const queryId = newQueryId();
+    runningQueryIds.current.add(queryId);
+    return {
+      queryId,
+      done: () => {
+        runningQueryIds.current.delete(queryId);
+      },
+    };
+  }, []);
+
+  /** Best-effort cancel of one in-flight query, and forget it. */
+  const cancelQuery = useCallback((queryId: string) => {
+    runningQueryIds.current.delete(queryId);
+    void biModelCancelQuery(queryId).catch(() => undefined);
+  }, []);
 
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
@@ -148,10 +175,10 @@ export function TransformEditorModal({
     if (!bound) return undefined;
     let cancelled = false;
     const handle = window.setTimeout(() => {
-      const previous = runningQueryId.current;
-      if (previous) void biModelCancelQuery(previous).catch(() => undefined);
-      const queryId = newQueryId();
-      runningQueryId.current = queryId;
+      const previous = runningPreviewId.current;
+      if (previous) cancelQuery(previous);
+      const { queryId, done } = startQuery();
+      runningPreviewId.current = queryId;
       setPreviewBusy(true);
       setPreviewError(null);
       void biModelTransformPreview({
@@ -172,7 +199,8 @@ export function TransformEditorModal({
           setPreviewError(String(err));
         })
         .finally(() => {
-          if (runningQueryId.current === queryId) runningQueryId.current = null;
+          done();
+          if (runningPreviewId.current === queryId) runningPreviewId.current = null;
           if (!cancelled) setPreviewBusy(false);
         });
     }, PREVIEW_DEBOUNCE_MS);
@@ -180,13 +208,16 @@ export function TransformEditorModal({
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [connectionId, table.name, steps, selected, previewNonce, bound]);
+  }, [connectionId, table.name, steps, selected, previewNonce, bound, startQuery, cancelQuery]);
 
-  // Closing mid-sample must not leave a query running on the connection.
+  // Closing mid-sample must not leave ANY query running on the connection —
+  // the preview or a detect sample. The ref's Set identity never changes, so
+  // capturing it here is safe for the cleanup that runs at unmount.
   useEffect(() => {
+    const ids = runningQueryIds.current;
     return () => {
-      const running = runningQueryId.current;
-      if (running) void biModelCancelQuery(running).catch(() => undefined);
+      for (const id of ids) void biModelCancelQuery(id).catch(() => undefined);
+      ids.clear();
     };
   }, []);
 
@@ -235,16 +266,23 @@ export function TransformEditorModal({
   const detectPivotValues = async (nameColumn: string): Promise<string[]> => {
     if (selected < 0) return [];
     if (!nameColumn) throw new Error("Choose the column whose values become columns first.");
-    const result = await biModelTransformPreview({
-      connectionId,
-      table: table.name,
-      // Only the prefix, so a later step that is still mid-edit cannot fail
-      // the sample.
-      steps: steps.slice(0, selected),
-      asOfStep: null,
-      rowLimit: PREVIEW_ROW_LIMIT,
-      queryId: newQueryId(),
-    });
+    // Registered like the preview, so Cancel and unmount reach this sample too.
+    const { queryId, done } = startQuery();
+    let result: TransformPreviewResult;
+    try {
+      result = await biModelTransformPreview({
+        connectionId,
+        table: table.name,
+        // Only the prefix, so a later step that is still mid-edit cannot fail
+        // the sample.
+        steps: steps.slice(0, selected),
+        asOfStep: null,
+        rowLimit: PREVIEW_ROW_LIMIT,
+        queryId,
+      });
+    } finally {
+      done();
+    }
     if (result.diagnostics.length > 0) {
       throw new Error(result.diagnostics.map((d) => d.message).join("\n"));
     }
@@ -293,14 +331,18 @@ export function TransformEditorModal({
     onClose();
   };
 
-  const cancelPreview = async () => {
-    const running = runningQueryId.current;
-    if (!running) return;
-    try {
-      await biModelCancelQuery(running);
-    } catch {
-      /* best-effort */
-    }
+  /** Cancel everything this modal has in flight — the preview and any sample. */
+  const cancelRunningQueries = async () => {
+    const ids = [...runningQueryIds.current];
+    runningQueryIds.current.clear();
+    runningPreviewId.current = null;
+    await Promise.all(
+      ids.map((id) =>
+        biModelCancelQuery(id).catch(() => {
+          /* best-effort */
+        }),
+      ),
+    );
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -498,7 +540,7 @@ export function TransformEditorModal({
                   bound ? null : "A preview needs a bound data source to sample from."
                 }
                 onRefresh={() => setPreviewNonce((n) => n + 1)}
-                onCancel={() => void cancelPreview()}
+                onCancel={() => void cancelRunningQueries()}
               />
             </div>
           </div>

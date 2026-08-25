@@ -1319,6 +1319,17 @@ const EXTENSION_DATA_MIN_FORMAT_VERSION: u64 = 22;
 /// the unranked intermediate).
 const EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION: u64 = 23;
 
+/// Minimum schema `format_version` required by anything a table's SOURCE
+/// BINDING gained in v24: a transformation pipeline, the pre-transform source
+/// schema it derives from, a persisted SQL `source_query`, or a REST/Web source.
+///
+/// This one is not cosmetic. A pre-v24 engine drops the pipeline and loads the
+/// table as though its RAW source rows were its content — a table that looks
+/// refreshed while being unfiltered, unrenamed and untyped, which is a wrong
+/// answer rather than a visible loss. A REST source likewise disappears
+/// entirely, leaving its tables unbound.
+const TRANSFORMATIONS_MIN_FORMAT_VERSION: u64 = 24;
+
 /// Minimum schema `format_version` for dynamic row-level security: a
 /// `FilterPredicate.dynamic` (USERNAME()/CUSTOMDATA()) is additive serde, so a
 /// pre-v11 engine silently treats it as a STATIC comparison against the
@@ -1444,7 +1455,21 @@ pub fn stamp_feature_format_version(
                 .any(|i| has_v23_expr(i.expression()) || i.format_string_expression().is_some())
         });
 
-    let required = if uses_v23 {
+    // v24: anything the source binding gained, plus the REST source kind.
+    let uses_v24 = model.tables().iter().any(|t| {
+        t.source_binding().is_some_and(|b| {
+            !b.transformations.is_empty()
+                || !b.source_columns.is_empty()
+                || b.source_query.is_some()
+        })
+    }) || model
+        .sources()
+        .iter()
+        .any(|s| s.kind == bi_engine::SourceKind::Rest || s.rest.is_some());
+
+    let required = if uses_v24 {
+        TRANSFORMATIONS_MIN_FORMAT_VERSION
+    } else if uses_v23 {
         EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION
     } else if !model.extension_data().is_empty() {
         EXTENSION_DATA_MIN_FORMAT_VERSION
@@ -1487,6 +1512,85 @@ pub fn stamp_feature_format_version(
 #[cfg(test)]
 mod format_gate_tests {
     use super::*;
+
+    /// A model whose one table carries `steps`, bound to `kind`.
+    fn model_with_binding(
+        steps: Vec<bi_engine::TransformStep>,
+        rest: bool,
+    ) -> bi_engine::DataModel {
+        use bi_engine::{
+            Column, DataModel, DataType, PersistedAuthKind, PersistedConnection, PersistedSource,
+            SourceKind, StorageMode, Table, TableSourceBinding,
+        };
+        let source_columns = vec![
+            Column::new("id", DataType::Int64),
+            Column::new("status", DataType::String),
+        ];
+        let derived = bi_engine::derive_pipeline_schema("T", &source_columns, &steps).unwrap();
+        let mut binding = TableSourceBinding::new("s", "public", "t");
+        if !steps.is_empty() {
+            binding = binding
+                .with_source_columns(source_columns)
+                .with_transformations(steps);
+        }
+        DataModel::builder()
+            .add_source(if rest {
+                PersistedSource::rest(
+                    "s",
+                    bi_engine::RestSourceConfig::new("https://api.example.com")
+                        .with_endpoint(bi_engine::RestEndpoint::new("t", "t")),
+                )
+            } else {
+                PersistedSource::new(
+                    "s",
+                    SourceKind::InMemory,
+                    PersistedConnection::default(),
+                    PersistedAuthKind::Integrated,
+                )
+            })
+            .add_table(
+                Table::new("T", derived)
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory)
+                    .with_source_binding(binding),
+            )
+            .build()
+            .unwrap()
+    }
+
+    fn stamped(model: &bi_engine::DataModel) -> u64 {
+        let mut json = serde_json::json!({ "format_version": 0 });
+        stamp_feature_format_version(model, &mut json);
+        json.get("format_version").and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+
+    #[test]
+    fn a_transformation_pipeline_stamps_format_version_24() {
+        // REGRESSION: nothing stamped v24, so a model that gained a pipeline
+        // persisted under its old version — and a pre-v24 reader then drops the
+        // pipeline and loads the table as if its RAW source rows were its
+        // content. That is a wrong answer, not a visible loss, which is exactly
+        // what the version gate exists to prevent.
+        let model = model_with_binding(
+            vec![bi_engine::TransformStep::RemoveColumns {
+                columns: vec!["status".into()],
+            }],
+            false,
+        );
+        assert_eq!(stamped(&model), 24);
+    }
+
+    #[test]
+    fn a_rest_source_stamps_format_version_24() {
+        assert_eq!(stamped(&model_with_binding(vec![], true)), 24);
+    }
+
+    #[test]
+    fn an_ordinary_bound_table_does_not_stamp_24() {
+        // The stamp must be conditional: a model using none of the v24 features
+        // has to stay openable by an older build.
+        assert_eq!(stamped(&model_with_binding(vec![], false)), 0);
+    }
 
     #[test]
     fn accepts_current_missing_and_older_formats() {
@@ -2331,7 +2435,7 @@ pub async fn bi_connect(
         let (_, auth_for_cache) = parse_connection_string(&stored_conn_str);
         match auth_for_cache {
             bi_engine::AuthMethod::UsernamePassword { ref username, ref password } => {
-                super::credential_cache::save_credentials(&server, &database, username, password);
+                let _ = super::credential_cache::save_credentials(&server, &database, username, password);
                 log_info!("CALP-DIAG", "Cached credentials for {}:{} user={}", server, database, username);
             }
             _ => {

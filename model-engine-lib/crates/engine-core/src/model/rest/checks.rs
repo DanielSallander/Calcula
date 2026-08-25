@@ -69,6 +69,39 @@ pub(super) fn host_of(authority: &str) -> &str {
     }
 }
 
+/// The `host:port` authority of an absolute URL, lowercased, or `None` when it
+/// is not one.
+///
+/// Port is deliberately part of the identity: `api.example.com:8443` is a
+/// different endpoint from `api.example.com`, and a credential granted for one
+/// was not granted for the other.
+pub fn authority_of(url: &str) -> Option<String> {
+    split_scheme_authority(url).map(|(_, authority)| authority.to_ascii_lowercase())
+}
+
+/// Check that `candidate` names the SAME host:port as `expected`.
+///
+/// Used for a server-supplied continuation URL (a `Link: rel="next"`). Such a
+/// URL is chosen by the remote server, and the connector attaches the source's
+/// resolved credential to every request it makes — so following one to a
+/// different host would hand the secret to whoever the server named. That is
+/// precisely the attack `redirect::Policy::none()` exists to prevent, and a
+/// `Link` header is just a redirect the body asks for politely.
+pub fn require_same_authority(candidate: &str, expected: &str, what: &str) -> EngineResult<()> {
+    let (Some(candidate_authority), Some(expected_authority)) =
+        (authority_of(candidate), authority_of(expected))
+    else {
+        return Err(invalid(format!("{what} is not an absolute URL")));
+    };
+    if candidate_authority == expected_authority {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "{what} points at '{candidate_authority}', but this source is declared              against '{expected_authority}'. A server cannot redirect an authenticated              request to a host the model does not declare"
+        )))
+    }
+}
+
 /// Reject any ASCII control character or space, which cannot appear literally in
 /// a request line or header field without splitting the message.
 pub(super) fn reject_control_chars(what: &str, value: &str) -> EngineResult<()> {

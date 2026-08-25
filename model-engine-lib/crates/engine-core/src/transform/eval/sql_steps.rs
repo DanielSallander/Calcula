@@ -13,8 +13,11 @@ use crate::compute::parser::parse_refresh_filter;
 use crate::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use crate::compute::udf::{session_context_with_udfs, UdfRegistry};
 use crate::error::EngineResult;
+use crate::model::Column;
 use crate::transform::eval::step_error;
+use crate::transform::literal::typed_sql_literal;
 use crate::transform::parts::{GroupAggregate, TextOp};
+use crate::transform::rules_rows::aggregate_output_type;
 use crate::types::DataType;
 
 /// The name the input batch is registered under. Underscore-prefixed so it
@@ -175,19 +178,22 @@ pub(super) async fn replace_values(
 ) -> EngineResult<RecordBatch> {
     let quoted = quote_ident_double(column);
     let rewritten = if match_entire_value {
-        // Whole-value replacement compares against a typed literal, so it
-        // works on numbers and dates as well as text.
-        let literal = |text: &str| -> String {
-            if column_type.needs_sql_quoting() {
-                sql_quote_literal(text)
-            } else {
-                text.to_string()
-            }
+        // Whole-value replacement compares against a TYPED literal, parsed and
+        // re-rendered by `typed_sql_literal` — never the author's bytes. For a
+        // numeric or boolean column the literal is emitted bare, so passing the
+        // text through would be a raw interpolation of model-file content.
+        // Derivation already refused text that cannot render, so a failure here
+        // means a hand-edited model file: fail the step rather than build a
+        // statement out of it.
+        let literal = |text: &str| -> EngineResult<String> {
+            typed_sql_literal(text, column_type).map_err(|reason| {
+                step.error(format!("cannot replace values in '{column}': {reason}"))
+            })
         };
         format!(
             "CASE WHEN {quoted} = {} THEN {} ELSE {quoted} END",
-            literal(find),
-            literal(replace)
+            literal(find)?,
+            literal(replace)?
         )
     } else {
         format!(
@@ -237,13 +243,45 @@ pub(super) async fn text_transform(
 }
 
 /// Render one aggregate over a quoted operand.
-fn aggregate_sql(aggregate: &GroupAggregate) -> String {
+fn aggregate_sql(aggregate: &GroupAggregate, input: &[Column]) -> String {
     if aggregate.function == AggregateOp::CountRows {
         AggregateOp::CountRows.render_sql("*")
     } else {
-        aggregate
-            .function
-            .render_sql(&quote_ident_double(&aggregate.column))
+        aggregate.function.render_sql(&aggregate_operand(
+            &aggregate.column,
+            aggregate.function,
+            input,
+        ))
+    }
+}
+
+/// The operand SQL for an aggregate, cast to `DOUBLE` when schema derivation
+/// declares a fractional result over a column that is not already fractional.
+///
+/// Without the cast the two layers disagree on the VALUE, not just the type.
+/// DataFusion's `median` returns its INPUT type and computes an even-count
+/// median with the input's own arithmetic, so the median of two `Int64` rows
+/// truncates — and the terminal cast to the derived `Float64` then makes the
+/// wrong number look deliberate. `SUM` over `Decimal` has the same shape: it
+/// returns a widened decimal where derivation promised `Float64`.
+///
+/// Casting the OPERAND makes the aggregate compute in the type it was declared
+/// to produce, so preview, refresh and the declared schema all agree.
+fn aggregate_operand(column: &str, function: AggregateOp, input: &[Column]) -> String {
+    let quoted = quote_ident_double(column);
+    let column_type = input
+        .iter()
+        .find(|c| c.name() == column)
+        .map(|c| c.data_type());
+    let declared_fractional = matches!(
+        aggregate_output_type(function, column_type),
+        Some(DataType::Float64)
+    );
+    let already_fractional = matches!(column_type, Some(DataType::Float64));
+    if declared_fractional && !already_fractional {
+        format!("CAST({quoted} AS DOUBLE)")
+    } else {
+        quoted
     }
 }
 
@@ -253,6 +291,7 @@ pub(super) async fn group_by(
     batch: RecordBatch,
     keys: &[String],
     aggregates: &[GroupAggregate],
+    input: &[Column],
 ) -> EngineResult<RecordBatch> {
     let quoted_keys: Vec<String> = keys.iter().map(|k| quote_ident_double(k)).collect();
 
@@ -260,7 +299,7 @@ pub(super) async fn group_by(
     for aggregate in aggregates {
         select.push(format!(
             "{} AS {}",
-            aggregate_sql(aggregate),
+            aggregate_sql(aggregate, input),
             quote_ident_double(&aggregate.alias)
         ));
     }
@@ -280,9 +319,10 @@ pub(super) async fn pivot(
     value_column: &str,
     aggregate: AggregateOp,
     value_names: &[String],
+    input: &[Column],
 ) -> EngineResult<RecordBatch> {
     let quoted_name = quote_ident_double(name_column);
-    let quoted_value = quote_ident_double(value_column);
+    let operand = aggregate_operand(value_column, aggregate, input);
 
     // Everything that is neither the name nor the value column becomes the
     // group — the same rule schema derivation used.
@@ -296,13 +336,14 @@ pub(super) async fn pivot(
 
     let mut select = group.clone();
     for value_name in value_names {
-        let cell = format!(
-            "CASE WHEN {quoted_name} = {} THEN {quoted_value} END",
-            sql_quote_literal(value_name)
-        );
+        // `render_case_when_sql`, NOT `render_sql` over a CASE expression:
+        // `render_sql` DISCARDS its operand for CountRows and emits a bare
+        // `COUNT(*)`, which would give every pivoted column the whole group's
+        // row count instead of the count for its own value.
+        let condition = format!("{quoted_name} = {}", sql_quote_literal(value_name));
         select.push(format!(
             "{} AS {}",
-            aggregate.render_sql(&cell),
+            aggregate.render_case_when_sql(&condition, &operand),
             quote_ident_double(value_name)
         ));
     }

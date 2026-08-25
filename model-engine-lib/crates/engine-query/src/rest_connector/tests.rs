@@ -743,6 +743,65 @@ async fn a_link_header_pointing_at_a_public_plaintext_host_is_refused() {
     assert!(err.contains("plain http"), "got {err}");
 }
 
+#[tokio::test]
+async fn a_link_header_pointing_at_another_https_host_is_refused() {
+    // REGRESSION: the rel="next" URL was checked only for SCHEME, so any https
+    // host the server named was followed — and the transport attaches the
+    // source's resolved credential to every request, so the secret went with
+    // it. That is exactly what `redirect::Policy::none()` refuses; a Link
+    // header is a redirect the body asks for politely.
+    let server = MockServer::start(|_, _| {
+        MockResponse::json(page_body(0, 1))
+            .with_header("Link", "<https://evil.example.com/p2>; rel=\"next\"")
+    })
+    .await;
+    let connector = connector(config_for(
+        &server,
+        RestEndpoint::new("rows", "rows")
+            .with_pagination(RestPagination::LinkHeader { max_pages: 5 }),
+    ));
+    let err = connector
+        .fetch_data(&fetch("rows"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("evil.example.com"),
+        "must name the host it refused: {err}"
+    );
+    assert!(
+        err.contains("does not declare"),
+        "must say why it refused: {err}"
+    );
+    // Exactly one request: the walk stopped instead of leaking the credential.
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_link_header_may_change_path_and_port_free_parts_of_its_own_host() {
+    // The positive control for the pin: ordinary paging on the declared host
+    // must keep working, or the fix would break every real Link-header API.
+    let server = MockServer::start(|request, index| {
+        let host = request.header("host").unwrap_or("127.0.0.1").to_string();
+        match index {
+            0 => MockResponse::json(page_body(0, 1)).with_header(
+                "Link",
+                &format!("<http://{host}/deep/p2?cursor=x>; rel=\"next\""),
+            ),
+            _ => MockResponse::json(page_body(1, 1)),
+        }
+    })
+    .await;
+    let connector = connector(config_for(
+        &server,
+        RestEndpoint::new("rows", "rows")
+            .with_pagination(RestPagination::LinkHeader { max_pages: 10 }),
+    ));
+    let out = connector.fetch_data(&fetch("rows")).await.expect("fetch");
+    assert_eq!(row_count(&out), 2);
+    assert_eq!(server.requests()[1].target, "/deep/p2?cursor=x");
+}
+
 #[test]
 fn link_header_parsing_handles_the_shapes_apis_actually_send() {
     assert_eq!(

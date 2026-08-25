@@ -27,7 +27,13 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 /// Save credentials for a server+database pair to Windows Credential Manager.
-pub fn save_credentials(server: &str, database: &str, username: &str, password: &str) {
+///
+/// Returns whether the write actually landed. A failure here is not
+/// theoretical — Windows caps a generic credential's blob, so a long token
+/// (an OAuth bearer, say) is rejected — and a caller that reports success
+/// anyway leaves the user with a UI saying "stored" and a connect that later
+/// fails with "no value was supplied", two steps removed from the cause.
+pub fn save_credentials(server: &str, database: &str, username: &str, password: &str) -> bool {
     let target = make_target(server, database);
     let secret = format!("{}\n{}", username, password);
     let secret_bytes = secret.as_bytes();
@@ -56,9 +62,11 @@ pub fn save_credentials(server: &str, database: &str, username: &str, password: 
         match CredWriteW(&cred, 0) {
             Ok(()) => {
                 crate::log_info!("CALP-DIAG", "credential_cache: saved to Windows Credential Manager");
+                true
             }
             Err(e) => {
                 crate::log_warn!("CALP-DIAG", "credential_cache: CredWriteW FAILED: {}", e);
+                false
             }
         }
     }

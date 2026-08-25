@@ -6,6 +6,7 @@
 use crate::error::EngineResult;
 use crate::model::Column;
 use crate::transform::infer::infer_expression_type;
+use crate::transform::literal::validate_typed_literal;
 use crate::transform::parts::{CastErrorPolicy, ColumnRename, TextOp, TypeChange};
 use crate::transform::schema::{require_absent, require_column, require_unique, transform_error};
 use crate::types::DataType;
@@ -270,13 +271,24 @@ pub(crate) fn replace_values(
     input: &[Column],
     column: &str,
     find: &str,
-    _replace: &str,
+    replace: &str,
     match_entire_value: bool,
 ) -> EngineResult<Vec<Column>> {
     if match_entire_value {
-        // Whole-value replacement works on any type whose literals parse; the
-        // evaluator renders typed literals, so only presence is checked here.
-        require_column(table, step_index, input, column)?;
+        // Whole-value replacement compares against a typed literal, so the
+        // text has to BE a value of the column's type. Checking it here — at
+        // edit time, with no data — is also what keeps the evaluator from ever
+        // interpolating author text into a generated statement on trust.
+        let target = require_column(table, step_index, input, column)?;
+        for (text, role) in [(find, "value to find"), (replace, "replacement")] {
+            validate_typed_literal(text, target.data_type()).map_err(|reason| {
+                transform_error(
+                    table,
+                    step_index,
+                    format!("{role} for column '{column}': {reason}"),
+                )
+            })?;
+        }
     } else {
         require_text_column(table, step_index, input, column, "substring replaceValues")?;
         if find.is_empty() {
@@ -640,6 +652,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names(&out), names(&source_schema()));
+    }
+
+    #[test]
+    fn whole_value_replace_refuses_text_that_is_not_a_value_of_the_column_type() {
+        // REGRESSION: the evaluator renders a numeric/boolean literal BARE, so
+        // text that is not a number used to be interpolated straight into the
+        // generated statement. Refusing it here is what stops that at the door,
+        // and gives the author a message while they are still editing.
+        for find in ["0 OR 1=1", "abc", "1; DROP TABLE t", "--"] {
+            let err = derive(
+                &source_schema(),
+                &TransformStep::ReplaceValues {
+                    column: "amount".into(),
+                    find: find.into(),
+                    replace: "1".into(),
+                    match_entire_value: true,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("value to find"),
+                "'{find}' must be refused by name; got {err}"
+            );
+        }
+
+        // The replacement half is checked too, not just the needle.
+        let err = derive(
+            &source_schema(),
+            &TransformStep::ReplaceValues {
+                column: "amount".into(),
+                find: "1".into(),
+                replace: "0); DROP TABLE t; --".into(),
+                match_entire_value: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("replacement"), "got {err}");
     }
 
     #[test]

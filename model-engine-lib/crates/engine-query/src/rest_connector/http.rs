@@ -295,18 +295,30 @@ impl RestTransport {
 
     /// Read up to [`ERROR_BODY_SNIPPET_BYTES`] of an error response for context.
     /// Best-effort: a body that cannot be read yields no snippet.
-    async fn error_snippet(&self, response: reqwest::Response) -> String {
-        match response.bytes().await {
-            Ok(bytes) => {
-                if bytes.is_empty() {
-                    return String::new();
+    async fn error_snippet(&self, mut response: reqwest::Response) -> String {
+        // Read CHUNK BY CHUNK and stop as soon as there is enough for the
+        // snippet. `response.bytes()` would buffer the entire body into memory
+        // first — so an endless or enormous error body would defeat the
+        // streaming cap this module promises, on the one path where the server
+        // is already behaving unexpectedly. The response is dropped right
+        // after, which closes the connection without draining the rest.
+        let mut collected: Vec<u8> = Vec::with_capacity(ERROR_BODY_SNIPPET_BYTES);
+        while collected.len() < ERROR_BODY_SNIPPET_BYTES {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    let room = ERROR_BODY_SNIPPET_BYTES - collected.len();
+                    let take = chunk.len().min(room);
+                    collected.extend_from_slice(&chunk[..take]);
                 }
-                let end = bytes.len().min(ERROR_BODY_SNIPPET_BYTES);
-                let text = String::from_utf8_lossy(&bytes[..end]);
-                format!(": {}", text.trim())
+                // End of body, or a read failure: report what we have.
+                Ok(None) | Err(_) => break,
             }
-            Err(_) => String::new(),
         }
+        if collected.is_empty() {
+            return String::new();
+        }
+        let text = String::from_utf8_lossy(&collected);
+        format!(": {}", text.trim())
     }
 
     /// Map a `reqwest` failure onto a connector error, stripping the URL (it

@@ -35,6 +35,30 @@ use crate::{
     SqlServerConnector,
 };
 
+/// Re-point a table's binding at `(source_id, schema, table)` while KEEPING
+/// everything the binding carries beyond the location.
+///
+/// A binding is not only a location any more: it also holds the table's
+/// transformation pipeline, the source schema that pipeline derives from, and
+/// any SQL source query. Building a fresh `TableSourceBinding` here would
+/// silently erase all three — and the stripped model still validates, because
+/// the pipeline checks are skipped for a table that (now) has no steps, so the
+/// next refresh would quietly serve raw source rows in place of the shaped ones.
+fn rebound(
+    existing: Option<&TableSourceBinding>,
+    source_id: &str,
+    schema: &str,
+    table: &str,
+) -> TableSourceBinding {
+    let mut binding = TableSourceBinding::new(source_id, schema, table);
+    if let Some(previous) = existing {
+        binding.source_query = previous.source_query.clone();
+        binding.source_columns = previous.source_columns.clone();
+        binding.transformations = previous.transformations.clone();
+    }
+    binding
+}
+
 /// Build the live binding a persisted binding describes.
 ///
 /// A table whose rows come from a SQL `SELECT` must be re-wired as a *query*
@@ -322,7 +346,6 @@ impl Engine {
         // Verify the model table exists before mutating anything.
         self.model.table(model_table)?;
 
-        let binding = TableSourceBinding::new(source_id, schema, table);
         let updated_tables: Vec<Table> = self
             .model
             .tables()
@@ -330,7 +353,8 @@ impl Engine {
             .map(|t| {
                 if t.name() == model_table {
                     let mut t = t.clone();
-                    t.set_source_binding(Some(binding.clone()));
+                    let binding = rebound(t.source_binding(), source_id, schema, table);
+                    t.set_source_binding(Some(binding));
                     t
                 } else {
                     t.clone()
@@ -339,10 +363,13 @@ impl Engine {
             .collect();
         let new_model = self.model.with_tables(updated_tables);
         new_model.validate()?;
-        self.set_model(new_model)?;
+        // `set_model` INSTALLS the model and only then returns any deferred
+        // script-build error, so `?` here would leave the model changed but the
+        // runtime binding un-set. Complete the transaction, then surface it.
+        let deferred = self.set_model(new_model);
         self.registry
             .bind(model_table, idx, SourceBinding::new(schema, table));
-        Ok(())
+        deferred
     }
 
     /// Discover every table a registered source exposes ([`Connector::list_tables`]),
@@ -417,9 +444,8 @@ impl Engine {
             .map(|t| {
                 if let Some(st) = source_tables.iter().find(|st| st.name == t.name()) {
                     let mut t = t.clone();
-                    t.set_source_binding(Some(TableSourceBinding::new(
-                        source_id, &st.schema, &st.name,
-                    )));
+                    let binding = rebound(t.source_binding(), source_id, &st.schema, &st.name);
+                    t.set_source_binding(Some(binding));
                     t
                 } else {
                     t.clone()
@@ -653,6 +679,32 @@ mod tests {
         let target = ConnectionTarget::new("db", "analytics");
         let restored = persisted_to_target(&target_to_persisted(&target));
         assert_eq!(target, restored);
+    }
+
+    #[test]
+    fn a_binding_that_carries_a_query_rewires_as_a_query_not_as_schema_dot_table() {
+        // The pair to the writer in `bi_model_import_sql_source`: a table
+        // imported from a native `SELECT` now stamps `source_query` on its
+        // persisted binding, and this is the read that makes that stamp mean
+        // something. Wiring it as `schema.table` would send the source a
+        // SELECT against a relation that does not exist.
+        let persisted = TableSourceBinding::new("warehouse", "", "OpenOrders")
+            .with_source_query("SELECT id FROM orders WHERE status = 'open'");
+        let live = runtime_binding(&persisted);
+        assert_eq!(
+            live.source_query.as_deref(),
+            Some("SELECT id FROM orders WHERE status = 'open'"),
+            "the saved query must survive reopen"
+        );
+    }
+
+    #[test]
+    fn a_binding_without_a_query_still_rewires_as_schema_dot_table() {
+        let persisted = TableSourceBinding::new("warehouse", "public", "orders");
+        let live = runtime_binding(&persisted);
+        assert!(live.source_query.is_none(), "no query was ever saved");
+        assert_eq!(live.schema, "public");
+        assert_eq!(live.table, "orders");
     }
 
     #[test]

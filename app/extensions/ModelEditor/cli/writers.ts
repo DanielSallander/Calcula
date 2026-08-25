@@ -472,10 +472,15 @@ function planTransform(cmd: Command, s: CliSession): TransformPlan {
     );
   }
   const t = requireTable(s.overview, target.text, cmd.line);
-  if (!t.bound) {
+  // A pipeline lives on the table's SOURCE BINDING, which is exactly what
+  // `sourceId` reports — the same test `TransformEditorModal` applies. `bound`
+  // is looser: it is also true for a live app-side bind that carries no
+  // persisted binding, and such a table cannot hold steps.
+  if (t.sourceId === null) {
     fail(
-      `Table '${t.name}' is not bound to a data source, so it cannot carry transformation ` +
-        `steps (bind it first: set table ${t.name} source=<source> sourcetable=<name>)`,
+      `Table '${t.name}' is not bound to a data source — a pipeline lives on the table's ` +
+        `source binding — so it cannot carry transformation steps (bind it first: ` +
+        `set table ${t.name} source=<source> sourcetable=<name>)`,
       cmd.line,
     );
   }

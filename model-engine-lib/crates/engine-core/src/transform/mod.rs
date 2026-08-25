@@ -48,6 +48,7 @@
 mod apply_to_model;
 mod eval;
 mod infer;
+mod literal;
 mod parts;
 mod rules_columns;
 mod rules_rows;

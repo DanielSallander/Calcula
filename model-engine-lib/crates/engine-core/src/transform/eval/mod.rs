@@ -187,7 +187,7 @@ async fn apply_one(
             aggregates,
         } => {
             let step = sql_steps::SqlStep { table, index, udfs };
-            sql_steps::group_by(&step, batch, group_by, aggregates).await
+            sql_steps::group_by(&step, batch, group_by, aggregates, input).await
         }
         TransformStep::Pivot {
             name_column,
@@ -203,6 +203,7 @@ async fn apply_one(
                 value_column,
                 *aggregate,
                 value_names,
+                input,
             )
             .await
         }

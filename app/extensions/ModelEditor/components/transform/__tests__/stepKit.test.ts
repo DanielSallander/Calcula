@@ -30,15 +30,20 @@ import {
 import { TRANSFORM_STEP_TYPES, normalizeStepType } from "../../../cli/transformSteps";
 import type { ModelColumnInfo, TransformStepDto } from "@api";
 
-/** The engine's serialized step tags, read from the Rust source. */
-function engineStepTags(): string[] {
-  const stepRs = fs.readFileSync(
+/** Read one file out of the engine's `transform` module. */
+function engineSource(file: "step.rs" | "parts.rs"): string {
+  return fs.readFileSync(
     path.resolve(
       __dirname,
-      "../../../../../../model-engine-lib/crates/engine-core/src/transform/step.rs",
+      `../../../../../../model-engine-lib/crates/engine-core/src/transform/${file}`,
     ),
     "utf8",
   );
+}
+
+/** The engine's serialized step tags, read from the Rust source. */
+function engineStepTags(): string[] {
+  const stepRs = engineSource("step.rs");
   // `type_name()` carries the exact serde tag for every variant, one arm each.
   const tags = [...stepRs.matchAll(/TransformStep::\w+\s*\{\s*\.\.\s*\}\s*=>\s*"([A-Za-z]+)"/g)].map(
     (m) => m[1],
@@ -71,53 +76,139 @@ describe("the step vocabulary matches the engine", () => {
   });
 });
 
+const SNAKE_TO_CAMEL = (s: string): string =>
+  s.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+
 /**
- * The engine's step FIELD names, in their serialized (camelCase) spelling.
+ * The bodies of every top-level `pub struct` / `pub enum` in a Rust source.
  *
- * `TransformStep` carries `rename_all_fields = "camelCase"`, so a Rust field
- * `keep_original` serializes as `keepOriginal`. Extracting the declarations and
- * converting is enough for what this guards against: a field name invented on
- * the TypeScript side that exists nowhere in the engine.
+ * Restricting to type bodies is what makes the field regex below safe: an
+ * `impl` block (`Self { from: from.into() }`) and a `#[cfg(test)]` module
+ * (`RowRange::Range { offset: 2, count: 5 }`) are full of `name: value` pairs
+ * that are not field DECLARATIONS. Both are indented under an `impl`/`mod`, so
+ * anchoring on a column-0 `pub struct`/`pub enum` and closing on a column-0 `}`
+ * excludes them.
+ */
+function rustTypeBodies(source: string): string[] {
+  return [...source.matchAll(/^pub (?:struct|enum) \w+ \{([\s\S]*?)\n\}/gm)].map((m) => m[1]);
+}
+
+/**
+ * The engine's transformation FIELD names, in their serialized (camelCase)
+ * spelling — from BOTH files that contribute them.
+ *
+ * `step.rs` declares the step variants; `parts.rs` declares the OPERAND types
+ * those variants carry (`ColumnRename{from,to}`, `TypeChange{column,new_type}`,
+ * `SortKey{column,descending}`, `GroupAggregate{column,function,alias}`,
+ * `RowRange{kind,count,offset}`). Nothing in `app/` reads parts.rs, so before
+ * this guard covered it a rename of `SortKey.descending` left every check green
+ * while every saved sort step silently flipped back to ascending.
+ *
+ * Both files carry `rename_all_fields`/`rename_all = "camelCase"`, so a Rust
+ * `new_type` serializes as `newType`. The internally tagged enums' TAG names
+ * (`type` on `TransformStep`, `kind` on `RowRange`) are keys in the JSON too,
+ * so they are collected from the `tag = "…"` attributes rather than guessed.
  */
 function engineFieldNames(): Set<string> {
-  const stepRs = fs.readFileSync(
-    path.resolve(
-      __dirname,
-      "../../../../../../model-engine-lib/crates/engine-core/src/transform/step.rs",
-    ),
-    "utf8",
-  );
-  const enumBody = stepRs.match(/pub enum TransformStep \{([\s\S]*?)\n\}/);
-  if (!enumBody) throw new Error("could not find `pub enum TransformStep` in step.rs");
-  const snake = [...enumBody[1].matchAll(/^\s+([a-z][a-z0-9_]*)\s*:\s*\S/gm)].map((m) => m[1]);
-  const camel = snake.map((s) => s.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase()));
-  return new Set(camel);
+  const sources = [engineSource("step.rs"), engineSource("parts.rs")];
+  const names = new Set<string>();
+  for (const source of sources) {
+    for (const tag of source.matchAll(/\btag\s*=\s*"([a-z][a-zA-Z0-9_]*)"/g)) {
+      names.add(SNAKE_TO_CAMEL(tag[1]));
+    }
+    for (const body of rustTypeBodies(source)) {
+      for (const field of body.matchAll(/^\s+(?:pub\s+)?([a-z][a-z0-9_]*)\s*:\s*\S/gm)) {
+        names.add(SNAKE_TO_CAMEL(field[1]));
+      }
+    }
+  }
+  if (!names.has("condition")) {
+    throw new Error("could not extract TransformStep's fields from step.rs");
+  }
+  return names;
+}
+
+/**
+ * Every object key `value` contains, at any depth, with the path that reached
+ * it. Arrays are walked into, because a step's operands live in them
+ * (`renames: [{ from, to }]`, `by: [{ column, descending }]`).
+ */
+function objectKeysDeep(
+  value: unknown,
+  trail: string[] = [],
+  out: Array<{ key: string; path: string }> = [],
+): Array<{ key: string; path: string }> {
+  if (Array.isArray(value)) {
+    for (const item of value) objectKeysDeep(item, trail, out);
+    return out;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const here = [...trail, key];
+      out.push({ key, path: here.join(".") });
+      objectKeysDeep(child, here, out);
+    }
+  }
+  return out;
 }
 
 describe("step field names match the engine", () => {
   const engineFields = engineFieldNames();
 
-  it("extracts a real field set from the Rust source", () => {
+  it("extracts a real field set from step.rs", () => {
     expect(engineFields.size).toBeGreaterThan(10);
     // A snake_case field must have arrived camelCased, or the conversion is
     // broken and every assertion below would be comparing the wrong spelling.
     expect(engineFields.has("keepOriginal")).toBe(true);
     expect(engineFields.has("keep_original")).toBe(false);
+    // The step tag itself is a key in the JSON, taken from `tag = "type"`.
+    expect(engineFields.has("type")).toBe(true);
   });
 
-  it("every seeded default uses only fields the engine declares", () => {
+  it("extracts the NESTED operand fields from parts.rs", () => {
+    // Non-vacuity for the second source: these names exist ONLY in parts.rs,
+    // so if its extraction silently produced nothing the assertion below would
+    // pass while guarding half of what it claims to.
+    expect(engineFields.has("newType"), "TypeChange::new_type").toBe(true);
+    expect(engineFields.has("new_type"), "snake_case must not survive").toBe(false);
+    expect(engineFields.has("descending"), "SortKey::descending").toBe(true);
+    expect(engineFields.has("alias"), "GroupAggregate::alias").toBe(true);
+    expect(engineFields.has("from"), "ColumnRename::from").toBe(true);
+    expect(engineFields.has("to"), "ColumnRename::to").toBe(true);
+    // RowRange is tagged on `kind`, and its variants carry count/offset.
+    expect(engineFields.has("kind"), "RowRange's serde tag").toBe(true);
+    expect(engineFields.has("count"), "RowRange::FirstN::count").toBe(true);
+    expect(engineFields.has("offset"), "RowRange::Range::offset").toBe(true);
+    expect(engineFields.has("range"), "TransformStep::KeepRows::range").toBe(true);
+    // The body scanner itself must still be finding parts.rs's types: every
+    // assertion above would survive a scanner that returned one lucky body.
+    expect(rustTypeBodies(engineSource("parts.rs")).length).toBeGreaterThanOrEqual(7);
+  });
+
+  it("every seeded default uses only fields the engine declares, NESTED ONES TOO", () => {
     // The failure this catches: a step that looks right in the editor and is
-    // refused by the engine on Apply, with the user seeing only a failed edit.
+    // refused by the engine on Apply, with the user seeing only a failed edit —
+    // or worse, one the engine ACCEPTS while dropping the misspelled operand,
+    // which is how a descending sort would come back ascending.
+    let checked = 0;
     for (const { value } of STEP_TYPES) {
       const step = defaultStep(value, columns) as Record<string, unknown>;
-      for (const key of Object.keys(step)) {
-        if (key === "type") continue;
+      for (const { key, path } of objectKeysDeep(step)) {
+        checked += 1;
         expect(
           engineFields.has(key),
-          `step '${value}' emits field '${key}', which the engine's TransformStep does not declare`,
+          `step '${value}' emits field '${path}', which the engine's transform module does not declare`,
         ).toBe(true);
       }
     }
+    // The loop must actually have reached nested keys: `renameColumns` alone
+    // contributes `renames.from`, and a walker that stopped at the top level
+    // would never see it.
+    expect(checked).toBeGreaterThan(STEP_TYPES.length);
+    const renameKeys = objectKeysDeep(defaultStep("renameColumns", columns)).map((k) => k.path);
+    expect(renameKeys).toContain("renames.from");
+    const sortKeys = objectKeysDeep(defaultStep("sort", columns)).map((k) => k.path);
+    expect(sortKeys).toContain("by.descending");
   });
 });
 

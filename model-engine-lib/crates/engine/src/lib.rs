@@ -182,6 +182,7 @@ pub use engine_core::compute::udf::{
     create_udf, ColumnarValue, ScalarUDF, UdfRegistry, Volatility,
 };
 pub use engine_core::error::{EngineError, EngineResult};
+pub use engine_core::model::rest::{authority_of, is_loopback_host, require_same_authority};
 pub use engine_core::model::schema::MODEL_FORMAT_VERSION;
 pub use engine_core::model::{
     CalculatedColumn, CalculationGroup, CalculationItem, Cardinality, ClearTarget, Column,

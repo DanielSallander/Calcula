@@ -37,7 +37,7 @@ function table(
   name: string,
   cols: string[],
   calc: string[] = [],
-  opts: { bound?: boolean; transformSteps?: TransformStepDto[] } = {},
+  opts: { bound?: boolean; sourceId?: string | null; transformSteps?: TransformStepDto[] } = {},
 ): ModelTableInfo {
   return {
     name,
@@ -46,7 +46,7 @@ function table(
     isHidden: false,
     storageMode: "InMemory",
     bound: opts.bound ?? false,
-    sourceId: null,
+    sourceId: opts.sourceId ?? null,
     transformSteps: opts.transformSteps ?? [],
     sourceColumns: [],
     columns: [
@@ -117,9 +117,11 @@ function fixtureOverview(): ModelOverview {
       table("Sales", ["Id", "Amount", "CustomerId", "Region"], ["Margin"]),
       table("Customer", ["Id", "Name"]),
       table("Orders", ["Id", "CustomerId"]),
-      // Source-bound WITH a pipeline: the only shape `transform` accepts.
+      // Source-bound WITH a pipeline: the only shape `transform` accepts. The
+      // binding that matters is `sourceId` — a pipeline lives on it.
       table("Web", ["Id", "Status", "Qty"], [], {
         bound: true,
+        sourceId: "11111111-2222-3333-4444-555555555555",
         transformSteps: [
           // Step 1 is renameable (it introduces an output name); step 2 is not
           // — both shapes the `transform … rename` row exercises.

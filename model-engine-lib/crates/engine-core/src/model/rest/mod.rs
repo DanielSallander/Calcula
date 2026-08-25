@@ -39,7 +39,7 @@ mod validate;
 mod tests;
 
 pub use auth_spec::RestAuthSpec;
-pub use checks::{is_loopback_host, validate_absolute_url};
+pub use checks::{authority_of, is_loopback_host, require_same_authority, validate_absolute_url};
 pub use config::{RestHeader, RestSourceConfig};
 pub use endpoint::{RestEndpoint, RestField, RestMethod, RestPagination};
 

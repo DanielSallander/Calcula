@@ -514,16 +514,30 @@ async fn a_preview_reports_when_it_only_saw_part_of_the_source() {
 // --- Interactions with the rest of the engine ---
 
 #[tokio::test]
-async fn a_transformed_table_is_never_an_auto_tier_candidate() {
-    // Auto-tiering promotes DirectQuery dimensions to InMemory by probing
-    // them. A transformed table is always InMemory, so it is structurally
-    // excluded — this pins that, because a probe would bypass the pipeline.
-    let engine = engine_with_steps(vec![TransformStep::FilterRows {
+async fn a_transformed_table_cannot_be_direct_query() {
+    // Auto-tiering probes DirectQuery dimensions and caches the rows it reads —
+    // which would bypass the pipeline entirely. What keeps it away from a
+    // transformed table is that such a table CANNOT be DirectQuery, so that is
+    // what this asserts: model validation refuses the combination outright.
+    //
+    // (Asserting only `is_in_memory()` on a fixture that sets InMemory itself,
+    // as this test first did, pins nothing — it would stay green if the rule
+    // were removed. `auto_tier_candidates_skips_explicit_inmemory` covers the
+    // skip itself against the real candidate-selection API.)
+    let base = model_with_steps(vec![TransformStep::FilterRows {
         condition: "status = \"open\"".into(),
     }]);
+    let mut tables = base.tables().to_vec();
+    tables[0].set_storage_mode(StorageMode::DirectQuery);
+
+    let error = base
+        .with_tables(tables)
+        .validate()
+        .expect_err("a transformed DirectQuery table must be refused");
+    let message = error.to_string();
     assert!(
-        engine.model().table("Orders").unwrap().is_in_memory(),
-        "a transformed table must be InMemory, which is what keeps auto-tier away"
+        message.contains("InMemory"),
+        "must say what is required: {message}"
     );
 }
 
@@ -664,4 +678,141 @@ async fn a_preview_of_a_transformed_table_derives_from_the_recorded_source_schem
         .unwrap();
     assert_eq!(preview.batch.num_rows(), 3);
     assert_eq!(preview.batch.num_columns(), 2);
+}
+
+// --- Regressions for the adversarial review -------------------------------
+
+#[tokio::test]
+async fn rebinding_a_table_keeps_its_pipeline() {
+    // REGRESSION: `bind_source_table` built a FRESH TableSourceBinding, which
+    // zeroed transformations/source_columns/source_query. The stripped model
+    // still validated (a table with no steps skips the pipeline checks), so the
+    // next refresh silently served raw source rows in place of shaped ones.
+    // `bind_source_table` needs the source registered under its catalog id, so
+    // this fixture registers the connector by id rather than anonymously.
+    let mut engine = Engine::new(model_with_steps(vec![TransformStep::FilterRows {
+        condition: "status <> \"cancelled\"".into(),
+    }]));
+    let source = InMemoryConnector::new().with_table("public", "orders", source_batch());
+    let idx = engine
+        .registry_mut()
+        .add_connector_with_id(Some("src".to_string()), source.into());
+    engine.bind_table("Orders", idx, SourceBinding::new("public", "orders"));
+    assert_eq!(engine.table_transformations("Orders").unwrap().len(), 1);
+    let columns_before: Vec<String> = engine
+        .model()
+        .table("Orders")
+        .unwrap()
+        .columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+
+    engine
+        .bind_source_table("src", "public", "orders", Some("Orders"))
+        .unwrap();
+
+    assert_eq!(
+        engine.table_transformations("Orders").unwrap().len(),
+        1,
+        "re-pointing a table at its source must not discard its steps"
+    );
+    assert!(
+        !engine.table_source_columns("Orders").unwrap().is_empty(),
+        "the pipeline's source anchor must survive too, or it cannot be checked"
+    );
+    let columns_after: Vec<String> = engine
+        .model()
+        .table("Orders")
+        .unwrap()
+        .columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
+    assert_eq!(columns_before, columns_after);
+
+    // And the pipeline still actually runs.
+    engine.refresh_table("Orders").await.unwrap();
+    assert_eq!(engine.cache().get("Orders").unwrap().num_rows(), 3);
+}
+
+#[tokio::test]
+async fn a_second_steps_edit_keeps_column_presentation_metadata() {
+    // REGRESSION: derivation works from the recorded SOURCE schema, so metadata
+    // the user set on the model table AFTER the pipeline existed was reverted
+    // to the anchor-time snapshot by the next steps edit.
+    let mut engine = engine_with_steps(vec![TransformStep::FilterRows {
+        condition: "status <> \"cancelled\"".into(),
+    }]);
+
+    // Decorate a surviving column, the way the Tables tab does.
+    let mut tables = engine.model().tables().to_vec();
+    for column in tables[0].columns_mut() {
+        if column.name() == "amount" {
+            column.set_display_name(Some("Order Amount".to_string()));
+            column.set_format_string(Some("#,##0.00".to_string()));
+        }
+    }
+    let decorated = engine.model().with_tables(tables);
+    engine.set_model(decorated).unwrap();
+
+    // A SECOND edit to the pipeline.
+    engine
+        .set_table_transformations(
+            "Orders",
+            vec![
+                TransformStep::FilterRows {
+                    condition: "status <> \"cancelled\"".into(),
+                },
+                TransformStep::Sort {
+                    by: vec![crate::SortKey::ascending("id")],
+                },
+            ],
+        )
+        .unwrap();
+
+    let table = engine.model().table("Orders").unwrap();
+    let amount = table.column("amount").unwrap();
+    assert_eq!(
+        amount.display_name(),
+        Some("Order Amount"),
+        "the user's display name must survive a later steps edit"
+    );
+    assert_eq!(amount.format_string(), Some("#,##0.00"));
+}
+
+#[tokio::test]
+async fn a_preview_conforms_to_the_schema_its_steps_derive() {
+    // REGRESSION: the preview returned raw pipeline output while a refresh
+    // conforms, so an aggregate coming back wider than the step declares
+    // rendered differently in the preview than it would once stored.
+    let engine = engine_with_steps(vec![]);
+    let candidate = vec![TransformStep::GroupBy {
+        group_by: vec!["status".into()],
+        aggregates: vec![crate::GroupAggregate::new(
+            "amount",
+            crate::AggregateOp::Median,
+            "mid",
+        )],
+    }];
+    let derived = crate::derive_pipeline_schema("Orders", &source_columns(), &candidate).unwrap();
+
+    let preview = engine
+        .preview_transformations(
+            &TransformPreviewRequest::new("Orders", candidate),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    for (index, column) in derived.iter().enumerate() {
+        let field = preview.batch.schema().field(index).clone();
+        assert_eq!(field.name(), column.name());
+        assert_eq!(
+            field.data_type(),
+            &column.data_type().to_arrow(),
+            "preview column '{}' does not match the type its step derives",
+            column.name()
+        );
+    }
 }

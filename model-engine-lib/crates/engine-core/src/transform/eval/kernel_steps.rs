@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, StringArray, UInt32Array};
 use arrow::compute::{cast_with_options, CastOptions};
-use arrow::datatypes::{Field, Schema};
+use arrow::datatypes::{DataType as ArrowType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::error::EngineResult;
@@ -116,6 +116,7 @@ pub(super) fn change_type(
     for change in changes {
         let index = column_index(table, step_index, batch, &change.column)?;
         let target = change.new_type.to_arrow();
+        let source_type = columns[index].data_type().clone();
         let cast = cast_with_options(&columns[index], &target, &options).map_err(|e| {
             step_error(
                 table,
@@ -128,11 +129,84 @@ pub(super) fn change_type(
                 ),
             )
         })?;
+
+        // Arrow's `safe: false` does NOT make a fractional-to-integer cast an
+        // error: it converts through `num::NumCast`, which truncates toward
+        // zero and fails only on NaN/infinity/overflow. So 10.7 would become
+        // 10 with no complaint — silently altering data under the one policy
+        // whose whole contract is to stop instead. Casting back and comparing
+        // is the only way to see the loss, so do it exactly where it can occur.
+        let cast = if narrowing_can_truncate(&source_type, &target) {
+            let round_trip = cast_with_options(&cast, &source_type, &options).map_err(|e| {
+                step_error(
+                    table,
+                    step_index,
+                    format!(
+                        "column '{}' could not be checked for rounding: {e}",
+                        change.column
+                    ),
+                )
+            })?;
+            let differs = arrow::compute::kernels::cmp::neq(&columns[index], &round_trip)?;
+            match (differs.true_count(), on_error) {
+                (0, _) => cast,
+                // Fail: a value that has to be rounded is a value this policy
+                // says the refresh must not invent.
+                (lost, CastErrorPolicy::Fail) => {
+                    return Err(step_error(
+                        table,
+                        step_index,
+                        format!(
+                            "column '{}' has {lost} value(s) that cannot become {:?} without \
+                             rounding. Set the step's error handling to produce blanks instead, \
+                             or round the values deliberately first",
+                            change.column, change.new_type
+                        ),
+                    ));
+                }
+                // Null: "cannot be represented" is exactly what this policy
+                // turns into a blank.
+                (_, CastErrorPolicy::Null) => {
+                    arrow::compute::kernels::nullif::nullif(&cast, &differs)?
+                }
+            }
+        } else {
+            cast
+        };
+
         let nullable = fields[index].is_nullable() || on_error == CastErrorPolicy::Null;
         fields[index] = Field::new(fields[index].name(), target, nullable);
         columns[index] = cast;
     }
     rebuild(fields, columns)
+}
+
+/// `true` when a cast can silently ROUND rather than fail or succeed exactly.
+///
+/// Arrow reports overflow and unparseable text, but a fractional source
+/// narrowed to an integer target converts by truncation with no error — the one
+/// outcome a caller cannot detect from the cast's own result.
+fn narrowing_can_truncate(from: &ArrowType, to: &ArrowType) -> bool {
+    let fractional = matches!(
+        from,
+        ArrowType::Float16
+            | ArrowType::Float32
+            | ArrowType::Float64
+            | ArrowType::Decimal128(_, _)
+            | ArrowType::Decimal256(_, _)
+    );
+    let integral = matches!(
+        to,
+        ArrowType::Int8
+            | ArrowType::Int16
+            | ArrowType::Int32
+            | ArrowType::Int64
+            | ArrowType::UInt8
+            | ArrowType::UInt16
+            | ArrowType::UInt32
+            | ArrowType::UInt64
+    );
+    fractional && integral
 }
 
 /// `fillDown` — carry the last non-null value forward, per column.
