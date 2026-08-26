@@ -21,6 +21,14 @@
 //          teach the model to strip declarations it cannot prove it needs.
 
 import { validateScriptSource, repairPrompt } from "@api/scriptHost/scriptValidation";
+// `@api/types`, NOT the `@api` barrel. The barrel is 2600 lines of grid context,
+// script host and Tauri doors, and every AIChat suite that reaches it mocks it by
+// hand -- draftGate.test.ts does not, because this module never needed it.
+// `@api/types` re-exports the SAME function (app/src/api/types.ts:70) and imports
+// nothing itself, so no suite has to learn a new double.
+import { columnToLetter } from "@api/types";
+// The user-facing wording, shared with the Object Script Editor's diff window.
+import { unexercisedHookNote } from "@api/scriptHost/scriptPreview/unexercisedHooks";
 // The report's shape is declared once, beside the authoring loop that also
 // consumes it. A second mirror here would be one more thing to drift from
 // `DryRunReport` in ai/dryrun.rs.
@@ -34,13 +42,43 @@ export interface GateVerdict {
   /** When `allow` is false, the text handed back to the model as a tool result. */
   message?: string;
   /**
-   * When `allow` is true and a dry run produced a usable observation, a
-   * one-line note the caller APPENDS to the tool result — so the model and the
-   * transcript say something concrete ("would change 3 cells") instead of just
-   * "queued". `describeDryRun` existed for exactly this and was dead code until
-   * the adversarial review noticed nothing ever called it.
+   * FOR THE MODEL. Appended to the tool result so the next turn knows what the
+   * draft would DO ("would change 3 cells (B2, B3)") rather than only that it
+   * was queued.
+   *
+   * It may address the model in the second person — "Tell the user they must
+   * raise the access level" — which is exactly why it must never be rendered
+   * into the transcript. `userNote` is the human's copy of the same fact.
    */
   note?: string;
+  /**
+   * FOR THE USER. The same observation, worded for the person reading the
+   * transcript, and the field a UI must render.
+   *
+   * Set on EVERY allowing arm that has anything to say, including the ones where
+   * it is identical to `note`, so a caller reads one field and never has to know
+   * which arm produced the verdict.
+   */
+  userNote?: string;
+  /**
+   * The draft is sound but only ran once the preview was raised to Unlocked.
+   *
+   * A permission only the USER can grant, so the transcript line is a WARNING
+   * rather than a neutral status: without the grant the script mounts and does
+   * nothing. Never a rejection (§11.2's "notices never block").
+   */
+  needsUnlocked?: boolean;
+  /**
+   * The ladder's NOTICES — today, capabilities the script declares that no call
+   * in it appears to need.
+   *
+   * §11.2 makes these information for the reviewer rather than a defect, because
+   * a machine cannot decide them and a person can. The gate then threw the whole
+   * report away the instant `ok` was true, so the person they were written for
+   * never saw a word of them — while pressing Save is precisely the act of
+   * granting them. Absent, not empty, when there are none.
+   */
+  notices?: string[];
 }
 
 const ALLOW: GateVerdict = { allow: true };
@@ -94,22 +132,34 @@ export const NEEDS_UNLOCKED =
   "access level to Unlocked in the Object Script Editor before it will work.";
 
 /**
- * The object type the draft targets.
+ * The same fact, said to the PERSON reading the transcript.
+ *
+ * Second person, and no "Tell the user" — a line relayed from the model's own
+ * instructions reads to its subject as being talked about rather than to.
+ */
+export const NEEDS_UNLOCKED_USER =
+  " NOTE: this script does NOT run at the Restricted access level a draft is mounted with — it " +
+  "only ran once the preview was raised to Unlocked. Raise the script's access level to Unlocked " +
+  "in the Object Script Editor before mounting it, or it will do nothing.";
+
+/**
+ * The object type the draft targets, or undefined when the call named none.
+ *
+ * WHY THIS NO LONGER DEFAULTS. The answer now feeds the VALIDATOR as well as the
+ * preview, and the two want opposite things from a missing value. The preview
+ * must run as something, so it falls back to "button" at the call site. The
+ * validator must not: narrowing an unlabelled draft to a button's context would
+ * REJECT a correct sheet script for a type nobody claimed, and this is a linter
+ * — its worst outcome must be missing a defect, never inventing one.
  *
  * `object_type` is REQUIRED by the tool schema and constrained to
- * `DRAFT_OBJECT_TYPES`, so in practice it is always present and always valid.
- * The fallback exists for the malformed call the gate deliberately does not
- * police (`validate_draft` in mcp/drafts.rs answers that clearly), and "button"
- * is the right one to fall back to: it is the overwhelmingly common target and
- * its single `onClick` hook is the one shape the whole corpus is built around.
- *
- * Before this read the type, EVERY draft was previewed as a button — so a shape
- * or sheet script was mounted against the wrong context and its own hooks were
- * never fired.
+ * `DRAFT_OBJECT_TYPES`, so in practice it is always present and always valid;
+ * this covers the malformed call the gate deliberately does not police
+ * (`validate_draft` in mcp/drafts.rs answers that clearly).
  */
-function objectTypeOf(input: unknown): string {
+function objectTypeOf(input: unknown): string | undefined {
   const raw = (input as { object_type?: unknown } | null)?.object_type;
-  return typeof raw === "string" && raw.trim() !== "" ? raw : "button";
+  return typeof raw === "string" && raw.trim() !== "" ? raw : undefined;
 }
 
 /**
@@ -133,8 +183,17 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
   if (typeof raw !== "string" || raw.trim() === "") return ALLOW;
   const source = raw;
 
+  // Read BEFORE the static ladder, not just before the dry run: L1 cannot tell
+  // `context.onSheetChange` (WorkbookContext only) or `context.cell.setValue`
+  // (only a sheet or a table can obtain a cell) from a member this object really
+  // has without it, and a button draft using either validated CLEAN and threw at
+  // mount.
+  const objectType = objectTypeOf(input);
+  /** The dry run must run as SOMETHING; an unlabelled draft is previewed as a button. */
+  const previewType = objectType ?? "button";
+
   // L0-L2: parse, reach, capabilities.
-  const report = validateScriptSource(source);
+  const report = validateScriptSource(source, objectType);
   if (!report.ok) {
     return {
       allow: false,
@@ -145,36 +204,45 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
     };
   }
 
+  // THE OTHER HALF OF THE REPORT, which nothing read. §11.2 makes "declared but
+  // not observed" a NOTICE because a machine cannot decide it and a person can --
+  // and then this gate threw the report away the instant `ok` was true, so the
+  // person it was written for never saw a word of it. Those are exactly the
+  // capabilities the reviewer grants by pressing Save.
+  //
+  // Filtered by SEVERITY, not by code: this renders whole messages, so it wants
+  // every notice the ladder ever grows.
+  const notices = report.findings
+    .filter((f) => f.severity === "notice")
+    .map((f) => f.message);
+
   // L3: does it actually run?
   //
   // `applicable === false` means the preview realm cannot host this script, so
-  // its answer describes the emulator rather than the draft. Object scripts —
-  // which is everything this gate sees — land there, and treating that as a
-  // failure rejected every valid draft with "it FAILS when run".
+  // its answer describes the emulator rather than the draft.
   //
   // AT THE TIER IT ACTUALLY MOUNTS AT. `previewObjectScript` defaults to
-  // "unlocked" while `draftToScriptDefinition` (ScriptableObjects/lib/
-  // scriptDrafts.ts) mounts every draft "restricted" — an AI-authored script
-  // must never arrive pre-escalated. So the rung was answering a question nobody
-  // asked: it green-lit scripts reaching `context.api.*`, the user pressed Save,
-  // and the script was refused by a gate the preview had never consulted.
-  const objectType = objectTypeOf(input);
-  const dry = await tryDryRun(source, objectType, "restricted");
+  // "unlocked" while `draftToScriptDefinition` mounts every draft "restricted".
+  const dry = await tryDryRun(source, previewType, "restricted");
 
   if (dry && dry.applicable !== false && !dry.ok) {
     // THE DIAGNOSIS IS A DEDUCTION, NOT A REGEX. Re-run at the unlocked tier: it
-    // is the only thing that changed, so if the script now passes, the tier is
-    // the only thing that can have been wrong. Matching the broker's denial text
-    // instead would be a coupling to a message that has no guard on it — and
-    // would miss the case where a restricted surface lacks the member entirely
-    // and fails as a TypeError rather than as a refusal.
-    const unlocked = await tryDryRun(source, objectType, "unlocked");
+    // is the only thing that changed.
+    const unlocked = await tryDryRun(source, previewType, "unlocked");
     if (unlocked && unlocked.applicable !== false && unlocked.ok) {
       // ALLOWED, NOT REJECTED (§11.2's "notices never block"). The script is
-      // sound; it needs a permission only the user can grant, and rejecting it
-      // would teach the model to avoid `context.api.*` — which for a button is
-      // the ONLY way to reach the grid.
-      return { allow: true, note: describeDryRun(unlocked) + NEEDS_UNLOCKED };
+      // sound; it needs a permission only the USER can grant -- which is why a
+      // sentence that reaches nobody but the model does nothing, and why the
+      // model's copy ("Tell the user they must raise...") is not a thing to put
+      // in front of the person it is about.
+      const observed = describeDryRun(unlocked);
+      return {
+        allow: true,
+        needsUnlocked: true,
+        note: observed + NEEDS_UNLOCKED,
+        userNote: observed + NEEDS_UNLOCKED_USER,
+        ...(notices.length > 0 ? { notices } : {}),
+      };
     }
     return {
       allow: false,
@@ -186,24 +254,74 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
   }
 
   const note = describeDryRun(dry);
-  return note ? { allow: true, note } : ALLOW;
+  // ALLOW is the shared constant every ungated call returns: an arm that carries
+  // something must build its own object rather than mutate that one.
+  if (!note && notices.length === 0) return ALLOW;
+  const verdict: GateVerdict = { allow: true };
+  if (note) {
+    verdict.note = note;
+    // Identical to `note` on this path -- nothing in `describeDryRun` addresses
+    // the model -- but set EXPLICITLY so the caller reads ONE field and never has
+    // to know which arm the verdict came from.
+    verdict.userNote = note;
+  }
+  if (notices.length > 0) verdict.notices = notices;
+  return verdict;
 }
 
 /**
- * A one-line note about what the draft would do, appended to the tool result so
- * the model — and the transcript — say something concrete rather than "queued".
+ * How many changed cells the note names before it stops.
  *
- * Deliberately separate from the gate: this runs only for drafts that PASSED,
- * and it is descriptive, never a rejection.
+ * Three, because this is ONE line in a transcript and in a tool result. The
+ * report's own list is capped far higher (MAX_REPORTED_CHANGES = 200), so
+ * `changes` can be shorter than `totalChanges` and the sentence must never imply
+ * it is the whole story.
+ */
+const MAX_NAMED_CELLS = 3;
+
+/**
+ * A one-line note about what the draft would do, appended to the tool result and
+ * shown to the user as its own transcript line.
+ *
+ * IT NAMES CELLS, not just a count. `changes` is the one field that says what the
+ * script actually DID -- computed cell by cell, sorted row-major -- and nothing
+ * read it: the reviewer was told "it would change 3 cells" and had to open the
+ * editor to find out which three.
+ *
+ * IT REFUSES TO SAY "changed no cells" ALONE when a handler the script registered
+ * was never fired. That zero is a fact about the PREVIEW, not about the script,
+ * and the bare sentence is read by the model as evidence -- it will "fix" a draft
+ * whose only problem is that the preview could not exercise it.
  */
 export function describeDryRun(dry: DryRunReport | null): string {
   // Say nothing rather than "it changed no cells" about a script that was never
   // run — that sentence reads as a finding, and it would be fabricated.
   if (!dry || !dry.ok || dry.applicable === false) return "";
+  const caveat = unexercisedHookNote(dry.unexercisedHooks);
   if (dry.totalChanges === 0) {
-    return " When run against a copy of the workbook it changed no cells.";
+    return caveat
+      // SECOND PERSON, not "Tell the user to...". This return value is stored
+      // as `userNote` as well as `note`, and ChatView renders `userNote`
+      // straight into the transcript — so model-facing phrasing here reaches
+      // the person as an instruction addressed to somebody else. Byte-compatible
+      // with the sibling wording in `dryRunNotes.ts`, deliberately.
+      ? ` When run against a copy of the workbook it changed no cells — but that is not evidence ` +
+          `about the script. ${caveat} Try it on real data before relying on it.`
+      : " When run against a copy of the workbook it changed no cells.";
   }
-  return ` When run against a copy of the workbook it would change ${dry.totalChanges} cell${
-    dry.totalChanges === 1 ? "" : "s"
-  }.`;
+  // Guarded on the LIST, never on the count: a report can legitimately arrive
+  // with a count and no entries, and inventing "(A1)" for one would be worse
+  // than the bare count. The count clause is unchanged either way.
+  const named = dry.changes
+    .slice(0, MAX_NAMED_CELLS)
+    .map((c) => `${columnToLetter(c.col)}${c.row + 1}`);
+  const where =
+    named.length > 0
+      ? ` (${named.join(", ")}${dry.totalChanges > named.length ? ", ..." : ""})`
+      : "";
+  const changed =
+    ` When run against a copy of the workbook it would change ${dry.totalChanges} cell${
+      dry.totalChanges === 1 ? "" : "s"
+    }${where}.`;
+  return caveat ? `${changed} ${caveat}` : changed;
 }

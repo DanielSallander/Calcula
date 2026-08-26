@@ -18,6 +18,7 @@
 
 import type { PreviewGrid } from "./grid";
 import type { DryRunReport } from "../scriptAuthoring";
+import { unexercisedHookNote } from "./unexercisedHooks";
 
 /** How many changed cells a report carries. Mirrors MAX_REPORTED_CHANGES (Rust). */
 export const MAX_REPORTED_CHANGES = 200;
@@ -64,6 +65,15 @@ export function buildReport(input: {
   changes: CellChange[];
   output: string[];
   readBack: Array<{ row: number; col: number; value: string }>;
+  /**
+   * Handlers the script registered that this run did NOT fire.
+   *
+   * REQUIRED, because the caller always knows: the realm reports the list, and
+   * an omitted field would silently mean "everything ran" — the one reading a
+   * caveat exists to prevent. `[]` is the honest answer for a run that fired
+   * everything it was offered.
+   */
+  unexercisedHooks: string[];
   /** Appended to the output when the workbook copy was capped. */
   note?: string;
 }): DryRunReport {
@@ -80,6 +90,11 @@ export function buildReport(input: {
     totalChanges,
     output: input.note ? [...input.output, `[preview] ${input.note}`] : input.output,
     readBack: input.readBack,
+    // COPIED, not aliased: the realm's own array keeps being pushed to while a
+    // run is in flight, and a report is a statement about a moment.
+    // `?? []` because a hand-built double omitting the field must produce "no
+    // caveat" rather than a TypeError in a render — see unexercisedHooks.ts.
+    unexercisedHooks: [...(input.unexercisedHooks ?? [])],
     applicable: true,
     declinedReason: null,
   };
@@ -103,12 +118,24 @@ export function declined(reason: string, output: string[] = []): DryRunReport {
     totalChanges: 0,
     output,
     readBack: [],
+    // Nothing was fired because nothing was RUN. An empty list here is not a
+    // claim that every handler ran — `applicable: false` is the claim, and it
+    // says nothing in this report is evidence about the script.
+    unexercisedHooks: [],
     applicable: false,
     declinedReason: reason,
   };
 }
 
-/** One line for a reviewer or a repair prompt. Mirrors `DryRunReport::summary`. */
+/**
+ * One line for a reviewer or a repair prompt. Mirrors `DryRunReport::summary`.
+ *
+ * THE ZERO IS QUALIFIED, never bare. "The script ran without error but changed
+ * no cells" is read as a finding about the SCRIPT, and when the handler holding
+ * the work was never fired it is a fact about the PREVIEW instead — so the
+ * caveat is appended rather than the sentence rewritten, and the uncaveated
+ * strings stay byte-identical to what every existing consumer already reads.
+ */
 export function summarize(report: DryRunReport): string {
   if (!report.applicable) {
     return `No preview: ${report.declinedReason ?? "this script cannot be previewed"}.`;
@@ -116,11 +143,14 @@ export function summarize(report: DryRunReport): string {
   if (!report.ok) {
     return `The script failed when run against a copy of the workbook: ${report.error ?? "unknown error"}`;
   }
+  const caveat = unexercisedHookNote(report.unexercisedHooks);
   if (report.totalChanges === 0) {
-    return "The script ran without error but changed no cells.";
+    return caveat
+      ? `The script ran without error but changed no cells. ${caveat}`
+      : "The script ran without error but changed no cells.";
   }
-  return (
+  const changed =
     `The script would change ${report.totalChanges} cell${report.totalChanges === 1 ? "" : "s"}` +
-    `${report.truncated ? ` (showing the first ${MAX_REPORTED_CHANGES})` : ""}.`
-  );
+    `${report.truncated ? ` (showing the first ${MAX_REPORTED_CHANGES})` : ""}.`;
+  return caveat ? `${changed} ${caveat}` : changed;
 }

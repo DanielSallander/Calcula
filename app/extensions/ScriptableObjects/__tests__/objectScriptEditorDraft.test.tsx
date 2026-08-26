@@ -99,6 +99,9 @@ vi.mock("../lib/monacoTypings", () => ({
   configureObjectScriptTypings: () => {},
   setActiveContextType: () => {},
   annotateScaffold: (s: string) => s,
+  // The API Reference heading reads the interface name out of the generated
+  // typings now, so a partial mock that omits it throws inside the sidebar.
+  contextInterfaceNameFor: (objectType: string) => objectType,
 }));
 const gateObjectScriptSave = vi.fn(async (src: string) => ({
   ok: true as const,
@@ -155,6 +158,23 @@ async function deliverDraft(draft: ScriptDraft = DRAFT): Promise<void> {
   });
 }
 
+/**
+ * Let the banner's lazy capability scan land.
+ *
+ * The effect imports `@api/scriptHost/scriptValidation` on demand — the surface
+ * it reaches is ~94 KB and an AI draft is a rare document. Importing it here
+ * first puts it in the module registry, so all that is left to flush is the
+ * promise chain and the re-render it causes.
+ */
+async function settleCapabilityScan(): Promise<void> {
+  await import("@api/scriptHost/scriptValidation");
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 describe("Object Script Editor — AI draft review mode", () => {
   beforeEach(() => {
     draftHandler = null;
@@ -185,6 +205,54 @@ describe("Object Script Editor — AI draft review mode", () => {
     // The status bar must not claim the document is saved.
     expect(container.textContent).toContain("Never saved");
     expect(container.textContent).not.toContain("AI DRAFT — Refresh the reportSaved");
+  });
+
+  // WHAT THE DRAFT ASKS FOR THAT NOTHING IN IT APPEARS TO USE. The reviewer
+  // grants exactly these capabilities by pressing Save, and the banner used to
+  // say only what was declared.
+  it("names a declared capability no call in the draft appears to need", async () => {
+    await mountApp();
+    await deliverDraft({
+      ...DRAFT,
+      source: "// @capability net.fetch\nexport function setup(context) { context.log('hi'); }",
+    });
+    await settleCapabilityScan();
+
+    const line = container.querySelector("[data-testid='ai-draft-unobserved']");
+    expect(line, "the banner never said the declaration was unused").toBeTruthy();
+    expect(line!.textContent).toContain("net.fetch");
+  });
+
+  it("says nothing when the draft actually uses what it declares", async () => {
+    // The control. Without it the assertion above passes for a banner that
+    // shouts about every declaration, which would train the reviewer to ignore
+    // the line entirely.
+    await mountApp();
+    await deliverDraft({
+      ...DRAFT,
+      source:
+        "// @capability net.fetch\nexport async function setup(context) { await context.caps.fetch('https://example.com'); }",
+    });
+    await settleCapabilityScan();
+
+    expect(container.querySelector("[data-testid='ai-draft-unobserved']")).toBeNull();
+  });
+
+  it("reads the PRAGMAS, not the draft's declaredCapabilities list", async () => {
+    // The default fixture declares net.fetch on the payload over a source with
+    // no pragma at all. Production cannot emit that shape — the draft's list is
+    // parsed out of the source it carries (`app/src-tauri/src/mcp/drafts.rs:159`
+    // -> `core/persistence/src/lib.rs:1705`) — and the scan deliberately reads
+    // the source, because the source is what will run.
+    await mountApp();
+    await deliverDraft();
+    await settleCapabilityScan();
+
+    expect(container.querySelector("[data-testid='ai-draft-unobserved']")).toBeNull();
+    // ...while the banner still reports what the payload claims.
+    expect(container.querySelector("[data-testid='ai-draft-banner']")!.textContent).toContain(
+      "net.fetch",
+    );
   });
 
   // THE SECURITY PROPERTY: arriving is inert.

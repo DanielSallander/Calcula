@@ -17,6 +17,22 @@ import { resolve } from "node:path";
 
 const RUST = resolve(__dirname, "../../../src-tauri/src/ai/dryrun.rs");
 const MIRROR = resolve(__dirname, "../scriptHost/scriptAuthoring/index.ts");
+const NOTE = resolve(__dirname, "../scriptHost/scriptPreview/unexercisedHooks.ts");
+
+/**
+ * The sentence both realms say, in the pieces each file writes it in.
+ *
+ * Every fragment must be SOURCE-CONTIGUOUS in both files: the TypeScript `+`
+ * split and the Rust `\` line continuation both fall after "the preview ", so no
+ * fragment straddles either break. Compared as source text rather than by
+ * calling the two functions, because one of them is Rust.
+ */
+const SHARED_FRAGMENTS = [
+  "The script registered ",
+  "but the preview ",
+  "never fired it, so nothing that handler does was measured.",
+  "never fired any of them, so nothing those handlers do was measured.",
+];
 
 /** snake_case -> camelCase, the way `#[serde(rename_all = "camelCase")]` does. */
 function camel(name: string): string {
@@ -68,5 +84,39 @@ describe("DryRunReport — the TS mirror matches the Rust struct", () => {
   it("keeps `applicable` non-optional in the mirror", () => {
     const body = mirror.slice(mirror.indexOf("export interface DryRunReport {"));
     expect(body).toMatch(/^ {2}applicable: boolean;/m);
+  });
+
+  /**
+   * `unexercisedHooks` fails the same way `applicable` did, one step further on:
+   * an optional field reads `undefined`, `(undefined?.length ?? 0) > 0` is
+   * false, and the caveat that exists to stop a correct draft being sent back
+   * for repair silently never fires.
+   */
+  it("keeps `unexercisedHooks` non-optional in the mirror", () => {
+    const body = mirror.slice(mirror.indexOf("export interface DryRunReport {"));
+    expect(body).toMatch(/^ {2}unexercisedHooks: string\[\];/m);
+  });
+});
+
+/**
+ * TWO REALMS, ONE SENTENCE.
+ *
+ * The Worker-realm preview and the Rust interpreter both answer "did anything
+ * this script registered go unfired?", and a reviewer reading the answer must
+ * not be able to tell which rung produced it from the wording. There is no way
+ * to call the Rust function from here, so the two are pinned as source text.
+ */
+describe("the unexercised-hook note says the same words in both realms", () => {
+  const rust = readFileSync(RUST, "utf8");
+  const ts = readFileSync(NOTE, "utf8");
+
+  it.each(SHARED_FRAGMENTS)("says %j in both files", (fragment) => {
+    expect(ts, "the TypeScript leaf").toContain(fragment);
+    expect(rust, "the Rust twin").toContain(fragment);
+  });
+
+  it("reads the real files, so the comparison cannot pass vacuously", () => {
+    expect(ts).toContain("export function unexercisedHookNote");
+    expect(rust).toContain("pub fn unexercised_hook_note");
   });
 });

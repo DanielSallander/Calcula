@@ -335,7 +335,13 @@ const OUTCOME_WEIGHT = 0.5;
  * must never run model output) simply omit it and get the static score.
  */
 export function scoreCandidate(task: EvalTask, candidate: string, outcome?: OutcomeGrade): TaskScore {
-  const report = validateScriptSource(candidate);
+  // Checked against the members THIS task's object type can actually reach.
+  // Unnarrowed, a button candidate calling `context.cell.setValue(...)` — a
+  // TypeError the moment the script mounts — scored as reach-clean, and reach is
+  // the heaviest component here. It is also the number the in-app probe turns
+  // into `canaryScore`, which PICKS THE AUTHORING TIER, so a too-generous reach
+  // check hands a model the direct tier on drafts that are dead at run time.
+  const report = validateScriptSource(candidate, task.objectType);
   const analysis = report.analysis;
 
   const parsed = analysis.parsed;
@@ -348,8 +354,11 @@ export function scoreCandidate(task: EvalTask, candidate: string, outcome?: Outc
   // here that changes what the product does.
   const mountable =
     parsed && !report.findings.some((f) => f.code === "no-entry-point");
+  // `wrong-object-type` is the same defect as `unknown-member` one axis over:
+  // the member exists, it is simply not on the context THIS object is handed.
+  // Both are dead code at run time, so both must cost `reachClean`.
   const inventedMethods = report.findings
-    .filter((f) => f.code === "unknown-member")
+    .filter((f) => f.code === "unknown-member" || f.code === "wrong-object-type")
     .map((f) => f.message);
   const reachClean = parsed && inventedMethods.length === 0;
   const capabilitiesDeclared =

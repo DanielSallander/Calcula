@@ -24,6 +24,7 @@ import type { DebugAction } from "@api/scriptHost/protocol";
 import {
   enclosingTopLevelFunction,
   topLevelFunctions,
+  type TopLevelFunction,
 } from "@api/scriptHost/worker/debugInstrument";
 
 export type { DebugSessionState, DebugTrigger, DebugAction };
@@ -575,16 +576,28 @@ export type RunAtCursorOutcome =
  * invoked by the mount and is not a run-target; `runAtCursor` sees that in the
  * session's trigger list and says so rather than firing into nothing.
  */
-function resolveRunTarget(
-  source: string,
-  line: number,
-): ReturnType<typeof enclosingTopLevelFunction> {
-  const enclosing = enclosingTopLevelFunction(source, line);
-  if (enclosing && enclosing.name !== "setup") return enclosing;
-  const all = topLevelFunctions(source);
-  const nonSetup = all.filter((f) => f.name !== "setup");
-  if (nonSetup.length === 1) return nonSetup[0];
-  return all.find((f) => f.name === "setup") ?? null;
+interface RunTargetResolution {
+  /** What Run would start, or null when nothing in the file resolves. */
+  target: TopLevelFunction | null;
+  /**
+   * Every top-level function the source declares — including `setup`.
+   *
+   * Returned alongside the target because THE MESSAGE NEEDS IT. Every reason
+   * Run can refuse ("setup is not a run target", "nothing resolved") is only
+   * actionable if it can say what the file does contain, and re-scanning the
+   * source in the message builder would derive the same fact twice from the
+   * same string.
+   */
+  functions: readonly TopLevelFunction[];
+}
+
+function resolveRunTarget(source: string, line: number): RunTargetResolution {
+  const functions = topLevelFunctions(source);
+  const enclosing = enclosingTopLevelFunction(functions, line);
+  if (enclosing && enclosing.name !== "setup") return { target: enclosing, functions };
+  const nonSetup = functions.filter((f) => f.name !== "setup");
+  if (nonSetup.length === 1) return { target: nonSetup[0], functions };
+  return { target: functions.find((f) => f.name === "setup") ?? null, functions };
 }
 
 /**
@@ -677,14 +690,9 @@ export async function runAtCursor(
   line: number,
   options: StartDebugOptions = {},
 ): Promise<RunAtCursorOutcome> {
-  const target = resolveRunTarget(source, line);
+  const { target, functions } = resolveRunTarget(source, line);
   if (!target) {
-    return {
-      status: "noFunction",
-      message:
-        "Put the cursor inside a top-level function to run it. This script has no single " +
-        "function to fall back to (either none, or more than one besides setup).",
-    };
+    return { status: "noFunction", message: noRunTargetMessage(functions) };
   }
   if (target.arity > 1) {
     return {
@@ -719,7 +727,7 @@ export async function runAtCursor(
     return {
       status: "notReady",
       functionName: target.name,
-      message: notReadyMessage(session, target.name),
+      message: notReadyMessage(session, target.name, functions),
     };
   }
   try {
@@ -743,13 +751,27 @@ export async function runAtCursor(
 }
 
 /**
- * Why Run cannot start `functionName` — always a reason, never a dead button.
+ * Why Run cannot start `functionName` — always a reason, and never a remedy the
+ * user cannot perform.
  *
- * The `setup` case is its own sentence: on a mount that INVOKES setup (every
- * object script) it is not a run-target at all, and "try again in a moment"
- * would be false advice for a wait that never ends.
+ * THE BRANCH ORDER IS LOAD-BEARING, in both directions:
+ *   - `failed` FIRST, because it is a settled status: reaching the settled arm
+ *     with a session that holds `error` would drop the one fact that explains
+ *     everything else.
+ *   - the `setup` arm SECOND, because on a mount that invokes setup no wait and
+ *     no restart makes it a run-target; the remedy is a different function or a
+ *     trigger, and it is the only arm that can name one.
+ *   - `detached` before the not-yet arm, because it is not settled either and
+ *     "try again in a moment" is false advice for a realm that is gone.
+ *   - the not-yet arm reads `SETTLED_DEBUG_STATUSES`, the same set the fire path
+ *     waits on, so a status can never be "still coming" to one and "settled" to
+ *     the other.
  */
-function notReadyMessage(session: DebugSessionState, functionName: string): string {
+function notReadyMessage(
+  session: DebugSessionState,
+  functionName: string,
+  functions: readonly TopLevelFunction[],
+): string {
   if (session.status === "failed") {
     return session.autoInvokeSetup === false
       ? `"${functionName}" cannot be started: ${session.error ?? "unknown error"}`
@@ -757,15 +779,114 @@ function notReadyMessage(session: DebugSessionState, functionName: string): stri
           `${session.error ?? "unknown error"}`;
   }
   if (functionName === "setup" && session.autoInvokeSetup !== false) {
+    return setupIsNotARunTargetMessage(functions, session.triggers ?? []);
+  }
+  if (session.status === "detached") {
     return (
-      "setup() is the entry point this mount already ran, so it is not a run target. " +
-      "Put the cursor inside another top-level function to run that, or fire one of the " +
-      "triggers in the debug panel."
+      `"${functionName}" cannot run: this script is no longer mounted, so the debug ` +
+      "session has nothing left to run it in. Press Debug to open a session again, then Run."
+    );
+  }
+  if (!SETTLED_DEBUG_STATUSES.has(session.status)) {
+    return (
+      `"${functionName}" is not registered as a run target yet (the script is ` +
+      `${session.status}). Try Run again in a moment.`
     );
   }
   return (
-    `"${functionName}" is not registered as a run target yet (the script is ` +
-    `${session.status}). Try Run again in a moment.`
+    `"${functionName}" is not one of the run targets this mount registered, and the ` +
+    `mount has settled (${session.status}) — waiting will not make it appear. ` +
+    "Press Stop, then Run again to open a fresh session."
+  );
+}
+
+/**
+ * The `setup` refusal, built from what THIS file and THIS mount actually hold.
+ *
+ * The sentence this replaced offered two remedies unconditionally — "put the
+ * cursor inside another top-level function to run that, or fire one of the
+ * triggers in the debug panel" — and the user who reported it had neither: one
+ * `setup`, no other function, and no trigger. Being told to use a thing that
+ * does not exist is worse than being told nothing, because it reads as a fact
+ * about the editor rather than a fact about the file.
+ *
+ * So each half is offered only when it is REAL, and when neither is, the message
+ * says the honest thing: nothing in this script can be started, here is how to
+ * add something that can.
+ */
+function setupIsNotARunTargetMessage(
+  functions: readonly TopLevelFunction[],
+  triggers: readonly DebugTrigger[],
+): string {
+  const others = functions.filter((f) => f.name !== "setup").map((f) => f.name);
+  // `runTarget !== true` is the correction that makes this offer honest. A
+  // run-target IS one of the top-level functions the cursor remedy just named,
+  // its panel button says "Run", not "Fire", and offering it here would tell the
+  // user to do the same thing twice under two different names.
+  const offerable = triggers.filter((t) => t.fireable && t.runTarget !== true);
+  const blocked = triggers.filter((t) => !t.fireable);
+
+  const parts = ["setup() is the entry point this mount already ran, so it is not a run target."];
+  if (others.length > 0) {
+    parts.push(`Put the cursor inside ${listNames(others)} and press Run.`);
+  }
+  if (offerable.length > 0) {
+    // "Or" only when a cursor remedy was actually offered above it. With no
+    // other top-level function — the exact shape that produced this report —
+    // the sentence would otherwise open on a dangling conjunction and read as
+    // the second half of advice the reader never got.
+    const lead = others.length > 0 ? "Or fire" : "Fire";
+    parts.push(
+      `${lead} one of the triggers in the debug panel: ${listNames(offerable.map(triggerLabel))}.`,
+    );
+  } else if (blocked.length > 0) {
+    const first = blocked[0];
+    const why = first.reason ? ` (${first.reason})` : "";
+    parts.push(
+      `The debug panel lists ${listNames(blocked.map(triggerLabel))}, but the debugger ` +
+        `cannot start ${blocked.length > 1 ? "them" : "it"} directly${why}.`,
+    );
+  }
+  if (others.length === 0 && triggers.length === 0) {
+    parts.push(
+      "This script has no entry point besides setup(): nothing was registered and there " +
+        "is no other top-level declaration. Add one — function doThing() { ... } — and " +
+        "press Run with the cursor inside it.",
+    );
+  }
+  return parts.join(" ");
+}
+
+/** How a trigger is written in prose: a method reads as a call, a hook as a name. */
+function triggerLabel(trigger: DebugTrigger): string {
+  return trigger.kind === "method" ? `${trigger.name}()` : trigger.name;
+}
+
+/** "a", "a or b", "a, b or c" — a list a person reads rather than parses. */
+function listNames(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+}
+
+/**
+ * Nothing resolved from the cursor — said in terms of what the file declares.
+ *
+ * Two genuinely different states, and the old single sentence told both of them
+ * to move the cursor. A file with NO top-level function has nowhere to put it;
+ * saying "put the cursor inside a top-level function" to someone whose file has
+ * none is the same defect as offering a trigger that does not exist.
+ */
+function noRunTargetMessage(functions: readonly TopLevelFunction[]): string {
+  const names = functions.map((f) => f.name);
+  if (names.length === 0) {
+    return (
+      "This script declares no top-level function, so Run has nothing to start. " +
+      "Add one — function doThing() { ... } — and press Run again."
+    );
+  }
+  return (
+    `Put the cursor inside ${listNames(names)} and press Run. Run starts the function ` +
+    "the cursor is in, and this script declares more than one to choose between."
   );
 }
 

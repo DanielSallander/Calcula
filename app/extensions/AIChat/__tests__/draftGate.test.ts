@@ -15,7 +15,8 @@ vi.mock("@api/scriptHost/scriptPreview", () => ({
   previewObjectScript: (...a: unknown[]) => preview(...a),
 }));
 
-const { gateToolCall, describeDryRun, NEEDS_UNLOCKED } = await import("../lib/draftGate");
+const { gateToolCall, describeDryRun, NEEDS_UNLOCKED, NEEDS_UNLOCKED_USER } =
+  await import("../lib/draftGate");
 
 const GOOD = "export function setup(context) {\n  context.log('x');\n}\n";
 const INVENTED = "export function setup(context) {\n  context.api.setCellValu(0, 0, 'x');\n}\n";
@@ -30,11 +31,11 @@ const NO_SETUP = "onClick(() => { context.log('x'); });\n";
 // never produces.
 const dryOk = (totalChanges = 1) => ({
   ok: true, error: null, durationMs: 2, changes: [], truncated: false, totalChanges,
-  output: [], readBack: [], applicable: true, declinedReason: null,
+  output: [], readBack: [], unexercisedHooks: [], applicable: true, declinedReason: null,
 });
 const dryFailed = (error: string) => ({
   ok: false, error, durationMs: 1, changes: [], truncated: false, totalChanges: 0,
-  output: [], readBack: [], applicable: true, declinedReason: null,
+  output: [], readBack: [], unexercisedHooks: [], applicable: true, declinedReason: null,
 });
 
 beforeEach(() => {
@@ -211,6 +212,7 @@ describe("a dry run that DECLINED is not a verdict", () => {
     totalChanges: 0,
     output: [],
     readBack: [],
+    unexercisedHooks: [],
     applicable: false,
     declinedReason: "the preview cannot serve api.createChart",
   });
@@ -252,7 +254,7 @@ describe("an allowed draft carries the dry run's observation", () => {
   it("carries no note when the preview declined", async () => {
     preview.mockResolvedValue({
       ok: true, error: null, durationMs: 0, changes: [], truncated: false,
-      totalChanges: 0, output: [], readBack: [], applicable: false,
+      totalChanges: 0, output: [], readBack: [], unexercisedHooks: [], applicable: false,
       declinedReason: "ES module",
     });
     const v = await gateToolCall("draft_object_script", { source: GOOD });
@@ -306,5 +308,167 @@ describe("the gate previews in the realm the draft will really run in", () => {
     await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
     const arg = preview.mock.calls[0][0] as { event?: unknown };
     expect(arg.event, "naming one would assert the draft MUST handle it").toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T11 — the ladder is narrowed to the object the draft is aimed at
+// ---------------------------------------------------------------------------
+
+describe("the gate rejects a draft aimed at the wrong object", () => {
+  // `onClick` is a ButtonContext/ShapeContext member, `cell` is handed out by
+  // SheetContext and TableContext alone. Before L1 knew the object type, both
+  // shapes validated CLEAN and threw at mount — the quietest failure the whole
+  // pipeline has, because the draft reaches a human's review queue looking fine.
+  const ONCLICK = "export function setup(context) {\n  context.onClick(async () => {});\n}\n";
+  const CELL_WRITE =
+    "export function setup(context) {\n  context.cell.setValue(0, 0, 'x');\n}\n";
+
+  it("rejects a button's onClick in a SHEET script, and never pays for the preview", async () => {
+    const v = await gateToolCall("draft_object_script", { source: ONCLICK, object_type: "sheet" });
+    expect(v.allow).toBe(false);
+    expect(v.message).toContain("context.onClick");
+    expect(preview, "a draft that cannot mount must not cost a preview").not.toHaveBeenCalled();
+  });
+
+  it("allows the identical source as a BUTTON — the positive control", async () => {
+    const v = await gateToolCall("draft_object_script", { source: ONCLICK, object_type: "button" });
+    expect(v.allow, "without this the test above passes for a gate that rejects everything").toBe(true);
+  });
+
+  it("rejects a cell write from a button, which cannot obtain a cell at all", async () => {
+    const v = await gateToolCall("draft_object_script", { source: CELL_WRITE, object_type: "button" });
+    expect(v.allow).toBe(false);
+    expect(v.message).toContain("context.cell");
+    // The repair has to name the objects that CAN, or the model rewrites a name
+    // it already had right and the loop cannot converge.
+    expect(v.message).toContain("sheet");
+  });
+
+  it("allows the same cell write from a SHEET", async () => {
+    const v = await gateToolCall("draft_object_script", { source: CELL_WRITE, object_type: "sheet" });
+    expect(v.allow).toBe(true);
+  });
+
+  it("does not reject a shared member reached from a button", async () => {
+    // THE false positive that would matter most: `api.range` is on every context
+    // and prefixes nothing, so narrowing must still admit it.
+    const source =
+      "export function setup(context) {\n" +
+      "  context.onClick(async () => {\n" +
+      "    const r = await context.api.range('A1');\n" +
+      "    r.setValue('x');\n" +
+      "  });\n}\n";
+    const v = await gateToolCall("draft_object_script", { source, object_type: "button" });
+    expect(v.allow, "narrowing must never reject correct code").toBe(true);
+  });
+
+  it("never NARROWS on a guessed object type, but still previews as a button", async () => {
+    // An unlabelled draft is previewed as SOMETHING because it must be; it is
+    // VALIDATED against nothing, because rejecting a correct sheet script for a
+    // type nobody claimed is a linter inventing a defect. The source is
+    // deliberately one a BUTTON cannot run — silently narrow to "button" here
+    // and this becomes `wrong-object-type` on a draft that is perfectly fine.
+    const sheetOnly =
+      "export function setup(context) {\n  context.onSelectionChange(async () => {});\n}\n";
+    const v = await gateToolCall("draft_object_script", { source: sheetOnly });
+    expect(v.allow, "an unclaimed type must narrow NOTHING").toBe(true);
+    expect(preview).toHaveBeenCalledWith(expect.objectContaining({ objectType: "button" }));
+  });
+
+  it("and the control: the same source IS rejected once someone claims 'button'", async () => {
+    const sheetOnly =
+      "export function setup(context) {\n  context.onSelectionChange(async () => {});\n}\n";
+    const v = await gateToolCall("draft_object_script", { source: sheetOnly, object_type: "button" });
+    expect(v.allow).toBe(false);
+    expect(v.message).toContain("context.onSelectionChange");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T12 — the verdict carries what the gate computed FOR A HUMAN
+// ---------------------------------------------------------------------------
+
+describe("the verdict carries what the gate computed for a human", () => {
+  it("carries the ladder's notices, which nothing used to read", async () => {
+    const v = await gateToolCall("draft_object_script", {
+      source: "// @capability net.fetch\n" + GOOD,
+      object_type: "button",
+    });
+    expect(v.allow, "a notice never blocks").toBe(true);
+    expect(v.notices).toHaveLength(1);
+    expect(v.notices![0]).toMatch(/net\.fetch.*declared/);
+  });
+
+  it("carries none when the script declares nothing it does not use", async () => {
+    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(v.notices, "absent, not an empty array").toBeUndefined();
+  });
+
+  it("says the tier thing TWICE — once to the model, once to the user", async () => {
+    preview
+      .mockResolvedValueOnce(dryFailed("api.setRangeFormat requires unlocked access"))
+      .mockResolvedValueOnce(dryOk(4));
+    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(v.allow).toBe(true);
+    expect(v.needsUnlocked).toBe(true);
+    expect(v.note).toContain(NEEDS_UNLOCKED);
+    expect(v.userNote).toContain(NEEDS_UNLOCKED_USER);
+    // THE defect the reviewed design would have shipped: relaying the model's
+    // own copy to the person it is about.
+    expect(v.userNote, "the user is not 'the user'").not.toContain("Tell the user");
+  });
+
+  it("sets userNote on the ordinary path too, so a caller reads ONE field", async () => {
+    preview.mockResolvedValue(dryOk(3));
+    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(v.userNote).toBe(v.note);
+    expect(v.needsUnlocked).toBeFalsy();
+  });
+});
+
+describe("describeDryRun names the cells, not just a count", () => {
+  const withChanges = (totalChanges: number, cells: Array<[number, number]>) => ({
+    ...dryOk(totalChanges),
+    changes: cells.map(([row, col]) => ({ row, col, before: "", after: "x" })),
+  });
+
+  it("names them, A1-style", () => {
+    // `columnToLetter` is 0-based, so {row:1,col:1} is B2.
+    const note = describeDryRun(withChanges(2, [[1, 1], [2, 1]]));
+    expect(note).toContain("2 cells");
+    expect(note).toContain("B2, B3");
+  });
+
+  it("says so when it is naming only the first few", () => {
+    const note = describeDryRun(withChanges(5, [[0, 0], [1, 0], [2, 0]]));
+    expect(note).toContain("5 cells");
+    expect(note.endsWith(", ...).")).toBe(true);
+  });
+
+  it("keeps the bare count when the report carried no list", () => {
+    // A report can legitimately arrive with a count and no entries; inventing
+    // "(A1)" for one would be worse than saying less.
+    const note = describeDryRun(dryOk(1));
+    expect(note).toContain("1 cell.");
+    expect(note).not.toContain("(");
+  });
+
+  it("refuses to let 'changed no cells' stand alone after an unfired handler", () => {
+    const plain = describeDryRun(dryOk(0));
+    const caveated = describeDryRun({ ...dryOk(0), unexercisedHooks: ["onSelectionChange"] });
+    expect(caveated).not.toBe(plain);
+    expect(caveated).toContain("not evidence about the script");
+    expect(caveated).toContain("onSelectionChange");
+    // ...AND IT ADDRESSES THE READER, NOT THE MODEL. This string is stored as
+    // `userNote` too, and ChatView renders that into the transcript — so
+    // "Tell the user to..." here reaches the user as an instruction aimed at
+    // someone else. The `userNote` guard elsewhere in this file cannot catch
+    // it: its double sets `unexercisedHooks: []`, so this branch never runs.
+    expect(caveated, "the reader IS the user").not.toContain("Tell the user");
+    expect(caveated).toContain("Try it on real data");
+    // The control: with nothing unfired, the sentence is byte-identical to what
+    // it has always been.
+    expect(plain).toBe(" When run against a copy of the workbook it changed no cells.");
   });
 });

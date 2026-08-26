@@ -413,6 +413,15 @@ const SLICE_BANNER = `// =======================================================
 // WHAT THIS IS: the object-script API as SIGNATURES, sliced by object type and
 // priced in tokens, for injecting into a script-authoring prompt.
 //
+// SLICED BY INTERFACE AND BY REACHABILITY. A chain is not unique: \`getCellValue\`
+// is three declarations with two different brokers, and every entry lists the
+// interfaces that declare THAT declaration -- \`entryFor(chain, objectType)\` is
+// the only correct way to resolve one. And a member is listed for a type only if
+// that type can actually OBTAIN the object it hangs off: \`range()\` and \`cell()\`
+// exist on SheetContext and TableContext alone, so their 102 members are not
+// shared. Both rules were wrong until 2026-08-25, and a draft written against
+// either error passes the whole validator ladder and is dead at runtime.
+//
 // WHY IT EXISTS: a model that does not know Calcula's API invents Excel VBA or
 // Office.js, and the fix is to put the real surface in front of it. But
 // objectContexts.d.ts is 348 KB and fits no context window worth having --
@@ -497,6 +506,22 @@ function groupOf(chain: string, capability: string | undefined, ownMember: boole
 
 export interface SurfaceEntryRow {
   chain: string;
+  /**
+   * Every context interface that declares THIS declaration of the chain.
+   *
+   * A chain is NOT unique. `getCellValue` is declared three times with three
+   * signatures and two brokers — ShapeContext takes an A1 string, TableContext a
+   * data row + column index, SheetContext row + col + optional sheet (and that
+   * one dispatches to `sheet.getCellValue`, not `object.getState`). Keyed by
+   * chain alone, the slices kept whichever interface sorted first and told every
+   * sheet script the SHAPE signature.
+   *
+   * A LIST because the dedup key is the emitted DECLARATION: an inherited member
+   * is one declaration shared by seventeen contexts, stored once, naming them
+   * all. That is what makes `entryFor`'s exact match total — all 894
+   * (chain, iface) pairs the policy knows appear in exactly one entry.
+   */
+  ifaces: string[];
   signature: string;
   summary: string;
   capability?: string;
@@ -507,18 +532,96 @@ export interface SurfaceEntryRow {
 export interface SliceModel {
   entries: SurfaceEntryRow[];
   /**
-   * Chains every object type can reach (BaseObjectContext plus every named
-   * subtree: caps, api, range, the handles).
+   * Chains EVERY object type can reach — REACHABILITY, not ownership.
+   *
+   * The old rule was "the owning interface is BaseObjectContext or appears in
+   * NAMED_SUBTREES", which answers a different question: a named subtree is only
+   * reachable through the member that HANDS IT OUT, and `range()` / `cell()` are
+   * declared on SheetContext and TableContext alone. So all 51 `range.*` and all
+   * 51 `cell.*` chains were published to all 17 object types while the `range` /
+   * `cell` entry points were correctly withheld. Measured at the chat's own
+   * 6,000-token budget: 22 such members in a button prompt, under a header that
+   * says "these are the ONLY methods this script may call".
    *
    * Emitted separately from the per-type extras because listing the full set
    * once per object type made the artifact 343 KB — as large as the .d.ts it
-   * exists to shrink. ~520 of the ~530 chains are identical across all 17
-   * types, so the shared set plus a handful of extras says the same thing in a
-   * fraction of the bytes.
+   * exists to shrink.
    */
   sharedChains: string[];
-  /** objectType -> only the chains its OWN root context adds. */
+  /**
+   * objectType -> the chains its OWN ROOT CONTEXT declares.
+   *
+   * The prompt ranker's FLOOR. Deliberately NOT the reachable set: flooring a
+   * sheet script's 119 reachable extras would spend the budget before
+   * `api.setCellValue`.
+   */
   ownByObjectType: Map<string, string[]>;
+  /**
+   * objectType -> every NON-SHARED chain it can REACH: its own root members plus
+   * everything hanging off a sub-object only this type can obtain. This bounds
+   * the prompt's pool. Differs from `ownByObjectType` exactly for "sheet" (17 vs
+   * 119) and "table" (28 vs 130), the two contexts that hand out a ScriptRange.
+   */
+  reachableByObjectType: Map<string, string[]>;
+  /** Drift reports; a non-empty list must fail the build. */
+  problems: string[];
+}
+
+/**
+ * The chain a member hangs off, or "" for one declared on a context root.
+ *
+ * `collectSurfaceRows` builds `chain` as `root ? root + "." + path : path`, so
+ * the entry is the chain with its own in-interface path removed. Derived rather
+ * than stored, so the two can never disagree.
+ */
+function entryChainOf(row: SurfaceMemberRow): string {
+  return row.chain === row.path ? "" : row.chain.slice(0, row.chain.length - row.path.length - 1);
+}
+
+/** Rows grouped by the chain they hang off — the surface as a graph. */
+export function indexSurfaceByEntry(
+  rows: readonly SurfaceMemberRow[],
+): Map<string, SurfaceMemberRow[]> {
+  const byEntry = new Map<string, SurfaceMemberRow[]>();
+  for (const row of rows) {
+    const entry = entryChainOf(row);
+    const list = byEntry.get(entry) ?? [];
+    list.push(row);
+    byEntry.set(entry, list);
+  }
+  return byEntry;
+}
+
+/**
+ * Every chain a script attached to `rootIface`'s object type can actually WRITE.
+ *
+ * The root context's own members, then everything hanging off a member already
+ * reached, transitively. `api.table.range.setValue` is reachable from any
+ * context because `api` is on every root; `range.setValue` only where `range`
+ * is. Total: every non-root entry key is itself a member chain (measured: 0
+ * orphan prefixes over the committed rows), because `ifacePrefixes()` and
+ * `collectSurfaceRows` are built from the same two tables.
+ */
+export function reachableChains(
+  byEntry: ReadonlyMap<string, SurfaceMemberRow[]>,
+  rootIface: string,
+): Set<string> {
+  const reached = new Set<string>();
+  const queue: string[] = [];
+  for (const row of byEntry.get("") ?? []) {
+    if (row.iface !== rootIface || reached.has(row.chain)) continue;
+    reached.add(row.chain);
+    queue.push(row.chain);
+  }
+  while (queue.length > 0) {
+    const entry = queue.pop()!;
+    for (const row of byEntry.get(entry) ?? []) {
+      if (reached.has(row.chain)) continue;
+      reached.add(row.chain);
+      queue.push(row.chain);
+    }
+  }
+  return reached;
 }
 
 /**
@@ -528,76 +631,176 @@ export interface SliceModel {
 export function collectSlices(probe: ProbeResult, model: TemplateModel, source: string): SliceModel {
   const rows = collectSurfaceRows(probe);
   const capabilityByChain = new Map<string, string>();
-  const ifaceByChain = new Map<string, string>();
   for (const r of rows) {
     if (r.capability) capabilityByChain.set(r.chain, r.capability);
-    if (!ifaceByChain.has(r.chain)) ifaceByChain.set(r.chain, r.iface);
   }
 
-  // Root context interfaces, so a member's "own vs shared" status is known.
+  // Root context interfaces, so a member's GROUP is known. (BaseObjectContext is
+  // one: "textbox" maps to it.)
   const rootIfaces = new Set(OBJECT_TYPE_INTERFACES.map(([, iface]) => iface).filter(Boolean));
 
+  // ONE ENTRY PER DISTINCT DECLARATION, NAMING EVERY INTERFACE THAT DECLARES IT.
+  //
+  // This loop used to open `if (seen.has(r.chain)) continue`, keeping whichever
+  // declaration `collectSurfaceRows` happened to emit first — it sorts by chain,
+  // then BROKER, with the alphabetical interface order entering only as the
+  // stable third key — and throwing the rest away: ShapeContext's for
+  // `getCellValue`, TableContext's for `setCellValue`. A lie for 28 chains, and
+  // on those two, where the owners disagree about the broker as well, a lie
+  // about the BROKER too. (Not "the alphabetically first interface": that is
+  // right for 27 of the 28 and wrong for `setCellValue`, where TableContext beat
+  // alphabetically-first SheetContext on the broker key.)
+  // These rows are the ONLY description of the API a model is shown,
+  // so a sheet script was taught the shape signature, produced code that passed
+  // the whole validator ladder (the reach check matches by CHAIN and cannot see
+  // arity) and did nothing at runtime.
+  //
+  //   keyed by chain:         667 rows, getCellValue means whatever ShapeContext says
+  //   keyed by (chain,iface): 894 rows, 176 byte-identical repeats of an inherited decl
+  //   keyed by declaration:   718 rows covering all 894 pairs   <- this one
   const entries: SurfaceEntryRow[] = [];
-  const seen = new Set<string>();
+  const byDeclaration = new Map<string, SurfaceEntryRow>();
   for (const r of rows) {
-    if (seen.has(r.chain)) continue;
     const declared = model.interfaces.get(r.iface)?.members.get(r.path);
     if (!declared) continue; // probed but undeclared: the generator already fails on this
-    seen.add(r.chain);
     const signature = oneLine(source.slice(declared.start, declared.end));
     const summary = summaryOf(declared);
     const capability = capabilityByChain.get(r.chain);
     const group = groupOf(r.chain, capability, rootIfaces.has(r.iface));
-    entries.push({
+    // JSON, not a delimiter-joined string: a signature legitimately contains
+    // quotes, pipes and backslashes (`lineEnding?: "\r\n" | "\n"`), and no
+    // separator is safe against all of them. It also keeps NUL escapes out of
+    // the source, which `npm run check:line-endings` hunts for a reason.
+    const key = JSON.stringify([r.chain, signature, summary, capability ?? "", group]);
+    const held = byDeclaration.get(key);
+    if (held) {
+      if (!held.ifaces.includes(r.iface)) held.ifaces.push(r.iface);
+      continue;
+    }
+    const entry: SurfaceEntryRow = {
       chain: r.chain,
+      ifaces: [r.iface],
       signature,
       summary,
       ...(capability ? { capability } : {}),
       group,
       cost: estimateTokens(`${r.chain} ${signature} ${summary}`),
-    });
+    };
+    byDeclaration.set(key, entry);
+    entries.push(entry);
   }
-  entries.sort((a, b) => a.chain.localeCompare(b.chain));
+  for (const entry of entries) entry.ifaces.sort();
+  // Chain first so the file still reads alphabetically; declaring interface
+  // second so a chain's several declarations have a total order and the artifact
+  // is byte-reproducible between runs.
+  entries.sort((a, b) => a.chain.localeCompare(b.chain) || a.ifaces[0].localeCompare(b.ifaces[0]));
 
-  // Which chains each object type can reach. A root context contributes its OWN
-  // members; BaseObjectContext and every NAMED_SUBTREES interface are reachable
-  // from any context, so those are shared. Derived from the same two tables the
-  // probe uses, not restated.
-  const sharedIfaces = new Set(NAMED_SUBTREES.map(([, iface]) => iface));
-  const isShared = (chain: string): boolean => {
-    const owner = ifaceByChain.get(chain)!;
-    return owner === "BaseObjectContext" || sharedIfaces.has(owner);
-  };
+  // WHICH CHAINS EACH OBJECT TYPE CAN ACTUALLY REACH — walked as a graph,
+  // because that is the shape the surface has.
+  const byEntry = indexSurfaceByEntry(rows);
+  const sliceChains = new Set(entries.map((e) => e.chain));
+  const reachSets = new Map<string, Set<string>>();
+  for (const [objectType, iface] of OBJECT_TYPE_INTERFACES) {
+    if (!iface) continue;
+    reachSets.set(objectType, reachableChains(byEntry, iface));
+  }
 
-  const sharedChains = entries.filter((e) => isShared(e.chain)).map((e) => e.chain);
-  // Ownership per TYPE comes from the per-iface ROWS, not from ifaceByChain's
-  // first-owner map: a chain carried by several root contexts (onSelectionChange
-  // on sheet, slicer, cell AND row) is OWN to each of them, and the first-owner
-  // view silently emptied every later type's own-member floor — which is how
-  // the prompt ranker under-served slicer/table/timeline tasks.
+  // SHARED is the INTERSECTION of what every root can reach — not "what
+  // BaseObjectContext can reach". The two are the same 424 chains today and the
+  // check below asserts it, but they FAIL differently: BaseObjectContext is only
+  // probed because "textbox" maps to it, so dropping that one row would make the
+  // base walk return NOTHING, every chain would become a per-type extra, and the
+  // artifact would grow to the 343 KB this split exists to avoid — while a "is
+  // every shared chain reachable?" guard passed vacuously over the empty set.
+  const problems: string[] = [];
+  let intersection: Set<string> | null = null;
+  for (const reached of reachSets.values()) {
+    if (intersection === null) {
+      intersection = new Set(reached);
+      continue;
+    }
+    for (const chain of [...intersection]) if (!reached.has(chain)) intersection.delete(chain);
+  }
+  const shared = intersection ?? new Set<string>();
+  const sharedChains = [...shared].filter((chain) => sliceChains.has(chain)).sort();
+
+  // The cheap explanation of that set, kept as a CHECKED claim rather than a
+  // comment: every root spreads BaseObjectContext in, so what all of them can
+  // reach is exactly what the base can reach.
+  const baseReach = reachableChains(byEntry, "BaseObjectContext");
+  const baseOnly = [...baseReach].filter((c) => sliceChains.has(c) && !shared.has(c));
+  const sharedOnly = sharedChains.filter((c) => !baseReach.has(c));
+  if (baseOnly.length > 0 || sharedOnly.length > 0) {
+    problems.push(
+      'the shared surface is no longer "what BaseObjectContext can reach": ' +
+        `${baseOnly.length} chain(s) reachable only from the base (${baseOnly.slice(0, 5).join(", ")}), ` +
+        `${sharedOnly.length} shared but not from the base (${sharedOnly.slice(0, 5).join(", ")})`,
+    );
+  }
+  if (sharedChains.length === 0) {
+    problems.push(
+      "SHARED_CHAINS came out EMPTY — no chain is reachable from every context root. " +
+        "The probe has almost certainly stopped producing one of the root interfaces.",
+    );
+  }
+
+  // The RANKING FLOOR still comes from the per-iface ROWS: a chain carried by
+  // several root contexts (onSelectionChange on sheet, slicer, cell AND row) is
+  // OWN to each of them.
   const chainsByIface = new Map<string, Set<string>>();
   for (const r of rows) {
     const set = chainsByIface.get(r.iface) ?? new Set<string>();
     set.add(r.chain);
     chainsByIface.set(r.iface, set);
   }
-  const sliceChains = new Set(entries.map((e) => e.chain));
+
   const ownByObjectType = new Map<string, string[]>();
+  const reachableByObjectType = new Map<string, string[]>();
   for (const [objectType, iface] of OBJECT_TYPE_INTERFACES) {
     if (!iface) continue;
-    const own = [...(chainsByIface.get(iface) ?? [])].filter(
-      (chain) => sliceChains.has(chain) && !isShared(chain),
+    const reached = reachSets.get(objectType)!;
+    ownByObjectType.set(
+      objectType,
+      [...(chainsByIface.get(iface) ?? [])]
+        .filter((chain) => sliceChains.has(chain) && !shared.has(chain))
+        .sort(),
     );
-    ownByObjectType.set(objectType, own.sort());
+    reachableByObjectType.set(
+      objectType,
+      [...reached].filter((chain) => sliceChains.has(chain) && !shared.has(chain)).sort(),
+    );
+    // THE INVARIANT THAT MAKES "SHARED" MEAN ANYTHING, per type so the message
+    // names what broke it.
+    const unreachable = sharedChains.filter((chain) => !reached.has(chain));
+    if (unreachable.length > 0) {
+      problems.push(
+        `SHARED_CHAINS holds ${unreachable.length} chain(s) that "${objectType}" cannot reach ` +
+          `(${unreachable.slice(0, 5).join(", ")}${unreachable.length > 5 ? ", ..." : ""}) — ` +
+          '"shared" must mean reachable from every context root',
+      );
+    }
   }
 
-  return { entries, sharedChains, ownByObjectType };
+  // `isKnownObjectType` reads one map and `chainsForObjectType` the other, so a
+  // key in one and not the other is a type the ranker calls known and then hands
+  // the shared surface only.
+  const ownKeys = [...ownByObjectType.keys()].sort().join(",");
+  const reachKeys = [...reachableByObjectType.keys()].sort().join(",");
+  if (ownKeys !== reachKeys) {
+    problems.push(
+      "OWN_CHAINS_BY_OBJECT_TYPE and REACHABLE_CHAINS_BY_OBJECT_TYPE have different keys " +
+        `(${ownKeys} vs ${reachKeys})`,
+    );
+  }
+
+  return { entries, sharedChains, ownByObjectType, reachableByObjectType, problems };
 }
 
 function surfaceSliceModule(slices: SliceModel): string {
   const entryLines = slices.entries.map((e) => {
     const bits = [
       `chain: ${JSON.stringify(e.chain)}`,
+      `ifaces: ${JSON.stringify(e.ifaces)}`,
       `signature: ${JSON.stringify(e.signature)}`,
       `summary: ${JSON.stringify(e.summary)}`,
     ];
@@ -608,6 +811,16 @@ function surfaceSliceModule(slices: SliceModel): string {
   const typeLines = [...slices.ownByObjectType]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([objectType, chains]) => `  ${JSON.stringify(objectType)}: ${JSON.stringify(chains)},`);
+  const reachLines = [...slices.reachableByObjectType]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([objectType, chains]) => `  ${JSON.stringify(objectType)}: ${JSON.stringify(chains)},`);
+  const rootIfaceLines = OBJECT_TYPE_INTERFACES.map(
+    ([objectType, iface]) => `  ${JSON.stringify(objectType)}: ${JSON.stringify(iface)},`,
+  );
+  // Emitted so `entryFor`'s fallback cannot drift from the generator: a
+  // declaration on the base or on a named subtree means the same thing wherever
+  // it is reached from.
+  const sharedIfaceNames = ["BaseObjectContext", ...new Set(NAMED_SUBTREES.map(([, iface]) => iface))];
 
   return [
     SLICE_BANNER,
@@ -618,8 +831,18 @@ function surfaceSliceModule(slices: SliceModel): string {
     "",
     "/** One callable member, as a model needs to see it. */",
     "export interface SurfaceEntry {",
-    "  /** The member-name sequence an author writes, e.g. \"caps.storage.get\". */",
+    '  /** The member-name sequence an author writes, e.g. "caps.storage.get". */',
     "  readonly chain: string;",
+    "  /**",
+    "   * Every context interface that declares THIS declaration of the chain.",
+    "   *",
+    "   * A chain is NOT unique: `getCellValue` is three declarations with two",
+    "   * different brokers. Resolve one with `entryFor(chain, objectType)` --",
+    "   * NEVER by scanning for the first entry whose chain matches, which is what",
+    "   * taught sheet scripts the shape signature and produced drafts that",
+    "   * validated clean and were dead at runtime.",
+    "   */",
+    "  readonly ifaces: readonly string[];",
     "  /** The declaration, collapsed to one line. */",
     "  readonly signature: string;",
     "  /** First sentence of the hand-written prose; generated policy excluded. */",
@@ -635,29 +858,114 @@ function surfaceSliceModule(slices: SliceModel): string {
     "];",
     "",
     "/**",
-    " * Chains EVERY object type can reach: BaseObjectContext plus every named",
-    " * subtree (caps, api, range, the handles).",
+    " * Chains EVERY object type can reach -- REACHABILITY, not ownership.",
+    " *",
+    " * The intersection of what each context root can reach by walking the surface",
+    " * as a graph, which is also exactly what BaseObjectContext reaches. A named",
+    " * subtree is NOT automatically shared: it is reachable only through the member",
+    " * that hands it out, and `range()` / `cell()` are declared on SheetContext and",
+    " * TableContext alone. All 51 `range.*` and all 51 `cell.*` chains used to be",
+    " * listed here, so a prompt told a button script that `context.cell.setValue`",
+    " * exists while correctly withholding any way to obtain a cell.",
     " *",
     " * Held separately from the per-type extras because listing the full set once",
-    " * per object type made this file as large as the .d.ts it exists to shrink --",
-    " * ~520 of ~530 chains are identical across all 17 types.",
+    " * per object type made this file as large as the .d.ts it exists to shrink.",
     " */",
     "export const SHARED_CHAINS: readonly string[] = " + JSON.stringify(slices.sharedChains) + ";",
     "",
-    "/** objectType -> only the chains its OWN root context adds on top of SHARED_CHAINS. */",
+    "/**",
+    " * objectType -> the chains its OWN ROOT CONTEXT declares.",
+    " *",
+    " * The prompt ranker's FLOOR. NOT the reachable set: flooring a sheet script's",
+    " * whole ScriptRange facet would spend the budget before `api.setCellValue`.",
+    " */",
     "export const OWN_CHAINS_BY_OBJECT_TYPE: Readonly<Record<string, readonly string[]>> = {",
     ...typeLines,
     "};",
     "",
+    "/**",
+    " * objectType -> every NON-SHARED chain it can REACH.",
+    " *",
+    ' * Differs from OWN_CHAINS_BY_OBJECT_TYPE exactly for "sheet" and "table", the',
+    " * two contexts that hand out a ScriptRange. This bounds the prompt's pool -- a",
+    " * chain outside it is a method the script cannot call. Its keys are identical",
+    " * to OWN_CHAINS_BY_OBJECT_TYPE's; the generator fails the build otherwise.",
+    " */",
+    "export const REACHABLE_CHAINS_BY_OBJECT_TYPE: Readonly<Record<string, readonly string[]>> = {",
+    ...reachLines,
+    "};",
+    "",
+    "/**",
+    " * objectType -> the context interface `setup(context)` is handed for it.",
+    " *",
+    " * The probe's own table, emitted so no consumer derives it from the",
+    ' * `"<Type>Context"` naming convention -- already wrong for "textbox".',
+    " */",
+    "export const ROOT_IFACE_BY_OBJECT_TYPE: Readonly<Record<string, string>> = {",
+    ...rootIfaceLines,
+    "};",
+    "",
+    "/** Interfaces whose declarations mean the same thing wherever they are reached. */",
+    "export const SHARED_IFACES: readonly string[] = " + JSON.stringify(sharedIfaceNames) + ";",
+    "",
     "/** Everything a script attached to `objectType` can reach. */",
     "export function chainsForObjectType(objectType: string): readonly string[] {",
-    "  const own = OWN_CHAINS_BY_OBJECT_TYPE[objectType];",
-    "  return own ? [...SHARED_CHAINS, ...own] : SHARED_CHAINS;",
+    "  const extra = REACHABLE_CHAINS_BY_OBJECT_TYPE[objectType];",
+    "  return extra ? [...SHARED_CHAINS, ...extra] : SHARED_CHAINS;",
     "}",
     "",
     "/** True when the object type has a slice at all (an unknown one has none). */",
     "export function isKnownObjectType(objectType: string): boolean {",
     "  return Object.prototype.hasOwnProperty.call(OWN_CHAINS_BY_OBJECT_TYPE, objectType);",
+    "}",
+    "",
+    "const VARIANTS_BY_CHAIN: ReadonlyMap<string, readonly SurfaceEntry[]> = (() => {",
+    "  const out = new Map<string, SurfaceEntry[]>();",
+    "  for (const entry of SURFACE_ENTRIES) {",
+    "    const held = out.get(entry.chain);",
+    "    if (held) held.push(entry);",
+    "    else out.set(entry.chain, [entry]);",
+    "  }",
+    "  return out;",
+    "})();",
+    "",
+    "const SHARED_IFACE_SET: ReadonlySet<string> = new Set(SHARED_IFACES);",
+    "",
+    "/**",
+    " * The ONE entry a script attached to `objectType` means when it writes `chain`.",
+    " *",
+    " * Most chains have a single declaration and this is a map lookup. The 28 that",
+    " * do not are why this exists.",
+    " */",
+    "export function entryFor(chain: string, objectType: string): SurfaceEntry | undefined {",
+    "  const variants = VARIANTS_BY_CHAIN.get(chain);",
+    "  if (!variants) return undefined;",
+    "  if (variants.length === 1) return variants[0];",
+    "  // hasOwnProperty, not `?? undefined`: the map is a plain object, so a",
+    '  // prototype-key objectType ("constructor") would read an inherited FUNCTION.',
+    "  if (Object.prototype.hasOwnProperty.call(ROOT_IFACE_BY_OBJECT_TYPE, objectType)) {",
+    "    const rootIface = ROOT_IFACE_BY_OBJECT_TYPE[objectType];",
+    "    const exact = variants.find((entry) => entry.ifaces.includes(rootIface));",
+    "    if (exact) return exact;",
+    "  }",
+    "  return variants.find((entry) => entry.ifaces.some((i) => SHARED_IFACE_SET.has(i))) ?? variants[0];",
+    "}",
+    "",
+    "/**",
+    " * Every member a script attached to `objectType` can call, each resolved to",
+    " * that object's OWN declaration. An unknown type degrades to one declaration",
+    " * of every chain rather than to nothing.",
+    " */",
+    "export function entriesForObjectType(objectType: string): readonly SurfaceEntry[] {",
+    "  const chains = isKnownObjectType(objectType)",
+    "    ? chainsForObjectType(objectType)",
+    "    : [...VARIANTS_BY_CHAIN.keys()];",
+    "  const out: SurfaceEntry[] = [];",
+    "  for (const chain of chains) {",
+    "    const entry = entryFor(chain, objectType);",
+    "    if (entry) out.push(entry);",
+    "  }",
+    "  return out;",
     "}",
     "",
   ].join("\n");
@@ -774,6 +1082,20 @@ export function generateObjectContexts(templateSource: string, templateName = "o
   const output = `${BANNER}\n${body.replace(/\s*$/, "")}\n`;
   const rows = collectSurfaceRows(probe);
   const slices = collectSlices(probe, model, templateSource);
+  // A slice model that contradicts itself must not be emitted, for the same
+  // reason a drifted .d.ts must not. Routed through `problems` because that is
+  // the one channel both callers already handle: gen-script-typings.mjs prints
+  // and exits 1 without writing, and objectContextsTypings.test.ts asserts empty.
+  if (slices.problems.length > 0) {
+    return {
+      output: "",
+      policyOutput: "",
+      sliceOutput: "",
+      problems: slices.problems,
+      unverified,
+      stats: { interfaces: probe.interfaces.size, members: memberCount, documented, policyRows: 0, sliceEntries: 0 },
+    };
+  }
   return {
     output,
     policyOutput: surfacePolicyModule(rows),

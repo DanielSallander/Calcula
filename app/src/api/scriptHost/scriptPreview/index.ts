@@ -47,6 +47,7 @@ import { PreviewGrid } from "./grid";
 import { objectHooksFor } from "./objectHooks";
 import { backendEvaluator, recalculatePreviewGrid, type FormulaEvaluator } from "./formulaEval";
 import { buildReport, declined, diffGrid } from "./report";
+import { previewSkipLine } from "./unexercisedHooks";
 import { MAX_SNAPSHOT_CELLS, snapshotActiveSheet, type SnapshotResult, type SnapshotSource } from "./snapshot";
 import type { DryRunReport } from "../scriptAuthoring";
 
@@ -257,10 +258,24 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
   // unexercised branch can never read as an exercised-and-clean one. This is a
   // note rather than a decline: everything that DID run ran faithfully, and
   // the reviewer decides whether the unfired handler is where the work lives.
-  const skippedNotes = run.skippedHooks.map(
-    (h) =>
-      `[preview] the ${h} handler was registered but not exercised — the preview cannot ` +
-      `synthesize the payload it receives`,
+  //
+  // IT LEAVES AS A FIELD, NOT ONLY AS PROSE. The line below goes into `output`
+  // for a human reading the transcript, and the same list goes onto the report
+  // as `unexercisedHooks` for the three surfaces that must ACT on it. A
+  // consumer that had to parse the sentence back out would be reading one of
+  // our own strings as an API.
+  // `(hook) =>`, never a bare `.map(previewSkipLine)`: map passes the INDEX as
+  // the second argument, so the point-free form hands `offered` a number and
+  // every hook after the first silently claims the wrong reason.
+  const offeredHooks = new Set(
+    req.event === undefined
+      ? objectHooksFor(req.objectType)
+      : Array.isArray(req.event)
+        ? req.event
+        : [req.event],
+  );
+  const skippedNotes = run.unexercisedHooks.map((hook) =>
+    previewSkipLine(hook, offeredHooks.has(hook)),
   );
 
   return buildReport({
@@ -269,6 +284,7 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
     durationMs: Date.now() - startedAt,
     changes: diffGrid(before, snapshot.grid),
     output: [...state.output, ...refusalNotes, ...skippedNotes],
+    unexercisedHooks: run.unexercisedHooks,
     readBack: (req.readBack ?? []).map((r) => ({
       row: r.row,
       col: r.col,

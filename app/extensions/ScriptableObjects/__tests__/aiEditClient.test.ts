@@ -49,7 +49,7 @@ const ASK = {
   documentId: "obj-1",
   documentName: "Button 1",
   objectType: "button",
-  documentKind: "object" as const,
+  documentKind: "objectScript" as const,
   currentSource: "export function onClick() {}",
   instruction: "make it red",
 };
@@ -92,6 +92,28 @@ describe("aiEditClient — the proposal stops here", () => {
     expect(state.proposal).toBe("NEW");
     // The client has no route to the buffer at all — that is the guarantee.
     expect(Object.keys(state)).not.toContain("applied");
+  });
+
+  it("always holds an ARRAY of unexercised hooks, whatever the payload carried", async () => {
+    // The diff window renders off `state.unexercisedHooks.length`. A result from
+    // an assistant provider that ran no dry run — or from a main window built
+    // before the field existed — omits it, and `undefined.length` inside a
+    // render takes the review window down with it.
+    await install();
+    askAiToEdit(ASK);
+    resultHandler!({ documentId: "obj-1", jobId: "j1", ok: true, source: "NEW", summary: "" });
+    expect(aiEditStateFor("obj-1").unexercisedHooks).toEqual([]);
+
+    askAiToEdit({ ...ASK, documentId: "obj-2" });
+    resultHandler!({
+      documentId: "obj-2",
+      jobId: "j2",
+      ok: true,
+      source: "NEW",
+      summary: "",
+      unexercisedHooks: ["onSelectionChange"],
+    });
+    expect(aiEditStateFor("obj-2").unexercisedHooks).toEqual(["onSelectionChange"]);
   });
 
   it("keeps state per document, so a run survives switching scripts", async () => {

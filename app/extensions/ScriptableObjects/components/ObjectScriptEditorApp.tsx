@@ -80,6 +80,7 @@ import {
 } from "./DebugPanel";
 import {
   configureObjectScriptTypings,
+  contextInterfaceNameFor,
   setActiveContextType,
   annotateScaffold,
 } from "../lib/monacoTypings";
@@ -1260,6 +1261,53 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   // had read a line of it.
   const [showAiEdit, setShowAiEdit] = useState(false);
   useEffect(() => installAiEditClient(), []);
+
+  /**
+   * Capabilities the DRAFT declares that no call in it appears to need.
+   *
+   * The reviewer is about to grant exactly these by pressing Save, and the
+   * banner above showed only what was declared — never that nothing in the code
+   * was seen to use it. §11.2 makes this a NOTICE precisely because a machine
+   * cannot decide it and a person can, and this is the person.
+   *
+   * IMPORTED LAZILY. `scriptValidation` reaches the generated
+   * `scriptSurfacePolicy` (~94 KB, which is all `scriptValidation/surface.ts`
+   * imports), and this window loads Monaco on a cold start — an AI draft is a
+   * rare document, so the surface is fetched when one actually arrives.
+   *
+   * Validated UNNARROWED. Only `declared-not-observed` is read, and that finding
+   * is about pragmas versus observed capability use — the same answer for every
+   * object type — so narrowing would change nothing here and add a second field
+   * to keep true.
+   */
+  const [unobservedCaps, setUnobservedCaps] = useState<string[]>([]);
+  const draftSource = isDraft && draftDoc ? draftDoc.script.source : null;
+  useEffect(() => {
+    if (!draftSource) {
+      setUnobservedCaps([]);
+      return;
+    }
+    let cancelled = false;
+    void import("@api/scriptHost/scriptValidation")
+      .then(({ validateScriptSource }) => {
+        if (cancelled) return;
+        const report = validateScriptSource(draftSource);
+        setUnobservedCaps(
+          report.findings
+            .filter((f) => f.code === "declared-not-observed")
+            .map((f) => f.capability ?? "")
+            .filter((c) => c !== ""),
+        );
+      })
+      .catch(() => {
+        // A surface that cannot be loaded means this one extra line is missing,
+        // nothing more. The banner's own facts do not depend on it.
+        if (!cancelled) setUnobservedCaps([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [draftSource]);
   const aiEdit = useSyncExternalStore(
     subscribeToAiEdits,
     // Returns the SHARED idle object when there is nothing, never a fresh
@@ -1276,7 +1324,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         documentId: activeScriptId,
         documentName: activeScript.name,
         objectType: activeScript.objectType,
-        documentKind: docKind === "module" ? "module" : "object",
+        documentKind: docKind,
         currentSource: editorRef.current?.getValue() ?? sourceRef.current,
         instruction,
       });
@@ -2350,6 +2398,16 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               : draftDoc.draft.declaredCapabilities.join(", ")}
             {" · "}Tier: {draftDoc.script.accessLevel}
           </div>
+          {/* WHAT IT ASKS FOR THAT IT DOES NOT APPEAR TO USE. Never a rejection
+              — the scanner cannot follow computed access, so the declaration may
+              well be right — but the reviewer grants exactly these by pressing
+              Save, and until now the banner said only what was asked for. */}
+          {unobservedCaps.length > 0 && (
+            <div data-testid="ai-draft-unobserved" style={{ marginTop: 2 }}>
+              Declared but not used anywhere this scan can see:{" "}
+              <strong>{unobservedCaps.join(", ")}</strong>. Read the code before granting it.
+            </div>
+          )}
           {draftDoc.draft.description && (
             <div style={{ marginTop: 2, opacity: 0.85 }}>{draftDoc.draft.description}</div>
           )}
@@ -2363,12 +2421,13 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         <AiEditDiff
           key={activeScriptId ?? "none"}
           documentName={activeScript.name}
-          documentKind={docKind === "module" ? "module" : "object"}
+          documentKind={docKind}
           original={source}
           proposed={aiEdit.proposal}
           language={language}
           summary={aiEdit.summary}
           unchanged={aiEdit.unchanged}
+          unexercisedHooks={aiEdit.unexercisedHooks}
           onAccept={handleAcceptAi}
           onReject={handleRejectAi}
         />
@@ -2525,7 +2584,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
                 padding: "3px 6px", background: "rgba(86,156,214,0.08)",
                 borderRadius: 3, display: "inline-block",
               }}>
-                {activeScript.objectType.charAt(0).toUpperCase() + activeScript.objectType.slice(1)}Context
+                {contextInterfaceNameFor(activeScript.objectType, objectContextsDts)}
               </div>
             )}
             {docs.map((cat) => (

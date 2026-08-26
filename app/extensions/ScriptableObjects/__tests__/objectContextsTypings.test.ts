@@ -100,12 +100,194 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // takes `lineEnding?: "\r\n" | "\n" | "\r"`, and an earlier version of this
     // test read those string-literal types as multi-line signatures.
     const sigs = [...result.sliceOutput.matchAll(/signature: "((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
-    expect(sigs.length).toBeGreaterThan(500);
+    expect(sigs.length).toBeGreaterThan(700);
     expect(sigs.filter((s) => s.includes("/**"))).toEqual([]);
     // And the whole thing must stay far under the .d.ts it came from.
+    //
+    // The bar was `/ 2` while the slices were keyed by CHAIN. Keying them by
+    // DECLARATION added 51 rows and an `ifaces` list per row, and withholding
+    // the unreachable subtrees shrank SHARED_CHAINS from 526 to 424: measured
+    // 209,483 chars against the .d.ts's 347,527, a ratio of 0.603. `* 0.65`
+    // (225,892) keeps ~16 KB of headroom and still catches a prose leak, which
+    // is the only thing this assertion was ever for.
+    //
+    // The PROMPT did not grow with the file. Every object type's resolved pool
+    // is the same size or smaller than before (button 528 -> 426, sheet and
+    // table unchanged at 543/554), because the rows that vanished from a type's
+    // slice are the ones it could never call. Worst-case full surface after:
+    // 24,384 tokens against the assembler's 40,000 ceiling.
     expect(result.sliceOutput.length).toBeLessThan(
-      fs.readFileSync(GENERATED_PATH, "utf8").length / 2,
+      fs.readFileSync(GENERATED_PATH, "utf8").length * 0.65,
     );
+  });
+
+  it("keeps one slice entry per DISTINCT DECLARATION, covering every declaration site", () => {
+    // A CHAIN IS NOT UNIQUE. `getCellValue` is declared three times with three
+    // signatures and two different brokers: ShapeContext takes an A1 string,
+    // TableContext a data row plus a column index, SheetContext row + col +
+    // optional sheet. Keyed by chain, the slices kept whichever interface sorted
+    // first and told every sheet script the SHAPE signature — the only
+    // description of the API a model is shown, so the draft came back calling a
+    // method that does not exist on its context, passed the whole validator
+    // ladder (the reach check matches by CHAIN and cannot see arity) and did
+    // nothing at run time.
+    const result = generateObjectContexts(readTemplate(), path.basename(TEMPLATE_PATH));
+    expect(result.problems).toEqual([]);
+
+    const entries = [
+      ...result.sliceOutput.matchAll(
+        /^ {2}\{ chain: ("(?:[^"\\]|\\.)*"), ifaces: (\[[^\]]*\]), signature: ("(?:[^"\\]|\\.)*")/gm,
+      ),
+    ].map((m) => ({
+      chain: JSON.parse(m[1]) as string,
+      ifaces: JSON.parse(m[2]) as string[],
+      signature: JSON.parse(m[3]) as string,
+    }));
+
+    // One row per DECLARATION sits strictly between one row per chain (which
+    // throws declarations away) and one row per (chain, iface) pair (which
+    // repeats an inherited declaration 176 times for no gain).
+    const chains = new Set(entries.map((e) => e.chain));
+    expect(chains.size).toBe(667);
+    expect(entries.length).toBe(718);
+    expect(entries.length).toBeGreaterThan(chains.size);
+
+    const policyPairs = new Set(
+      [
+        ...result.policyOutput.matchAll(
+          /^ {2}\{ chain: ("(?:[^"\\]|\\.)*"), iface: ("(?:[^"\\]|\\.)*")/gm,
+        ),
+      ].map((m) => `${JSON.parse(m[1])}|${JSON.parse(m[2])}`),
+    );
+    expect(policyPairs.size).toBe(894);
+    expect(entries.length).toBeLessThan(policyPairs.size);
+
+    // TOTALITY, which is what makes `entryFor`'s exact match total: every
+    // (chain, iface) pair the policy knows appears in exactly ONE entry.
+    const slicePairs: string[] = [];
+    for (const e of entries) for (const iface of e.ifaces) slicePairs.push(`${e.chain}|${iface}`);
+    const seen = new Set<string>();
+    const duplicated = slicePairs.filter((p) => (seen.has(p) ? true : (seen.add(p), false)));
+    expect(duplicated, "a (chain, iface) pair is declared by two slice entries").toEqual([]);
+    const missing = [...policyPairs].filter((p) => !seen.has(p)).sort();
+    expect(
+      missing.length,
+      `${missing.length} (chain, iface) pair(s) the policy knows have no slice entry, ` +
+        `so a script on that object type is shown another interface's declaration: ${missing.slice(0, 5).join(", ")}`,
+    ).toBe(0);
+    const extra = [...seen].filter((p) => !policyPairs.has(p)).sort();
+    expect(extra, "slice entries claim interfaces the policy has no row for").toEqual([]);
+
+    // The concrete member the chain-keyed artifact lied about. Three distinct
+    // signatures, so no ordering of the interfaces can make one of them right
+    // for all three. (Do NOT extend this to a (chain, signature) uniqueness
+    // claim over the whole file: 14 chains legitimately share a signature
+    // across 26 rows.)
+    const getCellValue = entries.filter((e) => e.chain === "getCellValue");
+    expect(getCellValue.flatMap((e) => e.ifaces).sort()).toEqual([
+      "ShapeContext",
+      "SheetContext",
+      "TableContext",
+    ]);
+    expect(new Set(getCellValue.map((e) => e.signature)).size).toBe(3);
+
+    // The two artifacts must agree on which interface each object type is
+    // handed, because `entryFor` resolves a chain THROUGH that table.
+    const rootIfaces = Object.fromEntries(
+      [
+        ...result.sliceOutput.matchAll(
+          /^ {2}("(?:[^"\\]|\\.)*"): ("(?:[^"\\]|\\.)*"),$/gm,
+        ),
+      ].map((m) => [JSON.parse(m[1]) as string, JSON.parse(m[2]) as string]),
+    );
+    const policyContexts = Object.fromEntries(
+      [
+        ...result.policyOutput.matchAll(
+          /^ {2}\[("(?:[^"\\]|\\.)*"), ("(?:[^"\\]|\\.)*")\],$/gm,
+        ),
+      ].map((m) => [JSON.parse(m[1]) as string, JSON.parse(m[2]) as string]),
+    );
+    expect(Object.keys(rootIfaces).length).toBe(OBJECT_TYPE_INTERFACES.length);
+    expect(rootIfaces).toEqual(policyContexts);
+  });
+
+  it("publishes a chain as SHARED only when every context can reach it", () => {
+    // "Shared" used to mean "the declaring interface is BaseObjectContext or a
+    // named subtree", which answers a different question. A named subtree is
+    // reachable only through the member that HANDS IT OUT, and `range()` /
+    // `cell()` are declared on SheetContext and TableContext alone — so all 51
+    // `range.*` and all 51 `cell.*` chains were published to all 17 object
+    // types while the `range` / `cell` entry points were correctly withheld. At
+    // the chat's own 6,000-token budget that put 22 uncallable members in a
+    // button prompt, under a header saying "these are the ONLY methods this
+    // script may call".
+    const result = generateObjectContexts(readTemplate(), path.basename(TEMPLATE_PATH));
+    expect(result.problems).toEqual([]);
+
+    const shared = JSON.parse(
+      /export const SHARED_CHAINS: readonly string\[\] = (\[[^\n]*?\]);/.exec(result.sliceOutput)![1],
+    ) as string[];
+    const parseMap = (name: string): Record<string, string[]> => {
+      const block = new RegExp(`export const ${name}[^{]*\\{\\n([\\s\\S]*?)\\n\\};`).exec(
+        result.sliceOutput,
+      )![1];
+      const out: Record<string, string[]> = {};
+      for (const line of block.split("\n")) {
+        const m = /^ {2}("(?:[^"\\]|\\.)*"): (\[[^\]]*\]),$/.exec(line)!;
+        out[JSON.parse(m[1]) as string] = JSON.parse(m[2]) as string[];
+      }
+      return out;
+    };
+    const own = parseMap("OWN_CHAINS_BY_OBJECT_TYPE");
+    const reachable = parseMap("REACHABLE_CHAINS_BY_OBJECT_TYPE");
+
+    // (a) NON-VACUITY FIRST. Every assertion below is over these sets, so an
+    // empty one would make the rest pass while saying nothing.
+    expect(shared.length).toBeGreaterThan(300);
+    expect(Object.keys(own).length).toBe(OBJECT_TYPE_INTERFACES.length);
+    expect(Object.keys(reachable).length).toBe(OBJECT_TYPE_INTERFACES.length);
+
+    // (b) `isKnownObjectType` reads one map and `chainsForObjectType` the
+    // other; a key in one and not the other is a type the ranker calls known
+    // and then hands the shared surface only.
+    expect(Object.keys(reachable).sort()).toEqual(Object.keys(own).sort());
+
+    // (c) The members the old rule got wrong, named.
+    expect(shared).not.toContain("cell.setValue");
+    expect(shared).not.toContain("range.setValue");
+    // ...while the SAME interface reached through a member every context has
+    // stays shared, so this is narrowing and not a blanket exclusion.
+    expect(shared).toContain("api.table.range.setValue");
+    expect(reachable.sheet).toContain("range");
+    expect(reachable.sheet).toContain("cell.setValue");
+    expect(reachable.table).toContain("cell.setValue");
+    for (const chain of ["range", "cell", "range.setValue", "cell.setValue"]) {
+      expect(
+        reachable.button,
+        `a button script cannot obtain a ScriptRange, so ${chain} must not be offered to one`,
+      ).not.toContain(chain);
+    }
+
+    // (d) CLOSURE, which is the general form of (c): a member is only callable
+    // if the object it hangs off is itself callable. The probe emits six chains
+    // whose entry point keeps its call parens (`getFields().columns`,
+    // `getRange().start`), so a prefix counts as present either as written or
+    // with a trailing "()" stripped.
+    const violations: string[] = [];
+    for (const objectType of Object.keys(reachable)) {
+      const set = new Set([...shared, ...reachable[objectType]]);
+      for (const chain of set) {
+        if (!chain.includes(".")) continue;
+        const prefix = chain.slice(0, chain.lastIndexOf("."));
+        if (set.has(prefix) || set.has(prefix.replace(/\(\)$/, ""))) continue;
+        violations.push(`${objectType}: ${chain} (needs ${prefix})`);
+      }
+    }
+    expect(
+      violations.length,
+      `${violations.length} chain(s) are offered to an object type that cannot reach their ` +
+        `entry point: ${violations.slice(0, 5).join(", ")}`,
+    ).toBe(0);
   });
 
   it("gives the validator a surface with the capability-bearing members on it", () => {

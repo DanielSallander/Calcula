@@ -76,9 +76,15 @@ export function detectScriptIntent(message: string): ScriptIntent {
 /**
  * The object type a message hints at, or null.
  *
- * Only used to PRESELECT the dropdown in the guided flow — the user always sees
- * and can change it. `draftGate` has to guess "button" silently because it runs
- * after the fact; here the guess is visible, which is the whole improvement.
+ * Used to PRESELECT the dropdown in the guided flow — where the user sees and
+ * can change it — AND to pick the API slice the chat shows the model before it
+ * writes anything, where nobody sees it at all. That second consumer is why the
+ * match has to be word-accurate: a wrong answer is a prompt that confidently
+ * describes the wrong object's hooks, and the model's draft is dead.
+ *
+ * ORDER MATTERS: first hit wins, so the NAMED objects come first and the generic
+ * grid words last. "add a button to my spreadsheet" is a button request that
+ * happens to mention where the button goes.
  */
 const TYPE_HINTS: ReadonlyArray<[string, string]> = [
   ["button", "button"],
@@ -94,12 +100,39 @@ const TYPE_HINTS: ReadonlyArray<[string, string]> = [
   ["workbook", "workbook"],
   ["sheet", "sheet"],
   ["worksheet", "sheet"],
+  // The grid primitives, last. They are real object types (`DRAFT_OBJECT_TYPES`
+  // in chatTools.ts), and until they were listed "when this cell changes" got
+  // the BUTTON surface — a documented miss, but a miss on the commonest way to
+  // describe a cell script.
+  ["cell", "cell"],
+  ["row", "row"],
+  ["column", "column"],
 ];
+
+/**
+ * Does the text contain `needle` AS A WORD?
+ *
+ * `includes` was WRONG, not merely loose. "spreadsheet" contains "sheet", so "a
+ * script for my spreadsheet that colours each selected cell" built a
+ * SheetContext surface — no `onClick` anywhere in it — for what is almost always
+ * a button request. "datatable" contains "table" the same way, and with the grid
+ * primitives above, "narrow" would contain "row" and "columns" would swallow
+ * every plural of every noun that ends in one.
+ *
+ * A miss is the acceptable failure here (`apiSurface.ts` falls back to "button"
+ * and says so); a confident wrong answer is not.
+ */
+export function mentionsWord(text: string, needle: string): boolean {
+  // The needles are a fixed lowercase table, but escaped anyway: a table entry
+  // with a "." or a "(" in it would otherwise silently become a wildcard.
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`).test(text);
+}
 
 export function guessObjectType(message: string): string | null {
   const text = message.toLowerCase();
   for (const [needle, type] of TYPE_HINTS) {
-    if (text.includes(needle)) return type;
+    if (mentionsWord(text, needle)) return type;
   }
   return null;
 }

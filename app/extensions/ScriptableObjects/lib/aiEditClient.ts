@@ -37,6 +37,15 @@ export interface AiEditState {
   summary: string;
   /** The model looked and decided nothing needed changing. */
   unchanged: boolean;
+  /**
+   * Handlers the proposal registers that the dry run never fired.
+   *
+   * REQUIRED here even though the wire field is tolerated as absent: the diff
+   * renders off this array, and "the run changed no cells" about code the run
+   * never reached is a fact about the PREVIEW that reads as a verdict on the
+   * script.
+   */
+  unexercisedHooks: string[];
   /** The instruction that produced this, echoed back for the banner. */
   instruction: string;
   jobId: string;
@@ -49,6 +58,10 @@ const IDLE: AiEditState = {
   proposal: "",
   summary: "",
   unchanged: false,
+  // ONE array, shared by every idle state — `IDLE` is returned by identity to
+  // keep `useSyncExternalStore` from seeing a new snapshot on every render, and
+  // a fresh `[]` per read would undo exactly that.
+  unexercisedHooks: [],
   instruction: "",
   jobId: "",
 };
@@ -125,6 +138,7 @@ export function askAiToEdit(opts: AskOptions): void {
     proposal: "",
     summary: "",
     unchanged: false,
+    unexercisedHooks: [],
     instruction: opts.instruction,
     jobId: "",
   });
@@ -162,7 +176,15 @@ export function cancelAiEdit(documentId: string): void {
  */
 export function rejectAiEdit(documentId: string): void {
   void emitAiEditCancel({ documentId, jobId: aiEditStateFor(documentId).jobId });
-  set(documentId, { phase: "idle", progress: "", live: "", proposal: "", summary: "", unchanged: false });
+  set(documentId, {
+    phase: "idle",
+    progress: "",
+    live: "",
+    proposal: "",
+    summary: "",
+    unchanged: false,
+    unexercisedHooks: [],
+  });
 }
 
 /**
@@ -219,7 +241,14 @@ export function installAiEditClient(): () => void {
       // know whether the first delivery landed; deciding that is this side's job.
       if (current.phase === "proposed" || current.phase === "error") return;
       if (!r.ok) {
-        set(r.documentId, { phase: "error", summary: r.summary, progress: "", live: "", proposal: "" });
+        set(r.documentId, {
+          phase: "error",
+          summary: r.summary,
+          progress: "",
+          live: "",
+          proposal: "",
+          unexercisedHooks: [],
+        });
         return;
       }
       set(r.documentId, {
@@ -227,6 +256,11 @@ export function installAiEditClient(): () => void {
         proposal: r.source,
         summary: r.summary,
         unchanged: !!r.unchanged,
+        // `?? []` because the payload crosses a window boundary and is built by
+        // whatever version of the main window is running — and because every
+        // test double in this repo predates the field. A render that indexes
+        // `undefined.length` takes the whole diff window down.
+        unexercisedHooks: r.unexercisedHooks ?? [],
         progress: "",
         live: "",
         jobId: r.jobId || current.jobId,

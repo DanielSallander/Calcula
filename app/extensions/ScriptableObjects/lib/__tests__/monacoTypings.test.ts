@@ -15,6 +15,8 @@ import {
   setActiveContextType,
   resetObjectScriptTypingsForTest,
   readContextTypeMap,
+  contextTypeMapFor,
+  contextInterfaceNameFor,
   buildActiveContextLib,
   annotateScaffold,
   OBJECT_CONTEXTS_LIB,
@@ -164,6 +166,42 @@ describe("readContextTypeMap", () => {
   it("falls back to the base context for an unknown objectType", () => {
     const lib = buildActiveContextLib("somethingNew", readContextTypeMap(DTS));
     expect(lib).toContain("BaseObjectContext");
+    // WITH TEETH. The assertion above passed while the alias was
+    // `ObjectScriptContextByType["somethingNew"]` — an index into a map with no
+    // such key, which resolves to nothing — because the word appears in the
+    // comment block. The alias itself has to name the interface.
+    expect(lib).toContain("declare type ObjectScriptContext = BaseObjectContext;");
+    expect(lib).not.toContain('ObjectScriptContextByType["somethingNew"]');
+  });
+});
+
+describe("contextInterfaceNameFor", () => {
+  it("names the interface the GENERATOR maps, never a capitalised objectType", () => {
+    // "namedRange" happens to capitalise correctly and "textbox" does not: its
+    // context is BaseObjectContext, so the editor's API Reference heading used
+    // to announce a `TextboxContext` that the typings never declare, above a
+    // member list read out of the real one.
+    expect(contextInterfaceNameFor("namedRange", DTS)).toBe("NamedRangeContext");
+    expect(contextInterfaceNameFor("textbox", DTS)).toBe("BaseObjectContext");
+  });
+
+  it("falls back to the base context for an objectType the map does not know", () => {
+    expect(contextInterfaceNameFor("somethingNew", DTS)).toBe("BaseObjectContext");
+  });
+
+  it("parses the 340 KB typings once per distinct string", () => {
+    // Called on every render of the sidebar; a regex over the whole .d.ts each
+    // time is the kind of cost that only shows up as a laggy editor.
+    expect(contextTypeMapFor(DTS)).toBe(contextTypeMapFor(DTS));
+  });
+
+  it("no editor spells a context interface by capitalising the objectType", () => {
+    // The bug lived in JSX, where a type name is a string being built rather
+    // than a symbol anything can check.
+    for (const file of ["ObjectScriptEditorApp.tsx", "CodeEditorDialog.tsx"]) {
+      const src = fs.readFileSync(path.resolve(__dirname, "../../components", file), "utf8");
+      expect(src, `${file} still builds a context type name by hand`).not.toContain("slice(1)}Context");
+    }
   });
 });
 

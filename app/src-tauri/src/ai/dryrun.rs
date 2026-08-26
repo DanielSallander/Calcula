@@ -79,6 +79,16 @@ pub struct DryRunReport {
     pub output: Vec<String>,
     /// Values of the cells the caller asked to see, after the run.
     pub read_back: Vec<CellReadback>,
+    /// Handlers the script REGISTERED that the run never fired.
+    ///
+    /// ALWAYS EMPTY IN THIS REALM, and present anyway. The interpreter realm
+    /// provides no `context` and fires no hooks, so it has no handler to skip —
+    /// but the field is the wire contract with the Worker-realm preview
+    /// (`scriptPreview/report.ts`), which does, and one consumer reads both.
+    /// A field missing here would arrive as `undefined` in TypeScript, which
+    /// reads as "nothing was skipped" — the right answer for the wrong reason,
+    /// and a silent one the day this realm learns to fire a hook.
+    pub unexercised_hooks: Vec<String>,
     /// Whether this rung can speak to this script AT ALL. When false, NOTHING
     /// else in the report is evidence about the script — see `declined_reason`.
     pub applicable: bool,
@@ -166,6 +176,7 @@ pub fn build_report(
         total_changes,
         output,
         read_back,
+        unexercised_hooks: Vec::new(),
         applicable: true,
         declined_reason: None,
     }
@@ -185,8 +196,47 @@ pub fn declined(reason: &str) -> DryRunReport {
         total_changes: 0,
         output: Vec::new(),
         read_back: Vec::new(),
+        unexercised_hooks: Vec::new(),
         applicable: false,
         declined_reason: Some(reason.to_string()),
+    }
+}
+
+/// "a", "a and b", "a, b and c" — a SENTENCE, never a debug-printed list.
+fn english_list(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        n => format!("{} and {}", items[..n - 1].join(", "), items[n - 1]),
+    }
+}
+
+/// The caveat for a run whose script registered handlers it never fired, or ""
+/// when there were none.
+///
+/// THE TWIN of `unexercisedHookNote` in
+/// `app/src/api/scriptHost/scriptPreview/unexercisedHooks.ts`, word for word.
+/// Two realms answer the same question — this one about the interpreter, that
+/// one about the Worker — and the reviewer reading the answer must not be able
+/// to tell which rung produced it from the wording.
+/// `app/src/api/__tests__/dryRunReportDrift.test.ts` pins the shared fragments.
+pub fn unexercised_hook_note(hooks: &[String]) -> String {
+    if hooks.is_empty() {
+        return String::new();
+    }
+    let names = english_list(hooks);
+    if hooks.len() == 1 {
+        format!(
+            "The script registered {}, but the preview \
+             never fired it, so nothing that handler does was measured.",
+            names
+        )
+    } else {
+        format!(
+            "The script registered {}, but the preview \
+             never fired any of them, so nothing those handlers do was measured.",
+            names
+        )
     }
 }
 
@@ -202,6 +252,11 @@ impl DryRunReport {
     }
 
     /// One line for a reviewer or a repair prompt.
+    ///
+    /// THE ZERO IS QUALIFIED, never bare. "changed no cells" is read as a
+    /// finding about the SCRIPT, and when a handler holding the work was never
+    /// fired it is a fact about the PREVIEW instead. The uncaveated strings are
+    /// byte-identical to what they always were.
     pub fn summary(&self) -> String {
         if !self.applicable {
             return format!(
@@ -217,10 +272,14 @@ impl DryRunReport {
                 self.error.as_deref().unwrap_or("unknown error")
             );
         }
+        let caveat = unexercised_hook_note(&self.unexercised_hooks);
         if self.total_changes == 0 {
-            return "The script ran without error but changed no cells.".to_string();
+            if caveat.is_empty() {
+                return "The script ran without error but changed no cells.".to_string();
+            }
+            return format!("The script ran without error but changed no cells. {}", caveat);
         }
-        format!(
+        let changed = format!(
             "The script would change {} cell{}{}.",
             self.total_changes,
             if self.total_changes == 1 { "" } else { "s" },
@@ -229,7 +288,12 @@ impl DryRunReport {
             } else {
                 String::new()
             },
-        )
+        );
+        if caveat.is_empty() {
+            changed
+        } else {
+            format!("{} {}", changed, caveat)
+        }
     }
 }
 
@@ -513,6 +577,48 @@ mod tests {
         assert_eq!(v["durationMs"], serde_json::json!(7));
         assert_eq!(v["changes"][0]["before"], serde_json::json!("a"));
         assert_eq!(v["output"][0], serde_json::json!("logged"));
+        // Struct-level `rename_all` covers the new field too — the TS mirror
+        // reads `unexercisedHooks`, and a field arriving as `unexercised_hooks`
+        // would be `undefined` there, which reads as "nothing was skipped".
+        assert_eq!(v["unexercisedHooks"], serde_json::json!([]));
+    }
+
+    /// A zero that came from an UNFIRED handler is a fact about the preview.
+    ///
+    /// Struct-update syntax on purpose: `build_report`'s arity is a wire contract
+    /// with five call sites, and widening it to prove one sentence would be the
+    /// test rewriting the code it is testing.
+    #[test]
+    fn a_report_with_an_unfired_handler_never_says_only_changed_no_cells() {
+        let base = build_report(true, None, 1, vec![], vec![], vec![]);
+        assert_eq!(
+            base.summary(),
+            "The script ran without error but changed no cells.",
+            "the control: nothing skipped, the sentence is unchanged"
+        );
+
+        let one = DryRunReport {
+            unexercised_hooks: vec!["onSelectionChange".to_string()],
+            ..base.clone()
+        };
+        let summary = one.summary();
+        assert!(
+            summary.starts_with("The script ran without error but changed no cells."),
+            "the count clause must survive: {summary}"
+        );
+        assert!(summary.contains("onSelectionChange"), "names the handler: {summary}");
+        assert!(summary.contains("never fired it"), "singular: {summary}");
+
+        let two = DryRunReport {
+            unexercised_hooks: vec!["onSelectionChange".to_string(), "onCellChange".to_string()],
+            ..base
+        };
+        let summary = two.summary();
+        assert!(
+            summary.contains("onSelectionChange and onCellChange"),
+            "an English list, never a debug-printed Vec: {summary}"
+        );
+        assert!(summary.contains("never fired any of them"), "plural: {summary}");
     }
     /// The rung must DECLINE an object script rather than judge it.
     ///

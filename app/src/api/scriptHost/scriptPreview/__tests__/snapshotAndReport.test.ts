@@ -10,9 +10,11 @@
 //          touched 200.
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { PreviewGrid } from "../grid";
 import { MAX_SNAPSHOT_CELLS, inputStringOf, snapshotActiveSheet, type SnapshotSource } from "../snapshot";
 import { buildReport, declined, diffGrid, summarize, MAX_REPORTED_CHANGES } from "../report";
+import { previewSkipLine, unexercisedHookNote } from "../unexercisedHooks";
 
 type Cell = Awaited<ReturnType<SnapshotSource["getRangeCells"]>>[number];
 
@@ -149,6 +151,7 @@ describe("the report", () => {
       changes: Array.from({ length: 1000 }, (_, r) => change(r)),
       output: [],
       readBack: [],
+      unexercisedHooks: [],
     });
     expect(report.truncated).toBe(true);
     expect(report.changes.length).toBe(MAX_REPORTED_CHANGES);
@@ -164,13 +167,21 @@ describe("the report", () => {
       changes: [],
       output: ["hello"],
       readBack: [],
+      unexercisedHooks: [],
       note: "only the first 20000 cells of the sheet were copied for this preview",
     });
     expect(report.output).toEqual(["hello", "[preview] only the first 20000 cells of the sheet were copied for this preview"]);
   });
 
   it("reports the ran-but-changed-nothing case as the signal it is", () => {
-    const report = buildReport({ ok: true, durationMs: 3, changes: [], output: [], readBack: [] });
+    const report = buildReport({
+      ok: true,
+      durationMs: 3,
+      changes: [],
+      output: [],
+      readBack: [],
+      unexercisedHooks: [],
+    });
     expect(report.ok).toBe(true);
     expect(report.totalChanges).toBe(0);
     expect(summarize(report)).toBe("The script ran without error but changed no cells.");
@@ -195,9 +206,135 @@ describe("the report", () => {
       changes: [],
       output: [],
       readBack: [],
+      unexercisedHooks: [],
     });
     expect(report.applicable, "a run that FAILED still produced a verdict").toBe(true);
     expect(summarize(report)).toContain("failed when run against a copy");
     expect(summarize(report)).toContain("TypeError");
+  });
+});
+
+/**
+ * THE ZERO THAT IS NOT ABOUT THE SCRIPT.
+ *
+ * A run that fired every handler it was offered and changed nothing is evidence
+ * about the DRAFT. A run whose only handler was skipped — because the preview
+ * cannot synthesize the payload the product's forwarder delivers — produces the
+ * identical zero and is evidence about the PREVIEW. The bare sentence reads as a
+ * finding either way, which is how a model came to spend repair rounds rewriting
+ * correct code.
+ */
+describe("a report says when a handler was never fired", () => {
+  const report = (totalChanges: number, unexercisedHooks: string[]) =>
+    buildReport({
+      ok: true,
+      durationMs: 2,
+      changes: Array.from({ length: totalChanges }, (_, r) => ({
+        row: r,
+        col: 0,
+        before: "",
+        after: "x",
+      })),
+      output: [],
+      readBack: [],
+      unexercisedHooks,
+    });
+
+  it("qualifies 'changed no cells' when one handler was skipped", () => {
+    const summary = summarize(report(0, ["onSelectionChange"]));
+    // The control is :176 — the same call with an empty list must still be the
+    // byte-identical sentence every existing consumer reads.
+    expect(summary).not.toBe("The script ran without error but changed no cells.");
+    expect(summary).toContain("The script ran without error but changed no cells.");
+    expect(summary).toContain("onSelectionChange");
+    expect(summary).toContain("never fired it");
+  });
+
+  it("says two handlers as a sentence, not as an array", () => {
+    const summary = summarize(report(0, ["onSelectionChange", "onCellChange"]));
+    expect(summary).toContain("onSelectionChange and onCellChange");
+    expect(summary).toContain("never fired any of them");
+    expect(summary).not.toContain("[");
+  });
+
+  it("keeps the count clause intact when a run BOTH changed cells and skipped a hook", () => {
+    // Both facts are true at once and both matter: the reviewer needs to know
+    // three cells changed AND that the biggest handler never ran.
+    const summary = summarize(report(3, ["onSelectionChange"]));
+    expect(summary).toContain("The script would change 3 cells.");
+    expect(summary).toContain("never fired it");
+  });
+
+  it("reports an empty list on a DECLINE, which is not a claim that everything ran", () => {
+    expect(declined("no realm").unexercisedHooks).toEqual([]);
+  });
+
+  it("COPIES the list, because a report is a statement about a moment", () => {
+    // The realm's own array keeps being pushed to while a run is in flight.
+    const live = ["onSelectionChange"];
+    const built = report(0, live);
+    live.push("onCellChange");
+    expect(built.unexercisedHooks).toEqual(["onSelectionChange"]);
+  });
+});
+
+describe("unexercisedHookNote", () => {
+  it("says nothing when there is nothing to say", () => {
+    // `undefined` is tolerated on purpose: test doubles and third-party
+    // assistant providers hand-build this shape, and several RENDER paths reach
+    // this function — a TypeError there would blank a panel.
+    expect(unexercisedHookNote(undefined)).toBe("");
+    expect(unexercisedHookNote([])).toBe("");
+  });
+
+  it("is singular for one handler and plural for several", () => {
+    expect(unexercisedHookNote(["onSelectionChange"])).toContain("never fired it");
+    expect(unexercisedHookNote(["a", "b"])).toContain("never fired any of them");
+  });
+
+  it("writes three names as English, not as JSON", () => {
+    expect(unexercisedHookNote(["a", "b", "c"])).toContain("a, b and c");
+  });
+});
+
+describe("previewSkipLine says WHY the handler was not fired", () => {
+  // Two genuinely different reasons. A hook the run OFFERED and skipped has an
+  // unsynthesizable payload; a hook that was never offered — anything hanging
+  // off a sub-object, like a shape's `render.onMessage` — has no payload
+  // problem at all and simply cannot be dispatched. Telling an author the first
+  // about the second sends them hunting a bug that does not exist.
+  it("blames the payload only for a hook that was offered", () => {
+    const line = previewSkipLine("onSelectionChange", true);
+    expect(line).toContain("registered but not exercised");
+    expect(line).toContain("cannot synthesize the payload");
+  });
+
+  it("says the preview has no way to fire one that was never offered", () => {
+    const line = previewSkipLine("render.onMessage", false);
+    expect(line).toContain("registered but not exercised");
+    expect(line).toContain("no way to fire it");
+    expect(line).not.toContain("synthesize the payload");
+  });
+
+  it("defaults to the offered wording, which the E2E spec matches on", () => {
+    expect(previewSkipLine("onClick")).toBe(previewSkipLine("onClick", true));
+  });
+
+  it("is not called point-free anywhere — map would pass the INDEX as `offered`", () => {
+    // The defect this pins was caught by the compiler once and would not be
+    // next time if someone widened the parameter: `hooks.map(previewSkipLine)`
+    // hands hook 0 `offered = 0` (falsy) and hook 1 `offered = 1` (truthy), so
+    // the reason flips with position.
+    // cwd-relative: `import.meta.url` is not a file:// URL under this vitest
+    // config, and vitest runs from `app/`.
+    const source = readFileSync("src/api/scriptHost/scriptPreview/index.ts", "utf8");
+    expect(source, "the file must actually be read for this guard to mean anything")
+      .toContain("previewSkipLine");
+    // COMMENTS STRIPPED FIRST. The comment at the call site quotes the bad form
+    // in order to warn about it, so matching raw source makes this pin fail on
+    // its own documentation — and "fixing" that by deleting the warning is the
+    // worst available outcome.
+    const code = source.replace(/^[ \t]*\/\/.*$/gm, "");
+    expect(code).not.toMatch(/\.map\(\s*previewSkipLine\s*\)/);
   });
 });

@@ -87,3 +87,58 @@ describe("guessObjectType", () => {
     expect(guessObjectType("using a named range")).toBe("namedRange");
   });
 });
+
+// ---------------------------------------------------------------------------
+// T21 — the guess matches WORDS, because a wrong answer is worse than a miss
+// ---------------------------------------------------------------------------
+
+describe("guessObjectType matches whole words", () => {
+  // The answer no longer only preselects a dropdown the user can see: it also
+  // picks the API slice the chat shows the model before it writes anything,
+  // where nobody sees it. `"spreadsheet".includes("sheet")` built a SheetContext
+  // surface — with no `onClick` in it at all — for what is almost always a
+  // button request.
+  const SPREADSHEET = "a script for my spreadsheet that highlights the totals";
+
+  it("does not read 'spreadsheet' as 'sheet'", () => {
+    expect(guessObjectType(SPREADSHEET)).toBeNull();
+  });
+
+  it("does not read 'datatable' as 'table'", () => {
+    expect(guessObjectType("refresh the datatable every morning")).toBeNull();
+  });
+
+  it("still finds the word when it is really there", () => {
+    // The positive controls. Without them, "return null always" passes above.
+    expect(guessObjectType("on the worksheet")).toBe("sheet");
+    expect(guessObjectType("when the sheet opens")).toBe("sheet");
+  });
+
+  it("prefers the object actually named over where it lives", () => {
+    expect(guessObjectType("add a button to my spreadsheet that highlights the totals")).toBe("button");
+  });
+
+  it("knows the grid primitives, and only as whole words", () => {
+    // Extended 2026-08-26 on the owner's call: "when this cell changes" is the
+    // commonest way to describe a cell script and used to get the button surface.
+    expect(guessObjectType("when this cell changes, recalculate the total")).toBe("cell");
+    expect(guessObjectType("colour the row when the total goes negative")).toBe("row");
+    expect(guessObjectType("total the column at the bottom")).toBe("column");
+    // ...and the plurals stay a MISS rather than becoming a wrong answer: a
+    // request about "cells" is nearly always about a range, not a cell script.
+    expect(guessObjectType("create a script that colours cells")).toBeNull();
+    expect(guessObjectType("follow the browse history")).toBeNull();
+  });
+});
+
+describe("the guess is what the model's API surface is built from", () => {
+  it("a missed guess still yields a surface with a button's hook in it", async () => {
+    // The COUPLING, which is the reason word-accuracy matters. A miss is the
+    // documented fallback ("button"); a wrong answer would be a prompt that
+    // confidently describes the wrong object's hooks.
+    const { apiSurfaceSection } = await import("../lib/apiSurface");
+    const text = "a script for my spreadsheet that highlights the totals";
+    const section = await apiSurfaceSection(text, guessObjectType(text));
+    expect(section).toContain("context.onClick");
+  });
+});

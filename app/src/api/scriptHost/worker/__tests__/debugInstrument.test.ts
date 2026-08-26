@@ -551,16 +551,24 @@ describe("topLevelFunctions", () => {
 });
 
 describe("enclosingTopLevelFunction", () => {
+  // The inventory is scanned ONCE and handed in — the caller needs the whole
+  // list anyway, to fall back to and to name in its message.
+  const MACRO_FNS = topLevelFunctions(RECORDED_MACRO);
+
   it("maps a cursor line to the function whose body contains it", () => {
-    expect(enclosingTopLevelFunction(RECORDED_MACRO, 3)?.name).toBe("demo");
-    expect(enclosingTopLevelFunction(RECORDED_MACRO, 9)?.name).toBe("setup");
-    expect(enclosingTopLevelFunction(RECORDED_MACRO, 2)?.name).toBe("demo"); // on the decl line
-    expect(enclosingTopLevelFunction(RECORDED_MACRO, 14)?.name).toBe("setup"); // on the close brace
+    expect(enclosingTopLevelFunction(MACRO_FNS, 3)?.name).toBe("demo");
+    expect(enclosingTopLevelFunction(MACRO_FNS, 9)?.name).toBe("setup");
+    expect(enclosingTopLevelFunction(MACRO_FNS, 2)?.name).toBe("demo"); // on the decl line
+    expect(enclosingTopLevelFunction(MACRO_FNS, 14)?.name).toBe("setup"); // on the close brace
   });
 
   it("returns null between declarations (blank line / header comment)", () => {
-    expect(enclosingTopLevelFunction(RECORDED_MACRO, 1)).toBeNull(); // header comment
-    expect(enclosingTopLevelFunction(RECORDED_MACRO, 5)).toBeNull(); // blank line
+    expect(enclosingTopLevelFunction(MACRO_FNS, 1)).toBeNull(); // header comment
+    expect(enclosingTopLevelFunction(MACRO_FNS, 5)).toBeNull(); // blank line
+  });
+
+  it("returns null for an empty inventory", () => {
+    expect(enclosingTopLevelFunction([], 1)).toBeNull();
   });
 });
 
@@ -570,6 +578,11 @@ describe("an EXPORTED declaration is a run-target", () => {
   // back to" about a script whose only top-level function was under the cursor.
   // `topLevelFunctions` returned [] because the token before `function` was the
   // WORD `export`, and only punctuation was accepted as a declaration anchor.
+  //
+  // That sentence is quoted as it read THEN. The editor's message has since been
+  // rewritten to name the functions the file declares (debugger.ts,
+  // `noRunTargetMessage`), so it is a historical quotation, not a string any
+  // test may assert on.
   //
   // `export function setup(context)` is what the docs teach, what the generated
   // typings show, what every corpus reference uses, and what the AI pipeline

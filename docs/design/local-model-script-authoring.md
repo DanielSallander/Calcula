@@ -291,7 +291,7 @@ This is what actually makes the design model-agnostic, and it gets its own secti
 | Level | Check | Inference cost | Catches |
 |---|---|---|---|
 | L0 | Parses as JS (QuickJS parse-only) | **zero**, ~1 ms | truncated / malformed output |
-| L1 | **Calls only methods present in the policy for its surface** (§5a) | **zero**, ~1 ms | **hallucinated APIs — the dominant small-model failure** |
+| L1 | **Calls only methods the object type can actually REACH** (§5a) | **zero**, ~1 ms | **hallucinated APIs — the dominant small-model failure** |
 | L2 | `// @capability` pragmas reconcile with the methods actually called | **zero**, ~1 ms | a ceiling that will deny the script at runtime (§5b) |
 | L3 | Dry run over cloned grid state, fuel-budgeted | ~100 ms | runtime errors, runaway loops |
 | L4 | Diff rendered for the user | — | wrong-but-valid behaviour |
@@ -949,11 +949,23 @@ cloud-authored and hand-written scripts too, not only local ones.
 
 **Its ground truth is a THIRD generated artifact**, `scriptHost/generated/scriptSurfacePolicy.ts`,
 emitted by the existing typings generator in the same pass as `objectContexts.d.ts` and pinned
-byte-for-byte by `objectContextsTypings.test.ts`. **669 rows, 58 capability-bearing**, each carrying
+byte-for-byte by `objectContextsTypings.test.ts`. **894 rows (one per (chain, interface) pair since 2026-08-21), 58 capability-bearing**, each carrying
 the author-facing chain, the broker method and the capability. Neither `allowlist.ts` nor the probe
 alone was enough: the probe records a path RELATIVE to its owning interface (`upsert`, not
 `caps.biModel.upsert`), so chains are composed through `NAMED_SUBTREES`, which is the probe's own
 answer to "this sub-object is its own interface".
+
+**L1 IS OBJECT-TYPE AWARE (2026-08-25).** `validateScriptSource(source, objectType?)` narrows the
+legal chain set by REACHABILITY — a member is legal only if this object can obtain the thing it
+hangs off — and reports a member that exists elsewhere as `wrong-object-type`, naming the interface
+that does declare it. Without it the surface was one flat namespace: `context.onSheetChange` is
+declared on WorkbookContext alone, yet a button script using it validated clean, threw at mount when
+`context.onSheetChange` came back `undefined`, and no static rung could say why. The narrowing is a
+second walk of the same graph the generator walks, deliberately over the 94 KB policy artifact
+rather than the 209 KB slices (importing the prompt surface into the validator would drag it into
+the main bundle through `draftGate`); the two are measured to agree set-for-set for all 17 object
+types. The parameter is OPTIONAL and an unknown object type does NOT narrow — a false rejection
+sends a correct draft into repair rounds, which is strictly worse than the false accept it replaces.
 
 Four things worth carrying forward:
 
@@ -1015,9 +1027,10 @@ commands at all; the new ones are there now, along with `ai_chat_complete`, whic
 but is the path that SPENDS one.
 
 **M4 — Sliceable typings. SHIPPED 2026-08-19.** A third generated artifact,
-`scriptHost/generated/scriptSurfaceSlices.ts` (**667 entries**), emitted by the same generator pass
-and pinned byte-for-byte by the lockstep test; plus `api/scriptHost/scriptPrompt/`, the budget-aware
-assembler from §4d.
+`scriptHost/generated/scriptSurfaceSlices.ts` (**718 entries**, one per distinct declaration since
+2026-08-25 — a chain is not unique, and a member is listed for an object type only if that type can
+reach it), emitted by the same generator pass and pinned byte-for-byte by the lockstep test; plus
+`api/scriptHost/scriptPrompt/`, the budget-aware assembler from §4d.
 
 **Measured, which is what justified the work:**
 
@@ -1044,9 +1057,14 @@ Four things worth carrying forward:
 - **Signatures must strip comments.** A member whose type is a nested type literal carries that
   literal's own JSDoc: `api.text` dragged 200+ characters of CSV prose into what was meant to be a
   declaration.
-- **The artifact emits shared + per-type delta.** Listing all ~530 chains once per object type made
-  the file 343 KB — as large as the `.d.ts` it exists to shrink — because ~520 are identical across
-  all 17 types.
+- **The artifact emits shared + per-type delta, and "shared" means REACHABLE.** Listing all ~530
+  chains once per object type made the file 343 KB — as large as the `.d.ts` it exists to shrink.
+  The shared set is the **intersection of what every context root can reach**, walked as a graph:
+  **424 chains**, not the ~520 the first cut published. A named subtree is NOT automatically shared —
+  it is reachable only through the member that hands it out, and `range()` / `cell()` are declared on
+  SheetContext and TableContext alone, so all 51 `range.*` and all 51 `cell.*` chains were being
+  offered to button scripts with no way to obtain either. Corrected 2026-08-25; the per-type extras
+  are now REACHABLE (sheet 119, table 130) while the ranker's floor stays OWN (sheet 17, table 28).
 
 **M5 — The eval set. SHIPPED 2026-08-19.** **36 tasks** at `tests/eval/tasks.json`, in two layers.
 

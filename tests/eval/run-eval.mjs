@@ -320,6 +320,11 @@ function harnessDryRun(task) {
         totalChanges: 0,
         output: obs.output,
         readBack: obs.readBack,
+        // The harness fires whatever the task names and nothing else, so it has
+        // no half-exercised run to report: a payload it cannot produce becomes a
+        // HARNESS GAP above, not a skipped handler. Empty, and said explicitly,
+        // because an absent field would read as "everything ran".
+        unexercisedHooks: [],
         applicable: false,
         declinedReason: `the offline harness does not implement ${obs.harnessGap}`,
       };
@@ -333,6 +338,7 @@ function harnessDryRun(task) {
       totalChanges: obs.totalChanges,
       output: obs.output,
       readBack: obs.readBack,
+      unexercisedHooks: [],
       applicable: true,
     };
   };

@@ -87,6 +87,20 @@ export interface DryRunReport {
   /** Values of the cells the caller asked to see, after the run. */
   readBack: Array<{ row: number; col: number; value: string }>;
   /**
+   * Handlers the script REGISTERED that the run never fired, because the
+   * preview cannot synthesize the payload the product's forwarder delivers.
+   *
+   * THE FIELD THAT MAKES A ZERO READABLE. `totalChanges === 0` is a statement
+   * about the script only when everything it registered actually ran; when the
+   * handler holding the work was skipped, the same zero is a statement about
+   * the PREVIEW. Without this field the two are indistinguishable, and both a
+   * model and a reviewer read the bare "changed no cells" as a defect — the
+   * model then spends a repair round "fixing" a correct draft.
+   *
+   * Always empty in the Rust interpreter realm, which fires no hooks at all.
+   */
+  unexercisedHooks: string[];
+  /**
    * Whether the dry run can speak to this script AT ALL.
    *
    * False means NOTHING else here is evidence about the script — an object
@@ -374,7 +388,11 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
   for (let round = 0; round <= req.plan.repairRounds; round++) {
     const reply = await req.complete(system, user);
     const source = extractScript(reply);
-    const report = validateScriptSource(source);
+    // NARROWED TO THE OBJECT TYPE. The check that GRADES the answer must use
+    // the same slice of the API the prompt showed: a draft written against a
+    // member this object cannot reach is dead at mount, and a validator that
+    // sees the flat union calls it clean.
+    const report = validateScriptSource(source, req.objectType);
     const attempt: AuthorAttempt = { round, source, report };
     attempts.push(attempt);
     req.onAttempt?.(round, report);
@@ -397,6 +415,23 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
           `The script passes every static check but FAILS when run against a copy of the workbook:\n` +
           `  ${dry.error ?? "unknown error"}\n` +
           `Fix the runtime error and return the whole script again.`;
+      } else if (req.expectsWrites && dry.totalChanges === 0 && (dry.unexercisedHooks?.length ?? 0) > 0) {
+        // SUPPRESSED, NOT FAILED. The zero is a fact about the PREVIEW here:
+        // the handler that would have done the writing was never fired, because
+        // the preview cannot synthesize the payload the product's forwarder
+        // delivers. Sending a correct script back for repair on that evidence
+        // is the rung's founding failure mode wearing a different hat — the
+        // model has nothing to fix, so it rewrites working code until the
+        // rounds run out.
+        //
+        // NO CURRENT CALLER REACHES THIS, and it is written anyway. The chat
+        // path sets `expectsWrites: false` (the `authorScript` call in
+        // app/extensions/AIChat/lib/authorRunner.ts) and the eval
+        // harness turns an unsynthesizable payload into a HARNESS GAP
+        // (`applicable: false`), which is handled two arms above. The day
+        // either changes its mind, the default must already be "say nothing"
+        // rather than "accuse the draft".
+        behaviouralFix = "";
       } else if (req.expectsWrites && dry.totalChanges === 0) {
         behaviouralFix =
           "The script runs without error but changes NOTHING. The task asks it to modify the " +

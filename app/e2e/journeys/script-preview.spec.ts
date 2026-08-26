@@ -54,6 +54,8 @@ interface DryRunReport {
   totalChanges: number;
   output: string[];
   readBack: Array<{ row: number; col: number; value: string }>;
+  /** Handlers the script registered that the preview declined to fire. */
+  unexercisedHooks: string[];
   applicable: boolean;
   declinedReason: string | null;
 }
@@ -418,6 +420,9 @@ export function setup(context) {
     expect(report.applicable, `declined: ${report.declinedReason}`).toBe(true);
     expect(report.ok, `a correct handler must not be fired with a guessed payload: ${report.error}`).toBe(true);
     expect(report.output.join("\n")).toContain("onSelectionChange handler was registered but not exercised");
+    // The same fact AS A FIELD, not only as prose. Three surfaces have to act on
+    // it, and this is the only tier with a real Worker realm to prove it arrives.
+    expect(report.unexercisedHooks).toEqual(["onSelectionChange"]);
   });
 
   test("serves the mirrors it seeded and DECLINES the ones it cannot", async ({ grid }) => {

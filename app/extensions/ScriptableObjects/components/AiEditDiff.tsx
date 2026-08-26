@@ -14,6 +14,7 @@
 
 import React from "react";
 import { DiffEditor } from "@monaco-editor/react";
+import { unexercisedHookNote } from "@api/scriptHost/scriptPreview/unexercisedHooks";
 import type { AiEditDocumentKind } from "../lib/crossWindowEvents";
 
 interface AiEditDiffProps {
@@ -28,6 +29,14 @@ interface AiEditDiffProps {
   summary: string;
   /** The model looked and concluded nothing needed changing. */
   unchanged: boolean;
+  /**
+   * Handlers the proposed script registers that the preview never fired.
+   *
+   * REQUIRED, and normalised to `[]` by `aiEditClient` — a diff that silently
+   * omitted this would tell the author the run "changed no cells" about code the
+   * run never reached.
+   */
+  unexercisedHooks: string[];
   onAccept: () => void;
   onReject: () => void;
 }
@@ -117,6 +126,21 @@ export function AiEditDiff(props: AiEditDiffProps): React.ReactElement {
               style={{ fontSize: 11, color: "#9CDCFE", marginTop: 5, lineHeight: 1.5 }}
             >
               {props.summary}
+            </div>
+          )}
+          {/* WHAT THE RUN COULD NOT MEASURE. The summary above reports what the
+              preview saw; a handler it never fired produced no evidence at all,
+              and "it changed no cells" read as a finding about the script is how
+              a sound draft gets rejected — or a broken one accepted. */}
+          {props.unexercisedHooks.length > 0 && (
+            <div
+              data-testid="ai-edit-diff-unexercised"
+              style={{ fontSize: 11, color: "#E3B341", marginTop: 5, lineHeight: 1.5 }}
+            >
+              {unexercisedHookNote(props.unexercisedHooks)}{" "}
+              {props.unexercisedHooks.length === 1
+                ? "Read that handler yourself before accepting."
+                : "Read those handlers yourself before accepting."}
             </div>
           )}
         </div>

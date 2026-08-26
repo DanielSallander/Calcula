@@ -55,7 +55,7 @@ const REQUEST = {
   documentId: "obj-1",
   documentName: "Button 1",
   objectType: "button",
-  documentKind: "object" as const,
+  documentKind: "objectScript" as const,
   currentSource: "export function onClick() {}",
   instruction: "make it red",
 };
@@ -75,6 +75,11 @@ type Result = {
   source: string;
   summary: string;
   unchanged?: boolean;
+  /**
+   * Required on the wire. The `done!(...)` calls below deliberately OMIT it,
+   * which is the "a provider ran no dry run" case the bridge normalises to `[]`.
+   */
+  unexercisedHooks: string[];
 };
 
 function results(): Result[] {
@@ -165,6 +170,9 @@ describe("aiEditBridge — it always answers", () => {
     expect(results()[0].ok).toBe(true);
     expect(results()[0].jobId).toBe("job-7");
     expect(results()[0].source).toContain("red");
+    // The provider above reported no dry run at all. The payload still carries
+    // an array, because the editor renders off it.
+    expect(results()[0].unexercisedHooks).toEqual([]);
   });
 
   it("passes the ON-SCREEN source, not a stored copy", async () => {
@@ -177,7 +185,7 @@ describe("aiEditBridge — it always answers", () => {
       expect.objectContaining({
         currentSource: REQUEST.currentSource,
         instruction: "make it red",
-        documentKind: "object",
+        documentKind: "objectScript",
         objectType: "button",
       }),
     );

@@ -13,7 +13,12 @@ import {
   rankSurface,
   hintTerms,
   SURFACE_ENTRIES,
+  SHARED_IFACES,
+  OWN_CHAINS_BY_OBJECT_TYPE,
+  REACHABLE_CHAINS_BY_OBJECT_TYPE,
+  ROOT_IFACE_BY_OBJECT_TYPE,
   chainsForObjectType,
+  entriesForObjectType,
 } from "../index";
 
 describe("the generated slices are present and sane", () => {
@@ -181,5 +186,104 @@ describe("an unknown object type degrades to the whole surface", () => {
     // one wholesale.
     const r = buildSurfacePrompt({ objectType: "spaceship", budgetTokens: 8_000 });
     expect(r.includedChains.length).toBeGreaterThan(50);
+  });
+});
+
+describe("a chain that means different things on different objects", () => {
+  /**
+   * The rendered signature, which `renderEntry` puts on the line directly after
+   * `context.<chain>`. Null when the type is not shown that chain at all.
+   */
+  function signatureFor(objectType: string, chain: string): string | null {
+    const lines = buildSurfacePrompt({ objectType, budgetTokens: 200_000 }).text.split("\n");
+    const at = lines.indexOf(`context.${chain}`);
+    return at === -1 ? null : lines[at + 1].trim();
+  }
+
+  it("shows each object type the getCellValue IT can call", () => {
+    // Three declarations, two brokers. The chain-keyed map this replaced kept
+    // whichever interface sorted first -- ShapeContext -- so a sheet script was
+    // shown an A1-string signature that does not exist on its context, as the
+    // ONLY description of the API it may call. The draft then validated clean
+    // (the reach check matches by CHAIN and cannot see arity) and did nothing.
+    expect(signatureFor("sheet", "getCellValue")).toBe(
+      "getCellValue(row: number, col: number, sheet?: SheetRef): Promise<string>",
+    );
+    expect(signatureFor("shape", "getCellValue")).toBe("getCellValue(cellRef: string): Promise<string>");
+    expect(signatureFor("table", "getCellValue")).toBe(
+      "getCellValue(row: number, colIndex: number): Promise<string>",
+    );
+  });
+
+  it("shows each object type the setCellValue IT can call", () => {
+    expect(signatureFor("sheet", "setCellValue")).toContain("sheet?: SheetRef");
+    expect(signatureFor("table", "setCellValue")).toContain("colIndex: number");
+  });
+
+  it("shows a button no getCellValue at all", () => {
+    // Declared on ShapeContext, SheetContext and TableContext only. A button
+    // cannot reach any of them, and a signature the script cannot call is worse
+    // than an absent one under a header promising these are the only methods.
+    expect(signatureFor("button", "getCellValue")).toBeNull();
+  });
+});
+
+describe("resolving per object type stays sound", () => {
+  const TYPES = Object.keys(OWN_CHAINS_BY_OBJECT_TYPE);
+
+  it("covers every object type the probe produced", () => {
+    // Non-vacuity for the three loops below, which are all it.each over TYPES.
+    expect(TYPES.length).toBe(17);
+  });
+
+  it.each([...TYPES, "spaceship"])("renders no chain twice for %s", (objectType) => {
+    const chains = buildSurfacePrompt({ objectType, budgetTokens: 200_000 }).includedChains;
+    expect(chains.filter((c, i) => chains.indexOf(c) !== i)).toEqual([]);
+  });
+
+  it.each(TYPES)("resolves exactly one entry per reachable chain for %s", (objectType) => {
+    expect(entriesForObjectType(objectType).length).toBe(chainsForObjectType(objectType).length);
+  });
+
+  it.each(TYPES)("resolves %s's own declaration, never a stranger's", (objectType) => {
+    // `entryFor`'s last arm exists for the unknown-type case. For a KNOWN type
+    // it must never be reached: every entry carries either that type's root
+    // interface or one whose declarations mean the same thing wherever they are
+    // reached from. Measured: the fallback is taken 0 times across all 17.
+    const rootIface = ROOT_IFACE_BY_OBJECT_TYPE[objectType];
+    const shared = new Set(SHARED_IFACES);
+    const strangers = entriesForObjectType(objectType).filter(
+      (e) => !e.ifaces.includes(rootIface) && !e.ifaces.some((i) => shared.has(i)),
+    );
+    expect(strangers.map((e) => `${e.chain} <- ${e.ifaces.join("/")}`)).toEqual([]);
+  });
+});
+
+describe("a prompt never offers a member the object type cannot reach", () => {
+  // A button task's own words, so the ranker is under real hint pressure.
+  const HINTS = ["formats", "background", "color", "selected", "cell", "content", "script"];
+
+  it("withholds the whole ScriptRange facet from a button", () => {
+    const r = buildSurfacePrompt({ objectType: "button", budgetTokens: 6_000, hints: HINTS });
+    // Non-vacuity FIRST: an empty prompt would pass the real assertion trivially.
+    expect(r.includedChains.length).toBeGreaterThan(80);
+    // `range()` and `cell()` are declared on SheetContext and TableContext
+    // alone, so a button script cannot obtain either object. Measured against
+    // the artifact before this change: 22 such members in exactly this prompt.
+    expect(r.includedChains.filter((c) => c.startsWith("cell.") || c.startsWith("range."))).toEqual([]);
+  });
+
+  it("still offers them to a sheet, which can obtain a range", () => {
+    const r = buildSurfacePrompt({ objectType: "sheet", budgetTokens: 6_000, hints: HINTS });
+    expect(r.includedChains).toContain("range");
+    expect(r.includedChains.filter((c) => c.startsWith("range.")).length).toBeGreaterThan(0);
+  });
+
+  it("floors the ranker on what the object DECLARES, not on what it can reach", () => {
+    // Two different questions, and the ranker's key 0 must keep asking the
+    // first: flooring a sheet script's 119 reachable extras would spend the
+    // budget before `api.setCellValue`.
+    expect(OWN_CHAINS_BY_OBJECT_TYPE.sheet.length).toBe(17);
+    expect(REACHABLE_CHAINS_BY_OBJECT_TYPE.sheet.length).toBe(119);
   });
 });

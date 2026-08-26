@@ -106,6 +106,50 @@ export function readContextTypeMap(dts: string): Map<string, string> {
 }
 
 /**
+ * The parsed map, remembered for the LAST .d.ts string this module was asked
+ * about.
+ *
+ * The generated file is ~340 KB and the map is read out of it with a regex.
+ * Every editor render that wants to name the active context would otherwise
+ * re-parse the whole thing; the string is a module-level import, so identity
+ * comparison is enough to know the answer cannot have changed.
+ */
+let cachedDts: string | null = null;
+let cachedMap: Map<string, string> | null = null;
+
+/** `readContextTypeMap`, parsed once per distinct .d.ts string. */
+export function contextTypeMapFor(dts: string): Map<string, string> {
+  if (cachedDts === dts && cachedMap) return cachedMap;
+  cachedMap = readContextTypeMap(dts);
+  cachedDts = dts;
+  return cachedMap;
+}
+
+/**
+ * The context interface an object type's `setup(context)` receives.
+ *
+ * The base context when the generated map does not name the type — the same
+ * fail-soft direction the alias takes: an unknown object type gets the members
+ * every context has, never an interface that does not exist.
+ */
+function ifaceFor(objectType: string, contextTypes: Map<string, string>): string {
+  return contextTypes.get(objectType) ?? "BaseObjectContext";
+}
+
+/**
+ * The interface NAME to show a human for `objectType`.
+ *
+ * Read out of the generated map, never spelled by capitalising the object type.
+ * That trick reads correctly for "namedRange" -> "NamedRangeContext" and lies
+ * for "textbox", whose context is `BaseObjectContext` — so the API Reference
+ * heading named an interface the typings do not declare, above a member list
+ * that came from the real one.
+ */
+export function contextInterfaceNameFor(objectType: string, dts: string): string {
+  return ifaceFor(objectType, contextTypeMapFor(dts));
+}
+
+/**
  * The extra lib that binds the typings to the script being edited.
  *
  * `ObjectScriptContext` is the ONE name an author has to remember, whatever the
@@ -113,7 +157,8 @@ export function readContextTypeMap(dts: string): Map<string, string> {
  * so hovering it explains the contract even before the author annotates.
  */
 export function buildActiveContextLib(objectType: string, contextTypes: Map<string, string>): string {
-  const iface = contextTypes.get(objectType) ?? "BaseObjectContext";
+  const iface = ifaceFor(objectType, contextTypes);
+  const known = contextTypes.has(objectType);
   return [
     "// Generated per open script by the Object Script editor. Regenerated when",
     "// you switch scripts; never saved with your code.",
@@ -128,7 +173,14 @@ export function buildActiveContextLib(objectType: string, contextTypes: Map<stri
     " *",
     " * written inside a JSDoc block above `function setup(context) {`.",
     " */",
-    `declare type ObjectScriptContext = ObjectScriptContextByType["${objectType}"];`,
+    // The INDEXED form for a type the generated map knows, so the alias tracks
+    // the generator; the interface by NAME for one it does not. Indexing the map
+    // with a key it has no entry for resolves to nothing — the "falls back to
+    // the base context" claim above it was true of the comment and of nothing
+    // else, and an unknown object type got an editor with no completions at all.
+    known
+      ? `declare type ObjectScriptContext = ObjectScriptContextByType["${objectType}"];`
+      : `declare type ObjectScriptContext = ${iface};`,
     "",
     "/** The objectType this script is attached to. */",
     `declare type ObjectScriptType = "${objectType}";`,

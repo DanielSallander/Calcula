@@ -386,10 +386,41 @@ describe("run-at-cursor (local transport)", () => {
     expect(hostStartDebugSession).not.toHaveBeenCalled();
   });
 
+  // TWO DIFFERENT STATES, AND THE OLD SENTENCE TOLD BOTH OF THEM TO MOVE THE
+  // CURSOR. "Put the cursor inside a top-level function" is not a remedy in a
+  // file that declares none — there is nowhere to put it — and a message whose
+  // only instruction is impossible reads as a fact about the editor rather than
+  // about the file.
   it("says so when the cursor resolves to no runnable function", async () => {
     const src = ["const x = 1;", "const y = 2;"].join("\n"); // no top-level functions
     const outcome = await dbg.runAtCursor(SCRIPT, src, 1);
     expect(outcome.status).toBe("noFunction");
+    if (outcome.status === "noFunction") {
+      expect(outcome.message).toMatch(/declares no top-level function/i);
+      // The remedy has to be one this file can actually carry out.
+      expect(outcome.message).toContain("function doThing()");
+      expect(outcome.message).not.toMatch(/put the cursor inside/i);
+    }
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
+
+  it("names the candidates when several functions could be meant", async () => {
+    const twoTargets = [
+      "function alpha() {", //   1
+      "  return 1;", //          2
+      "}", //                    3
+      "", //                     4
+      "function beta() {", //    5
+      "  return 2;", //          6
+      "}", //                    7
+    ].join("\n");
+    // Cursor on the blank line between them, and no `setup` to fall back to.
+    const outcome = await dbg.runAtCursor(SCRIPT, twoTargets, 4);
+    expect(outcome.status).toBe("noFunction");
+    if (outcome.status === "noFunction") {
+      expect(outcome.message).toMatch(/put the cursor inside/i);
+      expect(outcome.message).toContain("alpha or beta");
+    }
     expect(hostDebugFireTrigger).not.toHaveBeenCalled();
   });
 
@@ -455,6 +486,11 @@ describe("run-at-cursor (local transport)", () => {
   // ...but on a mount that INVOKED setup (every object script) it is not a run
   // target, and "try again in a moment" would be false advice for a wait that
   // never ends.
+  //
+  // AND THE REMEDY MUST EXIST IN THE FILE BEING EDITED. This sentence used to
+  // end "Put the cursor inside another top-level function to run that, or fire
+  // one of the triggers in the debug panel" — unconditionally, both halves,
+  // whatever the script held.
   it("explains, rather than firing, when setup() is not a run target", async () => {
     const allInSetup = ["function setup(context) {", "  return 1;", "}"].join("\n");
     seedLocalSession(SCRIPT, {
@@ -470,6 +506,178 @@ describe("run-at-cursor (local transport)", () => {
     if (outcome.status === "notReady") {
       expect(outcome.message).toMatch(/entry point this mount already ran/i);
       expect(outcome.message).not.toMatch(/try run again/i);
+      // The half that is REAL, named rather than gestured at.
+      expect(outcome.message).toContain("onClick");
+      // The half that is not: this file declares no other top-level function.
+      expect(outcome.message).not.toMatch(/another top-level function/i);
+      expect(outcome.message).not.toMatch(/put the cursor/i);
+      // ...and because that half was dropped, the trigger sentence must not
+      // open on "Or". A dangling conjunction reads as the second half of advice
+      // the reader never got, which is the same disease as offering a remedy
+      // that does not exist.
+      expect(outcome.message).not.toMatch(/\bOr fire\b/);
+      expect(outcome.message).toMatch(/\bFire one of the triggers\b/);
+    }
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
+
+  // THE MESSAGE THE USER ACTUALLY HIT (reported 2026-08-25). One `setup` in the
+  // file, nothing registered, session finished — so BOTH offered remedies were
+  // impossible: there is no "another top-level function", and there is no
+  // trigger in the debug panel to fire.
+  it("offers something REAL when the file holds only setup() and nothing registered", async () => {
+    const allInSetup = ["function setup(context) {", "  context.log('hi');", "}"].join("\n");
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "finished",
+      autoInvokeSetup: true,
+      triggers: [],
+    });
+
+    const outcome = await dbg.runAtCursor(SCRIPT, allInSetup, 2);
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.message).toMatch(/no entry point/i);
+      expect(outcome.message).toContain("function doThing()");
+      expect(outcome.message).not.toMatch(/another top-level function/i);
+      expect(outcome.message).not.toMatch(/fire/i);
+    }
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
+
+  // THE OTHER HALF OF THE SAME RULE: when the file does declare other functions
+  // the cursor remedy is real and must survive. The trigger offer beside it must
+  // not repeat them — a run-target IS one of those functions, and the button
+  // beside it in the debug panel says "Run", not "Fire".
+  it("names the other functions, and does not re-offer them as triggers", async () => {
+    const src = [
+      "function alpha() { return 1; }", //  1
+      "function beta() { return 2; }", //   2
+      "function setup(context) {", //       3
+      "  context.log('ready');", //         4
+      "}", //                               5
+    ].join("\n");
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "waiting",
+      autoInvokeSetup: true,
+      triggers: [
+        { id: "method:alpha", kind: "method", name: "alpha", fireable: true, runTarget: true },
+        { id: "method:beta", kind: "method", name: "beta", fireable: true, runTarget: true },
+        { id: "hook:onClick", kind: "hook", name: "onClick", fireable: true },
+      ],
+    });
+
+    const outcome = await dbg.runAtCursor(SCRIPT, src, 4); // cursor inside setup
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.message).toMatch(/put the cursor inside/i);
+      expect(outcome.message).toContain("alpha or beta");
+      expect(outcome.message).toContain("onClick");
+      // The positive control for the dangling-"Or" guard in the setup-only
+      // case above: HERE a cursor remedy really did precede the trigger offer,
+      // so the conjunction is correct and must survive.
+      expect(outcome.message).toMatch(/\bOr fire one of the triggers\b/);
+      // THE SABOTAGE THIS PINS: filtering the offer on `fireable` alone writes
+      // "alpha(), beta() or onClick" here — telling the user to fire the very
+      // functions the sentence before told them to put the cursor in.
+      expect(outcome.message).not.toMatch(/alpha\(\)/);
+    }
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
+
+  it("diagnoses a trigger that cannot be fired instead of offering it", async () => {
+    const allInSetup = [
+      "function setup(context) {",
+      "  context.onCellChange(() => {});",
+      "}",
+    ].join("\n");
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "waiting",
+      autoInvokeSetup: true,
+      triggers: [
+        {
+          id: "hook:onCellChange",
+          kind: "hook",
+          name: "onCellChange",
+          fireable: false,
+          reason: "the debugger cannot synthesize a cell edit",
+        },
+      ],
+    });
+
+    const outcome = await dbg.runAtCursor(SCRIPT, allInSetup, 2);
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.message).toContain("onCellChange");
+      expect(outcome.message).toContain("the debugger cannot synthesize a cell edit");
+      // Named as a diagnosis, never as an instruction to fire it...
+      expect(outcome.message).not.toMatch(/fire one of the triggers/i);
+      // ...and this mount DOES hold a trigger, so it must not claim otherwise.
+      expect(outcome.message).not.toMatch(/no entry point/i);
+    }
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
+
+  it("says the script is no longer mounted, and does not quietly remount it", async () => {
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "detached",
+      autoInvokeSetup: true,
+      triggers: [],
+    });
+
+    const outcome = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.functionName).toBe("writeB1");
+      expect(outcome.message).toMatch(/no longer mounted/i);
+      expect(outcome.message).toMatch(/press debug/i);
+      // Not "in a moment": the realm is gone, and waiting cannot bring it back.
+      expect(outcome.message).not.toMatch(/in a moment/i);
+    }
+    // A detached mirror IS a session as far as runAtCursor is concerned, so it
+    // must not open a second one behind the user's back.
+    expect(hostStartDebugSession).not.toHaveBeenCalled();
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes a mount that has SETTLED from one still coming up", async () => {
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "finished",
+      autoInvokeSetup: true,
+      triggers: [{ id: "hook:onClick", kind: "hook", name: "onClick", fireable: true }],
+    });
+    const settled = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+
+    expect(settled.status).toBe("notReady");
+    if (settled.status === "notReady") {
+      expect(settled.message).toMatch(/press stop, then run again/i);
+      expect(settled.message).not.toMatch(/in a moment/i);
+      // It must NOT claim the user edited the source: the editor restarts a
+      // drifted session before it ever calls runAtCursor, so that would be a
+      // guess about the person rather than a fact about the mount.
+      expect(settled.message).not.toMatch(/edited/i);
+    }
+
+    seedLocalSession(SCRIPT, {
+      scriptId: SCRIPT,
+      status: "running",
+      autoInvokeSetup: true,
+      triggers: [],
+    });
+    const early = await dbg.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+
+    expect(early.status).toBe("notReady");
+    if (early.status === "notReady") {
+      expect(early.message).toMatch(/in a moment/i);
+      expect(early.message).not.toMatch(/press stop/i);
     }
     expect(hostDebugFireTrigger).not.toHaveBeenCalled();
   });

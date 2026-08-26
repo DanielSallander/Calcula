@@ -74,6 +74,11 @@ export function buildScriptAssistant(): ScriptAssistantProvider {
             source: result.source,
             summary: result.summary,
             unchanged: result.unchanged,
+            // NOT DEAD ON THIS PATH. A module document is authored as
+            // "workbook", whose context declares ten hooks and not one the
+            // preview can synthesize a payload for — so an edit to a recorded
+            // macro that registers any of them reports every one of them here.
+            unexercisedHooks: result.unexercisedHooks,
           }),
       }),
 

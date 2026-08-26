@@ -41,6 +41,7 @@ import {
   type MountSpec,
   type RenderCellRequest,
   type RenderDrawTarget,
+  type RpcErrorShape,
   type StyleOverride,
 } from "./protocol";
 import {
@@ -1146,8 +1147,15 @@ export interface PreviewRunResult {
    * forwarder delivers (§5c.1). Firing them with `undefined` instead is how a
    * correct destructuring handler got rejected as "FAILS when run" — so an
    * unfired handler is reported, never guessed at.
+   *
+   * IT LEAVES THIS RUNG AS A FIELD, not only as prose in `output`. The preview
+   * already said it in a `[preview] ...` line, and every consumer that had to
+   * ACT on it — the transcript note, the guided result card, the editor's diff
+   * window — would have had to parse that line back out. A run that fired
+   * nothing and a run that fired everything and changed nothing are different
+   * facts, and only this list tells them apart.
    */
-  skippedHooks: string[];
+  unexercisedHooks: string[];
   /**
    * An explicitly-NAMED event whose payload the preview cannot synthesize.
    * The caller asserted this hook must be exercised; the preview cannot do it
@@ -1216,7 +1224,7 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
     // NOT a verdict. jsdom has no Worker, and answering "it did not run" there
     // would be a statement about the test environment reported as one about the
     // script — the precise failure this whole rung exists to avoid.
-    return { ran: false, realmUnavailable: true, hooks: [], calls: [], refusals: [], skippedHooks: [] };
+    return { ran: false, realmUnavailable: true, hooks: [], calls: [], refusals: [], unexercisedHooks: [] };
   }
 
   const scriptName = req.scriptName || "(preview)";
@@ -1290,9 +1298,16 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
           .then(
             (value) => send({ t: "callResult", callId: msg.callId, ok: true, value }),
             (err: unknown) => {
-              const error =
+              // ANNOTATED, and not `as string` on the code. BrokerError.code is
+              // already RpcErrorCode — the exact union RpcErrorShape.code
+              // requires — so the cast that used to sit here only widened it to
+              // `string` and made the object unassignable to the shape it is
+              // sent as. The annotation is what keeps the OTHER arm honest too:
+              // without a contextual type the ternary widens "HostError" to
+              // `string`, so a typo in that literal would compile.
+              const error: RpcErrorShape =
                 err instanceof BrokerError
-                  ? { code: err.code as string, message: err.message }
+                  ? { code: err.code, message: err.message }
                   : { code: "HostError", message: err instanceof Error ? err.message : String(err) };
               refusals.push({ method: msg.method, ...error });
               send({ t: "callResult", callId: msg.callId, ok: false, error });
@@ -1453,13 +1468,37 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
     return undefined;
   };
 
-  const skippedHooks: string[] = [];
+  /** Hooks this run actually DISPATCHED, recorded at the send. */
+  const firedHooks = new Set<string>();
   let unsupportedEvent: string | undefined;
   let undecidable: string | undefined;
 
   const finish = (ran: boolean, error?: string): PreviewRunResult => {
     worker.terminate();
-    return { ran, error, hooks, calls, refusals, skippedHooks, unsupportedEvent, undecidable };
+    // DERIVED FROM WHAT THE REALM REGISTERED, not from what the caller offered.
+    //
+    // Built by walking `req.events`, this list could only ever name a hook the
+    // CALLER knew about — and callers get that list from `objectHooksFor`,
+    // which matches root-level `on[A-Z]` chains only. A handler registered
+    // under a sub-object was therefore never offered, never fired, and never
+    // reported: `context.render.onMessage(...)` on a shape, `render.markRenderer`
+    // on a chart mark, `style.itemRenderer` on a slicer. Those drafts ran, did
+    // nothing, and read as exercised-and-clean — the exact inversion this field
+    // exists to prevent, and worst for chartMark, whose offered-hook list is
+    // empty outright.
+    //
+    // `event:` names are dropped: `api.onEvent("x", h)` registers `event:x`,
+    // which no preview can dispatch. Filtered HERE rather than left to break
+    // later, because the only thing standing between it and a stream of
+    // "the script registered event:x, but the preview never fired it" is a
+    // missing no-op case in the preview backend.
+    //
+    // Gated on `ran`: a run that never completed cannot support a claim about
+    // which of its handlers went unexercised.
+    const unexercisedHooks = ran
+      ? hooks.filter((h) => !firedHooks.has(h) && !h.startsWith("event:"))
+      : [];
+    return { ran, error, hooks, calls, refusals, unexercisedHooks, unsupportedEvent, undecidable };
   };
 
   try {
@@ -1542,13 +1581,15 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
       const synthesized = synthesizableHookPayload(event);
       if (synthesized === null) {
         if (req.eventOptional) {
-          skippedHooks.push(event);
+          // Nothing to record: `finish` derives the list from registered-minus-
+          // fired, and this hook is in `hooks` and will never reach `firedHooks`.
           continue;
         }
         unsupportedEvent = event;
         return finish(true);
       }
       const fires = Math.max(1, req.eventCount ?? 1);
+      firedHooks.add(event);
       for (let i = 0; i < fires; i++) {
         const doneTarget = eventDoneCount + 1;
         send({ t: "event", hook: event, payload: synthesized.payload });

@@ -169,6 +169,9 @@ vi.mock("../lib/monacoTypings", () => ({
   configureObjectScriptTypings: () => {},
   setActiveContextType: () => {},
   annotateScaffold: (s: string) => s,
+  // The API Reference heading reads the interface name out of the generated
+  // typings now, so a partial mock that omits it throws inside the sidebar.
+  contextInterfaceNameFor: (objectType: string) => objectType,
 }));
 vi.mock("../lib/authoringLanguage", () => ({
   objectScriptModelPath: () => "inmemory://script.js",

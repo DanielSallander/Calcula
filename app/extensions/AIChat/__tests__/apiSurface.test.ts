@@ -95,6 +95,10 @@ describe("apiSurfaceSection", () => {
     // The loop reuses one section across up to eight turns. If it varied, every
     // turn would re-process ~6k tokens on a local model.
     expect(await apiSurfaceSection(REPORTED)).toBe(section);
+    // Stability holds for the (text, objectType) PAIR now that the object type
+    // is an argument — a section that varied with an unchanged pair would miss
+    // the cache exactly as a varying text did.
+    expect(await apiSurfaceSection(REPORTED, "sheet")).toBe(await apiSurfaceSection(REPORTED, "sheet"));
   });
 
   it("never rejects on hostile input", async () => {
@@ -104,5 +108,48 @@ describe("apiSurfaceSection", () => {
             // Awaiting the resolution is the only form with teeth.
             await expect(apiSurfaceSection(bad)).resolves.toBeTypeOf("string");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T22 — the surface is built for the object the message is about
+// ---------------------------------------------------------------------------
+
+describe("the surface follows the object type it is given", () => {
+  // The claim this replaced — "the shared surface is most of what any script
+  // uses, so guessing wrong costs a handful of members" — is false exactly where
+  // the work lives: the HOOKS. A sheet is never clicked and a button cannot
+  // obtain a cell, so a prompt built for the wrong one describes an API the
+  // draft cannot call.
+  const SHEET = "run this whenever the selection on the sheet changes";
+  const SHAPE = "redraw the shape when the content behind it changes";
+
+  it("gives a sheet its own hook, and not a button's", async () => {
+    const s = await apiSurfaceSection(SHEET, "sheet");
+    expect(s).toContain("context.onSelectionChange");
+    expect(s, "a sheet is never clicked").not.toContain("context.onClick");
+  });
+
+  it("gives a button the inverse, from the very same words", async () => {
+    // The control that makes the case above about the OBJECT TYPE rather than
+    // about the message.
+    const s = await apiSurfaceSection(SHEET, "button");
+    expect(s).toContain("context.onClick");
+    expect(s).not.toContain("context.onSelectionChange");
+  });
+
+  it("gives a shape the members a button prompt has never contained", async () => {
+    const shape = await apiSurfaceSection(SHAPE, "shape");
+    const button = await apiSurfaceSection(SHAPE, "button");
+    for (const chain of ["context.onCellChange", "context.setProperty", "context.render.canvasRenderer"]) {
+      expect(shape, chain).toContain(chain);
+      expect(button, chain + " is not a button's").not.toContain(chain);
+    }
+  });
+
+  it("falls back to a button when the message named nothing", async () => {
+    // `guessObjectType` returns null rather than guessing, and null lands here.
+    const s = await apiSurfaceSection(SHAPE, null);
+    expect(s).toContain("context.onClick");
   });
 });

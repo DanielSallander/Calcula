@@ -150,7 +150,16 @@ export function describeProfile(profile: ModelProfile): string {
       ? " It did NOT emit a native tool call in the probe: expect it to write tool calls as text. " +
         "Calcula recovers those, and asks you before running anything that changes the workbook."
       : "";
-  return `${planFor(profile).rationale}${speed}${toolCalls}`;
+  // `emitsFencedCode` is a PROPORTION, not a flag — `probeModel` sets it when at
+  // least half the SCORED replies came back fenced — and it is false whenever
+  // nothing was scored at all. The `tasksScored` gate is what stops a probe that
+  // never reached the model from reporting a formatting verdict it never took.
+  const fencing =
+    profile.tasksScored > 0 && !profile.emitsFencedCode
+      ? " Fewer than half its probe replies came back as a fenced code block: expect prose mixed in " +
+        "with the script. Calcula extracts the code either way."
+      : "";
+  return `${planFor(profile).rationale}${speed}${toolCalls}${fencing}`;
 }
 
 const PROBE_SYSTEM = [

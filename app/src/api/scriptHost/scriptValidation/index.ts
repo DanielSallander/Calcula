@@ -29,16 +29,23 @@
 //          Do not "simplify" this into auto-declaring the pragmas. That was
 //          considered and rejected: an auto-written list always LOOKS right,
 //          which removes the reviewer's ability to notice when it is not.
+//
+//          L1 IS OBJECT-TYPE AWARE, and it has to be. The surface is not one
+//          flat list of names: `onSheetChange` is declared by WorkbookContext,
+//          `onClick` by ButtonContext, and a chain checked against the UNION of
+//          every context is checked against a context no script is ever handed.
+//          A button draft calling `context.onSheetChange` passed every check
+//          here and then threw on the first line of `setup`, because at mount
+//          that member was `undefined`. Narrowing is by REACHABILITY — a member
+//          is legal only if this object can obtain the thing it hangs off —
+//          which is what makes `context.cell.setValue` on a button an error
+//          rather than a clean pass. When the caller names no object type, or
+//          names one the generated table does not know, NOTHING is narrowed:
+//          this is a linter, and its worst outcome must be missing a defect,
+//          never inventing one.
 
 import { analyzeScript, type AnalyzedScript } from "./analyze";
-import {
-  capabilitiesFor,
-  hasCallableAncestor,
-  isKnownChain,
-  isKnownPrefix,
-  suggestChains,
-  surfaceMember,
-} from "./surface";
+import { capabilitiesFor, surfaceMember, surfaceScopeFor, wrongContextMember } from "./surface";
 import { CAPABILITY_ID_SET } from "../capabilityIds";
 
 export type FindingSeverity = "error" | "notice";
@@ -50,6 +57,7 @@ export interface ValidationFinding {
     | "parse-error"
     | "no-entry-point"
     | "unknown-member"
+    | "wrong-object-type"
     | "undeclared-capability"
     | "unknown-capability-id"
     | "declared-not-observed";
@@ -58,6 +66,16 @@ export interface ValidationFinding {
   /** Chains the author probably meant, when the finding is `unknown-member`. */
   suggestions?: string[];
   capability?: string;
+  /**
+   * The object types that CAN call the member, when the finding is
+   * `wrong-object-type`.
+   *
+   * Carried as data, not only inside the sentence, because the repair a model
+   * needs is not a better spelling: the script is aimed at the wrong object, and
+   * a caller that wants to offer "attach it to a sheet instead" must be able to
+   * read the list rather than parse the prose back out of the message.
+   */
+  objectTypes?: string[];
 }
 
 export interface ValidationReport {
@@ -74,6 +92,16 @@ export interface ValidationReport {
    * This is the fact that makes a `declared-not-observed` notice explicable.
    */
   hasDynamicAccess: boolean;
+  /**
+   * The object type the script was checked AS, when it was narrowed to one.
+   *
+   * Undefined means nothing was narrowed — either the caller named no object
+   * type, or it named one the generated table does not know — and every finding
+   * in this report was therefore judged against the whole surface. A consumer
+   * that wants to say "this member is a sheet's, not a button's" must know which
+   * of the two happened.
+   */
+  objectType?: string;
   analysis: AnalyzedScript;
 }
 
@@ -98,9 +126,22 @@ export function repairPrompt(report: ValidationReport): string {
   return lines.join("\n");
 }
 
-export function validateScriptSource(source: string): ValidationReport {
+/**
+ * Check a drafted script.
+ *
+ * @param source     The whole file, as the author would save it.
+ * @param objectType The object the script will be attached to ("button",
+ *                   "sheet", …). Given one, L1 checks reach against the members
+ *                   THAT object's context can actually obtain; omitted — or an
+ *                   object type the generated table does not know — it checks
+ *                   against the whole surface, which is the fail-open direction.
+ */
+export function validateScriptSource(source: string, objectType?: string): ValidationReport {
   const analysis = analyzeScript(source);
   const findings: ValidationFinding[] = [];
+  const scope = surfaceScopeFor(objectType);
+  /** What the report says it checked — undefined when nothing was narrowed. */
+  const attachedTo = scope.objectType;
 
   // ---- L0 -----------------------------------------------------------------
   if (!analysis.parsed) {
@@ -116,6 +157,7 @@ export function validateScriptSource(source: string): ValidationReport {
       declared: analysis.declaredCapabilities,
       observed: [],
       hasDynamicAccess: false,
+      objectType: attachedTo,
       analysis,
     };
   }
@@ -143,20 +185,42 @@ export function validateScriptSource(source: string): ValidationReport {
   // ---- L1 -----------------------------------------------------------------
   const reported = new Set<string>();
   for (const call of analysis.calls) {
-    if (isKnownChain(call.chain)) continue;
+    if (scope.isKnownChain(call.chain)) continue;
     // A bare namespace is not a call target but is legal to reference.
-    if (isKnownPrefix(call.chain)) continue;
+    if (scope.isKnownPrefix(call.chain)) continue;
     // `api.getCellValue(...).toString()` -> the tail belongs to the returned
     // VALUE, not to the script surface.
-    if (hasCallableAncestor(call.chain)) continue;
+    if (scope.callableAncestorOf(call.chain) !== undefined) continue;
     if (reported.has(call.chain)) continue;
     reported.add(call.chain);
+
+    // REAL, BUT NOT HERE. A member that exists on some OTHER object's context is
+    // a different defect from an invented one, and it has a different repair:
+    // there is no better spelling to reach for, the script is aimed at the wrong
+    // object. Told only "not part of the object-script API", a model rewrites the
+    // name it already had right and the repair loop cannot converge.
+    const wrong = wrongContextMember(call.chain, scope);
+    if (wrong) {
+      findings.push({
+        severity: "error",
+        code: "wrong-object-type",
+        message:
+          `\`context.${wrong.chain}\` is not part of the context a ${attachedTo ?? "this object"} ` +
+          `script is handed. It is declared by ${wrong.ifaces.join(", ")}, so only a script ` +
+          `attached to ${wrong.objectTypes.join(" or ")} can call it.`,
+        line: call.line,
+        objectTypes: wrong.objectTypes,
+        suggestions: scope.suggest(call.chain),
+      });
+      continue;
+    }
+
     findings.push({
       severity: "error",
       code: "unknown-member",
       message: `\`context.${call.chain}\` is not part of the object-script API`,
       line: call.line,
-      suggestions: suggestChains(call.chain),
+      suggestions: scope.suggest(call.chain),
     });
   }
 
@@ -225,10 +289,12 @@ export function validateScriptSource(source: string): ValidationReport {
     declared,
     observed,
     hasDynamicAccess,
+    objectType: attachedTo,
     analysis,
   };
 }
 
 export { analyzeScript, parseDeclaredCapabilities } from "./analyze";
 export type { AnalyzedScript } from "./analyze";
-export { SURFACE_SIZE, suggestChains } from "./surface";
+export { SURFACE_SIZE, suggestChains, surfaceScopeFor } from "./surface";
+export type { SurfaceScope } from "./surface";

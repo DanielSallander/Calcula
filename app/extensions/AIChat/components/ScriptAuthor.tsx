@@ -27,6 +27,7 @@ import {
   startAuthorJob, cancelJob, subscribeToJobs, latestJob, formatElapsed,
   type AuthorJob, type JobStep,
 } from "../lib/authorJobs";
+import { dryRunCaveat } from "../lib/dryRunNotes";
 import { ActivityDot, type ActivityStatus } from "../../_shared/components/ActivityDot";
 import { hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
 
@@ -155,6 +156,16 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
 
   const elapsed = job ? (job.endedAt ?? Date.now()) - job.startedAt : 0;
   const result = job?.result;
+  // ONE sentence, chosen in ONE place -- see `dryRunNotes.ts`. The rule it
+  // enforces is negative ("changed no cells" must never stand alone when a
+  // handler was never fired), and a negative rule expressed as two ternaries in
+  // the tree below disappears silently on the next edit.
+  const caveat = result
+    ? dryRunCaveat({
+        changedNothing: !!result.changedNothing,
+        unexercisedHooks: result.unexercisedHooks,
+      })
+    : "";
 
   return h("div", { style: wrap },
     showForm
@@ -252,15 +263,21 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
                   ? h("div", { style: badBox },
                       `The script was written but could not be queued for review: ${result.deliveryError}`)
                   : null,
-                // Reported, not acted on: the preview runs against a copy of
-                // whatever workbook is open, and a correct script legitimately
-                // matches nothing in it. Sending this back for a repair round
-                // cost a reporter ten minutes and a timeout on 2026-08-25.
-                result.changedNothing
+                // THE TEXT IS NOT DECIDED HERE. The old literal blamed the open
+                // sheet unconditionally, and when the zero came from a handler
+                // the preview never fired that was the opposite of the truth.
+                caveat ? h("div", { style: warnBox }, caveat) : null,
+                // WHAT IT ASKS FOR THAT IT DOES NOT APPEAR TO USE. §11.2 calls
+                // these information for the reviewer, never a rejection -- and
+                // this screen showed only the error count, so "passed every
+                // check" was the last word on a script declaring a capability
+                // nothing in it needs.
+                result.notices?.length
                   ? h("div", { style: warnBox },
-                      "It ran without error against a copy of your workbook but changed no cells. " +
-                      "That is expected if the open sheet has nothing for it to act on — check it " +
-                      "against real data before relying on it.")
+                      h("div", { style: { fontWeight: 600, marginBottom: 2 } },
+                        "Check what it declares before you mount it"),
+                      ...result.notices.map((n, i) => h("div", { key: i }, `- ${n}`)),
+                    )
                   : null,
                 result.source
                   ? h(React.Fragment, null,

@@ -29,13 +29,11 @@
 import {
   SURFACE_ENTRIES,
   OWN_CHAINS_BY_OBJECT_TYPE,
-  chainsForObjectType,
+  entriesForObjectType,
   isKnownObjectType,
   type SurfaceEntry,
   type SurfaceGroup,
 } from "../generated/scriptSurfaceSlices";
-
-const BY_CHAIN: ReadonlyMap<string, SurfaceEntry> = new Map(SURFACE_ENTRIES.map((e) => [e.chain, e]));
 
 /**
  * Group order when the budget bites.
@@ -220,14 +218,17 @@ function depthOf(chain: string): number {
  * repair loop non-reproducible and wastes any prefix caching the runtime does.
  */
 export function rankSurface(objectType: string, hints?: readonly string[]): SurfaceEntry[] {
-  // An unknown object type degrades to the WHOLE surface rather than to an
-  // empty one: over-showing costs budget, but handing a model an empty API and
+  // Resolved per OBJECT TYPE, not per chain. `context.getCellValue` is three
+  // different signatures, and the chain-keyed map this replaced handed every
+  // object type ShapeContext's, because it sorted first. A sheet script was
+  // shown, as the only description of the API it may call, a signature that does
+  // not exist on its context; the draft validated clean and did nothing.
+  //
+  // An unknown object type still degrades to the WHOLE surface rather than to an
+  // empty one -- `entriesForObjectType` returns one declaration of every chain --
+  // because over-showing costs budget, but handing a model an empty API and
   // watching it invent one wholesale costs the whole attempt.
-  const pool: SurfaceEntry[] = isKnownObjectType(objectType)
-    ? chainsForObjectType(objectType)
-        .map((c) => BY_CHAIN.get(c))
-        .filter((e): e is SurfaceEntry => Boolean(e))
-    : [...SURFACE_ENTRIES];
+  const pool: SurfaceEntry[] = [...entriesForObjectType(objectType)];
 
   const terms = hintTerms(hints);
   // The object's OWN members — a button has exactly `instanceId` and `onClick`.
@@ -391,8 +392,13 @@ export function fullSurfaceCost(objectType: string): number {
 export {
   SURFACE_ENTRIES,
   SHARED_CHAINS,
+  SHARED_IFACES,
   OWN_CHAINS_BY_OBJECT_TYPE,
+  REACHABLE_CHAINS_BY_OBJECT_TYPE,
+  ROOT_IFACE_BY_OBJECT_TYPE,
   chainsForObjectType,
+  entriesForObjectType,
+  entryFor,
   isKnownObjectType,
 } from "../generated/scriptSurfaceSlices";
 export type { SurfaceEntry, SurfaceGroup } from "../generated/scriptSurfaceSlices";

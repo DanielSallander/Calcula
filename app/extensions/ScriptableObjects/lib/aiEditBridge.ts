@@ -66,6 +66,9 @@ function fail(req: AiEditRequestPayload, summary: string): void {
     // screen would invite the user to apply a no-op and think something happened.
     source: "",
     summary,
+    // Nothing ran, so nothing was left unexercised. Empty is the honest answer,
+    // and the field is required so a later arm cannot forget to decide.
+    unexercisedHooks: [],
   };
   lastResults.set(req.documentId, payload);
   void emitAiEditResult(payload);
@@ -116,6 +119,11 @@ function handle(req: AiEditRequestPayload): void {
           source: result.source,
           summary: result.summary,
           unchanged: result.unchanged,
+          // THE ONE PLACE THE SEAM'S OPTIONAL FIELD BECOMES A REQUIRED ONE. A
+          // third-party assistant provider may run no dry run at all, so the
+          // seam leaves it optional; everything downstream of this line — the
+          // wire payload, the editor state, the diff — treats it as an array.
+          unexercisedHooks: result.unexercisedHooks ?? [],
         };
         lastResults.set(result.documentId, payload);
         jobsByDocument.delete(req.documentId);

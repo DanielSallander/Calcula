@@ -984,6 +984,12 @@ export interface TopLevelFunction {
  * back to `setup` by name, so an empty list is the only way to reach that
  * message.
  *
+ * That quotation is HISTORICAL — the message as it read when the defect was
+ * reported. `noRunTargetMessage` (app/extensions/ScriptableObjects/lib/debugger.ts)
+ * no longer says any of those words: it names the functions the file actually
+ * declares, and when it declares none it does not mention the cursor at all.
+ * Do not grep for this wording expecting to find live code.
+ *
  * This is the FIFTH instance of one family in this feature: `export function
  * setup` could not mount, the debug mount stripped it in the wrong order, the
  * preview judged every draft as a button, the assisted template taught a hook by
@@ -1114,9 +1120,19 @@ export function topLevelFunctions(source: string): TopLevelFunction[] {
  * Top-level declarations do not nest, so at most one contains the line; if the
  * cursor sits between declarations (blank line, header comment) the answer is
  * null and the caller falls back per its own rule.
+ *
+ * Takes the INVENTORY, not the source. Every caller that asks "which function is
+ * the cursor in?" also needs the rest of the list — to fall back to when the
+ * answer is null, and to NAME in the message it shows when there is nothing to
+ * fall back to. Scanning the source a second time for that list produced two
+ * inventories of one file that could disagree for no reason, and made the
+ * message the user reads a second derivation of the answer they were given.
  */
-export function enclosingTopLevelFunction(source: string, line: number): TopLevelFunction | null {
-  for (const fn of topLevelFunctions(source)) {
+export function enclosingTopLevelFunction(
+  functions: readonly TopLevelFunction[],
+  line: number,
+): TopLevelFunction | null {
+  for (const fn of functions) {
     if (line >= fn.startLine && line <= fn.endLine) return fn;
   }
   return null;

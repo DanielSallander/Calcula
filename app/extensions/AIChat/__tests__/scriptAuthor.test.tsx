@@ -217,7 +217,7 @@ describe("a job survives the screen", () => {
 
 describe("what the user gets at the end", () => {
   it("shows a click-through to the editor once the draft is queued", async () => {
-    runAuthor.mockResolvedValue({ ok: true, source: GOOD_SOURCE, summary: "Wrote it in 2 rounds.", rounds: [], draftId: "draft-abc123" });
+    runAuthor.mockResolvedValue({ ok: true, source: GOOD_SOURCE, summary: "Wrote it in 2 rounds.", rounds: [], unexercisedHooks: [], draftId: "draft-abc123" });
     await render();
     await type("colour the cells");
     await click("Author the script");
@@ -230,7 +230,7 @@ describe("what the user gets at the end", () => {
   it("still shows the best attempt when authoring failed", async () => {
     runAuthor.mockResolvedValue({
       ok: false, source: "export function setup(context) { /* half-written */ }",
-      summary: "qwen2.5:7b repeated the same mistake on 3 attempts in a row.", rounds: [],
+      summary: "qwen2.5:7b repeated the same mistake on 3 attempts in a row.", rounds: [], unexercisedHooks: [],
     });
     await render();
     await type("something hard");
@@ -242,7 +242,7 @@ describe("what the user gets at the end", () => {
 
   it("separates 'the script is broken' from 'it could not be queued'", async () => {
     runAuthor.mockResolvedValue({
-      ok: true, source: GOOD_SOURCE, summary: "Done.", rounds: [],
+      ok: true, source: GOOD_SOURCE, summary: "Done.", rounds: [], unexercisedHooks: [],
       deliveryError: "Script Security refused",
     });
     await render();
@@ -262,7 +262,7 @@ describe("what the user gets at the end", () => {
   });
 
   it("offers a fresh start that brings the form back", async () => {
-    runAuthor.mockResolvedValue({ ok: true, source: GOOD_SOURCE, summary: "Done.", rounds: [], draftId: "d1" });
+    runAuthor.mockResolvedValue({ ok: true, source: GOOD_SOURCE, summary: "Done.", rounds: [], unexercisedHooks: [], draftId: "d1" });
     await render();
     await type("colour the cells");
     await click("Author the script");
@@ -271,5 +271,51 @@ describe("what the user gets at the end", () => {
     await click("New script");
     expect(container.querySelector("textarea"), "the form comes back").toBeTruthy();
     expect(btn("Start again")).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T17 — the amber box says the RIGHT thing about a zero
+// ---------------------------------------------------------------------------
+
+describe("what the result card says about a run that changed nothing", () => {
+  async function showResult(over: Record<string, unknown>): Promise<void> {
+    runAuthor.mockResolvedValue({
+      ok: true, source: GOOD_SOURCE, summary: "Done.", rounds: [],
+      unexercisedHooks: [], ...over,
+    });
+    await render();
+    await type("colour the cells");
+    await click("Author the script");
+  }
+
+  it("blames the preview, not the user's data, when a handler was never fired", async () => {
+    await showResult({ changedNothing: true, unexercisedHooks: ["onSelectionChange"] });
+    expect(container.textContent).toContain("onSelectionChange");
+    expect(container.textContent).toContain("never fired");
+    expect(
+      container.textContent,
+      "the open sheet had nothing to do with it",
+    ).not.toContain("nothing for it to act on");
+  });
+
+  it("still says the old sentence when nothing was left unfired", async () => {
+    // The control: without it the assertion above passes for a card that
+    // renders no warning at all.
+    await showResult({ changedNothing: true, unexercisedHooks: [] });
+    expect(container.textContent).toContain("nothing for it to act on");
+  });
+
+  it("shows what the script DECLARES that it does not appear to use", async () => {
+    await showResult({
+      notices: ["`net.fetch` is declared but no call requiring it was found."],
+    });
+    expect(container.textContent).toContain("Check what it declares");
+    expect(container.textContent).toContain("net.fetch");
+  });
+
+  it("shows no declaration box when the ladder raised no notice", async () => {
+    await showResult({ notices: [] });
+    expect(container.textContent).not.toContain("Check what it declares");
   });
 });

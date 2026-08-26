@@ -96,7 +96,10 @@ describe("the corpus is well formed", () => {
 
 describe("every reference solution really works", () => {
   it.each(tasks.map((t) => [t.id, t] as const))("%s validates cleanly", (_id, task) => {
-    const report = validateScriptSource(referenceSource(task));
+    // Against the surface THIS task's object type can reach. Unnarrowed, a
+    // reference calling a member that exists somewhere in the API but not on the
+    // context it is attached to would pass Layer A and be dead at run time.
+    const report = validateScriptSource(referenceSource(task), task.objectType);
     const errors = report.findings.filter((f) => f.severity === "error");
     expect(
       errors,
@@ -107,7 +110,7 @@ describe("every reference solution really works", () => {
   });
 
   it.each(tasks.map((t) => [t.id, t] as const))("%s requires exactly the capabilities it claims", (_id, task) => {
-    const report = validateScriptSource(referenceSource(task));
+    const report = validateScriptSource(referenceSource(task), task.objectType);
     expect(
       [...report.observed].sort(),
       `${task.id} claims ${JSON.stringify(task.expectCapabilities)} but its reference is observed to need ` +

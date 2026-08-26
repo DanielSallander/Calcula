@@ -67,6 +67,16 @@ export interface ScriptEditResult {
   summary: string;
   /** The model returned the script unchanged. Not a failure; still worth saying. */
   unchanged?: boolean;
+  /**
+   * Handlers the proposed script registers that the dry run never fired.
+   *
+   * OPTIONAL on the seam, required everywhere the editor reads it. A provider is
+   * not obliged to run a preview at all — a third-party assistant that only
+   * calls a model has nothing to report — and "absent" must not be forced to
+   * masquerade as "the preview fired everything". The editor's bridge
+   * normalises the absence to `[]` at one point.
+   */
+  unexercisedHooks?: string[];
 }
 
 export interface ScriptAssistantProvider {

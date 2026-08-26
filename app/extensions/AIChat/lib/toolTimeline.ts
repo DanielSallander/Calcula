@@ -25,8 +25,16 @@
 //          wiring. Every function below returns a NEW array; none mutates its
 //          argument, so React's identity check sees the change.
 
-/** What a transcript entry is. `notice` is a neutral status line, not an error. */
-export type BubbleKind = "user" | "assistant" | "tool" | "error" | "notice";
+/**
+ * What a transcript entry is.
+ *
+ * `notice` is a neutral status line and `error` is a failure. `warning` is the
+ * third thing that actually happens and had nowhere to go: the run SUCCEEDED and
+ * the user must still act, or the result is worthless. A draft that only runs at
+ * the Unlocked tier is the case that forced it — mounted as-is it does nothing at
+ * all, and saying so in grey italics beside "3 charts" buries it.
+ */
+export type BubbleKind = "user" | "assistant" | "tool" | "error" | "notice" | "warning";
 
 export type ToolState = "running" | "done" | "error";
 

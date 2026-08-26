@@ -9,8 +9,12 @@
 import { describe, it, expect } from "vitest";
 import { validateScriptSource, repairPrompt } from "../index";
 import { analyzeScript, parseDeclaredCapabilities } from "../analyze";
-import { SURFACE_SIZE, suggestChains } from "../surface";
+import { SURFACE_SIZE, suggestChains, surfaceScopeFor } from "../surface";
 import { capabilitiesFor, isKnownChain } from "../surface";
+import { SCRIPTABLE_OBJECT_TYPES } from "../../../scriptableObjects";
+import { contextInterfaceFor, objectHooksFor } from "../../scriptPreview/objectHooks";
+import { OBJECT_TYPE_CONTEXTS, SCRIPT_SURFACE } from "../../generated/scriptSurfacePolicy";
+import { chainsForObjectType } from "../../generated/scriptSurfaceSlices";
 
 describe("the generated surface is present and indexed", () => {
   it("is not empty (every other test would pass vacuously)", () => {
@@ -500,5 +504,273 @@ describe("context flow — the false-pass half of the setup-only trade", () => {
       ].join("\n"),
     );
     expect(report.findings.filter((f) => f.code === "unknown-member")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L1 is narrowed to ONE object type
+// ---------------------------------------------------------------------------
+
+/** `onSheetChange` is declared by WorkbookContext and by nothing else. */
+const WORKBOOK_HOOK = [
+  "export function setup(context) {",
+  "  context.onSheetChange(() => {});",
+  "}",
+  "",
+].join("\n");
+
+describe("L1 - reach is object-type aware", () => {
+  // Deliberately asserts ONLY that the script is accepted. The report's own
+  // `objectType` field is checked in its own case below, so that a narrowing
+  // that silently stops narrowing reds the button case and leaves this one
+  // green — if BOTH go red, the union broke, not the narrowing.
+  it("accepts a workbook hook in a workbook script", () => {
+    const r = validateScriptSource(WORKBOOK_HOOK, "workbook");
+    expect(r.ok, JSON.stringify(r.findings)).toBe(true);
+  });
+
+  it("says which object type it checked the script AS", () => {
+    expect(validateScriptSource(WORKBOOK_HOOK, "workbook").objectType).toBe("workbook");
+  });
+
+  it("rejects that same hook in a BUTTON script, naming both contexts", () => {
+    // The defect this check exists for: a button draft calling
+    // `context.onSheetChange` used to validate CLEAN and then throw on the first
+    // line of `setup`, because at mount the member was `undefined`.
+    const r = validateScriptSource(WORKBOOK_HOOK, "button");
+    expect(r.ok).toBe(false);
+    const f = r.findings.find((x) => x.code === "wrong-object-type")!;
+    expect(f, "the member is REAL, so it must not be reported as invented").toBeDefined();
+    expect(f.severity).toBe("error");
+    expect(f.message).toContain("WorkbookContext");
+    expect(f.message, "the author must be told what this script IS").toContain("button");
+    expect(f.objectTypes, "the repair is data, not prose to parse back out").toEqual(["workbook"]);
+    expect(f.line).toBe(2);
+    expect(
+      r.findings.filter((x) => x.code === "unknown-member"),
+      "a real member must never also be reported as invented",
+    ).toEqual([]);
+    expect(r.objectType).toBe("button");
+  });
+
+  it("carries the wrong-object-type error into the repair prompt", () => {
+    const prompt = repairPrompt(validateScriptSource(WORKBOOK_HOOK, "button"));
+    expect(prompt).toContain("WorkbookContext");
+    expect(prompt).toContain("onSheetChange");
+  });
+
+  it("names EVERY object type that could call it, not just the first", () => {
+    // onSelectionChange is declared by SheetContext AND SlicerContext.
+    const src = [
+      "export function setup(context) {",
+      "  context.onSelectionChange(() => {});",
+      "}",
+      "",
+    ].join("\n");
+    const f = validateScriptSource(src, "button").findings.find((x) => x.code === "wrong-object-type")!;
+    expect(f).toBeDefined();
+    expect(f.objectTypes).toEqual(["sheet", "slicer"]);
+  });
+
+  it("still suggests the member this object DOES have", () => {
+    // `context.setCellValue` is a sheet's and a table's. A button has to go
+    // through `context.api`, and being told only "wrong object" would leave a
+    // model with nothing to do.
+    const src = [
+      "export function setup(context) {",
+      "  context.setCellValue(0, 0, 'x');",
+      "}",
+      "",
+    ].join("\n");
+    const f = validateScriptSource(src, "button").findings.find((x) => x.code === "wrong-object-type")!;
+    expect(f).toBeDefined();
+    expect(f.objectTypes).toEqual(["sheet", "table"]);
+    expect(f.suggestions).toContain("api.setCellValue");
+  });
+
+  it("leaves an ordinary typo an ordinary typo", () => {
+    // `api.setCellValu` is on nobody's context; its only known prefix is the
+    // `api` namespace, which this button CAN reach. It must not be diverted into
+    // the wrong-object branch.
+    const src = "export function setup(context) {\n  context.api.setCellValu(0, 0, 'x');\n}";
+    const r = validateScriptSource(src, "button");
+    expect(r.findings.some((f) => f.code === "wrong-object-type")).toBe(false);
+    const f = r.findings.find((x) => x.code === "unknown-member")!;
+    expect(f).toBeDefined();
+    expect(f.suggestions).toContain("api.setCellValue");
+  });
+
+  it("keeps its suggestions inside the scope it is checking", () => {
+    // `onSheetChanged` is one edit from a member a button cannot call. Offering
+    // it would send the repair loop at a member that does not exist here, and
+    // the loop could not converge.
+    const src = "export function setup(context) {\n  context.onSheetChanged(() => {});\n}";
+    const suggestions =
+      validateScriptSource(src, "button").findings.find((f) => f.code === "unknown-member")
+        ?.suggestions ?? [];
+    expect(suggestions).not.toContain("onSheetChange");
+    // NOT VACUOUS: over the whole surface it really is the nearest neighbour.
+    expect(suggestChains("onSheetChanged")).toContain("onSheetChange");
+  });
+
+  it("narrows NOTHING for an object type the generated table does not know", () => {
+    // The fail-open direction. A type added to the product before
+    // `npm run gen:script-typings` is re-run must not have its own hooks
+    // rejected: this is a linter, and inventing a defect costs more than missing
+    // one.
+    const r = validateScriptSource(WORKBOOK_HOOK, "spaceship");
+    expect(r.ok, JSON.stringify(r.findings)).toBe(true);
+    expect(r.objectType).toBeUndefined();
+  });
+
+  it("narrows NOTHING when the caller names no object type at all", () => {
+    const r = validateScriptSource(WORKBOOK_HOOK);
+    expect(r.ok, JSON.stringify(r.findings)).toBe(true);
+    expect(r.objectType).toBeUndefined();
+  });
+});
+
+describe("a sub-object is reachable only through the member that hands it out", () => {
+  /**
+   * The gap the iface-based first draft of this check left open, now CLOSED.
+   *
+   * `cell()` is declared by SheetContext and TableContext alone, so `cell.*` is
+   * not shared. A button that writes `context.cell.getValue()` cannot obtain a
+   * cell at all, and the call is a TypeError at mount.
+   */
+  const CELL_USE = [
+    "export function setup(context) {",
+    "  context.cell.getValue();",
+    "}",
+    "",
+  ].join("\n");
+
+  it("rejects `context.cell` in a button script, naming sheet and table", () => {
+    const r = validateScriptSource(CELL_USE, "button");
+    expect(r.ok).toBe(false);
+    const f = r.findings.find((x) => x.code === "wrong-object-type")!;
+    expect(f).toBeDefined();
+    expect(f.objectTypes).toEqual(["sheet", "table"]);
+  });
+
+  it("accepts the identical source in a SHEET script", () => {
+    const r = validateScriptSource(CELL_USE, "sheet");
+    expect(r.ok, JSON.stringify(r.findings)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE THING THAT MUST NOT HAPPEN: rejecting code that is correct today
+// ---------------------------------------------------------------------------
+
+const ALL_OBJECT_TYPES = OBJECT_TYPE_CONTEXTS.map(([objectType]) => objectType);
+
+/** Only members BaseObjectContext declares — legal in every script there is. */
+const BASE_MEMBERS_ONLY = [
+  "// @capability storage",
+  "export function setup(context) {",
+  "  context.log('hello');",
+  "  context.notify('hi');",
+  "  context.expose('doThing', async () => {",
+  "    await context.caps.storage.set('k', '1');",
+  "    const v = await context.caps.storage.get('k');",
+  "    await context.api.setCellValue(0, 0, String(v));",
+  "    await context.api.getCellValue(0, 0);",
+  "  });",
+  "}",
+  "",
+].join("\n");
+
+describe("narrowing must never reject correct code", () => {
+  it.each(ALL_OBJECT_TYPES)("%s - a script using only base members is clean", (objectType) => {
+    const r = validateScriptSource(BASE_MEMBERS_ONLY, objectType);
+    expect(
+      r.findings.filter((f) => f.severity === "error"),
+      `${objectType}: ${JSON.stringify(r.findings)}`,
+    ).toEqual([]);
+  });
+
+  it.each(ALL_OBJECT_TYPES)("%s - registering its OWN hooks is clean", (objectType) => {
+    const hooks = objectHooksFor(objectType);
+    const body = hooks.length > 0
+      ? hooks.map((h) => `  context.${h}(() => {});`)
+      : ["  context.log('this type declares no hooks of its own');"];
+    const src = ["export function setup(context) {", ...body, "}", ""].join("\n");
+    const r = validateScriptSource(src, objectType);
+    expect(
+      r.findings.filter((f) => f.severity === "error"),
+      `${objectType} hooks ${JSON.stringify(hooks)}: ${JSON.stringify(r.findings)}`,
+    ).toEqual([]);
+  });
+
+  it("keeps every BaseObjectContext member legal for every object type", () => {
+    const baseChains = [
+      ...new Set(SCRIPT_SURFACE.filter((m) => m.iface === "BaseObjectContext").map((m) => m.chain)),
+    ];
+    expect(baseChains.length, "not vacuous").toBeGreaterThan(5);
+    for (const objectType of ALL_OBJECT_TYPES) {
+      const scope = surfaceScopeFor(objectType);
+      const missing = baseChains.filter((c) => !scope.isKnownChain(c));
+      expect(missing, `${objectType} lost base members`).toEqual([]);
+    }
+  });
+
+  it("accepts a handle obtained through a member this object DOES have", () => {
+    // The false positive that matters most: `api.range` is shared and is the
+    // prefix of nothing, so `r.setValue` must resolve through its callable
+    // ancestor rather than being reported as an invented member.
+    const src = [
+      "export function setup(context) {",
+      "  context.onClick(async () => {",
+      "    const r = await context.api.range('A1');",
+      "    r.setValue('x');",
+      "  });",
+      "}",
+      "",
+    ].join("\n");
+    const r = validateScriptSource(src, "button");
+    expect(r.findings.filter((f) => f.severity === "error"), JSON.stringify(r.findings)).toEqual([]);
+  });
+});
+
+describe("the validator's scope and the prompt's slice are the same set", () => {
+  /**
+   * Two independent derivations of one fact, deliberately not one shared import:
+   * this module walks `SCRIPT_SURFACE` (94 KB, already in the main bundle),
+   * while the prompt reads the generated slices (~209 KB, lazily imported). If
+   * they ever disagree, a model is shown a member the checker will reject, or
+   * the checker admits one the model was never told about.
+   */
+  it.each(ALL_OBJECT_TYPES)("%s accepts exactly what the prompt shows", (objectType) => {
+    const mine = [...surfaceScopeFor(objectType).chains].sort();
+    const theirs = [...chainsForObjectType(objectType)].sort();
+    expect(mine.length, "not vacuous").toBeGreaterThan(300);
+    expect(mine).toEqual(theirs);
+  });
+});
+
+describe("the tripwires under the narrowing", () => {
+  it("knows an object type for every context interface in the surface", () => {
+    // A `*Context` interface with no row in OBJECT_TYPE_CONTEXTS is a context
+    // nobody is ever handed -- or, far likelier, a table that stopped being
+    // regenerated. Either way the narrowing is judging scripts against a
+    // surface that no longer describes them.
+    const known = new Set(OBJECT_TYPE_CONTEXTS.map(([, iface]) => iface));
+    const orphans = [
+      ...new Set(SCRIPT_SURFACE.map((m) => m.iface).filter((i) => /Context$/.test(i))),
+    ].filter((i) => !known.has(i));
+    expect(orphans).toEqual([]);
+  });
+
+  it("narrows every scriptable object type the product actually offers", () => {
+    for (const objectType of SCRIPTABLE_OBJECT_TYPES) {
+      expect(surfaceScopeFor(objectType).narrowed, `${objectType} narrowed nothing`).toBe(true);
+    }
+  });
+
+  it("agrees with the preview about which interface each type is handed", () => {
+    for (const objectType of ALL_OBJECT_TYPES) {
+      expect(surfaceScopeFor(objectType).iface, objectType).toBe(contextInterfaceFor(objectType));
+    }
   });
 });

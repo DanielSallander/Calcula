@@ -196,6 +196,10 @@ function bubbleStyle(kind: Bubble["kind"]): React.CSSProperties {
     case "assistant": return { ...base, alignSelf: "flex-start", background: "#FFF", border: "1px solid #E0E0E0", color: "#222" };
     case "tool": return { ...base, alignSelf: "flex-start", background: "#F0F4F8", border: "1px solid #D6E2EE", color: "#456", fontFamily: "Consolas, monospace", fontSize: 11 };
     case "notice": return { ...base, alignSelf: "flex-start", background: "#F5F5F5", border: "1px solid #E0E0E0", color: "#777", fontStyle: "italic" };
+    // Amber and NOT italic: the run succeeded, and the user still has to act or
+    // the result is worthless. Grey italics is the styling for "you may ignore
+    // this", which is the opposite of what this bubble means.
+    case "warning": return { ...base, alignSelf: "flex-start", background: "#FFF8E6", border: "1px solid #EBD9A8", color: "#6B5A1E" };
     case "error": return { ...base, alignSelf: "flex-start", background: "#FDECEA", border: "1px solid #F5C6C2", color: "#A1241B" };
   }
 }
@@ -409,8 +413,13 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     // `apply_formatting`, which takes ONE range and ONE set of properties and
     // therefore cannot express a per-cell colour at all.
     const scriptish = detectScriptIntent(text);
+    // Read ONCE, used twice: the offer card preselects this type, and the API
+    // surface below is built for it. They have to be the same answer -- the
+    // surface used to be hardcoded to "button", so a shape request was shown
+    // `onClick` and none of `onCellChange` / `setProperty` / `render.*`.
+    const guessedType = guessObjectType(text);
     if (scriptish.looksLikeScript) {
-      setOffer({ intent: text, objectType: guessObjectType(text) ?? undefined, matched: scriptish.matched ?? "" });
+      setOffer({ intent: text, objectType: guessedType ?? undefined, matched: scriptish.matched ?? "" });
     }
     setBusy(true);
     stoppedRef.current = false;
@@ -464,9 +473,9 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     // provider's prefix cache misses on each round. Measured: without this the
     // capable model explains what it would write and never calls the tool at
     // all (qwen2.5:7b, 3/3 text-only -> 2/3 valid drafts). See apiSurface.ts.
-    // Awaited: the surface module is imported lazily so 167 KB of generated
+    // Awaited: the surface module is imported lazily so ~209 KB of generated
     // reference data stays out of the extension's activation path.
-    const surface = await apiSurfaceSection(text);
+    const surface = await apiSurfaceSection(text, guessedType);
     try {
       for (turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         const streamId = newStreamId();
@@ -661,6 +670,25 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
                 ? draftIdsRef.current.slice(before)[0] ?? draftIdFromResult(result) ?? undefined
                 : undefined;
             setBubbles((prev) => finishTool(prev, tu.id, { ms, detail: truncate(result, 140), draftId }));
+            // THE NOTE IS FOR THE USER TOO. The gate computed what the draft
+            // would do and what permission it needs, handed it to the MODEL as a
+            // tool result, and showed the person nothing — so a draft that
+            // mounts and does nothing until its access level is raised looked
+            // exactly like one that works. `userNote`, never `note`: the model's
+            // copy says "Tell the user...", which is not a thing to put in front
+            // of the user.
+            if (verdict.userNote) {
+              addBubble({ kind: verdict.needsUnlocked ? "warning" : "notice", text: verdict.userNote.trim() });
+            }
+            // What it ASKS FOR that it does not appear to use. §11.2 keeps these
+            // out of the repair prompt on purpose; the reviewer is the one who
+            // can judge them, and pressing Save is the act of granting them.
+            if (verdict.notices?.length) {
+              addBubble({
+                kind: "notice",
+                text: `Before you mount it, check what it declares:\n${verdict.notices.map((n) => `- ${n}`).join("\n")}`,
+              });
+            }
             // The gate's dry-run note rides on the tool result so the model —
             // and the transcript — say what the draft would DO, not just that
             // it was queued. Empty for declined/inapplicable dry runs.

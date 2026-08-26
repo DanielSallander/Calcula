@@ -40,7 +40,7 @@ import { PreviewGrid } from "../scriptPreview/grid";
 import { createPreviewBackend, createPreviewState } from "../scriptPreview/backend";
 import { drainBrokerTraffic, synthesizableHookPayload, withTimeout } from "../scriptPreview/runShape";
 import { PREVIEW_MIRROR_GAP } from "../protocol";
-import type { MountSpec, W2H } from "../protocol";
+import type { MountSpec, RpcErrorShape, W2H } from "../protocol";
 import type { EvalTask, OutcomeObservation } from "./index";
 
 const SETUP_TIMEOUT_MS = 2_000;
@@ -68,7 +68,12 @@ export async function runTaskOutcome(task: EvalTask, source: string): Promise<Ou
 
   let hookError: string | undefined;
 
-  const declared = new Set<CapabilityId>(validateScriptSource(source).declared as CapabilityId[]);
+  // Narrowed for consistency with `scoreCandidate`, not for effect: only
+  // `.declared` is read here, and the capability pragmas a script carries are
+  // the same whatever object it is attached to.
+  const declared = new Set<CapabilityId>(
+    validateScriptSource(source, task.objectType).declared as CapabilityId[],
+  );
 
   const state = createPreviewState({ grid, stubs: outcome.stubs });
   const backend = createPreviewBackend(state);
@@ -103,7 +108,11 @@ export async function runTaskOutcome(task: EvalTask, source: string): Promise<Ou
     declaredCapabilities: declared,
   };
 
-  let settle: (callId: number, ok: boolean, value?: unknown, error?: { code: string; message: string }) => void =
+  // `RpcErrorShape`, not a hand-written `{ code: string; message: string }`:
+  // the structural twin widened `code` to `string`, and the value is handed
+  // straight to `rt.settleCall`, which requires the narrow union. The duplicate
+  // was the bug — the real type is the one the receiver declares.
+  let settle: (callId: number, ok: boolean, value?: unknown, error?: RpcErrorShape) => void =
     () => {};
   const post = (msg: W2H): void => {
     if (msg.t === "error") {

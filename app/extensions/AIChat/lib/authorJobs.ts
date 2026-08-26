@@ -293,6 +293,9 @@ export function startAuthorJob(req: StartJobRequest): string {
         source: "",
         summary: wasCancelled ? "Stopped at your request." : `${e}`,
         rounds: [],
+        // Required, and empty is the truth here: the run threw or was stopped,
+        // so no preview ever reported which handlers it managed to fire.
+        unexercisedHooks: [],
       });
     } finally {
       cancelled.delete(id);

@@ -47,6 +47,7 @@ import {
 import type { ObjectScriptDefinition, ScriptableObjectType, ScriptAccessLevel } from "@api/scriptableObjects";
 import {
   configureObjectScriptTypings,
+  contextInterfaceNameFor,
   setActiveContextType,
   annotateScaffold,
 } from "../lib/monacoTypings";
@@ -1342,7 +1343,7 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
                   borderRadius: 3,
                   display: "inline-block",
                 }}>
-                  {activeScript.objectType.charAt(0).toUpperCase() + activeScript.objectType.slice(1)}Context
+                  {contextInterfaceNameFor(activeScript.objectType, objectContextsDts)}
                 </div>
               )}
               {docs.map((cat) => (

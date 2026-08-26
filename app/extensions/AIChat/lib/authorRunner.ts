@@ -29,6 +29,11 @@ import { listenTauriEvent } from "@api";
 import { aiChatBackend } from "./aiChatBackend";
 import { AI_STREAM_EVENT, type ChatResponse, type StreamEvent } from "./aiTypes";
 import { readProfile } from "./probeRunner";
+// TYPE-ONLY, so it is fully erased under `verbatimModuleSyntax` and the ~209 KB
+// authoring graph stays behind the lazy `load()` below.
+import type { DryRunReport } from "@api/scriptHost/scriptAuthoring";
+// A leaf with no imports of its own, so this costs nothing at activation.
+import { unexercisedHookNote } from "@api/scriptHost/scriptPreview/unexercisedHooks";
 
 /** One repair round, as the UI shows it. */
 export interface AuthorRound {
@@ -97,6 +102,26 @@ export interface AuthorRunResult {
    * it. It is still the single most useful thing to tell the user to check.
    */
   changedNothing?: boolean;
+  /**
+   * Handlers the script REGISTERED that the preview never fired.
+   *
+   * REQUIRED, and empty rather than absent when there were none: it is the field
+   * that decides which sentence `changedNothing` gets, and a consumer that has
+   * to distinguish "no unfired handlers" from "nobody filled this in" will get
+   * it wrong. Always empty for a button draft — `SYNTHESIZABLE_HOOK_PAYLOADS`
+   * covers `onClick` — and non-empty for essentially every other context.
+   */
+  unexercisedHooks: string[];
+  /**
+   * The validation ladder's NOTICES, as whole sentences.
+   *
+   * Today: capabilities the script declares that no call in it appears to need.
+   * §11.2 keeps them out of the repair prompt because a machine cannot decide
+   * them; they belong in front of the person who grants them by pressing Save,
+   * and this screen showed only the error count, so "passed every check" was the
+   * last word on a script asking for `net.fetch` it never uses.
+   */
+  notices?: string[];
   /** EDIT MODE: the model judged that no change was needed. Not a failure. */
   unchanged?: boolean;
 }
@@ -130,7 +155,7 @@ function profileFor(providerId: string, model: string) {
 
 /**
  * Lazy, for the same reason `apiSurface.ts` is: this module's dependency graph
- * reaches the 167 KB generated surface, and the extension activates at app
+ * reaches the ~209 KB generated surface, and the extension activates at app
  * startup whether or not anyone authors a script.
  */
 async function load() {
@@ -161,6 +186,19 @@ function problemsOf(report: { findings: Array<{ severity: string; message: strin
     .filter((f) => f.severity === "error")
     .map((f) => f.message)
     .slice(0, 3);
+}
+
+/**
+ * Notice messages from a validation report — UNTRIMMED, unlike `problemsOf`.
+ *
+ * A problem is a progress line inside a round and there will be more of them; a
+ * notice is the finished verdict's own list, shown once, and silently dropping
+ * the fourth declared capability from it would be a lie about what the script
+ * asks for. Filtered by SEVERITY, not by code, so it picks up every notice the
+ * ladder ever grows.
+ */
+function noticesOf(report: { findings: Array<{ severity: string; message: string }> }): string[] {
+  return report.findings.filter((f) => f.severity === "notice").map((f) => f.message);
 }
 
 export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult> {
@@ -246,8 +284,15 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     }
   };
 
-  /** The last preview report, for the warning below. */
-  let lastDryRun: { ok: boolean; applicable?: boolean; totalChanges: number } | null = null;
+  /**
+   * The last preview report, for the warnings below.
+   *
+   * The REAL type, not a hand-written subset of it. The subset that used to
+   * stand here named the three fields the one warning needed, so the moment a
+   * second warning wanted a fourth field the structural type silently said it
+   * did not exist.
+   */
+  let lastDryRun: DryRunReport | null = null;
   const rounds: AuthorRound[] = [];
   const result = await authorScript({
     intent: req.intent,
@@ -275,8 +320,11 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
             : "It failed when run",
         report.applicable === false
           ? report.declinedReason ?? undefined
+          // A clean run is the one case with nothing to add — unless a handler
+          // the script registered was never fired, in which case the count above
+          // is a fact about the preview and the log has to say so.
           : report.ok
-            ? undefined
+            ? unexercisedHookNote(report.unexercisedHooks) || undefined
             : report.error ?? undefined,
       );
       return report;
@@ -313,12 +361,27 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
   const ranButChangedNothing = (): boolean =>
     lastDryRun !== null && lastDryRun.applicable !== false && lastDryRun.ok && lastDryRun.totalChanges === 0;
 
+  /**
+   * The handlers the last RUN left unfired, or [].
+   *
+   * Gated on the same three conditions as `ranButChangedNothing`, because the
+   * two are read together: a declined or failed report says nothing about which
+   * handlers were exercised either. `?? []` because a preview double — or a
+   * third-party provider — may hand back a report without the field, and the
+   * result contract promises an array.
+   */
+  const lastUnexercisedHooks = (): string[] =>
+    lastDryRun !== null && lastDryRun.applicable !== false && lastDryRun.ok
+      ? lastDryRun.unexercisedHooks ?? []
+      : [];
+
   if (!result.ok) {
     // The best attempt is returned even on failure: a script that is 90% right
     // is worth showing, and the editor is where a person fixes the rest.
     return {
       ok: false, source: result.source, summary: result.summary, rounds,
       changedNothing: ranButChangedNothing(), unchanged: result.unchanged,
+      unexercisedHooks: lastUnexercisedHooks(), notices: noticesOf(result.report),
     };
   }
 
@@ -334,6 +397,7 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     return {
       ok: true, source: result.source, summary: result.summary, rounds,
       changedNothing: ranButChangedNothing(), unchanged: result.unchanged,
+      unexercisedHooks: lastUnexercisedHooks(), notices: noticesOf(result.report),
     };
   }
 
@@ -351,7 +415,11 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       },
     });
     const id = /\(id=(draft-[0-9a-fA-F]+)\)/.exec(text)?.[1];
-    return { ok: true, source: result.source, summary: result.summary, rounds, draftId: id, changedNothing: ranButChangedNothing() };
+    return {
+      ok: true, source: result.source, summary: result.summary, rounds, draftId: id,
+      changedNothing: ranButChangedNothing(),
+      unexercisedHooks: lastUnexercisedHooks(), notices: noticesOf(result.report),
+    };
   } catch (e) {
     // Authoring SUCCEEDED; only delivery failed. Reported separately so the user
     // is not told their script is broken when it is sitting right there.
@@ -362,6 +430,8 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       rounds,
       deliveryError: `${e}`,
       changedNothing: ranButChangedNothing(),
+      unexercisedHooks: lastUnexercisedHooks(),
+      notices: noticesOf(result.report),
     };
   }
 }

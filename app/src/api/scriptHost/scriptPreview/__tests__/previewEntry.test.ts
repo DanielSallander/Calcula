@@ -105,6 +105,7 @@ describe("the report shape stays the one every consumer already reads", () => {
         "readBack",
         "totalChanges",
         "truncated",
+        "unexercisedHooks",
       ].sort(),
     );
   });

@@ -50,7 +50,12 @@ vi.mock("@api", () => ({
 
 // The gate needs a Worker realm it does not have here; it is proved separately
 // in draftGate.test.ts. Allow everything so this file tests only the wiring.
-vi.mock("../lib/draftGate", () => ({ gateToolCall: async () => ({ allow: true }) }));
+//
+// MUTABLE, and reset in `beforeEach`. The verdict now carries fields the CHAT
+// renders, so a test has to be able to set one — and a case that forgets to
+// reset it would decorate every later transcript with a stray bubble.
+let gateVerdict: Record<string, unknown> = { allow: true };
+vi.mock("../lib/draftGate", () => ({ gateToolCall: async () => gateVerdict }));
 
 // ScriptAuthor is reachable from the chat now; its own suite proves it.
 vi.mock("../lib/authorRunner", () => ({ runAuthor: () => new Promise(() => {}) }));
@@ -116,6 +121,8 @@ beforeEach(async () => {
   invoke.mockReset();
   confirmAsync.mockReset();
   openDraftInEditor.mockClear();
+  // Miss this and one case's verdict decorates every transcript after it.
+  gateVerdict = { allow: true };
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -982,5 +989,87 @@ describe("a running script job is visible from the chat", () => {
     invoke.mockImplementation(async () => textReply("ok"));
     await render();
     expect(container.textContent).not.toContain("Writing a script");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T13 — what the gate computed reaches the TRANSCRIPT, not only the model
+// ---------------------------------------------------------------------------
+
+describe("the gate's verdict is shown to the person, not only to the model", () => {
+  // The gate ran a preview, deduced that the draft needs the Unlocked tier and
+  // listed the capabilities it declares but does not appear to use — then handed
+  // all of it to the MODEL as a tool result and showed the user nothing. A draft
+  // that mounts and does nothing looked exactly like one that works.
+
+  function draftTurn(): void {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{
+              type: "toolUse", id: "call_1", name: "draft_object_script",
+              input: { name: "Paint", object_type: "button", source: "export function setup(c){}" },
+            }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("Queued for your review.");
+      }
+      return 'Drafted object script "Paint" (id=draft-ab12cd34) for button.';
+    });
+  }
+
+  it("renders the tier warning in the user's own words", async () => {
+    gateVerdict = {
+      allow: true,
+      needsUnlocked: true,
+      note: " NOTE: ... Tell the user they must raise the script's access level to Unlocked.",
+      userNote:
+        " NOTE: this script does NOT run at the Restricted access level a draft is mounted with — " +
+        "it only ran once the preview was raised to Unlocked. Raise the script's access level to " +
+        "Unlocked in the Object Script Editor before mounting it, or it will do nothing.",
+    };
+    draftTurn();
+    await ask("make me a button script");
+
+    expect(container.textContent).toContain("does NOT run at the Restricted access level");
+    expect(container.textContent).toContain("Unlocked");
+    expect(container.textContent, "the model's copy is not for the user").not.toContain("Tell the user");
+  });
+
+  it("renders the ladder's notices", async () => {
+    gateVerdict = {
+      allow: true,
+      notices: ["`net.fetch` is declared but no call requiring it was found."],
+    };
+    draftTurn();
+    await ask("make me a button script");
+
+    expect(container.textContent).toContain("Before you mount it");
+    expect(container.textContent).toContain("net.fetch");
+  });
+
+  it("still sends the MODEL's copy on the tool result", async () => {
+    // Both halves, not one instead of the other: the model needs the note to say
+    // what the draft would do on its next turn.
+    gateVerdict = {
+      allow: true,
+      note: " When run against a copy of the workbook it would change 3 cells (B2, B3, B4).",
+      userNote: " When run against a copy of the workbook it would change 3 cells (B2, B3, B4).",
+    };
+    draftTurn();
+    await ask("make me a button script");
+
+    const results = sentMessages(1).flatMap((m) => m.content).filter((b) => b.type === "toolResult");
+    expect(JSON.stringify(results)).toContain("would change 3 cells");
+  });
+
+  it("adds no bubble at all for a plain allow", async () => {
+    draftTurn();
+    await ask("make me a button script");
+    expect(container.textContent).not.toContain("Before you mount it");
+    expect(container.textContent).not.toContain("Restricted access level");
   });
 });

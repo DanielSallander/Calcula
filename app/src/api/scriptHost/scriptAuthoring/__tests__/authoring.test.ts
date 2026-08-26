@@ -145,7 +145,11 @@ describe("L3 — the dry run turns a runtime failure into a repair round", () =>
   // all failures were scripts the validator called `ok`. The loop stopped after
   // one round on every one of them, because "does it parse and call real
   // methods" was the only question it could ask.
-  const dryOk = (totalChanges: number) => ({
+  // The doubles carry the WHOLE report shape, including the fields the loop does
+  // not read today. A double that is a subset of what production emits is a
+  // second definition of the type, and it stops catching the day the loop starts
+  // reading one of the missing fields.
+  const dryOk = (totalChanges: number, unexercisedHooks: string[] = []) => ({
     ok: true,
     error: null,
     durationMs: 3,
@@ -153,6 +157,10 @@ describe("L3 — the dry run turns a runtime failure into a repair round", () =>
     truncated: false,
     totalChanges,
     output: [],
+    readBack: [],
+    unexercisedHooks,
+    applicable: true,
+    declinedReason: null,
   });
   const dryFailed = (error: string) => ({
     ok: false,
@@ -162,6 +170,10 @@ describe("L3 — the dry run turns a runtime failure into a repair round", () =>
     truncated: false,
     totalChanges: 0,
     output: [],
+    readBack: [],
+    unexercisedHooks: [],
+    applicable: true,
+    declinedReason: null,
   });
 
   it("repairs a script that passes every static check but throws when run", () => {
@@ -245,6 +257,82 @@ describe("L3 — the dry run turns a runtime failure into a repair round", () =>
     expect(r.summary).toContain("passes every static check but fails when run");
     expect(r.summary).toContain("ReferenceError");
     expect(r.summary).not.toContain("Still wrong: .");
+  });
+
+  /**
+   * THE UNEXERCISED-HOOK SUPPRESSION.
+   *
+   * "It changed nothing" is only evidence about the DRAFT when everything the
+   * draft registered actually ran. When the handler holding the work was never
+   * fired — the preview cannot synthesize the payload the product's forwarder
+   * delivers — the same zero is evidence about the PREVIEW, and sending a
+   * correct script back for repair on it is the founding failure mode of this
+   * whole rung wearing a different hat: the model has nothing to fix, so it
+   * rewrites working code until the rounds run out.
+   */
+  it("does NOT repair a script whose handler the preview never fired", async () => {
+    const complete = scripted(GOOD, GOOD);
+    const dryRun = vi.fn(async () => dryOk(0, ["onSelectionChange"]));
+    const r = await authorScript({
+      intent: "colour the selection",
+      objectType: "button",
+      plan: PLAN,
+      complete,
+      dryRun,
+      expectsWrites: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(complete, "one round: there was nothing to correct").toHaveBeenCalledTimes(1);
+  });
+
+  it("still repairs the same zero when every handler DID run", async () => {
+    // The control. Without it the suppression above could be passing because
+    // the expectsWrites check stopped working altogether.
+    const complete = scripted(GOOD, GOOD);
+    let call = 0;
+    const dryRun = vi.fn(async () => (call++ === 0 ? dryOk(0, []) : dryOk(1, [])));
+    const r = await authorScript({
+      intent: "put hi in A1",
+      objectType: "button",
+      plan: PLAN,
+      complete,
+      dryRun,
+      expectsWrites: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1][1]).toContain("changes NOTHING");
+  });
+
+  it("treats a report that omits the field as 'everything ran'", async () => {
+    // `run-eval.mjs` and third-party providers hand-build this shape. The
+    // suppression reads `?? 0`, so an absent list must repair exactly as an
+    // empty one does — never suppress on a field nobody set.
+    const complete = scripted(GOOD, GOOD);
+    let call = 0;
+    const legacy = (totalChanges: number) => ({
+      ok: true,
+      error: null,
+      durationMs: 3,
+      changes: [],
+      truncated: false,
+      totalChanges,
+      output: [],
+      readBack: [],
+      applicable: true,
+      declinedReason: null,
+    });
+    const dryRun = vi.fn(async () => (call++ === 0 ? legacy(0) : legacy(1)));
+    const r = await authorScript({
+      intent: "put hi in A1",
+      objectType: "button",
+      plan: PLAN,
+      complete,
+      dryRun,
+      expectsWrites: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(2);
   });
 });
 

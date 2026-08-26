@@ -312,6 +312,16 @@ export interface AiEditResultPayload {
   summary: string;
   /** The model judged that no change was needed. Not a failure. */
   unchanged?: boolean;
+  /**
+   * Handlers the proposed script registers that the dry run never fired.
+   *
+   * REQUIRED, and normalised once in `aiEditBridge` — the main window is the
+   * only side that ran the preview, so this window is the only one that can
+   * know. The editor renders it beside the summary, because "it changed no
+   * cells" about a handler nothing fired is a fact about the preview that reads
+   * as a verdict on the script.
+   */
+  unexercisedHooks: string[];
 }
 
 export interface AiEditProgressPayload {
@@ -323,6 +333,17 @@ export interface AiEditProgressPayload {
 }
 
 export interface AiEditCancelPayload {
+  /**
+   * The document the editor is done with.
+   *
+   * REQUIRED, and the more important half of the two: a cancel means "forget
+   * this run" — stopped, accepted or rejected — and the main window keys its
+   * stored last-result by document, not by job. Without this it cannot drop
+   * that result, and a proposal the author REJECTED is replayed at them the
+   * next time the editor window opens.
+   */
+  documentId: string;
+  /** Empty when the editor has no live job (a replayed proposal carries none). */
   jobId: string;
 }
 

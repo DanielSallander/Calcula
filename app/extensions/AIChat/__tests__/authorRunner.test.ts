@@ -46,7 +46,8 @@ const OK_RESULT = { ok: true, source: "export function setup(c) {}", report: { o
 
 const dry = (over: Record<string, unknown> = {}) => ({
   ok: true, error: null, durationMs: 2, changes: [], truncated: false,
-  totalChanges: 3, output: [], readBack: [], applicable: true, declinedReason: null,
+  totalChanges: 3, output: [], readBack: [], unexercisedHooks: [],
+  applicable: true, declinedReason: null,
   ...over,
 });
 
@@ -273,5 +274,152 @@ describe("EDIT mode", () => {
     expect(res.ok).toBe(false);
     expect(res.source).toBe("half edited");
     expect(invoke.mock.calls.some((c) => c[0] === "ai_chat_run_tool")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T15 — the two fields the result grew, on every arm that can return
+// ---------------------------------------------------------------------------
+
+describe("what the preview could not exercise reaches the result", () => {
+  // `totalChanges === 0` is a statement about the SCRIPT only when everything it
+  // registered actually ran. When the handler holding the work was never fired,
+  // the same zero is a statement about the PREVIEW — and the screen used to
+  // blame the user's data for it in both cases.
+
+  /** A run whose preview reported one unfired handler. */
+  function previewedWithUnfiredHook(): void {
+    previewObjectScript.mockResolvedValue(
+      dry({ totalChanges: 0, unexercisedHooks: ["onSelectionChange"] }),
+    );
+    authorScript.mockImplementation(async (r: { dryRun: (s: string) => Promise<unknown> }) => {
+      await r.dryRun("export function setup(c) {}");
+      return OK_RESULT;
+    });
+  }
+
+  it("carries it on the DELIVERED-DRAFT arm", async () => {
+    previewedWithUnfiredHook();
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    const res = await runAuthor({ ...REQ });
+    expect(res.draftId, "this is the delivered arm, not another one").toBe("draft-abc123");
+    expect(res.unexercisedHooks).toEqual(["onSelectionChange"]);
+  });
+
+  it("carries it on the FAILURE arm", async () => {
+    previewObjectScript.mockResolvedValue(
+      dry({ totalChanges: 0, unexercisedHooks: ["onSelectionChange"] }),
+    );
+    authorScript.mockImplementation(async (r: { dryRun: (s: string) => Promise<unknown> }) => {
+      await r.dryRun("x");
+      return { ...OK_RESULT, ok: false, summary: "Gave up." };
+    });
+    const res = await runAuthor({ ...REQ });
+    expect(res.ok).toBe(false);
+    expect(res.unexercisedHooks).toEqual(["onSelectionChange"]);
+  });
+
+  it("carries it on the EDIT arm", async () => {
+    previewedWithUnfiredHook();
+    const res = await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
+    expect(res.draftId, "an edit is never queued").toBeUndefined();
+    expect(res.unexercisedHooks).toEqual(["onSelectionChange"]);
+  });
+
+  it("carries it on the DELIVERY-FAILURE arm", async () => {
+    previewedWithUnfiredHook();
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_run_tool") throw new Error("Script Security refused");
+      return { blocks: [], stopReason: "endTurn", model: "m" };
+    });
+    const res = await runAuthor({ ...REQ });
+    expect(res.deliveryError).toContain("Script Security refused");
+    expect(res.unexercisedHooks).toEqual(["onSelectionChange"]);
+  });
+
+  it("is EMPTY when the preview declined — a declined report is not evidence", async () => {
+    previewObjectScript.mockResolvedValue(
+      dry({ applicable: false, declinedReason: "no realm", unexercisedHooks: ["onSelectionChange"] }),
+    );
+    authorScript.mockImplementation(async (r: { dryRun: (s: string) => Promise<unknown> }) => {
+      await r.dryRun("x");
+      return OK_RESULT;
+    });
+    const res = await runAuthor({ ...REQ });
+    expect(res.unexercisedHooks).toEqual([]);
+  });
+
+  it("is EMPTY when a preview omits the field entirely", async () => {
+    // A third-party provider, or a hand-built double, may not carry it. The
+    // contract promises an array either way.
+    const { unexercisedHooks: _drop, ...withoutField } = dry({ totalChanges: 0 });
+    previewObjectScript.mockResolvedValue(withoutField);
+    authorScript.mockImplementation(async (r: { dryRun: (s: string) => Promise<unknown> }) => {
+      await r.dryRun("x");
+      return OK_RESULT;
+    });
+    const res = await runAuthor({ ...REQ });
+    expect(res.unexercisedHooks).toEqual([]);
+  });
+
+  it("names the handler in the phase log, where the user is watching", async () => {
+    const details: Array<string | undefined> = [];
+    previewedWithUnfiredHook();
+    await runAuthor({ ...REQ, onPhase: (_p, d) => details.push(d) });
+    expect(details.some((d) => d?.includes("onSelectionChange"))).toBe(true);
+    expect(details.some((d) => d?.includes("never fired"))).toBe(true);
+  });
+});
+
+describe("the ladder's notices reach the result too", () => {
+  const MIXED_REPORT = {
+    ok: true,
+    findings: [
+      { severity: "notice", message: "`net.fetch` is declared but no call requiring it was found." },
+      { severity: "error", message: "`context.nope` is not part of the object-script API" },
+    ],
+  };
+
+  it("carries the notices and NOT the errors", async () => {
+    authorScript.mockImplementation(async (r: { onAttempt: (n: number, rep: unknown) => void }) => {
+      r.onAttempt(0, MIXED_REPORT);
+      return { ...OK_RESULT, report: MIXED_REPORT };
+    });
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    const res = await runAuthor({ ...REQ });
+
+    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+    // The error went where errors go — the per-round problem list — and a
+    // notice must never appear there, because that list feeds the repair.
+    expect(res.rounds[0].problems).toEqual(["`context.nope` is not part of the object-script API"]);
+  });
+
+  it("carries them on the EDIT arm as well", async () => {
+    authorScript.mockResolvedValue({ ...OK_RESULT, report: MIXED_REPORT, unchanged: false });
+    const res = await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
+    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+  });
+
+  it("carries them on the FAILURE arm as well", async () => {
+    authorScript.mockResolvedValue({ ...OK_RESULT, ok: false, report: MIXED_REPORT });
+    const res = await runAuthor({ ...REQ });
+    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+  });
+
+  it("carries them on the DELIVERY-FAILURE arm as well", async () => {
+    authorScript.mockResolvedValue({ ...OK_RESULT, report: MIXED_REPORT });
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_run_tool") throw new Error("Script Security refused");
+      return { blocks: [], stopReason: "endTurn", model: "m" };
+    });
+    const res = await runAuthor({ ...REQ });
+    expect(res.deliveryError).toContain("Script Security refused");
+    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+  });
+
+  it("is an empty list when the report has none", async () => {
+    authorScript.mockResolvedValue(OK_RESULT);
+    const res = await runAuthor({ ...REQ });
+    expect(res.notices).toEqual([]);
   });
 });

@@ -35,7 +35,7 @@
 //          to react to, only silence.
 
 //          WHY THE IMPORT IS LAZY. `scriptPrompt` pulls in the generated
-//          `scriptSurfaceSlices.ts` — 167 KB of surface data. A static import
+//          `scriptSurfaceSlices.ts` — ~209 KB of surface data. A static import
 //          puts that in the extension's activation path, where it is parsed at
 //          app startup whether or not the user ever opens the chat. It also made
 //          `aiChatExtension.test.ts` time out: its `beforeEach` does
@@ -70,15 +70,29 @@ async function loadBuilder(): Promise<BuildSurfacePrompt | null> {
 const SURFACE_BUDGET_TOKENS = 6000;
 
 /**
- * The object type the surface is built for.
+ * A FALLBACK, no longer a fixed answer.
  *
  * The chat cannot know the target until the model picks one in
- * `draft_object_script`, and the surface has to be in the prompt BEFORE that.
- * "button" is the right default for the same reason `draftGate.objectTypeOf`
- * falls back to it: it is overwhelmingly the common target, and its `onClick` is
- * the one hook the whole corpus is built around. The shared grid surface — which
- * is most of what any script uses — is identical across object types, so the
- * cost of guessing wrong is a handful of context members, not a wrong API.
+ * `draft_object_script`, and the surface has to be in the prompt BEFORE that —
+ * so `ChatView` reads the user's own words with `guessObjectType` and passes the
+ * guess in. "button" is what a message that names nothing gets, for the same
+ * reason `draftGate` previews an unlabelled draft as one: it is overwhelmingly
+ * the common target and its `onClick` is the hook the whole corpus is built
+ * around.
+ *
+ * WHY THE GUESS IS WORTH THREADING. The claim it replaced — "the shared surface
+ * is most of what any script uses, so guessing wrong costs a handful of members"
+ * — is measurably false for the hooks, which is where the work lives. A SHAPE
+ * script needs `onCellChange`, `setProperty` and the whole `render.*` subtree,
+ * none of which a button prompt contains; a SHEET script needs
+ * `onSelectionChange` and reaches `range()` and `cell()`, which a button cannot
+ * obtain at all. Shown a button surface, a model asked for a shape script writes
+ * `onClick` and the draft is dead.
+ *
+ * The guess is WORD-ACCURATE (`mentionsWord`, scriptIntent.ts) and it MISSES
+ * rather than guessing wrong: "spreadsheet" no longer reads as "sheet". A miss
+ * lands here, which is the documented fallback; a wrong answer would be a prompt
+ * that confidently describes the wrong object.
  */
 const DEFAULT_OBJECT_TYPE = "button";
 
@@ -111,12 +125,15 @@ export function hintsFrom(userText: string): string[] {
  * provider's prefix cache misses on every round, which on a local model is the
  * difference between a fast turn and re-processing 6,000 tokens.
  */
-export async function apiSurfaceSection(userText: string): Promise<string> {
+export async function apiSurfaceSection(
+  userText: string,
+  objectType?: string | null,
+): Promise<string> {
   try {
     const build = await loadBuilder();
     if (!build) return "";
     const built = build({
-      objectType: DEFAULT_OBJECT_TYPE,
+      objectType: objectType || DEFAULT_OBJECT_TYPE,
       budgetTokens: SURFACE_BUDGET_TOKENS,
       hints: hintsFrom(userText),
     });

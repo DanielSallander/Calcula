@@ -244,6 +244,9 @@ vi.mock("../lib/monacoTypings", () => ({
   configureObjectScriptTypings: () => {},
   setActiveContextType: () => {},
   annotateScaffold: (s: string) => s,
+  // The API Reference heading reads the interface name out of the generated
+  // typings now, so a partial mock that omits it throws inside the sidebar.
+  contextInterfaceNameFor: (objectType: string) => objectType,
 }));
 vi.mock("../lib/authoringLanguage", () => ({
   objectScriptModelPath: () => "inmemory://script.js",
@@ -318,11 +321,22 @@ async function ask(instruction: string): Promise<void> {
   await click("ai-edit-ask");
 }
 
-/** Deliver a successful proposal from the main window. */
-async function propose(documentId: string, source: string, summary = "Changed it."): Promise<void> {
+/**
+ * Deliver a successful proposal from the main window.
+ *
+ * `unexercisedHooks` defaults to `[]` rather than being omitted, because that is
+ * what the bridge now emits; the "omitted entirely" case is covered by the
+ * refusal payload below and by aiEditBridge.test.ts's `done!` calls.
+ */
+async function propose(
+  documentId: string,
+  source: string,
+  summary = "Changed it.",
+  unexercisedHooks: string[] = [],
+): Promise<void> {
   expect(aiResultHandler, "the editor never subscribed to AI results").toBeTruthy();
   await act(async () => {
-    aiResultHandler!({ documentId, jobId: "job-1", ok: true, source, summary });
+    aiResultHandler!({ documentId, jobId: "job-1", ok: true, source, summary, unexercisedHooks });
     await Promise.resolve();
   });
 }
@@ -367,7 +381,7 @@ describe("Object Script Editor — Edit with AI never writes for you", () => {
     expect(aiRequests).toHaveLength(1);
     expect(aiRequests[0].currentSource).toBe("export function onClick() { /* I typed this */ }");
     expect(aiRequests[0].instruction).toBe("add a guard");
-    expect(aiRequests[0].documentKind).toBe("object");
+    expect(aiRequests[0].documentKind).toBe("objectScript");
   });
 
   it("does not touch the buffer when the proposal arrives", async () => {
@@ -468,6 +482,7 @@ describe("Object Script Editor — Edit with AI never writes for you", () => {
         ok: false,
         source: "",
         summary: "No AI model is selected.",
+        unexercisedHooks: [],
       });
       await Promise.resolve();
     });
@@ -475,6 +490,33 @@ describe("Object Script Editor — Edit with AI never writes for you", () => {
     expect(q("ai-edit-error")!.textContent).toContain("No AI model is selected.");
     expect(q("ai-edit-diff")).toBeNull();
     expect(buffer().value).toBe(originalText);
+  });
+
+  it("says which handler the run never fired, beside the summary", async () => {
+    // "It ran and changed no cells" is a fact about the PREVIEW when the work
+    // lives in a handler nothing triggered. The author is about to accept this
+    // text on the strength of the summary above it.
+    await mountApp();
+    await ask("make it red");
+    await propose(OBJECT_SCRIPT.id, "PROPOSED", "Changed it.", ["onSelectionChange"]);
+
+    const caveat = q("ai-edit-diff-unexercised");
+    expect(caveat, "no unexercised-handler line in the diff").toBeTruthy();
+    expect(caveat!.textContent).toContain("onSelectionChange");
+    expect(caveat!.textContent).toContain("never fired");
+    expect(caveat!.textContent).toContain("Read that handler yourself");
+  });
+
+  it("says nothing when every handler was exercised", async () => {
+    // The control for the case above: the caveat must be absent, and the
+    // summary must still be there — a missing summary would make the assertion
+    // above pass for the wrong reason.
+    await mountApp();
+    await ask("make it red");
+    await propose(OBJECT_SCRIPT.id, "PROPOSED");
+
+    expect(q("ai-edit-diff-unexercised")).toBeNull();
+    expect(q("ai-edit-diff-summary")!.textContent).toContain("Changed it.");
   });
 
   it("keeps a proposal for a document the author has navigated away from", async () => {
@@ -538,6 +580,22 @@ describe("Object Script Editor — a recorded macro gets the same protection", (
     await click("ai-edit-accept");
 
     expect(buffer().value).toBe("function setup(context) { /* AI */ }");
+  });
+
+  it("carries the unexercised-handler caveat on a macro too", async () => {
+    // A module is authored as "workbook", whose context declares ten hooks and
+    // not one the preview can synthesize a payload for — so this is the DOCUMENT
+    // KIND the caveat fires for most often, not an edge case.
+    await openMacro();
+    await ask("simplify it");
+    await propose(MACRO.id, "function setup(context) { /* AI */ }", "Changed it.", [
+      "onSelectionChange",
+    ]);
+
+    const caveat = q("ai-edit-diff-unexercised");
+    expect(caveat, "no unexercised-handler line on the macro diff").toBeTruthy();
+    expect(caveat!.textContent).toContain("never fired");
+    expect(caveat!.textContent).toContain("Read that handler yourself");
   });
 
   it("cannot be accepted when the proposal is identical", async () => {
