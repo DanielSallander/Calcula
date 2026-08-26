@@ -41,6 +41,15 @@ mod whole_axis_tests;
 #[cfg(test)]
 mod trim_range_tests;
 
+/// `"<>n"` is a NEGATION, not a numeric test -- and an error ARGUMENT
+/// propagates out of the scalar-parameter builtins. Its own file because both
+/// defects are the same mistake (a value that is not a number treated as a
+/// value that does not qualify), both were invisible on the shape most data
+/// actually has, and the criteria half had to move in TWO places at once --
+/// the scan and the pass cache that mirrors it.
+#[cfg(test)]
+mod criteria_negation_tests;
+
 /// Excel's OMITTED ARGUMENT (`=IF(TRUE,,5)`). Its own file because the feature
 /// spans three layers that can each be wrong on their own -- the parser must
 /// keep the ARITY, the evaluator must read the slot as Excel's empty value

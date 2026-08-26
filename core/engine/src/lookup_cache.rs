@@ -522,8 +522,20 @@ impl CriteriaIndex {
     }
 
     /// NotEqual: coercible values with (v-n).abs() >= 1e-10.
+    /// `"<>n"`. A COMPLEMENT OF THE WHOLE POPULATION, exactly like
+    /// `count_text_not_equal` above -- not of the coercible numbers.
+    ///
+    /// This mirrored the scan path's defect rather than causing one of its own,
+    /// which is the hazard a second copy always carries: it subtracted from
+    /// `numbers.len()`, so a text or boolean cell was absent from BOTH sides of
+    /// the subtraction and could never be counted as "not equal to n". Over
+    /// `{1, "1", TRUE, "apple"}`, `=COUNTIF(A1:A4,"<>0")` answered 2 where
+    /// Excel answers 4.
+    ///
+    /// Blanks are subtracted back out because they are counted in `len` but
+    /// bucketed nowhere, and a blank matches no ordinary criteria.
     pub fn count_not_equal(&self, n: f64) -> u32 {
-        self.numbers.len() as u32 - self.window_count(n)
+        self.len - self.blanks - self.window_count(n)
     }
 
     pub fn sum_exact_text(&self, folded: &str) -> f64 {

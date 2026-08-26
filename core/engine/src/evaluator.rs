@@ -3070,6 +3070,39 @@ impl<'a> Evaluator<'a> {
     fn eval_lifted_function(&self, func: &BuiltinFunction, args: &[Expression]) -> EvalResult {
         let vals = self.eval_args_once(args);
 
+        // AN ERROR ARGUMENT PROPAGATES, and this is the one place the whole
+        // scalar-parameter family can be told so at once.
+        //
+        // WHY HERE. `as_number` answers `None` for an error exactly as it does
+        // for the text "apple", so 264 builtins spread over 604 call sites all
+        // reported `#VALUE!` -- "your argument has the wrong type" -- for a
+        // division by zero. `=ABS(A1)` over a `#DIV/0!` cell blamed the
+        // argument and sent the user to look at the wrong thing:
+        //
+        //   =ABS(A1)   answered #VALUE!,  Excel says #DIV/0!
+        //   =SQRT(A1)  answered #VALUE!,  Excel says #DIV/0!
+        //   =ROUND(A1,2) answered #VALUE!, Excel says #DIV/0!
+        //
+        // while `=A1+1`, `=SUM(A1:A2)` and `=LEN(A1)` already propagated
+        // correctly -- so the engine disagreed with itself about the same cell.
+        // Fixing it at each call site is 604 edits; `lifts_over_arrays` is
+        // already the allowlist of functions whose every parameter is a plain
+        // scalar, which is precisely the class that should propagate, and their
+        // arguments are already evaluated exactly once just above.
+        //
+        // ONLY A TOP-LEVEL ERROR. An error INSIDE an array is a per-element
+        // matter and the broadcast below handles it, so `=ABS({1,#DIV/0!,3})`
+        // still answers `{1,#DIV/0!,3}` rather than a bare error. The left-most
+        // error wins, which is Excel's rule and what falling out of this loop
+        // on the first hit gives.
+        if !Self::inspects_errors(func) {
+            for v in &vals {
+                if let EvalResult::Error(e) = v {
+                    return EvalResult::Error(e.clone());
+                }
+            }
+        }
+
         if vals.iter().any(array_lift::lifts) {
             return self.lift_over_broadcast(func, &vals);
         }
@@ -3077,6 +3110,55 @@ impl<'a> Evaluator<'a> {
         // evaluation of `args`. Re-evaluating would double the work of every
         // nested call and turn a recursive lambda into an exponential one.
         self.call_with_values(func, &vals)
+    }
+
+    /// Whether `func` exists to INSPECT an error, so an error argument is its
+    /// input rather than something to propagate.
+    ///
+    /// THE DANGEROUS HALF OF THE PROPAGATION RULE, and the reason it is a named
+    /// allowlist rather than a condition inlined above: `lifts_over_arrays`
+    /// contains `IsError`, `IsNa`, `ErrorType`, `IfError` and `IfNa`, so a
+    /// blanket "an error argument propagates" would make `=ISERROR(1/0)` answer
+    /// `#DIV/0!` instead of `TRUE` and `=IFERROR(1/0,"safe")` propagate the very
+    /// error it exists to swallow -- turning every error-handling formula in
+    /// every workbook into the error it was written to hide.
+    ///
+    /// Each name below receives an error BY DESIGN:
+    /// - `IsError`/`IsErr`/`IsNa` answer a question ABOUT the error.
+    /// - `ErrorType` maps it to Excel's code.
+    /// - `IfError`/`IfNa` catch it -- their entire purpose.
+    /// - `NFn` is Excel's documented pass-through: `N` returns an error
+    ///   unchanged, so it must reach the function to be returned by it.
+    /// - The `Is*` type predicates answer FALSE for an error rather than
+    ///   becoming one: Excel's `=ISNUMBER(1/0)` is `FALSE`, not `#DIV/0!`.
+    ///
+    /// Being on this list means the GATE does not decide -- not that the answer
+    /// is never an error. `fn_isblank` is the case that makes the distinction
+    /// worth stating: it propagates on purpose, because it cannot tell a cell
+    /// CONTAINING an error from a reference that could not be resolved at all,
+    /// and answering FALSE would launder `=ISBLANK(NoSuchSheet!A1)` into an
+    /// ordinary result. That is its own documented decision, taken at the
+    /// function; this list exists so the gate does not overrule it.
+    ///
+    /// `IsEven`/`IsOdd` are deliberately NOT here despite the name: Excel
+    /// propagates through both (`=ISEVEN(1/0)` is `#DIV/0!`), because they ask
+    /// about a NUMBER rather than about a value's type.
+    fn inspects_errors(func: &BuiltinFunction) -> bool {
+        matches!(
+            func,
+            BuiltinFunction::IsError
+                | BuiltinFunction::IsErr
+                | BuiltinFunction::IsNa
+                | BuiltinFunction::ErrorType
+                | BuiltinFunction::IfError
+                | BuiltinFunction::IfNa
+                | BuiltinFunction::NFn
+                | BuiltinFunction::IsBlank
+                | BuiltinFunction::IsNumber
+                | BuiltinFunction::IsText
+                | BuiltinFunction::IsNonText
+                | BuiltinFunction::IsLogical
+        )
     }
 
     /// Evaluates each argument exactly once.
@@ -6263,6 +6345,36 @@ impl<'a> Evaluator<'a> {
                 EvalResult::Text(t) => !crate::text_cmp::eq_ci_folded(t, s),
                 other => !crate::text_cmp::eq_ci_folded(&other.as_text(), s),
             },
+            // `"<>1"` IS A NEGATION, NOT A NUMERIC TEST -- and it was the only
+            // one of the three "not equal" criteria written as one. The two
+            // beside it are already negations over every type: `TextNotEqual`
+            // negates a text compare, and `WildcardNotEqual` answers TRUE for a
+            // non-text value because "is not like this pattern" is satisfied by
+            // anything that is not text at all. `Compare(NotEqual, n)` instead
+            // shared the arm below, which REQUIRES the value to be a number and
+            // answers `false` for everything else -- so a text or boolean cell
+            // failed to be "not equal to 1".
+            //
+            // A pure-numeric column is unaffected, which is exactly why this
+            // survived: it fires only where the range holds mixed types, and
+            // then it fires on the commonest criteria in the language. Over
+            // `{1, "1", TRUE, "apple"}`:
+            //
+            //   =COUNTIF(A1:A4,"<>1")          answered 0, Excel says 2
+            //   =COUNTIF(A1:A4,"<>0")          answered 2, Excel says 4
+            //   =SUMIF(A1:A4,"<>1",B1:B4)      answered 0, Excel says 70
+            //   =AVERAGEIF(A1:A4,"<>1",B1:B4)  answered #DIV/0! -- nothing
+            //                                  matched, so it divided by zero
+            //
+            // Written as the negation of the EQUALITY criteria rather than as
+            // its own rule, so the two cannot drift: whatever `ExactNumber`
+            // decides counts as equal to `n` is, by construction, what `<>n`
+            // decides is not. (Blanks never reach here -- the guard at the top
+            // of this function already answered for them, and that rule was
+            // settled deliberately elsewhere.)
+            CriteriaMatch::Compare(CriteriaOp::NotEqual, n) => {
+                !self.matches_criteria(value, &CriteriaMatch::ExactNumber(*n))
+            }
             CriteriaMatch::Compare(op, n) => {
                 if let Some(v) = criteria_number(value) {
                     match op {
@@ -6270,6 +6382,8 @@ impl<'a> Evaluator<'a> {
                         CriteriaOp::GreaterEqual => v >= *n,
                         CriteriaOp::Less => v < *n,
                         CriteriaOp::LessEqual => v <= *n,
+                        // Intercepted by the arm above; kept so that adding a
+                        // `CriteriaOp` variant stays a compile error here.
                         CriteriaOp::NotEqual => (v - n).abs() >= 1e-10,
                     }
                 } else {

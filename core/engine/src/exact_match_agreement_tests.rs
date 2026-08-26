@@ -439,14 +439,16 @@ fn the_criteria_divergences_left_standing_are_recorded_here() {
     // ...while the exact-match family, on the same column, refuses.
     na(&t, "=MATCH(1E-300,A1:A4,0)");
 
+    // `"<>n"` is now Excel's NEGATION and lives in `criteria_negation_tests`.
+    // The complement control stays here, where the exact-match family can be
+    // seen agreeing with it on the same column.
     let m = mixed();
     assert_eq!(
         num(&m, "=COUNTIF(A1:A4,\"<>1\")"),
-        0.0,
-        "`<>n` is a numeric test, not a negation; Excel answers 2. See this \
-         test's doc before changing it"
+        2.0,
+        "the negation and the equality must stay complements of each other"
     );
-    // The positive form it ought to be the complement of.
+    // The positive form it is the complement of.
     assert_eq!(num(&m, "=COUNTIF(A1:A4,1)"), 2.0);
 }
 
