@@ -219,6 +219,7 @@ test.describe("BI model — table transformations", () => {
       op: "previewStep",
       table: TABLE,
       steps: candidate,
+      text: null,
       asOfStep: -1, // the step list's "Source" row
       rowLimit: null,
       queryId: null,
@@ -232,6 +233,7 @@ test.describe("BI model — table transformations", () => {
       op: "previewStep",
       table: TABLE,
       steps: candidate,
+      text: null,
       asOfStep: 1,
       rowLimit: null,
       queryId: null,
@@ -252,6 +254,7 @@ test.describe("BI model — table transformations", () => {
       op: "previewStep",
       table: TABLE,
       steps: candidate,
+      text: null,
       asOfStep: null, // all steps
       rowLimit: null,
       queryId: null,
@@ -278,7 +281,8 @@ test.describe("BI model — table transformations", () => {
           { type: "removeColumns", columns: ["note"] },
           { type: "removeColumns", columns: ["does_not_exist"] },
         ],
-        asOfStep: null,
+        text: null,
+      asOfStep: null,
         rowLimit: null,
         queryId: null,
       },
@@ -295,6 +299,7 @@ test.describe("BI model — table transformations", () => {
       op: "set",
       table: TABLE,
       steps: [{ type: "removeColumns", columns: ["does_not_exist"] }],
+      text: null,
       asOfStep: null,
       rowLimit: null,
       queryId: null,
@@ -315,6 +320,7 @@ test.describe("BI model — table transformations", () => {
       op: "set",
       table: TABLE,
       steps: candidate,
+      text: null,
       asOfStep: null,
       rowLimit: null,
       queryId: null,
@@ -375,6 +381,7 @@ test.describe("BI model — table transformations", () => {
       op: "set",
       table: TABLE,
       steps: [],
+      text: null,
       asOfStep: null,
       rowLimit: null,
       queryId: null,
@@ -385,6 +392,149 @@ test.describe("BI model — table transformations", () => {
       columnNames(cleared),
       "clearing the steps brings the source's own columns back",
     ).toContain("note");
+  });
+
+  /**
+   * THE SCRIPT VIEW — the same pipeline as text, through the real command
+   * surface.
+   *
+   * The claim under test is that the text is a LOSSLESS projection of the
+   * steps: render it, edit it, read it back, and the model holds exactly what
+   * the buffer said. The unit battery in
+   * `engine-core/src/transform/script/tests.rs` proves `parse(render(s)) == s`
+   * against the enum itself; this proves the loop survives serde, IPC and the
+   * host arms in between — where a DTO mismatch (the `Decimal` tuple variant is
+   * the obvious candidate) would land.
+   *
+   * Runs after the pipeline test, which leaves the connection alive and the
+   * table's pipeline cleared.
+   */
+  test("renders, re-reads and refuses a pipeline as script", async ({ sharedPage }) => {
+    const page = sharedPage;
+    test.setTimeout(120_000);
+    expect(connectionId, "the import test must have connected first").not.toBe("");
+
+    const script = async (op: string, body: Record<string, unknown>) =>
+      invoke<Record<string, unknown>>(page, "bi_model_transform", {
+        connectionId,
+        op,
+        table: TABLE,
+        steps: null,
+        text: null,
+        asOfStep: null,
+        rowLimit: null,
+        queryId: null,
+        ...body,
+      });
+
+    // --- Probe 1: a saved pipeline renders as statements -------------------
+    const saved = [
+      { type: "filterRows", condition: 'status <> "cancelled"' },
+      { type: "removeColumns", columns: ["note"] },
+    ];
+    await script("set", { steps: saved });
+
+    const rendered = (await script("toScript", {})) as { script: string };
+    expect(rendered.script, "the condition survives verbatim").toContain(
+      'filterRows = status <> "cancelled"',
+    );
+    expect(rendered.script).toContain("removeColumns columns=note");
+
+    // --- Probe 2: the round trip is lossless through IPC -------------------
+    const readBack = (await script("fromScript", { text: rendered.script })) as {
+      parsed: boolean;
+      steps: Array<Record<string, unknown>>;
+      diagnostics: unknown[];
+      stepLines: number[];
+    };
+    expect(readBack.parsed).toBe(true);
+    expect(readBack.diagnostics).toEqual([]);
+    expect(
+      readBack.steps,
+      "what the text says must be exactly what was rendered from",
+    ).toEqual(saved);
+    expect(readBack.stepLines.length, "one line number per statement").toBe(2);
+
+    // --- Probe 3: editing the TEXT edits the pipeline ----------------------
+    // The gesture the view exists for: type a step rather than open a form.
+    const edited = `${rendered.script}\n\nsort by=-amount`;
+    const afterEdit = (await script("fromScript", { text: edited })) as {
+      parsed: boolean;
+      steps: Array<Record<string, unknown>>;
+    };
+    expect(afterEdit.parsed).toBe(true);
+    expect(afterEdit.steps).toHaveLength(3);
+    expect(afterEdit.steps[2]).toEqual({
+      type: "sort",
+      by: [{ column: "amount", descending: true }],
+    });
+
+    const overview = (await script("set", { steps: afterEdit.steps })) as unknown as Overview;
+    expect(
+      tableOf(overview, TABLE).transformSteps,
+      "the model holds what the buffer said, not an approximation of it",
+    ).toHaveLength(3);
+
+    // --- Probe 4: a comment disables a step, without a side channel --------
+    const commented = rendered.script
+      .split("\n")
+      .map((line) => (line.startsWith("removeColumns") ? `// ${line}` : line))
+      .join("\n");
+    const withComment = (await script("fromScript", { text: commented })) as {
+      parsed: boolean;
+      steps: Array<Record<string, unknown>>;
+    };
+    expect(withComment.parsed).toBe(true);
+    expect(withComment.steps, "the commented step is simply not there").toHaveLength(1);
+
+    // --- Probe 5: a broken buffer is REFUSED, with a position --------------
+    // The teeth: `parsed: false` AND no steps. A backend that returned the last
+    // good parse here would let the editor Apply something the buffer does not
+    // say.
+    const broken = (await script("fromScript", {
+      text: 'filterRows = status <> "x"\n\nfrobnicate columns=note',
+    })) as {
+      parsed: boolean;
+      steps: unknown[];
+      diagnostics: Array<{ message: string; line?: number; column?: number }>;
+    };
+    expect(broken.parsed).toBe(false);
+    expect(broken.steps, "nothing may be offered from a buffer that did not read").toEqual([]);
+    expect(broken.diagnostics).toHaveLength(1);
+    expect(broken.diagnostics[0].message).toContain("not a transformation step");
+    expect(broken.diagnostics[0].line, "the third physical line").toBe(3);
+    expect(broken.diagnostics[0].column).toBe(1);
+
+    // --- Probe 6: a valid script that cannot APPLY is named by line --------
+    const dangling = (await script("fromScript", {
+      text: "removeColumns columns=nosuchcolumn",
+    })) as {
+      parsed: boolean;
+      diagnostics: Array<{ message: string; line?: number }>;
+    };
+    expect(dangling.parsed, "it parses — the defect is semantic, not syntactic").toBe(true);
+    expect(dangling.diagnostics).toHaveLength(1);
+    expect(
+      dangling.diagnostics[0].line,
+      "a step index alone cannot be placed in a buffer",
+    ).toBe(1);
+
+    // --- Probe 7: the grammar is SERVED, not restated in the front end -----
+    const vocabulary = (await script("vocabulary", {})) as {
+      steps: Array<{ tag: string; options: Array<{ key: string }> }>;
+      dataTypes: string[];
+      placementOption: string;
+    };
+    expect(vocabulary.steps).toHaveLength(17);
+    expect(vocabulary.steps.map((s) => s.tag)).toContain("pivot");
+    expect(
+      vocabulary.dataTypes,
+      "Decimal is spellable here even though the per-step form cannot author it",
+    ).toContain("Decimal(18,2)");
+    expect(vocabulary.placementOption).toBe("at");
+
+    // --- Leave the table as the other test found it ------------------------
+    await script("set", { steps: [] });
   });
 
   test.afterAll(async ({ sharedPage }) => {

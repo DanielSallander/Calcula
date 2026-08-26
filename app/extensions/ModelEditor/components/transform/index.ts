@@ -7,4 +7,5 @@ export { TransformEditorModal } from "./TransformEditorModal";
 export { PreviewGrid } from "./PreviewGrid";
 export { StepList, SOURCE_ROW } from "./StepList";
 export { StepConfigForm } from "./StepConfigForms";
-export { describeStep, stepDetail, stepTypeLabel, summarizeSteps } from "./stepKit";
+export { ScriptPane } from "./ScriptPane";
+export { dataTypeLabel, describeStep, stepDetail, stepTypeLabel, summarizeSteps } from "./stepKit";

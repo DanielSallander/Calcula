@@ -63,6 +63,32 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 
 ---
 
+## Applied-steps SCRIPT — a text projection of a transformation pipeline (no format change)
+
+A table's transformation pipeline can now be **rendered as text and parsed back**, so a host can offer the equivalent of Power Query's Advanced Editor: the whole pipeline in one editable buffer instead of one form per step.
+
+**The steps stay canonical.** The script is generated on demand and compiled back before anything is stored; nothing new is persisted and `MODEL_FORMAT_VERSION` does not move. That direction is deliberate and is what keeps three existing properties intact:
+
+- `pipeline_fingerprint` hashes the step JSON and feeds `Table::schema_hash()`. If text were the stored form, re-indenting a `groupBy` block would change the fingerprint and invalidate every cached row on disk for a whitespace edit.
+- `TransformStep` derives `Eq`, so the round trip is asserted on the **structure** (`parse(render(s)) == s`) rather than on rendered bytes — the assertion that actually catches a renderer and a parser drifting apart.
+- Validation and schema derivation are defined over typed steps and read no rows. Text as the stored form would push a parser below that boundary and into every model load.
+
+- **New public API** (`engine_core::transform`, re-exported from `bi_engine`):
+  - `render_script(&[TransformStep]) -> String` and `render_statement(&TransformStep) -> String`.
+  - `parse_script(&str) -> Result<Vec<TransformStep>, ScriptError>`.
+  - `parse_statement(&str) -> Result<TransformStep, ScriptError>` and `parse_placed_statement(&str) -> Result<PlacedStep, ScriptError>`, where `PlacedStep { step, at: Option<u32> }` carries the `at=` placement a command line supplies. `at=` is part of the EDITING grammar, not of a step: a script carries position in the order of its statements, so the renderer never emits it.
+  - `script_vocabulary() -> ScriptVocabulary` — the step tags, their option keys, and every enum spelling, so an editor's completion and highlighting are **served** rather than restated. A host that hard-codes this table has re-created the drift the feature removed.
+- **New error the host can observe:** `ScriptError { message, line, column }` — 1-based, addressing the **physical** line and column of the source text, so a marker can be placed in the buffer without re-deriving anything. Syntax errors only; a step that parses but cannot be applied is still reported by `validate_steps` against a step INDEX.
+- **The grammar.** One statement per step. A statement is the step's serde tag, `key=value` options whose keys are the engine's own serde field names, and — for `filterRows` and `addColumn` only — a free-standing `= <expression>` tail. A line beginning with whitespace CONTINUES the statement above it; `//` or `#` at column zero is a comment. There is no terminator character and no new escape convention on the expression tail, which is the field that feeds the fail-closed expression allowlist.
+  - Continuation lines are emitted with exactly one extra leading space and read back by stripping exactly one, so a multi-line condition round-trips verbatim. Carriage returns are line terminators, not data: a CRLF buffer and an LF buffer parse identically.
+  - Value spellings are the **serde** spellings, so the PascalCase exception survives rather than being papered over: `Int64`, `Decimal(18,2)`, `Sum`, `CountRows` (no `rename_all`), against `trim`, `fail`, `null` (which have one). `AggregateOp`'s `Display` is SQL text — `Average` displays as `AVG` — and is NOT the script spelling.
+  - Defaults are omitted on render, mirroring `skip_serializing_if` exactly, so an omitted `columns=` on `removeDuplicates` is the meaning "every column" rather than an absence.
+- **Tolerant in, canonical out.** Option keys resolve case-insensitively, `[bracketed]` names parse beside `"quoted"` ones, and legacy single-rename / single-cast shapes are understood. None is ever emitted: `parse(render(steps)) == steps` is guaranteed; `render(parse(text)) == text` is not, and never will be.
+- **The parser checks syntax only.** Every semantic rule stays in validation, which is what stops a script reaching something the step editor cannot. `AggregateOp::Mode` is the worked example: it deserializes fine and is refused only at schema derivation, so it renders, re-parses identically, and fails later on its own step index — refusing it at parse would make the renderer emit text its own parser rejects.
+- **Calcula action.** Drive an "advanced editor" with `render_script` on entry and `parse_script` (or the host's fused parse + validate + derive) on every pause; refuse to commit while the buffer does not parse, because the draft then says something the buffer does not. Serve completion from `script_vocabulary()`. `ScriptError`'s line/column place a marker directly; a `validate_steps` failure needs the host to map its step index onto the statement's line.
+
+---
+
 ## Table transformations — applied steps, and persisted SQL-source bindings (format version 24)
 
 A model table bound to a data source can now carry an ordered list of **transformation steps** that turn the rows a connector returned into the rows the table declares — the engine's answer to "I can import this table, but I cannot reshape it". Steps are **declarative data, not code**: they serialize into the model file, a host renders them as an editable list, and the resulting columns are derived without reading a single row.

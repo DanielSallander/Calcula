@@ -53,6 +53,52 @@ Logic the catalog genuinely cannot express is still reachable: an expression ste
 call a **model script function** (sandboxed Rhai, already budgeted and deterministic)
 via `Expression::Call`. That is the escape hatch, and it costs no new runtime.
 
+## The script view, and why it points the other way from M
+
+Power Query's Advanced Editor is the answer to a real complaint about applied-steps
+panes: one form per step is fine for one step and miserable for twenty. You cannot copy
+a pipeline to another table, cannot paste one a colleague sent you, cannot diff one in
+version control, cannot reorder by dragging a line.
+
+So a table's pipeline is also editable as **text** — but the arrow runs the opposite way
+from M. Power Query makes the M text the stored form and renders the step list as a view
+of it. Here the **steps stay canonical** and the text is a lossless rendering that parses
+back. Three mechanical reasons, any one of which decides it:
+
+- **The cache identity hashes the typed JSON.** `pipeline_fingerprint` is
+  `serde_json::to_string(steps).hash(..)`, folded into `Table::schema_hash()`. With text
+  as the stored form, re-indenting a `groupBy` block would change the fingerprint, so
+  every cached row for that table on disk would be discarded — for a whitespace edit.
+- **`TransformStep` derives `Eq`.** That allows the strongest round-trip assertion
+  available anywhere in this repo, `parse(render(s)) == s`, on the STRUCTURE rather than
+  on rendered bytes. Asserting rendered text is how a serializer and its parser drift
+  apart while both look tested — this project has already paid for that once, in the
+  formula renderer that dropped every parenthesis and printed 248 built-ins under their
+  Rust variant names.
+- **Validation reads no rows.** Schema derivation and the expression allowlist are
+  defined over typed steps. Text as the stored form would push a parser below that
+  boundary and into every model load.
+
+The practical consequence is that entering the Script view and leaving it again is
+*provably* not an edit, and that a script cannot express anything the typed steps
+cannot: the grammar spells exactly the seventeen tags and nothing else, there is no
+binding, no control flow and no evaluation, and a parsed script is a `Vec<TransformStep>`
+or an error. Nothing about the Python rejection above is re-opened.
+
+What it costs, honestly: no `let … in`, no `Table.*` function names, and **no step
+names** — the store has no label field, and inventing a side channel for one (a name map
+in `extension_data`) would be worse than having none, because that map is script-mutable
+through the gateway and travels inside signed `.calp` packages, so a party other than the
+pipeline's author could label steps that do something else. Steps are addressed by their
+1-based number, the same number `show table` and the step editor already use. Comments
+survive only as long as the editor is open, for the same reason.
+
+The grammar deliberately reuses what the Model Editor's command line already reads, so
+`show table <name>` prints paste-able script and a `transform … add` line is one
+statement of it. It lives in `engine-core`, beside the enum it mirrors, because that is
+the only place where the renderer can be an exhaustive `match` (an eighteenth variant is
+a compile error) and where the round trip can be asserted against the enum itself.
+
 ## Why it is universal across connectors, nearly for free
 
 The requirement was "it must work for all current and future connectors". That turned
@@ -140,6 +186,8 @@ front-to-back, and the evaluator already takes an arbitrary sub-range.
 | Step catalog + operand types | `model-engine-lib/crates/engine-core/src/transform/{step,parts}.rs` |
 | Pure schema derivation | `.../transform/{schema,rules_columns,rules_rows,infer}.rs` |
 | Validation (the allowlist) | `.../transform/validate.rs` |
+| Script render + parse (one pair) | `.../transform/script/{lex,vocabulary,render,parse,mod}.rs` |
+| Script round-trip battery | `.../transform/script/tests.rs` |
 | Evaluation over batches | `.../transform/eval/{mod,sql_steps,kernel_steps}.rs` |
 | Model-build enforcement | `.../model/schema/validation.rs` (`validate_table_transformations`) |
 | Persistence | `.../model/source.rs` (`TableSourceBinding`), format version **24** |
@@ -147,8 +195,10 @@ front-to-back, and the evaluator already takes an arbitrary sub-range.
 | Edit + preview API | `crates/engine/src/{transform_edit,transform_preview}.rs` |
 | Host command | `app/src-tauri/src/bi/model_editor.rs` (`bi_model_transform`) |
 | Host DTOs / `@api` | `app/src/api/backend.ts` |
-| Step editor | `app/extensions/ModelEditor/components/transform/` |
+| Step editor + Script tab | `app/extensions/ModelEditor/components/transform/` |
+| Script editor language | `.../components/transform/transformScriptLanguage.ts` (vocabulary SERVED, never declared) |
 | CLI verb | `app/extensions/ModelEditor/cli/` (`transform`) |
+| CLI-to-engine drift guard | `.../cli/__tests__/transformScriptDrift.test.ts` |
 | End-to-end journey | `app/e2e/journeys/model-transform.spec.ts` |
 | REST source config + validation | `model-engine-lib/crates/engine-core/src/model/rest/` |
 | REST connector | `model-engine-lib/crates/engine-query/src/rest_connector/` |

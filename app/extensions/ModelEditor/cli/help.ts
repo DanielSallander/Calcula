@@ -208,33 +208,41 @@ source now. Not undoable (data, not model).`,
   materialize: `materialize calctable <name> — write a non-dynamic calculated
 table's rows into its derived model table now.`,
   transform: `Applied steps (Power Query-style table transformations):
-  transform table <name> add <stepType> [key=value …] [= <expression>] [at=<n>]
+  transform table <name> add <statement> [at=<n>]
   transform table <name> remove <n>          transform table <name> move <n> <to>
   transform table <name> rename <n> <name>   transform table <name> clear
-  ls: 'show table <name>' prints the pipeline, numbered from 1 — the SAME
-  numbers every subaction takes. No wildcards: a step number means something
-  different in each table's list. The table must be bound to a data source,
-  and a transformed table is forced to InMemory storage.
+  ls: 'show table <name>' prints the pipeline as SCRIPT, numbered from 1 - the
+  SAME numbers every subaction takes, and the same text the Model Editor's
+  Transform > Script tab edits. Paste a line straight back into 'add'. No
+  wildcards: a step number means something different in each table's list. The
+  table must be bound to a data source, and a transformed table is forced to
+  InMemory storage.
 
-Step types and their options:
+A <statement> is a step name, its key=value options, and - for filterRows and
+addColumn only - a trailing '= <expression>'. The grammar lives in the engine
+beside the step definitions, so the command line, the Script tab and a saved
+model all read exactly the same text:
   removeColumns columns=A,B        selectColumns columns=A,B   (also reorders)
-  renameColumn column=Old newname=New
-  changeType column=Qty type=Int64 [onerror=fail|null]   (or columns=A,B)
+  renameColumns rename=Old:New                   (repeat for more renames)
+  changeType cast=Qty:Int64 [onError=fail|null]  (repeat cast= per column)
   filterRows = <row condition>
-  addColumn name=Margin [type=Float64] = <expression>
-  splitColumn column=Name delimiter="," parts=2 [keeporiginal=true]
-  replaceValues column=Region find="x" [replace="y"] [matchentire=true]
+  addColumn name=Margin [dataType=Float64] = <expression>
+  splitColumn column=Name delimiter="," parts=2 [keepOriginal=true]
+  replaceValues column=Region find="x" [replace="y"] [matchEntireValue=true]
   textTransform columns=A,B operation=trim|clean|upper|lower
   fillDown columns=A,B             removeDuplicates [columns=A,B]
   sort by=Amount,-Date             (also Col:desc / Col:asc)
-  groupBy groupby=Region agg=sum:Amount:Total agg=countrows::Rows
+  groupBy groupBy=Region agg=Sum:Amount:Total agg=CountRows::Rows
   keepRows range=first:100         removeRows range=range:0:10
-  unpivot columns=Jan,Feb namecolumn=Month valuecolumn=Amount
-  pivot namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb
+  unpivot columns=Jan,Feb nameColumn=Month valueColumn=Amount
+  pivot nameColumn=Month valueColumn=Amount aggregate=Sum valueNames=Jan,Feb
 
+  Option keys are matched case-insensitively, and the older spellings still
+  read (column=/newname=, type=, values=, matchentire=). Types are the engine's
+  own: String Int32 Int64 Float64 Decimal(18,2) Boolean Date Timestamp.
   Each edit rewrites the WHOLE pipeline in one call, so it is one undo step.
   'rename <n> <name>' renames the OUTPUT NAME the step introduces (addColumn's
-  column, or a one-column renameColumn's target) — the engine's steps carry no
+  column, or a one-rename renameColumns' target) - the engine's steps carry no
   display label, so a step with no such name refuses rather than losing it.`,
   validate: `validate — run the engine's model consistency checks.`,
   import: `import tables schema.table,schema.other [schema=<default>]

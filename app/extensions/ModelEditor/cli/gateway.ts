@@ -45,6 +45,7 @@ import {
   biModelSetTableStorageMode,
   biModelTransformGet,
   biModelTransformSet,
+  biModelTransformParseStatement,
   biModelUndo,
   biModelUpdateColumn,
   biModelUpdateTable,
@@ -101,6 +102,10 @@ export interface CliGateway {
   transformGet: typeof biModelTransformGet;
   /** Replace a table's pipeline — ONE model edit, so one undo step. */
   transformSet: typeof biModelTransformSet;
+  /** Read ONE step from its script statement. The grammar lives in the engine
+   *  beside the step enum, so the command line reads exactly what the script
+   *  pane reads and neither can drift from the other. */
+  transformParseStatement: typeof biModelTransformParseStatement;
   updateColumn: typeof biModelUpdateColumn;
   upsertModelColumn: typeof biModelUpsertModelColumn;
   deleteCalcColumn: typeof biModelDeleteCalcColumn;
@@ -173,6 +178,7 @@ export function createLiveGateway(): CliGateway {
     refreshTable: biModelRefreshTable,
     transformGet: biModelTransformGet,
     transformSet: biModelTransformSet,
+    transformParseStatement: biModelTransformParseStatement,
     updateColumn: biModelUpdateColumn,
     upsertModelColumn: biModelUpsertModelColumn,
     deleteCalcColumn: biModelDeleteCalcColumn,

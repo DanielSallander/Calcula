@@ -9,7 +9,12 @@
 // for a column's lookup expression.
 
 import React, { useState } from "react";
-import type { ModelColumnInfo, ModelOverview, TransformStepDto } from "@api";
+import type {
+  ModelColumnInfo,
+  ModelOverview,
+  TransformDataType,
+  TransformStepDto,
+} from "@api";
 import { Field, styles } from "../editorShared";
 import { ExpressionEditorModal } from "../ExpressionEditorModal";
 import {
@@ -23,6 +28,7 @@ import {
   STEP_DATA_TYPES,
   TEXT_OPS,
   TextList,
+  dataTypeLabel,
   stepTypeInfo,
   stepTypeLabel,
 } from "./stepKit";
@@ -194,19 +200,24 @@ export function StepConfigForm({
                     />
                     <span style={styles.muted}>&rarr;</span>
                     <select
-                      style={{ ...styles.input, width: 130 }}
-                      value={c.newType}
+                      style={{ ...styles.input, width: 150 }}
+                      value={dataTypeLabel(c.newType)}
                       disabled={readOnly}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        // A parameterized type (Decimal) is shown but not
+                        // authored here; picking it back is a no-op rather
+                        // than a silent downgrade to the string "Decimal(18,2)".
+                        if (!STEP_DATA_TYPES.includes(e.target.value)) return;
+                        const newType = e.target.value as TransformDataType;
                         patch({
-                          changes: changes.map((x, j) =>
-                            j === i ? { ...x, newType: e.target.value } : x,
-                          ),
-                        })
-                      }
+                          changes: changes.map((x, j) => (j === i ? { ...x, newType } : x)),
+                        });
+                      }}
                     >
-                      {!STEP_DATA_TYPES.includes(c.newType) && (
-                        <option value={c.newType}>{c.newType}</option>
+                      {!STEP_DATA_TYPES.includes(dataTypeLabel(c.newType)) && (
+                        <option value={dataTypeLabel(c.newType)}>
+                          {dataTypeLabel(c.newType)} (edit in Script)
+                        </option>
                       )}
                       {STEP_DATA_TYPES.map((t) => (
                         <option key={t} value={t}>
@@ -296,19 +307,23 @@ export function StepConfigForm({
             >
               <select
                 style={{ ...styles.input, width: 200 }}
-                value={step.dataType ?? ""}
+                value={dataTypeLabel(step.dataType)}
                 disabled={readOnly}
                 onChange={(e) => {
+                  if (e.target.value !== "" && !STEP_DATA_TYPES.includes(e.target.value)) return;
                   const next = { ...step };
                   if (e.target.value === "") delete next.dataType;
-                  else next.dataType = e.target.value;
+                  else next.dataType = e.target.value as TransformDataType;
                   onChange(next);
                 }}
               >
                 <option value="">(infer from the expression)</option>
-                {step.dataType !== undefined && !STEP_DATA_TYPES.includes(step.dataType) && (
-                  <option value={step.dataType}>{step.dataType}</option>
-                )}
+                {step.dataType !== undefined &&
+                  !STEP_DATA_TYPES.includes(dataTypeLabel(step.dataType)) && (
+                    <option value={dataTypeLabel(step.dataType)}>
+                      {dataTypeLabel(step.dataType)} (edit in Script)
+                    </option>
+                  )}
                 {STEP_DATA_TYPES.map((t) => (
                   <option key={t} value={t}>
                     {t}

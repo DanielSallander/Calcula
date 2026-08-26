@@ -53,6 +53,7 @@ mod parts;
 mod rules_columns;
 mod rules_rows;
 mod schema;
+mod script;
 mod step;
 mod validate;
 
@@ -68,6 +69,10 @@ pub use parts::{
 };
 pub(crate) use schema::describe_schema;
 pub use schema::{derive_pipeline_schema, derive_step_schema, schemas_match};
+pub use script::{
+    parse_placed_statement, parse_script, parse_statement, render_script, render_statement,
+    script_vocabulary, OptionSpec, PlacedStep, ScriptError, ScriptVocabulary, StepVocabulary,
+};
 pub use step::TransformStep;
 pub use validate::validate_steps;
 

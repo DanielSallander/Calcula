@@ -1493,6 +1493,14 @@ pub struct ModelTableInfo {
     /// `type`-tagged, camelCase — so the shape stays in lockstep with the
     /// engine by construction rather than by a hand-maintained mirror.
     pub transform_steps: Vec<serde_json::Value>,
+    /// The same pipeline rendered as applied-steps script text, empty when
+    /// there is none.
+    ///
+    /// Carried here so every reader — `show table`, the script pane, a report —
+    /// prints the ONE rendering the engine produces. The command line used to
+    /// build its own prose description of a step, which was a second
+    /// (and lossy, and 64-character-clipped) statement of what a step means.
+    pub transform_script: String,
     /// The source's own schema, before the steps run. Empty when the table has
     /// no pipeline. The step editor shows this as the pipeline's "Source" row.
     pub source_columns: Vec<ModelColumnInfo>,
@@ -2380,6 +2388,10 @@ pub(super) fn build_overview(
                             .filter_map(|s| serde_json::to_value(s).ok())
                             .collect()
                     })
+                    .unwrap_or_default(),
+                transform_script: t
+                    .source_binding()
+                    .map(|b| bi_engine::render_script(&b.transformations))
                     .unwrap_or_default(),
                 source_columns: t
                     .source_binding()
@@ -5688,6 +5700,14 @@ pub struct TransformDiagnosticDto {
     pub severity: String,
     /// What is wrong, and where possible how to fix it.
     pub message: String,
+    /// 1-based physical line in the script text, when the diagnostic came from
+    /// reading a script. A step index alone cannot be placed in a text buffer,
+    /// and a marker on the wrong line is worse than no marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// 1-based column, paired with `line`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
 }
 
 /// The result of deriving a candidate pipeline's schema without committing it.
@@ -5764,7 +5784,78 @@ fn transform_diagnostic(
             .unwrap_or_default(),
         severity: "error".to_string(),
         message,
+        line: None,
+        column: None,
     }
+}
+
+/// The script text for a table's pipeline, plus the vocabulary an editor needs
+/// to highlight and complete it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformScriptText {
+    /// The pipeline rendered as an applied-steps script. Empty for a table with
+    /// no steps, which is a valid script rather than an error.
+    pub script: String,
+}
+
+/// The result of reading a candidate script without committing it.
+///
+/// Parse, validate and schema derivation are fused into ONE response because
+/// the script pane needs all three on every keystroke: separate round trips
+/// would let the column list and the diagnostics disagree about which text they
+/// describe.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformScriptResult {
+    /// True when the text parsed. A host must refuse to Apply when it is false:
+    /// `steps` is then the last thing that parsed, not what the buffer says.
+    pub parsed: bool,
+    /// The steps the text describes, empty when it did not parse.
+    pub steps: Vec<serde_json::Value>,
+    /// The columns the pipeline produces, or those it reaches before the first
+    /// failing step, so the editor keeps a live column list mid-edit.
+    pub columns: Vec<ModelColumnInfo>,
+    /// Empty when the script is valid.
+    pub diagnostics: Vec<TransformDiagnosticDto>,
+    /// 1-based line for each parsed step, so a step-indexed validation error
+    /// can be placed in the buffer. Same length as `steps` when `parsed`.
+    pub step_lines: Vec<usize>,
+}
+
+/// Turn a script syntax error into a diagnostic the editor can place.
+fn script_diagnostic(error: &bi_engine::ScriptError) -> TransformDiagnosticDto {
+    TransformDiagnosticDto {
+        index: 0,
+        step_type: String::new(),
+        severity: "error".to_string(),
+        message: error.message.clone(),
+        line: Some(error.line),
+        column: Some(error.column),
+    }
+}
+
+/// The 1-based physical line each statement of a script starts on.
+///
+/// Derived by re-reading the text the same way the lexer groups it: a line
+/// whose first character is not whitespace starts a statement, and a blank or
+/// column-zero comment line starts nothing. Kept beside the parse so a
+/// step-INDEXED diagnostic from `validate_steps` — which knows nothing about
+/// text — can still be shown on the step's own line.
+fn script_statement_lines(source: &str) -> Vec<usize> {
+    source
+        .split('\n')
+        .enumerate()
+        .filter_map(|(index, raw)| {
+            let raw = raw.strip_suffix('\r').unwrap_or(raw);
+            let indented = raw.starts_with(' ') || raw.starts_with('\t');
+            if indented || raw.trim().is_empty() || raw.starts_with("//") || raw.starts_with('#') {
+                None
+            } else {
+                Some(index + 1)
+            }
+        })
+        .collect()
 }
 
 /// Render engine columns as the frontend's column DTO.
@@ -6029,6 +6120,7 @@ pub async fn bi_model_transform(
     op: String,
     table: String,
     steps: Option<Vec<serde_json::Value>>,
+    text: Option<String>,
     as_of_step: Option<i64>,
     row_limit: Option<usize>,
     query_id: Option<String>,
@@ -6081,6 +6173,149 @@ pub async fn bi_model_transform(
             )
             .await?;
             serde_json::to_value(overview).map_err(|e| e.to_string())
+        }
+
+        // The pipeline as editable text. Rendered on demand from the stored
+        // steps rather than kept beside them: a second stored form would have
+        // to be kept in sync with the first, which is the drift this whole
+        // surface is built to avoid.
+        "toScript" => {
+            let base = {
+                let conns = bi_state.connections.lock().unwrap();
+                let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+                conn.base_model
+                    .clone()
+                    .ok_or("This connection has no model loaded")?
+            };
+            let t = base
+                .table(&table)
+                .map_err(|_| format!("Table '{table}' not found"))?;
+            // Renders the CANDIDATE steps when the caller supplies them, and
+            // the table's saved ones otherwise. The editor needs the former:
+            // switching to the script view mid-edit must show the draft, not
+            // the last thing that was applied.
+            let steps = match &steps {
+                Some(_) => parse_transform_steps(steps)?,
+                None => t
+                    .source_binding()
+                    .map(|b| b.transformations.clone())
+                    .unwrap_or_default(),
+            };
+            serde_json::to_value(TransformScriptText {
+                script: bi_engine::render_script(&steps),
+            })
+            .map_err(|e| e.to_string())
+        }
+
+        // Read a candidate script: parse, validate and derive in one response,
+        // because the pane needs all three for the same text.
+        "fromScript" => {
+            let source = text.unwrap_or_default();
+            let base = {
+                let conns = bi_state.connections.lock().unwrap();
+                let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+                conn.base_model
+                    .clone()
+                    .ok_or("This connection has no model loaded")?
+            };
+            let t = base
+                .table(&table)
+                .map_err(|_| format!("Table '{table}' not found"))?;
+            let source_columns = t
+                .source_binding()
+                .filter(|b| !b.source_columns.is_empty())
+                .map(|b| b.source_columns.clone())
+                .unwrap_or_else(|| t.columns().to_vec());
+
+            let result = match bi_engine::parse_script(&source) {
+                Err(error) => TransformScriptResult {
+                    parsed: false,
+                    steps: Vec::new(),
+                    columns: transform_columns_to_dto(&source_columns),
+                    diagnostics: vec![script_diagnostic(&error)],
+                    step_lines: Vec::new(),
+                },
+                Ok(parsed) => {
+                    let lines = script_statement_lines(&source);
+                    let encoded: Vec<serde_json::Value> = parsed
+                        .iter()
+                        .filter_map(|s| serde_json::to_value(s).ok())
+                        .collect();
+                    let (columns, diagnostics) =
+                        match bi_engine::validate_steps(&table, &source_columns, &parsed) {
+                            Ok(columns) => (transform_columns_to_dto(&columns), Vec::new()),
+                            Err(error) => {
+                                let mut diagnostic = transform_diagnostic(&error, &parsed);
+                                // A step index cannot be placed in a buffer;
+                                // the statement's own line can.
+                                diagnostic.line = lines.get(diagnostic.index).copied();
+                                diagnostic.column = diagnostic.line.map(|_| 1);
+                                let partial = bi_engine::derive_pipeline_schema(
+                                    &table,
+                                    &source_columns,
+                                    &parsed[..diagnostic.index.min(parsed.len())],
+                                )
+                                .unwrap_or_else(|_| source_columns.clone());
+                                (transform_columns_to_dto(&partial), vec![diagnostic])
+                            }
+                        };
+                    TransformScriptResult {
+                        parsed: true,
+                        steps: encoded,
+                        columns,
+                        diagnostics,
+                        step_lines: lines,
+                    }
+                }
+            };
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+
+        // ONE statement, as the command line's `transform … add` supplies it.
+        // Separate from `fromScript` because a single statement may carry the
+        // `at=` placement, and because validating one statement against the
+        // whole table's source schema would refuse a step that is only ever
+        // meant to join an existing pipeline.
+        "parseStatement" => {
+            let source = text.unwrap_or_default();
+            match bi_engine::parse_placed_statement(&source) {
+                Ok(placed) => serde_json::to_value(serde_json::json!({
+                    "step": serde_json::to_value(&placed.step).map_err(|e| e.to_string())?,
+                    "at": placed.at,
+                }))
+                .map_err(|e| e.to_string()),
+                // Rendered as a plain message rather than a diagnostic: the
+                // command line reports one error per line and has no buffer to
+                // place a marker in.
+                Err(error) => Err(error.message),
+            }
+        }
+
+        // The grammar itself, so the editor's highlighting and completion are
+        // served from the same table the parser reads against. A copy in the
+        // front end would be a second declaration of the vocabulary.
+        "vocabulary" => {
+            let vocabulary = bi_engine::script_vocabulary();
+            serde_json::to_value(serde_json::json!({
+                "steps": vocabulary.steps.iter().map(|step| serde_json::json!({
+                    "tag": step.tag,
+                    "help": step.help,
+                    "takesExpression": step.takes_expression,
+                    "options": step.options.iter().map(|option| serde_json::json!({
+                        "key": option.key,
+                        "repeatable": option.repeatable,
+                        "optional": option.optional,
+                        "help": option.help,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "dataTypes": vocabulary.data_types,
+                "aggregates": vocabulary.aggregates,
+                "textOperations": vocabulary.text_operations,
+                "castErrorPolicies": vocabulary.cast_error_policies,
+                "rowRangeKinds": vocabulary.row_range_kinds,
+                "placementOption": vocabulary.placement_option,
+            }))
+            .map_err(|e| e.to_string())
         }
 
         "deriveSchema" => {
@@ -9311,6 +9546,68 @@ mod tests {
     /// A pipeline-only edit must report its own domain — the macro recorder
     /// cannot replay a generic "table" edit, so mislabelling one silently
     /// drops it from a recording.
+    #[test]
+    fn script_statement_lines_places_a_step_index_in_the_buffer() {
+        // The bridge between the two error worlds. `validate_steps` reports a
+        // step INDEX and knows nothing about text; a marker needs a LINE. Get
+        // this wrong by one and the editor underlines the wrong step, which is
+        // worse than underlining nothing.
+        let source = "// a comment\n\nremoveColumns columns=a\n\nrenameColumns\n  rename=a:b\n\n# another comment\nfillDown columns=c\n";
+        let lines = script_statement_lines(source);
+        assert_eq!(
+            lines,
+            vec![3, 5, 9],
+            "one entry per statement, at the line its first word is on"
+        );
+        // And it agrees with the parser about how many statements there are.
+        let steps = bi_engine::parse_script(source).expect("the fixture must parse");
+        assert_eq!(steps.len(), lines.len());
+        assert_eq!(steps[1].type_name(), "renameColumns");
+    }
+
+    #[test]
+    fn script_statement_lines_reads_crlf_the_same_as_lf() {
+        let lf = concat!("removeColumns columns=a", "\n", "\n", "fillDown columns=b");
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(
+            script_statement_lines(lf),
+            script_statement_lines(&crlf),
+            "a pasted CRLF buffer must not shift every marker"
+        );
+        assert_eq!(script_statement_lines(lf), vec![1, 3]);
+    }
+
+    #[test]
+    fn a_script_syntax_error_carries_a_position_and_a_validation_error_carries_a_line() {
+        // A syntax error knows exactly where it is; a validation error knows
+        // only which step, and is placed on that step's line. Both must reach
+        // the buffer, or the pane can only show a banner.
+        let syntax = bi_engine::parse_script("fillDown wrong=1").unwrap_err();
+        let diagnostic = script_diagnostic(&syntax);
+        assert_eq!(diagnostic.line, Some(1));
+        assert_eq!(diagnostic.column, Some(10), "the column of 'wrong'");
+        assert_eq!(diagnostic.severity, "error");
+
+        // The validation side: step 1 (zero-based) is the one that cannot
+        // derive, and it starts on line 3.
+        let source = "removeColumns columns=a\n\nfillDown columns=nosuchcolumn";
+        let lines = script_statement_lines(source);
+        let steps = bi_engine::parse_script(source).unwrap();
+        // Two source columns, so the FIRST step is valid and the diagnostic
+        // really lands on the second one rather than on a pipeline that was
+        // broken from its opening line.
+        let columns = vec![
+            bi_engine::Column::new("a", bi_engine::DataType::Int64),
+            bi_engine::Column::new("keep", bi_engine::DataType::String),
+        ];
+        let error = bi_engine::validate_steps("T", &columns, &steps)
+            .expect_err("fillDown over a column that does not exist must be refused");
+        let mut diagnostic = transform_diagnostic(&error, &steps);
+        assert_eq!(diagnostic.index, 1, "the second step is the bad one");
+        diagnostic.line = lines.get(diagnostic.index).copied();
+        assert_eq!(diagnostic.line, Some(3), "which starts on the third line");
+    }
+
     #[test]
     fn a_pipeline_only_edit_reports_the_transform_domain() {
         let before = model_with_steps(vec![]);

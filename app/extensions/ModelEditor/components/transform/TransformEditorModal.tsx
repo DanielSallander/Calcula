@@ -21,6 +21,7 @@ import {
   biModelTransformDeriveSchema,
   biModelTransformPreview,
   biModelTransformSet,
+  biModelTransformToScript,
 } from "@api";
 import type {
   ModelColumnInfo,
@@ -36,6 +37,7 @@ import { Badge, Modal, styles } from "../editorShared";
 import { PreviewGrid } from "./PreviewGrid";
 import { SOURCE_ROW, StepList } from "./StepList";
 import { StepConfigForm } from "./StepConfigForms";
+import { ScriptPane } from "./ScriptPane";
 import { defaultStep, describeStep } from "./stepKit";
 
 /** The backend caps a preview at 500 rows; asking for that much keeps the
@@ -345,6 +347,38 @@ export function TransformEditorModal({
     );
   };
 
+  // ── Script view ───────────────────────────────────────────────────────────
+  //
+  // The same pipeline, as text. Entering renders the DRAFT (not the last thing
+  // applied), and the buffer compiles back into the draft on every pause, so
+  // the preview, the resulting-columns rail and Apply all keep working off one
+  // set of steps whichever view is on screen.
+  const [mode, setMode] = useState<"steps" | "script">("steps");
+  const [scriptSeed, setScriptSeed] = useState<string | null>(null);
+  const [scriptSeedError, setScriptSeedError] = useState<string | null>(null);
+  const [scriptParses, setScriptParses] = useState(true);
+
+  const enterScript = useCallback(() => {
+    setScriptSeed(null);
+    setScriptSeedError(null);
+    setMode("script");
+    void biModelTransformToScript(connectionId, table.name, steps)
+      .then((result) => setScriptSeed(result.script))
+      .catch((err: unknown) => setScriptSeedError(String(err)));
+  }, [connectionId, table.name, steps]);
+
+  const enterSteps = useCallback(() => {
+    setMode("steps");
+    setScriptParses(true);
+    // The draft already holds the last good parse, so nothing is lifted here.
+    // Keep the selection in range: the script may have removed steps.
+    setSelected((current) => (current >= steps.length ? steps.length - 1 : current));
+  }, [steps.length]);
+
+  const onScriptParsed = useCallback((next: TransformStepDto[]) => {
+    setSteps((current) => (sameSteps(current, next) ? current : next));
+  }, []);
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   const selectedStep = selected >= 0 && selected < steps.length ? steps[selected] : null;
@@ -378,13 +412,17 @@ export function TransformEditorModal({
           </button>
           <button
             style={styles.primaryBtn}
-            disabled={readOnly || applying || !dirty || !bound || schemaHasErrors}
+            disabled={
+              readOnly || applying || !dirty || !bound || schemaHasErrors || !scriptParses
+            }
             title={
               !bound
                 ? "Bind this table to a data source before giving it steps"
-                : schemaHasErrors
-                  ? "Fix the step the diagnostic points at first"
-                  : "Replace this table's pipeline — one model edit, one undo step"
+                : !scriptParses
+                  ? "The script does not read yet — fix it before applying"
+                  : schemaHasErrors
+                    ? "Fix the step the diagnostic points at first"
+                    : "Replace this table's pipeline — one model edit, one undo step"
             }
             onClick={() => void apply()}
           >
@@ -435,8 +473,76 @@ export function TransformEditorModal({
           </div>
         )}
 
+        {/* The two views of one pipeline. The steps are the same either way —
+            the script is a rendering of them, compiled back before anything is
+            stored — so switching is not an edit. */}
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+          <div style={{ display: "flex", border: "1px solid #ccc", borderRadius: 4 }}>
+            <button
+              style={{
+                ...styles.smallBtn,
+                border: "none",
+                borderRadius: "3px 0 0 3px",
+                background: mode === "steps" ? "#0b5cad" : "transparent",
+                color: mode === "steps" ? "#fff" : undefined,
+              }}
+              onClick={enterSteps}
+            >
+              Steps
+            </button>
+            <button
+              style={{
+                ...styles.smallBtn,
+                border: "none",
+                borderRadius: "0 3px 3px 0",
+                background: mode === "script" ? "#0b5cad" : "transparent",
+                color: mode === "script" ? "#fff" : undefined,
+              }}
+              onClick={enterScript}
+              title="Edit the whole pipeline as text — copy it between tables, diff it, paste one you were sent"
+            >
+              Script
+            </button>
+          </div>
+          <span style={styles.hint}>
+            {mode === "steps"
+              ? "One step at a time, with a form for each."
+              : "The whole pipeline as text. The steps stay the stored form; this is a rendering of them."}
+          </span>
+        </div>
+
         <div style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
-          {/* Rail 1: the pipeline */}
+          {/* Rail 1: the pipeline — the step list, or the script buffer */}
+          {mode === "script" ? (
+            <div
+              style={{
+                flex: 1,
+                minWidth: 0,
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 0,
+              }}
+            >
+              {scriptSeedError !== null && (
+                <div style={{ fontSize: 12, color: "#a4262c", marginBottom: 6 }}>
+                  {scriptSeedError}
+                </div>
+              )}
+              {scriptSeed === null && scriptSeedError === null && (
+                <div style={styles.hint}>Rendering the pipeline…</div>
+              )}
+              {scriptSeed !== null && (
+                <ScriptPane
+                  connectionId={connectionId}
+                  tableName={table.name}
+                  initialScript={scriptSeed}
+                  readOnly={readOnly}
+                  onParsed={onScriptParsed}
+                  onParseStateChange={setScriptParses}
+                />
+              )}
+            </div>
+          ) : (
           <div
             style={{
               width: 280,
@@ -457,8 +563,11 @@ export function TransformEditorModal({
               onMove={moveStep}
             />
           </div>
+          )}
 
-          {/* Rail 2: the selected step's form, over its preview */}
+          {/* Rail 2: the selected step's form, over its preview. In Script mode
+              the form is gone (the text IS the form) but the preview stays —
+              seeing the rows change is the point of editing either way. */}
           <div
             style={{
               flex: 1,
@@ -476,6 +585,7 @@ export function TransformEditorModal({
                 maxHeight: "48%",
                 overflowY: "auto",
                 flexShrink: 0,
+                display: mode === "script" ? "none" : undefined,
               }}
             >
               {selectedStep === null ? (

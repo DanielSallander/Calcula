@@ -11,7 +11,7 @@
 // (`step.rs` for the tags, `parts.rs` for the operand vocabularies).
 
 import React, { useState } from "react";
-import type { ModelColumnInfo, TransformStepDto } from "@api";
+import type { ModelColumnInfo, TransformDataType, TransformStepDto } from "@api";
 import { Badge, styles } from "../editorShared";
 
 // ============================================================================
@@ -148,6 +148,22 @@ export const STEP_DATA_TYPES = [
   "Date",
   "Timestamp",
 ];
+
+/**
+ * A column type as text.
+ *
+ * `DataType::Decimal(u8, i8)` is a TUPLE variant, so it serializes as
+ * `{ Decimal: [18, 2] }` rather than as a string — a real value the forms must
+ * be able to DISPLAY without mangling. Authoring one is deliberately left to
+ * the script pane, whose parser lives in the engine: a decimal spelling parsed
+ * here as well would be a second declaration of the same grammar, and this
+ * repo has already paid for that once.
+ */
+export function dataTypeLabel(value: TransformDataType | undefined): string {
+  if (value === undefined) return "";
+  if (typeof value === "string") return value;
+  return `Decimal(${value.Decimal[0]},${value.Decimal[1]})`;
+}
 
 /** The engine's `AggregateOp`, PascalCase for the same reason. */
 export const AGGREGATE_OPS: { value: string; label: string }[] = [

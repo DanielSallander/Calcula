@@ -13,6 +13,7 @@ import type {
   ModelCultureInfo,
   ModelOverview,
   ModelRelationshipInfo,
+  ModelTableInfo,
   NameTranslationInfo,
   RefreshStrategyDto,
   RoleFilterDto,
@@ -31,9 +32,6 @@ import { relationshipTarget, sourceLabel } from "./readers";
 import { plural } from "./format";
 import { dataType } from "./dataTypes";
 import {
-  buildTransformStep,
-  describeTransformStep,
-  normalizeStepType,
   renameStepOutput,
   stepIndexArg,
   stepInsertPosition,
@@ -344,7 +342,16 @@ export function previewWriteCommand(cmd: Command, s: CliSession): WritePreview |
     case "transform":
       // A pipeline is per-table state addressed by step NUMBER, so fanning a
       // reorder out over a pattern is incoherent: no wildcards, ever.
-      return { labels: [planTransform(cmd, s).label], wildcard: false };
+      //
+      // The label is built WITHOUT reading the step, because reading it now
+      // means parsing it, and the parser lives in the engine behind an async
+      // call while this plan is synchronous. For `add` the card therefore shows
+      // the statement the user typed rather than a description of it — which is
+      // the more faithful thing to consent to anyway, since the old prose was a
+      // second statement of what the step meant and was clipped at 64
+      // characters. A syntax error in that statement now surfaces when the
+      // command runs rather than when it is planned.
+      return { labels: [planTransformLabel(cmd, s)], wildcard: false };
     case "set":
     case "rename":
     case "delete":
@@ -410,7 +417,7 @@ export async function runWrite(cmd: Command, s: CliSession, io: CliIo): Promise<
     case "transform": {
       // Re-plan against the CURRENT overview: an earlier command in the same
       // run may already have changed this table's steps.
-      const p = planTransform(cmd, s);
+      const p = await planTransform(cmd, s);
       await mutOverview(s, () => s.gateway.transformSet(s.connectionId, p.table, p.steps));
       io.print(p.message, "info");
       return;
@@ -453,15 +460,13 @@ interface TransformPlan {
 }
 
 /**
- * Resolve `transform table …` against the CURRENT session overview.
+ * Resolve the table a `transform table …` command addresses, and refuse the
+ * shapes that cannot work at all.
  *
- * Called from previewWrite (so a bad step number fails before the confirm
- * card) and again from runWrite (so an earlier command in the same run is
- * accounted for). Step numbers are 1-BASED everywhere the user sees them —
- * exactly the numbering `show table <name>` prints — and are converted to
- * array indices here, in one place.
+ * Shared by the synchronous label pass and the asynchronous plan, so a bad
+ * table name or a wildcard still fails before the confirm card.
  */
-function planTransform(cmd: Command, s: CliSession): TransformPlan {
+function transformTarget(cmd: Command, s: CliSession): ModelTableInfo {
   if (cmd.kind !== "table") fail(`Usage: ${TRANSFORM_USAGE}`, cmd.line);
   const target = primary(cmd, TRANSFORM_USAGE);
   if (isPattern(target.text)) {
@@ -484,6 +489,95 @@ function planTransform(cmd: Command, s: CliSession): TransformPlan {
       cmd.line,
     );
   }
+  return t;
+}
+
+/**
+ * The confirm-card label, built without parsing anything.
+ *
+ * Everything except `add` is addressed by step NUMBER, so its label is exact.
+ * `add` shows the statement verbatim: describing it would mean parsing it, and
+ * the parser is an async call into the engine.
+ */
+function planTransformLabel(cmd: Command, s: CliSession): string {
+  const t = transformTarget(cmd, s);
+  const current: TransformStepDto[] = t.transformSteps ?? [];
+  const actionTok = cmd.pos[1];
+  if (!actionTok) fail(`Usage: ${TRANSFORM_USAGE}`, cmd.line);
+  const head = `transform table ${t.name}`;
+  switch (actionTok.text.toLowerCase()) {
+    case "add": {
+      const at = optNum(cmd, "at");
+      const index =
+        at === undefined ? current.length : stepInsertPosition(at, current.length, cmd.line);
+      return `${head}: add step ${index + 1}: ${firstLine(statementText(cmd))}`;
+    }
+    case "remove":
+    case "delete": {
+      const index = stepIndexArg(cmd.pos[2], current.length, "removed", t.name, cmd.line);
+      return `${head}: remove step ${index + 1} (${current[index].type})`;
+    }
+    case "move": {
+      const from = stepIndexArg(cmd.pos[2], current.length, "moved", t.name, cmd.line);
+      const to = stepIndexArg(cmd.pos[3], current.length, "destination", t.name, cmd.line);
+      return `${head}: move step ${from + 1} -> ${to + 1}`;
+    }
+    case "rename": {
+      const index = stepIndexArg(cmd.pos[2], current.length, "renamed", t.name, cmd.line);
+      return `${head}: rename step ${index + 1} output to ${cmd.pos[3]?.text ?? "?"}`;
+    }
+    case "clear":
+      if (current.length === 0) fail(`'${t.name}' has no transformation steps to clear`, cmd.line);
+      return `${head}: clear ${plural(current.length, "step")}`;
+    default:
+      fail(
+        `Unknown transform action '${actionTok.text}' (add, remove, move, rename, clear)`,
+        cmd.line,
+      );
+  }
+}
+
+/**
+ * The statement text of a `transform … add` command: everything from the step
+ * name to the end of the logical line, handed to the engine's parser as-is.
+ *
+ * Continuation lines gain ONE space, because the script grammar reads exactly
+ * one leading whitespace character as the marker that makes a line a
+ * continuation. Without it a multi-line condition would come back one space
+ * short of what the author wrote.
+ */
+function statementText(cmd: Command): string {
+  const typeTok = cmd.pos[2];
+  if (!typeTok) {
+    fail(
+      `Usage: transform table <name> add <stepType> [key=value ...] [= <expression>]\n` +
+        `Step types: ${TRANSFORM_STEP_TYPES.join(", ")}`,
+      cmd.line,
+    );
+  }
+  return cmd.raw
+    .slice(typeTok.pos)
+    .split("\n")
+    .map((line, i) => (i === 0 ? line : " " + line))
+    .join("\n");
+}
+
+/** The first physical line of a statement, for a one-line confirm-card label. */
+function firstLine(text: string): string {
+  const break_ = text.indexOf("\n");
+  return break_ === -1 ? text : text.slice(0, break_);
+}
+
+/**
+ * Resolve `transform table …` against the CURRENT session overview.
+ *
+ * Step numbers are 1-BASED everywhere the user sees them — exactly the
+ * numbering `show table <name>` prints — and are converted to array indices
+ * here, in one place. `add` is the only action that has to read a step, and it
+ * reads it through the engine's own grammar rather than through a mirror of it.
+ */
+async function planTransform(cmd: Command, s: CliSession): Promise<TransformPlan> {
+  const t = transformTarget(cmd, s);
   const current: TransformStepDto[] = t.transformSteps ?? [];
   const actionTok = cmd.pos[1];
   if (!actionTok) fail(`Usage: ${TRANSFORM_USAGE}`, cmd.line);
@@ -492,32 +586,24 @@ function planTransform(cmd: Command, s: CliSession): TransformPlan {
 
   switch (action) {
     case "add": {
-      const typeTok = cmd.pos[2];
-      if (!typeTok) {
-        fail(
-          `Usage: transform table ${t.name} add <stepType> [key=value …] [= <expression>]\n` +
-            `Step types: ${TRANSFORM_STEP_TYPES.join(", ")}`,
-          cmd.line,
-        );
-      }
-      const type = normalizeStepType(typeTok.text);
-      if (!type) {
-        fail(
-          `Unknown step type '${typeTok.text}' (${TRANSFORM_STEP_TYPES.join(", ")})`,
-          cmd.line,
-        );
-      }
-      const step = buildTransformStep(cmd, type);
-      const at = optNum(cmd, "at");
+      // The engine parses the statement, including any `at=` placement: ONE
+      // grammar, living in the crate that owns the step enum. A syntax error
+      // arrives as the engine's own message, positioned within the statement.
+      const parsed = await s.gateway
+        .transformParseStatement(s.connectionId, statementText(cmd))
+        .catch((e: unknown) => fail(String((e as Error)?.message ?? e), cmd.line));
+      const at = parsed.at ?? optNum(cmd, "at");
       const index =
-        at === undefined ? current.length : stepInsertPosition(at, current.length, cmd.line);
+        at === undefined || at === null
+          ? current.length
+          : stepInsertPosition(at, current.length, cmd.line);
       const steps = [...current];
-      steps.splice(index, 0, step);
+      steps.splice(index, 0, parsed.step);
       return {
         table: t.name,
         steps,
-        label: `${head}: add step ${index + 1} ${type}`,
-        message: `Added step ${index + 1} (${type}) to ${t.name}: ${describeTransformStep(step)}`,
+        label: `${head}: add step ${index + 1} ${parsed.step.type}`,
+        message: `Added step ${index + 1} (${parsed.step.type}) to ${t.name}.`,
       };
     }
     case "remove":
@@ -560,7 +646,7 @@ function planTransform(cmd: Command, s: CliSession): TransformPlan {
         table: t.name,
         steps,
         label: `${head}: rename step ${index + 1} output to ${nameTok.text}`,
-        message: `Step ${index + 1} (${renamed.type}) in ${t.name} now reads: ${describeTransformStep(renamed)}`,
+        message: `Step ${index + 1} (${renamed.type}) in ${t.name} now outputs '${nameTok.text}'.`,
       };
     }
     case "clear": {

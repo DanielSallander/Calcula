@@ -6,7 +6,10 @@
 // WHY THE DRIFT GUARD MATTERS MOST. The step catalog is written down THREE
 // times: the engine's `TransformStep` enum (Rust, authoritative), the step
 // picker's `STEP_TYPES` (this folder), and the CLI's `TRANSFORM_STEP_TYPES`.
-// Nothing but this file makes them agree. A step added to the engine and
+// Nothing but this file makes them agree. (It used to be FOUR: the CLI also
+// held a builder that constructed steps from its own option table. That is
+// gone — the grammar moved into the engine — so both surviving copies are
+// display lists that cannot construct anything.) A step added to the engine and
 // forgotten here is invisible in the editor; a tag misspelled here produces a
 // step the engine refuses at save time, which the user meets as a failed edit
 // with no obvious cause. The Rust file is read at test time, so the engine
@@ -27,7 +30,7 @@ import {
   stepTypeLabel,
   summarizeSteps,
 } from "../stepKit";
-import { TRANSFORM_STEP_TYPES, normalizeStepType } from "../../../cli/transformSteps";
+import { TRANSFORM_STEP_TYPES } from "../../../cli/transformSteps";
 import type { ModelColumnInfo, TransformStepDto } from "@api";
 
 /** Read one file out of the engine's `transform` module. */
@@ -330,19 +333,29 @@ describe("summarizeSteps", () => {
   });
 });
 
-describe("the CLI's step-name normalizer", () => {
-  it("accepts the engine's own tag for every step", () => {
-    for (const tag of TRANSFORM_STEP_TYPES) {
-      expect(normalizeStepType(tag), `'${tag}' is not accepted by its own name`).toBe(tag);
+describe("the CLI's step-name list", () => {
+  // The normalizer this block used to test is gone: resolving a step name —
+  // including the alternative spellings `filter`, `dedupe`, `renameColumn` —
+  // now happens in the engine, beside the enum, so the command line and the
+  // Script tab cannot disagree about what a step is called. What is left in
+  // TypeScript is a DISPLAY list for completion, and the property that still
+  // matters about it is that it names the same steps the engine does.
+  //
+  // The list is diffed against the engine's published vocabulary by
+  // `cli/__tests__/transformScriptDrift.test.ts`; here it is diffed against
+  // the enum's own `type_name()` arms, which is the other end of the same
+  // chain.
+  it("names exactly the engine's tags, in the engine's catalog order", () => {
+    expect([...TRANSFORM_STEP_TYPES].sort()).toEqual(engineStepTags());
+  });
+
+  it("carries no duplicate and no alternative spelling", () => {
+    // Completion offers one canonical name per step; an alias in this list
+    // would be offered as if it were a distinct step.
+    const list = [...TRANSFORM_STEP_TYPES];
+    expect(new Set(list).size, "duplicated step name").toBe(list.length);
+    for (const tag of list) {
+      expect(tag, `'${tag}' is not the engine's spelling`).toMatch(/^[a-z][A-Za-z]*$/);
     }
-  });
-
-  it("is case-insensitive, because a CLI user is typing", () => {
-    expect(normalizeStepType("filterrows")).toBe("filterRows");
-    expect(normalizeStepType("FILTERROWS")).toBe("filterRows");
-  });
-
-  it("refuses an unknown step rather than guessing", () => {
-    expect(normalizeStepType("teleportRows")).toBeNull();
   });
 });

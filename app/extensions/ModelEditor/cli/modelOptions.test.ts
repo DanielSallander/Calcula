@@ -349,27 +349,44 @@ const MATRIX: Array<[kind: string, verb: string, cmd: string]> = [
 // So its audit runs over a GROUP of commands whose union must equal the spec
 // row exactly — the same teeth (nothing declared that no command uses, nothing
 // used that is not declared), one row per legal shape instead of one row.
+/** Canonical spellings — the option keys the engine's renderer emits, which
+ *  are the ones completion offers and help documents. */
 const TRANSFORM_MATRIX: string[] = [
   "transform table Web add removeColumns columns=Notes at=1",
   "transform table Web add selectColumns columns=Id,Status",
-  "transform table Web add renameColumn column=Status newname=OrderStatus",
-  "transform table Web add changeType column=Qty type=Int64 onerror=null",
-  "transform table Web add addColumn name=Margin = [Qty] * 2",
-  'transform table Web add splitColumn column=Status delimiter="-" parts=2 keeporiginal=true',
-  'transform table Web add replaceValues column=Status find="a" replace="b" matchentire=true',
+  "transform table Web add renameColumns rename=Status:OrderStatus",
+  "transform table Web add changeType cast=Qty:Int64 onError=null",
+  "transform table Web add addColumn name=Margin dataType=Float64 = [Qty] * 2",
+  'transform table Web add splitColumn column=Status delimiter="-" parts=2 keepOriginal=true',
+  'transform table Web add replaceValues column=Status find="a" replace="b" matchEntireValue=true',
   "transform table Web add textTransform columns=Status operation=trim",
   "transform table Web add fillDown columns=Status",
   "transform table Web add removeDuplicates",
   "transform table Web add sort by=Qty,-Id",
-  "transform table Web add groupBy groupby=Status agg=sum:Qty:Total",
+  "transform table Web add groupBy groupBy=Status agg=Sum:Qty:Total",
   "transform table Web add keepRows range=first:10",
   "transform table Web add removeRows range=range:0:5",
-  "transform table Web add unpivot columns=Jan,Feb namecolumn=Month valuecolumn=Amount",
-  "transform table Web add pivot namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb",
+  "transform table Web add unpivot columns=Jan,Feb nameColumn=Month valueColumn=Amount",
+  "transform table Web add pivot nameColumn=Month valueColumn=Amount aggregate=Sum valueNames=Jan,Feb",
   "transform table Web remove 2",
   "transform table Web move 2 1",
   "transform table Web rename 1 Kept",
   "transform table Web clear",
+];
+
+/** The spellings the command line shipped with, before the grammar moved into
+ *  the engine. Validation must not be STRICTER than the parser that runs the
+ *  command — the engine resolves option keys case-insensitively and still
+ *  understands the single-rename and single-cast shapes, so a script written
+ *  against the old surface has to keep planning. */
+const TRANSFORM_LEGACY_MATRIX: string[] = [
+  "transform table Web add renameColumn column=Status newname=OrderStatus",
+  "transform table Web add changeType column=Qty type=Int64 onerror=null",
+  'transform table Web add splitColumn column=Status delimiter="-" parts=2 keeporiginal=true',
+  'transform table Web add replaceValues column=Status find="a" replace="b" matchentire=true',
+  "transform table Web add groupBy groupby=Status agg=sum:Qty:Total",
+  "transform table Web add unpivot columns=Jan,Feb namecolumn=Month valuecolumn=Amount",
+  "transform table Web add pivot namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb",
 ];
 
 describe("model option schema — table/matrix integrity", () => {
@@ -392,7 +409,46 @@ describe("model option schema — table/matrix integrity", () => {
     expect(cmd.verb).toBe(verb);
     expect(cmd.kind).toBe(kind);
     const specs = MODEL_OPTION_TABLES[kind as Kind]?.[verb] ?? [];
-    expect([...usedOptKeys(cmd)].sort()).toEqual(specs.map((s) => s.key).sort());
+    // Lowercased on both sides: the lexer lowercases what the user typed, and
+    // validation matches case-insensitively, so a spec key spelled in the
+    // engine's canonical camelCase is the same option.
+    expect([...usedOptKeys(cmd)].map((k) => k.toLowerCase()).sort()).toEqual(
+      specs.map((s) => s.key.toLowerCase()).sort(),
+    );
+  });
+
+  it.each(TRANSFORM_LEGACY_MATRIX)("still plans the shipped spelling '%s'", (text) => {
+    const { session } = makeSession();
+    expect(() => planRun(text, session)).not.toThrow();
+  });
+
+  it("every legacy spelling is an alias of a canonical option, never a stray", () => {
+    // Guards the aliases themselves: an alias that matches no canonical key
+    // would let validation accept a key the engine then refuses.
+    // Everything is compared lowercased, because validation is
+    // case-insensitive: a key that differs only in case is the SAME option,
+    // not a legacy spelling.
+    const specs = MODEL_OPTION_TABLES.table?.transform ?? [];
+    const canonical = new Set(specs.map((s) => s.key.toLowerCase()));
+    for (const spec of specs) {
+      for (const alias of spec.aliases ?? []) {
+        expect(
+          canonical.has(alias.toLowerCase()),
+          `'${alias}' only differs in case from a canonical key, so it is not an alias`,
+        ).toBe(false);
+      }
+    }
+    const aliases = new Set(specs.flatMap((s) => s.aliases ?? []).map((a) => a.toLowerCase()));
+    const usedLegacy = new Set<string>();
+    for (const text of TRANSFORM_LEGACY_MATRIX) {
+      for (const key of usedOptKeys(parseScript(text)[0])) {
+        if (!canonical.has(key.toLowerCase())) usedLegacy.add(key.toLowerCase());
+      }
+    }
+    expect(usedLegacy.size).toBeGreaterThan(0);
+    for (const key of usedLegacy) {
+      expect(aliases.has(key), `'${key}=' is planned but declared nowhere`).toBe(true);
+    }
   });
 
   it("the transform group's option keys are exactly the 'transform table' spec row", () => {
@@ -404,7 +460,9 @@ describe("model option schema — table/matrix integrity", () => {
       for (const key of usedOptKeys(cmd)) used.add(key);
     }
     const specs = MODEL_OPTION_TABLES.table?.transform ?? [];
-    expect([...used].sort()).toEqual(specs.map((s) => s.key).sort());
+    expect([...used].map((k) => k.toLowerCase()).sort()).toEqual(
+      specs.map((s) => s.key.toLowerCase()).sort(),
+    );
   });
 });
 

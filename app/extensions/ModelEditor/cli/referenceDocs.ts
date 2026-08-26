@@ -402,7 +402,7 @@ Notes:
     markdown: `# transform
 
 \`\`\`
-transform table <name> add <stepType> [key=value …] [= <expression>] [at=<n>]
+transform table <name> add <statement> [at=<n>]
 transform table <name> remove <n>
 transform table <name> move <n> <to>
 transform table <name> rename <n> <new output name>
@@ -412,7 +412,15 @@ transform table <name> clear
 A **pipeline** ("applied steps") turns the rows a connector returned into the
 rows the [table](table.md) declares — the same idea as Power Query's applied
 steps. \`transform\` is the write half; the read half is
-[\`show table <name>\`](show.md), which prints the steps as a numbered list.
+[\`show table <name>\`](show.md), which prints the pipeline as **script**,
+numbered from 1.
+
+A \`<statement>\` is one step written as text: the step's name, its
+\`key=value\` options, and — for \`filterRows\` and \`addColumn\` only — a
+trailing \`= <expression>\`. It is the SAME text the Model Editor's
+**Transform → Script** tab edits, and the same text \`show table\` prints, so a
+line can be copied between the two in either direction. The grammar lives in
+the engine, next to the step definitions, which is why there is only one of it.
 
 - Step numbers are **1-based** — exactly the numbers \`show table\` prints.
 - **No [wildcards](wildcards.md).** A pipeline is per-table state addressed by
@@ -426,8 +434,8 @@ steps. \`transform\` is the write half; the read half is
 
 \`\`\`
 transform table Sales add filterRows = [Status] <> "Cancelled"
-transform table Sales add renameColumn column=Status newname=OrderStatus at=2
-transform table Sales add changeType column=Qty type=Int64 onerror=null
+transform table Sales add renameColumns rename=Status:OrderStatus at=2
+transform table Sales add changeType cast=Qty:Int64 onError=null
 transform table Sales add removeColumns columns=Notes,Internal
 transform table Sales move 3 1
 transform table Sales rename 4 NetAmount
@@ -441,30 +449,53 @@ transform table Sales clear
 | --- | --- |
 | \`removeColumns\` | \`columns=A,B\` |
 | \`selectColumns\` | \`columns=A,B\` (keeps them, **in this order**) |
-| \`renameColumn\` | \`column=Old newname=New\` |
-| \`changeType\` | \`column=Qty\` (or \`columns=A,B\`) \`type=Int64\` \`[onerror=fail\\|null]\` |
+| \`renameColumns\` | \`rename=Old:New\` (repeat for more renames) |
+| \`changeType\` | \`cast=Qty:Int64\` (repeat per column) \`[onError=fail\\|null]\` |
 | \`filterRows\` | \`= <row condition>\` |
-| \`addColumn\` | \`name=Margin [type=Float64] = <expression>\` |
-| \`splitColumn\` | \`column=Name delimiter="," parts=2 [keeporiginal=true]\` |
-| \`replaceValues\` | \`column=Region find="x" [replace="y"] [matchentire=true]\` |
+| \`addColumn\` | \`name=Margin [dataType=Float64] = <expression>\` |
+| \`splitColumn\` | \`column=Name delimiter="," parts=2 [keepOriginal=true]\` |
+| \`replaceValues\` | \`column=Region find="x" [replace="y"] [matchEntireValue=true]\` |
 | \`textTransform\` | \`columns=A,B operation=trim\\|clean\\|upper\\|lower\` |
 | \`fillDown\` | \`columns=A,B\` |
 | \`removeDuplicates\` | \`[columns=A,B]\` (omit = every column) |
 | \`sort\` | \`by=Amount,-Date\` (also \`Col:desc\` / \`Col:asc\`) |
-| \`groupBy\` | \`groupby=Region agg=sum:Amount:Total agg=countrows::Rows\` |
+| \`groupBy\` | \`groupBy=Region agg=Sum:Amount:Total agg=CountRows::Rows\` |
 | \`keepRows\` / \`removeRows\` | \`range=first:100\` \\| \`last:50\` \\| \`range:OFFSET:COUNT\` |
-| \`unpivot\` | \`columns=Jan,Feb namecolumn=Month valuecolumn=Amount\` |
-| \`pivot\` | \`namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb\` |
+| \`unpivot\` | \`columns=Jan,Feb nameColumn=Month valueColumn=Amount\` |
+| \`pivot\` | \`nameColumn=Month valueColumn=Amount aggregate=Sum valueNames=Jan,Feb\` |
 
-Options that do not belong to the step type being added are refused by name —
-a \`filterRows\` step never silently swallows a \`column=\`.
+Option keys are matched **case-insensitively**, and the spellings this command
+line shipped with still read (\`column=\`/\`newname=\`, \`type=\`, \`values=\`,
+\`matchentire=\`) — but the canonical form above is what the engine renders, so
+it is what \`show table\` prints and what the Script tab shows.
+
+Types are the engine's own spellings: \`String\`, \`Int32\`, \`Int64\`,
+\`Float64\`, \`Decimal(18,2)\`, \`Boolean\`, \`Date\`, \`Timestamp\`. \`Decimal\`
+carries a precision and a scale and can only be written here or in the Script
+tab — the per-step forms show it but do not author it.
+
+Options that do not belong to the step being added are refused by name —
+a \`filterRows\` step never silently swallows a \`column=\`. That refusal now
+comes from the engine's parser, so it arrives when the command RUNS rather than
+when it is planned.
 
 ## Renaming a step
 
 \`rename <n> <name>\` renames the **output name the step introduces**:
-\`addColumn\`'s new column, or a one-column \`renameColumn\`'s target. The
+\`addColumn\`'s new column, or a one-rename \`renameColumns\`' target. The
 engine's steps carry no display label, so any other step type refuses the
 rename rather than accepting a name that would be dropped on the next save.
+
+## Editing the whole pipeline at once
+
+The Model Editor's **Transform** dialog has a \`Steps | Script\` toggle. The
+Script view is this same text for the WHOLE pipeline, editable in one buffer —
+Power Query's "Advanced Editor", except that the STEPS remain the stored form
+and the text is a rendering of them. It is the way to copy a pipeline between
+tables, paste one a colleague sent you, reorder by moving a line, or change
+twenty steps without opening twenty forms. Commenting a line out with \`//\`
+disables that step for as long as the dialog is open; it is not saved, because
+a step carries no comment field to save it in.
 
 ## Aggregates
 

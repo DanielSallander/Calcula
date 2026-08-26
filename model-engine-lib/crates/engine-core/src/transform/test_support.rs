@@ -115,6 +115,159 @@ pub(crate) fn one_of_every_step() -> Vec<TransformStep> {
     ]
 }
 
+/// Strings chosen to break a naive grammar, driven into every string-bearing
+/// slot of every step by the script round-trip tests.
+///
+/// `region.1` and `period.1` are not hypothetical: `splitColumn` generates
+/// exactly those names itself, so a grammar that read a dot as a path separator
+/// would fail on its own output.
+pub(crate) const HOSTILE: &[&str] = &[
+    "",
+    "\"",
+    "a\"\"b",
+    "\\",
+    "a\\nb",
+    "a\nb",
+    "a\tb",
+    " leading",
+    "trailing ",
+    "a,b",
+    "a=b",
+    "a:b",
+    "-x",
+    "+x",
+    "[a]",
+    "a]]b",
+    "//not a comment",
+    "#not a comment",
+    "region.1",
+    "period.1",
+    "Decimal(18,2)",
+    "columns",
+    "sum",
+    "desc",
+    "first",
+    "Sales Amount",
+    "\u{00e5}\u{00e4}\u{00f6}",
+];
+
+/// Every step in **both states of every field that serde may omit**.
+///
+/// [`one_of_every_step`] covers each variant once, which is enough to catch a
+/// missing variant and not enough to catch a missing FIELD: a field with
+/// `skip_serializing_if` is invisible in JSON whenever it holds its default, so
+/// a fixture that only ever sets one state cannot tell a spelling that is
+/// absent from one that is merely unexercised. These instances pin the other
+/// state of each such field, plus the empty and multiple cardinalities that a
+/// single-entry fixture hides.
+pub(crate) fn every_field_shape() -> Vec<TransformStep> {
+    vec![
+        // Cardinality: empty and multiple, for every list-valued field.
+        TransformStep::RemoveColumns { columns: vec![] },
+        TransformStep::RemoveColumns {
+            columns: vec!["a".into(), "b".into(), "c".into()],
+        },
+        TransformStep::SelectColumns { columns: vec![] },
+        TransformStep::RenameColumns { renames: vec![] },
+        TransformStep::RenameColumns {
+            renames: vec![
+                ColumnRename::new("a", "b"),
+                ColumnRename::new("c", "d"),
+                ColumnRename::new("e", "f"),
+            ],
+        },
+        // A heterogeneous cast list, which the command line cannot express.
+        TransformStep::ChangeType {
+            changes: vec![
+                TypeChange::new("a", DataType::Int32),
+                TypeChange::new("b", DataType::Decimal(38, -2)),
+                TypeChange::new("c", DataType::Timestamp),
+            ],
+            on_error: CastErrorPolicy::Fail,
+        },
+        TransformStep::ChangeType {
+            changes: vec![],
+            on_error: CastErrorPolicy::Null,
+        },
+        // A condition carrying a newline, a quote and a comment introducer.
+        TransformStep::FilterRows {
+            condition: "status <> \"cancelled\"\n  AND amount > 0 // keep".into(),
+        },
+        TransformStep::AddColumn {
+            name: "margin".into(),
+            expression: "amount - cost".into(),
+            data_type: None,
+        },
+        TransformStep::SplitColumn {
+            column: "region".into(),
+            delimiter: "\n".into(),
+            parts: 1,
+            keep_original: false,
+        },
+        TransformStep::SplitColumn {
+            column: "region".into(),
+            delimiter: " - ".into(),
+            parts: 64,
+            keep_original: true,
+        },
+        TransformStep::ReplaceValues {
+            column: "status".into(),
+            find: "open".into(),
+            replace: String::new(),
+            match_entire_value: false,
+        },
+        TransformStep::TextTransform {
+            columns: vec![],
+            operation: TextOp::Clean,
+        },
+        TransformStep::FillDown { columns: vec![] },
+        // The meaning-bearing empty: every column defines a duplicate.
+        TransformStep::RemoveDuplicates { columns: vec![] },
+        TransformStep::Sort { by: vec![] },
+        TransformStep::Sort {
+            by: vec![
+                SortKey::ascending("a"),
+                SortKey::descending("b"),
+                SortKey::descending("Sales Amount"),
+            ],
+        },
+        // A zero-key group-by, which the engine accepts and the CLI refuses.
+        TransformStep::GroupBy {
+            group_by: vec![],
+            aggregates: vec![GroupAggregate::count_rows("Rows")],
+        },
+        TransformStep::GroupBy {
+            group_by: vec!["region".into(), "month".into()],
+            aggregates: vec![
+                GroupAggregate::new("amount", AggregateOp::Sum, "total"),
+                GroupAggregate::count_rows("orders"),
+                GroupAggregate::new("id", AggregateOp::DistinctCount, "customers"),
+            ],
+        },
+        TransformStep::GroupBy {
+            group_by: vec!["region".into()],
+            aggregates: vec![],
+        },
+        TransformStep::KeepRows {
+            range: RowRange::LastN { count: 0 },
+        },
+        TransformStep::RemoveRows {
+            range: RowRange::FirstN { count: u64::MAX },
+        },
+        TransformStep::Unpivot {
+            columns: vec![],
+            name_column: "measure".into(),
+            value_column: "value".into(),
+        },
+        TransformStep::Pivot {
+            name_column: "status".into(),
+            value_column: "amount".into(),
+            aggregate: AggregateOp::CountRows,
+            value_names: vec![],
+        },
+    ]
+}
+
 /// Compile-time proof that [`one_of_every_step`] is complete.
 ///
 /// The count assertion below can only compare the fixture against ITSELF, so on

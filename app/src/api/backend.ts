@@ -3768,10 +3768,32 @@ export interface ModelTableInfo {
   /** The table's transformation pipeline ("applied steps"), in order. Empty
    *  for an ordinary table. */
   transformSteps: TransformStepDto[];
+  /** The same pipeline as applied-steps script text, empty when there is none.
+   *  Every reader prints this ONE rendering rather than describing a step in
+   *  its own words. */
+  transformScript: string;
   /** The source's own schema, before the steps run. Empty when the table has
    *  no pipeline; the step editor shows this as the "Source" row. */
   sourceColumns: ModelColumnInfo[];
 }
+
+/**
+ * A column type as the engine serializes it.
+ *
+ * `DataType` carries no serde `rename_all`, so its simple variants are
+ * PascalCase strings — and `Decimal` is a TUPLE variant, which serializes as
+ * an object rather than a string. Typing this as a bare `string` (as it was)
+ * silently mistyped every decimal cast at the boundary.
+ */
+export type TransformDataType =
+  | "Int32"
+  | "Int64"
+  | "Float64"
+  | "String"
+  | "Boolean"
+  | "Date"
+  | "Timestamp"
+  | { Decimal: [number, number] };
 
 /**
  * One applied transformation step.
@@ -3793,12 +3815,12 @@ export interface TransformStepDto {
   type: string;
   columns?: string[];
   renames?: Array<{ from: string; to: string }>;
-  changes?: Array<{ column: string; newType: string }>;
+  changes?: Array<{ column: string; newType: TransformDataType }>;
   onError?: "fail" | "null";
   condition?: string;
   name?: string;
   expression?: string;
-  dataType?: string;
+  dataType?: TransformDataType;
   column?: string;
   delimiter?: string;
   parts?: number;
@@ -3824,6 +3846,11 @@ export interface TransformDiagnosticDto {
   stepType: string;
   severity: "error" | "warning";
   message: string;
+  /** 1-based line in the script text, present only for a diagnostic that came
+   *  from reading a script. A step index alone cannot be placed in a buffer. */
+  line?: number;
+  /** 1-based column, paired with `line`. */
+  column?: number;
 }
 
 /** The columns a candidate pipeline would produce, without committing it. */
@@ -3844,6 +3871,48 @@ export interface TransformPreviewResult {
    *  table, so this sample is indicative rather than final. */
   sampled: boolean;
   diagnostics: TransformDiagnosticDto[];
+}
+
+/** A table's pipeline rendered as editable script text. */
+export interface TransformScriptText {
+  /** Empty for a table with no steps, which is a valid (empty) script. */
+  script: string;
+}
+
+/** The result of reading candidate script text without committing it. */
+export interface TransformScriptResult {
+  /** False when the text did not parse. Do NOT offer Apply: `steps` is empty,
+   *  and the buffer says something the engine could not read. */
+  parsed: boolean;
+  steps: TransformStepDto[];
+  /** The columns the pipeline produces, or those reached before the first
+   *  failing step, so the column list stays live mid-edit. */
+  columns: ModelColumnInfo[];
+  /** Empty when the script is valid. A syntax error carries line/column; a
+   *  validation error carries the line of the step it names. */
+  diagnostics: TransformDiagnosticDto[];
+  /** 1-based line each parsed step starts on, same length as `steps`. */
+  stepLines: number[];
+}
+
+/** One step's entry in the script grammar. */
+export interface TransformScriptStepVocabulary {
+  tag: string;
+  help: string;
+  takesExpression: boolean;
+  options: Array<{ key: string; repeatable: boolean; optional: boolean; help: string }>;
+}
+
+/** The script grammar, served by the engine that parses it. */
+export interface TransformScriptVocabulary {
+  steps: TransformScriptStepVocabulary[];
+  dataTypes: string[];
+  aggregates: string[];
+  textOperations: string[];
+  castErrorPolicies: string[];
+  rowRangeKinds: string[];
+  /** The option that places a step, accepted on every step and never rendered. */
+  placementOption: string;
 }
 
 /** A table's saved pipeline and the source schema it derives from. */
@@ -4788,9 +4857,9 @@ export async function biModelRefreshTable(
 /** Read one extension-data entry (null when absent). */
 // --- Table transformations ("applied steps") ---
 //
-// All four go through the one multiplexed `bi_model_transform` command (the
+// All seven go through the one multiplexed `bi_model_transform` command (the
 // backend's dispatch frame has a fixed stack budget, so the repo prefers one
-// op-command over four).
+// op-command over seven).
 
 /** A table's saved pipeline and the source schema it derives from. */
 export async function biModelTransformGet(
@@ -4802,6 +4871,7 @@ export async function biModelTransformGet(
     op: "get",
     table,
     steps: null,
+    text: null,
     asOfStep: null,
     rowLimit: null,
     queryId: null,
@@ -4823,6 +4893,7 @@ export async function biModelTransformSet(
     op: "set",
     table,
     steps,
+    text: null,
     asOfStep: null,
     rowLimit: null,
     queryId: null,
@@ -4843,6 +4914,7 @@ export async function biModelTransformDeriveSchema(
     op: "deriveSchema",
     table,
     steps,
+    text: null,
     asOfStep: null,
     rowLimit: null,
     queryId: null,
@@ -4869,9 +4941,118 @@ export async function biModelTransformPreview(params: {
     op: "previewStep",
     table: params.table,
     steps: params.steps,
+    text: null,
     asOfStep: params.asOfStep ?? null,
     rowLimit: params.rowLimit ?? null,
     queryId: params.queryId ?? null,
+  });
+}
+
+/**
+ * The table's pipeline as editable text — the "advanced editor" view.
+ *
+ * Rendered on demand from the stored steps, never stored alongside them: the
+ * steps stay canonical, so entering the script view and leaving it again cannot
+ * report the pipeline as edited, and re-indenting cannot invalidate the table's
+ * on-disk row cache. An empty pipeline renders as empty text, which is valid.
+ */
+export async function biModelTransformToScript(
+  connectionId: string,
+  table: string,
+  /** Render THESE steps instead of the table's saved ones. The step editor
+   *  passes its draft, so switching to the script view mid-edit shows what is
+   *  on screen rather than what was last applied. */
+  steps?: TransformStepDto[] | null,
+): Promise<TransformScriptText> {
+  return invoke<TransformScriptText>("bi_model_transform", {
+    connectionId,
+    op: "toScript",
+    table,
+    steps: steps ?? null,
+    text: null,
+    asOfStep: null,
+    rowLimit: null,
+    queryId: null,
+  });
+}
+
+/**
+ * Read candidate script text: parse, validate and derive the columns in ONE
+ * round trip.
+ *
+ * Fused deliberately — the pane needs all three for the same text, and two
+ * calls would let the column list and the diagnostics describe different
+ * buffers. Check `parsed` before offering to Apply: when it is false, `steps`
+ * is empty and `diagnostics[0]` carries the `line`/`column` of the syntax
+ * error. No mutation and no I/O, so it is cheap enough to debounce on typing.
+ */
+export async function biModelTransformFromScript(
+  connectionId: string,
+  table: string,
+  text: string,
+): Promise<TransformScriptResult> {
+  return invoke<TransformScriptResult>("bi_model_transform", {
+    connectionId,
+    op: "fromScript",
+    table,
+    steps: null,
+    text,
+    asOfStep: null,
+    rowLimit: null,
+    queryId: null,
+  });
+}
+
+/** One statement parsed on its own, plus any `at=` placement it named. */
+export interface TransformParsedStatement {
+  step: TransformStepDto;
+  /** 1-based position the statement asked for, or null. */
+  at: number | null;
+}
+
+/**
+ * Parse ONE statement, as the command line supplies it.
+ *
+ * Separate from `biModelTransformFromScript` because a single statement may
+ * carry an `at=` placement, and because a statement meant to join an existing
+ * pipeline cannot be validated against the table's source schema on its own.
+ * Rejects with the syntax error's message.
+ */
+export async function biModelTransformParseStatement(
+  connectionId: string,
+  text: string,
+): Promise<TransformParsedStatement> {
+  return invoke<TransformParsedStatement>("bi_model_transform", {
+    connectionId,
+    op: "parseStatement",
+    table: "",
+    steps: null,
+    text,
+    asOfStep: null,
+    rowLimit: null,
+    queryId: null,
+  });
+}
+
+/**
+ * The script grammar, for an editor's highlighting and completion.
+ *
+ * Served by the engine rather than restated in the front end: a local copy
+ * would be a second declaration of the vocabulary the parser reads against, and
+ * would drift the first time a step gained an option.
+ */
+export async function biModelTransformVocabulary(
+  connectionId: string,
+): Promise<TransformScriptVocabulary> {
+  return invoke<TransformScriptVocabulary>("bi_model_transform", {
+    connectionId,
+    op: "vocabulary",
+    table: "",
+    steps: null,
+    text: null,
+    asOfStep: null,
+    rowLimit: null,
+    queryId: null,
   });
 }
 

@@ -15,7 +15,6 @@ import type { Command } from "./parse";
 import type { CliIo, CliSession } from "./execute";
 import { detailBlock, plural, textTable, yesNo } from "./format";
 import { filterNames, globToRegex, matchColumns, matchNamed, matchRelationships, matchTables, requireOne } from "./resolve";
-import { describeTransformStep } from "./transformSteps";
 
 export async function runRead(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
   if (cmd.verb === "validate") {
@@ -596,22 +595,31 @@ async function runShow(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
 // Transformation pipeline listing (the read half of the `transform` verb)
 // ---------------------------------------------------------------------------
 
-/** Print a table's applied steps, numbered the way `transform` addresses them:
- *  1-BASED, matching the step editor's list. Silent when there is no pipeline,
- *  so an ordinary table's `show` is unchanged. */
+/** Print a table's applied steps as the script the engine renders, numbered
+ *  the way `transform` addresses them: 1-BASED, matching the step editor's
+ *  list. Silent when there is no pipeline, so an ordinary table's `show` is
+ *  unchanged.
+ *
+ *  Printed as SCRIPT rather than as a table of prose. The prose column went
+ *  through `textTable`, which clips a cell at 64 characters and flattens
+ *  newlines — so a real filter condition was shown truncated, with an ellipsis,
+ *  and could not be copied anywhere. Script lines are the engine's own
+ *  rendering: complete, and paste-able into another table's Script tab or back
+ *  into `transform … add`. */
 function printTransformPipeline(io: CliIo, t: ModelTableInfo): void {
   if (t.transformSteps.length === 0) return;
   io.print(`Applied steps (${plural(t.transformSteps.length, "step")}):`, "info");
-  io.print(
-    textTable(
-      ["#", "step", "detail"],
-      t.transformSteps.map((step, i) => [
-        String(i + 1),
-        step.type,
-        describeTransformStep(step),
-      ]),
-    ),
-  );
+  // One statement per step, in order, so the number in the margin is the
+  // number every `transform` subaction takes.
+  const statements = t.transformScript.split("\n\n");
+  statements.forEach((statement, i) => {
+    const lines = statement.split("\n");
+    const margin = `${i + 1}`.padStart(3, " ");
+    io.print(`${margin}  ${lines[0]}`);
+    for (const continuation of lines.slice(1)) {
+      io.print(`     ${continuation}`);
+    }
+  });
   if (t.sourceColumns.length > 0) {
     io.print(
       `Source columns before the steps: ${t.sourceColumns.map((c) => c.name).join(", ")}`,

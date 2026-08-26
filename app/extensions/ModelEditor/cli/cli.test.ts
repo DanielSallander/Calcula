@@ -19,11 +19,8 @@ import { createSession, executeRun, planRun } from "./execute";
 import type { CliIo } from "./execute";
 import type { CliGateway } from "./gateway";
 import {
-  describeTransformStep,
-  normalizeStepType,
   TRANSFORM_STEP_OPTIONS,
   TRANSFORM_STEP_TYPES,
-  transformStepOptionKeys,
 } from "./transformSteps";
 
 // ---------------------------------------------------------------------------
@@ -35,6 +32,11 @@ interface TableOpts {
   /** The PERSISTED source binding a pipeline lives on. `bound` is looser. */
   sourceId?: string | null;
   transformSteps?: TransformStepDto[];
+  /** The pipeline as the ENGINE renders it. Supplied literally here because
+   *  the renderer lives in Rust: these fixtures stand in for what the backend
+   *  sends, and a hand-written re-implementation of it in this file would be
+   *  the exact second source of truth the feature removed. */
+  transformScript?: string;
 }
 
 function table(
@@ -52,6 +54,7 @@ function table(
     bound: opts.bound ?? false,
     sourceId: opts.sourceId ?? null,
     transformSteps: opts.transformSteps ?? [],
+    transformScript: opts.transformScript ?? "",
     sourceColumns: [],
     columns: [
       ...cols.map((c) => ({
@@ -132,6 +135,13 @@ function fixtureOverview(): ModelOverview {
           { type: "renameColumns", renames: [{ from: "amount", to: "net" }] },
           { type: "filterRows", condition: '[Status] <> "Cancelled"' },
         ],
+        transformScript: [
+          "removeColumns columns=Notes",
+          "",
+          "renameColumns rename=amount:net",
+          "",
+          'filterRows = [Status] <> "Cancelled"',
+        ].join("\n"),
       }),
     ],
     relationships: [
@@ -458,6 +468,54 @@ describe("executor", () => {
 // transform — a table's applied-steps pipeline
 // ---------------------------------------------------------------------------
 
+/**
+ * What the ENGINE returns for each statement these tests write.
+ *
+ * The grammar lives in Rust now, so a TypeScript test cannot parse a statement
+ * and must not try: re-implementing the parser here to test the code that
+ * replaced it would recreate the very mirror this change deleted. The map
+ * states, per statement, what the engine answers — and
+ * `model-engine-lib/.../transform/script/tests.rs` is what proves the engine
+ * really answers that. These tests cover the CLI's own job: index arithmetic,
+ * read-modify-write, one `transformSet` per command.
+ */
+const PARSED_STATEMENTS: Record<string, { step: TransformStepDto; at: number | null }> = {
+  "removeColumns columns=Qty": { step: { type: "removeColumns", columns: ["Qty"] }, at: null },
+  "fillDown columns=Status at=2": { step: { type: "fillDown", columns: ["Status"] }, at: 2 },
+  "fillDown columns=Status at=4": { step: { type: "fillDown", columns: ["Status"] }, at: 4 },
+  "fillDown columns=Status at=5": { step: { type: "fillDown", columns: ["Status"] }, at: 5 },
+  "renameColumns rename=amount:net": {
+    step: { type: "renameColumns", renames: [{ from: "amount", to: "net" }] },
+    at: null,
+  },
+  'filterRows = [Status] <> "Cancelled"': {
+    step: { type: "filterRows", condition: '[Status] <> "Cancelled"' },
+    at: null,
+  },
+};
+
+/** The engine's refusals, keyed the same way. */
+const REFUSED_STATEMENTS: Record<string, string> = {
+  "frobnicate columns=Q":
+    "'frobnicate' is not a transformation step. The steps are: removeColumns, ...",
+  'filterRows column=Status = [Status] <> "x"':
+    "'column=' does not apply to a filterRows step - it takes only an '= <expression>'",
+  "fillDown columns=Qty = 1":
+    "a fillDown step takes no '= <expression>' - only filterRows and addColumn do",
+};
+
+/** Stand-in for the engine's single-statement parser. */
+function fakeParseStatement(_connectionId: string, text: string) {
+  if (text in REFUSED_STATEMENTS) return Promise.reject(new Error(REFUSED_STATEMENTS[text]));
+  const parsed = PARSED_STATEMENTS[text];
+  if (!parsed) {
+    return Promise.reject(
+      new Error(`the test fixture has no parse for the statement ${JSON.stringify(text)}`),
+    );
+  }
+  return Promise.resolve(parsed);
+}
+
 /** A session whose `transformSet` actually INSTALLS the new steps, so a second
  *  command in the same run reads what the first one wrote (the read-modify-
  *  write is against the session overview, not a re-fetch). */
@@ -470,6 +528,7 @@ function transformSession(overview: ModelOverview = fixtureOverview()): {
   const sets: Array<{ table: string; steps: TransformStepDto[] }> = [];
   let current = overview;
   const { gateway, calls } = mockGateway(overview, {
+    transformParseStatement: fakeParseStatement,
     transformSet: (connectionId: string, table: string, steps: TransformStepDto[]) => {
       sets.push({ table, steps });
       current = {
@@ -511,6 +570,27 @@ function webSteps(): TransformStepDto[] {
   return fixtureOverview().tables.find((t) => t.name === "Web")!.transformSteps;
 }
 
+/**
+ * Run a transform command and return the error text it printed.
+ *
+ * Several refusals moved from PLAN time to RUN time when the grammar moved
+ * into the engine: the parser is an async call, and planning is synchronous.
+ * The confirm card therefore shows the statement as typed and a bad statement
+ * fails when the command runs. That is the deliberate trade recorded in
+ writers.ts's previewWrite comment, and these tests pin it rather than
+ * pretending the old timing survived.
+ */
+async function transformError(text: string): Promise<string> {
+  const { session } = transformSession();
+  const { io, lines } = collectIo();
+  const outcome = await executeRun(planRun(text, session), session, io);
+  expect(outcome.ok).toBe(false);
+  return lines
+    .filter((l) => l.cls === "err")
+    .map((l) => l.text)
+    .join(" | ");
+}
+
 describe("transform — parsing", () => {
   it("parses the subaction and indices as positionals", () => {
     const cmd = parseCommand({ text: "transform table Sales move 3 1", line: 1 });
@@ -528,11 +608,50 @@ describe("transform — parsing", () => {
     expect(cmd.expr).toBe('[Status] <> "Cancelled"');
   });
 
-  it("normalizes step-type spellings, including the singular renameColumn", () => {
-    expect(normalizeStepType("renameColumn")).toBe("renameColumns");
-    expect(normalizeStepType("REMOVECOLUMNS")).toBe("removeColumns");
-    expect(normalizeStepType("groupby")).toBe("groupBy");
-    expect(normalizeStepType("nonsense")).toBeNull();
+  it("hands the whole statement to the engine, verbatim from the step name on", async () => {
+    // The contract that replaced the TypeScript builder: everything from the
+    // step name to the end of the logical line goes to the engine's parser,
+    // untouched. Anything less would mean re-deciding here what a step is.
+    const seen: string[] = [];
+    const overview = fixtureOverview();
+    const { gateway } = mockGateway(overview, {
+      transformParseStatement: (connectionId: string, text: string) => {
+        seen.push(text);
+        return Promise.resolve({
+          step: { type: "removeColumns", columns: ["Qty"] } as TransformStepDto,
+          at: null,
+        });
+      },
+      getOverview: () => Promise.resolve(overview),
+    });
+    const session = createSession("conn-1", overview, false, gateway);
+    const { io } = collectIo();
+    await executeRun(planRun("transform table Web add removeColumns columns=Qty", session), session, io);
+    expect(seen).toEqual(["removeColumns columns=Qty"]);
+  });
+
+  it("re-indents a continuation line so the engine reads the author's text exactly", async () => {
+    // The script grammar strips ONE leading whitespace character as the marker
+    // that makes a line a continuation. The command line's own raw form has no
+    // such marker, so it adds one — without this the condition comes back a
+    // space short of what was typed.
+    const seen: string[] = [];
+    const overview = fixtureOverview();
+    const { gateway } = mockGateway(overview, {
+      transformParseStatement: (connectionId: string, text: string) => {
+        seen.push(text);
+        return Promise.resolve({
+          step: { type: "filterRows", condition: "x" } as TransformStepDto,
+          at: null,
+        });
+      },
+      getOverview: () => Promise.resolve(overview),
+    });
+    const session = createSession("conn-1", overview, false, gateway);
+    const { io } = collectIo();
+    const typed = 'transform table Web add filterRows = [Status] <> "x"\n  AND [Qty] > 0';
+    await executeRun(planRun(typed, session), session, io);
+    expect(seen).toEqual(['filterRows = [Status] <> "x"\n   AND [Qty] > 0']);
   });
 });
 
@@ -614,9 +733,8 @@ describe("transform — subactions", () => {
     });
   });
 
-  it("rename refuses a step that carries no output name, saying why", () => {
-    const { session } = transformSession();
-    expect(() => planRun("transform table Web rename 3 Whatever", session)).toThrow(
+  it("rename refuses a step that carries no output name, saying why", async () => {
+    expect(await transformError("transform table Web rename 3 Whatever")).toMatch(
       /filterRows step, which introduces no single output name/,
     );
   });
@@ -681,27 +799,32 @@ describe("transform — guards", () => {
     );
   });
 
-  it("rejects a declared option that means nothing to THIS step type", () => {
-    const { session } = transformSession();
-    expect(() =>
-      planRun('transform table Web add filterRows column=Status = [Status] <> "x"', session),
-    ).toThrow(/does not apply to a filterRows step/);
+  it("surfaces the engine's refusal of an option that means nothing to THIS step", async () => {
+    // Refused by the engine's parser now, not by a mirror of it here — and so
+    // at RUN time rather than at plan time. What matters is that the refusal
+    // still reaches the user, with the engine's own wording.
+    expect(
+      await transformError('transform table Web add filterRows column=Status = [Status] <> "x"'),
+    ).toMatch(/does not apply to a filterRows step/);
   });
 
-  it("rejects an expression tail on a step that takes none", () => {
-    const { session } = transformSession();
-    expect(() => planRun("transform table Web add fillDown columns=Qty = 1", session)).toThrow(
+  it("surfaces the engine's refusal of an expression tail on a step that takes none", async () => {
+    expect(await transformError("transform table Web add fillDown columns=Qty = 1")).toMatch(
       /takes no '= <expression>'/,
     );
   });
 
-  it("refuses an unknown subaction and an unknown step type", () => {
+  it("refuses an unknown subaction at plan time, and an unknown step at run time", async () => {
+    // The subaction is the command line's OWN vocabulary, so it still fails
+    // before the confirm card. The step name belongs to the engine's catalog,
+    // so its refusal arrives with the engine's message — which names the
+    // catalog, where the old one only named the seventeen tags.
     const { session } = transformSession();
     expect(() => planRun("transform table Web frobnicate 1", session)).toThrow(
       /Unknown transform action 'frobnicate'/,
     );
-    expect(() => planRun("transform table Web add frobnicate columns=Q", session)).toThrow(
-      /Unknown step type 'frobnicate'/,
+    expect(await transformError("transform table Web add frobnicate columns=Q")).toMatch(
+      /not a transformation step/,
     );
   });
 
@@ -732,159 +855,57 @@ describe("transform — scripts", () => {
   });
 });
 
-describe("transform — step construction", () => {
-  const STEP_MATRIX: Array<[type: string, cmd: string, expected: TransformStepDto]> = [
-    [
-      "removeColumns",
-      "transform table Web add removeColumns columns=Notes,Internal",
-      { type: "removeColumns", columns: ["Notes", "Internal"] },
-    ],
-    [
-      "selectColumns",
-      "transform table Web add selectColumns columns=Id,Status",
-      { type: "selectColumns", columns: ["Id", "Status"] },
-    ],
-    [
-      "renameColumns",
-      "transform table Web add renameColumn column=Status newname=OrderStatus",
-      { type: "renameColumns", renames: [{ from: "Status", to: "OrderStatus" }] },
-    ],
-    [
-      "changeType",
-      "transform table Web add changeType column=Qty type=Int64",
-      { type: "changeType", changes: [{ column: "Qty", newType: "Int64" }] },
-    ],
-    [
-      "changeType (many + policy)",
-      "transform table Web add changeType columns=Qty,Id type=int onerror=null",
-      {
-        type: "changeType",
-        changes: [
-          { column: "Qty", newType: "Int64" },
-          { column: "Id", newType: "Int64" },
-        ],
-        onError: "null",
+describe('transform — step construction moved to the engine', () => {
+  it('no longer builds steps in TypeScript', async () => {
+    // This block used to hold a seventeen-row matrix asserting the shape the
+    // TypeScript builder produced for each step. That builder is gone: the
+    // grammar lives in the crate that owns the step enum, and the matrix that
+    // replaced this one is
+    // model-engine-lib/crates/engine-core/src/transform/script/tests.rs,
+    // where it can assert Rust value equality against the enum itself rather
+    // than against a DTO mirror of it.
+    //
+    // What is asserted HERE is the property that makes that safe: the command
+    // line constructs nothing, and whatever the engine answers is exactly what
+    // gets written. A test that re-parsed the statement in TypeScript to check
+    // the answer would be the mirror this change removed.
+    const engineAnswer: TransformStepDto = {
+      type: 'changeType',
+      changes: [
+        { column: 'a', newType: { Decimal: [18, 2] } },
+        { column: 'b', newType: 'Timestamp' },
+      ],
+      onError: 'null',
+    };
+    const overview = fixtureOverview();
+    const sets: Array<{ table: string; steps: TransformStepDto[] }> = [];
+    const { gateway } = mockGateway(overview, {
+      transformParseStatement: () => Promise.resolve({ step: engineAnswer, at: null }),
+      transformSet: (_c: string, table: string, steps: TransformStepDto[]) => {
+        sets.push({ table, steps });
+        return Promise.resolve(overview);
       },
-    ],
-    [
-      "filterRows",
-      'transform table Web add filterRows = [Status] <> "Cancelled"',
-      { type: "filterRows", condition: '[Status] <> "Cancelled"' },
-    ],
-    [
-      "addColumn",
-      "transform table Web add addColumn name=Margin type=Float64 = [Qty] * 2",
-      { type: "addColumn", name: "Margin", expression: "[Qty] * 2", dataType: "Float64" },
-    ],
-    [
-      "splitColumn",
-      'transform table Web add splitColumn column=Status delimiter="-" parts=2 keeporiginal=true',
-      { type: "splitColumn", column: "Status", delimiter: "-", parts: 2, keepOriginal: true },
-    ],
-    [
-      "replaceValues",
-      'transform table Web add replaceValues column=Status find="n/a" replace="" matchentire=true',
-      {
-        type: "replaceValues",
-        column: "Status",
-        find: "n/a",
-        replace: "",
-        matchEntireValue: true,
-      },
-    ],
-    [
-      "textTransform",
-      "transform table Web add textTransform columns=Status operation=trim",
-      { type: "textTransform", columns: ["Status"], operation: "trim" },
-    ],
-    [
-      "fillDown",
-      "transform table Web add fillDown columns=Status",
-      { type: "fillDown", columns: ["Status"] },
-    ],
-    [
-      "removeDuplicates",
-      "transform table Web add removeDuplicates",
-      { type: "removeDuplicates", columns: [] },
-    ],
-    [
-      "sort",
-      "transform table Web add sort by=Qty,-Id,Status:desc",
-      {
-        type: "sort",
-        by: [{ column: "Qty" }, { column: "Id", descending: true }, { column: "Status", descending: true }],
-      },
-    ],
-    [
-      "groupBy",
-      "transform table Web add groupBy groupby=Status agg=sum:Qty:TotalQty agg=countrows::Rows",
-      {
-        type: "groupBy",
-        groupBy: ["Status"],
-        aggregates: [
-          { column: "Qty", function: "Sum", alias: "TotalQty" },
-          { function: "CountRows", alias: "Rows" },
-        ],
-      },
-    ],
-    [
-      "keepRows",
-      "transform table Web add keepRows range=first:100",
-      { type: "keepRows", range: { kind: "firstN", count: 100 } },
-    ],
-    [
-      "removeRows",
-      "transform table Web add removeRows range=range:0:10",
-      { type: "removeRows", range: { kind: "range", offset: 0, count: 10 } },
-    ],
-    [
-      "unpivot",
-      "transform table Web add unpivot columns=Jan,Feb namecolumn=Month valuecolumn=Amount",
-      {
-        type: "unpivot",
-        columns: ["Jan", "Feb"],
-        nameColumn: "Month",
-        valueColumn: "Amount",
-      },
-    ],
-    [
-      "pivot",
-      "transform table Web add pivot namecolumn=Month valuecolumn=Amount aggregate=sum values=Jan,Feb",
-      {
-        type: "pivot",
-        nameColumn: "Month",
-        valueColumn: "Amount",
-        aggregate: "Sum",
-        valueNames: ["Jan", "Feb"],
-      },
-    ],
-  ];
-
-  it.each(STEP_MATRIX)("builds a %s step", async (_label, text, expected) => {
-    const { sets, ok } = await runTransform(text);
-    expect(ok).toBe(true);
-    expect(sets[0].steps[sets[0].steps.length - 1]).toEqual(expected);
+      getOverview: () => Promise.resolve(overview),
+    });
+    const session = createSession('conn-1', overview, false, gateway);
+    const { io } = collectIo();
+    await executeRun(planRun('transform table Web add changeType cast=a:Decimal(18,2)', session), session, io);
+    // Written through untouched — including the heterogeneous cast list and
+    // the Decimal type, neither of which the old TypeScript builder could
+    // even express.
+    expect(sets[0].steps[sets[0].steps.length - 1]).toEqual(engineAnswer);
   });
 
-  it("covers every step type the engine defines", () => {
-    const built = new Set(
-      STEP_MATRIX.map(([, , expected]) => expected.type),
-    );
-    expect([...TRANSFORM_STEP_TYPES].filter((t) => !built.has(t))).toEqual([]);
-  });
-
-  it("every per-step option key is declared in the option schema", () => {
-    const declared = new Set(TRANSFORM_STEP_OPTIONS.map((s) => s.key));
-    const undeclared = TRANSFORM_STEP_TYPES.flatMap((t) =>
-      transformStepOptionKeys(t).filter((k) => !declared.has(k)),
-    );
-    expect(undeclared).toEqual([]);
-    // …and the schema declares nothing no step reads (bar the placement key).
-    const read = new Set([
-      "at",
-      ...TRANSFORM_STEP_TYPES.flatMap((t) => transformStepOptionKeys(t)),
-    ]);
-    expect(TRANSFORM_STEP_OPTIONS.map((s) => s.key).filter((k) => !read.has(k))).toEqual([]);
+  it('declares every option the engine publishes, and none it does not', () => {
+    // The one remaining mirror — a word list for completion — pinned to the
+    // engine's own vocabulary by __tests__/transformScriptDrift.test.ts, which
+    // reads the Rust source. This test only guards the local shape.
+    const keys = TRANSFORM_STEP_OPTIONS.map((s) => s.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain('at');
+    for (const spec of TRANSFORM_STEP_OPTIONS) {
+      expect(spec.help && spec.help.length).toBeGreaterThan(5);
+    }
   });
 });
 
@@ -894,9 +915,13 @@ describe("transform — show table lists the pipeline", () => {
     const text = lines.map((l) => l.text).join("\n");
     expect(text).toContain("applied steps");
     expect(text).toContain("Applied steps (3 steps)");
-    expect(text).toMatch(/^1 +removeColumns +Notes$/m);
-    expect(text).toMatch(/^2 +renameColumns +amount -> net$/m);
-    expect(text).toMatch(/^3 +filterRows +\[Status\] <> "Cancelled"$/m);
+    // Printed as the engine's own script, numbered the way `transform`
+    // addresses the steps. The old prose column went through `textTable`,
+    // which clips a cell at 64 characters and flattens newlines, so a real
+    // condition was shown truncated and could not be copied anywhere.
+    expect(text).toMatch(/^ +1 +removeColumns columns=Notes$/m);
+    expect(text).toMatch(/^ +2 +renameColumns rename=amount:net$/m);
+    expect(text).toMatch(/^ +3 +filterRows = \[Status\] <> "Cancelled"$/m);
   });
 
   it("says nothing extra for a table with no pipeline", async () => {
@@ -905,20 +930,65 @@ describe("transform — show table lists the pipeline", () => {
     expect(text).not.toContain("Applied steps");
   });
 
-  it("renders each step type as one readable line", () => {
-    expect(describeTransformStep(webSteps()[1])).toBe("amount -> net");
-    expect(
-      describeTransformStep({ type: "removeDuplicates", columns: [] }),
-    ).toBe("(every column)");
-    expect(
-      describeTransformStep({
-        type: "changeType",
-        changes: [{ column: "Qty", newType: "Int64" }],
-        onError: "null",
-      }),
-    ).toBe("Qty -> Int64 (errors -> null)");
-    expect(
-      describeTransformStep({ type: "keepRows", range: { kind: "lastN", count: 5 } }),
-    ).toBe("last 5");
+  it("prints a long condition in full, and a multi-line step across lines", async () => {
+    // The defect the prose column had: `textTable` clips a cell at 64
+    // characters and flattens newlines, so the one part of a pipeline most
+    // likely to be long was the part you could not read.
+    const long = '[Status] <> "Cancelled" AND [Qty] > 0 AND [Region] IN {"North", "South", "East"}';
+    expect(long.length).toBeGreaterThan(64);
+    const overview = fixtureOverview();
+    overview.tables = overview.tables.map((t) =>
+      t.name === "Web"
+        ? {
+            ...t,
+            transformSteps: [{ type: "filterRows", condition: long }],
+            transformScript: `filterRows = ${long}`,
+          }
+        : t,
+    );
+    const { gateway } = mockGateway(overview);
+    const session = createSession("conn-1", overview, false, gateway);
+    const { io, lines } = collectIo();
+    await executeRun(planRun("show table Web", session), session, io);
+    const text = lines.map((l) => l.text).join("\n");
+    expect(text).toContain(long);
+    expect(text).not.toContain("...");
+  });
+
+  it("keeps a wrapped step's continuation lines under its number", async () => {
+    const overview = fixtureOverview();
+    overview.tables = overview.tables.map((t) =>
+      t.name === "Web"
+        ? {
+            ...t,
+            transformSteps: [
+              { type: "removeColumns", columns: ["Notes"] },
+              {
+                type: "renameColumns",
+                renames: [
+                  { from: "a", to: "b" },
+                  { from: "c", to: "d" },
+                ],
+              },
+            ],
+            transformScript: [
+              "removeColumns columns=Notes",
+              "",
+              "renameColumns",
+              "  rename=a:b",
+              "  rename=c:d",
+            ].join("\n"),
+          }
+        : t,
+    );
+    const { gateway } = mockGateway(overview);
+    const session = createSession("conn-1", overview, false, gateway);
+    const { io, lines } = collectIo();
+    await executeRun(planRun("show table Web", session), session, io);
+    const text = lines.map((l) => l.text).join("\n");
+    expect(text).toMatch(/^ +1 +removeColumns columns=Notes$/m);
+    expect(text).toMatch(/^ +2 +renameColumns$/m);
+    expect(text).toMatch(/^ +rename=a:b$/m);
+    expect(text).toMatch(/^ +rename=c:d$/m);
   });
 });
