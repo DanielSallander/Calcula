@@ -683,11 +683,28 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
             // What it ASKS FOR that it does not appear to use. §11.2 keeps these
             // out of the repair prompt on purpose; the reviewer is the one who
             // can judge them, and pressing Save is the act of granting them.
+            //
+            // PARTITIONED BY CODE. The gate selects notices by SEVERITY, which
+            // is right — it must pick up every notice the ladder grows — but
+            // printing them all under one heading is not: a `no-run-target`
+            // notice under "check what it declares" tells the author their
+            // capability pragmas are wrong, about a sentence that has nothing to
+            // do with capabilities.
             if (verdict.notices?.length) {
-              addBubble({
-                kind: "notice",
-                text: `Before you mount it, check what it declares:\n${verdict.notices.map((n) => `- ${n}`).join("\n")}`,
-              });
+              const declared = verdict.notices.filter((n) => n.code !== "no-run-target");
+              const runTarget = verdict.notices.filter((n) => n.code === "no-run-target");
+              if (declared.length > 0) {
+                addBubble({
+                  kind: "notice",
+                  text: `Before you mount it, check what it declares:\n${declared.map((n) => `- ${n.message}`).join("\n")}`,
+                });
+              }
+              if (runTarget.length > 0) {
+                addBubble({
+                  kind: "notice",
+                  text: `You can mount this, but you will not be able to press Run on it:\n${runTarget.map((n) => `- ${n.message}`).join("\n")}`,
+                });
+              }
             }
             // The gate's dry-run note rides on the tool result so the model —
             // and the transcript — say what the draft would DO, not just that

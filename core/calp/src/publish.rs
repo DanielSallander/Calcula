@@ -1272,6 +1272,116 @@ mod tests {
         }
     }
 
+    /// Every regular file under `root`, recursively, as raw bytes.
+    ///
+    /// A field-by-field check would only ever prove what somebody remembered to
+    /// look at. Bytes prove the absence.
+    fn every_file_under(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(bytes) = fs::read(&path) {
+                    out.push((path, bytes));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn user_files_never_reach_a_published_package() {
+        // THE PRIVACY TEETH, and there is no equivalent for ANY `user_files`
+        // section today: `rg user_files core/calp/src/` returns no hits
+        // outside a doc comment in audit.rs and this test. The firewall that
+        // keeps a subscriber
+        // from receiving the publisher's audit log, schedule and — since
+        // 2026-08-26 — the prompts the publisher typed to an AI has rested on
+        // "the calp crate never reads Workbook::user_files", which is a property
+        // nothing measured.
+        //
+        // `script_authoring.json` is the section that makes it matter most: a
+        // prompt is the publisher's own words about their own data. Anyone who
+        // publishes a sales report should not thereby email their subscribers
+        // the sentence "flag the customers who are behind on payments".
+        //
+        // Byte-level over the whole package, not a field check, and it
+        // retroactively pins the same firewall for scheduled_jobs.json and
+        // audit_log.json.
+        const SECRET: &str = "customers who are behind on payments";
+
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        let mut wb = make_test_workbook();
+        wb.user_files.insert(
+            "script_authoring.json".to_string(),
+            format!(
+                r#"{{"schemaVersion":1,"runs":{{"obj-1":[{{"runId":"r1","instruction":"{}"}}]}}}}"#,
+                SECRET
+            )
+            .into_bytes(),
+        );
+        wb.user_files.insert(
+            "scheduled_jobs.json".to_string(),
+            format!(r#"{{"schemaVersion":1,"jobs":[],"note":"{}"}}"#, SECRET).into_bytes(),
+        );
+        wb.user_files.insert(
+            "audit_log.json".to_string(),
+            format!(r#"{{"enabled":true,"entries":[],"note":"{}"}}"#, SECRET).into_bytes(),
+        );
+
+        let request = PublishRequest {
+            model_writebacks: None,
+            workbook: &wb,
+            package_name: "privacy".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            sheet_indices: vec![0, 1],
+            now: "2026-08-26T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish(&reg, &request, prof.path()).unwrap();
+
+        let files = every_file_under(dir.path());
+        assert!(
+            !files.is_empty(),
+            "the walk found no artifacts at all, so it proves nothing"
+        );
+        let needle = SECRET.as_bytes();
+        for (path, bytes) in &files {
+            assert!(
+                !bytes
+                    .windows(needle.len())
+                    .any(|w| w == needle),
+                "the publisher's own words reached the package, in {}",
+                path.display()
+            );
+            assert!(
+                !bytes.windows(21).any(|w| w == b"script_authoring.json"),
+                "the section NAME reached the package, in {}",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn reference_sheet_name_parses_prefixes() {
         assert_eq!(reference_sheet_name("Data!A1:A10"), Some("Data".to_string()));

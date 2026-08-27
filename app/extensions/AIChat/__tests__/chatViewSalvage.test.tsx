@@ -1042,13 +1042,40 @@ describe("the gate's verdict is shown to the person, not only to the model", () 
   it("renders the ladder's notices", async () => {
     gateVerdict = {
       allow: true,
-      notices: ["`net.fetch` is declared but no call requiring it was found."],
+      notices: [
+        {
+          code: "declared-not-observed",
+          message: "`net.fetch` is declared but no call requiring it was found.",
+        },
+      ],
     };
     draftTurn();
     await ask("make me a button script");
 
     expect(container.textContent).toContain("Before you mount it");
     expect(container.textContent).toContain("net.fetch");
+  });
+
+  it("does NOT file the run-target notice under 'check what it declares'", async () => {
+    // Both notices arrive at the same SEVERITY, which is what made this easy to
+    // get wrong: printed under one heading, "you will not be able to press Run
+    // on this" reads as a complaint about the script's capability pragmas.
+    gateVerdict = {
+      allow: true,
+      notices: [
+        {
+          code: "no-run-target",
+          message: "Nothing in this script can be started on demand.",
+        },
+      ],
+    };
+    draftTurn();
+    await ask("make me a button script");
+
+    expect(container.textContent).toContain("you will not be able to press Run on it");
+    expect(container.textContent, "wrong heading for this notice").not.toContain(
+      "check what it declares",
+    );
   });
 
   it("still sends the MODEL's copy on the tool result", async () => {

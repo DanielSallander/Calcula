@@ -26,6 +26,14 @@
 // second invisible job universe with no status-bar indicator, no completion
 // toast, no route back, and a job that dies with the window.
 
+import type { AuthoringRun } from "./scriptHost/authoringRun";
+
+/**
+ * Re-exported so a caller of this seam never has to reach past it for the shape
+ * of the thing the seam hands back. One record, one import path.
+ */
+export type { AuthoringRun, RunStep } from "./scriptHost/authoringRun";
+
 /** Which store the document being edited lives in. Reported, never acted on. */
 export type ScriptDocumentKind = "module" | "objectScript" | "aiDraft";
 
@@ -77,6 +85,13 @@ export interface ScriptEditResult {
    * normalises the absence to `[]` at one point.
    */
   unexercisedHooks?: string[];
+  /**
+   * The whole run. OPTIONAL for the same reason `unexercisedHooks` is: a
+   * third-party assistant that runs no repair loop has no rounds to report, and
+   * absent must not masquerade as a measurement. `outcomeOf` derives the
+   * outcome from `ok`/`unchanged` in that case.
+   */
+  run?: AuthoringRun;
 }
 
 export interface ScriptAssistantProvider {

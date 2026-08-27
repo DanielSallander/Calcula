@@ -9,6 +9,7 @@ import type {
   ScriptAccessLevel,
   ScriptProvenance,
 } from "./scriptableObjects";
+import type { AuthoringRun } from "./scriptHost/authoringRun";
 
 // ============================================================================
 // Backend API Types (match Rust serialization)
@@ -127,4 +128,58 @@ export async function loadAllObjectScripts(): Promise<ObjectScriptDefinition[]> 
   }
 
   return scripts;
+}
+
+// ============================================================================
+// AI authoring transcript
+// ============================================================================
+//
+// The persisted half of "what was asked, what the model said, what I decided".
+// Four commands, all window-guarded to MAIN_AND_OBJECT_SCRIPT_EDITOR, because
+// the two windows that make an authoring decision are exactly those two.
+//
+// NOTHING REACHES THE FILE EXCEPT THROUGH A DECISION. For an EDIT,
+// `appendScriptAuthoringRun` is called only when a human presses Accept, Reject
+// or Save — the `objscript:ai-edit-result` Tauri event channel itself never
+// triggers a write, because an event channel must not be able to dirty the
+// workbook on its own. A CREATE run is appended once, under its `draft-*` id,
+// at the moment the drafted script is queued for review (authorRunner.ts), with
+// `decision` unset; that bucket is SESSION-ONLY — the save path filters
+// `draft-*` buckets out of the archive — and Save re-keys it via
+// `adoptScriptAuthoringRuns`, which is what makes it persistent (the create run
+// never gains a decision: adoption is the record that it was kept). Save
+// separately appends, decided as "saved", any edit run still pending on the
+// draft. The backend enforces replay-safety: a second append of the same
+// `runId` REPLACES the stored run, because `replayAiEditResults` re-sends on
+// every editor open and a client-side dedupe cannot survive a reopened window.
+
+/** Every run recorded against one script id (or a `draft-*` id). A pure read. */
+export async function getScriptAuthoringRuns(scriptId: string): Promise<AuthoringRun[]> {
+  return invoke<AuthoringRun[]>("get_script_authoring_runs", { scriptId });
+}
+
+/**
+ * Record ONE run — one caller, one write point per run: the author's decision
+ * for an EDIT, draft delivery (decision unset, under the `draft-*` id) for a
+ * CREATE.
+ *
+ * Singular on purpose: one call writes one run. A plural form would invite a
+ * caller to batch runs it never individually decided about or delivered, which
+ * is the fiction the backend's id check exists to refuse.
+ */
+export async function appendScriptAuthoringRun(
+  scriptId: string,
+  run: AuthoringRun,
+): Promise<void> {
+  return invoke<void>("append_script_authoring_run", { scriptId, run });
+}
+
+/** Re-key a draft's runs onto the script id it was just saved as. */
+export async function adoptScriptAuthoringRuns(fromId: string, toId: string): Promise<void> {
+  return invoke<void>("adopt_script_authoring_runs", { fromId, toId });
+}
+
+/** Forget one script's authoring history. The author's own words, removable. */
+export async function clearScriptAuthoringRuns(scriptId: string): Promise<void> {
+  return invoke<void>("clear_script_authoring_runs", { scriptId });
 }

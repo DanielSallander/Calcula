@@ -1180,7 +1180,7 @@ mod tests {
         out
     }
 
-    /// The published 104 / 62 / 40 / 2 split, pinned.
+    /// The published 105 / 63 / 40 / 2 split, pinned.
     ///
     /// WHY A TEST AND NOT A DOC LINE. This count has been published wrong four
     /// times (36, 51, 59, and a 2026-08-17 miscount reading 39 bare + 3 unlocked
@@ -1210,8 +1210,8 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        assert_eq!(decls.len(), 104, "AppState field count changed");
-        assert_eq!(persisted.len(), 62, "Persisted<T> count changed");
+        assert_eq!(decls.len(), 105, "AppState field count changed");
+        assert_eq!(persisted.len(), 63, "Persisted<T> count changed");
         assert_eq!(bare.len(), 40, "bare Mutex/RwLock count changed");
         assert_eq!(
             neither,

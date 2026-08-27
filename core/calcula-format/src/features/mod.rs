@@ -15,3 +15,4 @@ pub mod notebooks;
 pub mod pivot_layouts;
 pub mod object_scripts;
 pub mod scheduled_jobs;
+pub mod script_authoring;

@@ -255,6 +255,91 @@ describe("several jobs", () => {
   });
 });
 
+describe("the name a CREATE job carries", () => {
+  // Reported 2026-08-26: the draft was named after the first six words of the
+  // request, so the toast, the tab and the recap all quoted the preamble.
+  const OWNER_PROMPT = "create a script that formats the background color of each selected cell";
+
+  it("derives a name for a CREATE, and none for an EDIT", async () => {
+    runAuthor.mockResolvedValue({ ok: true, source: "x", summary: "Done.", rounds: [] });
+    const create = startAuthorJob({ ...REQ, intent: OWNER_PROMPT });
+    await settle();
+    expect(jobById(create)!.scriptName).toBe("Formats the background color of each selected...");
+
+    const edit = startAuthorJob({ ...REQ, intent: OWNER_PROMPT, baseSource: "export function setup(c) {}" });
+    await settle();
+    expect(
+      jobById(edit)!.scriptName,
+      "an EDIT changes a script that is already named",
+    ).toBeUndefined();
+  });
+
+  it("quotes that name in the success toast, not the first words of the request", async () => {
+    runAuthor.mockResolvedValue({ ok: true, source: "x", summary: "Wrote it.", rounds: [], draftId: "d1" });
+    startAuthorJob({ ...REQ, intent: OWNER_PROMPT });
+    await settle();
+    const text = String(showToast.mock.calls[0][0]);
+    expect(text).toContain("ready for review");
+    expect(text).toContain("Formats the background color");
+    expect(text, "the preamble is exactly what the owner reported").not.toContain("create a script");
+  });
+
+  it("leaves the EDIT toast byte-unchanged", async () => {
+    runAuthor.mockResolvedValue({ ok: true, source: "x", summary: "Done.", rounds: [] });
+    startAuthorJob({
+      ...REQ, intent: OWNER_PROMPT,
+      baseSource: "export function setup(c) {}",
+      documentName: "Refresh Sales",
+    });
+    await settle();
+    expect(String(showToast.mock.calls[0][0])).toBe(
+      'A change to "Refresh Sales" is ready for you to review.',
+    );
+  });
+});
+
+describe("a run that never produced a result still hands back a record", () => {
+  // Before this, the catch arm handed `onDone` a result with `rounds: []` and
+  // nothing else — so the editor window, which cannot subscribe to this store,
+  // had no way to say WHY the run ended.
+  it("says `failed` when the run threw, with a real elapsed time", async () => {
+    let done: Record<string, unknown> | null = null;
+    runAuthor.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 2));
+      throw new Error("Ollama error 500");
+    });
+    startAuthorJob({ ...REQ, onDone: (r: Record<string, unknown>) => { done = r; } });
+    // The mock sleeps, so `settle()`'s single macrotask is not enough — and the
+    // sleep is the point: `elapsedMs` has to be a MEASURED number, not a zero
+    // that a fast machine would produce either way.
+    await new Promise((r) => setTimeout(r, 20));
+    await settle();
+
+    const run = (done as unknown as { run: Record<string, unknown> }).run;
+    expect(run.outcome, "a run that threw is not a model that gave up").toBe("failed");
+    expect(run.kind).toBe("create");
+    expect(run.instruction).toBe(REQ.intent);
+    expect(run.model).toBe(REQ.model);
+    expect(run.elapsedMs as number).toBeGreaterThan(0);
+    expect(Number.isInteger(run.elapsedMs), "i64 on the wire").toBe(true);
+    expect(run.attempts).toEqual([]);
+  });
+
+  it("says `cancelled` when the author pressed Stop", async () => {
+    let done: Record<string, unknown> | null = null;
+    let finish: () => void = () => {};
+    runAuthor.mockImplementation(() => new Promise((_res, rej) => { finish = () => rej(new Error("cancelled")); }));
+    const id = startAuthorJob({ ...REQ, onDone: (r: Record<string, unknown>) => { done = r; } });
+    cancelJob(id);
+    finish();
+    await settle();
+
+    const run = (done as unknown as { run: Record<string, unknown> }).run;
+    expect(run.outcome, "an author who stopped must not be told the model gave up").toBe("cancelled");
+    expect(run.outcome).not.toBe("exhausted");
+  });
+});
+
 describe("formatting", () => {
   it("reads durations at a human scale", () => {
     expect(formatElapsed(900)).toBe("0s");

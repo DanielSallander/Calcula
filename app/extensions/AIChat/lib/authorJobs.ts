@@ -17,9 +17,24 @@
 //          session; writing it into the workbook would put a transient UI
 //          concern into a `.cala`, and reloading the app mid-run has no run to
 //          resume anyway (the model call would be long gone).
+//
+//          AMENDED 2026-08-26, because a written decision is being reversed and
+//          leaving both statements standing is how this repo grows headers that
+//          lie:
+//          A RUN IN FLIGHT IS STILL SESSION STATE and still unresumable: this
+//          store dies with the session and the model call would be long gone.
+//          What now leaves this module is the CLOSED record. An EDIT's record
+//          is handed to the editor to persist once a human accepts, rejects or
+//          saves; a CREATE's record is persisted by the runner itself, under
+//          the draft id, when the draft is queued for review — a session-only
+//          bucket the save path filters out of the archive, until Save re-keys
+//          it onto the real script id and it becomes persistent. A decided
+//          fact about the author's own scripts belongs in the workbook for the
+//          same reason the audit trail does.
 
 import { showToast } from "@api";
 import { runAuthor, type AuthorRound, type AuthorRunResult } from "./authorRunner";
+import { scriptNameFromIntent } from "./scriptName";
 
 /** One line in a job's progress log. */
 export interface JobStep {
@@ -40,6 +55,10 @@ export interface AuthorJob {
   kind: JobKind;
   /** EDIT: the document being changed, so the toast can name it. */
   documentName?: string;
+  /** CREATE: the name the draft will carry, so the toast and the recap quote
+   *  the same string the editor shows. Undefined for an EDIT, which changes a
+   *  script that is already named. */
+  scriptName?: string;
   intent: string;
   objectType: string;
   model: string;
@@ -197,10 +216,16 @@ export interface StartJobRequest {
  */
 export function startAuthorJob(req: StartJobRequest): string {
   const id = `job-${Date.now()}-${counter++}`;
+  // The same discriminator the job's own `kind` uses one line below, so the two
+  // cannot disagree. `runAuthor` is handed `req.intent` unchanged and derives
+  // the name with this same pure function, so one input cannot produce two
+  // names without a code change.
+  const scriptName = req.baseSource === undefined ? scriptNameFromIntent(req.intent) : undefined;
   const job: AuthorJob = {
     id,
     kind: req.baseSource !== undefined ? "edit" : "create",
     documentName: req.documentName,
+    scriptName,
     intent: req.intent,
     objectType: req.objectType,
     model: req.model,
@@ -261,7 +286,7 @@ export function startAuthorJob(req: StartJobRequest): string {
       // The whole point of a background job is that the user is elsewhere. A
       // toast is what tells them it is worth coming back.
       if (!wasCancelled) {
-        showToast(toastFor(req, result), {
+        showToast(toastFor(req, result, scriptName), {
           type: result.ok ? (result.unchanged ? "info" : "success") : "warning",
         });
       }
@@ -296,6 +321,29 @@ export function startAuthorJob(req: StartJobRequest): string {
         // Required, and empty is the truth here: the run threw or was stopped,
         // so no preview ever reported which handlers it managed to fire.
         unexercisedHooks: [],
+        // A required field one arm forgets to fill is the same failure this
+        // arm exists to prevent. "failed" not "exhausted": a run that threw and
+        // a model that ran out of attempts are different facts, and an author
+        // who pressed Stop must not be told the model gave up.
+        run: {
+          runId: id,
+          kind: req.baseSource !== undefined ? "edit" : "create",
+          outcome: wasCancelled ? "cancelled" : "failed",
+          startedAt: new Date(job.startedAt).toISOString(),
+          elapsedMs: Date.now() - job.startedAt,
+          instruction: req.intent,
+          objectType: req.objectType,
+          providerId: req.providerId,
+          model: req.model,
+          tier: "",
+          surfaceTokens: 0,
+          surfaceTruncated: false,
+          summary: wasCancelled ? "Stopped at your request." : `${e}`,
+          attempts: [],
+          notices: [],
+          changedNothing: false,
+          unexercisedHooks: [],
+        },
       });
     } finally {
       cancelled.delete(id);
@@ -312,7 +360,7 @@ export function startAuthorJob(req: StartJobRequest): string {
  * and "ready for review" without saying WHICH script is the kind of message
  * that sends someone hunting.
  */
-function toastFor(req: StartJobRequest, result: AuthorRunResult): string {
+function toastFor(req: StartJobRequest, result: AuthorRunResult, scriptName?: string): string {
   const what = req.documentName ? `"${shortIntent(req.documentName)}"` : `"${shortIntent(req.intent)}"`;
   if (req.baseSource !== undefined) {
     if (!result.ok) return `Could not edit ${what} — open the script editor for details.`;
@@ -320,9 +368,14 @@ function toastFor(req: StartJobRequest, result: AuthorRunResult): string {
       ? `${what} needed no change, according to the model.`
       : `A change to ${what} is ready for you to review.`;
   }
+  // CREATE quotes the NAME the editor will show, not the first words of the
+  // request: a toast that says one thing and a tab that says another is how a
+  // user loses track of which draft is which. `shortIntent` is the fallback for
+  // a caller that never derived a name.
+  const named = scriptName ? `"${scriptName}"` : what;
   return result.ok
-    ? `Script ready for review: ${what}`
-    : `Could not write ${what} — open AI Chat for details.`;
+    ? `Script ready for review: ${named}`
+    : `Could not write ${named} — open AI Chat for details.`;
 }
 
 /** A few words of the intent, for a toast that has to fit on one line. */
@@ -331,10 +384,8 @@ export function shortIntent(intent: string): string {
   return oneLine.length <= 40 ? oneLine : `${oneLine.slice(0, 37)}...`;
 }
 
-/** `1.4s` / `2m 05s` — a duration a person reads at a glance. */
-export function formatElapsed(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "";
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  return `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s`;
-}
+// MOVED, NOT COPIED. The Object Script Editor is a separate window and cannot
+// import AIChat's internals, so the one definition lives in `_shared` and this
+// re-export keeps all four existing call sites — and `authorJobs.test.ts:20`,
+// which imports it from here — compiling untouched.
+export { formatElapsed } from "../../_shared/formatElapsed";

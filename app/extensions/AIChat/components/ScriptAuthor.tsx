@@ -27,8 +27,9 @@ import {
   startAuthorJob, cancelJob, subscribeToJobs, latestJob, formatElapsed,
   type AuthorJob, type JobStep,
 } from "../lib/authorJobs";
-import { dryRunCaveat } from "../lib/dryRunNotes";
+import { dryRunCaveat } from "@api/scriptHost/scriptPreview/dryRunCaveat";
 import { ActivityDot, type ActivityStatus } from "../../_shared/components/ActivityDot";
+import { RunLog, type RunLogRow } from "../../_shared/components/RunLog";
 import { hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
 
 const wrap: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 10, padding: 12, flex: 1, minHeight: 0 };
@@ -44,10 +45,6 @@ const openBtn: React.CSSProperties = { padding: "5px 12px", fontSize: 11, border
 const recapStyle: React.CSSProperties = { background: "#F3F6F9", border: "1px solid #DDE5EC", borderRadius: 6, padding: "8px 10px", fontSize: 11, color: "#455", lineHeight: 1.5 };
 /** The live line. Given its own emphasis because it is the anti-hang signal. */
 const liveStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 6, background: "#EEF4FB", border: "1px solid #CBDCEE", fontSize: 12, color: "#24547E" };
-/** THE LOG GETS THE SPARE ROOM — flex:1 + minHeight:0, not a fixed maxHeight. */
-const logBox: React.CSSProperties = { flex: 1, minHeight: 90, overflowY: "auto", background: "#FFF", border: "1px solid #E2E8EE", borderRadius: 6, padding: "6px 8px", fontFamily: "Consolas, monospace", fontSize: 11, color: "#456" };
-const stepRow: React.CSSProperties = { display: "flex", gap: 6, padding: "1px 0", whiteSpace: "pre-wrap", wordBreak: "break-word" };
-const stepTime: React.CSSProperties = { color: "#9AA7B2", flexShrink: 0, minWidth: 44, textAlign: "right" };
 const okBox: React.CSSProperties = { background: "#EDF7ED", border: "1px solid #C6E7C6", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#245C24", lineHeight: 1.45 };
 const badBox: React.CSSProperties = { background: "#FDECEA", border: "1px solid #F5C6C2", borderRadius: 6, padding: "8px 10px", fontSize: 12, color: "#A1241B", lineHeight: 1.45 };
 /** Amber, not red: "changed nothing" is something to check, not a failure. */
@@ -66,20 +63,21 @@ export interface ScriptAuthorProps {
   onBackToChat: () => void;
 }
 
-const STEP_MARK: Record<JobStep["kind"], string> = {
-  info: "   ",
-  roundOk: "[OK]",
-  roundBad: "[!] ",
-  done: "[OK]",
-  error: "[!] ",
-};
-
-const STEP_COLOUR: Record<JobStep["kind"], string> = {
-  info: "#556",
-  roundOk: "#2E7D32",
-  roundBad: "#B4690E",
-  done: "#2E7D32",
-  error: "#A1241B",
+/**
+ * The job store's step kinds, in the shared log's vocabulary.
+ *
+ * A `Record<JobStep["kind"], ...>` on purpose: a new kind in `authorJobs` is
+ * then a compile error here rather than a row that silently renders in the
+ * wrong colour. The MARKS and the COLOURS moved into `RunLog` with the rest of
+ * the rendering — the Object Script Editor is a separate window and cannot
+ * import this file, and two copies of a palette drift the moment one is retuned.
+ */
+const LOG_KIND: Record<JobStep["kind"], RunLogRow["kind"]> = {
+  info: "info",
+  roundOk: "ok",
+  roundBad: "bad",
+  done: "done",
+  error: "error",
 };
 
 function statusOf(job: AuthorJob | undefined): ActivityStatus {
@@ -156,7 +154,7 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
 
   const elapsed = job ? (job.endedAt ?? Date.now()) - job.startedAt : 0;
   const result = job?.result;
-  // ONE sentence, chosen in ONE place -- see `dryRunNotes.ts`. The rule it
+  // ONE sentence, chosen in ONE place -- see `scriptPreview/dryRunCaveat.ts`. The rule it
   // enforces is negative ("changed no cells" must never stand alone when a
   // handler was never fired), and a negative rule expressed as two ternaries in
   // the tree below disappears silently on the next edit.
@@ -166,6 +164,9 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
         unexercisedHooks: result.unexercisedHooks,
       })
     : "";
+  // Two different things to say, so two boxes. See the render below.
+  const declaredNotices = (result?.notices ?? []).filter((n) => n.code !== "no-run-target");
+  const runTargetNotices = (result?.notices ?? []).filter((n) => n.code === "no-run-target");
 
   return h("div", { style: wrap },
     showForm
@@ -206,8 +207,22 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
     job && !showForm
       ? h(React.Fragment, { key: "job" },
           // What was asked for, compact, so the form is not in the way.
+          //
+          // THE NAME AND THE REQUEST ARE TWO DIFFERENT THINGS. The heading is
+          // what the script will be CALLED — the same string the editor's
+          // dropdown shows — and the line under it is what was actually asked,
+          // verbatim. Reported 2026-08-26: the script was named after the first
+          // six words of its own prompt, so "create a script that formats the"
+          // was both. Showing only the name would also lose the request, which
+          // is the thing the author needs to check the result against.
+          // For an EDIT the name is the DOCUMENT being edited (job.documentName)
+          // — an edit job never derives a scriptName — matching the completion
+          // toast's rule in authorJobs.ts (`toastFor`).
           h("div", { style: recapStyle },
-            h("div", { style: { fontWeight: 600, marginBottom: 2 } }, job.intent),
+            h("div", { style: { fontWeight: 600, marginBottom: 2 } }, job.scriptName || job.documentName || job.intent),
+            (job.scriptName || job.documentName)
+              ? h("div", { style: { color: "#67788A", marginBottom: 2 } }, job.intent)
+              : null,
             h("div", null, `attached to a ${job.objectType} — ${job.model}`),
           ),
 
@@ -222,17 +237,15 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
               formatElapsed(elapsed)),
           ),
 
-          h("div", { style: logBox },
-            job.steps.length === 0
-              ? h("div", { style: { color: "#9AA7B2" } }, "Starting...")
-              : job.steps.map((s, i) =>
-                  h("div", { key: i, style: stepRow },
-                    h("span", { style: stepTime }, formatElapsed(s.at)),
-                    h("span", { style: { color: STEP_COLOUR[s.kind] } },
-                      `${STEP_MARK[s.kind]} ${s.text}${s.detail ? ` — ${s.detail}` : ""}`),
-                  ),
-                ),
-          ),
+          // THE LOG GETS THE SPARE ROOM. No `maxHeight`, so `RunLog` keeps
+          // flex:1 + minHeight:90 — the layout this screen already shipped.
+          h(RunLog, {
+            theme: "light",
+            emptyText: "Starting...",
+            rows: job.steps.map((s): RunLogRow => ({
+              at: s.at, kind: LOG_KIND[s.kind], text: s.text, detail: s.detail,
+            })),
+          }),
 
           running
             ? h("p", { style: hint },
@@ -272,11 +285,24 @@ export function ScriptAuthor(props: ScriptAuthorProps): React.ReactElement {
                 // this screen showed only the error count, so "passed every
                 // check" was the last word on a script declaring a capability
                 // nothing in it needs.
-                result.notices?.length
+                //
+                // PARTITIONED BY CODE, not lumped under one heading. The notices
+                // arrive selected by SEVERITY, which is right; but a
+                // `no-run-target` notice under "check what it declares" tells
+                // the author their capability pragmas are wrong about a sentence
+                // that has nothing to do with capabilities.
+                declaredNotices.length > 0
                   ? h("div", { style: warnBox },
                       h("div", { style: { fontWeight: 600, marginBottom: 2 } },
                         "Check what it declares before you mount it"),
-                      ...result.notices.map((n, i) => h("div", { key: i }, `- ${n}`)),
+                      ...declaredNotices.map((n, i) => h("div", { key: i }, `- ${n.message}`)),
+                    )
+                  : null,
+                runTargetNotices.length > 0
+                  ? h("div", { style: warnBox },
+                      h("div", { style: { fontWeight: 600, marginBottom: 2 } },
+                        "You can mount this, but you will not be able to press Run on it"),
+                      ...runTargetNotices.map((n, i) => h("div", { key: i }, `- ${n.message}`)),
                     )
                   : null,
                 result.source

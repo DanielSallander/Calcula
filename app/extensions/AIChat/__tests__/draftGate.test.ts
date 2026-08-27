@@ -396,12 +396,37 @@ describe("the verdict carries what the gate computed for a human", () => {
       object_type: "button",
     });
     expect(v.allow, "a notice never blocks").toBe(true);
+    // TWO as of 2026-08-26: the over-declared capability, and the run-target
+    // notice — `GOOD` is a setup-only script, so it genuinely cannot be started
+    // with Run (F5) and saying so is correct. Asserted by CONTENT rather than by
+    // count alone, or this test stops naming which notice it is about.
+    expect(v.notices).toHaveLength(2);
+    expect(v.notices!.some((n) => /net\.fetch.*declared/.test(n.message))).toBe(true);
+    // EACH ONE CARRIES ITS CODE, as of 2026-08-26. Both notices arrive at the
+    // same severity, and a renderer that cannot tell them apart files "you will
+    // not be able to press Run on this" under "check what it declares".
+    expect(v.notices!.map((n) => n.code).sort()).toEqual([
+      "declared-not-observed",
+      "no-run-target",
+    ]);
+  });
+
+  it("carries the run-target notice for a setup-only script", async () => {
+    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    expect(v.allow, "a notice never blocks").toBe(true);
     expect(v.notices).toHaveLength(1);
-    expect(v.notices![0]).toMatch(/net\.fetch.*declared/);
+    expect(v.notices![0].code).toBe("no-run-target");
+    expect(v.notices![0].message).toMatch(/run target|started on demand/);
   });
 
   it("carries none when the script declares nothing it does not use", async () => {
-    const v = await gateToolCall("draft_object_script", { source: GOOD, object_type: "button" });
+    // THE ORIGINAL POINT OF THIS CASE — "absent, not an empty array" — needs a
+    // script with nothing to say about it at all, which now means one that has a
+    // run target too.
+    const runnable =
+      "async function run() {\n  context.log('x');\n}\n" +
+      "export function setup(context) {\n  return run();\n}\n";
+    const v = await gateToolCall("draft_object_script", { source: runnable, object_type: "button" });
     expect(v.notices, "absent, not an empty array").toBeUndefined();
   });
 

@@ -26,14 +26,24 @@
 //          anything.
 
 import { listenTauriEvent } from "@api";
+// The CREATE run is persisted from HERE, in the main window, keyed by the draft
+// id the delivery just minted. That is what removes any need to widen the
+// editor seam: the id is already on the wire, and the editor holds both ids from
+// the moment the draft arrives, so it re-keys the bucket on Save.
+import { appendScriptAuthoringRun } from "@api/objectScriptBackend";
 import { aiChatBackend } from "./aiChatBackend";
 import { AI_STREAM_EVENT, type ChatResponse, type StreamEvent } from "./aiTypes";
 import { readProfile } from "./probeRunner";
+import { scriptNameFromIntent } from "./scriptName";
 // TYPE-ONLY, so it is fully erased under `verbatimModuleSyntax` and the ~209 KB
 // authoring graph stays behind the lazy `load()` below.
-import type { DryRunReport } from "@api/scriptHost/scriptAuthoring";
-// A leaf with no imports of its own, so this costs nothing at activation.
+import type { AuthorAttempt, AuthorResult, DryRunReport } from "@api/scriptHost/scriptAuthoring";
+// Leaves with no imports of their own, so these cost nothing at activation.
 import { unexercisedHookNote } from "@api/scriptHost/scriptPreview/unexercisedHooks";
+import {
+  MAX_REASONING_CHARS, clampRun, outcomeOf,
+  type AuthoringRun, type RunAttempt, type RunNotice,
+} from "@api/scriptHost/authoringRun";
 
 /** One repair round, as the UI shows it. */
 export interface AuthorRound {
@@ -120,10 +130,26 @@ export interface AuthorRunResult {
    * them; they belong in front of the person who grants them by pressing Save,
    * and this screen showed only the error count, so "passed every check" was the
    * last word on a script asking for `net.fetch` it never uses.
+   *
+   * EACH ONE CARRIES ITS CODE, so a renderer can put the run-target notice
+   * somewhere other than under "check what it declares".
    */
-  notices?: string[];
+  notices?: RunNotice[];
   /** EDIT MODE: the model judged that no change was needed. Not a failure. */
   unchanged?: boolean;
+  /**
+   * The whole run, as a record. REQUIRED.
+   *
+   * Every field a caller used to reconstruct by hand — rounds, notices,
+   * changedNothing, unexercisedHooks — is in here, plus the ones nothing could
+   * see before: what the model actually SAID, how long each attempt took, and
+   * what the dry run reported per attempt. A hand-written subset is the shape
+   * that goes stale; this file's own :287-295 records that lesson about
+   * `DryRunReport`.
+   */
+  run: AuthoringRun;
+  /** The loop stopped repeating itself rather than running out of rounds. */
+  stalled?: boolean;
 }
 
 /**
@@ -180,25 +206,44 @@ async function load() {
  */
 const LIVE_PROGRESS_MS = 1000;
 
-/** Error messages from a validation report, trimmed for a progress line. */
+/**
+ * Error messages from a validation report.
+ *
+ * UNTRIMMED as of 2026-08-26. The `.slice(0, 3)` that used to stand here was a
+ * display decision taken at the RECORDER, so a round with four errors was
+ * recorded as a round with three and nothing downstream could ever recover the
+ * fourth. The trim now happens at the display site, which is the only place that
+ * knows how much room it has.
+ */
 function problemsOf(report: { findings: Array<{ severity: string; message: string }> }): string[] {
   return report.findings
     .filter((f) => f.severity === "error")
-    .map((f) => f.message)
-    .slice(0, 3);
+    .map((f) => f.message);
 }
 
 /**
- * Notice messages from a validation report — UNTRIMMED, unlike `problemsOf`.
+ * Notices from a validation report — UNTRIMMED, unlike `problemsOf`.
  *
  * A problem is a progress line inside a round and there will be more of them; a
  * notice is the finished verdict's own list, shown once, and silently dropping
  * the fourth declared capability from it would be a lie about what the script
  * asks for. Filtered by SEVERITY, not by code, so it picks up every notice the
  * ladder ever grows.
+ *
+ * IT CARRIES THE CODE, as of 2026-08-26. Selecting by severity and then
+ * printing the lot under "check what it declares" was right while every notice
+ * WAS about a declaration; the run-target notice arrives under the same
+ * severity and is about something else entirely, and the reader has to be able
+ * to tell them apart. The severity filter stays: a notice with an unfamiliar
+ * code must still reach the person, just not under a heading that misdescribes
+ * it.
  */
-function noticesOf(report: { findings: Array<{ severity: string; message: string }> }): string[] {
-  return report.findings.filter((f) => f.severity === "notice").map((f) => f.message);
+function noticesOf(
+  report: { findings: Array<{ severity: string; code?: string; message: string }> },
+): RunNotice[] {
+  return report.findings
+    .filter((f) => f.severity === "notice")
+    .map((f) => ({ code: f.code ?? "", message: f.message }));
 }
 
 export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult> {
@@ -214,6 +259,10 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
 
   /** Which attempt `complete` is serving. It is called once per round, in order. */
   let attempt = 0;
+  const reasoningByRound: string[] = [];
+  const reasoningCharsByRound: number[] = [];
+  const startedAt = Date.now();
+  const runId = `run-${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
   const totalAttempts = plan.repairRounds + 1;
 
   /**
@@ -243,8 +292,24 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     const streamId = `author-${Date.now()}-${attempt}`;
     let streamed = "";
     let lastReport = 0;
+    const round = attempt - 1;
+    reasoningByRound[round] = "";
+    reasoningCharsByRound[round] = 0;
     const off = await listenTauriEvent<StreamEvent>(AI_STREAM_EVENT, (event) => {
-      if (!event || event.streamId !== streamId || event.type !== "textDelta") return;
+      if (!event || event.streamId !== streamId) return;
+      // REASONING WAS ALREADY ON THE WIRE AND THROWN AWAY HERE. `ReasoningDelta`
+      // is emitted by ai/stream.rs:64 and typed at aiTypes.ts:104; the old
+      // `event.type !== "textDelta"` early return discarded every one of them.
+      // CAPPED AT THE LISTENER, not at render: a single attempt has been
+      // measured at 6m35s and an uncapped buffer grows for all of it.
+      if (event.type === "reasoningDelta") {
+        reasoningCharsByRound[round] += event.text.length;
+        if (reasoningByRound[round].length < MAX_REASONING_CHARS) {
+          reasoningByRound[round] += event.text;
+        }
+        return;
+      }
+      if (event.type !== "textDelta") return;
       streamed += event.text;
       // Throttled: a token-by-token phase update would push hundreds of lines
       // into the job log and tell the reader nothing a line count does not.
@@ -346,11 +411,11 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     // warning on the result, where they can check their own data against it.
     // The eval corpus still sets this true, because there the fixture IS known.
     expectsWrites: false,
-    onAttempt: (round: number, report: { findings: Array<{ severity: string; message: string }> }) => {
+    onAttempt: (a: AuthorAttempt) => {
       const entry: AuthorRound = {
-        round,
-        ok: report.findings.every((f) => f.severity !== "error"),
-        problems: problemsOf(report),
+        round: a.round,
+        ok: a.report.findings.every((f) => f.severity !== "error"),
+        problems: problemsOf(a.report),
       };
       rounds.push(entry);
       req.onRound?.(entry);
@@ -375,13 +440,28 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       ? lastDryRun.unexercisedHooks ?? []
       : [];
 
+  /** Computed ONCE: four return arms and the record must not disagree. */
+  const notices = noticesOf(result.report);
+  const ctx = {
+    runId, startedAt, plan,
+    reasoning: reasoningByRound, reasoningChars: reasoningCharsByRound,
+    changedNothing: ranButChangedNothing(),
+    unexercisedHooks: lastUnexercisedHooks(),
+    // WHOLE SENTENCES on the record. The code is what a live renderer needs to
+    // decide which heading a notice goes under; the persisted log is read, not
+    // partitioned, and it is mirrored field for field in Rust.
+    notices: notices.map((n) => n.message),
+  };
+  const run = buildRunRecord(req, result, ctx);
+
   if (!result.ok) {
     // The best attempt is returned even on failure: a script that is 90% right
     // is worth showing, and the editor is where a person fixes the rest.
     return {
       ok: false, source: result.source, summary: result.summary, rounds,
       changedNothing: ranButChangedNothing(), unchanged: result.unchanged,
-      unexercisedHooks: lastUnexercisedHooks(), notices: noticesOf(result.report),
+      unexercisedHooks: lastUnexercisedHooks(), notices,
+      run, stalled: result.stalled,
     };
   }
 
@@ -397,7 +477,8 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     return {
       ok: true, source: result.source, summary: result.summary, rounds,
       changedNothing: ranButChangedNothing(), unchanged: result.unchanged,
-      unexercisedHooks: lastUnexercisedHooks(), notices: noticesOf(result.report),
+      unexercisedHooks: lastUnexercisedHooks(), notices,
+      run, stalled: result.stalled,
     };
   }
 
@@ -408,17 +489,21 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
     const text = await aiChatBackend.invoke<string>("ai_chat_run_tool", {
       name: "draft_object_script",
       input: {
-        name: titleFor(req.intent),
+        name: scriptNameFromIntent(req.intent),
         object_type: req.objectType,
         description: req.intent,
         source: result.source,
       },
     });
     const id = /\(id=(draft-[0-9a-fA-F]+)\)/.exec(text)?.[1];
+    // The creation run, keyed by the DRAFT id. Fire-and-forget: a failed write
+    // must never break the delivery of a script that was authored successfully.
+    if (id) void appendScriptAuthoringRun(id, run).catch(() => {});
     return {
       ok: true, source: result.source, summary: result.summary, rounds, draftId: id,
       changedNothing: ranButChangedNothing(),
-      unexercisedHooks: lastUnexercisedHooks(), notices: noticesOf(result.report),
+      unexercisedHooks: lastUnexercisedHooks(), notices,
+      run, stalled: result.stalled,
     };
   } catch (e) {
     // Authoring SUCCEEDED; only delivery failed. Reported separately so the user
@@ -431,19 +516,70 @@ export async function runAuthor(req: AuthorRunRequest): Promise<AuthorRunResult>
       deliveryError: `${e}`,
       changedNothing: ranButChangedNothing(),
       unexercisedHooks: lastUnexercisedHooks(),
-      notices: noticesOf(result.report),
+      notices,
+      run, stalled: result.stalled,
     };
   }
 }
 
 /**
- * A short display name from the user's own words.
- *
- * `validate_draft` (mcp/drafts.rs) rejects an empty name, and the editor tab
- * shows it, so it has to be non-empty and readable rather than a uuid.
+ * The finished record, built ONCE from what `authorScript` returned plus this
+ * module's own bookkeeping. There is no second place a run is described.
  */
-export function titleFor(intent: string): string {
-  const words = intent.trim().split(/\s+/).slice(0, 6).join(" ");
-  const trimmed = words.length > 48 ? `${words.slice(0, 45)}...` : words;
-  return trimmed || "AI script";
+function buildRunRecord(
+  req: AuthorRunRequest,
+  result: AuthorResult,
+  ctx: {
+    runId: string; startedAt: number; plan: { tier: string };
+    reasoning: string[]; reasoningChars: number[];
+    changedNothing: boolean; unexercisedHooks: string[]; notices: string[];
+  },
+): AuthoringRun {
+  const attempts: RunAttempt[] = result.attempts.map((a) => ({
+    attempt: a.round + 1,
+    at: a.at,
+    durationMs: a.durationMs,
+    ok: a.report.ok,
+    reply: a.reply,
+    replyChars: a.reply.length,
+    note: a.note,
+    // Stream-split reasoning first (`ReasoningDelta`), the INLINE scratchpad
+    // as the fallback. Ollama delivers deepseek-r1/qwen3 reasoning inline in
+    // the text — no delta ever fires — so before this fallback an inline
+    // reasoner's run record showed an empty reasoning column while its actual
+    // thought process sat untruncated inside the reply, eating the run budget.
+    reasoning: ctx.reasoning[a.round] || a.thinking || "",
+    reasoningChars: ctx.reasoningChars[a.round] || a.thinking.length || 0,
+    // EVERY SEVERITY, unlike `problemsOf`: the NOTICES are what tell a reviewer
+    // the script asks for `net.fetch` it never uses.
+    findings: a.report.findings.map((f) => ({ severity: f.severity, code: f.code, message: f.message })),
+    dryRun: a.dryRun
+      ? {
+          applicable: a.dryRun.applicable,
+          ok: a.dryRun.ok,
+          changedCells: a.dryRun.totalChanges,
+          error: a.dryRun.error ?? undefined,
+          declinedReason: a.dryRun.declinedReason ?? undefined,
+        }
+      : undefined,
+  }));
+  return clampRun({
+    runId: ctx.runId,
+    kind: req.baseSource !== undefined ? "edit" : "create",
+    outcome: outcomeOf(result),
+    startedAt: new Date(ctx.startedAt).toISOString(),
+    elapsedMs: Date.now() - ctx.startedAt,
+    instruction: req.intent,
+    objectType: req.objectType,
+    providerId: req.providerId,
+    model: req.model,
+    tier: ctx.plan.tier,
+    surfaceTokens: result.attempts[0]?.surfaceTokens ?? 0,
+    surfaceTruncated: result.attempts[0]?.surfaceTruncated ?? false,
+    summary: result.summary,
+    attempts,
+    notices: ctx.notices,
+    changedNothing: ctx.changedNothing,
+    unexercisedHooks: ctx.unexercisedHooks,
+  });
 }

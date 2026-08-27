@@ -69,6 +69,33 @@ function fail(req: AiEditRequestPayload, summary: string): void {
     // Nothing ran, so nothing was left unexercised. Empty is the honest answer,
     // and the field is required so a later arm cannot forget to decide.
     unexercisedHooks: [],
+    // REFUSED EARNS ITS OWN ARM. Telling an author their model could not write
+    // the script when no model was ever selected sends them tuning the wrong
+    // thing. Nothing was asked, so every measured field is zero and says so.
+    run: {
+      // "" IS THE STRUCTURAL UNPERSISTABLE MARKER: `append_run` refuses an
+      // empty run id, and the editor's `recordDecision` skips a run without
+      // one — a refusal is shown, never written into the authoring log.
+      runId: "",
+      kind: "edit",
+      outcome: "refused",
+      startedAt: new Date().toISOString(),
+      elapsedMs: 0,
+      instruction: req.instruction,
+      objectType: req.objectType,
+      providerId: "",
+      model: "",
+      tier: "",
+      surfaceTokens: 0,
+      surfaceTruncated: false,
+      summary,
+      attempts: [],
+      notices: [],
+      changedNothing: false,
+      unexercisedHooks: [],
+    },
+    instruction: req.instruction,
+    askedAgainst: req.currentSource,
   };
   lastResults.set(req.documentId, payload);
   void emitAiEditResult(payload);
@@ -96,7 +123,17 @@ function handle(req: AiEditRequestPayload): void {
   }
 
   try {
-    const jobId = assistant.startScriptEdit({
+    // Assigned when `startScriptEdit` returns; both callbacks close over it.
+    // A late onProgress/onDone from a run this document is no longer waiting
+    // on — cancelled (mapping deleted) or superseded (mapping now holds the
+    // NEXT run's id) — must not be relayed: it would re-store a stopped
+    // result for replay at every EDITOR_READY, stamp this run's payload with
+    // the next run's id, and delete the next run's mapping. The `jobId &&`
+    // half keeps the guard permissive for a provider that answers
+    // synchronously from inside `startScriptEdit`, before any id exists to
+    // compare — that completion must still reach the editor.
+    let jobId = "";
+    jobId = assistant.startScriptEdit({
       documentId: req.documentId,
       documentName: req.documentName,
       objectType: req.objectType,
@@ -104,17 +141,19 @@ function handle(req: AiEditRequestPayload): void {
       currentSource: req.currentSource,
       instruction: req.instruction,
       onProgress: (phase, live) => {
+        if (jobId && jobsByDocument.get(req.documentId) !== jobId) return;
         void emitAiEditProgress({
           documentId: req.documentId,
-          jobId: jobsByDocument.get(req.documentId) ?? "",
+          jobId,
           phase,
           live,
         });
       },
       onDone: (result) => {
+        if (jobId && jobsByDocument.get(req.documentId) !== jobId) return;
         const payload: AiEditResultPayload = {
           documentId: result.documentId,
-          jobId: jobsByDocument.get(req.documentId) ?? "",
+          jobId,
           ok: result.ok,
           source: result.source,
           summary: result.summary,
@@ -124,6 +163,15 @@ function handle(req: AiEditRequestPayload): void {
           // seam leaves it optional; everything downstream of this line — the
           // wire payload, the editor state, the diff — treats it as an array.
           unexercisedHooks: result.unexercisedHooks ?? [],
+          // `?? null` for the same reason: the seam leaves it optional because a
+          // third-party assistant runs no repair loop and has no run to report,
+          // and absent must not cross the wire as a silent `undefined`.
+          run: result.run ?? null,
+          // From the REQUEST, not the result: the request is what the author
+          // typed and what the model was handed, and a replayed payload has to
+          // carry both or the diff can only guess at them.
+          instruction: req.instruction,
+          askedAgainst: req.currentSource,
         };
         lastResults.set(result.documentId, payload);
         jobsByDocument.delete(req.documentId);

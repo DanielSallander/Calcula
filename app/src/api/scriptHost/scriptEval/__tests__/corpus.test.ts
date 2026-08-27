@@ -22,6 +22,7 @@ import {
   scoreCandidate,
   gradeOutcome,
   extractScript,
+  splitReply,
   summarize,
   type EvalCorpus,
   type EvalTask,
@@ -194,6 +195,180 @@ describe("extracting a script from a model reply", () => {
 
   it("takes a bare reply verbatim, because some models answer with plain code", () => {
     expect(extractScript("export function setup(context) {}")).toBe("export function setup(context) {}\n");
+  });
+});
+
+describe("splitReply keeps the prose the model wrote", () => {
+  // THE DEFECT THIS EXISTS TO STOP. Reported 2026-08-26: "I could not see the
+  // reasoning or the results from the chat." `extractScript` kept `fenced[1]`
+  // and dropped every word around it, so the model's own account of what it
+  // changed was destroyed at the moment it arrived and nothing downstream could
+  // show it because nothing downstream ever had it.
+
+  it("keeps BOTH prose fragments verbatim, before and after the fence", () => {
+    const reply =
+      "I changed the fill to red because the sheet already uses blue.\n\n" +
+      "```js\nexport function setup(context) {}\n```\n\n" +
+      "You will need to click the button once for it to apply.";
+    const split = splitReply(reply);
+    expect(split.source).toBe("export function setup(context) {}\n");
+    expect(split.note).toContain("I changed the fill to red because the sheet already uses blue.");
+    expect(split.note).toContain("You will need to click the button once for it to apply.");
+  });
+
+  it("leaves no raw fence markers in a note that is rendered as plain text", () => {
+    const reply =
+      "Here is the script:\n```js\nexport function setup(context) {}\n```\n" +
+      "And here is how you would call it:\n```js\nrun();\n```\n";
+    const split = splitReply(reply);
+    expect(split.source).toBe("export function setup(context) {}\n");
+    expect(split.note).toContain("And here is how you would call it:");
+    expect(split.note, "a second fenced block leaked its markers").not.toContain("```");
+    expect(split.note).not.toContain("run();");
+  });
+
+  it("has no note at all when the model answered with bare code", () => {
+    // "" and not the code itself: a note that repeats the script is a second
+    // copy of it in a record that is already capped.
+    expect(splitReply("export function setup(context) {}").note).toBe("");
+  });
+
+  it("is the ONE parser — extractScript is defined in terms of it", () => {
+    // Two functions that both parse a fence are two functions that drift, and
+    // this is the assertion that keeps them one.
+    const REPLIES = [
+      "Sure! Here you go:\n\n```js\nexport function setup(context) {}\n```\n\nHope that helps.",
+      "```\nconst a = 1;\n```",
+      "```typescript\nconst a = 1;\n```",
+      "export function setup(context) {}",
+      "",
+      "no fence, just words",
+      "```js\nfirst();\n```\nmiddle\n```js\nsecond();\n```",
+    ];
+    for (const reply of REPLIES) {
+      expect(extractScript(reply), JSON.stringify(reply)).toBe(splitReply(reply).source);
+    }
+  });
+});
+
+describe("splitReply separates the scratchpad from the answer", () => {
+  // Measured 2026-08-27: nothing in ai/stream.rs strips <think> blocks, and
+  // Ollama delivers deepseek-r1/qwen3 reasoning INLINE in the text — no
+  // ReasoningDelta ever fires for it. Untouched, the scratchpad would (a) be
+  // rendered as the model's "account of what it did" and (b) worse, hand its
+  // fenced code SKETCHES to the fence matcher as the answer.
+
+  it("never returns a fenced sketch inside <think> as the script", () => {
+    // THE HEADLINE. A reasoning model drafts code in its scratchpad, discards
+    // it, and then answers. Matching the fence before stripping think blocks
+    // graded the DISCARDED sketch as the model's answer.
+    const reply =
+      "<think>\nMaybe something like\n```js\nsketch();\n```\nno, wrong hook.\n</think>\n\n" +
+      "Here is the script:\n\n```js\nexport function setup(context) {}\n```\n";
+    const split = splitReply(reply);
+    expect(split.source).toBe("export function setup(context) {}\n");
+    expect(split.source).not.toContain("sketch");
+    expect(split.thinking).toContain("no, wrong hook.");
+    expect(split.note).toBe("Here is the script:");
+    expect(split.note).not.toContain("think");
+  });
+
+  it("keeps a fenced script that CONTAINS paired literal think tags byte-identical", () => {
+    // THE OTHER DIRECTION of the headline. A tag-filtering utility — a script
+    // whose job is cleaning pasted AI output — legitimately holds the literal
+    // tags as string constants. A think-strip that ran over the RAW reply ate
+    // the span between them out of the SOURCE (still valid JS, so it passed
+    // the validator clean) and misfiled it as the model's thinking.
+    const code = 'const banned = ["<think>", "</think>"];\nexport function setup(context) {}';
+    const reply = "Here is a tag filter:\n```js\n" + code + "\n```\nDone.";
+    const split = splitReply(reply);
+    expect(split.source).toBe(code + "\n");
+    expect(split.thinking).toBe("");
+    expect(split.note).toContain("Here is a tag filter:");
+    expect(split.note).toContain("Done.");
+  });
+
+  it("keeps a fence with a single UNPAIRED literal <think> intact", () => {
+    // The worse path: an unpaired opener inside a fence used to hit the
+    // truncated-stream fallback, which amputated the reply at the tag,
+    // misfiled the tail INCLUDING the closing fence as thinking, and left a
+    // destroyed fence that no longer matched — the source became prose plus
+    // partial code.
+    const code = "const openTag = '<think>';\nexport function setup(context) {}";
+    const reply = "Here:\n```js\n" + code + "\n```\nDone.";
+    const split = splitReply(reply);
+    expect(split.source).toBe(code + "\n");
+    expect(split.thinking).toBe("");
+    expect(split.note).toContain("Done.");
+  });
+
+  it("routes an orphan </think> scratchpad into thinking, not the note", () => {
+    // The known reasoning-template shape: the server consumes the opening tag
+    // and the stream begins mid-thought. Untouched, the whole scratchpad —
+    // raw tag included — landed in `note`, the field rendered as the model's
+    // account of what it changed.
+    const reply =
+      "The user wants a formatter. I will use onClick.\n</think>\n" +
+      "```javascript\nlet x = 1;\n```\nDone.";
+    const split = splitReply(reply);
+    expect(split.source).toBe("let x = 1;\n");
+    expect(split.thinking).toBe("The user wants a formatter. I will use onClick.");
+    expect(split.note).toBe("Done.");
+    expect(split.note).not.toContain("</think>");
+  });
+
+  it("never promotes a fenced sketch from an orphan-closed scratchpad as the script", () => {
+    // The teeth of the orphan case: a sketch fence BEFORE the orphan closer is
+    // scratchpad, and the real fence after it is the answer. The old code
+    // matched the sketch as the first fence and returned it as `source` — the
+    // exact headline defect the think-strip was added to prevent.
+    const reply =
+      "Maybe something like\n```js\nsketch();\n```\nno, wrong hook.\n</think>\n" +
+      "Here is the script:\n```js\nexport function setup(context) {}\n```\n";
+    const split = splitReply(reply);
+    expect(split.source).toBe("export function setup(context) {}\n");
+    expect(split.source).not.toContain("sketch");
+    expect(split.thinking).toContain("sketch();");
+    expect(split.thinking).toContain("no, wrong hook.");
+    expect(split.note).toBe("Here is the script:");
+  });
+
+  it("treats everything after an unclosed <think> as scratchpad", () => {
+    // A truncated stream ends mid-thought; the tail is not an answer.
+    const split = splitReply("Working on it.\n<think>\nlet me reconsider the hook");
+    expect(split.thinking).toBe("let me reconsider the hook");
+    expect(split.source).toBe("Working on it.\n");
+  });
+
+  it("joins several think blocks and keeps the prose between them", () => {
+    const split = splitReply(
+      "<think>first</think>between<think>second</think>\n```js\nrun();\n```",
+    );
+    expect(split.thinking).toBe("first\n\nsecond");
+    expect(split.note).toBe("between");
+  });
+
+  it("salvages the fence when the whole reply was scratchpad", () => {
+    // Broken, but a truncated reasoning model produces exactly this shape.
+    // Returning an empty source would hand the validator nothing to reject
+    // BUT a parse error with no content.
+    const split = splitReply("<think>the plan:\n```js\nonly();\n```\nthat is all");
+    expect(split.source).toBe("only();\n");
+    // The whole reply WAS scratchpad, so the honest note is empty — anything
+    // else leaks the literal tag and scratchpad prose into the field rendered
+    // as the model's account — and the promoted fence must not sit in
+    // `thinking` too, doubling the code against the run budget.
+    expect(split.note).toBe("");
+    expect(split.thinking).not.toContain("only();");
+    expect(split.thinking).toContain("the plan:");
+  });
+
+  it("changes NOTHING for a reply with no think block", () => {
+    const reply = "Done.\n```js\nexport function setup(context) {}\n```";
+    const split = splitReply(reply);
+    expect(split.source).toBe("export function setup(context) {}\n");
+    expect(split.note).toBe("Done.");
+    expect(split.thinking).toBe("");
   });
 });
 

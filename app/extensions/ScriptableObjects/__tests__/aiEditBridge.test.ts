@@ -249,6 +249,109 @@ describe("aiEditBridge — it always answers", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
+  it("suppresses a late completion for a run the editor cancelled", async () => {
+    // Cancellation is only polled between attempts, so a stopped run's onDone
+    // can land minutes after Stop. Relaying it would re-store the "stopped"
+    // result and replay a red error strip at every EDITOR_READY — the exact
+    // thing the cancel handler's "forgetting the stored result" exists to
+    // prevent.
+    let done: ((r: unknown) => void) | null = null;
+    const cancel = vi.fn();
+    provider = {
+      isConfigured: () => true,
+      startScriptEdit: (req: { onDone: (r: unknown) => void }) => {
+        done = req.onDone;
+        return "job-10";
+      },
+      cancelScriptEdit: cancel,
+    };
+    await install();
+    requestHandler!(REQUEST);
+    cancelHandler!({ documentId: "obj-1", jobId: "job-10" });
+    expect(cancel).toHaveBeenCalledWith("job-10");
+
+    done!({ documentId: "obj-1", ok: false, source: "", summary: "Stopped at your request." });
+
+    expect(results()).toHaveLength(0);
+    replayAiEditResults();
+    expect(results()).toHaveLength(0);
+  });
+
+  it("does not let a stopped run's late completion clobber its successor's mapping", async () => {
+    // Stop run 1, ask again (run 2), then run 1 finally throws. Before the
+    // guard, run 1's onDone deleted run 2's mapping and emitted ok:false under
+    // run 2's id — putting the editor in "error" so run 2's real proposal was
+    // then dropped by the replay guard.
+    const dones: Array<(r: unknown) => void> = [];
+    const cancel = vi.fn();
+    provider = {
+      isConfigured: () => true,
+      startScriptEdit: (req: { onDone: (r: unknown) => void }) => {
+        dones.push(req.onDone);
+        return `job-${dones.length}`;
+      },
+      cancelScriptEdit: cancel,
+    };
+    await install();
+    requestHandler!(REQUEST); // job-1
+    cancelHandler!({ documentId: "obj-1", jobId: "job-1" });
+    requestHandler!(REQUEST); // job-2
+
+    dones[0]({ documentId: "obj-1", ok: false, source: "", summary: "Stopped at your request." });
+    expect(results()).toHaveLength(0);
+
+    // Run 2's mapping survived run 1's late completion: a cancel that names no
+    // job still reaches the provider with job-2.
+    cancelHandler!({ documentId: "obj-1", jobId: "" });
+    expect(cancel).toHaveBeenLastCalledWith("job-2");
+  });
+
+  it("keeps only the superseding run's result for replay", async () => {
+    const dones: Array<(r: unknown) => void> = [];
+    provider = {
+      isConfigured: () => true,
+      startScriptEdit: (req: { onDone: (r: unknown) => void }) => {
+        dones.push(req.onDone);
+        return `job-${dones.length}`;
+      },
+      cancelScriptEdit: vi.fn(),
+    };
+    await install();
+    requestHandler!(REQUEST); // job-1
+    cancelHandler!({ documentId: "obj-1", jobId: "job-1" });
+    requestHandler!(REQUEST); // job-2
+
+    // Run 1 completes late — swallowed. Run 2 completes — emitted under its
+    // OWN id, and it alone is what a reopened editor gets replayed.
+    dones[0]({ documentId: "obj-1", ok: false, source: "", summary: "Stopped at your request." });
+    dones[1]({ documentId: "obj-1", ok: true, source: "V2", summary: "done" });
+
+    expect(results()).toHaveLength(1);
+    expect(results()[0].jobId).toBe("job-2");
+    expect(results()[0].source).toBe("V2");
+    emitted.results = [];
+    replayAiEditResults();
+    expect(results().map((r) => r.source)).toEqual(["V2"]);
+  });
+
+  it("still emits for a provider that answers synchronously from inside start", async () => {
+    // The seam anticipates third-party providers. One that calls onDone before
+    // startScriptEdit returns has no job id to compare yet; the race guard
+    // must stay permissive there or the editor spins forever.
+    provider = {
+      isConfigured: () => true,
+      startScriptEdit: (req: { onDone: (r: unknown) => void }) => {
+        req.onDone({ documentId: "obj-1", ok: true, source: "sync", summary: "instant" });
+        return "job-sync";
+      },
+    };
+    await install();
+    requestHandler!(REQUEST);
+
+    expect(results()).toHaveLength(1);
+    expect(results()[0].source).toBe("sync");
+  });
+
   it("unsubscribes on teardown and forgets stored results", async () => {
     provider = { isConfigured: () => true, startScriptEdit: () => "job-5" };
     const off = await install();

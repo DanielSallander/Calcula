@@ -27,7 +27,7 @@ vi.mock("@api", () => ({
 }));
 
 const { ScriptAuthor } = await import("../components/ScriptAuthor");
-const { __resetJobs } = await import("../lib/authorJobs");
+const { __resetJobs, startAuthorJob } = await import("../lib/authorJobs");
 
 const GOOD_SOURCE = "export function setup(context) {\n  context.onClick(async () => {});\n}";
 
@@ -176,9 +176,46 @@ describe("the run is visible, and looks alive", () => {
     // for one scrolling column and the result ended up in a two-line slot.
     await startAndHold();
     expect(container.querySelector("textarea"), "the form is out of the way").toBeNull();
-    // ...and what was asked for is still on screen, compactly.
+    // ...and what was asked for is still on screen, compactly. VERBATIM, in the
+    // user's own lower case: the recap heading is the script's NAME now, and if
+    // the request itself stopped being shown this assertion would be the only
+    // thing that noticed.
     expect(container.textContent).toContain("colour the cells");
     expect(container.textContent).toContain("attached to a button");
+  });
+
+  it("names the script in the recap, beside the request it came from", async () => {
+    // Reported 2026-08-26: "It prompts 'what should change in' and then the
+    // beginning of my prompt is shown". The NAME and the REQUEST are two
+    // different facts and both belong on screen — the name is what the editor's
+    // dropdown will show, the request is what the result has to be checked
+    // against.
+    await startAndHold();
+    expect(container.textContent, "the name the draft will carry").toContain("Colour the cells");
+    expect(container.textContent, "and the request, unaltered").toContain("colour the cells");
+  });
+
+  it("names the DOCUMENT in the recap for an EDIT job", async () => {
+    // An edit job never derives a scriptName (it changes a script that is
+    // already named), but documentName is on the record — the rule the
+    // completion toast already follows (`toastFor` in authorJobs.ts). Falling
+    // back to the raw instruction here made a six-minute edit run, viewed from
+    // the pane, read as an anonymous instruction.
+    runAuthor.mockReturnValue(new Promise(() => {}));
+    startAuthorJob({
+      intent: "make the refresh faster",
+      objectType: "button",
+      providerId: "ollama",
+      model: "qwen2.5:7b",
+      baseSource: "export function setup(context) {}",
+      documentName: "Refresh Sales",
+    });
+    await render();
+    await flush();
+    const heading = [...container.querySelectorAll("div")]
+      .find((d) => d.style.fontWeight === "600" && d.textContent === "Refresh Sales");
+    expect(heading, "the document being edited is the recap heading").toBeTruthy();
+    expect(container.textContent, "with the instruction beneath it").toContain("make the refresh faster");
   });
 
   it("can be stopped", async () => {
@@ -308,7 +345,12 @@ describe("what the result card says about a run that changed nothing", () => {
 
   it("shows what the script DECLARES that it does not appear to use", async () => {
     await showResult({
-      notices: ["`net.fetch` is declared but no call requiring it was found."],
+      notices: [
+        {
+          code: "declared-not-observed",
+          message: "`net.fetch` is declared but no call requiring it was found.",
+        },
+      ],
     });
     expect(container.textContent).toContain("Check what it declares");
     expect(container.textContent).toContain("net.fetch");
@@ -317,5 +359,36 @@ describe("what the result card says about a run that changed nothing", () => {
   it("shows no declaration box when the ladder raised no notice", async () => {
     await showResult({ notices: [] });
     expect(container.textContent).not.toContain("Check what it declares");
+  });
+
+  it("does NOT file the run-target notice under 'check what it declares'", async () => {
+    // Both notices arrive at the same SEVERITY. Printed under one heading, "you
+    // will not be able to press Run on this" reads as a complaint about the
+    // script's capability pragmas — which is a different thing entirely, and
+    // wrong.
+    await showResult({
+      notices: [
+        {
+          code: "no-run-target",
+          message:
+            "Nothing in this script can be started on demand: setup() is the entry point the mount already ran.",
+        },
+      ],
+    });
+    expect(container.textContent).toContain("you will not be able to press Run on it");
+    expect(container.textContent, "wrong heading for this notice").not.toContain(
+      "Check what it declares",
+    );
+  });
+
+  it("shows both boxes when the ladder raised both kinds", async () => {
+    await showResult({
+      notices: [
+        { code: "declared-not-observed", message: "`net.fetch` is declared but unused." },
+        { code: "no-run-target", message: "Nothing in this script can be started on demand." },
+      ],
+    });
+    expect(container.textContent).toContain("Check what it declares");
+    expect(container.textContent).toContain("you will not be able to press Run on it");
   });
 });

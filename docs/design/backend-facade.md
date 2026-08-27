@@ -9,14 +9,25 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | This doc said | Actual (2026-08-16) | How counted |
-|---|---:|---:|---|
-| Commands in `generate_handler!` | 569 | **761** | bracket-matched parse of `lib.rs` (all unique) |
-| `#[tauri::command]` attributes | — | **798** | `rg -c` over `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | **94** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
-| Feature-open commands | "safe 540" | **667** | 761 − 94 |
-| Typed wrappers in `backend.ts` | ~229 | **327** | exported functions/consts |
-| Vitest at the time of the DONE claim | 102k | **~107,155 / 808 files** | current suite |
+| Figure | This doc said | Actual (2026-08-16) | Recounted (2026-08-27) | How counted |
+|---|---:|---:|---:|---|
+| Commands in `generate_handler!` | 569 | 761 | **773** | bracket-matched parse of `lib.rs` (all unique) |
+| `#[tauri::command]` attributes | — | 798 | **815** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | **100** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
+| Feature-open commands | "safe 540" | 667 | **673** | 773 − 100 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | **338** | exported functions/consts in `backend.ts` |
+| Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | current suite |
+
+**The 2026-08-27 recount is the point of the row, not the numbers.** CLAUDE.md and this file
+are supposed to be two INDEPENDENT counts of the same thing, which only works if both are
+re-run together. Four of the five re-measured figures had drifted since 2026-08-16 while both
+documents kept quoting the old ones: the command count was **769** at the parent commit — stale
+by 8 before the four `script_authoring` commands in this change took it to 773 — and the
+denylist had grown from 94 to 100 with nobody updating either page. A figure nothing enforces
+goes stale silently; the AppState census in `document_effect.rs` is the shape that does not,
+and it is the shape any of these would need to stop drifting for good. Vitest's total is left
+alone deliberately: re-running the suite is the only honest way to measure it, and quoting a
+number I did not measure is exactly the failure this paragraph is about.
 
 Also corrected below: the `is_bi_granted` / `grant_script_bi` paragraph (those symbols were
 **deleted** and generalized — the control was strengthened, not dropped), and the "third-party
@@ -24,16 +35,16 @@ extensions cannot call `invokeBackend` at all" finding, which is pre-A3 history 
 document then contradicts three paragraphs later. **Nothing described here is unbuilt** except
 the item explicitly marked "Resolved (not built)", which is a deliberate design decision.
 
-## The reality (verified 2026-06-27; counts refreshed 2026-08-16 — see the table above)
+## The reality (verified 2026-06-27; counts refreshed 2026-08-16, recounted 2026-08-27 — see the table above)
 
-- `app/src-tauri` registers **569** (now **761**) `#[tauri::command]`s in one crate, including
+- `app/src-tauri` registers **569** (now **773**) `#[tauri::command]`s in one crate, including
   feature-specific modules (`chart_commands`, `conditional_formatting`,
   `data_validation`, `autofilter`, `grouping`, `pivot/`, `bi/`, …). There is no
   Rust-side IoC / plugin surface — a feature that needs backend logic adds a
   command directly. So "even built-in features are extensions / the grid is the
   kernel" is a **frontend-only** reality (now noted in `ARCHITECTURE.md`).
 - The frontend door is `app/src/api/backend.ts` → `invokeBackend<T>(cmd, args) =
-  invoke<T>(...)` — a zero-gating passthrough. ~229 (now **327**) typed wrappers
+  invoke<T>(...)` — a zero-gating passthrough. ~229 (now **338**) typed wrappers
   exist, but raw `invokeBackend("string")` is also used: **44 extension files call
   ~90 distinct commands by raw string across ~112 sites.** *(That last figure is
   dated 2026-06-27 and describes the problem this document went on to fix. **As of
@@ -54,7 +65,7 @@ document records as DONE):** third-party extensions are *already* constrained �
 they cannot call `invokeBackend` at all. **Today they can**, through the governed
 door: `ExtensionContext.invokeBackend` is injected per-extension and scoped by
 trust, so a distributed extension reaches feature-open commands and is refused the
-94 privileged ones. Read this paragraph as the starting position, not the current
+100 privileged ones. Read this paragraph as the starting position, not the current
 one. So the untyped passthrough was, at the time, a **built-in
 (trusted) typing/maintainability** concern, not an open third-party hole. But the
 architecture has **no declared capability boundary** for backend commands, so the
@@ -73,8 +84,8 @@ Mirror the script broker's "ALLOWLIST as data" pattern:
    drift-guard test (`backendCommands.test.ts`) parses `generate_handler!` and
    asserts every privileged name still exists, so the registry can't go stale.
    Everything not listed is "feature-open" (the danger is concentrated in ~30 —
-   now **94** — commands, so a denylist of the dangerous beats an allowlist of the
-   safe 540 — now **667**). The ratio moved, the argument did not: the privileged
+   now **100** — commands, so a denylist of the dangerous beats an allowlist of the
+   safe 540 — now **673**). The ratio moved, the argument did not: the privileged
    set is still an order of magnitude smaller than the open set, which is what
    makes a denylist the maintainable choice.
 

@@ -79,6 +79,12 @@ export function buildScriptAssistant(): ScriptAssistantProvider {
             // preview can synthesize a payload for — so an edit to a recorded
             // macro that registers any of them reports every one of them here.
             unexercisedHooks: result.unexercisedHooks,
+            // THE WHOLE RUN, forwarded rather than re-derived. Everything the
+            // editor used to reconstruct by hand — how it ended, how long it
+            // took, what the model actually SAID on each attempt — is on this
+            // one field. A hand-picked subset here is a second description of a
+            // run that would drift from the first.
+            run: result.run,
           }),
       }),
 

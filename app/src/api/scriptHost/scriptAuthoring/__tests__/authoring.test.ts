@@ -10,11 +10,23 @@ import { authorScript } from "../index";
 import { planFor, probeModel, describeProfile, DEFAULT_CONTEXT_TOKENS, type ModelProfile } from "../../modelProfile";
 import { CANARY_TASKS } from "../../generated/canaryTasks";
 
+// THE FIXTURE IS THE PRODUCTION SHAPE, and as of 2026-08-26 that includes a
+// top-level zero-argument RUN TARGET.
+//
+// It is not decoration. `authorScript` now nudges a valid CREATE draft that has
+// no run target back for one more round, so a setup-only fixture makes every
+// test in this file spend an extra `complete` call for a reason none of them is
+// about. Fixtures that do not look like what the loop is being asked to produce
+// are how the assisted template drifted away from the production form in the
+// first place.
 const GOOD = [
   "```javascript",
+  "async function run() {",
+  "  await context.api.setCellValue(0, 0, 'hi');",
+  "}",
   "export function setup(context) {",
   "  context.onClick(async () => {",
-  "    await context.api.setCellValue(0, 0, 'hi');",
+  "    await run();",
   "  });",
   "}",
   "```",
@@ -104,7 +116,8 @@ describe("the repair loop", () => {
     // reviewer. Sending it to the model teaches it to strip declarations it
     // cannot prove it needs, which is exactly backwards.
     const overDeclared = "```javascript\n// @capability storage\n" +
-      "export function setup(context) { context.log('x'); }\n```";
+      "async function run() { context.log('x'); }\n" +
+      "export function setup(context) { return run(); }\n```";
     const complete = scripted(overDeclared);
     const r = await authorScript({ intent: "log", objectType: "button", plan: PLAN, complete });
     expect(r.ok, "an over-declared script is VALID and must not loop").toBe(true);
@@ -614,14 +627,25 @@ describe("the assisted template matches the object it targets", () => {
   });
 
   it("names the hooks the type actually has, or says it has none", async () => {
+    // WAS `hooks[0]`, AND THAT ASSERTION PINNED THE DEFECT. Alphabetically first
+    // is not "the hook a script for this object usually wants": for a workbook
+    // it is `onAfterSave` and for a sheet `onActivate`, neither of which is
+    // anybody's default. `preferredHookFor` is the product judgement, and the
+    // live generated list stays the authority — so what is asserted here is that
+    // whatever hook gets taught is one the object ACTUALLY HAS.
     const { objectHooksFor } = await import("../../scriptPreview/objectHooks");
+    const { preferredHookFor } = await import("../../scriptTemplate");
     for (const type of ["button", "workbook", "sheet", "chart", "slicer", "textbox"]) {
       const system = await systemFor(type);
       const hooks = objectHooksFor(type);
+      const taught = preferredHookFor(type);
       if (hooks.length === 0) {
         expect(system, `${type} has no hooks and must be told so`).toContain("no event hooks of its own");
+      } else if (taught === null) {
+        expect(system, `${type} is taught the direct shape`).toContain("setup() starts run() directly");
       } else {
-        expect(system, `${type} should be taught ${hooks[0]}`).toContain(`context.${hooks[0]}(async () =>`);
+        expect(hooks, `${type}'s preferred hook must be one it has`).toContain(taught);
+        expect(system, `${type} should be taught ${taught}`).toContain(`context.${taught}(async () =>`);
       }
     }
   });
@@ -640,5 +664,160 @@ describe("the assisted template matches the object it targets", () => {
     const system = complete.mock.calls[0][0] as string;
     expect(system).not.toContain("Follow this shape exactly");
     expect(system).not.toContain("no event hooks of its own");
+  });
+
+  it("carries the skeleton's exact bytes, and names no hook the type lacks", async () => {
+    // ONE definition of the runnable shape. If the prompt paraphrases the
+    // skeleton instead of embedding it, the teaching and the scaffold drift —
+    // which is the bug class the whole `scriptTemplate` leaf exists to close.
+    const { objectHooksFor } = await import("../../scriptPreview/objectHooks");
+    const { buildRunnableSkeleton, preferredHookFor } = await import("../../scriptTemplate");
+    const { OBJECT_TYPE_CONTEXTS } = await import("../../generated/scriptSurfacePolicy");
+
+    for (const [type] of OBJECT_TYPE_CONTEXTS) {
+      const system = await systemFor(type);
+      const hooks = objectHooksFor(type);
+      const preferred = preferredHookFor(type);
+      const primary =
+        preferred === null ? null : hooks.includes(preferred) ? preferred : hooks[0] ?? null;
+      expect(system, `${type} must embed the skeleton verbatim`)
+        .toContain(buildRunnableSkeleton({ objectType: type, primaryHook: primary }));
+
+      // And it must never WIRE a hook this object does not have — the exact
+      // failure reported on 2026-08-24 (`context.onClick is not a function`).
+      // The wiring form, not the bare name: BASE_SYSTEM legitimately says "a
+      // button's click handler is `context.onClick(handler)`" to every type, and
+      // that is a rule about the API, not a template telling THIS object to call
+      // a method it does not have.
+      for (const other of ["onClick", "onEdit", "onRefresh", "onSelectionChange", "onDataChange"]) {
+        if (hooks.includes(other)) continue;
+        expect(system, `${type} has no ${other}`).not.toContain(`context.${other}(async () =>`);
+      }
+    }
+  });
+
+  it("degrades a renamed hook to a REAL hook, never to 'runs at mount'", async () => {
+    // THE FAILURE DIRECTION. The table is a preference; `objectHooksFor` is the
+    // authority. When the table names a hook the object no longer carries, the
+    // template must fall back to one the object DOES carry — falling back to the
+    // direct branch would silently turn a button's template into "runs at
+    // mount", which is the very defect the run-target work exists to fix.
+    const template = await import("../../scriptTemplate");
+    const spy = vi.spyOn(template, "preferredHookFor").mockReturnValue("onHookThatWasRenamedAway");
+    try {
+      const { objectHooksFor } = await import("../../scriptPreview/objectHooks");
+      const system = await systemFor("button");
+      expect(objectHooksFor("button")).toContain("onClick");
+      expect(system, "it must still wire a hook").toContain("context.onClick(async () =>");
+      expect(system).not.toContain("setup() starts run() directly");
+      expect(system).not.toContain("onHookThatWasRenamedAway");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("the run target is taught at EVERY tier, not only the assisted one", () => {
+  // THE INVERSION THE OWNER'S REPORT EXPOSED. `assistedSystemFor` is appended
+  // only when `tier === "assisted"`, so teaching the entry point there alone
+  // would leave every PROBED, CAPABLE model producing exactly the script the
+  // owner could not run — the missing teaching would be in the tier for models
+  // measured as GOOD.
+  it.each([
+    ["assisted", { tier: "assisted" as const, surfaceBudgetTokens: 3000, repairRounds: 6, rationale: "" }],
+    ["standard", PLAN],
+    ["direct", { tier: "direct" as const, surfaceBudgetTokens: 6000, repairRounds: 1, rationale: "" }],
+  ])("%s", async (_label, plan) => {
+    const complete = scripted(GOOD);
+    await authorScript({ intent: "x", objectType: "button", plan, complete });
+    const system = complete.mock.calls[0][0] as string;
+    expect(system).toContain("TOP-LEVEL function that takes NO arguments");
+    expect(system).toContain("async function run()");
+    expect(system, "and WHY setup does not count").toContain("setup() is not a run target");
+  });
+
+  it("says the same thing in the API surface header the user prompt carries", async () => {
+    // The surface header used to say the API is reachable "through the `context`
+    // parameter of `export function setup(context)`" — which reads as a
+    // PROHIBITION on the very shape the template now asks for.
+    const complete = scripted(GOOD);
+    await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete });
+    const user = complete.mock.calls[0][1] as string;
+    expect(user).toContain("also in scope for");
+    expect(user).toContain("every top-level function in the file");
+  });
+});
+
+describe("the run-target nudge", () => {
+  // Reported 2026-08-26: "again I could not run it due to it lacking some sort
+  // of entry point function." A draft whose whole body sits inside setup() or a
+  // handler mounts correctly and has NOTHING for Run (F5) to start.
+  const HOOK_ONLY = [
+    "```javascript",
+    "export function setup(context) {",
+    "  context.onClick(async () => {",
+    "    await context.api.setCellValue(0, 0, 'hi');",
+    "  });",
+    "}",
+    "```",
+  ].join("\n");
+
+  it("fires ONCE, and only in CREATE mode", async () => {
+    const complete = scripted(HOOK_ONLY, HOOK_ONLY, HOOK_ONLY, HOOK_ONLY);
+    const r = await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete });
+    expect(r.ok).toBe(true);
+    // One nudge => exactly two calls, even though the second reply STILL has no
+    // run target and repairRounds is 3.
+    expect(complete).toHaveBeenCalledTimes(2);
+    const nudges = complete.mock.calls.filter(
+      (c) => typeof c[1] === "string" && (c[1] as string).includes("cannot press Run to start it"),
+    );
+    expect(nudges, "one shot: a pure refactor is not worth two rounds").toHaveLength(1);
+  });
+
+  it("does NOT nudge an EDIT, which was told to keep every other line", async () => {
+    const complete = scripted(HOOK_ONLY);
+    const r = await authorScript({
+      intent: "x", objectType: "button", plan: PLAN, complete,
+      edit: { baseSource: HOOK_ONLY.split("\n").slice(1, -1).join("\n") },
+    });
+    expect(r.ok).toBe(true);
+    expect(complete, "asking for a refactor contradicts EDIT_SYSTEM").toHaveBeenCalledTimes(1);
+  });
+
+  it("never turns a VALID draft into a failure on the final round", async () => {
+    // THE STRONG TIER HAS repairRounds === 1, so a nudge on the LAST round would
+    // set behaviouralFix, skip the accept arm, run out of rounds and report
+    // `ok: false` — "It passes every static check but does not do what was
+    // asked" — about a script that is correct. Round 0 has to fail here, or the
+    // nudge lands on round 0 and there is still a round left to spend.
+    const complete = scripted(INVENTED, HOOK_ONLY);
+    const r = await authorScript({
+      intent: "x", objectType: "button", plan: { ...PLAN, repairRounds: 1 }, complete,
+    });
+    expect(r.ok, "a correct script must never be reported as a failure").toBe(true);
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1][1] as string).not.toContain("cannot press Run to start it");
+  });
+
+  it("keeps the draft it set aside when the nudged reply comes back worse", async () => {
+    // A COSMETIC REFACTOR REQUEST MUST NEVER COST A WORKING SCRIPT.
+    const BROKEN = "```javascript\nexport function setup(context) { context.nopeNope(); }\n```";
+    const complete = scripted(HOOK_ONLY, BROKEN, BROKEN, BROKEN);
+    const r = await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete });
+    expect(r.ok).toBe(true);
+    expect(r.source, "the valid draft wins").toContain("setCellValue");
+    expect(r.source).not.toContain("nopeNope");
+    expect(r.summary).toContain("discarded because it came back worse");
+  });
+
+  it("accepts the nudged reply when it IS better", async () => {
+    // The control. Without it the set-aside path could be passing because the
+    // nudge stopped happening at all.
+    const complete = scripted(HOOK_ONLY, GOOD);
+    const r = await authorScript({ intent: "x", objectType: "button", plan: PLAN, complete });
+    expect(r.ok).toBe(true);
+    expect(r.source).toContain("async function run()");
+    expect(r.summary).not.toContain("came back worse");
   });
 });

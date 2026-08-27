@@ -417,6 +417,146 @@ export function scoreCandidate(task: EvalTask, candidate: string, outcome?: Outc
   };
 }
 
+/** A model's reply, split into the code it fenced and the prose around it. */
+export interface ModelReply {
+  /** The script, exactly as `extractScript` has always returned it. */
+  source: string;
+  /**
+   * Everything the model said OUTSIDE the fence, with any further fenced
+   * blocks removed.
+   *
+   * THIS IS THE SENTENCE THE OWNER WENT LOOKING FOR. Reported 2026-08-26:
+   * "I could not see the reasoning or the results from the chat." The reason
+   * was one line long — `extractScript` kept `fenced[1]` and dropped every word
+   * around it, so the model's account of what it changed was destroyed at the
+   * moment it arrived. Nothing downstream could show it because nothing
+   * downstream ever had it.
+   */
+  note: string;
+  /**
+   * The model's INLINE scratchpad — the contents of `<think>...</think>`
+   * blocks, joined.
+   *
+   * Measured 2026-08-27: nothing in ai/stream.rs strips these. A server that
+   * splits reasoning into `reasoning_content` routes it to `ReasoningDelta`
+   * and out of the text — but Ollama delivers deepseek-r1/qwen3 reasoning
+   * INLINE in `content` unless configured otherwise, so it arrives here. Kept
+   * separate from `note` because the two are different artifacts: the note is
+   * the model's account of what it DID, the scratchpad is how it got there,
+   * and a multi-thousand-character think block rendered as the "summary"
+   * would bury the sentence the reader came for.
+   */
+  thinking: string;
+}
+
+/**
+ * The one fence grammar. The scan in `splitReply` and its final capture read
+ * the SAME expression — two spellings of "a fence" would drift, and the scan's
+ * whole job is deciding which text the capture is allowed to see.
+ */
+const FENCE = /```(?:javascript|js|typescript|ts)?\s*\n([\s\S]*?)```/;
+const FENCE_SCAN = new RegExp(FENCE.source, "g");
+
+const THINK_OPEN = "<think>";
+const THINK_CLOSE = "</think>";
+
+export function splitReply(reply: string): ModelReply {
+  // ONE LINEAR SCAN, first-open-wins. The old shape — a think-strip regex over
+  // the RAW reply, then fence matching — corrupted real replies in both
+  // directions: a fenced script whose CODE contains literal think tags (a
+  // tag-filtering utility is exactly such a script) had the span between them
+  // deleted from the source and misfiled as "thinking", while an orphan
+  // `</think>` with no opener (the reasoning-template shape where the server
+  // consumes the opening tag and the stream begins mid-thought) left the whole
+  // scratchpad in the note and promoted a fenced sketch inside it as the
+  // answer. So the scan walks the reply once and whichever construct OPENS
+  // first claims the text: a fence opened outside any think block is answer
+  // material verbatim — think tags inside it are literal — while a `<think>`
+  // opened outside a fence is scratchpad to its close, fenced sketches
+  // included. An orphan `</think>` before any opener means everything before
+  // it was scratchpad, already-passed fences included.
+  const thoughts: string[] = [];
+  let answer = "";
+  let sawThink = false;
+  let pos = 0;
+  while (pos < reply.length) {
+    FENCE_SCAN.lastIndex = pos;
+    const fence = FENCE_SCAN.exec(reply);
+    const fenceAt = fence ? fence.index : -1;
+    const openAt = reply.indexOf(THINK_OPEN, pos);
+    const closeAt = reply.indexOf(THINK_CLOSE, pos);
+    const candidates = [fenceAt, openAt, closeAt].filter((i) => i !== -1);
+    if (candidates.length === 0) {
+      answer += reply.slice(pos);
+      break;
+    }
+    const next = Math.min(...candidates);
+    if (fence && next === fenceAt) {
+      // An answer fence, copied whole — nothing inside it is markup.
+      answer += reply.slice(pos, fenceAt + fence[0].length);
+      pos = fenceAt + fence[0].length;
+    } else if (next === openAt) {
+      answer += reply.slice(pos, openAt);
+      sawThink = true;
+      const bodyStart = openAt + THINK_OPEN.length;
+      const end = reply.indexOf(THINK_CLOSE, bodyStart);
+      if (end === -1) {
+        // Cut off mid-thought (a truncated stream): everything after the tag
+        // is scratchpad, not answer.
+        thoughts.push(reply.slice(bodyStart).trim());
+        pos = reply.length;
+      } else {
+        thoughts.push(reply.slice(bodyStart, end).trim());
+        pos = end + THINK_CLOSE.length;
+      }
+    } else if (!sawThink) {
+      // Orphan closer before any opener: the stream began INSIDE a thought,
+      // so everything up to here — fences included — was scratchpad.
+      thoughts.push(reply.slice(0, closeAt).trim());
+      answer = "";
+      sawThink = true;
+      pos = closeAt + THINK_CLOSE.length;
+    } else {
+      // A stray closer after real think markup is literal text.
+      answer += reply.slice(pos, closeAt + THINK_CLOSE.length);
+      pos = closeAt + THINK_CLOSE.length;
+    }
+  }
+  const thinking = thoughts.filter(Boolean).join("\n\n");
+  // A reply that was ALL scratchpad (broken, but a truncated reasoning model
+  // produces exactly this): fall back to the raw text so a fence inside it is
+  // still salvaged rather than returning an empty source for the validator to
+  // reject as a parse error with no content.
+  const salvaged = answer.trim() === "" && reply.trim() !== "";
+  const haystack = salvaged ? reply : answer;
+
+  const fenced = haystack.match(FENCE);
+  if (!fenced) return { source: haystack.trim() + "\n", note: "", thinking };
+  if (salvaged) {
+    // The whole reply was scratchpad, so the honest note is empty — prose here
+    // would duplicate `thinking` against the same run budget, with the raw
+    // think tag rendered as the model's account — and the promoted fence is
+    // cut from the scratchpad so the code is stored once, not twice.
+    return {
+      source: fenced[1].trim() + "\n",
+      note: "",
+      thinking: thinking.replace(fenced[0], "").trim(),
+    };
+  }
+  // `RegExpMatchArray.index` is `number | undefined` — a bare `match.index`
+  // fails `npm run check-types` (tsconfig.check.json runs with strict null
+  // checks; a bare `npx tsc --noEmit` does not and would let it through).
+  const at = fenced.index ?? 0;
+  const around = haystack.slice(0, at) + haystack.slice(at + fenced[0].length);
+  return {
+    source: fenced[1].trim() + "\n",
+    // A model that emits a SECOND fenced block after its prose would otherwise
+    // put raw ``` markers into a note that is rendered as plain text.
+    note: around.replace(/```[\s\S]*?```/g, "").trim(),
+    thinking,
+  };
+}
+
 /**
  * Pull a script out of a model's reply.
  *
@@ -424,11 +564,12 @@ export function scoreCandidate(task: EvalTask, candidate: string, outcome?: Outc
  * JSON, which is the whole reason §1a says script authoring suits weak models:
  * the output is ONE artifact in a code block. A reply with no fence at all is
  * taken verbatim, because some models simply answer with bare code.
+ *
+ * DEFINED IN TERMS OF `splitReply`, not beside it: two functions that both
+ * parse a fence are two functions that drift.
  */
 export function extractScript(reply: string): string {
-  const fenced = reply.match(/```(?:javascript|js|typescript|ts)?\s*\n([\s\S]*?)```/);
-  if (fenced) return fenced[1].trim() + "\n";
-  return reply.trim() + "\n";
+  return splitReply(reply).source;
 }
 
 export interface CorpusSummary {

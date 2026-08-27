@@ -47,6 +47,7 @@
 import { analyzeScript, type AnalyzedScript } from "./analyze";
 import { capabilitiesFor, surfaceMember, surfaceScopeFor, wrongContextMember } from "./surface";
 import { CAPABILITY_ID_SET } from "../capabilityIds";
+import { topLevelFunctions } from "../worker/debugInstrument";
 
 export type FindingSeverity = "error" | "notice";
 
@@ -60,7 +61,8 @@ export interface ValidationFinding {
     | "wrong-object-type"
     | "undeclared-capability"
     | "unknown-capability-id"
-    | "declared-not-observed";
+    | "declared-not-observed"
+    | "no-run-target";
   message: string;
   line?: number;
   /** Chains the author probably meant, when the finding is `unknown-member`. */
@@ -179,6 +181,39 @@ export function validateScriptSource(source: string, objectType?: string): Valid
         "Wrap the logic in `export function setup(context) { ... }`, register event handlers " +
         "through the object's hooks (a button's click is `context.onClick(handler)`), and use " +
         "`context.expose(name, handler)` only for named commands.",
+    });
+  }
+
+  // ---- Run target ----------------------------------------------------------
+  // NOTICE, NEVER AN ERROR. `export function setup(context) {
+  //   context.onBeforeSave(() => ({ cancel: true })); }` has exactly one
+  // top-level function and is CORRECT, as is an onRender painter. This file's
+  // own header (:43-45) says its worst outcome must be missing a defect, never
+  // inventing one.
+  //
+  // Computed with `topLevelFunctions` — the SAME scanner
+  // `buildRunTargetRegistrations` uses (debugWrapper.ts:320) — so the warning
+  // and the registrar cannot disagree about what a run target is.
+  //
+  // SUPPRESSED for the hooks whose RETURN VALUE is the point. `onRender` and
+  // every `onBefore*` are the shapes where hook-only is most often correct, and
+  // where a refactor can silently disarm a veto in a way `report.ok` cannot see.
+  const runTargets = topLevelFunctions(source).filter((f) => f.name !== "setup");
+  const exposes = analysis.calls.some((c) => c.chain === "expose" || c.chain.endsWith(".expose"));
+  const vetoHook = analysis.calls.some((c) => {
+    const leaf = c.chain.split(".").pop() ?? "";
+    return leaf === "onRender" || leaf.startsWith("onBefore");
+  });
+  if (analysis.hasSetup && runTargets.length === 0 && !exposes && !vetoHook) {
+    findings.push({
+      severity: "notice",
+      code: "no-run-target",
+      message:
+        "Nothing in this script can be started on demand: setup() is the entry point the mount " +
+        "already ran, so it is not a run target, and there is no other top-level function and no " +
+        "context.expose(...) command. The script still works when its hooks fire. To be able to " +
+        "press Run (F5) in the editor, move the work into a top-level function that takes no " +
+        "arguments -- async function run() { ... } -- and have setup() call it.",
     });
   }
 

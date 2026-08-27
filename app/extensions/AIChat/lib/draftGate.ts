@@ -33,6 +33,9 @@ import { unexercisedHookNote } from "@api/scriptHost/scriptPreview/unexercisedHo
 // consumes it. A second mirror here would be one more thing to drift from
 // `DryRunReport` in ai/dryrun.rs.
 import type { DryRunReport } from "@api/scriptHost/scriptAuthoring";
+// TYPE-ONLY, and the module it names imports nothing at all, so this costs the
+// gate's own suite no new double.
+import type { RunNotice } from "@api/scriptHost/authoringRun";
 import { previewObjectScript } from "@api/scriptHost/scriptPreview";
 
 /** What the gate decided about one tool call. */
@@ -77,8 +80,12 @@ export interface GateVerdict {
    * report away the instant `ok` was true, so the person they were written for
    * never saw a word of them — while pressing Save is precisely the act of
    * granting them. Absent, not empty, when there are none.
+   *
+   * EACH ONE CARRIES ITS CODE: the ladder now raises notices about more than
+   * declarations, and a renderer has to be able to tell which heading one
+   * belongs under.
    */
-  notices?: string[];
+  notices?: RunNotice[];
 }
 
 const ALLOW: GateVerdict = { allow: true };
@@ -210,11 +217,14 @@ export async function gateToolCall(name: string, input: unknown): Promise<GateVe
   // person it was written for never saw a word of it. Those are exactly the
   // capabilities the reviewer grants by pressing Save.
   //
-  // Filtered by SEVERITY, not by code: this renders whole messages, so it wants
-  // every notice the ladder ever grows.
-  const notices = report.findings
+  // SELECTED by severity, CARRIED with its code. Selecting by severity is what
+  // picks up every notice the ladder ever grows; carrying the code is what stops
+  // the renderer printing all of them under one heading. As of 2026-08-26 the
+  // ladder raises a `no-run-target` notice, and under "check what it declares"
+  // it would tell the author their capability pragmas were wrong.
+  const notices: RunNotice[] = report.findings
     .filter((f) => f.severity === "notice")
-    .map((f) => f.message);
+    .map((f) => ({ code: f.code, message: f.message }));
 
   // L3: does it actually run?
   //
@@ -304,7 +314,7 @@ export function describeDryRun(dry: DryRunReport | null): string {
       // as `userNote` as well as `note`, and ChatView renders `userNote`
       // straight into the transcript — so model-facing phrasing here reaches
       // the person as an instruction addressed to somebody else. Byte-compatible
-      // with the sibling wording in `dryRunNotes.ts`, deliberately.
+      // with the sibling wording in `scriptPreview/dryRunCaveat.ts`, deliberately.
       ? ` When run against a copy of the workbook it changed no cells — but that is not evidence ` +
           `about the script. ${caveat} Try it on real data before relying on it.`
       : " When run against a copy of the workbook it changed no cells.";

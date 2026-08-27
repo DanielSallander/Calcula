@@ -135,6 +135,27 @@ describe("aiEditClient — the proposal stops here", () => {
     expect(aiEditStateFor("obj-1").proposal).toBe("");
   });
 
+  it("KEEPS the best attempt when the run failed", async () => {
+    // `authorRunner` deliberately returns its best attempt on failure, on the
+    // stated grounds that "a script that is 90% right is worth showing, and the
+    // editor is where a person fixes the rest". This window used to throw that
+    // text away the instant it arrived, so the one place that could act on it
+    // was the only place that never saw it. The phase is still `error`: nothing
+    // about keeping the text says the run succeeded.
+    await install();
+    askAiToEdit(ASK);
+    resultHandler!({
+      documentId: "obj-1",
+      jobId: "",
+      ok: false,
+      source: "ALMOST RIGHT",
+      summary: "could not fix the last error",
+    });
+
+    expect(aiEditStateFor("obj-1").phase).toBe("error");
+    expect(aiEditStateFor("obj-1").proposal).toBe("ALMOST RIGHT");
+  });
+
   it("reports a request that never left the window", async () => {
     // Otherwise the spinner runs forever waiting on a result that cannot come.
     requestRejects = true;

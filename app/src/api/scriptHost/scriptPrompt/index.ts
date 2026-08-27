@@ -323,7 +323,8 @@ const HEADER = [
   "# Calcula object-script API",
   "",
   "These are the ONLY methods this script may call. Reach them through the",
-  "`context` parameter of `export function setup(context)`. A method not listed",
+  "`context` parameter of `export function setup(context)`, which is also in scope for",
+  "every top-level function in the file. A method not listed",
   "here does not exist -- do not invent one.",
   "",
 ].join("\n");

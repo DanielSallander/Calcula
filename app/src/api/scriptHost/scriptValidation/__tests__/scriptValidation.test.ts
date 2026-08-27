@@ -418,6 +418,96 @@ describe("what counts as an entry point", () => {
   });
 });
 
+describe("the RUN TARGET notice — a warning, never a rejection", () => {
+  // Reported 2026-08-26: "again I could not run it due to it lacking some sort
+  // of entry point function." A script whose whole body is inside setup() or a
+  // hook handler MOUNTS correctly and does exactly what it was asked to do when
+  // the hook fires — it simply has nothing for Run (F5) to start, because setup
+  // is excluded from run-at-cursor (the mount already called it).
+  //
+  // THE SEVERITY IS THE WHOLE POINT. A false rejection sends a correct draft
+  // into repair rounds, which is minutes per round on a local model and strictly
+  // worse than the gap it would be closing.
+  const hasRunTargetNotice = (src: string, objectType?: string) => {
+    const report = validateScriptSource(src, objectType);
+    return {
+      notice: report.findings.find((f) => f.code === "no-run-target"),
+      ok: report.ok,
+    };
+  };
+
+  it("warns about a hook-only script, and still calls it VALID", () => {
+    const { notice, ok } = hasRunTargetNotice(
+      "export function setup(context) {\n" +
+      "  context.onClick(async () => { await context.api.setCellValue(0, 0, 'hi'); });\n" +
+      "}\n",
+      "button",
+    );
+    expect(notice, "the gap the owner hit must be reported").toBeTruthy();
+    expect(notice!.severity, "a notice, so nothing blocks and no round is spent").toBe("notice");
+    expect(ok, "report.ok must stay true").toBe(true);
+    expect(notice!.message).toContain("async function run()");
+  });
+
+  it("says nothing when there IS a top-level run target", () => {
+    const { notice } = hasRunTargetNotice(
+      "async function run() {\n" +
+      "  await context.api.setCellValue(0, 0, 'hi');\n" +
+      "}\n" +
+      "export function setup(context) {\n" +
+      "  context.onClick(async () => { await run(); });\n" +
+      "}\n",
+      "button",
+    );
+    expect(notice).toBeUndefined();
+  });
+
+  it("says nothing about a context.expose command — that IS startable", () => {
+    // An exposed handler is reachable from a schedule, a shortcut and another
+    // script. Nagging about it would be nagging about a script that already has
+    // the thing the notice asks for.
+    const { notice } = hasRunTargetNotice(
+      "export function setup(context) {\n" +
+      "  context.expose('refresh', async () => { await context.api.setCellValue(0, 0, 'x'); });\n" +
+      "}\n",
+      "button",
+    );
+    expect(notice).toBeUndefined();
+  });
+
+  it("says nothing about a VETO hook, where the return value is the point", () => {
+    // THE SUPPRESSION WITH THE MOST AT STAKE. A refactor that moved the work out
+    // of `onBeforeSave` to satisfy this notice would silently disarm a veto, and
+    // `report.ok` cannot see that.
+    const { notice, ok } = hasRunTargetNotice(
+      "export function setup(context) {\n" +
+      "  context.onBeforeSave(() => ({ cancel: true }));\n" +
+      "}\n",
+      "workbook",
+    );
+    expect(notice, "a one-line veto script is CORRECT").toBeUndefined();
+    expect(ok).toBe(true);
+  });
+
+  it("says nothing about an onRender painter either", () => {
+    const { notice } = hasRunTargetNotice(
+      "export function setup(context) {\n" +
+      "  context.onRender((c) => { c.fillRect(0, 0, 1, 1); });\n" +
+      "}\n",
+      "chartMark",
+    );
+    expect(notice).toBeUndefined();
+  });
+
+  it("says nothing about a script with no setup at all", () => {
+    // That script has a DIFFERENT, harder defect — `no-entry-point`, an ERROR —
+    // and piling a second finding on top of it would only crowd the repair
+    // prompt at the exact moment the model needs one clear instruction.
+    const { notice } = hasRunTargetNotice("onClick(() => { context.log('x'); });\n", "button");
+    expect(notice).toBeUndefined();
+  });
+});
+
 describe("context flow — the false-pass half of the setup-only trade", () => {
   /**
    * `setup(context) { helper(context); }` makes helper's parameter the context

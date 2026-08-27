@@ -60,8 +60,10 @@ vi.mock("../lib/crossWindowEvents", () => ({
   onConsoleOutput: async () => () => {},
   onScriptError: async () => () => {},
   onScriptsChanged: async () => () => {},
-  // "Edit with AI" channels. The editor subscribes to these on mount; a partial
-  // mock without them throws inside the mount effect and takes the window down.
+  // "Edit with AI" channels. The editor subscribes to the two on* channels on
+  // mount; installAiEditClient catches a missing export's throw and AI editing
+  // is then silently absent (one console.warn per missing channel) with the
+  // window still mounting. Mocked here so the subscriptions actually succeed.
   emitAiEditRequest: async () => {},
   emitAiEditCancel: async () => {},
   onAiEditProgress: async () => () => {},

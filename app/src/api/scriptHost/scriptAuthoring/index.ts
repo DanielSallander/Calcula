@@ -19,8 +19,9 @@
 
 import { analyzeScript, repairPrompt, validateScriptSource, type ValidationReport } from "../scriptValidation";
 import { buildSurfacePrompt } from "../scriptPrompt";
-import { extractScript } from "../scriptEval";
+import { splitReply } from "../scriptEval";
 import { objectHooksFor } from "../scriptPreview/objectHooks";
+import { buildRunnableSkeleton, preferredHookFor } from "../scriptTemplate";
 import type { CompleteFn, TierPlan } from "../modelProfile";
 
 /**
@@ -72,7 +73,16 @@ export interface AuthorRequest {
    * nothing and must not be marked wrong for it.
    */
   expectsWrites?: boolean;
-  onAttempt?: (round: number, report: ValidationReport) => void;
+  /**
+   * One attempt finished. WIDENED 2026-08-26 from `(round, report)`.
+   *
+   * A second callback beside one that already did 90% of the job is the drift
+   * this repo keeps paying for, so the existing one carries the whole attempt.
+   * It fires AFTER the dry-run block, so `dryRun` is populated when there was
+   * one — which is the whole reason a caller wants the attempt rather than the
+   * report.
+   */
+  onAttempt?: (attempt: AuthorAttempt) => void;
 }
 
 /** The shape `ai_dry_run_script` returns (mirrors `DryRunReport` in ai/dryrun.rs). */
@@ -118,6 +128,26 @@ export interface AuthorAttempt {
   round: number;
   source: string;
   report: ValidationReport;
+  /** The model's WHOLE reply, before the fence was taken out of it. */
+  reply: string;
+  /** The prose outside the fence — the model's account of what it did. */
+  note: string;
+  /**
+   * The inline `<think>...</think>` scratchpad, when the model emitted one.
+   *
+   * Distinct from the stream-split reasoning the RUNNER accumulates from
+   * `ReasoningDelta` events: Ollama delivers deepseek-r1/qwen3 reasoning
+   * INLINE in the text, which no delta ever carries — so without this field
+   * an inline reasoner's thought process was invisible to the run record.
+   */
+  thinking: string;
+  /** Milliseconds since the RUN started, and how long this attempt took. */
+  at: number;
+  durationMs: number;
+  /** The surface this attempt was shown, as a size. Rides per-attempt so an
+   *  evicted log is still self-describing. */
+  surfaceTokens: number;
+  surfaceTruncated: boolean;
   /** Present when a dry run was performed for this attempt. */
   dryRun?: DryRunReport;
 }
@@ -161,6 +191,8 @@ const BASE_SYSTEM = [
   "You write Calcula object scripts.",
   "Reply with ONE fenced JavaScript code block and nothing else — no explanation.",
   "The script must export `setup(context)`.",
+  "Put the work in a TOP-LEVEL function that takes NO arguments (async function run() { ... }) and have setup() call it, or wire a hook to call it.",
+  "setup() is not a run target -- the mount has already called it -- so a script whose only top-level function is setup cannot be started with Run (F5). `context` is in scope for every top-level function in the file, so nothing has to be passed in.",
   "React to the object's events through its hooks: a button's click handler is `context.onClick(handler)`.",
   "Use `context.expose(name, handler)` only for named commands (schedules, shortcuts, other scripts) — an exposed handler does NOT run when the object is clicked.",
   "Reach the API only through `context`, and only methods you were shown.",
@@ -191,37 +223,38 @@ const BASE_SYSTEM = [
  */
 function assistedSystemFor(objectType: string): string {
   const hooks = objectHooksFor(objectType);
-  if (hooks.length === 0) {
-    return [
-      "",
-      `A "${objectType}" script has no event hooks of its own: put the work directly`,
-      "in `setup`, which runs when the script is mounted.",
-      "",
-      "```javascript",
-      "export function setup(context) {",
-      "  // your code here",
-      "}",
-      "```",
-    ].join("\n");
-  }
-  const primary = hooks[0];
-  const others =
-    hooks.length > 1
-      ? ` This object can also fire: ${hooks.slice(1).join(", ")}.`
+  const preferred = preferredHookFor(objectType);
+  // THE TABLE IS A PREFERENCE OVER THE LIVE LIST, NEVER AN AUTHORITY.
+  // An explicit `null` means DIRECT. A named hook the live surface no longer
+  // carries degrades to hooks[0] — NOT to direct: a renamed hook must never
+  // silently turn a button's template into "runs at mount".
+  const primary =
+    preferred === null ? null : hooks.includes(preferred) ? preferred : hooks[0] ?? null;
+
+  const lines: string[] = [
+    "",
+    "Follow this shape exactly, replacing only the body of run().",
+  ];
+  if (primary) {
+    const others = hooks.length > 1
+      ? ` This object can also fire: ${hooks.filter((h) => h !== primary).join(", ")}.`
       : "";
-  return [
-    "",
-    `Follow this shape exactly, replacing only the body. A "${objectType}" reacts`,
-    `through \`context.${primary}\`.${others}`,
-    "",
-    "```javascript",
-    "export function setup(context) {",
-    `  context.${primary}(async () => {`,
-    "    // your code here",
-    "  });",
-    "}",
-    "```",
-  ].join("\n");
+    lines.push(`A "${objectType}" reacts through \`context.${primary}\`.${others}`);
+  } else if (hooks.length > 0) {
+    lines.push(
+      `A "${objectType}" script runs when it is mounted, so setup() starts run() directly.` +
+        ` This object can also fire: ${hooks.join(", ")}.`,
+    );
+  } else {
+    // The literal two tests in authoring.test.ts key on (one toContain, one
+    // not.toContain). Do not reword.
+    lines.push(
+      `A "${objectType}" script has no event hooks of its own: setup() starts run() directly,`,
+      "and setup runs when the script is mounted.",
+    );
+  }
+  lines.push("", "```javascript", buildRunnableSkeleton({ objectType, primaryHook: primary }), "```");
+  return lines.join("\n");
 }
 
 /**
@@ -382,20 +415,47 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
   let lastSignature = "";
   let repeatedSignatures = 0;
   let stalled = false;
+  /** The run-target nudge is ONE SHOT. See the block that sets it. */
+  let nudgedRunTarget = false;
+  /**
+   * The draft that was set aside TO BE NUDGED, and nothing else.
+   *
+   * Set at exactly one place, and it means exactly one thing: this draft passed
+   * every static check and the dry run said nothing, so it WOULD have been
+   * accepted — it is only going round again to be made runnable. A nudged reply
+   * that comes back broken must never cost the user the working script they
+   * already had.
+   */
+  let setAsideForNudge: { source: string; report: ValidationReport } | null = null;
+  const runStartedAt = Date.now();
 
   // rounds + 1: the first pass is the ATTEMPT, `repairRounds` is how many
   // corrections follow it. Off-by-one here silently halves a weak tier's budget.
   for (let round = 0; round <= req.plan.repairRounds; round++) {
+    const t0 = Date.now();
     const reply = await req.complete(system, user);
-    const source = extractScript(reply);
+    // SPLIT, not extracted: the prose around the fence is the model's account of
+    // what it changed, and dropping it here is why the author could not see any
+    // reasoning anywhere downstream.
+    const { source, note, thinking } = splitReply(reply);
     // NARROWED TO THE OBJECT TYPE. The check that GRADES the answer must use
     // the same slice of the API the prompt showed: a draft written against a
     // member this object cannot reach is dead at mount, and a validator that
     // sees the flat union calls it clean.
     const report = validateScriptSource(source, req.objectType);
-    const attempt: AuthorAttempt = { round, source, report };
+    const attempt: AuthorAttempt = {
+      round,
+      source,
+      report,
+      reply,
+      note,
+      thinking,
+      at: t0 - runStartedAt,
+      durationMs: Date.now() - t0,
+      surfaceTokens: surface.costTokens,
+      surfaceTruncated: surface.truncated,
+    };
     attempts.push(attempt);
-    req.onAttempt?.(round, report);
 
     // L3 runs ONLY once the static checks pass. Executing a script that is
     // already known broken wastes a run and produces a runtime error that just
@@ -438,6 +498,41 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
           "workbook, so it is not doing the job. Return the whole script again, actually writing " +
           "the cells the task describes.";
       }
+    }
+
+    // REPORTED ONCE, AND HERE. Below the dry run, so `attempt.dryRun` is filled
+    // in; above the nudge, because the nudge is a repair instruction and not a
+    // fact about the attempt.
+    req.onAttempt?.(attempt);
+
+    // THE RUN-TARGET NUDGE.
+    //
+    // `round < req.plan.repairRounds` is not defensive: repairRounds is ONE for
+    // the strong tier (modelProfile/index.ts:107), so a nudge on the final round
+    // sets behaviouralFix, skips the accept arm, ends the loop and reports
+    // `ok: false` — "It passes every static check but does not do what was
+    // asked" — about a script that is correct.
+    //
+    // CREATE ONLY: in EDIT mode, EDIT_SYSTEM says "keep every other line byte
+    // for byte", and asking for a refactor in the same message contradicts it.
+    //
+    // ONE SHOT: the change is a pure refactor, and a round is minutes on a local
+    // model (6m35s measured).
+    if (
+      report.ok &&
+      !behaviouralFix &&
+      !req.edit &&
+      !nudgedRunTarget &&
+      round < req.plan.repairRounds &&
+      report.findings.some((f) => f.code === "no-run-target")
+    ) {
+      setAsideForNudge = { source, report };
+      nudgedRunTarget = true;
+      behaviouralFix =
+        "The script is valid, but all of its work sits inside setup() or a handler, so the user " +
+        "cannot press Run to start it. Move the work into a TOP-LEVEL function that takes NO " +
+        "arguments -- async function run() { ... } -- and have setup() call it (or wire the hook " +
+        "to call it). Do not change what the script does. Return the whole script again.";
     }
 
     if (report.ok && !behaviouralFix) {
@@ -512,6 +607,24 @@ export async function authorScript(req: AuthorRequest): Promise<AuthorResult> {
   }
 
   const last = attempts[attempts.length - 1];
+
+  // A COSMETIC REFACTOR REQUEST MUST NEVER COST A WORKING SCRIPT.
+  //
+  // "Accept whatever comes back" is not what this loop does: the nudged reply is
+  // re-validated, and a broken one would be returned as the result. The draft we
+  // set aside was already accept-worthy, so it wins.
+  if (!last.report.ok && setAsideForNudge) {
+    return {
+      ok: true,
+      source: setAsideForNudge.source,
+      report: setAsideForNudge.report,
+      attempts,
+      unchanged: req.edit ? sameScript(setAsideForNudge.source, req.edit.baseSource) : undefined,
+      summary:
+        "Drafted and validated; a follow-up correction was discarded because it came back worse.",
+    };
+  }
+
   const errors = last.report.findings.filter((f) => f.severity === "error");
   // A draft can exhaust its rounds while STATICALLY valid — that is exactly the
   // case L3 exists to catch, and reporting "still wrong: " with an empty list

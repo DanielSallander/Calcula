@@ -1269,6 +1269,66 @@ fn the_reset_leaves_application_state_alone() {
     );
 }
 
+/// WORKBOOK A'S PROMPTS DO NOT SURVIVE INTO WORKBOOK B.
+///
+/// `script_authoring.json` is a save source (`persist_script_authoring`), so a
+/// log left resident is one workbook's prompts written into the next `.cala` the
+/// user saves — attributed to a different document's script ids. This is the §2w
+/// leak class with the user's own words as the payload: a prompt says what the
+/// author was trying to do with their data, and a workbook you send someone must
+/// not carry it out of an unrelated one.
+///
+/// POPULATE / assert-populated / RESET / assert-empty, because a reset test that
+/// passes on an empty store proves nothing.
+#[test]
+fn an_authoring_transcript_does_not_survive_the_document_it_belongs_to() {
+    use calcula_format::features::script_authoring::{AuthoringRun, ScriptAuthoringLog};
+
+    let s = Stores::new();
+    let mut log = ScriptAuthoringLog::new();
+    log.insert(
+        "obj-1".to_string(),
+        vec![AuthoringRun {
+            run_id: "r1".to_string(),
+            kind: "edit".to_string(),
+            outcome: "unchanged".to_string(),
+            decision: Some("rejected".to_string()),
+            decided_at: Some("2026-08-26T10:00:05Z".to_string()),
+            started_at: "2026-08-26T10:00:00Z".to_string(),
+            elapsed_ms: 5_000,
+            instruction: "LEAK PROBE: flag the customers who are behind on payments".to_string(),
+            object_type: "button".to_string(),
+            provider_id: "ollama".to_string(),
+            model: "qwen3:8b".to_string(),
+            tier: "restricted".to_string(),
+            surface_tokens: 3_200,
+            surface_truncated: false,
+            summary: "returned unchanged".to_string(),
+            attempts: Vec::new(),
+            notices: Vec::new(),
+            changed_nothing: true,
+            unexercised_hooks: Vec::new(),
+            elided: None,
+        }],
+    );
+    *s.state.script_authoring.write(&seed()).unwrap() = log;
+
+    assert_eq!(
+        s.state.script_authoring.read().unwrap().len(),
+        1,
+        "precondition: the transcript really is live before the reset"
+    );
+
+    s.reset();
+
+    assert!(
+        s.state.script_authoring.read().unwrap().is_empty(),
+        "the previous document's prompts are still live after the reset, so the \
+         next save writes a `script_authoring.json` naming scripts this workbook \
+         does not have and words its author never typed here"
+    );
+}
+
 /// The reset does not dirty the document.
 ///
 /// Both callers assign "saved" as their last act, so a reset that marked the

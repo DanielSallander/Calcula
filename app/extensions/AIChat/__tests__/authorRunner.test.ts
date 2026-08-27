@@ -25,6 +25,17 @@ vi.mock("@api", () => ({
 
 vi.mock("../lib/probeRunner", () => ({ readProfile: () => null }));
 
+/**
+ * The transcript client. Mocked because the real one calls `invoke` straight
+ * through to Tauri, and because the CREATE run is persisted here — in the main
+ * window, keyed by the DRAFT id the delivery just minted, which is what lets the
+ * editor re-key it on Save without widening the editor seam by a single field.
+ */
+const appendScriptAuthoringRun = vi.fn(async () => {});
+vi.mock("@api/objectScriptBackend", () => ({
+  appendScriptAuthoringRun: (...a: unknown[]) => appendScriptAuthoringRun(...(a as [])),
+}));
+
 const authorScript = vi.fn();
 const previewObjectScript = vi.fn();
 vi.mock("@api/scriptHost/scriptAuthoring", () => ({ authorScript: (...a: unknown[]) => authorScript(...a) }));
@@ -34,6 +45,7 @@ vi.mock("@api/scriptHost/modelProfile", () => ({
 }));
 
 const { runAuthor } = await import("../lib/authorRunner");
+const { MAX_REASONING_CHARS } = await import("@api/scriptHost/authoringRun");
 
 const REQ = {
   intent: "colour each selected cell by its content",
@@ -55,6 +67,7 @@ beforeEach(() => {
   invoke.mockReset();
   authorScript.mockReset();
   previewObjectScript.mockReset();
+  appendScriptAuthoringRun.mockClear();
   unlisten.mockClear();
   deltaSink = null;
   previewObjectScript.mockResolvedValue(dry());
@@ -259,6 +272,42 @@ describe("EDIT mode", () => {
     expect(res.draftId).toBe("draft-abc123");
   });
 
+  it("records the CREATE run under the DRAFT id", async () => {
+    // The draft id is the only identity this script has until someone saves it,
+    // and both ids are in the editor's hand from the moment the draft arrives —
+    // so keying here is what makes the editor's adopt-on-save possible without a
+    // single new field on the wire.
+    authorScript.mockResolvedValue(OK_RESULT);
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    const res = await runAuthor({ ...REQ });
+
+    expect(appendScriptAuthoringRun).toHaveBeenCalledTimes(1);
+    const [id, run] = appendScriptAuthoringRun.mock.calls[0] as unknown as [string, { kind: string; runId: string }];
+    expect(id).toBe("draft-abc123");
+    expect(run.kind).toBe("create");
+    // The SAME record the caller got, not a second description of the same run.
+    expect(run).toBe(res.run);
+  });
+
+  it("does not record an EDIT here — the editor writes that, on a decision", async () => {
+    // The control. An edit belongs to a script that already exists, and nothing
+    // is persisted about it until a human presses Accept or Reject.
+    authorScript.mockResolvedValue(OK_RESULT);
+    await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
+    expect(appendScriptAuthoringRun).not.toHaveBeenCalled();
+  });
+
+  it("delivers the draft even when the transcript write fails", async () => {
+    // Fire-and-forget is load-bearing: an authoring run that SUCCEEDED must not
+    // be reported as failed because a log write did not land.
+    authorScript.mockResolvedValue(OK_RESULT);
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    appendScriptAuthoringRun.mockRejectedValueOnce(new Error("no workbook"));
+    const res = await runAuthor({ ...REQ });
+    expect(res.ok).toBe(true);
+    expect(res.draftId).toBe("draft-abc123");
+  });
+
   it("carries `unchanged` through to the caller", async () => {
     authorScript.mockResolvedValue({ ...OK_RESULT, unchanged: true });
     const res = await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
@@ -372,23 +421,43 @@ describe("what the preview could not exercise reaches the result", () => {
 });
 
 describe("the ladder's notices reach the result too", () => {
+  // EVERY FINDING CARRIES ITS CODE, as of 2026-08-26: `notices` is what two
+  // screens render, and both used to print the lot under "check what it
+  // declares" — which became a lie the moment the ladder raised a notice about
+  // something other than a declaration.
   const MIXED_REPORT = {
     ok: true,
     findings: [
-      { severity: "notice", message: "`net.fetch` is declared but no call requiring it was found." },
-      { severity: "error", message: "`context.nope` is not part of the object-script API" },
+      { severity: "notice", code: "declared-not-observed", message: "`net.fetch` is declared but no call requiring it was found." },
+      { severity: "error", code: "unknown-member", message: "`context.nope` is not part of the object-script API" },
     ],
   };
 
   it("carries the notices and NOT the errors", async () => {
-    authorScript.mockImplementation(async (r: { onAttempt: (n: number, rep: unknown) => void }) => {
-      r.onAttempt(0, MIXED_REPORT);
+    // `onAttempt` WAS `(round, report)` and is now `(attempt)`. WIDENED, not
+    // joined by a second callback: one callback that already did 90% of the job
+    // is what the whole attempt now rides on. The two assertions below are
+    // UNCHANGED, which is the proof that widening it changed no behaviour.
+    authorScript.mockImplementation(async (r: { onAttempt: (a: unknown) => void }) => {
+      r.onAttempt({
+        round: 0,
+        source: "export function setup(c) {}",
+        report: MIXED_REPORT,
+        reply: "```javascript\nexport function setup(c) {}\n```",
+        note: "",
+        at: 0,
+        durationMs: 1,
+        surfaceTokens: 100,
+        surfaceTruncated: false,
+      });
       return { ...OK_RESULT, report: MIXED_REPORT };
     });
     invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
     const res = await runAuthor({ ...REQ });
 
-    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+    expect(res.notices).toEqual([
+      { code: "declared-not-observed", message: "`net.fetch` is declared but no call requiring it was found." },
+    ]);
     // The error went where errors go — the per-round problem list — and a
     // notice must never appear there, because that list feeds the repair.
     expect(res.rounds[0].problems).toEqual(["`context.nope` is not part of the object-script API"]);
@@ -397,13 +466,17 @@ describe("the ladder's notices reach the result too", () => {
   it("carries them on the EDIT arm as well", async () => {
     authorScript.mockResolvedValue({ ...OK_RESULT, report: MIXED_REPORT, unchanged: false });
     const res = await runAuthor({ ...REQ, baseSource: "export function setup(c) {}" });
-    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+    expect(res.notices).toEqual([
+      { code: "declared-not-observed", message: "`net.fetch` is declared but no call requiring it was found." },
+    ]);
   });
 
   it("carries them on the FAILURE arm as well", async () => {
     authorScript.mockResolvedValue({ ...OK_RESULT, ok: false, report: MIXED_REPORT });
     const res = await runAuthor({ ...REQ });
-    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+    expect(res.notices).toEqual([
+      { code: "declared-not-observed", message: "`net.fetch` is declared but no call requiring it was found." },
+    ]);
   });
 
   it("carries them on the DELIVERY-FAILURE arm as well", async () => {
@@ -414,12 +487,269 @@ describe("the ladder's notices reach the result too", () => {
     });
     const res = await runAuthor({ ...REQ });
     expect(res.deliveryError).toContain("Script Security refused");
-    expect(res.notices).toEqual(["`net.fetch` is declared but no call requiring it was found."]);
+    expect(res.notices).toEqual([
+      { code: "declared-not-observed", message: "`net.fetch` is declared but no call requiring it was found." },
+    ]);
   });
 
   it("is an empty list when the report has none", async () => {
     authorScript.mockResolvedValue(OK_RESULT);
     const res = await runAuthor({ ...REQ });
     expect(res.notices).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The NAME the draft carries
+// ---------------------------------------------------------------------------
+
+describe("the name that reaches the draft store", () => {
+  // Reported 2026-08-26: "It prompts 'what should change in' and then the
+  // beginning of my prompt is shown: 'create a script that formats the'."
+  // `titleFor` took the first six words, so every AI draft was named after its
+  // own request preamble.
+  //
+  // `./scriptName` is a SIBLING and is deliberately not mocked in this file, so
+  // the real function runs and this measures the real name.
+  const OWNER_PROMPT = "create a script that formats the background color of each selected cell";
+
+  function draftInput(): Record<string, unknown> {
+    const call = invoke.mock.calls.find((c) => c[0] === "ai_chat_run_tool");
+    return (call![1] as { input: Record<string, unknown> }).input;
+  }
+
+  it("names the draft after the WORK, never after the request", async () => {
+    authorScript.mockResolvedValue(OK_RESULT);
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    await runAuthor({ ...REQ, intent: OWNER_PROMPT });
+
+    const input = draftInput();
+    expect(input.name).toBe("Formats the background color of each selected...");
+    expect(input.name as string).not.toContain("create a script");
+  });
+
+  it("still hands the draft store the FULL intent as its description", async () => {
+    // The draft banner renders `description`, and truncating it there would lose
+    // the only complete record of what was asked.
+    authorScript.mockResolvedValue(OK_RESULT);
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    await runAuthor({ ...REQ, intent: OWNER_PROMPT });
+
+    const input = draftInput();
+    expect(input.description).toBe(OWNER_PROMPT);
+    // snake_case because this is an MCP tool INPUT SCHEMA, not a serde struct.
+    expect(input.object_type).toBe("button");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The RUN record — what the owner could not see
+// ---------------------------------------------------------------------------
+
+describe("the run record", () => {
+  /** An attempt as `authorScript` now produces one. */
+  const attempt = (over: Record<string, unknown> = {}) => ({
+    round: 0,
+    source: "export function setup(c) {}",
+    report: { ok: true, findings: [] },
+    reply: "```javascript\nexport function setup(c) {}\n```",
+    note: "",
+    thinking: "",
+    at: 0,
+    durationMs: 5,
+    surfaceTokens: 1234,
+    surfaceTruncated: false,
+    ...over,
+  });
+
+  it("keeps the model's WHOLE reply, prose and all", async () => {
+    // THE ANTI-DRIFT TEST, and the one that stops anyone "tidying" the recorder
+    // back into a code archive. `extractScript` kept the fence and dropped every
+    // word around it, which is why the author could see no reasoning anywhere.
+    const reply = [
+      "I looked at the sheet first.",
+      "```javascript",
+      "export function setup(c) {}",
+      "```",
+      "I left the capability line alone.",
+    ].join("\n");
+    authorScript.mockResolvedValue({
+      ...OK_RESULT,
+      attempts: [attempt({ reply, note: "I looked at the sheet first.\nI left the capability line alone." })],
+    });
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    const res = await runAuthor({ ...REQ });
+
+    expect(res.run.attempts).toHaveLength(1);
+    expect(res.run.attempts[0].reply).toContain("I looked at the sheet first.");
+    expect(res.run.attempts[0].reply).toContain("I left the capability line alone.");
+    expect(res.run.attempts[0].replyChars).toBe(reply.length);
+    expect(res.run.attempts[0].note).toContain("I left the capability line alone.");
+  });
+
+  it("records the reasoning deltas that were already on the wire", async () => {
+    // `ReasoningDelta` is emitted by ai/stream.rs and typed in aiTypes.ts; the
+    // listener's `event.type !== "textDelta"` early return discarded every one.
+    const long = "why".repeat(2000); // 6,000 chars, well past MAX_REASONING_CHARS
+    authorScript.mockImplementation(async (r: { complete: (s: string, u: string) => Promise<string> }) => {
+      const p = r.complete("sys", "user");
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+      const call = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").pop();
+      const streamId = (call![1] as { streamId: string }).streamId;
+      deltaSink!({ streamId, type: "reasoningDelta", text: long });
+      await p;
+      return { ...OK_RESULT, attempts: [attempt()] };
+    });
+    invoke.mockResolvedValue({ blocks: [{ type: "text", text: "```javascript\nexport function setup(c) {}\n```" }], stopReason: "endTurn", model: "m" });
+    const res = await runAuthor({ ...REQ });
+
+    const a = res.run.attempts[0];
+    expect(a.reasoning.length, "the record is capped").toBeLessThanOrEqual(MAX_REASONING_CHARS);
+    expect(a.reasoning.startsWith("why"), "head-kept, so the opening survives").toBe(true);
+    expect(a.reasoning.length, "and it is not empty — the deltas DID arrive").toBeGreaterThan(100);
+    expect(a.reasoningChars, "the TRUE length, so the elision is legible").toBe(long.length);
+  });
+
+  it("falls back to the INLINE scratchpad when no reasoning delta ever fired", async () => {
+    // Ollama delivers deepseek-r1/qwen3 reasoning inline as <think>...</think>
+    // in the TEXT — no ReasoningDelta fires for it. Before the fallback, an
+    // inline reasoner's run record showed an empty reasoning column while its
+    // actual thought process sat inside the reply.
+    authorScript.mockResolvedValue({
+      ...OK_RESULT,
+      attempts: [attempt({ thinking: "maybe onSelectionChange... no, direct." })],
+    });
+    const res = await runAuthor({ ...REQ });
+    const a = res.run.attempts[0];
+    expect(a.reasoning).toBe("maybe onSelectionChange... no, direct.");
+    expect(a.reasoningChars).toBe("maybe onSelectionChange... no, direct.".length);
+  });
+
+  it("prefers stream reasoning over the inline scratchpad when BOTH exist", async () => {
+    // A server that splits reasoning out sends deltas AND may leave residue in
+    // the text. The deltas are the authoritative channel; falling through to
+    // the scratchpad would record the same thoughts twice under two shapes.
+    authorScript.mockImplementation(async (r: { complete: (s: string, u: string) => Promise<string> }) => {
+      const p = r.complete("sys", "user");
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+      const call = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").pop();
+      const streamId = (call![1] as { streamId: string }).streamId;
+      deltaSink!({ streamId, type: "reasoningDelta", text: "streamed thought" });
+      await p;
+      return { ...OK_RESULT, attempts: [attempt({ thinking: "inline residue" })] };
+    });
+    invoke.mockResolvedValue({ blocks: [{ type: "text", text: "```javascript\nexport function setup(c) {}\n```" }], stopReason: "endTurn", model: "m" });
+    const res = await runAuthor({ ...REQ });
+    expect(res.run.attempts[0].reasoning).toBe("streamed thought");
+  });
+
+  it("maps ok/unchanged/stalled onto the outcome, with `ok` tested FIRST", async () => {
+    // `authorScript` sets `unchanged` on its FAILURE return too, so an
+    // unchanged-first ordering would headline an exhausted run as "a real
+    // answer, not a failure".
+    authorScript.mockResolvedValue({ ...OK_RESULT, unchanged: true, attempts: [attempt()] });
+    expect((await runAuthor({ ...REQ, baseSource: "x" })).run.outcome).toBe("unchanged");
+
+    authorScript.mockResolvedValue({ ...OK_RESULT, ok: false, stalled: true, attempts: [attempt()] });
+    expect((await runAuthor({ ...REQ })).run.outcome).toBe("stalled");
+
+    authorScript.mockResolvedValue({ ...OK_RESULT, ok: false, unchanged: true, attempts: [attempt()] });
+    expect((await runAuthor({ ...REQ })).run.outcome).toBe("exhausted");
+
+    authorScript.mockResolvedValue({ ...OK_RESULT, attempts: [attempt()] });
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    expect((await runAuthor({ ...REQ })).run.outcome).toBe("changed");
+  });
+
+  it("reports ALL FOUR errors of a round, not the first three", async () => {
+    // The regression guard for the removed `.slice(0, 3)`: trimming at the
+    // RECORDER meant the fourth error could never be recovered downstream.
+    const four = [1, 2, 3, 4].map((n) => ({ severity: "error", code: "unknown-member", message: `problem ${n}` }));
+    const badReport = { ok: false, findings: four };
+    authorScript.mockImplementation(async (r: { onAttempt: (a: unknown) => void }) => {
+      r.onAttempt(attempt({ report: badReport }));
+      return { ...OK_RESULT, ok: false, report: badReport, attempts: [attempt({ report: badReport })] };
+    });
+    const res = await runAuthor({ ...REQ });
+    expect(res.run.attempts[0].findings).toHaveLength(4);
+    expect(res.rounds[0].problems, "the fourth error must survive the recorder").toEqual([
+      "problem 1", "problem 2", "problem 3", "problem 4",
+    ]);
+  });
+
+  it("carries every severity onto the record, notices included", async () => {
+    const mixed = [
+      { severity: "notice", code: "declared-not-observed", message: "`net.fetch` is declared but unused." },
+      { severity: "error", code: "unknown-member", message: "`context.nope` is not part of the API" },
+    ];
+    authorScript.mockResolvedValue({
+      ...OK_RESULT,
+      report: { ok: true, findings: mixed },
+      attempts: [attempt({ report: { ok: true, findings: mixed } })],
+    });
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    const res = await runAuthor({ ...REQ });
+    expect(res.run.attempts[0].findings.map((f) => f.severity)).toEqual(["notice", "error"]);
+    expect(res.run.notices).toEqual(["`net.fetch` is declared but unused."]);
+  });
+
+  it("is present on EVERY return arm, including the failure one", async () => {
+    previewObjectScript.mockResolvedValue(dry({ totalChanges: 0 }));
+    authorScript.mockImplementation(async (r: { dryRun: (s: string) => Promise<unknown> }) => {
+      await r.dryRun("x");
+      return {
+        ...OK_RESULT, ok: false, summary: "Gave up.",
+        report: { ok: false, findings: [{ severity: "notice", code: "n", message: "a notice" }] },
+        attempts: [attempt()],
+      };
+    });
+    const res = await runAuthor({ ...REQ });
+    expect(res.ok).toBe(false);
+    expect(res.run.notices, "the failure arm must fill it too").toEqual(["a notice"]);
+    expect(res.run.changedNothing).toBe(true);
+    expect(res.run.kind).toBe("create");
+    expect(res.run.model).toBe("qwen3.5:9b");
+    expect(res.run.tier).toBe("assisted");
+  });
+
+  it("clamps a verbose run to the wire budget, and SAYS that it did", async () => {
+    // A local model that reasons at length must not be able to wedge the channel.
+    const attempts = Array.from({ length: 7 }, (_, i) =>
+      attempt({ round: i, at: i * 1000, note: "n".repeat(5000), reply: "r".repeat(5000) }),
+    );
+    authorScript.mockResolvedValue({ ...OK_RESULT, attempts });
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    const res = await runAuthor({ ...REQ });
+
+    const total = res.run.attempts.reduce(
+      (n, a) => n + a.reply.length + a.note.length + a.reasoning.length,
+      0,
+    );
+    expect(total).toBeLessThanOrEqual(12_000);
+    expect(res.run.elided, "an elision the reader cannot see reads as a bug").toBe(true);
+    expect(res.run.attempts[0].replyChars, "the TRUE length survives the clamp").toBe(5000);
+  });
+
+  it("uses integers for every field the Rust wire types as an integer", async () => {
+    // serde_json REFUSES a JSON float for an i64/u32 field: one
+    // `performance.now()` in `buildRunRecord` and the whole append invoke fails
+    // with "invalid type: floating point number".
+    authorScript.mockResolvedValue({ ...OK_RESULT, attempts: [attempt()] });
+    invoke.mockResolvedValue("Drafted (id=draft-abc123) for button.");
+    const res = await runAuthor({ ...REQ });
+    const ints: Array<[string, number]> = [
+      ["elapsedMs", res.run.elapsedMs],
+      ["surfaceTokens", res.run.surfaceTokens],
+      ["attempt", res.run.attempts[0].attempt],
+      ["at", res.run.attempts[0].at],
+      ["durationMs", res.run.attempts[0].durationMs],
+      ["replyChars", res.run.attempts[0].replyChars],
+      ["reasoningChars", res.run.attempts[0].reasoningChars],
+    ];
+    for (const [name, value] of ints) {
+      expect(Number.isInteger(value), `${name} must be an integer on the wire`).toBe(true);
+      expect(value, `${name} must not be negative`).toBeGreaterThanOrEqual(0);
+    }
+    expect(res.run.startedAt, "ISO, so Rust can parse it as a string").toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });

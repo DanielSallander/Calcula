@@ -14,6 +14,9 @@ use crate::features::pivot_layouts::PivotLayoutDef;
 use crate::features::scheduled_jobs::{
     SCHEDULED_JOBS_FEATURE, SCHEDULED_JOBS_FILE, SCHEDULED_JOBS_MIN_FORMAT_VERSION,
 };
+// No `*_MIN_FORMAT_VERSION` import here, and there is none to import: the
+// authoring transcript takes a feature id and no link in the version chain.
+use crate::features::script_authoring::{SCRIPT_AUTHORING_FEATURE, SCRIPT_AUTHORING_FILE};
 use crate::manifest::{
     stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
@@ -138,6 +141,16 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     // forgot to push the id are still recovered rather than silently dropped.
     if !workbook.media.is_empty() {
         manifest.features.push("media".to_string());
+    }
+    // The prompts the author typed. A manifest FEATURE ID and DELIBERATELY NO
+    // LINK IN THE FORMAT-VERSION CHAIN, for the reason the `media` block above
+    // spells out: an older reader that drops this loses a LOG, it is not made
+    // to lie. The id still earns its keep exactly as media's does — it lets
+    // `read_calcula_manifest` answer "does this workbook carry the prompts its
+    // author typed?" without materializing the workbook, which is a privacy
+    // question someone should be able to answer before emailing a .cala.
+    if workbook.user_files.contains_key(SCRIPT_AUTHORING_FILE) {
+        manifest.features.push(SCRIPT_AUTHORING_FEATURE.to_string());
     }
     // Scheduled jobs ride in user_files (see features::scheduled_jobs for why
     // that home is the .calp firewall), but they get their OWN manifest feature
@@ -1479,6 +1492,81 @@ mod tests {
             manifest.format_version, CALA_BASE_FORMAT_VERSION,
             "media must not take a link in the format-version chain"
         );
+    }
+
+    #[test]
+    fn script_authoring_declares_a_feature_id_but_never_raises_the_format_version() {
+        // Modeled on the media test above, and for the same reason: an older
+        // reader that drops `script_authoring.json` loses a LOG. It is not made
+        // to lie -- no schedule is disarmed, no stale workbook comes back
+        // looking calculated, no hidden row comes back visible. Stamping a
+        // version would instead make every workbook that ever carried an AI
+        // authoring transcript unopenable by an older build, for no protective
+        // gain at all.
+        //
+        // The id itself is load-bearing for a PRIVACY question: "does this
+        // .cala carry the prompts its author typed?" must be answerable from
+        // the manifest alone, before anyone emails the file.
+        //
+        // A future edit that adds a version link fails HERE and has to argue
+        // for it rather than land in passing.
+        use crate::features::script_authoring::{
+            AuthoringRun, ScriptAuthoringFile, ScriptAuthoringLog, SCRIPT_AUTHORING_FILE,
+        };
+
+        let baseline = write_calcula_bytes(&make_test_workbook()).unwrap();
+        let baseline_version = read_calcula_manifest(&baseline).unwrap().format_version;
+
+        let mut workbook = make_test_workbook();
+        let mut log = ScriptAuthoringLog::new();
+        log.insert(
+            "obj-1".to_string(),
+            vec![AuthoringRun {
+                run_id: "r1".to_string(),
+                kind: "edit".to_string(),
+                outcome: "unchanged".to_string(),
+                decision: Some("rejected".to_string()),
+                decided_at: Some("2026-08-26T10:00:05Z".to_string()),
+                started_at: "2026-08-26T10:00:00Z".to_string(),
+                elapsed_ms: 5_000,
+                instruction: "colour the negatives red".to_string(),
+                object_type: "button".to_string(),
+                provider_id: "ollama".to_string(),
+                model: "qwen3:8b".to_string(),
+                tier: "restricted".to_string(),
+                surface_tokens: 3_200,
+                surface_truncated: false,
+                summary: "returned unchanged".to_string(),
+                attempts: Vec::new(),
+                notices: Vec::new(),
+                changed_nothing: true,
+                unexercised_hooks: Vec::new(),
+                elided: None,
+            }],
+        );
+        workbook.user_files.insert(
+            SCRIPT_AUTHORING_FILE.to_string(),
+            ScriptAuthoringFile::new(log).to_json_bytes().unwrap(),
+        );
+
+        let bytes = write_calcula_bytes(&workbook).unwrap();
+        let manifest = read_calcula_manifest(&bytes).unwrap();
+        assert!(
+            manifest.features.contains(&"script_authoring".to_string()),
+            "the manifest must answer 'does this carry the prompts its author typed?' alone"
+        );
+        assert_eq!(
+            manifest.format_version, baseline_version,
+            "script_authoring must not take a link in the format-version chain"
+        );
+
+        // And the section survives the round trip under the existing `files` id.
+        let loaded = read_calcula_bytes(&bytes).unwrap();
+        let back = ScriptAuthoringFile::from_json_bytes(
+            loaded.user_files.get(SCRIPT_AUTHORING_FILE).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(back.runs["obj-1"][0].instruction, "colour the negatives red");
     }
 
     #[test]

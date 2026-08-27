@@ -63,6 +63,39 @@ describe("CREATE mode is byte-identical to before edit mode existed", () => {
     const r = await authorScript({ intent: "x", objectType: "button", plan: PLAN_STANDARD, complete });
     expect(r.unchanged).toBeUndefined();
   });
+
+  it("never tells the model about the transcript that records it", async () => {
+    // CHEAP, AND IT GUARDS A BUG CLASS RATHER THAN A LINE. A run is now recorded
+    // — replies, prose, reasoning, timings — and the tempting next edit is
+    // "while we're here, tell the model its reasoning is being kept." That is
+    // teaching drift: the prompt would start describing the product's internals
+    // instead of the API, and every draft would pay tokens for it. All three
+    // system prompts are covered: BASE alone (standard), BASE + the assisted
+    // template, and BASE + the edit contract.
+    const forbidden = ["transcript", "history", "reasoning"];
+    const probes: Array<[string, string]> = [];
+
+    const std = scripted(fenced(BASE));
+    await authorScript({ intent: "x", objectType: "button", plan: PLAN_STANDARD, complete: std });
+    probes.push(["standard (BASE_SYSTEM alone)", promptOf(std).system]);
+
+    const assisted = scripted(fenced(BASE));
+    await authorScript({ intent: "x", objectType: "button", plan: PLAN_ASSISTED, complete: assisted });
+    probes.push(["assisted (BASE_SYSTEM + template)", promptOf(assisted).system]);
+
+    const edit = scripted(fenced(BASE));
+    await authorScript({
+      intent: "x", objectType: "button", plan: PLAN_STANDARD, complete: edit,
+      edit: { baseSource: BASE },
+    });
+    probes.push(["edit (BASE_SYSTEM + EDIT_SYSTEM)", promptOf(edit).system]);
+
+    for (const [label, system] of probes) {
+      for (const word of forbidden) {
+        expect(system.toLowerCase(), `${label} must not mention "${word}"`).not.toContain(word);
+      }
+    }
+  });
 });
 
 describe("EDIT mode shows the model the script it is changing", () => {
@@ -215,5 +248,67 @@ describe("an unchanged reply is reported, not repaired", () => {
       intent: "x", objectType: "button", plan: PLAN_STANDARD, complete, edit: { baseSource: BASE },
     });
     expect(r.summary).not.toContain("Drafted");
+  });
+});
+
+describe("what an attempt records, against the REAL loop", () => {
+  // DELIBERATELY NOT IN `authorRunner.test.ts`. That file mocks `authorScript`,
+  // so a stall assertion there would be an assertion about the fixture the test
+  // itself wrote. The stall, the timings and the out-of-fence prose are all
+  // properties of THIS loop, so they are measured where the loop actually runs.
+  const INVALID = "export function setup(context) { context.nopeNope(); }";
+
+  it("stalls after the same errors repeat, and records three attempts", async () => {
+    const complete = scripted(fenced(INVALID));
+    const r = await authorScript({
+      intent: "x", objectType: "button", plan: PLAN_ASSISTED, model: "m", complete,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.stalled).toBe(true);
+    // STALLED_AFTER_REPEATS is 2, so: one attempt plus two identical repeats.
+    // NOT the full seven that `PLAN_ASSISTED` would otherwise allow.
+    expect(r.attempts).toHaveLength(3);
+  });
+
+  it("carries the model's out-of-fence prose, and per-attempt timings", async () => {
+    // THE FIELD THE OWNER WENT LOOKING FOR. `extractScript` used to keep the
+    // fence and drop every word around it, so the model's account of what it did
+    // was destroyed at the moment it arrived.
+    const reply = [
+      "Here is what I changed and why.",
+      fenced(BASE),
+      "I left the capability pragma alone on purpose.",
+    ].join("\n\n");
+    const complete = scripted(reply);
+    const r = await authorScript({
+      intent: "x", objectType: "button", plan: PLAN_STANDARD, complete, edit: { baseSource: BASE },
+    });
+    const a = r.attempts[0];
+    expect(a.note).toContain("Here is what I changed and why.");
+    expect(a.note).toContain("I left the capability pragma alone on purpose.");
+    expect(a.note, "the fence itself is the SOURCE, not the note").not.toContain("```");
+    expect(a.reply, "the whole reply, verbatim").toBe(reply);
+    expect(a.source).toContain("setRangeFormat");
+
+    // Timings. `at` is measured from the RUN's start, so attempt 0 is at ~0 and
+    // never negative; both are integers, because the wire types them as i64 and
+    // serde_json refuses a float for an integer field.
+    for (const at of r.attempts) {
+      expect(at.at).toBeGreaterThanOrEqual(0);
+      expect(Number.isInteger(at.at), "`at` must be an integer for the i64 wire field").toBe(true);
+      expect(at.durationMs).toBeGreaterThanOrEqual(0);
+      expect(Number.isInteger(at.durationMs), "`durationMs` must be an integer too").toBe(true);
+      expect(at.surfaceTokens).toBeGreaterThan(0);
+      expect(typeof at.surfaceTruncated).toBe("boolean");
+    }
+  });
+
+  it("records an empty note for a model that fences and says nothing else", async () => {
+    // The common case must not fabricate prose out of stray whitespace.
+    const complete = scripted(fenced(BASE));
+    const r = await authorScript({
+      intent: "x", objectType: "button", plan: PLAN_STANDARD, complete, edit: { baseSource: BASE },
+    });
+    expect(r.attempts[0].note).toBe("");
   });
 });

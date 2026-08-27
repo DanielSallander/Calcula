@@ -7,6 +7,7 @@ pub mod commands;
 pub mod notebook_commands;
 pub mod notebook_executor;
 pub mod object_script_commands;
+pub mod authoring_log;
 pub mod template_commands;
 pub mod capability_store;
 pub mod scheduler;
@@ -17,6 +18,9 @@ pub mod distribution_gateway;
 pub use commands::*;
 pub use notebook_commands::*;
 pub use object_script_commands::*;
+// Glob so the `#[tauri::command]`-generated `__cmd__*` macros come along —
+// `generate_handler!` resolves those, not just the functions.
+pub use authoring_log::*;
 pub use template_commands::*;
 pub use udf::*;
 pub use capability_store::CapabilityStore;

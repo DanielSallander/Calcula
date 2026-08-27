@@ -4,14 +4,13 @@
 //          hook.
 // CONTEXT: docs/design/local-model-script-authoring.md §5c.1.
 //
-//          WHY IT IS ITS OWN LEAF. Five call sites reach this sentence
-//          (measured): `dryRunNotes.ts` (the chat transcript note and the guided
-//          result card), `draftGate.describeDryRun` (the model's note, and the
-//          same string as the user's), `authorRunner` (the guided job's phase
-//          line), `AiEditDiff.tsx` (the editor's diff window), and
-//          `report.summarize` — which has no production caller at all and is
-//          filed for deletion, so four of the five reach a person. A sentence
-//          spelled five times is five sentences the day one of them is edited,
+//          WHY IT IS ITS OWN LEAF. Every surface that renders a dry-run
+//          caveat reaches this sentence — some through `dryRunCaveat` beside
+//          it, the rest by calling `unexercisedHookNote` directly; the census
+//          is `rg unexercisedHookNote app`, not this comment. (One caller,
+//          `report.summarize`, has no production caller of its own and is
+//          filed for deletion.) A sentence spelled separately at each surface
+//          is that many different sentences the day one of them is edited,
 //          and this particular sentence exists to stop a MISREADING: "it changed
 //          no cells" is a fact about the preview when the handler holding the
 //          work was never fired, and both a model and a reviewer read the bare

@@ -182,9 +182,19 @@ const OBJECT_SCRIPT = {
   provenance: "local",
 };
 const saveObjectScript = vi.fn(async () => {});
+// The authoring log. Doubled here rather than left off: the editor imports these
+// four by name, and vitest throws on an export a mock factory does not declare.
+const appendScriptAuthoringRun = vi.fn(async () => {});
+const adoptScriptAuthoringRuns = vi.fn(async () => {});
+const clearScriptAuthoringRuns = vi.fn(async () => {});
+const getScriptAuthoringRuns = vi.fn(async () => [] as unknown[]);
 vi.mock("@api/objectScriptBackend", () => ({
   loadAllObjectScripts: async () => [OBJECT_SCRIPT],
   saveObjectScript: (...a: unknown[]) => saveObjectScript(...(a as [])),
+  appendScriptAuthoringRun: (...a: unknown[]) => appendScriptAuthoringRun(...(a as [])),
+  adoptScriptAuthoringRuns: (...a: unknown[]) => adoptScriptAuthoringRuns(...(a as [])),
+  clearScriptAuthoringRuns: (...a: unknown[]) => clearScriptAuthoringRuns(...(a as [])),
+  getScriptAuthoringRuns: (...a: unknown[]) => getScriptAuthoringRuns(...(a as [])),
 }));
 vi.mock("@api/backend", () => ({
   listenTauriEvent: async () => () => {},
@@ -333,12 +343,78 @@ async function propose(
   source: string,
   summary = "Changed it.",
   unexercisedHooks: string[] = [],
+  // `run: null` and `askedAgainst: ""` are the DEFAULTS on purpose: they are what
+  // a third-party provider that runs no repair loop, and a payload replayed by an
+  // older main window, actually put on the wire. Every case above this line
+  // therefore keeps exercising the no-run path.
+  run: unknown = null,
+  askedAgainst = "",
 ): Promise<void> {
   expect(aiResultHandler, "the editor never subscribed to AI results").toBeTruthy();
   await act(async () => {
-    aiResultHandler!({ documentId, jobId: "job-1", ok: true, source, summary, unexercisedHooks });
+    aiResultHandler!({
+      documentId, jobId: "job-1", ok: true, source, summary, unexercisedHooks,
+      run, instruction: "make it red", askedAgainst,
+    });
     await Promise.resolve();
   });
+}
+
+/**
+ * An `AuthoringRun` with everything a diff reads.
+ *
+ * Written out rather than partially typed, because `tsconfig.check.json`
+ * excludes test files: a double that forgets a field is invisible to the type
+ * gate and shows up as a blank line in the panel.
+ */
+function runFixture(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    runId: "run-1",
+    kind: "edit",
+    outcome: "unchanged",
+    startedAt: "2026-08-26T09:00:00.000Z",
+    elapsedMs: 395_000,
+    instruction: "make it red",
+    objectType: "button",
+    providerId: "ollama",
+    model: "qwen3.5:9b",
+    tier: "assisted",
+    surfaceTokens: 1200,
+    surfaceTruncated: false,
+    summary: "Read it and left it alone.",
+    attempts: [
+      {
+        attempt: 1, at: 0, durationMs: 1000, ok: false,
+        reply: "I will try this.\n```javascript\nnope\n```",
+        replyChars: 40,
+        note: "I will try this.",
+        reasoning: "", reasoningChars: 0,
+        findings: [
+          { severity: "error", code: "unknown-member", message: "`context.nope` is not part of the object-script API" },
+        ],
+      },
+      {
+        attempt: 2, at: 1000, durationMs: 2000, ok: true,
+        reply: "Nothing here needs changing.\n```javascript\nok\n```",
+        replyChars: 48,
+        note: "Nothing here needs changing.",
+        reasoning: "", reasoningChars: 0,
+        findings: [],
+        dryRun: { applicable: true, ok: true, changedCells: 0 },
+      },
+      {
+        attempt: 3, at: 3000, durationMs: 3000, ok: true,
+        reply: "Same again.\n```javascript\nok\n```",
+        replyChars: 31,
+        note: "", reasoning: "", reasoningChars: 0,
+        findings: [],
+      },
+    ],
+    notices: [],
+    changedNothing: false,
+    unexercisedHooks: [],
+    ...over,
+  };
 }
 
 beforeEach(() => {
@@ -355,6 +431,7 @@ beforeEach(() => {
   store.set(MACRO.id, MACRO);
   saveWorkbookScript.mockClear();
   saveObjectScript.mockClear();
+  appendScriptAuthoringRun.mockClear();
   __resetAiEditClient();
 });
 
@@ -492,6 +569,34 @@ describe("Object Script Editor — Edit with AI never writes for you", () => {
     expect(buffer().value).toBe(originalText);
   });
 
+  it("persists nothing when a REFUSED run is dismissed", async () => {
+    // The bridge's fail() stamps `runId: ""` — the structural unpersistable
+    // marker: nothing was asked, and the backend refuses an empty run id.
+    // Dismiss (wired to reject) must skip the append entirely rather than
+    // fire a write that is guaranteed to be refused and swallowed.
+    await mountApp();
+    await ask("make it red");
+    await act(async () => {
+      aiResultHandler!({
+        documentId: OBJECT_SCRIPT.id,
+        jobId: "",
+        ok: false,
+        source: "",
+        summary: "No AI model is selected.",
+        unexercisedHooks: [],
+        run: runFixture({ runId: "", outcome: "refused", model: "", attempts: [] }),
+        instruction: "make it red",
+        askedAgainst: OBJECT_SCRIPT.source,
+      });
+      await Promise.resolve();
+    });
+
+    await click("ai-edit-dismiss");
+
+    expect(appendScriptAuthoringRun).not.toHaveBeenCalled();
+    expect(q("ai-edit-error")).toBeNull();
+  });
+
   it("says which handler the run never fired, beside the summary", async () => {
     // "It ran and changed no cells" is a fact about the PREVIEW when the work
     // lives in a handler nothing triggered. The author is about to accept this
@@ -607,6 +712,210 @@ describe("Object Script Editor — a recorded macro gets the same protection", (
 
     const accept = q("ai-edit-accept") as HTMLButtonElement;
     expect(accept.disabled).toBe(true);
-    expect(q("ai-edit-diff-nochange")).toBeTruthy();
+    // `propose` sets no `unchanged` and no `run`, so this is the CHANGED arm
+    // with an identical proposal — the case the old single sentence ("the model
+    // made no change to it") could not tell apart from a model that read the
+    // script and decided nothing needed doing.
+    expect(q("ai-edit-diff-verdict")!.textContent).toMatch(/already matches/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE REPORTED CASE: "it did not change anything ... but I could not see the
+// reasoning or the results from the chat."
+// ---------------------------------------------------------------------------
+
+describe("the diff says WHY a run changed nothing, and what the model said", () => {
+  it("names the model and says it found nothing to change", async () => {
+    await mountApp();
+    await ask("make it red");
+    await propose(
+      OBJECT_SCRIPT.id,
+      OBJECT_SCRIPT.source,
+      "Read it and left it alone.",
+      [],
+      runFixture(),
+      OBJECT_SCRIPT.source,
+    );
+
+    const verdict = q("ai-edit-diff-verdict");
+    expect(verdict, "no verdict line in the diff").toBeTruthy();
+    expect(verdict!.textContent).toContain("qwen3.5:9b");
+    expect(verdict!.textContent).toContain("found nothing to change");
+    expect(q("ai-edit-diff-detail")!.textContent).toContain("a real answer, not a failure");
+    // ...and the bare line count is NOT also printed: it restates half of it.
+    expect(q("ai-edit-diff-scale")).toBeNull();
+  });
+
+  it("shows every attempt, what was wrong with it, and what the model said", async () => {
+    await mountApp();
+    await ask("make it red");
+    await propose(
+      OBJECT_SCRIPT.id, OBJECT_SCRIPT.source, "Read it and left it alone.", [],
+      runFixture(), OBJECT_SCRIPT.source,
+    );
+
+    const log = q("ai-edit-run-log");
+    expect(log, "no run log in the diff").toBeTruthy();
+    const text = log!.textContent ?? "";
+    expect(text).toContain("attempt 1");
+    expect(text).toContain("attempt 2");
+    expect(text).toContain("attempt 3");
+    // The rejection, in the validator's own words.
+    expect(text).toContain("`context.nope` is not part of the object-script API");
+    // THE SENTENCE THAT USED TO BE DESTROYED AT `extractScript`.
+    expect(text).toContain("Nothing here needs changing.");
+    expect(text).toContain("[qwen3.5:9b]");
+    // What the dry run made of it.
+    expect(text).toContain("changed 0 cells");
+    // "It was running for some time" becomes a figure.
+    expect(q("ai-edit-run-stats")!.textContent).toContain("6m 35s");
+  });
+
+  it("says none of that about an ordinary change", async () => {
+    // THE NEGATIVE CONTROL. Without it the two assertions above pass for a
+    // component that prints the sentence unconditionally.
+    await mountApp();
+    await ask("make it red");
+    await propose(
+      OBJECT_SCRIPT.id,
+      "export function onClick() { /* AI */ }",
+      "Changed it.",
+      [],
+      runFixture({ outcome: "changed" }),
+      OBJECT_SCRIPT.source,
+    );
+
+    expect(q("ai-edit-diff-verdict"), "a changed run needs no headline").toBeNull();
+    expect(q("ai-edit-diff-scale")!.textContent).toContain("differ");
+  });
+
+  it("warns that accepting would replace what the author typed", async () => {
+    // The six-minute case: the model was handed one version, the author kept
+    // typing, and "nothing to accept" would have been a lie that cost them the
+    // typing.
+    await mountApp();
+    await ask("make it red");
+    await propose(
+      OBJECT_SCRIPT.id,
+      "export function onClick() { /* what the model was handed */ }",
+      "Read it and left it alone.",
+      [],
+      runFixture(),
+      "export function onClick() { /* what the model was handed */ }",
+    );
+
+    expect(q("ai-edit-diff-verdict")!.textContent).toContain("since you asked");
+    expect(q("ai-edit-diff-detail")!.textContent).toContain("REPLACE what you have typed");
+    const accept = q("ai-edit-accept") as HTMLButtonElement;
+    expect(accept.disabled).toBe(false);
+    expect(accept.textContent).toContain("Accept (replaces your edits)");
+  });
+
+  it("does not accuse the author when the buffer matches what was asked against", async () => {
+    // The control for the case above.
+    await mountApp();
+    await ask("make it red");
+    await propose(
+      OBJECT_SCRIPT.id, OBJECT_SCRIPT.source, "Read it and left it alone.", [],
+      runFixture(), OBJECT_SCRIPT.source,
+    );
+    expect(q("ai-edit-diff-verdict")!.textContent).not.toContain("since you asked");
+  });
+
+  it("reports an UNKNOWN as nothing, never as a measurement", async () => {
+    // A REPLAYED result carries no `askedAgainst`. Saying "you have edited this
+    // since you asked" on the strength of an empty string accuses the author of
+    // something they did not do.
+    //
+    // NO `ask()` HERE, and that is the whole test: a window that asked has
+    // captured the source it asked against, so an empty field on the payload
+    // falls back to a real measurement. The unknown only exists in the window
+    // that did NOT ask — the reopened one the main window replays into.
+    await mountApp();
+    await propose(
+      OBJECT_SCRIPT.id, OBJECT_SCRIPT.source, "Read it and left it alone.", [],
+      runFixture(), "",
+    );
+
+    const verdict = q("ai-edit-diff-verdict")!.textContent ?? "";
+    expect(verdict).not.toContain("since you asked");
+    expect(verdict).not.toContain("reformatted");
+    expect(verdict).toContain("found nothing to change");
+  });
+
+  it("says WHICH KIND of not-happening it was", async () => {
+    // The strip printed one sentence whether no model was ever selected, the
+    // loop repeated itself until it was pointless, or the rounds ran out — and
+    // the three send the author to fix three different things.
+    async function failWith(run: unknown): Promise<string> {
+      // Per-document state lives in the module, so a second mount inside one
+      // test would re-open on the previous failure instead of the composer.
+      __resetAiEditClient();
+      await mountApp();
+      await ask("make it red");
+      await act(async () => {
+        aiResultHandler!({
+          documentId: OBJECT_SCRIPT.id, jobId: "", ok: false, source: "",
+          summary: "No AI model is selected.", unexercisedHooks: [],
+          run, instruction: "make it red", askedAgainst: OBJECT_SCRIPT.source,
+        });
+        await Promise.resolve();
+      });
+      const text = q("ai-edit-error")!.textContent ?? "";
+      await act(async () => { root.unmount(); });
+      container.remove();
+      return text;
+    }
+
+    const refused = await failWith(runFixture({ outcome: "refused", model: "", attempts: [] }));
+    expect(refused).toContain("The edit never started");
+    // ...and it still names where to go and what happened to the script.
+    expect(refused).toContain("No AI model is selected.");
+    expect(refused).toContain("Your script was not changed.");
+
+    const stalled = await failWith(runFixture({ outcome: "stalled" }));
+    expect(stalled).toContain("made the same mistake");
+    expect(stalled).toContain("qwen3.5:9b");
+
+    const unknown = await failWith(null);
+    expect(unknown).toContain("The run did not finish");
+
+    expect(new Set([refused, stalled, unknown]).size, "three outcomes, three sentences").toBe(3);
+
+    // The afterEach unmounts whatever is mounted, so leave one standing.
+    await mountApp();
+  });
+
+  it("shows what the script declares that nothing in it appears to use", async () => {
+    await mountApp();
+    await ask("make it red");
+    await propose(
+      OBJECT_SCRIPT.id, "export function onClick() { /* AI */ }", "Changed it.", [],
+      runFixture({
+        outcome: "changed",
+        notices: ["`net.fetch` is declared but no call requiring it was found."],
+      }),
+      OBJECT_SCRIPT.source,
+    );
+
+    const box = q("ai-edit-diff-notices");
+    expect(box, "the diff never showed the ladder's notices").toBeTruthy();
+    expect(box!.textContent).toContain("net.fetch");
+  });
+
+  it("says the preview changed no cells — a branch the editor could not reach", async () => {
+    await mountApp();
+    await ask("make it red");
+    await propose(
+      OBJECT_SCRIPT.id, "export function onClick() { /* AI */ }", "Changed it.", [],
+      runFixture({ outcome: "changed", changedNothing: true, unexercisedHooks: [] }),
+      OBJECT_SCRIPT.source,
+    );
+
+    const caveat = q("ai-edit-diff-unexercised");
+    expect(caveat, "no dry-run caveat").toBeTruthy();
+    expect(caveat!.textContent).toContain("changed no cells");
+    expect(caveat!.textContent).toContain("read it yourself before accepting");
   });
 });

@@ -22,7 +22,16 @@ import {
 import {
   loadAllObjectScripts,
   saveObjectScript,
+  // The persisted half of "what was asked, what it answered, what I decided".
+  // Beside `saveObjectScript` because that is the module that owns them, and
+  // because every call below is made at the instant a human presses a button —
+  // never when a result merely arrives.
+  getScriptAuthoringRuns,
+  appendScriptAuthoringRun,
+  adoptScriptAuthoringRuns,
+  clearScriptAuthoringRuns,
 } from "@api/objectScriptBackend";
+import type { AuthoringRun, RunDecision } from "@api/scriptHost/authoringRun";
 import {
   getWorkbookScript,
   listWorkbookScriptRecords,
@@ -70,6 +79,7 @@ import {
 import AiEditStrip from "./AiEditStrip";
 import { ActivityDot } from "../../_shared/components/ActivityDot";
 import AiEditDiff from "./AiEditDiff";
+import ScriptHistoryPanel from "./ScriptHistoryPanel";
 import {
   breakpointShift,
   DebugPanel,
@@ -1262,6 +1272,17 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const [showAiEdit, setShowAiEdit] = useState(false);
   useEffect(() => installAiEditClient(), []);
 
+  // ==========================================================================
+  // How this script was written
+  // ==========================================================================
+  // READ ON OPEN, never on load. An ordinary editing session never asks for the
+  // history, and paying for it on every window open would be a cost with no
+  // reader. The badge therefore counts what THIS window knows: the undecided
+  // proposal on screen always, plus whatever the last read returned.
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyRuns, setHistoryRuns] = useState<AuthoringRun[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   /**
    * Capabilities the DRAFT declares that no call in it appears to need.
    *
@@ -1340,9 +1361,45 @@ export function ObjectScriptEditorApp(): React.ReactElement {
    * handler, so dirty-marking and the module live-save path behave exactly as
    * they do for typing. A direct setSource would bypass both.
    */
+  /**
+   * Write one run down, at the instant its author decides about it.
+   *
+   * THE ONLY WRITE POINT FOR AN EDIT, and `mutates` is honest here because a
+   * human pressed a button: an `objscript:ai-edit-result` event — a Tauri
+   * channel — must not be able to dirty the workbook on its own. What is
+   * captured is the fact a run cannot know about itself: "I asked for X, it
+   * proposed Y, I said no."
+   *
+   * FIRE-AND-FORGET. A failed write must never block the buffer edit the author
+   * actually asked for; the backend refuses an unknown id, and losing a log line
+   * is not a reason to lose the edit.
+   *
+   * A DRAFT'S DECISIONS ARE WRITTEN UNDER ITS `draft-*` ID — the one key the
+   * backend accepts before Save (`append_run` takes any draft-prefixed id and
+   * REFUSES an unknown minted one), the same key `historyId` below reads, and
+   * the key `adoptScriptAuthoringRuns` re-keys onto the real script id at Save.
+   */
+  const recordDecision = useCallback(
+    (run: AuthoringRun | null, decision: RunDecision) => {
+      // A REFUSED run is deliberately unpersistable: nothing was asked, so the
+      // bridge's `fail()` stamps `runId: ""` and `append_run` refuses an empty
+      // run id. Skip it here rather than fire an append that must fail.
+      if (!run || !run.runId) return;
+      const targetId = isDraft && draftDoc ? draftDoc.draft.id : activeScriptId;
+      if (!targetId) return;
+      void appendScriptAuthoringRun(targetId, {
+        ...run,
+        decision,
+        decidedAt: new Date().toISOString(),
+      }).catch(() => {});
+    },
+    [activeScriptId, isDraft, draftDoc],
+  );
+
   const handleAcceptAi = useCallback(() => {
     if (!activeScriptId) return;
-    const proposal = aiEditStateFor(activeScriptId).proposal;
+    const decided = aiEditStateFor(activeScriptId);
+    const proposal = decided.proposal;
     const ed = editorRef.current;
     const model = ed?.getModel();
     if (ed && model) {
@@ -1356,12 +1413,52 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       setSource(proposal);
       setIsDirty(true);
     }
+    recordDecision(decided.run, "accepted");
     clearAiEdit(activeScriptId);
-  }, [activeScriptId]);
+  }, [activeScriptId, recordDecision]);
 
   const handleRejectAi = useCallback(() => {
-    if (activeScriptId) rejectAiEdit(activeScriptId);
-  }, [activeScriptId]);
+    if (!activeScriptId) return;
+    // READ BEFORE REJECTING: `rejectAiEdit` clears `run`, and a rejection with
+    // nothing written down is exactly the provenance that was asked for.
+    recordDecision(aiEditStateFor(activeScriptId).run, "rejected");
+    rejectAiEdit(activeScriptId);
+  }, [activeScriptId, recordDecision]);
+
+  /**
+   * Which id this document's runs are filed under.
+   *
+   * A DRAFT'S RUNS LIVE UNDER THE `draft-*` ID until Save re-keys them, because
+   * that is the only id that existed when the script was written. Reading the
+   * minted id instead would show an empty history on the one document whose
+   * history the author is most likely to want.
+   */
+  const historyId = isDraft && draftDoc ? draftDoc.draft.id : activeScriptId;
+
+  const openHistory = useCallback(async () => {
+    setShowHistory(true);
+    if (!historyId) return;
+    setHistoryLoading(true);
+    try {
+      setHistoryRuns(await getScriptAuthoringRuns(historyId));
+    } catch (e) {
+      // An unreadable history is a missing panel, not a broken editor.
+      setHistoryRuns([]);
+      console.warn("[ObjectScriptEditor] Could not read the authoring history:", e);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyId]);
+
+  const clearHistory = useCallback(async () => {
+    if (!historyId) return;
+    try {
+      await clearScriptAuthoringRuns(historyId);
+      setHistoryRuns([]);
+    } catch (e) {
+      console.warn("[ObjectScriptEditor] Could not delete the authoring history:", e);
+    }
+  }, [historyId]);
 
 
   // Point `ObjectScriptContext` at THIS script's context interface, so
@@ -1499,6 +1596,33 @@ export function ObjectScriptEditorApp(): React.ReactElement {
 
       setIsDirty(false);
       if (isDraft) {
+        // THE EXACT INSTANT A DRAFT GAINS A PERSISTED IDENTITY. The run that
+        // WROTE this script was recorded in the main window against the
+        // `draft-*` id, because that is the only id that existed then; both ids
+        // are in hand here, which is why no wire, seam or main-window change is
+        // needed for any of this.
+        //
+        // Its own try/catch: the script is already stored and mounted at this
+        // point, and a failed log write must not be reported to the author as
+        // "Failed to save" about a save that succeeded.
+        try {
+          if (draftDoc) await adoptScriptAuthoringRuns(draftDoc.draft.id, updated.id);
+          // Plus any EDIT the author asked for while reviewing the draft and
+          // has not decided about: pressing Save is the decision. (A decided
+          // run was appended under the draft id by `recordDecision` and is
+          // null here, so this cannot double-write; a REFUSED run has
+          // `runId: ""`, which the backend refuses, so it is skipped.)
+          const pending = aiEditStateFor(activeScriptId ?? "").run;
+          if (pending && pending.runId) {
+            await appendScriptAuthoringRun(updated.id, {
+              ...pending,
+              decision: "saved",
+              decidedAt: new Date().toISOString(),
+            });
+          }
+        } catch (e) {
+          console.warn("[ObjectScriptEditor] Could not carry the authoring history over:", e);
+        }
         // The draft has become a real, saved, mounted script — it belongs in
         // the script list now, and the review banner must go away with it.
         setScripts((prev) => [...prev, updated]);
@@ -1544,6 +1668,8 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     }
   }, [
     activeScript,
+    activeScriptId,
+    draftDoc,
     isDirty,
     isDraft,
     isMacro,
@@ -1983,6 +2109,50 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     listTemplates().then(setTemplates).catch(() => {});
   }, []);
 
+  /**
+   * Rename the open script.
+   *
+   * THE ESCAPE HATCH FOR A NAME NOBODY CHOSE. An AI draft arrives named from the
+   * request that produced it, and however good that rule gets it will sometimes
+   * be wrong — a heuristic with no way out is a heuristic you have to keep
+   * tuning. Offered for a DRAFT too, deliberately: renaming before Save is the
+   * cheapest possible fix.
+   *
+   * IT WRITES `activeScript.source`, THE STORED TEXT. A rename must not be the
+   * gesture that saves unsaved edits, and must not discard them either — they
+   * stay in the buffer, exactly as they were. `save_object_script` re-derives
+   * `declared_capabilities` from that same stored source, so a rename cannot
+   * move a capability ceiling.
+   *
+   * `emitRegisterScript`, NOT `emitSaveAndApply`: save-and-apply unmounts and
+   * remounts the script in the main window, re-running `setup()` for what is a
+   * cosmetic change. Registering only refreshes the registry, so the name a
+   * runtime error quotes is the new one without anything being re-run.
+   */
+  const handleRename = useCallback(async () => {
+    if (!activeScript || isReadOnly || isMacro) return;
+    const answer = await promptAsync("Script name:", {
+      title: "Rename script",
+      defaultValue: activeScript.name,
+    });
+    const name = (answer ?? "").trim();
+    if (!name || name === activeScript.name) return;
+    // A DRAFT HAS NO BACKEND RECORD, so there is nothing to save: the new name
+    // lives in the draft until the author presses Save as Script.
+    if (isDraft && draftDoc) {
+      setDraftDoc({ ...draftDoc, script: { ...draftDoc.script, name } });
+      return;
+    }
+    const updated = { ...activeScript, name };
+    try {
+      await saveObjectScript(updated);
+      await emitRegisterScript(updated);
+      setScripts((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+    } catch (e) {
+      reportToConsole(`Could not rename the script: ${e}`, activeScript.id);
+    }
+  }, [activeScript, isReadOnly, isMacro, isDraft, draftDoc, reportToConsole]);
+
   const handleSaveAsTemplate = useCallback(async () => {
     if (!activeScript) return;
     const name = await promptAsync("Template name:", {
@@ -2138,6 +2308,22 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           </select>
         )}
 
+        {/* Rename. Deliberately a DIFFERENT guard from the Template button
+            beside it: a draft IS offered this, because an AI draft arrives
+            named after the request that produced it and renaming before Save is
+            the cheapest fix when that name is wrong. A distributed script is
+            read-only here, and a macro is named in the module store. */}
+        {activeScript && !isReadOnly && !isMacro && (
+          <button
+            className="ose-btn"
+            data-testid="script-rename"
+            onClick={() => void handleRename()}
+            title="Give this script a different name"
+          >
+            Rename
+          </button>
+        )}
+
         {/* Templates are auto-applied to newly created components, so an
             AI draft must become a script the user approved BEFORE it can be
             stamped into one. Save it first. */}
@@ -2217,6 +2403,36 @@ export function ObjectScriptEditorApp(): React.ReactElement {
               size={6}
             />
             Edit with AI
+          </button>
+        )}
+
+        {/* How this script was written. The badge counts what THIS window knows:
+            the undecided proposal on screen always counts, and the persisted
+            runs are read when the panel opens rather than on every window load —
+            an ordinary editing session never asks for them. */}
+        {activeScript && (
+          <button
+            className="ose-btn"
+            data-testid="script-history-toggle"
+            onClick={() => void openHistory()}
+            title="Read what was asked, what the model replied, and what was decided"
+          >
+            History
+            {historyRuns.length + (aiEdit.run ? 1 : 0) > 0 && (
+              <span
+                style={{
+                  background: "#3C3C3C",
+                  color: "#D4D4D4",
+                  borderRadius: 8,
+                  padding: "0 5px",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  marginLeft: 4,
+                }}
+              >
+                {historyRuns.length + (aiEdit.run ? 1 : 0)}
+              </span>
+            )}
           </button>
         )}
 
@@ -2426,10 +2642,34 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           proposed={aiEdit.proposal}
           language={language}
           summary={aiEdit.summary}
-          unchanged={aiEdit.unchanged}
+          run={aiEdit.run}
+          instruction={aiEdit.instruction}
+          // `original={source}` above is deliberately the CURRENT buffer, which
+          // is what makes these two separate, meaningful inputs: "the model
+          // returned it unchanged" is measured against what it was HANDED, and
+          // "accepting changes nothing" against what is on screen NOW.
+          askedAgainst={aiEdit.askedAgainst}
+          unchangedFallback={aiEdit.unchanged}
           unexercisedHooks={aiEdit.unexercisedHooks}
           onAccept={handleAcceptAi}
           onReject={handleRejectAi}
+        />
+      )}
+
+      {/* How this script was written. The LIVE run is passed alongside the
+          persisted ones: the author was looking at an undecided proposal when
+          they went looking for the reasoning, and an EDIT run is not persisted
+          until a decision, so a panel that read only the backend would show an
+          empty page at exactly that moment. (A draft's CREATE run is already
+          on the backend under its draft-* id.) */}
+      {showHistory && activeScript && (
+        <ScriptHistoryPanel
+          scriptName={activeScript.name}
+          liveRun={aiEdit.run}
+          runs={historyRuns}
+          loading={historyLoading}
+          onClear={() => void clearHistory()}
+          onClose={() => setShowHistory(false)}
         />
       )}
 

@@ -13,6 +13,7 @@
 
 import React, { useState } from "react";
 import { ActivityDot } from "../../_shared/components/ActivityDot";
+import { editVerdict } from "@api/scriptHost/authoringRun";
 import type { AiEditState } from "../lib/aiEditClient";
 
 interface AiEditStripProps {
@@ -91,6 +92,20 @@ export function AiEditStrip(props: AiEditStripProps): React.ReactElement {
 
   // ---- Failed: say why, and how to fix it ----
   if (state.phase === "error") {
+    // WHICH KIND OF NOT-HAPPENING. This strip used to print one sentence
+    // whether no model was ever selected, the loop repeated itself until it was
+    // pointless, or a 9B tried seven times over ten minutes — and the three
+    // send the author to fix three different things. The wording is
+    // `editVerdict`'s, so the strip and the diff cannot describe one run two
+    // ways.
+    const v = editVerdict({
+      outcome: state.run?.outcome ?? "failed",
+      identicalToBuffer: false,
+      bufferMovedSinceAsk: false,
+      model: state.run?.model ?? "",
+      attempts: state.run?.attempts.length ?? 0,
+      elapsedMs: state.run?.elapsedMs ?? 0,
+    });
     return (
       <div
         style={{ ...BAR, backgroundColor: "#3A2323", borderBottom: "1px solid #6A3A3A", color: "#F48771" }}
@@ -98,7 +113,16 @@ export function AiEditStrip(props: AiEditStripProps): React.ReactElement {
       >
         <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
           <div style={{ flex: 1, lineHeight: 1.5 }}>
-            <strong>The edit did not happen.</strong> {state.summary}
+            <strong>{v.headline}</strong> {v.detail}
+            {/* The run's own account of itself, below the verdict: the verdict
+                says WHICH KIND of not-happening this was, and this says what
+                the provider actually reported — "No AI model is selected. Open
+                the AI Chat pane..." is the sentence that names where to fix it. */}
+            <div style={{ color: "#C99", marginTop: 2 }}>{state.summary}</div>
+            {/* KEPT WORD FOR WORD. `e2e/journeys/object-script-ai-edit.spec.ts`
+                asserts this reassurance on the refusal banner, and the one
+                thing an author wants to know when an edit fails is whether
+                their script survived it. */}
             <div style={{ color: "#C99", marginTop: 2 }}>Your script was not changed.</div>
           </div>
           <button className="ose-btn" data-testid="ai-edit-dismiss" onClick={props.onDismissError}>
@@ -110,6 +134,14 @@ export function AiEditStrip(props: AiEditStripProps): React.ReactElement {
   }
 
   // ---- Idle: the composer ----
+  //
+  // THE PLACEHOLDER IS NOT WHERE IDENTITY GOES. It vanishes on the first
+  // keystroke, it cannot wrap, and a long name is truncated inside the box —
+  // and for an AI draft named after its own prompt it read, verbatim,
+  // "What should change in create a script that formats the...?". The document
+  // name now sits in the hint below, which persists and wraps; the placeholder
+  // does the one thing a placeholder is good at, which is showing the SHAPE of
+  // an answer.
   return (
     <div style={BAR} data-testid="ai-edit-composer">
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
@@ -126,7 +158,7 @@ export function AiEditStrip(props: AiEditStripProps): React.ReactElement {
             }
             if (e.key === "Escape") props.onClose();
           }}
-          placeholder={`What should change in ${props.documentName}?`}
+          placeholder={`Describe the change — e.g. "${EXAMPLES[0]}"`}
           rows={2}
           disabled={props.disabled}
           style={{
@@ -158,9 +190,9 @@ export function AiEditStrip(props: AiEditStripProps): React.ReactElement {
         </div>
       </div>
       <div style={{ color: "#7A7A7A", marginTop: 5, lineHeight: 1.5 }}>
-        The model sees the script <em>as it is on screen</em>, including unsaved edits. You will
-        get a diff to accept or reject &mdash; nothing is saved for you. For example:{" "}
-        <span style={{ color: "#9A9A9A" }}>&ldquo;{EXAMPLES[0]}&rdquo;</span>
+        Editing <strong>{props.documentName}</strong>. The model sees the script{" "}
+        <em>as it is on screen</em>, including unsaved edits. You will get a diff to accept or
+        reject &mdash; nothing is saved for you.
       </div>
     </div>
   );

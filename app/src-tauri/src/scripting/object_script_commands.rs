@@ -329,6 +329,11 @@ pub fn delete_object_script(
     // would show the user a live-looking job for code that no longer exists —
     // the transparency panel must not list a ghost.
     crate::scripting::scheduler::remove_script_jobs(&id);
+    // Same reasoning, same place: the script's authoring history describes code
+    // that no longer exists. Deleting a script deletes its history with it.
+    // AFTER `drop(scripts)` above -- std mutexes are not reentrant and this
+    // takes its own guard on a different store.
+    crate::scripting::authoring_log::forget_script_runs(&state, &effect, &id);
     Ok(())
 }
 
@@ -363,6 +368,7 @@ pub(crate) fn prune_scripts_for_instance(
     // not outlive it in the registry the transparency panel reads.
     for id in &removed {
         crate::scripting::scheduler::remove_script_jobs(id);
+        crate::scripting::authoring_log::forget_script_runs(state, effect, id);
     }
 }
 

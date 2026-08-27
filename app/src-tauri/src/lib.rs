@@ -604,6 +604,14 @@ pub struct AppState {
     // cached `Vec<SavedReport>` here re-opens that. See src/report.rs.
     /// Object scripts for scriptable objects (primitive + component scripts)
     pub object_scripts: document_effect::Persisted<Vec<::persistence::SavedObjectScript>>,
+    /// AI script-authoring transcript: runs by script id (or by `draft-` id
+    /// before a draft is saved). What the author asked for, what the model said,
+    /// what the checks found, and what the author then decided.
+    /// PERSISTED (user_files/script_authoring.json) -> `Persisted<T>`. It is the
+    /// user's own words about their own scripts; losing it at close would
+    /// discard the one fact a later run cannot reconstruct about itself.
+    pub script_authoring:
+        document_effect::Persisted<calcula_format::features::script_authoring::ScriptAuthoringLog>,
     /// Generic per-extension persisted state (extension id -> arbitrary JSON).
     /// Round-trips through the .cala extension-data part. Any extension
     /// (built-in or third-party) can persist workbook state here without a new
@@ -854,6 +862,7 @@ pub fn create_app_state() -> AppState {
         reference_style: Mutex::new("A1".to_string()),
         pivot_layouts: document_effect::Persisted::new(Vec::new()),
         object_scripts: document_effect::Persisted::new(Vec::new()),
+        script_authoring: document_effect::Persisted::new(Default::default()),
         extension_data: document_effect::Persisted::new(std::collections::HashMap::new()),
         sheet_ids: document_effect::Persisted::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: crate::document_effect::Persisted::new(calp::manifest::SubscriptionManifest::default()),
@@ -6215,6 +6224,12 @@ pub fn run() {
             scripting::save_object_script,
             scripting::delete_object_script,
             scripting::delete_object_scripts_for_instance,
+            // AI script-authoring transcript (what was asked, what came back,
+            // what the author decided). Appended ONLY on a decision.
+            scripting::get_script_authoring_runs,
+            scripting::append_script_authoring_run,
+            scripting::adopt_script_authoring_runs,
+            scripting::clear_script_authoring_runs,
             // Script network capability commands (Phase 4 — net.fetch egress)
             net_commands::grant_script_net_origin,
             net_commands::audit_record_capability,

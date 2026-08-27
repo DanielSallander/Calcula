@@ -397,8 +397,12 @@ describe("run-at-cursor (local transport)", () => {
     expect(outcome.status).toBe("noFunction");
     if (outcome.status === "noFunction") {
       expect(outcome.message).toMatch(/declares no top-level function/i);
-      // The remedy has to be one this file can actually carry out.
-      expect(outcome.message).toContain("function doThing()");
+      // The remedy has to be one this file can actually carry out, and it has
+      // to suggest the SAME name everything else does. `doThing` was a third
+      // spelling of the run target the scaffolds emit and the authoring prompt
+      // asks for, so a reader who followed this sentence and a reader who
+      // followed the template ended up with differently-named entry points.
+      expect(outcome.message).toContain("async function run()");
       expect(outcome.message).not.toMatch(/put the cursor inside/i);
     }
     expect(hostDebugFireTrigger).not.toHaveBeenCalled();
@@ -539,7 +543,8 @@ describe("run-at-cursor (local transport)", () => {
     expect(outcome.status).toBe("notReady");
     if (outcome.status === "notReady") {
       expect(outcome.message).toMatch(/no entry point/i);
-      expect(outcome.message).toContain("function doThing()");
+      // Same name as the sibling refusal above, and as the scaffold.
+      expect(outcome.message).toContain("async function run()");
       expect(outcome.message).not.toMatch(/another top-level function/i);
       expect(outcome.message).not.toMatch(/fire/i);
     }

@@ -848,9 +848,14 @@ function setupIsNotARunTargetMessage(
     );
   }
   if (others.length === 0 && triggers.length === 0) {
+    // THE SAME REMEDY IS SPELLED OUT IN `noRunTargetMessage` BELOW. Change one
+    // and change the other: they are the sibling refusals for the same missing
+    // run target, and the name they suggest must be the name the scaffolds,
+    // the validator's `no-run-target` notice and the authoring prompt all use
+    // (`RUNNABLE_WORK_FN`, scriptTemplate.ts). `doThing` was a third spelling.
     parts.push(
       "This script has no entry point besides setup(): nothing was registered and there " +
-        "is no other top-level declaration. Add one — function doThing() { ... } — and " +
+        "is no other top-level declaration. Add one — async function run() { ... } — and " +
         "press Run with the cursor inside it.",
     );
   }
@@ -879,9 +884,11 @@ function listNames(names: readonly string[]): string {
 function noRunTargetMessage(functions: readonly TopLevelFunction[]): string {
   const names = functions.map((f) => f.name);
   if (names.length === 0) {
+    // Sibling of the "no entry point besides setup()" remedy above; keep the
+    // suggested name identical in both.
     return (
       "This script declares no top-level function, so Run has nothing to start. " +
-      "Add one — function doThing() { ... } — and press Run again."
+      "Add one — async function run() { ... } — and press Run again."
     );
   }
   return (

@@ -6,6 +6,9 @@
 import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 import type { UnlistenFn } from "@api/backend";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
+// TYPE-ONLY, and deliberately so: `verbatimModuleSyntax` erases it completely,
+// so this wire module gains no runtime dependency from carrying the record.
+import type { AuthoringRun } from "@api/scriptHost/authoringRun";
 
 // ============================================================================
 // Event Names
@@ -322,6 +325,28 @@ export interface AiEditResultPayload {
    * as a verdict on the script.
    */
   unexercisedHooks: string[];
+  /**
+   * The whole run. REQUIRED-WITH-NULL, following the `unexercisedHooks`
+   * precedent right above: every arm has to DECIDE, including `fail()`
+   * (aiEditBridge.ts), where a forgotten optional field would silently
+   * become `undefined` on the wire.
+   */
+  run: AuthoringRun | null;
+  /**
+   * The author's own words. REQUIRED, and the only way a REPLAYED result can
+   * restate the question: the editor window may have been closed and reopened,
+   * and its `AiEditState.instruction` was only ever set locally
+   * (aiEditClient.ts).
+   */
+  instruction: string;
+  /**
+   * The source the model was actually HANDED.
+   *
+   * Without it the diff cannot tell "the model reformatted your whitespace"
+   * from "you typed while it ran, and accepting reverts that". ~2 KB for a
+   * 73-line script, on an event that already carries the proposal.
+   */
+  askedAgainst: string;
 }
 
 export interface AiEditProgressPayload {

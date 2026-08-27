@@ -25,6 +25,7 @@ import {
   type MonacoTypescriptNamespace,
   type MonacoLanguageDefaults,
 } from "../monacoTypings";
+import { buildRunnableSkeleton } from "@api/scriptHost/scriptTemplate";
 
 const DTS = fs.readFileSync(path.resolve(__dirname, "../../objectContexts.d.ts"), "utf8");
 
@@ -225,5 +226,28 @@ describe("annotateScaffold", () => {
   it("leaves a script with no setup(...) shape alone", () => {
     const src = "context.log('hello');\n";
     expect(annotateScaffold(src)).toBe(src);
+  });
+
+  // THE SHAPE THE TEMPLATE ACTUALLY EMITS, taken FROM the template rather than
+  // retyped. `buildRunnableSkeleton` writes `export function setup(context)`,
+  // and a regex that anchors `function` at line start matches none of it: the
+  // annotation is skipped, IntelliSense never binds to ObjectScriptContext, and
+  // nothing reports an error anywhere. Reading the real skeleton is what makes
+  // this a drift guard instead of a second copy of the template.
+  it.each([
+    ["a wired hook", buildRunnableSkeleton({ objectType: "button", primaryHook: "onClick" })],
+    ["the direct branch", buildRunnableSkeleton({ objectType: "workbook", primaryHook: null })],
+  ])("annotates the exported setup the scaffold emits (%s)", (_label, skeleton) => {
+    expect(skeleton, "the template no longer exports setup; re-check the regex").toContain(
+      "export function setup(",
+    );
+    const out = annotateScaffold(skeleton);
+    expect(out).toContain(CONTEXT_ANNOTATION);
+    // ABOVE the `export`, not between `export` and `function` — a JSDoc block
+    // wedged inside the declaration is not attached to anything.
+    expect(out.indexOf(CONTEXT_ANNOTATION)).toBeLessThan(out.indexOf("export function setup("));
+    expect(out.slice(out.indexOf(CONTEXT_ANNOTATION))).toBe(
+      `${CONTEXT_ANNOTATION}\nexport function setup(context) {${skeleton.split("export function setup(context) {")[1]}`,
+    );
   });
 });

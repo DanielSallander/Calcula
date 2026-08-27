@@ -2459,6 +2459,11 @@ fn assemble_workbook_for_save(
     // writing, not to whatever happens to be in memory.
     persist_scheduled_jobs(&mut workbook);
 
+    // Serialize the AI script-authoring transcript. Beside the scheduler and in
+    // the SAME shape, for the reason spelled out on the function itself: this
+    // key must be OWNED by the save path, never conditionally inserted.
+    persist_script_authoring(&mut workbook, state);
+
     // Media garbage collection, and it runs LAST for the same reason
     // `persist_scheduled_jobs` does: it reads back every section this save has
     // finished assembling. A sweep run earlier would scan a half-built workbook
@@ -2530,6 +2535,78 @@ fn persist_scheduled_jobs(workbook: &mut Workbook) {
             // dropped on the next load anyway, and a truncated one is worse.
             crate::log_warn!("SECURITY", "scheduled jobs could not be serialized: {}", e);
             workbook.user_files.remove(SCHEDULED_JOBS_FILE);
+        }
+    }
+}
+
+/// Write the AI script-authoring transcript into the workbook's user-files
+/// section.
+///
+/// SHAPED LIKE `persist_scheduled_jobs`, AND NOT like the `audit_log` conditional
+/// insert a few hundred lines above. That difference is the whole point.
+/// `build_workbook_for_save` seeds `workbook.user_files` from the user-visible
+/// virtual filesystem, so a file literally named `script_authoring.json` can be
+/// PLANTED through `create_virtual_file`. A conditional insert leaves a planted
+/// key exactly where it is whenever the live store is empty — and what rides
+/// into the archive is then fabricated provenance about the user's own scripts:
+/// "you asked for this, the model proposed that, you accepted it", about a
+/// conversation that never happened. Unconditionally owning the key means the
+/// section reflects the live store and nothing else.
+///
+/// The key is likewise REMOVED, never left alone, when the store is empty or the
+/// bytes cannot be produced: a half-formed section would be dropped on the next
+/// load anyway, and a truncated one is worse than none.
+///
+/// Takes `&AppState` rather than `State<AppState>` — the `restore_scheduled_jobs`
+/// precedent — so the planted-file refusal is exercisable without a Tauri app
+/// handle. `State<T>` derefs, so the call site is unchanged.
+fn persist_script_authoring(workbook: &mut Workbook, state: &AppState) {
+    use calcula_format::features::script_authoring::{
+        ScriptAuthoringFile, DRAFT_ID_PREFIX, SCRIPT_AUTHORING_FILE,
+    };
+
+    let mut log = match state.script_authoring.read() {
+        Ok(log) => log.clone(),
+        Err(e) => {
+            crate::log_warn!(
+                "SECURITY",
+                "the script authoring log is unreadable ({}) - the section is dropped rather \
+                 than left holding whatever is in user_files",
+                e
+            );
+            workbook.user_files.remove(SCRIPT_AUTHORING_FILE);
+            return;
+        }
+    };
+    // Draft buckets are SESSION-ONLY and never ride the archive. A `draft-*`
+    // id is minted per process and dies with it, so a persisted draft bucket
+    // is orphaned by construction — unreachable by any surface, unremovable by
+    // the user, and its first run exempt from byte-budget eviction. Only the
+    // serialized COPY is filtered; the live store keeps the bucket, so
+    // same-session adoption at Save still works, and adoption is the one way a
+    // draft's runs become persistent. Accepted loss: saving and re-opening the
+    // SAME file mid-draft-review replaces the live store, so the draft's
+    // pre-adoption transcript is gone — one degradation in the class the
+    // fire-and-forget delivery append already occupies, versus permanently
+    // unremovable prompts.
+    log.retain(|k, _| !k.starts_with(DRAFT_ID_PREFIX));
+    if log.is_empty() {
+        workbook.user_files.remove(SCRIPT_AUTHORING_FILE);
+        return;
+    }
+    match ScriptAuthoringFile::new(log).to_json_bytes() {
+        Ok(bytes) => {
+            workbook
+                .user_files
+                .insert(SCRIPT_AUTHORING_FILE.to_string(), bytes);
+        }
+        Err(e) => {
+            crate::log_warn!(
+                "SECURITY",
+                "the script authoring log could not be serialized: {}",
+                e
+            );
+            workbook.user_files.remove(SCRIPT_AUTHORING_FILE);
         }
     }
 }
@@ -2616,8 +2693,9 @@ fn restore_scheduled_jobs(
     }
 }
 
-/// Restore the four DISTRIBUTION state files carried in `user_files`:
-/// subscriptions, the override layer, the audit log and the writeback drafts.
+/// Restore the five document state files carried in `user_files`:
+/// subscriptions, the override layer, the audit log, the writeback drafts and
+/// the AI script-authoring transcript.
 ///
 /// EVERY branch assigns. The rule this enforces is that a file which is PRESENT
 /// but unparseable resets its state, exactly as an absent file does. The earlier
@@ -2636,6 +2714,12 @@ fn restore_scheduled_jobs(
 /// * `overrides.json` would re-apply another document's cell overrides, and
 ///   `audit_log.json` would show one workbook's script-activity trail while
 ///   reading another.
+/// * `script_authoring.json` is the fifth, and it fails in the direction the
+///   other four do not: an inherited transcript would attribute one workbook's
+///   PROMPTS — the user's own words, about their own data — to a different
+///   document's scripts, and then save them there. "I asked for X, it proposed
+///   Y, I said no" is provenance, and provenance about the wrong script is worse
+///   than none at all.
 ///
 /// Written as `match remove(..) { Some => parse-or-default, None => default }`
 /// so the compiler forces a value in every arm — the shape `autofilters.json`
@@ -2706,6 +2790,46 @@ fn restore_distribution_user_files(
         None => calp::writeback::WritebackLayer::new(),
     };
     *state.writeback_layer.write(&load).map_err(|e| e.to_string())? = drafts;
+
+    // `remove()`, not `get`, and that is load-bearing for all five: it is what
+    // stops the key lingering in the map that is copied wholesale into
+    // `UserFilesState` — where it would show up as a file in the user-visible
+    // virtual filesystem and be re-planted into the next save.
+    let mut authoring = match workbook.user_files.remove(
+        calcula_format::features::script_authoring::SCRIPT_AUTHORING_FILE,
+    ) {
+        Some(bytes) => {
+            match calcula_format::features::script_authoring::ScriptAuthoringFile::from_json_bytes(
+                &bytes,
+            ) {
+                Ok(file) => file.runs,
+                Err(e) => {
+                    crate::log_warn!(
+                        "SECURITY",
+                        "script_authoring.json is unreadable ({}) - starting with an EMPTY \
+                         authoring history",
+                        e
+                    );
+                    calcula_format::features::script_authoring::ScriptAuthoringLog::default()
+                }
+            }
+        }
+        None => calcula_format::features::script_authoring::ScriptAuthoringLog::default(),
+    };
+    // A `draft-*` key arriving FROM DISK is either a legacy orphan or a
+    // planted slot — `persist_script_authoring` filters draft buckets out of
+    // every save, so the writer never produces one — and no surface could ever
+    // list, adopt or clear it (the draft id died with the process that minted
+    // it). Dropped BEFORE `clamp_log`, so a multi-megabyte planted draft
+    // bucket cannot make the byte budget evict real scripts' runs on the way in.
+    authoring.retain(|k, _| {
+        !k.starts_with(calcula_format::features::script_authoring::DRAFT_ID_PREFIX)
+    });
+    // Re-apply the caps on the way IN. The file on disk is as trustworthy as the
+    // last thing that wrote it, and this is the load path a hand-edited (or
+    // hostile) archive arrives through.
+    calcula_format::features::script_authoring::clamp_log(&mut authoring);
+    *state.script_authoring.write(&load).map_err(|e| e.to_string())? = authoring;
 
     Ok(())
 }
@@ -3572,8 +3696,9 @@ pub fn open_file(
     restore_scripts(&workbook.scripts, &script_state);
     restore_notebooks(&workbook.notebooks, &script_state);
 
-    // Subscriptions, override layer, audit log and writeback drafts. Absent OR
-    // unparseable both reset to empty — see the function for why.
+    // Subscriptions, override layer, audit log, writeback drafts and the AI
+    // authoring transcript. Absent OR unparseable both reset to empty — see the
+    // function for why.
     restore_distribution_user_files(&state, &mut workbook)?;
 
     // Re-materialize the BI connections that a `.calp` pull created, and point
@@ -4228,6 +4353,12 @@ pub(crate) fn reset_document_scoped_stores(
 
     // ---- Extension-owned document slots ------------------------------------
     state.object_scripts.write(effect).map_err(|e| e.to_string())?.clear();
+    // The AI authoring transcript goes with the scripts it describes. It is a
+    // save source (`script_authoring.json`), so leaving it resident would attach
+    // one workbook's prompts to the next document's scripts and then write them
+    // there — the §2w leak class, with the user's own words as the payload.
+    *state.script_authoring.write(effect).map_err(|e| e.to_string())? =
+        calcula_format::features::script_authoring::ScriptAuthoringLog::default();
     // Clearing extension_data clears the grid reports with it — the slot IS the
     // report store, so there is no second copy left holding the old workbook's
     // reports.
@@ -6023,6 +6154,312 @@ mod scheduled_job_persistence_tests {
             "the save path must rewrite (here: remove) the section, never inherit it"
         );
         reset_jobs();
+    }
+}
+
+#[cfg(test)]
+mod script_authoring_persistence_tests {
+    //! THE PLANTED-FILE TEST, and why the `audit_log` shape would have let it
+    //! through.
+    //!
+    //! `build_workbook_for_save` seeds `workbook.user_files` from the
+    //! user-visible virtual filesystem (`user_files_state.files`), so a file
+    //! literally named `script_authoring.json` can be created through
+    //! `create_virtual_file` and be sitting in the map before any section writer
+    //! runs. The `audit_log` shape — `if !empty { insert }` — leaves that key
+    //! exactly where it is whenever the live store is empty, and the archive
+    //! then carries fabricated provenance about the user's own scripts.
+    //!
+    //! The save path must therefore OWN the key: write it, or remove it. Never
+    //! leave it alone.
+
+    use super::*;
+    use calcula_format::features::script_authoring::{
+        AuthoringRun, ScriptAuthoringFile, ScriptAuthoringLog, SCRIPT_AUTHORING_FILE,
+    };
+
+    fn planted_bytes() -> Vec<u8> {
+        let mut log = ScriptAuthoringLog::new();
+        log.insert("obj-1".to_string(), vec![a_run("planted", "I never typed this")]);
+        ScriptAuthoringFile::new(log).to_json_bytes().unwrap()
+    }
+
+    fn a_run(id: &str, instruction: &str) -> AuthoringRun {
+        AuthoringRun {
+            run_id: id.to_string(),
+            kind: "edit".to_string(),
+            outcome: "changed".to_string(),
+            decision: Some("accepted".to_string()),
+            decided_at: Some("2026-08-26T10:00:05Z".to_string()),
+            started_at: "2026-08-26T10:00:00Z".to_string(),
+            elapsed_ms: 5_000,
+            instruction: instruction.to_string(),
+            object_type: "button".to_string(),
+            provider_id: "ollama".to_string(),
+            model: "qwen3:8b".to_string(),
+            tier: "restricted".to_string(),
+            surface_tokens: 3_200,
+            surface_truncated: false,
+            summary: "one round".to_string(),
+            attempts: Vec::new(),
+            notices: Vec::new(),
+            changed_nothing: false,
+            unexercised_hooks: Vec::new(),
+            elided: None,
+        }
+    }
+
+    fn seed_log(state: &AppState, log: ScriptAuthoringLog) {
+        let effect = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        *state.script_authoring.write(&effect).unwrap() = log;
+    }
+
+    #[test]
+    fn a_planted_script_authoring_file_never_reaches_the_archive() {
+        // Sabotage: swap `persist_script_authoring` for the `audit_log`-shaped
+        // conditional insert (`if !log.is_empty() { insert }`) and this reds.
+        let state = crate::create_app_state();
+        let mut wb = Workbook::new();
+        // Exactly what build_workbook_for_save hands over: the user's virtual
+        // filesystem, verbatim, including a file the user (or a script) planted.
+        wb.user_files
+            .insert(SCRIPT_AUTHORING_FILE.to_string(), planted_bytes());
+
+        assert!(
+            state.script_authoring.read().unwrap().is_empty(),
+            "precondition: the live store really is empty"
+        );
+
+        persist_script_authoring(&mut wb, &state);
+
+        assert!(
+            !wb.user_files.contains_key(SCRIPT_AUTHORING_FILE),
+            "a planted script_authoring.json rode into the archive as history \
+             the author never made"
+        );
+    }
+
+    #[test]
+    fn a_planted_file_is_overwritten_by_the_live_log_never_merged_with_it() {
+        let state = crate::create_app_state();
+        let mut log = ScriptAuthoringLog::new();
+        log.insert("obj-2".to_string(), vec![a_run("real", "colour the negatives red")]);
+        seed_log(&state, log);
+
+        let mut wb = Workbook::new();
+        wb.user_files
+            .insert(SCRIPT_AUTHORING_FILE.to_string(), planted_bytes());
+
+        persist_script_authoring(&mut wb, &state);
+
+        let written = ScriptAuthoringFile::from_json_bytes(
+            wb.user_files.get(SCRIPT_AUTHORING_FILE).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written.runs.len(), 1, "the planted bucket was merged in");
+        assert!(written.runs.contains_key("obj-2"));
+        assert!(!written.runs.contains_key("obj-1"));
+    }
+
+    #[test]
+    fn a_draft_bucket_never_reaches_the_archive() {
+        // A `draft-*` id is minted per process and dies with it, so a draft
+        // bucket in the ARCHIVE is orphaned by construction: no surface can
+        // list, adopt or clear it again, it rides every future save carrying
+        // the user's prompt, and its first run is exempt from byte-budget
+        // eviction. The save path therefore filters draft buckets out of the
+        // serialized COPY — the live store keeps them, so same-session
+        // adoption at Save still works. Sabotage: delete the `retain` in
+        // `persist_script_authoring` and this reds.
+        let state = crate::create_app_state();
+        let mut log = ScriptAuthoringLog::new();
+        log.insert(
+            "obj-2".to_string(),
+            vec![a_run("real", "colour the negatives red")],
+        );
+        log.insert(
+            "draft-abc".to_string(),
+            vec![a_run("d1", "make me a button")],
+        );
+        seed_log(&state, log);
+
+        let mut wb = Workbook::new();
+        persist_script_authoring(&mut wb, &state);
+
+        let written = ScriptAuthoringFile::from_json_bytes(
+            wb.user_files.get(SCRIPT_AUTHORING_FILE).unwrap(),
+        )
+        .unwrap();
+        assert!(written.runs.contains_key("obj-2"));
+        assert!(
+            !written.runs.keys().any(|k| k.starts_with("draft-")),
+            "a draft bucket rode into the archive: {:?}",
+            written.runs.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state.script_authoring.read().unwrap().len(),
+            2,
+            "the LIVE store must keep the draft bucket for same-session adoption"
+        );
+
+        // An all-draft log serializes as EMPTY, and the empty-log arm removes
+        // the section entirely rather than writing a hollow one.
+        let mut only_draft = ScriptAuthoringLog::new();
+        only_draft.insert(
+            "draft-xyz".to_string(),
+            vec![a_run("d2", "another unsaved draft")],
+        );
+        seed_log(&state, only_draft);
+        persist_script_authoring(&mut wb, &state);
+        assert!(
+            !wb.user_files.contains_key(SCRIPT_AUTHORING_FILE),
+            "an all-draft log must remove the section, not write an empty one"
+        );
+    }
+
+    #[test]
+    fn a_draft_bucket_from_disk_is_dropped_at_load() {
+        // The hostile-input backstop behind the save filter: a `draft-*` key
+        // arriving FROM DISK is a legacy orphan or a planted slot — the writer
+        // never produces one — and either way no surface could list, adopt or
+        // clear it, since the id died with the process that minted it.
+        // Sabotage: delete the `retain` in `restore_distribution_user_files`
+        // and this reds.
+        let state = crate::create_app_state();
+        let mut log = ScriptAuthoringLog::new();
+        log.insert(
+            "obj-2".to_string(),
+            vec![a_run("real", "colour the negatives red")],
+        );
+        log.insert(
+            "draft-orphan".to_string(),
+            vec![a_run("d1", "planted or orphaned")],
+        );
+        let mut wb = Workbook::new();
+        wb.user_files.insert(
+            SCRIPT_AUTHORING_FILE.to_string(),
+            ScriptAuthoringFile::new(log).to_json_bytes().unwrap(),
+        );
+
+        restore_distribution_user_files(&state, &mut wb).unwrap();
+
+        let stored = state.script_authoring.read().unwrap();
+        assert!(
+            stored.contains_key("obj-2"),
+            "the real bucket must survive the load"
+        );
+        assert!(
+            !stored.keys().any(|k| k.starts_with("draft-")),
+            "a draft bucket from disk survived the load: {:?}",
+            stored.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_transcript_round_trips_through_a_real_cala_file() {
+        let state = crate::create_app_state();
+        let mut log = ScriptAuthoringLog::new();
+        log.insert(
+            "obj-2".to_string(),
+            vec![a_run("real", "colour the negatives red")],
+        );
+        seed_log(&state, log);
+
+        let mut wb = Workbook::new();
+        persist_script_authoring(&mut wb, &state);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript.cala");
+        calcula_format::save_calcula(&wb, &path).unwrap();
+        let loaded = calcula_format::load_calcula(&path).unwrap();
+
+        let back = ScriptAuthoringFile::from_json_bytes(
+            loaded.user_files.get(SCRIPT_AUTHORING_FILE).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            back.runs["obj-2"][0].instruction,
+            "colour the negatives red"
+        );
+        assert_eq!(back.runs["obj-2"][0].decision.as_deref(), Some("accepted"));
+    }
+
+    #[test]
+    fn a_corrupt_section_starts_empty_rather_than_inheriting_the_previous_document() {
+        // The `restore_distribution_user_files` contract: PRESENT-but-corrupt
+        // resets, exactly as ABSENT does. Seed the store with workbook A's
+        // prompts first, so an assignment that never happens is visible.
+        let state = crate::create_app_state();
+        let mut previous = ScriptAuthoringLog::new();
+        previous.insert(
+            "obj-A".to_string(),
+            vec![a_run("a1", "workbook A's private words")],
+        );
+        seed_log(&state, previous);
+
+        let mut wb = Workbook::new();
+        wb.user_files
+            .insert(SCRIPT_AUTHORING_FILE.to_string(), b"{not json".to_vec());
+        restore_distribution_user_files(&state, &mut wb).unwrap();
+
+        assert!(
+            state.script_authoring.read().unwrap().is_empty(),
+            "a corrupt section left the PREVIOUS workbook's prompts resident"
+        );
+        assert!(
+            !wb.user_files.contains_key(SCRIPT_AUTHORING_FILE),
+            "the key must be REMOVED, or it lingers in the map copied into \
+             UserFilesState and gets re-planted on the next save"
+        );
+    }
+
+    #[test]
+    fn an_absent_section_clears_the_previous_documents_transcript() {
+        let state = crate::create_app_state();
+        let mut previous = ScriptAuthoringLog::new();
+        previous.insert(
+            "obj-A".to_string(),
+            vec![a_run("a1", "workbook A's private words")],
+        );
+        seed_log(&state, previous);
+
+        let mut wb = Workbook::new();
+        restore_distribution_user_files(&state, &mut wb).unwrap();
+
+        assert!(
+            state.script_authoring.read().unwrap().is_empty(),
+            "opening a workbook with no transcript inherited the previous one's"
+        );
+    }
+
+    #[test]
+    fn the_load_path_re_applies_the_caps() {
+        // The file on disk is only as trustworthy as the last thing that wrote
+        // it. A hand-edited archive carrying 100 runs for one script comes back
+        // capped, with the first run still first.
+        use calcula_format::features::script_authoring::MAX_RUNS_PER_SCRIPT;
+
+        let state = crate::create_app_state();
+        let mut log = ScriptAuthoringLog::new();
+        log.insert(
+            "obj-1".to_string(),
+            (0..100)
+                .map(|i| a_run(&format!("r{}", i), "colour the negatives red"))
+                .collect(),
+        );
+        let mut wb = Workbook::new();
+        wb.user_files.insert(
+            SCRIPT_AUTHORING_FILE.to_string(),
+            ScriptAuthoringFile::new(log).to_json_bytes().unwrap(),
+        );
+
+        restore_distribution_user_files(&state, &mut wb).unwrap();
+
+        let stored = state.script_authoring.read().unwrap();
+        assert_eq!(stored["obj-1"].len(), MAX_RUNS_PER_SCRIPT);
+        assert_eq!(stored["obj-1"][0].run_id, "r0");
     }
 }
 

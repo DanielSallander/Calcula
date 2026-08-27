@@ -119,7 +119,15 @@ describe("priority decides what survives", () => {
   it("promotes a hinted member that is NOT the capability's representative", () => {
     // `caps.storage.get` is always present as storage's index entry; `set` is
     // not, so it is what actually tests the hint path.
-    const tight = 2_000;
+    //
+    // THE BUDGET IS TUNING, NOT THE PROPERTY. It was 2,000 until 2026-08-26,
+    // when HEADER grew one line (the run-target teaching) and cost ~18 tokens —
+    // enough to push this one marginal member out of the hinted fill, so the
+    // test failed for a reason that had nothing to do with hinting. The fill is
+    // greedy, so inclusion is NOT monotonic in the budget: measured across
+    // 1,900-2,400, the property holds in narrow bands. 2,223-2,261 is the widest
+    // contiguous one, so this sits in the middle of it rather than on an edge.
+    const tight = 2_240;
     const without = buildSurfacePrompt({ objectType: "button", budgetTokens: tight });
     const withHint = buildSurfacePrompt({ objectType: "button", budgetTokens: tight, hints: ["storage"] });
     expect(without.includedChains).not.toContain("caps.storage.set");

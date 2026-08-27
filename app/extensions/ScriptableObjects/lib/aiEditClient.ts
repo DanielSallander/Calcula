@@ -22,6 +22,7 @@ import {
   onAiEditResult,
   type AiEditDocumentKind,
 } from "./crossWindowEvents";
+import type { AuthoringRun } from "@api/scriptHost/authoringRun";
 
 export type AiEditPhase = "idle" | "running" | "proposed" | "error";
 
@@ -48,6 +49,21 @@ export interface AiEditState {
   unexercisedHooks: string[];
   /** The instruction that produced this, echoed back for the banner. */
   instruction: string;
+  /**
+   * The whole run — how it ended, what each attempt said, how long it took.
+   *
+   * NULL, not absent: a proposal from a provider that runs no loop, and a
+   * replayed payload built by an older main window, both have to land somewhere
+   * the diff can read without indexing into `undefined`.
+   */
+  run: AuthoringRun | null;
+  /**
+   * The source the model was HANDED, as opposed to what is in the buffer now.
+   *
+   * Empty means "not known", never "known to be unchanged" — a replayed result
+   * carries none, and an unknown must not be rendered as a measurement.
+   */
+  askedAgainst: string;
   jobId: string;
 }
 
@@ -63,6 +79,8 @@ const IDLE: AiEditState = {
   // a fresh `[]` per read would undo exactly that.
   unexercisedHooks: [],
   instruction: "",
+  run: null,
+  askedAgainst: "",
   jobId: "",
 };
 
@@ -140,6 +158,12 @@ export function askAiToEdit(opts: AskOptions): void {
     unchanged: false,
     unexercisedHooks: [],
     instruction: opts.instruction,
+    // Reset, not carried: a new question must never be answered with the last
+    // run's account of itself.
+    run: null,
+    // Captured HERE, at the instant of asking, because that is the only moment
+    // the "what the model was handed" and "what is on screen" are the same text.
+    askedAgainst: opts.currentSource,
     jobId: "",
   });
   void emitAiEditRequest({
@@ -184,6 +208,8 @@ export function rejectAiEdit(documentId: string): void {
     summary: "",
     unchanged: false,
     unexercisedHooks: [],
+    run: null,
+    askedAgainst: "",
   });
 }
 
@@ -246,8 +272,16 @@ export function installAiEditClient(): () => void {
           summary: r.summary,
           progress: "",
           live: "",
-          proposal: "",
+          // THE BEST ATTEMPT IS KEPT. `authorRunner` deliberately returns it on
+          // failure — "a script that is 90% right is worth showing, and the
+          // editor is where a person fixes the rest" — and this line used to
+          // throw it away the moment it arrived, so the one window that could
+          // act on it was the only one that never saw it.
+          proposal: r.source,
           unexercisedHooks: [],
+          run: r.run ?? null,
+          instruction: r.instruction || current.instruction,
+          askedAgainst: r.askedAgainst || current.askedAgainst,
         });
         return;
       }
@@ -261,6 +295,12 @@ export function installAiEditClient(): () => void {
         // test double in this repo predates the field. A render that indexes
         // `undefined.length` takes the whole diff window down.
         unexercisedHooks: r.unexercisedHooks ?? [],
+        // Same reason, one field along. `|| current.x` rather than `?? `: an
+        // EMPTY string on a replayed payload is "not known", and the state this
+        // window captured when it asked is a better answer than nothing.
+        run: r.run ?? null,
+        instruction: r.instruction || current.instruction,
+        askedAgainst: r.askedAgainst || current.askedAgainst,
         progress: "",
         live: "",
         jobId: r.jobId || current.jobId,

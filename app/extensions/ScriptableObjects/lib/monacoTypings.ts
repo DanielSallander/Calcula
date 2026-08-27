@@ -203,7 +203,19 @@ export const CONTEXT_ANNOTATION = "/** @param {ObjectScriptContext} context */";
  */
 export function annotateScaffold(source: string): string {
   if (source.includes("@param {ObjectScriptContext}")) return source;
-  const match = /^([ \t]*)((?:async\s+)?function\s+setup\s*\()/m.exec(source);
+  // `export` IS PART OF THE PATTERN, and leaving it out would be a SILENT
+  // failure. The AI skeleton (`buildRunnableSkeleton`, scriptTemplate.ts)
+  // emits `export function setup(context)`, and the deferred scaffold rewrite
+  // (open-items row 303) will too; a regex anchoring `function` at line start
+  // matches none of those — the annotation would be skipped, IntelliSense
+  // would never bind, and nothing anywhere would report an error (guarded by
+  // monacoTypings.test.ts's from-the-template drift cases). The 17 hand-written
+  // scaffolds (`getScaffoldTemplate`, @api's scriptableObjectScaffolds.ts) —
+  // this function's only production inputs today — still emit bare
+  // `function setup(<type>)`, which the pattern also accepts.
+  // `stripModuleSyntax` (debugWrapper.ts:76) and `isDeclarationAnchor`
+  // (debugInstrument.ts:999-1006) already accept the exported form.
+  const match = /^([ \t]*)((?:export\s+)?(?:async\s+)?function\s+setup\s*\()/m.exec(source);
   if (!match) return source;
   const indent = match[1];
   return (

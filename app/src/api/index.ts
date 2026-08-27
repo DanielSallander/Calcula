@@ -2458,6 +2458,10 @@ export {
   deleteObjectScript,
   deleteObjectScriptsForInstance,
   loadAllObjectScripts,
+  getScriptAuthoringRuns,
+  appendScriptAuthoringRun,
+  adoptScriptAuthoringRuns,
+  clearScriptAuthoringRuns,
 } from "./objectScriptBackend";
 
 // ---- Code inventory (T1: "Code in This File" transparency inspector) ----
