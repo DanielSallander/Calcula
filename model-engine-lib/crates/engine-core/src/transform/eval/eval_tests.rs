@@ -77,6 +77,54 @@ fn sales_batch() -> RecordBatch {
     RecordBatch::try_new(schema, columns).unwrap()
 }
 
+/// The other table every fixture pipeline may look into.
+///
+/// Deliberately carries a DUPLICATE key (customer 1 appears twice) and a key
+/// the host never matches (99), so the two properties that matter are exercised
+/// by the ordinary census rather than only by a bespoke test: a duplicate must
+/// not multiply host rows, and an unmatched host row must survive with null.
+fn customers_batch() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("customer_id", ArrowType::Int64, true),
+        Field::new("name", ArrowType::Utf8, true),
+        Field::new("tier", ArrowType::Utf8, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1, 1, 2, 3, 99])),
+            Arc::new(StringArray::from(vec!["Ann", "Anna", "Bob", "Cal", "Zed"])),
+            Arc::new(StringArray::from(vec![
+                "gold", "gold", "silver", "gold", "bronze",
+            ])),
+        ],
+    )
+    .unwrap()
+}
+
+/// The declared columns of [`customers_batch`].
+fn customers_columns() -> Vec<Column> {
+    vec![
+        Column::new("customer_id", DataType::Int64),
+        Column::new("name", DataType::String),
+        Column::new("tier", DataType::String),
+    ]
+}
+
+/// Rows AND declared columns of the tables a fixture pipeline may look into.
+///
+/// One value answers both questions — `StepInputs` implements `TableSchemas` —
+/// so derivation and evaluation in these tests cannot disagree about what the
+/// target table looks like, which is exactly the divergence the seam exists to
+/// prevent in production.
+fn lookup_inputs() -> crate::transform::StepInputs {
+    crate::transform::StepInputs::none().with_table(
+        "Customers",
+        customers_batch(),
+        customers_columns(),
+    )
+}
+
 /// Run a pipeline over [`sales_batch`] and return the result.
 async fn run(steps: &[TransformStep]) -> EngineResult<RecordBatch> {
     apply_steps(
@@ -86,6 +134,7 @@ async fn run(steps: &[TransformStep]) -> EngineResult<RecordBatch> {
         steps,
         steps.len(),
         &UdfRegistry::new(),
+        &lookup_inputs(),
     )
     .await
 }
@@ -93,7 +142,8 @@ async fn run(steps: &[TransformStep]) -> EngineResult<RecordBatch> {
 /// Run a pipeline and assert the batch matches the schema derivation promised
 /// — the invariant the whole design rests on.
 async fn run_checked(steps: &[TransformStep]) -> RecordBatch {
-    let derived = derive_pipeline_schema("Sales", &sales_columns(), steps).unwrap();
+    let derived =
+        derive_pipeline_schema("Sales", &sales_columns(), steps, &lookup_inputs()).unwrap();
     let batch = run(steps).await.unwrap();
     let conformed = conform_to_declared("Sales", steps.len(), &batch, &derived)
         .unwrap_or_else(|e| panic!("pipeline output does not conform to its derived schema: {e}"));
@@ -394,6 +444,173 @@ async fn a_declared_type_is_cast_mid_pipeline_so_a_later_step_agrees() {
 }
 
 #[tokio::test]
+async fn a_lookup_never_multiplies_rows_even_on_duplicate_keys() {
+    // THE structural guarantee. `customers_batch` has customer_id 1 TWICE
+    // ("Ann" and "Anna"), and sales row 1 matches it. A plain LEFT JOIN would
+    // turn 5 sales rows into 6; the grouped subquery cannot, because it
+    // contributes at most one row per key by the shape of the query.
+    let batch = run_checked(&[TransformStep::LookupColumn {
+        table: "Customers".into(),
+        keys: vec![crate::transform::LookupKey::new("id", "customer_id")],
+        takes: vec![crate::transform::LookupTake::new("name")],
+    }])
+    .await;
+    assert_eq!(batch.num_rows(), 5, "a duplicate key must not add a row");
+    // Ties resolve to MIN, matching the calculated-column LOOKUPVALUE contract.
+    assert_eq!(strings(&batch, "name")[0], Some("Ann".into()));
+}
+
+#[tokio::test]
+async fn an_unmatched_row_survives_with_null() {
+    // LEFT, not INNER: sales ids 4 and 5 have no customer, and dropping them
+    // would silently shrink the table a user thought they were enriching.
+    let batch = run_checked(&[TransformStep::LookupColumn {
+        table: "Customers".into(),
+        keys: vec![crate::transform::LookupKey::new("id", "customer_id")],
+        takes: vec![crate::transform::LookupTake::new("name")],
+    }])
+    .await;
+    assert_eq!(
+        strings(&batch, "name"),
+        vec![
+            Some("Ann".into()),
+            Some("Bob".into()),
+            Some("Cal".into()),
+            None,
+            None
+        ]
+    );
+}
+
+#[tokio::test]
+async fn multiple_takes_ride_one_join_and_can_be_renamed() {
+    let batch = run_checked(&[TransformStep::LookupColumn {
+        table: "Customers".into(),
+        keys: vec![crate::transform::LookupKey::new("id", "customer_id")],
+        takes: vec![
+            crate::transform::LookupTake::new("name"),
+            crate::transform::LookupTake::renamed("tier", "customer_tier"),
+        ],
+    }])
+    .await;
+    assert_eq!(batch.num_rows(), 5);
+    assert_eq!(strings(&batch, "name")[2], Some("Cal".into()));
+    assert_eq!(strings(&batch, "customer_tier")[2], Some("gold".into()));
+}
+
+#[tokio::test]
+async fn a_lookup_preserves_row_order_for_the_steps_that_depend_on_it() {
+    // A JOIN does not preserve input order, and this pipeline's order is
+    // MEANINGFUL — `keepRows` addresses positions, `fillDown` carries a value
+    // downwards, `removeDuplicates` keeps the first row. A reshuffle here
+    // would corrupt all three SILENTLY, because the row count stays right.
+    //
+    // Proved through a following `keepRows`, not just by reading the ids back:
+    // that is the shape a user would actually be burned by.
+    let batch = run_checked(&[
+        TransformStep::LookupColumn {
+            table: "Customers".into(),
+            keys: vec![crate::transform::LookupKey::new("id", "customer_id")],
+            takes: vec![crate::transform::LookupTake::new("name")],
+        },
+        TransformStep::KeepRows {
+            range: RowRange::FirstN { count: 2 },
+        },
+    ])
+    .await;
+    assert_eq!(
+        ints(&batch, "id"),
+        vec![Some(1), Some(2)],
+        "the first two rows after a lookup must be the first two rows before it"
+    );
+
+    // And the whole order, without a following step.
+    let batch = run_checked(&[TransformStep::LookupColumn {
+        table: "Customers".into(),
+        keys: vec![crate::transform::LookupKey::new("id", "customer_id")],
+        takes: vec![crate::transform::LookupTake::new("name")],
+    }])
+    .await;
+    assert_eq!(
+        ints(&batch, "id"),
+        vec![Some(1), Some(2), Some(3), Some(4), Some(5)]
+    );
+}
+
+#[tokio::test]
+async fn a_composite_key_matches_on_every_pair() {
+    // Two pairs are ANDed. Sales row 1 is (north, open) and row 3 is
+    // (south, open); only the exact pair may match.
+    let batch = run_checked(&[TransformStep::LookupColumn {
+        table: "Customers".into(),
+        keys: vec![
+            crate::transform::LookupKey::new("id", "customer_id"),
+            crate::transform::LookupKey::new("status", "tier"),
+        ],
+        takes: vec![crate::transform::LookupTake::new("name")],
+    }])
+    .await;
+    // No sales status equals a customer tier, so nothing matches — which is
+    // the point: a composite key is stricter than either half.
+    assert_eq!(batch.num_rows(), 5);
+    assert!(strings(&batch, "name").iter().all(Option::is_none));
+}
+
+#[tokio::test]
+async fn a_lookup_with_no_loaded_target_names_its_own_step() {
+    // A cold cache is a real condition (a hand-edited model, a dependency that
+    // never loaded). It must name the STEP, not surface as a DataFusion
+    // "table not found" from three layers down.
+    let steps = [
+        TransformStep::RemoveColumns {
+            columns: vec!["cost".into()],
+        },
+        TransformStep::LookupColumn {
+            table: "Customers".into(),
+            keys: vec![crate::transform::LookupKey::new("id", "customer_id")],
+            takes: vec![crate::transform::LookupTake::new("name")],
+        },
+    ];
+    let error = apply_steps(
+        "Sales",
+        sales_batch(),
+        &sales_columns(),
+        &steps,
+        steps.len(),
+        &UdfRegistry::new(),
+        // Schemas known (so derivation passes) but no ROWS supplied.
+        &crate::transform::StepInputs::none().with_table(
+            "Customers",
+            customers_batch().slice(0, 0),
+            customers_columns(),
+        ),
+    )
+    .await;
+    // Slicing to zero rows still supplies the table, so this must SUCCEED —
+    // an empty target is a legitimate state, not a failure.
+    assert!(error.is_ok(), "an empty target table is not an error");
+
+    // Supplying nothing at all is the cold-cache case.
+    let error = apply_steps(
+        "Sales",
+        sales_batch(),
+        &sales_columns(),
+        &steps,
+        steps.len(),
+        &UdfRegistry::new(),
+        &crate::transform::StepInputs::none(),
+    )
+    .await
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("Customers"), "got {message}");
+    assert!(
+        message.contains("step 1"),
+        "must name the step that wanted it: {message}"
+    );
+}
+
+#[tokio::test]
 async fn split_column_splits_and_nulls_absent_parts() {
     let batch = run_checked(&[TransformStep::SplitColumn {
         column: "status".into(),
@@ -504,6 +721,7 @@ async fn fill_down_leaves_a_leading_null_null() {
         }],
         1,
         &UdfRegistry::new(),
+        &lookup_inputs(),
     )
     .await
     .unwrap();
@@ -875,6 +1093,7 @@ async fn upto_reproduces_the_pipeline_as_of_a_step() {
         &steps,
         0,
         &UdfRegistry::new(),
+        &lookup_inputs(),
     )
     .await
     .unwrap();
@@ -888,6 +1107,7 @@ async fn upto_reproduces_the_pipeline_as_of_a_step() {
         &steps,
         1,
         &UdfRegistry::new(),
+        &lookup_inputs(),
     )
     .await
     .unwrap();
@@ -907,6 +1127,7 @@ async fn upto_beyond_the_pipeline_is_clamped() {
         &steps,
         99,
         &UdfRegistry::new(),
+        &lookup_inputs(),
     )
     .await
     .unwrap();
@@ -929,12 +1150,13 @@ async fn every_step_produces_the_schema_derivation_promised() {
     let mut covered = 0usize;
     for step in &catalog {
         let steps = [step.clone()];
-        let derived = match derive_pipeline_schema("Sales", &sales_columns(), &steps) {
-            Ok(derived) => derived,
-            // A step this fixture's schema cannot accept is derivation's
-            // business, not evaluation's.
-            Err(_) => continue,
-        };
+        let derived =
+            match derive_pipeline_schema("Sales", &sales_columns(), &steps, &lookup_inputs()) {
+                Ok(derived) => derived,
+                // A step this fixture's schema cannot accept is derivation's
+                // business, not evaluation's.
+                Err(_) => continue,
+            };
         covered += 1;
         let batch = run(&steps)
             .await
@@ -1042,7 +1264,9 @@ async fn an_empty_input_batch_survives_every_step() {
     let mut covered = 0usize;
     for step in &catalog {
         let steps = [step.clone()];
-        let Ok(derived) = derive_pipeline_schema("Sales", &sales_columns(), &steps) else {
+        let Ok(derived) =
+            derive_pipeline_schema("Sales", &sales_columns(), &steps, &lookup_inputs())
+        else {
             continue;
         };
         covered += 1;
@@ -1053,6 +1277,7 @@ async fn an_empty_input_batch_survives_every_step() {
             &steps,
             1,
             &UdfRegistry::new(),
+            &lookup_inputs(),
         )
         .await
         .unwrap_or_else(|e| panic!("step {} failed on an empty batch: {e}", step.type_name()));
@@ -1099,9 +1324,17 @@ async fn identifiers_and_literals_carrying_quotes_are_not_injectable() {
         replace: "safe".into(),
         match_entire_value: true,
     }];
-    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
-        .await
-        .unwrap();
+    let out = apply_steps(
+        "T",
+        batch,
+        &columns,
+        &steps,
+        1,
+        &UdfRegistry::new(),
+        &lookup_inputs(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         strings(&out, "ev\"il"),
         vec![Some("safe".into()), Some("b".into())]
@@ -1157,7 +1390,8 @@ async fn derived_and_declared_schemas_agree_for_a_realistic_pipeline() {
             by: vec![SortKey::ascending("region")],
         },
     ];
-    let derived = derive_pipeline_schema("Sales", &sales_columns(), &steps).unwrap();
+    let derived =
+        derive_pipeline_schema("Sales", &sales_columns(), &steps, &lookup_inputs()).unwrap();
     let batch = run(&steps).await.unwrap();
     let conformed = conform_to_declared("Sales", steps.len(), &batch, &derived).unwrap();
 
@@ -1261,9 +1495,17 @@ async fn change_type_refuses_to_round_under_the_failing_policy() {
         changes: vec![TypeChange::new("v", DataType::Int64)],
         on_error: CastErrorPolicy::Fail,
     }];
-    let error = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
-        .await
-        .unwrap_err();
+    let error = apply_steps(
+        "T",
+        batch,
+        &columns,
+        &steps,
+        1,
+        &UdfRegistry::new(),
+        &lookup_inputs(),
+    )
+    .await
+    .unwrap_err();
     let message = error.to_string();
     assert!(message.contains('v'), "must name the column: {message}");
     assert!(message.contains("rounding"), "must say why: {message}");
@@ -1277,9 +1519,17 @@ async fn change_type_blanks_unroundable_values_under_the_null_policy() {
         changes: vec![TypeChange::new("v", DataType::Int64)],
         on_error: CastErrorPolicy::Null,
     }];
-    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
-        .await
-        .unwrap();
+    let out = apply_steps(
+        "T",
+        batch,
+        &columns,
+        &steps,
+        1,
+        &UdfRegistry::new(),
+        &lookup_inputs(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         ints(&out, "v"),
         vec![None, Some(2)],
@@ -1295,9 +1545,17 @@ async fn an_exact_float_to_int_cast_still_succeeds() {
         changes: vec![TypeChange::new("v", DataType::Int64)],
         on_error: CastErrorPolicy::Fail,
     }];
-    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
-        .await
-        .unwrap();
+    let out = apply_steps(
+        "T",
+        batch,
+        &columns,
+        &steps,
+        1,
+        &UdfRegistry::new(),
+        &lookup_inputs(),
+    )
+    .await
+    .unwrap();
     assert_eq!(ints(&out, "v"), vec![Some(10), Some(-3), Some(0)]);
 }
 
@@ -1327,9 +1585,17 @@ async fn median_over_integers_is_not_truncated_by_integer_arithmetic() {
         group_by: vec!["g".into()],
         aggregates: vec![GroupAggregate::new("n", AggregateOp::Median, "mid")],
     }];
-    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
-        .await
-        .unwrap();
+    let out = apply_steps(
+        "T",
+        batch,
+        &columns,
+        &steps,
+        1,
+        &UdfRegistry::new(),
+        &lookup_inputs(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         floats(&out, "mid"),
         vec![Some(1.5)],
@@ -1348,8 +1614,16 @@ async fn whole_value_replace_on_a_numeric_column_rewrites_only_that_value() {
         replace: "9".into(),
         match_entire_value: true,
     }];
-    let out = apply_steps("T", batch, &columns, &steps, 1, &UdfRegistry::new())
-        .await
-        .unwrap();
+    let out = apply_steps(
+        "T",
+        batch,
+        &columns,
+        &steps,
+        1,
+        &UdfRegistry::new(),
+        &lookup_inputs(),
+    )
+    .await
+    .unwrap();
     assert_eq!(floats(&out, "v"), vec![Some(9.0), Some(2.0)]);
 }

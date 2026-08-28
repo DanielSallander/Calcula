@@ -733,7 +733,12 @@ impl PushdownPlanner {
             .fetch_scalar
             .iter()
             .flat_map(|(owners, _)| owners.iter())
-            .chain(scoped_plan.fetch_in.iter().flat_map(|(owners, _)| owners.iter()))
+            .chain(
+                scoped_plan
+                    .fetch_in
+                    .iter()
+                    .flat_map(|(owners, _)| owners.iter()),
+            )
             .chain(scoped_plan.contested.iter().map(|c| &c.table))
             .map(|s| s.as_str())
             .collect();
@@ -1337,28 +1342,27 @@ impl PushdownPlanner {
         // list also names every scoped/contested column (values are ignored
         // by projection).
         let projection_request: QueryRequest;
-        let projection_request_ref: &QueryRequest = if request.scoped_filters.is_empty()
-            && request.scoped_in_filters.is_empty()
-        {
-            request
-        } else {
-            let mut widened = request.clone();
-            widened.filters.extend(
+        let projection_request_ref: &QueryRequest =
+            if request.scoped_filters.is_empty() && request.scoped_in_filters.is_empty() {
                 request
-                    .scoped_filters
-                    .iter()
-                    .map(|f| f.condition.clone())
-                    .chain(request.scoped_in_filters.iter().map(|f| {
-                        FilterCondition::new(
-                            f.filter.column.clone(),
-                            engine_connectors::FilterOperator::Equal,
-                            String::new(),
-                        )
-                    })),
-            );
-            projection_request = widened;
-            &projection_request
-        };
+            } else {
+                let mut widened = request.clone();
+                widened.filters.extend(
+                    request
+                        .scoped_filters
+                        .iter()
+                        .map(|f| f.condition.clone())
+                        .chain(request.scoped_in_filters.iter().map(|f| {
+                            FilterCondition::new(
+                                f.filter.column.clone(),
+                                engine_connectors::FilterOperator::Equal,
+                                String::new(),
+                            )
+                        })),
+                );
+                projection_request = widened;
+                &projection_request
+            };
         let projections = compute_table_projections(
             projection_request_ref,
             model,

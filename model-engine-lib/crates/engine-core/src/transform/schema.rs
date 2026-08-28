@@ -14,6 +14,7 @@
 
 use crate::error::{EngineError, EngineResult};
 use crate::model::Column;
+use crate::transform::catalog::TableSchemas;
 use crate::transform::rules_columns;
 use crate::transform::rules_rows;
 use crate::transform::TransformStep;
@@ -109,6 +110,7 @@ pub fn derive_step_schema(
     step_index: usize,
     input: &[Column],
     step: &TransformStep,
+    schemas: &dyn TableSchemas,
 ) -> EngineResult<Vec<Column>> {
     let output = match step {
         TransformStep::RemoveColumns { columns } => {
@@ -147,6 +149,11 @@ pub fn derive_step_schema(
             expression,
             data_type.as_ref(),
         )?,
+        TransformStep::LookupColumn {
+            table: target,
+            keys,
+            takes,
+        } => rules_columns::lookup_column(table, step_index, input, target, keys, takes, schemas)?,
         TransformStep::SplitColumn {
             column,
             delimiter,
@@ -244,10 +251,11 @@ pub fn derive_pipeline_schema(
     table: &str,
     source_columns: &[Column],
     steps: &[TransformStep],
+    schemas: &dyn TableSchemas,
 ) -> EngineResult<Vec<Column>> {
     let mut columns = source_columns.to_vec();
     for (index, step) in steps.iter().enumerate() {
-        columns = derive_step_schema(table, index, &columns, step)?;
+        columns = derive_step_schema(table, index, &columns, step, schemas)?;
     }
     Ok(columns)
 }
@@ -283,7 +291,9 @@ mod tests {
     #[test]
     fn empty_pipeline_returns_the_source_schema() {
         let source = source_schema();
-        let derived = derive_pipeline_schema("Sales", &source, &[]).unwrap();
+        let derived =
+            derive_pipeline_schema("Sales", &source, &[], &crate::transform::NoOtherTables)
+                .unwrap();
         assert!(schemas_match(&source, &derived));
     }
 
@@ -298,7 +308,9 @@ mod tests {
                 renames: vec![crate::transform::ColumnRename::new("amount", "net")],
             },
         ];
-        let derived = derive_pipeline_schema("Sales", &source, &steps).unwrap();
+        let derived =
+            derive_pipeline_schema("Sales", &source, &steps, &crate::transform::NoOtherTables)
+                .unwrap();
         let names: Vec<&str> = derived.iter().map(|c| c.name()).collect();
         assert_eq!(names, vec!["id", "region", "status", "net", "order_date"]);
     }
@@ -314,7 +326,9 @@ mod tests {
                 columns: vec!["cost".into()], // already gone
             },
         ];
-        let err = derive_pipeline_schema("Sales", &source, &steps).unwrap_err();
+        let err =
+            derive_pipeline_schema("Sales", &source, &steps, &crate::transform::NoOtherTables)
+                .unwrap_err();
         match err {
             EngineError::InvalidTransform {
                 table, step_index, ..
@@ -332,7 +346,9 @@ mod tests {
         let steps = vec![TransformStep::RemoveColumns {
             columns: vec!["nope".into()],
         }];
-        let err = derive_pipeline_schema("Sales", &source, &steps).unwrap_err();
+        let err =
+            derive_pipeline_schema("Sales", &source, &steps, &crate::transform::NoOtherTables)
+                .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("nope"), "got {message}");
         assert!(
@@ -347,7 +363,8 @@ mod tests {
         let step = TransformStep::RemoveColumns {
             columns: vec!["a".into()],
         };
-        let err = derive_step_schema("T", 0, &input, &step).unwrap_err();
+        let err = derive_step_schema("T", 0, &input, &step, &crate::transform::NoOtherTables)
+            .unwrap_err();
         assert!(err.to_string().contains("no columns"), "got {err}");
     }
 

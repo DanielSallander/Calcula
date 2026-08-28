@@ -393,7 +393,7 @@ mod tests {
     use crate::transform::TransformStep;
 
     fn derive(input: &[Column], step: &TransformStep) -> EngineResult<Vec<Column>> {
-        derive_step_schema("Sales", 0, input, step)
+        derive_step_schema("Sales", 0, input, step, &crate::transform::NoOtherTables)
     }
 
     #[test]

@@ -133,6 +133,7 @@ mod transform_tests;
 #[cfg(test)]
 mod writeback_tests;
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -143,7 +144,7 @@ use auto_tier::AutoTierState;
 
 pub use auto_tier::AutoTierConfig;
 pub use query_cache::{QueryCacheConfig, QueryCacheStats};
-pub use refresh::{RefreshFailure, RefreshReport, SourceQueryPolicy};
+pub use refresh::{RefreshFailure, RefreshReport, RefreshSkip, SourceQueryPolicy};
 pub use transform_edit::SourceSchemaDiff;
 pub use transform_preview::{TransformPreview, TransformPreviewRequest, MAX_PREVIEW_ROWS};
 
@@ -156,8 +157,8 @@ pub use tokio_util::sync::CancellationToken;
 pub use engine_core::catalog::{function_catalog, FunctionInfo};
 pub use engine_core::compute::aggregate::AggregateOp;
 pub use engine_core::compute::context::{
-    ContextResolver, EvaluationContext, FilterSource, LevelRange, ResolvedFilter,
-    ResolvedInFilter, LEVEL_AXIS, LEVEL_MAX, LEVEL_SLICER,
+    ContextResolver, EvaluationContext, FilterSource, LevelRange, ResolvedFilter, ResolvedInFilter,
+    LEVEL_AXIS, LEVEL_MAX, LEVEL_SLICER,
 };
 pub use engine_core::compute::expression::{
     self, expand_global_variables, expression_to_formula, extract_dependencies, infer_fact_table,
@@ -201,12 +202,14 @@ pub use engine_core::model::{
 pub use engine_core::optimize::{OptimizationStats, OptimizerConfig};
 pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::transform::{
-    apply_steps, conform_to_declared, derive_pipeline_schema, derive_step_schema,
-    parse_placed_statement, parse_script, parse_statement, pipeline_fingerprint, render_script,
-    render_statement, row_level_function_names, schemas_match, script_vocabulary, validate_steps,
-    with_table_transformations, CastErrorPolicy, ColumnRename, GroupAggregate, OptionSpec,
-    PlacedStep, RowRange, ScriptError, ScriptVocabulary, SortKey, StepVocabulary, TextOp,
-    TransformStep, TypeChange,
+    apply_steps, cache_identity, conform_to_declared, derive_pipeline_schema, derive_step_schema,
+    parse_placed_statement, parse_script, parse_statement, pipeline_dependencies,
+    pipeline_fingerprint, pipeline_refresh_order, render_script, render_statement,
+    row_level_function_names, schemas_match, script_vocabulary, step_dependencies, validate_steps,
+    with_table_transformations, CastErrorPolicy, ColumnRename, GroupAggregate, LookupKey,
+    LookupTake, ModelTableSchemas, NoOtherTables, OptionSpec, PlacedStep, RowRange, ScriptError,
+    ScriptVocabulary, SortKey, StepInputs, StepVocabulary, TableSchemas, TextOp, TransformStep,
+    TypeChange,
 };
 pub use engine_core::types::{DataType, TableColumn, Value};
 pub use function_docs::{function_docs, FunctionDoc};
@@ -323,6 +326,21 @@ pub struct Engine {
     /// builder already rejects bad script bodies and built-in collisions at
     /// `build()` time, so this is the one error the rebuild can produce.
     script_build_error: Option<EngineError>,
+    /// For each table whose pipeline LOOKS UP other tables: the cache
+    /// generation each of those targets had when this table was last
+    /// transformed.
+    ///
+    /// Refreshing B alone leaves A holding joined values from B's previous
+    /// rows. Nothing else can see that: A's own source is untouched, so every
+    /// timestamp and fingerprint strategy A has says "fresh", and the
+    /// in-run "was it refreshed just now" set is gone the moment the call
+    /// returns. Comparing these numbers against the cache's current ones is
+    /// what makes a LATER `refresh_stale` recompute A.
+    ///
+    /// A target that was not cached at transform time is recorded as ABSENT,
+    /// which differs from any generation — so a lookup that produced all-NULL
+    /// because its target had no rows is recomputed once the target arrives.
+    transform_dep_generations: HashMap<String, BTreeMap<String, u64>>,
 }
 
 /// Clone a deferred script-build [`EngineError`] so it can be returned from
@@ -1198,6 +1216,7 @@ impl Engine {
             active_roles: Vec::new(),
             user_identity: None,
             custom_data: None,
+            transform_dep_generations: HashMap::new(),
         }
     }
 
@@ -1290,6 +1309,63 @@ impl Engine {
             self.query_cache.lock().invalidate_all();
         }
         removed
+    }
+
+    /// Drop a table's cached rows **and every table computed from them**.
+    ///
+    /// A pipeline that looks up into `table_name` folded that table's rows into
+    /// its own cached output, so dropping only the one that changed leaves
+    /// dependents holding rows built from data the model no longer has — the
+    /// silent-wrong-data failure this whole feature has to avoid. The walk is
+    /// transitive (A reads B reads C: changing C drops both), and the
+    /// visited-set makes it terminate even on a model that dodged the
+    /// build-time cycle check.
+    ///
+    /// Returns every table name actually dropped, seeds included.
+    pub fn drop_table_cache_and_dependents(&mut self, seeds: &[String]) -> Vec<String> {
+        // Reverse edges: target -> the tables whose pipelines read it.
+        let mut readers: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for table in self.model.tables() {
+            let Some(binding) = table.source_binding() else {
+                continue;
+            };
+            for dependency in
+                engine_core::transform::pipeline_dependencies(&binding.transformations)
+            {
+                readers
+                    .entry(dependency.to_lowercase())
+                    .or_default()
+                    .push(table.name().to_string());
+            }
+        }
+
+        let mut queue: std::collections::VecDeque<String> = seeds.iter().cloned().collect();
+        let mut visited: std::collections::BTreeSet<String> = Default::default();
+        let mut dropped = Vec::new();
+        while let Some(name) = queue.pop_front() {
+            if !visited.insert(name.to_lowercase()) {
+                continue;
+            }
+            if self.drop_table_cache(&name) {
+                dropped.push(name.clone());
+            }
+            // Forget what it was transformed against too. Keeping the record
+            // would let a re-fetch that happens to land the same generations
+            // look "unchanged" for a table whose PIPELINE is what changed.
+            self.transform_dep_generations.remove(&name);
+            if let Ok(table) = self.model.table(&name) {
+                let canonical = table.name().to_string();
+                self.transform_dep_generations.remove(&canonical);
+            }
+            for reader in readers
+                .get(&name.to_lowercase())
+                .cloned()
+                .unwrap_or_default()
+            {
+                queue.push_back(reader);
+            }
+        }
+        dropped
     }
 
     /// Register a PostgreSQL data source and return its connector index.

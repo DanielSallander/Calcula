@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/ModelEditor/components/transform/stepKit.tsx
-// PURPOSE: The step vocabulary of the transformation editor (the 17 step types,
+// PURPOSE: The step vocabulary of the transformation editor (the 19 step types,
 //          their defaults, and how a step describes itself in a list) plus the
 //          small field widgets every step form reuses (column pickers, ordered
 //          column lists, integer fields).
@@ -140,6 +140,12 @@ export const STEP_TYPES: StepTypeInfo[] = [
     group: "Reshape",
     hint: "Turn distinct values of one column into columns. The values are DECLARED, not discovered — a value present at refresh but not declared here is dropped.",
   },
+  {
+    value: "lookupColumn",
+    label: "Look up columns",
+    group: "Reshape",
+    hint: "Bring columns across from another table in this model, matched on a key. This never adds rows: a duplicate key on the other side resolves to the smallest value, and a row with no match gets a blank.",
+  },
 ];
 
 /** The engine's `DataType`, minus `Decimal` (which carries precision/scale and
@@ -274,6 +280,11 @@ export function defaultStep(type: string, columns: ModelColumnInfo[]): Transform
       return { type, columns: [], nameColumn: "Attribute", valueColumn: "Value" };
     case "pivot":
       return { type, nameColumn: first, valueColumn: second, aggregate: "Sum", valueNames: [] };
+    case "lookupColumn":
+      // Deliberately empty: the target table decides what the key and take
+      // pickers can even offer, so there is nothing honest to pre-fill until
+      // the user picks one. The form shows the picker first for that reason.
+      return { type, table: "", keys: [], takes: [] };
     default:
       return { type };
   }
@@ -344,6 +355,11 @@ export function describeStep(step: TransformStepDto): string {
       return "Unpivot columns";
     case "pivot":
       return "Pivot column";
+    case "lookupColumn": {
+      const n = count(step.takes);
+      if (!step.table) return "Look up columns";
+      return n === 1 ? `Look up from ${step.table}` : `Look up ${n} columns from ${step.table}`;
+    }
     default:
       return stepTypeLabel(step.type);
   }
@@ -403,6 +419,14 @@ export function stepDetail(step: TransformStepDto): string {
       return describeRange(step.range);
     case "pivot":
       return `${step.nameColumn ?? ""} → columns, ${step.aggregate ?? ""}(${step.valueColumn ?? ""})`;
+    case "lookupColumn": {
+      const on = (step.keys ?? []).map((k) => `${k.host} = ${k.target}`).join(" and ");
+      const taken = (step.takes ?? [])
+        .map((t) => (t.outputName && t.outputName !== t.column ? `${t.column} → ${t.outputName}` : t.column))
+        .join(", ");
+      if (!on) return taken;
+      return taken ? `${taken} · on ${on}` : `on ${on}`;
+    }
     default:
       return "";
   }

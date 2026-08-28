@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::compute::aggregate::AggregateOp;
 use crate::transform::parts::{
-    CastErrorPolicy, ColumnRename, GroupAggregate, RowRange, SortKey, TextOp, TypeChange,
+    CastErrorPolicy, ColumnRename, GroupAggregate, LookupKey, LookupTake, RowRange, SortKey,
+    TextOp, TypeChange,
 };
 use crate::types::DataType;
 
@@ -115,6 +116,39 @@ pub enum TransformStep {
         /// text, and keeping the old type would cast the answer away.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data_type: Option<DataType>,
+    },
+
+    /// Bring one or more columns across from ANOTHER model table, matched on
+    /// a key — Power Query's Merge-then-expand, kept declarative.
+    ///
+    /// This is the only step that reads a table other than its own, and it is
+    /// deliberately a TYPED step rather than a `LOOKUPVALUE` expression: the
+    /// row-level allowlist is one gate shared by every expression-bearing
+    /// step, so admitting a cross-table node there would grant reach to
+    /// `groupBy` aggregate formulas too. As a step, the reach is a field a
+    /// reviewer can read in the model JSON.
+    ///
+    /// # It can never multiply rows
+    ///
+    /// Evaluation is a `LEFT JOIN` against a subquery grouped by exactly the
+    /// join keys, so the target contributes at most one row per key BY
+    /// CONSTRUCTION — not by a runtime check that a later edit could skip.
+    /// Duplicate keys resolve to `MIN` and no match yields null, which is
+    /// byte-for-byte the semantics `LOOKUPVALUE` already has in a calculated
+    /// column. Every output column is therefore nullable.
+    ///
+    /// # Ordering
+    ///
+    /// A pipeline that looks up into another table depends on it, so refresh
+    /// visits the target first and a cycle is refused at model build. See
+    /// [`pipeline_refresh_order`](crate::transform::pipeline_refresh_order).
+    LookupColumn {
+        /// The model table to read from. Must be a different, InMemory table.
+        table: String,
+        /// The key pairs, ANDed. Non-empty.
+        keys: Vec<LookupKey>,
+        /// The columns to bring back. Non-empty; all ride one join.
+        takes: Vec<LookupTake>,
     },
 
     /// Split one text column into `parts` columns on a literal delimiter.
@@ -249,6 +283,7 @@ impl TransformStep {
             TransformStep::FilterRows { .. } => "filterRows",
             TransformStep::AddColumn { .. } => "addColumn",
             TransformStep::TransformColumn { .. } => "transformColumn",
+            TransformStep::LookupColumn { .. } => "lookupColumn",
             TransformStep::SplitColumn { .. } => "splitColumn",
             TransformStep::ReplaceValues { .. } => "replaceValues",
             TransformStep::TextTransform { .. } => "textTransform",

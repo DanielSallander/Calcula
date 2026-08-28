@@ -1365,6 +1365,30 @@ const TRANSFORM_COLUMN_MIN_FORMAT_VERSION: u64 = 25;
 /// application". Stamped only when a pipeline actually uses the shape.
 const FORMULA_AGGREGATE_MIN_FORMAT_VERSION: u64 = 26;
 
+/// Minimum schema `format_version` for a filter LEVEL ceiling on the clear
+/// family: `CLEAR(dim, LEVEL 2)`, `RESET(LEVEL n)`, `CLEAR_OUTER`,
+/// `RESET_OUTER`, and the matching `ContextOp` operations.
+///
+/// The field is additive serde, so a pre-v27 engine deserializes the measure
+/// happily and then IGNORES the ceiling — computing `CLEAR(dim)` where the
+/// author wrote `CLEAR(dim, LEVEL 2)`. Once filters are pinned above the
+/// default level that is a different number on the report, not a missing
+/// feature, so the gate refuses rather than under-reporting. Stamped only when
+/// an explicit level is actually present: `None` means the default of 1, which
+/// every reader already agrees on.
+const FILTER_LEVEL_MIN_FORMAT_VERSION: u64 = 27;
+
+/// Minimum schema `format_version` for the `lookupColumn` step: a pipeline
+/// that brings columns across from another model table.
+///
+/// A new tag on an internally tagged enum cannot be ignored, so a pre-v28
+/// engine fails to deserialize the pipeline and refuses the whole model. That
+/// is the right outcome — dropping the step would serve a table that looks
+/// refreshed while missing its joined columns — but it would read as a serde
+/// error about an unknown variant. The gate turns it into "update the
+/// application". Stamped only when a pipeline actually contains a lookup.
+const LOOKUP_COLUMN_MIN_FORMAT_VERSION: u64 = 28;
+
 /// Minimum schema `format_version` for dynamic row-level security: a
 /// `FilterPredicate.dynamic` (USERNAME()/CUSTOMDATA()) is additive serde, so a
 /// pre-v11 engine silently treats it as a STATIC comparison against the
@@ -1523,7 +1547,46 @@ pub fn stamp_feature_format_version(
         })
     });
 
-    let required = if uses_v26 {
+    // v27: an explicit filter LEVEL ceiling, from a measure/calculated column
+    // expression or from a named CONTEXT definition.
+    let uses_v27 = model
+        .measures()
+        .iter()
+        .any(|m| m.expression().contains_filter_level())
+        || model
+            .calculated_columns()
+            .iter()
+            .any(|cc| cc.expression().contains_filter_level())
+        || model
+            .global_variables()
+            .iter()
+            .any(|gv| gv.expression().contains_filter_level())
+        || model.calculation_groups().iter().any(|g| {
+            g.items()
+                .iter()
+                .chain(g.multiple_or_empty_selection())
+                .chain(g.no_selection())
+                .any(|i| i.expression().contains_filter_level())
+        })
+        || model
+            .contexts()
+            .iter()
+            .any(|c| c.operations().iter().any(|op| op.has_filter_level()));
+
+    // v28: a cross-table lookup step, stamped only when a pipeline uses one.
+    let uses_v28 = model.tables().iter().any(|t| {
+        t.source_binding().is_some_and(|b| {
+            b.transformations
+                .iter()
+                .any(|step| matches!(step, bi_engine::TransformStep::LookupColumn { .. }))
+        })
+    });
+
+    let required = if uses_v28 {
+        LOOKUP_COLUMN_MIN_FORMAT_VERSION
+    } else if uses_v27 {
+        FILTER_LEVEL_MIN_FORMAT_VERSION
+    } else if uses_v26 {
         FORMULA_AGGREGATE_MIN_FORMAT_VERSION
     } else if uses_v25 {
         TRANSFORM_COLUMN_MIN_FORMAT_VERSION
@@ -1586,7 +1649,9 @@ mod format_gate_tests {
             Column::new("id", DataType::Int64),
             Column::new("status", DataType::String),
         ];
-        let derived = bi_engine::derive_pipeline_schema("T", &source_columns, &steps).unwrap();
+        let derived =
+            bi_engine::derive_pipeline_schema("T", &source_columns, &steps, &bi_engine::NoOtherTables)
+                .unwrap();
         let mut binding = TableSourceBinding::new("s", "public", "t");
         if !steps.is_empty() {
             binding = binding
@@ -1699,6 +1764,100 @@ mod format_gate_tests {
             false,
         );
         assert_eq!(stamped(&model), 24);
+    }
+
+    /// A two-table model where `T` looks up `Dim`, so a `lookupColumn` step
+    /// can be built without tripping the "unknown lookup table" refusal.
+    fn model_with_lookup(steps: Vec<bi_engine::TransformStep>) -> bi_engine::DataModel {
+        use bi_engine::{
+            Column, DataModel, DataType, PersistedAuthKind, PersistedConnection, PersistedSource,
+            SourceKind, StorageMode, Table, TableSourceBinding,
+        };
+        let dim = Table::new(
+            "Dim",
+            vec![
+                Column::new("id", DataType::Int64),
+                Column::new("label", DataType::String),
+            ],
+        )
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory);
+
+        let source_columns = vec![
+            Column::new("id", DataType::Int64),
+            Column::new("status", DataType::String),
+        ];
+        let derived = bi_engine::derive_pipeline_schema(
+            "T",
+            &source_columns,
+            &steps,
+            &bi_engine::ModelTableSchemas::new(std::slice::from_ref(&dim)),
+        )
+        .unwrap();
+        DataModel::builder()
+            .add_source(PersistedSource::new(
+                "s",
+                SourceKind::InMemory,
+                PersistedConnection::default(),
+                PersistedAuthKind::Integrated,
+            ))
+            .add_table(
+                Table::new("T", derived)
+                    .unwrap()
+                    .with_storage_mode(StorageMode::InMemory)
+                    .with_source_binding(
+                        TableSourceBinding::new("s", "public", "t")
+                            .with_source_columns(source_columns)
+                            .with_transformations(steps),
+                    ),
+            )
+            .add_table(dim)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_lookup_column_step_stamps_format_version_28() {
+        // A NEW TAG on an internally tagged enum: a pre-v28 engine cannot
+        // deserialize the pipeline at all, so without the stamp the user sees
+        // a serde error about an unknown variant instead of "update the app".
+        let model = model_with_lookup(vec![bi_engine::TransformStep::LookupColumn {
+            table: "Dim".into(),
+            keys: vec![bi_engine::LookupKey::new("id", "id")],
+            takes: vec![bi_engine::LookupTake::new("label")],
+        }]);
+        assert_eq!(stamped(&model), 28);
+    }
+
+    #[test]
+    fn a_pipeline_without_a_lookup_still_stamps_only_24() {
+        // Per-FEATURE, not per-model: a model that merely HAS a pipeline must
+        // keep the lowest version that can express it, so it stays openable by
+        // older builds.
+        let model = model_with_lookup(vec![bi_engine::TransformStep::RemoveColumns {
+            columns: vec!["status".into()],
+        }]);
+        assert_eq!(stamped(&model), 24);
+    }
+
+    #[test]
+    fn an_explicit_filter_level_stamps_format_version_27() {
+        // REGRESSION: filter levels shipped with NO stamp at all, so a model
+        // that gained `CLEAR(dim, LEVEL 2)` persisted under its old version.
+        // The field is additive serde, so a pre-v27 reader deserializes it
+        // happily and then IGNORES the ceiling — computing `CLEAR(dim)`. A
+        // different number on the report, silently.
+        let model = model_with_measure("Leveled", "SUM(Sales[amount], CLEAR(Sales, LEVEL 2))");
+        assert_eq!(stamped(&model), 27);
+    }
+
+    #[test]
+    fn a_clear_without_a_level_does_not_stamp_27() {
+        // `None` is not a level: it means the default of 1, which every
+        // reader already agrees on. Without this the stamp would fire for
+        // every model that uses CLEAR at all.
+        let model = model_with_measure("Plain", "SUM(Sales[amount], CLEAR(Sales))");
+        assert_eq!(stamped(&model), 0, "nothing here needs a newer reader");
     }
 
     #[test]
@@ -2718,6 +2877,18 @@ pub(crate) async fn bi_query_core(
                 r.failures
                     .iter()
                     .map(|f| format!("{}: {}", f.table, f.detail))
+                    // A SKIP is the same class of event and must not be quieter
+                    // than a failure: the table was not refreshed, so this query
+                    // is served from its previous rows. It is only absent from
+                    // `failures` because nothing about IT went wrong — a table
+                    // its pipeline looks up could not be refreshed, so
+                    // rebuilding it would have joined against stale rows and
+                    // reported success.
+                    .chain(
+                        r.skipped
+                            .iter()
+                            .map(|s| format!("{}: {}", s.table, s.detail)),
+                    )
                     .collect()
             })
             .unwrap_or_default();

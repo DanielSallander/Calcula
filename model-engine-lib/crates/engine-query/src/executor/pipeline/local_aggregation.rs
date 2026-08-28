@@ -1743,8 +1743,7 @@ impl QueryExecutor {
                 // Inner aggregate SQL: CASE WHEN when KEEP filters/conditions are
                 // present, else the plain aggregate.
                 let inner_sql = if has_case {
-                    let mut condition = if !effective.is_empty() || !merged_conditions.is_empty()
-                    {
+                    let mut condition = if !effective.is_empty() || !merged_conditions.is_empty() {
                         build_condition_sql_with_conditions(
                             &effective,
                             &merged_conditions,

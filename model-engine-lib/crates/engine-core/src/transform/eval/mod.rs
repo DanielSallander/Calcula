@@ -20,6 +20,7 @@ use arrow::record_batch::RecordBatch;
 use crate::compute::udf::UdfRegistry;
 use crate::error::{EngineError, EngineResult};
 use crate::model::Column;
+use crate::transform::catalog::StepInputs;
 use crate::transform::schema::derive_step_schema;
 use crate::transform::TransformStep;
 use crate::types::DataType;
@@ -68,30 +69,58 @@ pub async fn apply_steps(
     steps: &[TransformStep],
     upto: usize,
     udfs: &UdfRegistry,
+    inputs: &StepInputs,
 ) -> EngineResult<RecordBatch> {
     let upto = upto.min(steps.len());
     let mut batch = batch;
     let mut columns = source_columns.to_vec();
 
     for (index, step) in steps.iter().take(upto).enumerate() {
-        let output = derive_step_schema(table, index, &columns, step)?;
-        batch = apply_one(table, index, batch, step, &columns, &output, udfs).await?;
+        let output = derive_step_schema(table, index, &columns, step, inputs)?;
+        let context = StepContext {
+            table,
+            index,
+            udfs,
+            inputs,
+        };
+        batch = apply_one(context, batch, step, &columns, &output).await?;
         columns = output;
     }
     Ok(batch)
 }
 
+/// What every step arm needs about WHERE it is, as opposed to what it does.
+///
+/// Bundled rather than passed as four positional arguments: the SQL arms
+/// already re-bundle three of these into a `SqlStep`, and a lookup added a
+/// fourth. Destructured immediately below so no arm has to know it exists.
+struct StepContext<'a> {
+    /// The table being transformed, for error messages.
+    table: &'a str,
+    /// The step's position in the pipeline, for error messages.
+    index: usize,
+    /// The effective registry, so a step expression may call a model script
+    /// function exactly as a measure can.
+    udfs: &'a UdfRegistry,
+    /// The other tables a lookup may read.
+    inputs: &'a StepInputs,
+}
+
 /// Apply a single step. `input`/`output` are the derived schemas either side
 /// of it.
 async fn apply_one(
-    table: &str,
-    index: usize,
+    context: StepContext<'_>,
     batch: RecordBatch,
     step: &TransformStep,
     input: &[Column],
     output: &[Column],
-    udfs: &UdfRegistry,
 ) -> EngineResult<RecordBatch> {
+    let StepContext {
+        table,
+        index,
+        udfs,
+        inputs,
+    } = context;
     match step {
         // --- Arrow kernels ---
         TransformStep::RemoveColumns { .. } | TransformStep::SelectColumns { .. } => {
@@ -157,6 +186,29 @@ async fn apply_one(
             let step = sql_steps::SqlStep { table, index, udfs };
             sql_steps::transform_column(&step, batch, input, column, expression, data_type.as_ref())
                 .await
+        }
+        TransformStep::LookupColumn {
+            table: target,
+            keys,
+            takes,
+        } => {
+            let step_ctx = sql_steps::SqlStep { table, index, udfs };
+            // Validation already refused an unknown target, so a missing batch
+            // here means the pipeline reached evaluation without its
+            // dependency loaded — a real condition (a cold cache, a hand-edited
+            // model) that must name the step rather than surface as a
+            // DataFusion "table not found".
+            let target_batch = inputs.batch_of(target).ok_or_else(|| {
+                step_error(
+                    table,
+                    index,
+                    format!(
+                        "the lookup table '{target}' has no loaded rows — refresh it, \
+                         or refresh this table, which loads it first"
+                    ),
+                )
+            })?;
+            sql_steps::lookup_column(&step_ctx, batch, target_batch.clone(), keys, takes).await
         }
         TransformStep::SplitColumn {
             column,

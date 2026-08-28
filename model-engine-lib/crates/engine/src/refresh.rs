@@ -55,6 +55,25 @@ pub struct RefreshReport {
     pub refreshed: Vec<String>,
     /// Failures encountered while polling staleness or refreshing tables.
     pub failures: Vec<RefreshFailure>,
+    /// Tables that needed refreshing but were deliberately NOT attempted,
+    /// because a table their pipeline looks up could not be refreshed.
+    ///
+    /// Rebuilding them anyway would join against the target's OLD rows and
+    /// then report success — a wrong answer wearing a green badge. Reporting
+    /// the skip is the point: the host can name the table holding the others
+    /// back instead of showing a model that looks fully refreshed.
+    pub skipped: Vec<RefreshSkip>,
+}
+
+/// A refresh that was not attempted, and why.
+#[derive(Debug, Clone)]
+pub struct RefreshSkip {
+    /// The model table that was not refreshed.
+    pub table: String,
+    /// The table whose failure caused this skip, possibly indirectly.
+    pub blocked_by: String,
+    /// Human-readable explanation, naming the blocking table.
+    pub detail: String,
 }
 
 /// A single failed staleness poll or table refresh.
@@ -66,7 +85,48 @@ pub struct RefreshFailure {
     pub detail: String,
 }
 
+/// The report entry for a table left un-refreshed because a table it looks
+/// up could not be refreshed.
+fn skip_because(table: &str, cause: &str) -> RefreshSkip {
+    RefreshSkip {
+        table: table.to_string(),
+        blocked_by: cause.to_string(),
+        detail: format!(
+            "not refreshed: it looks up '{cause}', which could not be refreshed — rebuilding \
+             now would join against that table's previous rows and report success"
+        ),
+    }
+}
+
 impl Engine {
+    /// The canonical names of the tables `table_name`'s pipeline looks up.
+    fn lookup_dependencies_of(&self, table_name: &str) -> Vec<String> {
+        let Ok(table) = self.model.table(table_name) else {
+            return Vec::new();
+        };
+        let Some(binding) = table.source_binding() else {
+            return Vec::new();
+        };
+        engine_core::transform::pipeline_dependencies(&binding.transformations)
+            .into_iter()
+            .filter_map(|name| self.model.table(&name).ok())
+            .map(|dependency| dependency.name().to_string())
+            .collect()
+    }
+
+    /// The first table in `table_name`'s dependencies that is untrustworthy,
+    /// if any — propagating transitively, since `blocked` accumulates as the
+    /// dependency-ordered walk proceeds.
+    fn blocking_lookup_target(
+        &self,
+        table_name: &str,
+        blocked: &HashMap<String, String>,
+    ) -> Option<String> {
+        self.lookup_dependencies_of(table_name)
+            .iter()
+            .find_map(|dependency| blocked.get(dependency).cloned())
+    }
+
     /// Set the host policy for executing model-supplied `SourceQuery` poll SQL.
     ///
     /// Defaults to [`SourceQueryPolicy::ValidatedSelectOnly`]. Hosts that
@@ -148,9 +208,75 @@ impl Engine {
             }
         }
 
+        // A lookup joins the rows the model CURRENTLY holds. If a target has
+        // none — the user refreshed this one table right after opening the
+        // file, or after an edit dropped the target's cache — the honest
+        // choice is to load it rather than to hand back a column of NULLs
+        // that looks like real "no match" data. Depth-first, so the target's
+        // own targets are there before it transforms.
+        self.warm_lookup_targets(table_name).await?;
+
         let batches = Self::fetch_table_batches(&self.registry, table_name).await?;
         let batches = self.apply_table_transforms(table_name, batches).await?;
-        self.store_refreshed_table(table_name, batches)
+        let stats = self.store_refreshed_table(table_name, batches)?;
+        self.record_transform_dependencies(table_name);
+        Ok(stats)
+    }
+
+    /// Refresh any table this one's pipeline looks up that has no cached rows.
+    ///
+    /// Walks the transitive closure in dependency order rather than recursing
+    /// blindly: `pipeline_refresh_order` REFUSES a cycle, so a hand-edited
+    /// model that validation never saw cannot drive this into an infinite
+    /// descent. A target that is already cached is left alone even if stale —
+    /// `refresh_stale` is where freshness is decided; a single-table refresh
+    /// should not silently pull the whole model behind it.
+    fn warm_lookup_targets<'a>(
+        &'a mut self,
+        table_name: &'a str,
+    ) -> futures::future::BoxFuture<'a, EngineResult<()>> {
+        Box::pin(async move {
+            let mut wanted: std::collections::BTreeSet<String> = Default::default();
+            let mut frontier = vec![table_name.to_string()];
+            while let Some(current) = frontier.pop() {
+                let Ok(table) = self.model.table(&current) else {
+                    continue;
+                };
+                let Some(binding) = table.source_binding() else {
+                    continue;
+                };
+                for name in engine_core::transform::pipeline_dependencies(&binding.transformations)
+                {
+                    let Ok(dependency) = self.model.table(&name) else {
+                        continue;
+                    };
+                    let canonical = dependency.name().to_string();
+                    if wanted.insert(canonical.clone()) {
+                        frontier.push(canonical);
+                    }
+                }
+            }
+            if wanted.is_empty() {
+                return Ok(());
+            }
+
+            // Errors here (a cycle) name the members; better to surface that
+            // than to warm nothing and fail later with a confusing message.
+            let order = engine_core::transform::pipeline_refresh_order(self.model.tables())?;
+            for name in order {
+                if !wanted.contains(&name) || self.cache.contains(&name) {
+                    continue;
+                }
+                let Ok(table) = self.model.table(&name) else {
+                    continue;
+                };
+                if !table.is_in_memory() {
+                    continue;
+                }
+                self.refresh_table_inner(&name).await?;
+            }
+            Ok(())
+        })
     }
 
     /// Incrementally refresh a cached in-memory table: re-fetch only the
@@ -337,9 +463,31 @@ impl Engine {
 
         // Phase 2: transform and store sequentially. Both need `&self` /
         // `&mut self`, so they cannot join phase 1's concurrent fetches.
-        for (name, result) in fetched {
+        //
+        // In DEPENDENCY ORDER, not model order: a pipeline that looks up into
+        // another table reads that table's STORE, so the target must have
+        // passed `store_refreshed_table` before the dependent transforms.
+        // Ordering the FETCHES would be neither necessary nor sufficient —
+        // fetch results never feed a lookup, the cache does.
+        let order = engine_core::transform::pipeline_refresh_order(self.model.tables())?;
+        let mut pending: std::collections::HashMap<String, EngineResult<Vec<RecordBatch>>> =
+            fetched.into_iter().collect();
+        for name in order {
+            let Some(result) = pending.remove(&name) else {
+                continue;
+            };
             let batches = self.apply_table_transforms(&name, result?).await?;
             self.store_refreshed_table(&name, batches)?;
+            self.record_transform_dependencies(&name);
+        }
+        // Anything the order did not name (it only walks model tables) still
+        // has to be stored, or a table would silently stop refreshing.
+        let leftovers: Vec<String> = pending.keys().cloned().collect();
+        for name in leftovers {
+            let result = pending.remove(&name).expect("key just listed");
+            let batches = self.apply_table_transforms(&name, result?).await?;
+            self.store_refreshed_table(&name, batches)?;
+            self.record_transform_dependencies(&name);
         }
         Ok(())
     }
@@ -463,22 +611,98 @@ impl Engine {
             }
         }
 
+        // Cross-run staleness: a table whose pipeline looks up another is
+        // stale once the rows it joined against have been replaced, even
+        // though its own source, timestamp and fingerprints all say fresh.
+        // No strategy above can see it — B may have been refreshed by an
+        // entirely separate call — so it is decided here.
+        for (table_name, _, _) in &candidates {
+            if !stale_tables.contains(table_name) && self.lookup_targets_moved(table_name) {
+                stale_tables.push(table_name.clone());
+            }
+        }
+
+        // In DEPENDENCY ORDER: a stale table must transform against its
+        // targets' NEW rows, so each target refreshes first. Candidate order
+        // would rebuild a dependent against rows that are replaced two
+        // iterations later, and then report it refreshed.
+        let order = engine_core::transform::pipeline_refresh_order(self.model.tables())?;
+        let mut queue: Vec<String> = order
+            .into_iter()
+            .filter(|name| stale_tables.iter().any(|stale| stale == name))
+            .collect();
+        // Defensive: anything the order did not name still gets its turn,
+        // rather than silently never refreshing again.
         for name in &stale_tables {
-            match self.refresh_table(name).await {
+            if !queue.iter().any(|queued| queued == name) {
+                queue.push(name.clone());
+            }
+        }
+
+        let mut refreshed_now: std::collections::HashSet<String> = Default::default();
+        // table -> the table whose failure makes its rows untrustworthy.
+        let mut blocked: HashMap<String, String> = HashMap::new();
+
+        for name in queue {
+            // A target that failed, or was itself blocked, leaves its rows at
+            // the previous refresh. Transforming against those and calling it
+            // a success is the silent-wrong-answer case this exists to stop.
+            if let Some(cause) = self.blocking_lookup_target(&name, &blocked) {
+                report.skipped.push(skip_because(&name, &cause));
+                blocked.insert(name, cause);
+                continue;
+            }
+
+            match self.refresh_table(&name).await {
                 Ok(()) => {
                     // Commit fingerprints only now that the refresh succeeded;
                     // committing earlier would mask staleness after a failure.
-                    if let Some(fingerprints) = pending_fingerprints.get(name) {
+                    if let Some(fingerprints) = pending_fingerprints.get(&name) {
                         for (key, fingerprint) in fingerprints {
-                            self.cache.set_fingerprint(name, *key, fingerprint.clone());
+                            self.cache.set_fingerprint(&name, *key, fingerprint.clone());
                         }
                     }
-                    report.refreshed.push(name.clone());
+                    refreshed_now.insert(name.clone());
+                    report.refreshed.push(name);
                 }
-                Err(e) => report.failures.push(RefreshFailure {
-                    table: name.clone(),
-                    detail: e.to_string(),
-                }),
+                Err(e) => {
+                    report.failures.push(RefreshFailure {
+                        table: name.clone(),
+                        detail: e.to_string(),
+                    });
+                    blocked.insert(name.clone(), name);
+                }
+            }
+        }
+
+        // A table nobody marked stale still has to be rebuilt when a target it
+        // looks up was refreshed in THIS run: its own source said nothing, but
+        // its joined columns are now wrong. Dependency order means every such
+        // target is already stored, so one pass over the rest suffices.
+        let downstream: Vec<String> = candidates
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .filter(|name| !refreshed_now.contains(name) && !blocked.contains_key(name))
+            .filter(|name| self.lookup_targets_moved(name))
+            .collect();
+        for name in downstream {
+            if let Some(cause) = self.blocking_lookup_target(&name, &blocked) {
+                report.skipped.push(skip_because(&name, &cause));
+                blocked.insert(name, cause);
+                continue;
+            }
+            match self.refresh_table(&name).await {
+                Ok(()) => {
+                    refreshed_now.insert(name.clone());
+                    report.refreshed.push(name);
+                }
+                Err(e) => {
+                    report.failures.push(RefreshFailure {
+                        table: name.clone(),
+                        detail: e.to_string(),
+                    });
+                    blocked.insert(name.clone(), name);
+                }
             }
         }
 

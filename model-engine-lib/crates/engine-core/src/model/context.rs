@@ -134,6 +134,24 @@ fn level_suffix(level: Option<u8>) -> String {
 }
 
 impl ContextOp {
+    /// Whether this operation carries an explicit filter LEVEL ceiling.
+    ///
+    /// The other half of [`Expression::contains_filter_level`]: a level can
+    /// reach a model through a named CONTEXT definition as well as through a
+    /// measure, and both raise the same version stamp (v27). `None` is not a
+    /// level — it means the default of 1, which every reader agrees on.
+    ///
+    /// [`Expression::contains_filter_level`]: crate::compute::Expression::contains_filter_level
+    pub fn has_filter_level(&self) -> bool {
+        match self {
+            ContextOp::Clear { level, .. }
+            | ContextOp::Reset { level, .. }
+            | ContextOp::ClearOuter { level, .. }
+            | ContextOp::ResetOuter { level, .. } => level.is_some(),
+            _ => false,
+        }
+    }
+
     /// Render this operation in the `CONTEXT` expression syntax accepted by
     /// [`parse_context`](crate::compute::parser::parse_context). Returns
     /// `None` for operations with no textual form (an empty KEEP/CLEAR is a

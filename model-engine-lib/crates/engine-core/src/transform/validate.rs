@@ -18,6 +18,7 @@ use crate::compute::expression::{child_expressions, Expression};
 use crate::compute::parser::parse_refresh_filter;
 use crate::error::{EngineError, EngineResult};
 use crate::model::Column;
+use crate::transform::catalog::TableSchemas;
 use crate::transform::schema::{derive_step_schema, transform_error};
 use crate::transform::TransformStep;
 use crate::types::DataType;
@@ -289,6 +290,7 @@ pub fn validate_steps(
     table: &str,
     source_columns: &[Column],
     steps: &[TransformStep],
+    schemas: &dyn TableSchemas,
 ) -> EngineResult<Vec<Column>> {
     if source_columns.is_empty() && !steps.is_empty() {
         return Err(transform_error(
@@ -320,7 +322,7 @@ pub fn validate_steps(
                 }
             }
         }
-        columns = derive_step_schema(table, index, &columns, step)?;
+        columns = derive_step_schema(table, index, &columns, step, schemas)?;
     }
     Ok(columns)
 }
@@ -553,7 +555,13 @@ mod tests {
                 renames: vec![ColumnRename::new("amount", "net")],
             },
         ];
-        let derived = validate_steps("Sales", &source_schema(), &steps).unwrap();
+        let derived = validate_steps(
+            "Sales",
+            &source_schema(),
+            &steps,
+            &crate::transform::NoOtherTables,
+        )
+        .unwrap();
         assert!(names(&derived).contains(&"net"));
     }
 
@@ -562,7 +570,13 @@ mod tests {
         let steps = vec![TransformStep::FilterRows {
             condition: "amount".into(),
         }];
-        let err = validate_steps("Sales", &source_schema(), &steps).unwrap_err();
+        let err = validate_steps(
+            "Sales",
+            &source_schema(),
+            &steps,
+            &crate::transform::NoOtherTables,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("true or false"), "got {err}");
     }
 
@@ -578,7 +592,13 @@ mod tests {
                 data_type: None,
             },
         ];
-        let err = validate_steps("Sales", &source_schema(), &steps).unwrap_err();
+        let err = validate_steps(
+            "Sales",
+            &source_schema(),
+            &steps,
+            &crate::transform::NoOtherTables,
+        )
+        .unwrap_err();
         match err {
             EngineError::InvalidTransform { step_index, .. } => assert_eq!(step_index, 1),
             other => panic!("expected InvalidTransform, got {other:?}"),
@@ -590,7 +610,8 @@ mod tests {
         let steps = vec![TransformStep::RemoveColumns {
             columns: vec!["cost".into()],
         }];
-        let err = validate_steps("Sales", &[], &steps).unwrap_err();
+        let err =
+            validate_steps("Sales", &[], &steps, &crate::transform::NoOtherTables).unwrap_err();
         assert!(err.to_string().contains("source columns"), "got {err}");
     }
 
@@ -598,6 +619,10 @@ mod tests {
     fn an_empty_pipeline_over_no_source_columns_is_fine() {
         // A table with no pipeline is an ordinary table; it must not be
         // dragged into transformation validation at all.
-        assert!(validate_steps("Sales", &[], &[]).unwrap().is_empty());
+        assert!(
+            validate_steps("Sales", &[], &[], &crate::transform::NoOtherTables)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

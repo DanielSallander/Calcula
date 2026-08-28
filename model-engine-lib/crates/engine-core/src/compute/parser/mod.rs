@@ -963,9 +963,8 @@ mod tests {
             other => panic!("expected Clear, got {other:?}"),
         }
         // Multi-target with a trailing level.
-        let e =
-            parse_measure_expression("SUM(Sales[amount], CLEAR(Product, Cal[year], LEVEL 3))")
-                .unwrap();
+        let e = parse_measure_expression("SUM(Sales[amount], CLEAR(Product, Cal[year], LEVEL 3))")
+            .unwrap();
         match e {
             Expression::Clear { targets, level, .. } => {
                 assert_eq!(targets.len(), 2);
@@ -987,10 +986,7 @@ mod tests {
         let e = parse_measure_expression("SUM(Sales[amount], RESET(LEVEL 2))").unwrap();
         assert!(matches!(e, Expression::Reset { level: Some(2), .. }));
         let e = parse_measure_expression("SUM(Sales[amount], RESET_OUTER(LEVEL 2))").unwrap();
-        assert!(matches!(
-            e,
-            Expression::ResetOuter { level: Some(2), .. }
-        ));
+        assert!(matches!(e, Expression::ResetOuter { level: Some(2), .. }));
     }
 
     #[test]
@@ -1032,12 +1028,8 @@ mod tests {
         );
         assert!(parse_measure_expression("SUM(Sales[amount], RESET_OUTER(LEVEL 0))").is_err());
         // Out-of-range / non-integer levels.
-        assert!(
-            parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 10))").is_err()
-        );
-        assert!(
-            parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 2.5))").is_err()
-        );
+        assert!(parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 10))").is_err());
+        assert!(parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 2.5))").is_err());
         // LEVEL must be the last argument.
         assert!(
             parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 2, Cal))").is_err()

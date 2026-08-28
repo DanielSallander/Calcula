@@ -3815,7 +3815,8 @@ export interface TransformStepDto {
   /** "removeColumns" | "selectColumns" | "renameColumns" | "changeType"
    *  | "filterRows" | "addColumn" | "splitColumn" | "replaceValues"
    *  | "textTransform" | "fillDown" | "removeDuplicates" | "sort"
-   *  | "groupBy" | "keepRows" | "removeRows" | "unpivot" | "pivot" */
+   *  | "groupBy" | "keepRows" | "removeRows" | "unpivot" | "pivot"
+   *  | "lookupColumn" */
   type: string;
   columns?: string[];
   renames?: Array<{ from: string; to: string }>;
@@ -3849,6 +3850,17 @@ export interface TransformStepDto {
   valueColumn?: string;
   aggregate?: string;
   valueNames?: string[];
+  /** `lookupColumn`: the model table to bring columns across FROM. Matched
+   *  case-insensitively, like every other table name. */
+  table?: string;
+  /** `lookupColumn`: the key pairs, ANDed. `host` is a column of THIS table,
+   *  `target` a column of `table`. */
+  keys?: Array<{ host: string; target: string }>;
+  /** `lookupColumn`: the target columns to bring across. `outputName` renames;
+   *  absent means keep the target's own name. N takes ride ONE join, and the
+   *  step can never multiply rows — a duplicate key resolves to MIN, no match
+   *  to null. */
+  takes?: Array<{ column: string; outputName?: string }>;
 }
 
 /** One diagnostic against a step, by index. Mirrors the chart-transform

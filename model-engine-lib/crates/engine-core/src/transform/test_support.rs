@@ -3,7 +3,8 @@
 use crate::compute::aggregate::AggregateOp;
 use crate::model::Column;
 use crate::transform::parts::{
-    CastErrorPolicy, ColumnRename, GroupAggregate, RowRange, SortKey, TextOp, TypeChange,
+    CastErrorPolicy, ColumnRename, GroupAggregate, LookupKey, LookupTake, RowRange, SortKey,
+    TextOp, TypeChange,
 };
 use crate::transform::TransformStep;
 use crate::types::DataType;
@@ -67,6 +68,11 @@ pub(crate) fn one_of_every_step() -> Vec<TransformStep> {
             column: "status".into(),
             expression: "UPPER(TRIM([status]))".into(),
             data_type: None,
+        },
+        TransformStep::LookupColumn {
+            table: "Customers".into(),
+            keys: vec![LookupKey::new("id", "customer_id")],
+            takes: vec![LookupTake::new("name")],
         },
         TransformStep::SplitColumn {
             column: "region".into(),
@@ -213,6 +219,24 @@ pub(crate) fn every_field_shape() -> Vec<TransformStep> {
             expression: "LEFT([status], 3)".into(),
             data_type: None,
         },
+        // Both states of `outputName`, and the composite/multi-take shapes a
+        // single-entry fixture hides.
+        TransformStep::LookupColumn {
+            table: "Customers".into(),
+            keys: vec![LookupKey::new("id", "customer_id")],
+            takes: vec![LookupTake::renamed("name", "customer_name")],
+        },
+        TransformStep::LookupColumn {
+            table: "Prices".into(),
+            keys: vec![
+                LookupKey::new("region", "region"),
+                LookupKey::new("status", "tier"),
+            ],
+            takes: vec![
+                LookupTake::new("price"),
+                LookupTake::renamed("currency", "ccy"),
+            ],
+        },
         TransformStep::SplitColumn {
             column: "region".into(),
             delimiter: "\n".into(),
@@ -315,6 +339,7 @@ fn _every_variant_is_represented(step: &TransformStep) {
         | TransformStep::FilterRows { .. }
         | TransformStep::AddColumn { .. }
         | TransformStep::TransformColumn { .. }
+        | TransformStep::LookupColumn { .. }
         | TransformStep::SplitColumn { .. }
         | TransformStep::ReplaceValues { .. }
         | TransformStep::TextTransform { .. }
@@ -348,8 +373,8 @@ mod tests {
         );
         assert_eq!(
             tags.len(),
-            18,
-            "the catalog has 18 steps; add the new one to one_of_every_step()"
+            19,
+            "the catalog has 19 steps; add the new one to one_of_every_step()"
         );
         // The count above compares the fixture with a literal — both sides are
         // this file. `_every_variant_is_represented` is what actually ties the

@@ -108,6 +108,18 @@ const CSV = [
   "4,closed,300,delta",
 ].join("\n");
 
+/** The lookup target. Deliberately NOT one row per order id:
+ *  - id 1 appears TWICE, so a step that multiplied rows would show it;
+ *  - id 4 is absent, so an unmatched row must survive with a blank. */
+const CUSTOMERS_TABLE = "customers";
+const CUSTOMERS_CSV = [
+  "cid,customer,tier",
+  "1,Ann,gold",
+  "1,Andrea,silver",
+  "2,Bob,silver",
+  "3,Cal,bronze",
+].join("\n");
+
 interface ColumnInfo {
   name: string;
 }
@@ -154,6 +166,7 @@ test.describe("BI model — table transformations", () => {
     // --- Arrange: a real CSV folder source ---------------------------------
     csvDir = fs.mkdtempSync(path.join(os.tmpdir(), "calcula-transform-e2e-"));
     fs.writeFileSync(path.join(csvDir, `${TABLE}.csv`), CSV, "utf8");
+    fs.writeFileSync(path.join(csvDir, `${CUSTOMERS_TABLE}.csv`), CUSTOMERS_CSV, "utf8");
 
     await fileApi(page, "newFile");
     await page.waitForTimeout(500);
@@ -525,7 +538,7 @@ test.describe("BI model — table transformations", () => {
       dataTypes: string[];
       placementOption: string;
     };
-    expect(vocabulary.steps).toHaveLength(17);
+    expect(vocabulary.steps).toHaveLength(19);
     expect(vocabulary.steps.map((s) => s.tag)).toContain("pivot");
     expect(
       vocabulary.dataTypes,
@@ -535,6 +548,182 @@ test.describe("BI model — table transformations", () => {
 
     // --- Leave the table as the other test found it ------------------------
     await script("set", { steps: [] });
+  });
+
+  /**
+   * CROSS-TABLE LOOKUPS — `lookupColumn` through the real command surface.
+   *
+   * The unit tier proves the join shape and the facade tier proves refresh
+   * ordering. What only a live run can prove is that the whole thing survives
+   * serde, IPC and the host arms: that the host passes the MODEL into the
+   * widened `validate_steps` (passing `NoOtherTables` there would turn a valid
+   * lookup into "unknown lookup table", and every unit test would still pass),
+   * that a refresh actually joins real rows from another table's cache, and
+   * that a cycle is refused at the edit rather than at some later refresh.
+   *
+   * THE PROBES, AND WHY THEY HAVE TEETH
+   *
+   *   "does the host know the model?" -> deriveSchema for a lookup step must
+   *                                      SUCCEED. It can only succeed if the
+   *                                      host handed the catalog down.
+   *   "does it JOIN real rows?"       -> after refreshing, the joined column
+   *                                      holds the target's values — and the
+   *                                      ROW COUNT is unchanged even though
+   *                                      the target has a duplicate key.
+   *   "does an unmatched row survive?"-> order 4 has no customer, so its
+   *                                      joined value is blank and the row is
+   *                                      still there. A join that dropped it
+   *                                      would still pass a "values arrived"
+   *                                      assertion.
+   *   "is a CYCLE refused?"           -> pointing the target back at the host
+   *                                      must be rejected AND leave the model
+   *                                      standing. A cycle accepted here has
+   *                                      no valid refresh order at all.
+   *
+   * Runs after the script test, which leaves the orders pipeline cleared.
+   */
+  test("looks up another table, and refuses a cycle", async ({ sharedPage }) => {
+    const page = sharedPage;
+    test.setTimeout(180_000);
+    expect(connectionId, "the import test must have connected first").not.toBe("");
+
+    const transform = async <T = Record<string, unknown>>(
+      op: string,
+      table: string,
+      body: Record<string, unknown>,
+    ): Promise<T> =>
+      invoke<T>(page, "bi_model_transform", {
+        connectionId,
+        op,
+        table,
+        steps: null,
+        text: null,
+        asOfStep: null,
+        rowLimit: null,
+        queryId: null,
+        ...body,
+      });
+
+    // --- Arrange: the target table joins the model -------------------------
+    const listed = await invoke<Array<{ schema: string; name: string }>>(
+      page,
+      "bi_model_list_source_tables",
+      { connectionId },
+    );
+    const target = listed.find((t) => t.name === CUSTOMERS_TABLE);
+    expect(target, `source table '${CUSTOMERS_TABLE}' was listed`).toBeTruthy();
+    await invoke<Overview>(page, "bi_model_import_tables", {
+      connectionId,
+      tables: [{ schema: target!.schema, name: target!.name }],
+    });
+
+    const lookup = [
+      {
+        type: "lookupColumn",
+        table: CUSTOMERS_TABLE,
+        keys: [{ host: "id", target: "cid" }],
+        takes: [{ column: "customer" }, { column: "tier", outputName: "customer_tier" }],
+      },
+    ];
+
+    // --- Probe 1: the host derives a schema for it -------------------------
+    // Only possible if the host passed the MODEL into `validate_steps`. With
+    // `NoOtherTables` this is "unknown lookup table 'customers'" — and every
+    // engine unit test still passes, which is why this probe is here.
+    const derived = await transform<{
+      columns: ColumnInfo[];
+      diagnostics: Array<{ message: string }>;
+    }>("deriveSchema", TABLE, { steps: lookup });
+    expect(
+      derived.diagnostics,
+      "the host must know the model's other tables",
+    ).toEqual([]);
+    const derivedNames = derived.columns.map((c) => c.name);
+    expect(derivedNames).toContain("customer");
+    expect(derivedNames, "outputName renames on the way in").toContain("customer_tier");
+    expect(derivedNames, "and never under the target's own name").not.toContain("tier");
+
+    // --- Probe 2: the script projection round-trips it ---------------------
+    await transform("set", TABLE, { steps: lookup });
+    const rendered = await transform<{ script: string }>("toScript", TABLE, {});
+    expect(rendered.script).toContain(`lookupColumn table=${CUSTOMERS_TABLE}`);
+    expect(rendered.script).toContain("on=id:cid");
+    expect(rendered.script).toContain("take=tier:customer_tier");
+    const readBack = await transform<{
+      parsed: boolean;
+      steps: Array<Record<string, unknown>>;
+    }>("fromScript", TABLE, { text: rendered.script });
+    expect(readBack.parsed).toBe(true);
+    expect(
+      readBack.steps,
+      "an absent outputName must stay absent, or the round trip is not lossless",
+    ).toEqual(lookup);
+
+    // --- Probe 3: a refresh JOINS real rows, without multiplying them ------
+    await invoke(page, "bi_model_refresh_table", {
+      connectionId,
+      tableName: TABLE,
+    });
+
+    const joined = await transform<PreviewResult>("previewStep", TABLE, {
+      steps: lookup,
+      asOfStep: 1,
+    });
+    expect(joined.diagnostics).toEqual([]);
+    expect(
+      joined.rowCount,
+      "the target has TWO rows for id 1, and the step still may not add a row",
+    ).toBe(4);
+    const nameAt = joined.columns.indexOf("customer");
+    expect(nameAt, "the joined column is in the result").toBeGreaterThanOrEqual(0);
+    const idAt = joined.columns.indexOf("id");
+    const byId = new Map(joined.rows.map((r) => [r[idAt], r[nameAt]]));
+    expect(byId.get("1"), "ties resolve to the smallest value, silently").toBe("Andrea");
+    expect(byId.get("2")).toBe("Bob");
+    expect(
+      byId.has("4"),
+      "order 4 has no customer, and must still be a row",
+    ).toBe(true);
+    expect(byId.get("4"), "an unmatched row is blank, not dropped").toBeFalsy();
+
+    // --- Probe 4: a cycle is refused, and the model still stands -----------
+    // `customers` looking back at `orders` closes the loop: neither could ever
+    // be refreshed first.
+    const cycle = [
+      {
+        type: "lookupColumn",
+        table: TABLE,
+        keys: [{ host: "cid", target: "id" }],
+        takes: [{ column: "status" }],
+      },
+    ];
+    const refused = await transform<{ diagnostics?: Array<{ message: string }> }>(
+      "set",
+      CUSTOMERS_TABLE,
+      { steps: cycle },
+    ).then(
+      (ok) => ({ ok }),
+      (err: unknown) => ({ err: String(err) }),
+    );
+    expect(
+      "err" in refused,
+      `a cycle must be refused at the edit, got ${JSON.stringify(refused)}`,
+    ).toBe(true);
+    const message = (refused as { err: string }).err;
+    expect(message.toLowerCase()).toContain("cycle");
+
+    const after = await invoke<Overview>(page, "bi_model_get_overview", { connectionId });
+    expect(
+      tableOf(after, CUSTOMERS_TABLE).transformSteps,
+      "a refused edit leaves the model exactly as it was",
+    ).toEqual([]);
+    expect(
+      tableOf(after, TABLE).transformSteps,
+      "and the valid pipeline is still installed",
+    ).toHaveLength(1);
+
+    // --- Leave the table as the other tests found it -----------------------
+    await transform("set", TABLE, { steps: [] });
   });
 
   test.afterAll(async ({ sharedPage }) => {

@@ -316,9 +316,8 @@ impl Parser {
         let level = match self.advance()?.clone() {
             Token::Number(n) if n.fract() == 0.0 && (0.0..=9.0).contains(&n) => n as u8,
             Token::Number(n) => {
-                return Err(self.parse_err_prev(format!(
-                    "LEVEL must be an integer between 0 and 9, got {n}"
-                )));
+                return Err(self
+                    .parse_err_prev(format!("LEVEL must be an integer between 0 and 9, got {n}")));
             }
             tok => {
                 return Err(self.parse_err_prev(format!("LEVEL: expected a number, got {tok:?}")));
@@ -1076,10 +1075,7 @@ mod tests {
         let ctx = parse_context("test", "CLEAR_INNER(dim_date), CLEAR_OUTER(dim_product)").unwrap();
         assert_eq!(ctx.operations().len(), 2);
         assert!(matches!(&ctx.operations()[0], ContextOp::ClearInner(_)));
-        assert!(matches!(
-            &ctx.operations()[1],
-            ContextOp::ClearOuter { .. }
-        ));
+        assert!(matches!(&ctx.operations()[1], ContextOp::ClearOuter { .. }));
     }
 
     #[test]
@@ -1111,7 +1107,10 @@ mod tests {
             &ctx.operations()[2],
             ContextOp::Clear { level: None, .. }
         ));
-        assert_eq!(ctx.operations()[3], ContextOp::ResetOuter { level: Some(3) });
+        assert_eq!(
+            ctx.operations()[3],
+            ContextOp::ResetOuter { level: Some(3) }
+        );
 
         // RESET(LEVEL 0) lowers to RESET_INNER.
         let ctx = parse_context("lvl0", "RESET(LEVEL 0)").unwrap();

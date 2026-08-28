@@ -120,6 +120,11 @@ const TRANSFORM_COLUMN: &[OptionSpec] = &[
     opt!("column" -> "column", "the existing column to rewrite"),
     opt!(optional "dataType" -> "dataType", "declared type; omit to infer from the expression"),
 ];
+const LOOKUP_COLUMN: &[OptionSpec] = &[
+    opt!("table" -> "table", "the model table to read from"),
+    opt!(repeatable "on" -> "keys", "one key pair, written hostColumn:targetColumn"),
+    opt!(repeatable "take" -> "takes", "one column to bring back, written column or column:newName"),
+];
 const SPLIT_COLUMN: &[OptionSpec] = &[
     opt!("column" -> "column", "the text column to split"),
     opt!("delimiter" -> "delimiter", "the literal delimiter, not a pattern"),
@@ -222,6 +227,13 @@ pub(crate) const STEPS: &[StepVocabulary] = &[
         takes_expression: true,
         expression_field: "expression",
         help: "rewrite an existing column with a formula, in place",
+    },
+    StepVocabulary {
+        tag: "lookupColumn",
+        options: LOOKUP_COLUMN,
+        takes_expression: false,
+        expression_field: "",
+        help: "bring columns across from another table, matched on a key",
     },
     StepVocabulary {
         tag: "splitColumn",
@@ -337,6 +349,9 @@ pub(crate) fn step_by_tag(word: &str) -> Option<&'static StepVocabulary> {
         "filter" | "filterrow" => "filterRows",
         "split" => "splitColumn",
         "transformcolumns" | "changecolumn" | "setcolumn" => "transformColumn",
+        // NOT "merge": a merge multiplies rows and a lookup structurally
+        // cannot, so `unsupported_hint` keeps teaching that difference.
+        "lookup" | "lookupcolumns" => "lookupColumn",
         "replace" => "replaceValues",
         "text" => "textTransform",
         "dedupe" | "distinct" => "removeDuplicates",

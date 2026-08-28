@@ -42,7 +42,7 @@ fn every_step_survives_render_and_reparse() {
     // the enum by a wildcard-free match that stops compiling when a variant is
     // added, so the denominator cannot silently shrink.
     let steps = one_of_every_step();
-    assert_eq!(steps.len(), 18, "the catalog has 18 steps");
+    assert_eq!(steps.len(), 19, "the catalog has 19 steps");
 
     for step in &steps {
         let text = render_statement(step);
@@ -135,7 +135,7 @@ fn every_serialized_field_has_a_spelling() {
             step.tag
         );
     }
-    assert_eq!(seen.len(), 18, "every tag must be represented");
+    assert_eq!(seen.len(), 19, "every tag must be represented");
 }
 
 #[test]
@@ -234,7 +234,8 @@ fn enum_spelling_census() {
         // spelling must be the canonical one the vocabulary publishes.
         assert!(
             AGGREGATE_NAMES.contains(&rendered),
-            "{aggregate:?} rendered as {rendered:?}, which is not one of the published              spellings {AGGREGATE_NAMES:?}"
+            "{aggregate:?} rendered as {rendered:?}, which is not one of the \
+             published spellings {AGGREGATE_NAMES:?}"
         );
         assert_eq!(parse_aggregate(rendered), Some(aggregate));
         let step = TransformStep::GroupBy {
@@ -1083,7 +1084,7 @@ fn the_vocabulary_covers_the_catalog() {
     // The table the host serves to its editor must describe every step, or
     // completion silently stops offering one.
     let vocabulary = super::script_vocabulary();
-    assert_eq!(vocabulary.steps.len(), 18);
+    assert_eq!(vocabulary.steps.len(), 19);
     let tags: BTreeSet<&str> = vocabulary.steps.iter().map(|s| s.tag).collect();
     for step in one_of_every_step() {
         assert!(

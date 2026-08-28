@@ -369,6 +369,7 @@ const TRANSFORM_MATRIX: string[] = [
   "transform table Web add removeRows range=range:0:5",
   "transform table Web add unpivot columns=Jan,Feb nameColumn=Month valueColumn=Amount",
   "transform table Web add pivot nameColumn=Month valueColumn=Amount aggregate=Sum valueNames=Jan,Feb",
+  "transform table Web add lookupColumn table=Customers on=Id:CustomerId take=Name take=Tier:CustomerTier",
   "transform table Web remove 2",
   "transform table Web move 2 1",
   "transform table Web rename 1 Kept",

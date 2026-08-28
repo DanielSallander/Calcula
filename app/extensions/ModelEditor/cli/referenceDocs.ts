@@ -454,6 +454,7 @@ transform table Sales clear
 | \`filterRows\` | \`= <row condition>\` |
 | \`addColumn\` | \`name=Margin [dataType=Float64] = <expression>\` |
 | \`transformColumn\` | \`column=Status [dataType=String] = <expression>\` — rewrite **in place** |
+| \`lookupColumn\` | \`table=Customers on=customer_id:id take=name take=segment:seg\` — bring columns across from **another table** |
 | \`splitColumn\` | \`column=Name delimiter="," parts=2 [keepOriginal=true]\` |
 | \`replaceValues\` | \`column=Region find="x" [replace="y"] [matchEntireValue=true]\` |
 | \`textTransform\` | \`columns=A,B operation=trim\\|clean\\|upper\\|lower\` |
@@ -479,6 +480,45 @@ Options that do not belong to the step being added are refused by name —
 a \`filterRows\` step never silently swallows a \`column=\`. That refusal now
 comes from the engine's parser, so it arrives when the command RUNS rather than
 when it is planned.
+
+## Looking up another table
+
+A pipeline is single-table almost everywhere — but a lookup reaches across to
+another table in the same model and brings columns back, matched on a key:
+
+\`\`\`
+transform table Sales add lookupColumn table=Customers on=customer_id:id take=name
+transform table Sales add lookupColumn table=Customers on=region:region on=tier:tier take=quota:target
+\`\`\`
+
+Repeat \`on=\` for a composite key; every pair must match. Repeat \`take=\` for
+more columns, and write \`take=column:newName\` to rename one on the way in.
+Every take rides **one** join, so bringing three columns across costs no more
+than bringing one.
+
+**It can never add rows.** If the other table has several rows matching a key,
+the smallest value wins; if it has none, the result is blank. That is not a
+rule to remember — the step is built as a join against a grouped subquery, so
+one output row per input row is structural. Row ORDER is preserved too, which
+matters because \`keepRows\` addresses positions and \`fillDown\` carries a value
+downwards.
+
+The target must be an **Import** table in this model, and not this one. A
+DirectQuery table is refused (its rows are never held here, so there would be
+nothing to join against), and so is a materialized calculated table (those are
+built *after* the tables they read from). The model also refuses a **loop** —
+if \`Sales\` looks up \`Customers\`, then \`Customers\` cannot look up \`Sales\`.
+
+Refreshing is ordered for you: the target is loaded first, and refreshing
+\`Sales\` alone loads \`Customers\` if it has no rows yet. If the target's refresh
+FAILS, \`Sales\` is reported as **skipped** rather than rebuilt against the
+target's old rows — a stale join that reported success would be worse than a
+named skip.
+
+\`LOOKUPVALUE(...)\` is *not* available inside a step expression. The expression
+gate is one allowlist shared by \`filterRows\`, \`addColumn\`, \`transformColumn\`
+and a \`groupBy\` formula, so admitting it there would offer it in places with
+nothing behind it. Use this step instead — it is what the refusal points at.
 
 ## Renaming a step
 

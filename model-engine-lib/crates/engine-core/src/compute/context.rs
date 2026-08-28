@@ -1785,10 +1785,8 @@ mod tests {
         ];
 
         let mut ctx = EvaluationContext::new();
-        ctx.cleared_columns.insert(
-            ("Sales".into(), "region".into()),
-            LevelRange::axis_only(),
-        );
+        ctx.cleared_columns
+            .insert(("Sales".into(), "region".into()), LevelRange::axis_only());
 
         let effective = ctx.effective_filters(&outer);
         // GroupBy region filter cleared, Query year filter kept
@@ -1957,7 +1955,10 @@ mod tests {
             Some(&LevelRange::through(2))
         );
 
-        let expression = expr::agg(AggregateOp::Sum, expr::reset_at(expr::col("amount"), Some(3)));
+        let expression = expr::agg(
+            AggregateOp::Sum,
+            expr::reset_at(expr::col("amount"), Some(3)),
+        );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
         assert_eq!(ctx.reset, Some(LevelRange::through(3)));
     }
@@ -1996,7 +1997,13 @@ mod tests {
         let axis = LevelRange::axis_only();
         let outer2 = LevelRange::outer(2);
         let both = axis.union(outer2);
-        assert_eq!(both, LevelRange { floor: 0, ceiling: 2 });
+        assert_eq!(
+            both,
+            LevelRange {
+                floor: 0,
+                ceiling: 2
+            }
+        );
         for level in 0..=9u8 {
             assert_eq!(
                 both.contains(level),
@@ -2021,7 +2028,10 @@ mod tests {
         assert_eq!(bare.effective_filters(&outer).len(), 1);
 
         let mut leveled = EvaluationContext::new();
-        leveled.record_clear(&[ClearTarget::Table("Sales".into())], LevelRange::through(2));
+        leveled.record_clear(
+            &[ClearTarget::Table("Sales".into())],
+            LevelRange::through(2),
+        );
         assert!(leveled.effective_filters(&outer).is_empty());
 
         // RESET behaves the same way across all tables.

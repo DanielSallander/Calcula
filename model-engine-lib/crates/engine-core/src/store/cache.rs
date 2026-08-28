@@ -40,6 +40,14 @@ struct CacheEntry {
     /// prevents multiple `SourceQuery` strategies on one table from
     /// overwriting each other's last-seen values (refresh ping-pong).
     fingerprints: HashMap<u64, String>,
+    /// Monotonic stamp, unique across the cache's whole life, assigned on
+    /// every store. A dependent table records the generation of each table
+    /// its pipeline looked up; a mismatch later means "the rows I joined
+    /// against have been replaced", which is staleness that no timestamp can
+    /// see — the dependent's own source may be untouched, and TTLs measure
+    /// the wrong thing. Never reused: `remove` then `store` yields a NEW
+    /// number, so dropping and re-fetching an identical batch still counts.
+    generation: u64,
 }
 
 /// In-memory cache holding Arrow `RecordBatch` data for `InMemory`-mode tables.
@@ -63,6 +71,9 @@ pub struct InMemoryCache {
     total_bytes: usize,
     /// Maximum bytes allowed.
     budget_bytes: usize,
+    /// Next value for [`CacheEntry::generation`]. Starts at 1 so that 0 can
+    /// never collide with a real stamp.
+    next_generation: u64,
 }
 
 impl InMemoryCache {
@@ -72,6 +83,7 @@ impl InMemoryCache {
             entries: HashMap::new(),
             total_bytes: 0,
             budget_bytes: DEFAULT_MEMORY_BUDGET,
+            next_generation: 1,
         }
     }
 
@@ -81,6 +93,7 @@ impl InMemoryCache {
             entries: HashMap::new(),
             total_bytes: 0,
             budget_bytes,
+            next_generation: 1,
         }
     }
 
@@ -147,6 +160,8 @@ impl InMemoryCache {
             .get(table_name)
             .map(|e| e.fingerprints.clone())
             .unwrap_or_default();
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
         self.entries.insert(
             table_name.to_string(),
             CacheEntry {
@@ -155,6 +170,7 @@ impl InMemoryCache {
                 size_bytes: new_size,
                 force_stale,
                 fingerprints,
+                generation,
             },
         );
         Ok(())
@@ -184,6 +200,18 @@ impl InMemoryCache {
             }
             None => false,
         }
+    }
+
+    /// Returns the table's cache generation, if cached.
+    ///
+    /// Two reads that return the same number are guaranteed to have seen the
+    /// same rows; a different number means the entry was replaced. Used to
+    /// detect that a table whose own source is unchanged nonetheless has to
+    /// be recomputed because a table it LOOKS UP was refreshed — including
+    /// across separate refresh calls, which an in-run "was it refreshed just
+    /// now" set cannot see.
+    pub fn generation(&self, table_name: &str) -> Option<u64> {
+        self.entries.get(table_name).map(|e| e.generation)
     }
 
     /// Returns when the table was last refreshed, if cached.
@@ -586,6 +614,33 @@ mod tests {
 
         // Just cached → stale with zero max_age.
         assert!(cache.is_stale("products", Duration::ZERO));
+    }
+
+    #[test]
+    fn a_generation_is_unique_per_store_and_never_reused() {
+        let mut cache = InMemoryCache::new();
+        assert!(cache.generation("products").is_none(), "uncached has none");
+
+        cache.store("products", make_test_batch(10)).unwrap();
+        let first = cache.generation("products").unwrap();
+
+        // Re-storing the SAME rows still counts as a replacement: the point is
+        // "these are different rows than the ones you joined against", and the
+        // cache cannot tell sameness cheaply.
+        cache.store("products", make_test_batch(10)).unwrap();
+        let second = cache.generation("products").unwrap();
+        assert_ne!(first, second);
+
+        // Another table never borrows this one's number.
+        cache.store("orders", make_test_batch(3)).unwrap();
+        assert_ne!(cache.generation("orders").unwrap(), second);
+
+        // Dropping and re-storing must NOT hand back the old number, or a
+        // dependent would conclude "unchanged" about rows that were refetched.
+        cache.remove("products");
+        assert!(cache.generation("products").is_none());
+        cache.store("products", make_test_batch(10)).unwrap();
+        assert!(cache.generation("products").unwrap() > second);
     }
 
     #[test]

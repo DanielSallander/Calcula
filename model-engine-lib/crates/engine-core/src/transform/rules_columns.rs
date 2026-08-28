@@ -5,9 +5,12 @@
 
 use crate::error::EngineResult;
 use crate::model::Column;
+use crate::transform::catalog::TableSchemas;
 use crate::transform::infer::infer_parsed_type;
 use crate::transform::literal::validate_typed_literal;
-use crate::transform::parts::{CastErrorPolicy, ColumnRename, TextOp, TypeChange};
+use crate::transform::parts::{
+    CastErrorPolicy, ColumnRename, LookupKey, LookupTake, TextOp, TypeChange,
+};
 use crate::transform::schema::{require_absent, require_column, require_unique, transform_error};
 use crate::transform::validate::parse_row_expression;
 use crate::types::DataType;
@@ -258,6 +261,125 @@ pub(crate) fn transform_column(
     Ok(output)
 }
 
+/// `lookupColumn`: append one column per take, read from another table.
+///
+/// Pure: the output schema is a function of THIS step's input schema and the
+/// target's DECLARED columns. No rows are read — which is what keeps
+/// `derive_pipeline_schema` an offline call a host can make on every keystroke
+/// and a reviewer can trust without a connection.
+///
+/// Every output column is **nullable** regardless of how the target declares
+/// it: the join is a LEFT JOIN, so a host row with no match gets null.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lookup_column(
+    table: &str,
+    step_index: usize,
+    input: &[Column],
+    target_name: &str,
+    keys: &[LookupKey],
+    takes: &[LookupTake],
+    schemas: &dyn TableSchemas,
+) -> EngineResult<Vec<Column>> {
+    if target_name.is_empty() {
+        return Err(transform_error(table, step_index, "no lookup table named"));
+    }
+    if target_name.eq_ignore_ascii_case(table) {
+        return Err(transform_error(
+            table,
+            step_index,
+            format!(
+                "a lookup reads ANOTHER table, but '{target_name}' is this table. To compute \
+                 from this table's own columns use addColumn or transformColumn."
+            ),
+        ));
+    }
+    if keys.is_empty() {
+        return Err(transform_error(
+            table,
+            step_index,
+            "a lookup needs at least one key pair (hostColumn:targetColumn)",
+        ));
+    }
+    if takes.is_empty() {
+        return Err(transform_error(
+            table,
+            step_index,
+            "a lookup needs at least one column to take from the target table",
+        ));
+    }
+
+    let target_columns = schemas.columns_of(target_name).ok_or_else(|| {
+        transform_error(
+            table,
+            step_index,
+            format!("unknown lookup table '{target_name}'"),
+        )
+    })?;
+
+    // Keys: the host side must exist in THIS step's input (not the table's
+    // final columns — an earlier step may have created or renamed it), the
+    // target side in the target's declared columns.
+    for key in keys {
+        require_column(table, step_index, input, &key.host)?;
+        if !target_columns
+            .iter()
+            .any(|c| c.name().eq_ignore_ascii_case(&key.target))
+        {
+            return Err(transform_error(
+                table,
+                step_index,
+                format!(
+                    "lookup table '{target_name}' has no column '{}' — it has: {}",
+                    key.target,
+                    target_columns
+                        .iter()
+                        .map(Column::name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+    }
+
+    let mut output = input.to_vec();
+    for take in takes {
+        let source = target_columns
+            .iter()
+            .find(|c| c.name().eq_ignore_ascii_case(&take.column))
+            .ok_or_else(|| {
+                transform_error(
+                    table,
+                    step_index,
+                    format!(
+                        "lookup table '{target_name}' has no column '{}' — it has: {}",
+                        take.column,
+                        target_columns
+                            .iter()
+                            .map(Column::name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+            })?;
+        let name = take.output();
+        if name.is_empty() {
+            return Err(transform_error(
+                table,
+                step_index,
+                format!("the take of '{}' has an empty output name", take.column),
+            ));
+        }
+        require_absent(table, step_index, &output, name)?;
+        output.push(
+            Column::new(name, source.data_type().clone())
+                // A LEFT JOIN yields null for an unmatched host row, whatever
+                // the target declares.
+                .with_nullable(true),
+        );
+    }
+    Ok(output)
+}
+
 /// "unknown column 'x'", naming what IS there — the message a formula author
 /// needs when a name is misspelled.
 fn unknown_column(
@@ -430,7 +552,7 @@ mod tests {
     use crate::transform::TransformStep;
 
     fn derive(input: &[Column], step: &TransformStep) -> EngineResult<Vec<Column>> {
-        derive_step_schema("Sales", 0, input, step)
+        derive_step_schema("Sales", 0, input, step, &crate::transform::NoOtherTables)
     }
 
     #[test]
@@ -736,6 +858,155 @@ mod tests {
                 step.type_name()
             );
         }
+    }
+
+    /// A model catalog with one other table, for the lookup rules below.
+    fn other_tables() -> Vec<Column> {
+        cols(&[
+            ("customer_id", DataType::Int64),
+            ("name", DataType::String),
+            ("tier", DataType::String),
+        ])
+    }
+
+    struct Customers(Vec<Column>);
+    impl crate::transform::TableSchemas for Customers {
+        fn columns_of(&self, table: &str) -> Option<&[Column]> {
+            table.eq_ignore_ascii_case("Customers").then_some(&self.0)
+        }
+    }
+
+    fn derive_with_lookup(step: &TransformStep) -> EngineResult<Vec<Column>> {
+        crate::transform::derive_step_schema(
+            "Sales",
+            0,
+            &source_schema(),
+            step,
+            &Customers(other_tables()),
+        )
+    }
+
+    fn lookup(keys: Vec<LookupKey>, takes: Vec<LookupTake>) -> TransformStep {
+        TransformStep::LookupColumn {
+            table: "Customers".into(),
+            keys,
+            takes,
+        }
+    }
+
+    #[test]
+    fn a_lookup_appends_the_taken_columns_as_nullable() {
+        let out = derive_with_lookup(&lookup(
+            vec![LookupKey::new("id", "customer_id")],
+            vec![
+                LookupTake::new("name"),
+                LookupTake::renamed("tier", "customer_tier"),
+            ],
+        ))
+        .unwrap();
+        assert_eq!(
+            names(&out),
+            vec![
+                "id",
+                "region",
+                "status",
+                "amount",
+                "cost",
+                "order_date",
+                "name",
+                "customer_tier"
+            ]
+        );
+        // ALWAYS nullable: a LEFT JOIN yields null for an unmatched host row
+        // whatever the target declares.
+        assert!(out[6].nullable(), "an unmatched row gets null");
+        assert_eq!(out[6].data_type(), &DataType::String);
+    }
+
+    #[test]
+    fn a_lookup_into_an_unknown_table_is_refused() {
+        let err = crate::transform::derive_step_schema(
+            "Sales",
+            0,
+            &source_schema(),
+            &lookup(
+                vec![LookupKey::new("id", "customer_id")],
+                vec![LookupTake::new("name")],
+            ),
+            &crate::transform::NoOtherTables,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Customers"), "got {err}");
+    }
+
+    #[test]
+    fn a_lookup_into_itself_is_refused_and_says_what_to_use() {
+        let err = crate::transform::derive_step_schema(
+            "Sales",
+            0,
+            &source_schema(),
+            &TransformStep::LookupColumn {
+                table: "Sales".into(),
+                keys: vec![LookupKey::new("id", "id")],
+                takes: vec![LookupTake::new("amount")],
+            },
+            &Customers(other_tables()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("addColumn"), "got {err}");
+    }
+
+    #[test]
+    fn a_lookup_names_the_targets_columns_when_one_is_wrong() {
+        let err = derive_with_lookup(&lookup(
+            vec![LookupKey::new("id", "custmer_id")],
+            vec![LookupTake::new("name")],
+        ))
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("custmer_id"), "got {message}");
+        assert!(
+            message.contains("customer_id"),
+            "must list what IS there: {message}"
+        );
+
+        let err = derive_with_lookup(&lookup(
+            vec![LookupKey::new("id", "customer_id")],
+            vec![LookupTake::new("naem")],
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("naem"), "got {err}");
+    }
+
+    #[test]
+    fn a_lookup_whose_host_key_is_not_a_column_here_is_refused() {
+        let err = derive_with_lookup(&lookup(
+            vec![LookupKey::new("nope", "customer_id")],
+            vec![LookupTake::new("name")],
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("nope"), "got {err}");
+    }
+
+    #[test]
+    fn a_take_colliding_with_an_existing_column_is_refused() {
+        // Silently shadowing `status` would make every later step ambiguous.
+        let err = derive_with_lookup(&lookup(
+            vec![LookupKey::new("id", "customer_id")],
+            vec![LookupTake::renamed("name", "status")],
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("status"), "got {err}");
+    }
+
+    #[test]
+    fn a_lookup_with_no_keys_or_no_takes_is_refused() {
+        let err = derive_with_lookup(&lookup(vec![], vec![LookupTake::new("name")])).unwrap_err();
+        assert!(err.to_string().contains("key pair"), "got {err}");
+
+        let err = derive_with_lookup(&lookup(vec![LookupKey::new("id", "customer_id")], vec![]))
+            .unwrap_err();
+        assert!(err.to_string().contains("at least one column"), "got {err}");
     }
 
     #[test]

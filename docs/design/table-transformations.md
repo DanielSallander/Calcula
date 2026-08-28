@@ -160,13 +160,93 @@ has the same caveat; stating it is better than hiding it.
 Validation runs *before* the fetch, so a typo in a half-typed expression comes back
 instantly rather than after a round trip to the database.
 
+## Looking across tables (`lookupColumn`, format version 28)
+
+A pipeline is single-table almost everywhere, and deliberately so. The one exception
+brings columns across from another model table, matched on a key, before either table
+has joined the model as a relationship:
+
+```
+lookupColumn table=Customers on=customer_id:id take=name take=segment:customer_segment
+```
+
+This is the `LOOKUPVALUE` *capability* at pipeline time. `RELATED` stays out: it needs a
+relationship, which does not exist yet. There is no query folding involved and none is
+possible — the two tables may live in different sources — so the join happens **locally,
+against the target's cached rows, at refresh**.
+
+### Why a typed step and not a `LOOKUPVALUE(...)` spelling
+
+The obvious surface would have been the formula one, since the pipeline already accepts
+row-level expressions. It was rejected on a mechanical fact rather than a taste
+argument: `parse_row_expression` → `ensure_row_level` is **one fail-closed allowlist
+shared by four surfaces** — `filterRows`, `addColumn`, `transformColumn`, and a `groupBy`
+aggregate formula. Admitting `Expression::LookupValue` there admits it in all four,
+including inside an aggregate formula where nothing implements it. A second, mechanical
+reason: `substitute_measure_refs` has no `LookupValue` arm (it falls to `_ => self.clone()`),
+so bracket resolution would silently not reach into a lookup's search values — the
+`[column]` spelling this pipeline teaches everywhere else would quietly not work there.
+
+The refusal message points at the step by name. The formula spelling stays open as a
+later desugar restricted to a top-level `addColumn`.
+
+### The three properties that make it safe
+
+**It cannot multiply rows.** The step compiles to a LEFT JOIN against a *grouped*
+subquery (`SELECT keys, MIN(take) … GROUP BY keys`), so one output row per input row is
+structural, not a rule someone has to remember. Ties resolve to `MIN` and no match yields
+`NULL` — verbatim the contract `LOOKUPVALUE` already has in calculated columns, so a
+user who learns one has learned the other. N takes ride ONE join.
+
+**It cannot reorder rows.** A join does not preserve input order, and this pipeline's
+order is meaningful: `keepRows`/`removeRows` address positions, `fillDown` carries a
+value downwards, `removeDuplicates` keeps the FIRST row. So the host is numbered with
+`ROW_NUMBER() OVER ()` before the join and sorted back afterwards. This was not
+theoretical — the first implementation silently produced `[Bob, None, Ann, Cal, None]`
+where the pipeline meant `[Ann, Bob, Cal, None, None]`, with the row COUNT correct.
+
+**It cannot see a table it should not.** The target must be an Import table that is not
+this one; DirectQuery is refused (nothing is ever cached for it, so every refresh would
+fail with "no loaded rows") and so is a materialized calculated table (those are built a
+phase later, so the join would hit an empty cache). The model refuses a **cycle** at
+build, naming the members, so a loop fails to LOAD rather than at refresh.
+
+### Two questions at two different times, two different types
+
+Deriving a schema needs the target's DECLARED COLUMNS and nothing else — no rows — so
+`derive_pipeline_schema` stays an offline function a host can call on every keystroke.
+Evaluating additionally needs the target's ROWS, which only the `engine` facade can
+supply. Hence `TableSchemas` (a trait: columns) for the first and `StepInputs` (rows AND
+columns) for the second, where the struct *implements* the trait so evaluation answers
+both from one value. `StepInputs` carries declared columns beside each batch rather than
+re-deriving them from Arrow, because `optimize_batch` may have dictionary-encoded or
+narrowed the cached batch and reconstructing model types from that would be a second,
+disagreeing answer.
+
+### Freshness is four separate mechanisms, because it has four separate failure modes
+
+| Failure | Mechanism |
+|---|---|
+| The dependent transforms before its target is stored | `pipeline_refresh_order` (Kahn) drives both `refresh_all_in_memory` phase 2 and `refresh_stale`. Model order is the WRONG order and the fixture declares the dependent first to prove it. |
+| A single-table refresh joins against an empty target | `refresh_table` warms uncached targets depth-first. Otherwise the first refresh after opening a file yields a column of NULLs indistinguishable from real "no match" data. |
+| The target was refreshed by an EARLIER call | The cache stamps a monotonic **generation** on every store; a dependent records each target's generation. Invisible to every timestamp and fingerprint strategy, because the dependent's own source never changed. |
+| The target's refresh FAILED | The dependent is **skipped with a reason**, not rebuilt. Rebuilding would join against the target's previous rows and then report success — a wrong answer wearing a green badge. `RefreshReport.skipped` names the table holding it back. |
+
+Editing a pipeline drops the caches of every table that looks up into it, **transitively**
+(`drop_table_cache_and_dependents`), and the disk cache stores `cache_identity` — a
+post-order fold of a table's own `schema_hash` with each dependency's identity — instead
+of the bare hash. A table with no lookups gets its `schema_hash` verbatim, so an ordinary
+model's disk caches are untouched by the existence of the feature.
+
 ## What is deliberately NOT built
 
-**Multi-table steps (`mergeTable` / `appendTable`).** Cleanly additive: the evaluator
-takes a batch and a schema, so a `TransformTableProvider` reading other tables' cached
-batches slots in. What it needs beyond that is refresh **ordering** — a topological sort
-over the table dependency graph, with cycle rejection in `validate()`. That is a real
-piece of work and it does not block anything shipped here.
+**Row-multiplying multi-table steps (`mergeTable` / `appendTable`).** The half that was
+"a real piece of work" is now BUILT — see *Looking across tables* below: refresh
+ordering, cycle rejection, the data-provider seam and dependency-aware cache identity
+all exist and are reusable verbatim. What is left for a merge is the part `lookupColumn`
+structurally cannot do: **multiply rows**. That is a different contract (a merge changes
+the row count, so `keepRows`/`removeDuplicates`/`fillDown` downstream mean something
+else) and it belongs in its own step tag, never as an option on this one.
 
 **Query folding.** A leading prefix of a pipeline can fold into the existing
 `FetchRequest`: `selectColumns` → `columns`, an AND-of-comparisons `filterRows` →
@@ -190,8 +270,11 @@ front-to-back, and the evaluator already takes an arbitrary sub-range.
 | Script round-trip battery | `.../transform/script/tests.rs` |
 | Evaluation over batches | `.../transform/eval/{mod,sql_steps,kernel_steps}.rs` |
 | Model-build enforcement | `.../model/schema/validation.rs` (`validate_table_transformations`) |
-| Persistence | `.../model/source.rs` (`TableSourceBinding`), format version **24** |
-| Refresh integration | `crates/engine/src/transform_apply.rs` + `refresh.rs` |
+| Cross-table seam (columns / rows) | `.../transform/catalog.rs` (`TableSchemas`, `StepInputs`, `ModelTableSchemas`) |
+| Dependency graph, order, cache identity | `.../transform/mod.rs` (`pipeline_refresh_order`, `validate_lookup_targets`, `cache_identity`) |
+| Persistence | `.../model/source.rs` (`TableSourceBinding`), format version **24**; a lookup stamps **28** |
+| Refresh integration + ordering | `crates/engine/src/transform_apply.rs` + `refresh.rs` |
+| Dependency-aware invalidation | `crates/engine/src/lib.rs` (`drop_table_cache_and_dependents`) |
 | Edit + preview API | `crates/engine/src/{transform_edit,transform_preview}.rs` |
 | Host command | `app/src-tauri/src/bi/model_editor.rs` (`bi_model_transform`) |
 | Host DTOs / `@api` | `app/src/api/backend.ts` |

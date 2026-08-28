@@ -526,8 +526,23 @@ use crate::model::writeback_column::WritebackColumn;
 ///   computes once pinned filters exist. That is a misinterpretation, not a
 ///   cosmetic loss, so the version gate refuses instead.
 ///
+/// - `28` — cross-table lookups in a pipeline:
+///   [`TransformStep`](crate::transform::TransformStep) gained
+///   `LookupColumn { table, keys, takes }`, which brings columns across from
+///   another model table matched on a key. It is the first step that reads a
+///   table other than its own, so a model carrying one also carries a refresh
+///   ORDER (the target loads first) and a build-time cycle refusal.
+///
+///   A new tag on an internally tagged enum cannot be ignored, so a pre-v28
+///   engine fails to deserialize the pipeline and refuses the whole model.
+///   That is the right outcome — dropping the step would serve a table that
+///   looks refreshed while missing its joined columns — but the failure would
+///   read as a serde error about an unknown variant. The version gate turns it
+///   into "update the application to open this model". Stamped only when a
+///   pipeline actually contains a lookup.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 27;
+pub const MODEL_FORMAT_VERSION: u32 = 28;
 
 /// A data model consisting of tables and relationships between them.
 ///

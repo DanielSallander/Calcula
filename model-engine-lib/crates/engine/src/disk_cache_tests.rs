@@ -493,3 +493,206 @@ fn load_cache_skips_legacy_entry_with_traversal_table_name() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// Cross-table lookups: a restored cache must not outlive its target's shape
+// ---------------------------------------------------------------------------
+
+/// A two-table model: `Orders` looks up `Customers`, whose column list is
+/// whatever `customer_columns` says. Varying that is how the tests reshape
+/// the target without touching the dependent.
+fn lookup_model(customer_columns: Vec<Column>) -> DataModel {
+    use crate::{
+        PersistedAuthKind, PersistedConnection, PersistedSource, SourceKind, TableSourceBinding,
+        TransformStep,
+    };
+
+    let customers = Table::new("Customers", customer_columns)
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory)
+        .with_source_binding(TableSourceBinding::new("src", "public", "customers"));
+
+    let steps = vec![TransformStep::LookupColumn {
+        table: "Customers".into(),
+        keys: vec![engine_core::transform::LookupKey::new("id", "customer_id")],
+        takes: vec![engine_core::transform::LookupTake::new("customer_name")],
+    }];
+    let source_columns = vec![Column::new("id", DataType::Int64)];
+    let derived = crate::derive_pipeline_schema(
+        "Orders",
+        &source_columns,
+        &steps,
+        &engine_core::transform::ModelTableSchemas::new(std::slice::from_ref(&customers)),
+    )
+    .unwrap();
+
+    DataModel::builder()
+        .add_source(PersistedSource::new(
+            "src",
+            SourceKind::InMemory,
+            PersistedConnection::default(),
+            PersistedAuthKind::Integrated,
+        ))
+        .add_table(
+            Table::new("Orders", derived)
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory)
+                .with_source_binding(
+                    TableSourceBinding::new("src", "public", "orders")
+                        .with_source_columns(source_columns)
+                        .with_transformations(steps),
+                ),
+        )
+        .add_table(customers)
+        .build()
+        .unwrap()
+}
+
+fn narrow_customers() -> Vec<Column> {
+    vec![
+        Column::new("customer_id", DataType::Int64),
+        Column::new("customer_name", DataType::String),
+    ]
+}
+
+fn wide_customers() -> Vec<Column> {
+    vec![
+        Column::new("customer_id", DataType::Int64),
+        Column::new("customer_name", DataType::String),
+        Column::new("segment", DataType::String),
+    ]
+}
+
+/// A single-column Int64 batch, enough to occupy a cache slot.
+fn one_column_batch(name: &str) -> RecordBatch {
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        name,
+        ArrowDataType::Int64,
+        true,
+    )]));
+    RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2, 3]))]).unwrap()
+}
+
+#[test]
+fn a_restored_dependent_is_rejected_when_its_target_was_reshaped() {
+    // `Orders`' own columns and pipeline are byte-identical across the two
+    // models, so its `schema_hash` matches and a schema-hash-only check would
+    // happily restore rows carrying a `customer_name` joined out of a
+    // `Customers` that has since gained a column. The dependency fold is what
+    // catches it.
+    let dir = make_cache_dir("lookup_target_reshaped");
+
+    let mut engine = Engine::new(lookup_model(narrow_customers()));
+    engine
+        .cache
+        .store("Orders", one_column_batch("id"))
+        .unwrap();
+    engine
+        .cache
+        .store("Customers", one_column_batch("customer_id"))
+        .unwrap();
+    engine.save_cache_to_disk(&dir).unwrap();
+
+    // Reopen against a model whose TARGET changed shape.
+    let mut reopened = Engine::new(lookup_model(wide_customers()));
+    let loaded = reopened.load_cache_from_disk(&dir).unwrap();
+
+    assert!(
+        !loaded.iter().any(|t| t == "Customers"),
+        "the reshaped table itself is rejected by its own hash: {loaded:?}"
+    );
+    assert!(
+        !loaded.iter().any(|t| t == "Orders"),
+        "and so must the table whose rows were JOINED from it: {loaded:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_restored_dependent_is_kept_when_nothing_changed() {
+    // The non-vacuity control: the rejection above must come from the
+    // reshape, not from having a lookup at all. Without this, making
+    // `cache_identity` return a random string every call would "pass".
+    let dir = make_cache_dir("lookup_unchanged");
+
+    let mut engine = Engine::new(lookup_model(narrow_customers()));
+    engine
+        .cache
+        .store("Orders", one_column_batch("id"))
+        .unwrap();
+    engine
+        .cache
+        .store("Customers", one_column_batch("customer_id"))
+        .unwrap();
+    engine.save_cache_to_disk(&dir).unwrap();
+
+    let mut reopened = Engine::new(lookup_model(narrow_customers()));
+    let mut loaded = reopened.load_cache_from_disk(&dir).unwrap();
+    loaded.sort();
+    assert_eq!(loaded, vec!["Customers".to_string(), "Orders".to_string()]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_consistently_restored_pair_is_not_immediately_stale() {
+    // Both tables came out of ONE save, so the restored `Orders` really was
+    // computed from the restored `Customers`. If the engine forgot that, the
+    // next `refresh_stale` would refetch the whole chain and the disk cache
+    // would be worthless for exactly the tables that cost most to rebuild.
+    let dir = make_cache_dir("lookup_restored_pair");
+
+    let mut engine = Engine::new(lookup_model(narrow_customers()));
+    engine
+        .cache
+        .store("Orders", one_column_batch("id"))
+        .unwrap();
+    engine
+        .cache
+        .store("Customers", one_column_batch("customer_id"))
+        .unwrap();
+    engine.save_cache_to_disk(&dir).unwrap();
+
+    let mut reopened = Engine::new(lookup_model(narrow_customers()));
+    reopened.load_cache_from_disk(&dir).unwrap();
+    assert!(
+        !reopened.lookup_targets_moved("Orders"),
+        "a consistently restored pair must not read as stale"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_dependent_restored_without_its_target_goes_stale_as_soon_as_the_target_arrives() {
+    // The inverse. `Customers` was never cached, so only `Orders` is on disk;
+    // its restored rows were joined against rows that are NOT coming back.
+    // The moment the target is fetched, the dependent must read as stale.
+    let dir = make_cache_dir("lookup_restored_alone");
+
+    let mut engine = Engine::new(lookup_model(narrow_customers()));
+    engine
+        .cache
+        .store("Orders", one_column_batch("id"))
+        .unwrap();
+    engine.save_cache_to_disk(&dir).unwrap();
+
+    let mut reopened = Engine::new(lookup_model(narrow_customers()));
+    assert_eq!(reopened.load_cache_from_disk(&dir).unwrap(), vec!["Orders"]);
+    assert!(
+        !reopened.lookup_targets_moved("Orders"),
+        "with no target cached at all there is nothing to disagree with yet"
+    );
+
+    reopened
+        .cache
+        .store("Customers", one_column_batch("customer_id"))
+        .unwrap();
+    assert!(
+        reopened.lookup_targets_moved("Orders"),
+        "now the target has rows the restored Orders never saw"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

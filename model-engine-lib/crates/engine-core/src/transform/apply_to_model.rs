@@ -81,7 +81,14 @@ pub fn with_table_transformations(
     let derived: Vec<Column> = if steps.is_empty() {
         binding.source_columns.clone()
     } else {
-        derive_pipeline_schema(table, &binding.source_columns, &steps)?
+        // The other tables' declared schemas come from the model being edited —
+        // a lookup step is validated against the model it will live in.
+        derive_pipeline_schema(
+            table,
+            &binding.source_columns,
+            &steps,
+            &crate::transform::ModelTableSchemas::new(model.tables()),
+        )?
     };
     // Keep the presentation work the user did on the model table; only the
     // shape comes from derivation.

@@ -2091,9 +2091,30 @@ impl DataModelBuilder {
         // table's declared columns are exactly what its own steps produce —
         // without which a model could claim a shape its refresh never
         // delivers. See `validation::validate_table_transformations`.
-        for table in &self.tables {
-            super::validation::validate_table_transformations(table)?;
+        {
+            // A lookup step reads another table's DECLARED columns, and the
+            // loop above establishes that those columns are exactly what that
+            // table's own pipeline produces — so validating against the
+            // declaration is validating against the real post-pipeline shape.
+            let schemas = crate::transform::ModelTableSchemas::new(&self.tables);
+            for table in &self.tables {
+                super::validation::validate_table_transformations(table, &schemas)?;
+            }
         }
+
+        // 13b-ii. Refuse a pipeline dependency CYCLE. A table whose pipeline
+        // looks up into another table must be refreshed after it, so a loop has
+        // no valid refresh order at all — and the failure has to land at model
+        // BUILD, where it can name the tables involved, rather than at refresh
+        // where it would be a table built from a half-built other table.
+        crate::transform::pipeline_refresh_order(&self.tables)?;
+
+        // 13b-iii. Refuse a lookup into a KIND of table whose rows the model
+        // never holds (DirectQuery) or does not hold YET when the dependent
+        // transforms (a calculated table, materialized a phase later). Both are
+        // structural mistakes that would otherwise surface as "the lookup table
+        // has no loaded rows" on every refresh, forever.
+        crate::transform::validate_lookup_targets(&self.tables)?;
 
         // 13c. Validate REST sources. A REST configuration is turned into live
         // HTTP requests on every refresh, so its transport posture is

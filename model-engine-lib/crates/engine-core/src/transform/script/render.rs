@@ -107,6 +107,7 @@ fn repeatable_count(step: &TransformStep) -> usize {
         TransformStep::RenameColumns { renames } => renames.len(),
         TransformStep::ChangeType { changes, .. } => changes.len(),
         TransformStep::GroupBy { aggregates, .. } => aggregates.len(),
+        TransformStep::LookupColumn { keys, takes, .. } => keys.len() + takes.len(),
         _ => 0,
     }
 }
@@ -157,6 +158,25 @@ fn statement_parts(step: &TransformStep) -> (Vec<String>, Option<String>) {
                 options.push(format!("dataType={}", render_data_type(data_type)));
             }
             (options, Some(expression.clone()))
+        }
+        TransformStep::LookupColumn {
+            table: target,
+            keys,
+            takes,
+        } => {
+            let mut options = vec![format!("table={}", name(target))];
+            for key in keys {
+                options.push(format!("on={}:{}", name(&key.host), name(&key.target)));
+            }
+            for take in takes {
+                // `take=col` when the name is kept, `take=col:newName` when it
+                // is not — mirroring serde, which omits an absent outputName.
+                options.push(match &take.output_name {
+                    Some(output) => format!("take={}:{}", name(&take.column), name(output)),
+                    None => format!("take={}", name(&take.column)),
+                });
+            }
+            (options, None)
         }
         TransformStep::SplitColumn {
             column,

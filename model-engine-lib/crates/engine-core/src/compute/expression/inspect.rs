@@ -342,6 +342,33 @@ impl Expression {
                 .any(|c| c.has_lookup_value())
     }
 
+    /// Returns `true` if this tree carries an explicit filter LEVEL ceiling on
+    /// any of the clear family (`CLEAR(…, LEVEL n)`, `RESET(LEVEL n)`,
+    /// `CLEAR_OUTER(…, LEVEL n)`, `RESET_OUTER(LEVEL n)`).
+    ///
+    /// Drives the host's format-version stamping (v27). The field is additive
+    /// serde, so a pre-v27 engine deserializes a leveled measure and silently
+    /// IGNORES the ceiling — computing `CLEAR(dim)` where the author wrote
+    /// `CLEAR(dim, LEVEL 2)`. That is a different number, not a missing
+    /// feature, which is why it needs a version gate rather than a shrug.
+    ///
+    /// `None` is not a level: it means the default of 1, which every reader
+    /// already agrees on. Only an explicit ceiling raises the stamp, so an
+    /// ordinary model keeps the lowest version that can express it.
+    pub fn contains_filter_level(&self) -> bool {
+        let leveled = match self {
+            Expression::Clear { level, .. }
+            | Expression::Reset { level, .. }
+            | Expression::ClearOuter { level, .. }
+            | Expression::ResetOuter { level, .. } => level.is_some(),
+            _ => false,
+        };
+        leveled
+            || super::child_expressions(self)
+                .iter()
+                .any(|c| c.contains_filter_level())
+    }
+
     /// Returns `true` if this tree contains a `PATHLENGTH(...)` or
     /// `PATHITEM(...)` call ([`TextFunction::PathLength`] /
     /// [`TextFunction::PathItem`]) anywhere. Drives the host's

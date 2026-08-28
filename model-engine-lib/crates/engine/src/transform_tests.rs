@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int64Array, StringArray};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType as ArrowType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use engine_query::registry::SourceBinding;
@@ -55,8 +55,13 @@ fn source_batch() -> RecordBatch {
 /// A model with one `Orders` table carrying `steps`, whose declared columns
 /// are derived from them.
 fn model_with_steps(steps: Vec<TransformStep>) -> DataModel {
-    let derived = derive_pipeline_schema("Orders", &source_columns(), &steps)
-        .expect("test steps must derive");
+    let derived = derive_pipeline_schema(
+        "Orders",
+        &source_columns(),
+        &steps,
+        &engine_core::transform::NoOtherTables,
+    )
+    .expect("test steps must derive");
     let mut binding = TableSourceBinding::new("src", "public", "orders");
     if !steps.is_empty() {
         binding = binding
@@ -572,7 +577,13 @@ async fn a_step_expression_may_call_a_model_script_function() {
         expression: "double_it(amount)".into(),
         data_type: Some(DataType::Float64),
     }];
-    let derived = derive_pipeline_schema("Orders", &source_columns(), &steps).unwrap();
+    let derived = derive_pipeline_schema(
+        "Orders",
+        &source_columns(),
+        &steps,
+        &engine_core::transform::NoOtherTables,
+    )
+    .unwrap();
     let model = DataModel::builder()
         .add_source(PersistedSource::new(
             "src",
@@ -795,7 +806,13 @@ async fn a_preview_conforms_to_the_schema_its_steps_derive() {
             "mid",
         )],
     }];
-    let derived = crate::derive_pipeline_schema("Orders", &source_columns(), &candidate).unwrap();
+    let derived = crate::derive_pipeline_schema(
+        "Orders",
+        &source_columns(),
+        &candidate,
+        &engine_core::transform::NoOtherTables,
+    )
+    .unwrap();
 
     let preview = engine
         .preview_transformations(
@@ -815,4 +832,642 @@ async fn a_preview_conforms_to_the_schema_its_steps_derive() {
             column.name()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-table lookups: refresh ordering, invalidation, failure isolation
+// ---------------------------------------------------------------------------
+
+/// `Customers`' declared columns.
+fn customer_columns() -> Vec<Column> {
+    vec![
+        Column::new("customer_id", DataType::Int64),
+        Column::new("customer_name", DataType::String),
+    ]
+}
+
+/// Three customers, ids 1..3 — so `Orders` id 4 has no match.
+fn customer_batch(names: [&str; 3]) -> RecordBatch {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("customer_id", ArrowType::Int64, true),
+        Field::new("customer_name", ArrowType::Utf8, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(names.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+fn lookup_step() -> TransformStep {
+    TransformStep::LookupColumn {
+        table: "Customers".into(),
+        keys: vec![engine_core::transform::LookupKey::new("id", "customer_id")],
+        takes: vec![engine_core::transform::LookupTake::new("customer_name")],
+    }
+}
+
+/// A `Customers` table bound to the in-memory source.
+fn customers_table() -> Table {
+    Table::new("Customers", customer_columns())
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory)
+        .with_source_binding(TableSourceBinding::new("src", "public", "customers"))
+}
+
+/// A model where `Orders` looks up `Customers`.
+///
+/// `Orders` is added FIRST on purpose: model order is then the WRONG refresh
+/// order, so anything that walks tables as declared reads an empty target.
+fn model_with_lookup(steps: Vec<TransformStep>) -> DataModel {
+    let customers = customers_table();
+    let catalog = vec![customers.clone()];
+    let derived = derive_pipeline_schema(
+        "Orders",
+        &source_columns(),
+        &steps,
+        &engine_core::transform::ModelTableSchemas::new(&catalog),
+    )
+    .expect("test steps must derive");
+    let binding = TableSourceBinding::new("src", "public", "orders")
+        .with_source_columns(source_columns())
+        .with_transformations(steps);
+    DataModel::builder()
+        .add_source(PersistedSource::new(
+            "src",
+            SourceKind::InMemory,
+            PersistedConnection::default(),
+            PersistedAuthKind::Integrated,
+        ))
+        .add_table(
+            Table::new("Orders", derived)
+                .unwrap()
+                .with_storage_mode(StorageMode::InMemory)
+                .with_source_binding(binding),
+        )
+        .add_table(customers)
+        .build()
+        .expect("test model must build")
+}
+
+/// An engine over the two-table model, both tables served in-memory.
+fn engine_with_lookup(names: [&str; 3]) -> Engine {
+    let mut engine = Engine::new(model_with_lookup(vec![lookup_step()]));
+    bind_both(&mut engine, names);
+    engine
+}
+
+/// Point both tables at one in-memory connector.
+fn bind_both(engine: &mut Engine, names: [&str; 3]) {
+    let source = InMemoryConnector::new()
+        .with_table("public", "orders", source_batch())
+        .with_table("public", "customers", customer_batch(names));
+    let idx = engine.add_in_memory_source(source);
+    engine.bind_table("Orders", idx, SourceBinding::new("public", "orders"));
+    engine.bind_table("Customers", idx, SourceBinding::new("public", "customers"));
+}
+
+/// The joined `customer_name` column of the cached `Orders`.
+fn joined_names(engine: &Engine) -> Vec<Option<String>> {
+    let batch = engine.cache().get("Orders").expect("Orders must be cached");
+    let index = batch
+        .schema()
+        .index_of("customer_name")
+        .expect("the lookup must have added the column");
+    let column = batch.column(index);
+    // `optimize_batch` may dictionary-encode a low-cardinality string column,
+    // so read through a cast rather than downcasting to StringArray.
+    let plain = arrow::compute::cast(column, &ArrowType::Utf8).unwrap();
+    let values = plain.as_any().downcast_ref::<StringArray>().unwrap();
+    (0..values.len())
+        .map(|i| {
+            if values.is_null(i) {
+                None
+            } else {
+                Some(values.value(i).to_string())
+            }
+        })
+        .collect()
+}
+
+/// Eight customers whose names repeat across only three distinct values, so
+/// the optimizer's cardinality ratio (3/8) is under its 0.5 threshold and the
+/// column is actually dictionary-encoded on the way into the cache.
+fn low_cardinality_customers() -> RecordBatch {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("customer_id", ArrowType::Int64, true),
+        Field::new("customer_name", ArrowType::Utf8, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8])),
+            Arc::new(StringArray::from(vec![
+                "open",
+                "cancelled",
+                "open",
+                "closed",
+                "open",
+                "cancelled",
+                "closed",
+                "open",
+            ])),
+        ],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_lookup_matches_on_a_dictionary_encoded_key() {
+    // The cached target is NOT the batch that was fetched: `optimize_batch`
+    // narrows and dictionary-encodes it on the way into the cache. So the join
+    // runs against a physically different array type than any engine-core unit
+    // test ever sees, and a key comparison that only worked on plain Utf8
+    // would fail here and nowhere else.
+    //
+    // The optimizer skips batches under 1024 rows, so the threshold is lowered
+    // rather than the fixture inflated to four figures — inflating it would
+    // hide WHICH property the test depends on.
+    let mut engine = Engine::new(model_with_lookup(vec![TransformStep::LookupColumn {
+        table: "Customers".into(),
+        // A STRING key, so the encoding is on the column being MATCHED rather
+        // than only on one carried across.
+        keys: vec![engine_core::transform::LookupKey::new(
+            "status",
+            "customer_name",
+        )],
+        takes: vec![engine_core::transform::LookupTake::renamed(
+            "customer_id",
+            "status_code",
+        )],
+    }]));
+    engine.set_optimizer_config(crate::OptimizerConfig {
+        min_rows_to_analyze: 1,
+        ..Default::default()
+    });
+    let source = InMemoryConnector::new()
+        .with_table("public", "orders", source_batch())
+        .with_table("public", "customers", low_cardinality_customers());
+    let idx = engine.add_in_memory_source(source);
+    engine.bind_table("Orders", idx, SourceBinding::new("public", "orders"));
+    engine.bind_table("Customers", idx, SourceBinding::new("public", "customers"));
+
+    engine.refresh_all_in_memory().await.unwrap();
+
+    // Non-vacuity: if the optimizer ever stopped encoding this column, the
+    // test would silently go back to proving what engine-core already proves.
+    let cached = engine.cache().get("Customers").unwrap();
+    let index = cached.schema().index_of("customer_name").unwrap();
+    assert!(
+        matches!(
+            cached.schema().field(index).data_type(),
+            ArrowType::Dictionary(_, _)
+        ),
+        "the target's key column must actually be dictionary-encoded here, or \
+         this test proves nothing: {:?}",
+        cached.schema().field(index).data_type()
+    );
+
+    let batch = engine.cache().get("Orders").unwrap();
+    let column = batch
+        .schema()
+        .index_of("status_code")
+        .expect("the lookup must have added the column");
+    let plain = arrow::compute::cast(batch.column(column), &ArrowType::Int64).unwrap();
+    let values = plain.as_any().downcast_ref::<Int64Array>().unwrap();
+    // Each status matches several customers, so MIN decides: open -> 1,
+    // cancelled -> 2, closed -> 4. Orders read open, cancelled, open, closed.
+    assert_eq!(batch.num_rows(), 4, "dedup must survive the encoding too");
+    assert_eq!(
+        (0..values.len())
+            .map(|i| values.value(i))
+            .collect::<Vec<_>>(),
+        vec![1, 2, 1, 4]
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_joins_the_other_tables_rows() {
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    engine.refresh_all_in_memory().await.unwrap();
+
+    assert_eq!(
+        joined_names(&engine),
+        vec![
+            Some("Ann".to_string()),
+            Some("Bob".to_string()),
+            Some("Cal".to_string()),
+            None
+        ],
+        "order 4 has no customer, so its name is null — not a dropped row"
+    );
+    assert_eq!(engine.cache().get("Orders").unwrap().num_rows(), 4);
+}
+
+#[tokio::test]
+async fn refresh_all_stores_the_target_before_the_dependent_transforms() {
+    // The ordering guard. `Orders` is declared BEFORE `Customers`, so a phase
+    // that walks model order transforms `Orders` while `Customers` is still
+    // uncached — and a lookup with no target rows yields all-NULL, silently.
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    assert_eq!(
+        engine
+            .model()
+            .tables()
+            .iter()
+            .map(|t| t.name())
+            .collect::<Vec<_>>(),
+        vec!["Orders", "Customers"],
+        "the fixture must declare the dependent first or this proves nothing"
+    );
+
+    // Not unwrapped: out of order the dependent transforms against a target
+    // that is not in the cache yet, and `step_inputs_for` leaves an uncached
+    // dependency OUT — so the failure arrives as "unknown lookup table",
+    // which an unwrap would report as a bare panic rather than as this.
+    let outcome = engine.refresh_all_in_memory().await;
+    assert!(
+        outcome.is_ok(),
+        "the target must be stored before the dependent transforms, but the \
+         refresh failed: {:?}",
+        outcome.err()
+    );
+    assert!(
+        joined_names(&engine).iter().any(Option::is_some),
+        "the target's rows must be the ones joined, not an empty target"
+    );
+}
+
+#[tokio::test]
+async fn refreshing_only_the_dependent_loads_an_uncached_target() {
+    // The owner's decision: a cold target is fetched depth-first rather than
+    // joined as nothing. Otherwise the first refresh after opening a file
+    // produces a column of NULLs that looks exactly like real "no match" data.
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    assert!(engine.cache().get("Customers").is_none());
+
+    engine.refresh_table("Orders").await.unwrap();
+
+    assert!(
+        engine.cache().get("Customers").is_some(),
+        "the target must have been fetched on the way"
+    );
+    assert_eq!(joined_names(&engine)[0], Some("Ann".to_string()));
+}
+
+#[tokio::test]
+async fn refresh_stale_recomputes_a_dependent_after_the_target_moved_in_an_earlier_call() {
+    // Cross-run staleness. `Orders`' own source never changes and it has no
+    // refresh strategies, so every timestamp and fingerprint says "fresh".
+    // Only the target's cache GENERATION can reveal that its joined column is
+    // now wrong — and the in-run "refreshed just now" set is long gone.
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    engine.refresh_all_in_memory().await.unwrap();
+    assert_eq!(joined_names(&engine)[0], Some("Ann".to_string()));
+
+    // A separate call refreshes ONLY the target, with new names.
+    bind_both(&mut engine, ["Ada", "Bo", "Cy"]);
+    engine.refresh_table("Customers").await.unwrap();
+    assert_eq!(
+        joined_names(&engine)[0],
+        Some("Ann".to_string()),
+        "Orders still holds the old join at this point"
+    );
+
+    let report = engine.refresh_stale().await.unwrap();
+    assert!(
+        report.refreshed.iter().any(|t| t == "Orders"),
+        "Orders must be recomputed: {:?}",
+        report.refreshed
+    );
+    assert_eq!(joined_names(&engine)[0], Some("Ada".to_string()));
+}
+
+#[tokio::test]
+async fn refresh_stale_leaves_an_ordinary_table_alone_once_it_is_fresh() {
+    // The non-vacuity companion to the test above: the generation check must
+    // not make every lookup table permanently stale, or refresh_stale would
+    // re-fetch the whole chain on every call forever.
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    engine.refresh_all_in_memory().await.unwrap();
+
+    let report = engine.refresh_stale().await.unwrap();
+    assert!(
+        report.refreshed.is_empty(),
+        "nothing changed, so nothing should refresh: {:?}",
+        report.refreshed
+    );
+    assert!(report.skipped.is_empty());
+}
+
+/// The same two-table model, but `Customers` is bound to a source table that
+/// does not exist — so its refresh fails while `Orders`' own fetch works.
+fn engine_with_a_broken_target() -> Engine {
+    let mut engine = Engine::new(model_with_lookup(vec![lookup_step()]));
+    let source = InMemoryConnector::new()
+        .with_table("public", "orders", source_batch())
+        .with_table("public", "customers", customer_batch(["Ann", "Bob", "Cal"]));
+    let idx = engine.add_in_memory_source(source);
+    engine.bind_table("Orders", idx, SourceBinding::new("public", "orders"));
+    engine.bind_table("Customers", idx, SourceBinding::new("public", "missing"));
+    engine
+}
+
+#[tokio::test]
+async fn a_target_that_fails_makes_its_dependent_a_named_skip_not_a_silent_success() {
+    // Failure isolation, inverted. Refreshing `Orders` against the target's
+    // PREVIOUS rows would succeed and be reported as refreshed — a wrong
+    // answer wearing a green badge. It must be skipped, and the report must
+    // name the table holding it back.
+    let mut engine = engine_with_a_broken_target();
+
+    let report = engine.refresh_stale().await.unwrap();
+
+    assert!(
+        report.failures.iter().any(|f| f.table == "Customers"),
+        "the target's own failure must be reported: {:?}",
+        report.failures
+    );
+    assert!(
+        !report.refreshed.iter().any(|t| t == "Orders"),
+        "Orders must NOT be reported refreshed: {:?}",
+        report.refreshed
+    );
+    let skip = report
+        .skipped
+        .iter()
+        .find(|s| s.table == "Orders")
+        .expect("Orders must be reported as skipped, not merely absent");
+    assert_eq!(skip.blocked_by, "Customers");
+    assert!(
+        skip.detail.contains("Customers"),
+        "the reason must name the blocking table: {}",
+        skip.detail
+    );
+}
+
+#[tokio::test]
+async fn a_target_that_succeeds_lets_its_dependent_refresh() {
+    // The positive control for the test above: the skip must come from the
+    // failure, not from having a lookup at all.
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    let report = engine.refresh_stale().await.unwrap();
+
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert!(report.refreshed.iter().any(|t| t == "Orders"));
+    assert!(report.refreshed.iter().any(|t| t == "Customers"));
+    assert_eq!(joined_names(&engine)[0], Some("Ann".to_string()));
+}
+
+#[tokio::test]
+async fn editing_a_targets_pipeline_drops_the_dependents_cache_too() {
+    // `Orders`' cached rows were computed FROM `Customers`. Reshaping
+    // `Customers` makes them the wrong rows, not merely stale ones, so they
+    // must go — otherwise a query keeps serving a join against a shape that
+    // no longer exists.
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    engine.refresh_all_in_memory().await.unwrap();
+    assert!(engine.cache().get("Orders").is_some());
+    assert!(engine.cache().get("Customers").is_some());
+
+    engine
+        .set_table_transformations(
+            "Customers",
+            vec![TransformStep::RenameColumns {
+                renames: vec![ColumnRename::new("customer_name", "customer_name")],
+            }],
+        )
+        .expect("a no-op rename is still an edit");
+
+    assert!(
+        engine.cache().get("Customers").is_none(),
+        "the edited table's own cache must go"
+    );
+    assert!(
+        engine.cache().get("Orders").is_none(),
+        "and so must every table computed from it"
+    );
+}
+
+/// A three-table chain: `Summary` looks up `Orders`, which looks up
+/// `Customers`. Declared in exactly the wrong order, worst-first.
+fn model_with_lookup_chain() -> DataModel {
+    let customers = customers_table();
+    let orders_steps = vec![lookup_step()];
+    let orders_columns = derive_pipeline_schema(
+        "Orders",
+        &source_columns(),
+        &orders_steps,
+        &engine_core::transform::ModelTableSchemas::new(std::slice::from_ref(&customers)),
+    )
+    .unwrap();
+    let orders = Table::new("Orders", orders_columns)
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory)
+        .with_source_binding(
+            TableSourceBinding::new("src", "public", "orders")
+                .with_source_columns(source_columns())
+                .with_transformations(orders_steps),
+        );
+
+    let summary_steps = vec![TransformStep::LookupColumn {
+        table: "Orders".into(),
+        keys: vec![engine_core::transform::LookupKey::new("id", "id")],
+        takes: vec![engine_core::transform::LookupTake::new("customer_name")],
+    }];
+    let catalog = vec![customers.clone(), orders.clone()];
+    let summary_columns = derive_pipeline_schema(
+        "Summary",
+        &source_columns(),
+        &summary_steps,
+        &engine_core::transform::ModelTableSchemas::new(&catalog),
+    )
+    .unwrap();
+    let summary = Table::new("Summary", summary_columns)
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory)
+        .with_source_binding(
+            TableSourceBinding::new("src", "public", "orders")
+                .with_source_columns(source_columns())
+                .with_transformations(summary_steps),
+        );
+
+    DataModel::builder()
+        .add_source(PersistedSource::new(
+            "src",
+            SourceKind::InMemory,
+            PersistedConnection::default(),
+            PersistedAuthKind::Integrated,
+        ))
+        .add_table(summary)
+        .add_table(orders)
+        .add_table(customers)
+        .build()
+        .expect("a chain is not a cycle")
+}
+
+fn engine_with_lookup_chain() -> Engine {
+    let mut engine = Engine::new(model_with_lookup_chain());
+    let source = InMemoryConnector::new()
+        .with_table("public", "orders", source_batch())
+        .with_table("public", "customers", customer_batch(["Ann", "Bob", "Cal"]));
+    let idx = engine.add_in_memory_source(source);
+    engine.bind_table("Orders", idx, SourceBinding::new("public", "orders"));
+    engine.bind_table("Summary", idx, SourceBinding::new("public", "orders"));
+    engine.bind_table("Customers", idx, SourceBinding::new("public", "customers"));
+    engine
+}
+
+#[tokio::test]
+async fn a_two_hop_chain_refreshes_bottom_up() {
+    // Declared Summary, Orders, Customers — the exact reverse of the order
+    // they must run in. A single reverse-edge hop is not enough here: the
+    // walk has to reach all the way down.
+    let mut engine = engine_with_lookup_chain();
+    let outcome = engine.refresh_all_in_memory().await;
+    assert!(outcome.is_ok(), "{:?}", outcome.err());
+
+    for table in ["Customers", "Orders", "Summary"] {
+        assert!(
+            engine.cache().get(table).is_some(),
+            "{table} must be cached"
+        );
+    }
+    // The name travelled two hops: Customers -> Orders -> Summary.
+    let summary = engine.cache().get("Summary").unwrap();
+    let index = summary.schema().index_of("customer_name").unwrap();
+    let plain = arrow::compute::cast(summary.column(index), &ArrowType::Utf8).unwrap();
+    let values = plain.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(values.value(0), "Ann");
+}
+
+#[tokio::test]
+async fn editing_the_bottom_of_a_chain_invalidates_every_table_above_it() {
+    // The transitivity guard. Editing `Customers` makes `Orders`' cached rows
+    // wrong, which makes `Summary`'s cached rows wrong in turn. A drop walk
+    // that follows one reverse edge and stops leaves `Summary` serving a join
+    // against a shape that no longer exists.
+    let mut engine = engine_with_lookup_chain();
+    engine.refresh_all_in_memory().await.unwrap();
+
+    engine
+        .set_table_transformations(
+            "Customers",
+            vec![TransformStep::RenameColumns {
+                renames: vec![ColumnRename::new("customer_name", "customer_name")],
+            }],
+        )
+        .expect("a no-op rename is still an edit");
+
+    assert!(
+        engine.cache().get("Customers").is_none(),
+        "the edited table"
+    );
+    assert!(engine.cache().get("Orders").is_none(), "one hop up");
+    assert!(
+        engine.cache().get("Summary").is_none(),
+        "TWO hops up — the reverse-edge walk must be transitive, not one-step"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_that_closes_a_cycle_is_refused_and_the_old_model_stands() {
+    // `Orders` already looks up `Customers`. Pointing `Customers` back at
+    // `Orders` closes the loop — neither could ever be refreshed first.
+    let mut engine = engine_with_lookup(["Ann", "Bob", "Cal"]);
+    engine.refresh_all_in_memory().await.unwrap();
+
+    let error = engine
+        .set_table_transformations(
+            "Customers",
+            vec![TransformStep::LookupColumn {
+                table: "Orders".into(),
+                keys: vec![engine_core::transform::LookupKey::new("customer_id", "id")],
+                takes: vec![engine_core::transform::LookupTake::new("status")],
+            }],
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("cycle"), "must say what is wrong: {error}");
+    assert!(
+        error.contains("Orders") && error.contains("Customers"),
+        "must name the members: {error}"
+    );
+
+    // "The model is left untouched in every failure case" is the documented
+    // contract, and the cache is part of what untouched means.
+    assert!(
+        engine
+            .table_transformations("Customers")
+            .unwrap()
+            .is_empty(),
+        "the refused pipeline must not be installed"
+    );
+    assert!(
+        engine.cache().get("Orders").is_some(),
+        "a refused edit must not invalidate anything"
+    );
+    assert_eq!(joined_names(&engine)[0], Some("Ann".to_string()));
+}
+
+#[test]
+fn a_model_whose_pipelines_form_a_cycle_fails_to_build() {
+    // The load-time gate. A hand-edited or hostile model file must be refused
+    // outright rather than half-refreshed — `refresh_all_in_memory` would
+    // otherwise have no first table to start from.
+    let a_columns = vec![
+        Column::new("id", DataType::Int64),
+        Column::new("b_value", DataType::String),
+    ];
+    let b_columns = vec![
+        Column::new("id", DataType::Int64),
+        Column::new("a_value", DataType::String),
+    ];
+    let a = Table::new("A", a_columns.clone())
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory)
+        .with_source_binding(
+            TableSourceBinding::new("src", "public", "a")
+                .with_source_columns(vec![Column::new("id", DataType::Int64)])
+                .with_transformations(vec![TransformStep::LookupColumn {
+                    table: "B".into(),
+                    keys: vec![engine_core::transform::LookupKey::new("id", "id")],
+                    takes: vec![engine_core::transform::LookupTake::renamed(
+                        "a_value", "b_value",
+                    )],
+                }]),
+        );
+    let b = Table::new("B", b_columns)
+        .unwrap()
+        .with_storage_mode(StorageMode::InMemory)
+        .with_source_binding(
+            TableSourceBinding::new("src", "public", "b")
+                .with_source_columns(vec![Column::new("id", DataType::Int64)])
+                .with_transformations(vec![TransformStep::LookupColumn {
+                    table: "A".into(),
+                    keys: vec![engine_core::transform::LookupKey::new("id", "id")],
+                    takes: vec![engine_core::transform::LookupTake::renamed(
+                        "b_value", "a_value",
+                    )],
+                }]),
+        );
+
+    let error = DataModel::builder()
+        .add_source(PersistedSource::new(
+            "src",
+            SourceKind::InMemory,
+            PersistedConnection::default(),
+            PersistedAuthKind::Integrated,
+        ))
+        .add_table(a)
+        .add_table(b)
+        .build()
+        .expect_err("a cycle must not build")
+        .to_string();
+    assert!(error.contains('A') && error.contains('B'), "{error}");
 }

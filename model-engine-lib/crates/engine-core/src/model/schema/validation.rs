@@ -115,7 +115,10 @@ pub(crate) fn validate_metadata_text(
 /// 4. **Declared columns match derived columns.** This is the invariant that
 ///    keeps the model honest: a table may not claim a shape its own pipeline
 ///    does not produce.
-pub(crate) fn validate_table_transformations(table: &crate::model::Table) -> EngineResult<()> {
+pub(crate) fn validate_table_transformations(
+    table: &crate::model::Table,
+    schemas: &dyn crate::transform::TableSchemas,
+) -> EngineResult<()> {
     let Some(binding) = table.source_binding() else {
         return Ok(());
     };
@@ -153,8 +156,12 @@ pub(crate) fn validate_table_transformations(table: &crate::model::Table) -> Eng
         ));
     }
 
-    let derived =
-        crate::transform::validate_steps(name, &binding.source_columns, &binding.transformations)?;
+    let derived = crate::transform::validate_steps(
+        name,
+        &binding.source_columns,
+        &binding.transformations,
+        schemas,
+    )?;
 
     if !crate::transform::schemas_match(&derived, table.columns()) {
         return Err(EngineError::InvalidTransform {

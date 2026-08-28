@@ -16,7 +16,7 @@ It is the authoritative hand-off surface between the engine and its hosts. It is
 The shared model file carries a `format_version: u32` field (serde key `format_version`, defaults to `0` for legacy files). The engine's current maximum is:
 
 ```rust
-pub const MODEL_FORMAT_VERSION: u32 = 27; // engine-core::model::schema
+pub const MODEL_FORMAT_VERSION: u32 = 28; // engine-core::model::schema
 ```
 
 Opening a model whose `format_version` is **higher** than the engine supports fails closed with:
@@ -61,8 +61,36 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 | `25` | The `transformColumn` step — `TransformStep::TransformColumn { column, expression, data_type }` rewrites an existing column in place. Stamped only when a pipeline uses it. |
 | `26` | Formula aggregates (the SUMIF shape) — `GroupAggregate` gained `expression: Option<String>`. Stamped only when a pipeline carries a formula aggregate. |
 | `27` | Filter levels — the clear family's `Expression` variants (`Clear`/`Reset`/`ClearOuter`/`ResetOuter`) and the matching `ContextOp` operations gained an optional `level: u8` ceiling (`CLEAR(dim, LEVEL 2)`); `ContextOp`'s clear/reset operations changed from tuple to **struct** variants (a deliberate pre-production shape break). A pre-v27 engine would silently IGNORE the additive `level` and misread `CLEAR(dim, LEVEL 2)` as `CLEAR(dim)`, so the gate refuses. |
+| `28` | Cross-table lookups in a pipeline — `TransformStep` gained `LookupColumn { table, keys, takes }`, the first step that reads a table other than its own. A model carrying one also carries a refresh ORDER (targets first) and a build-time cycle refusal. A new tag on an internally tagged enum cannot be ignored, so a pre-v28 engine refuses the whole model — the gate turns a serde error about an unknown variant into "update the application". Stamped only when a pipeline actually contains a lookup. |
 
 > **Studio action:** when you write a model that uses a feature, stamp the matching minimum `format_version`. When you open a model, surface `ModelFormatTooNew` as "update the app", never as a parse error.
+
+---
+
+## Cross-table lookups in a pipeline — the `lookupColumn` step (format version 28)
+
+A table's transformation pipeline can now bring columns across from **another model table**, matched on one or more key pairs, before either table has joined the model as a relationship. This is the `LOOKUPVALUE` capability at pipeline time; `RELATED` stays out, because it needs a relationship that does not exist yet. There is no query folding involved and none is possible — the two tables may live in different sources — so the join happens locally, against the target's **cached rows**, at refresh.
+
+```
+lookupColumn table=Customers on=customer_id:id take=name take=segment:customer_segment
+```
+
+- **Semantics.** `on=` is repeatable and ANDed for composite keys; `take=` is repeatable and `take=col:newName` renames. N takes ride ONE join. The step is a LEFT JOIN against a grouped subquery (`SELECT keys, MIN(take) … GROUP BY keys`), which makes "one output row per input row" **structural** rather than a rule someone has to remember: a duplicate key in the target cannot multiply rows. Ties resolve to `MIN` silently and no match yields `NULL` — the same contract `LOOKUPVALUE` already has in calculated columns. Output columns are **always nullable**, whatever the target declares.
+- **Row order is preserved.** A JOIN does not preserve input order and this pipeline's order is meaningful (`keepRows` addresses positions, `fillDown` carries values downwards, `removeDuplicates` keeps the first row), so the host rows are numbered before the join and sorted back after. Without this the row COUNT stays right while the rows silently move.
+- **Model JSON:** `{"type": "lookupColumn", "table": "...", "keys": [{"host": "...", "target": "..."}], "takes": [{"column": "...", "outputName": "..."}]}`. `outputName` is `skip_serializing_if = "Option::is_none"`, so `parse(render(steps)) == steps` still holds. `MODEL_FORMAT_VERSION` **27 → 28**, stamped only when a pipeline actually contains a lookup.
+- **New public API.** `TableSchemas` (trait: the declared columns of the other tables a pipeline may read), with `NoOtherTables` for single-table callers, `ModelTableSchemas::new(&[Table])` for anything holding a table list, and `StepInputs` (rows AND declared columns) for evaluation. Plus `step_dependencies`, `pipeline_dependencies`, `pipeline_refresh_order`, `cache_identity`, `LookupKey`, `LookupTake`, and `Engine::drop_table_cache_and_dependents(&[String]) -> Vec<String>`.
+- **WIDENED SIGNATURES — every host call site must be updated.** `validate_steps`, `derive_pipeline_schema`, `derive_step_schema` and `apply_steps` each gained a final parameter. Pass `&NoOtherTables` where the caller genuinely has no catalog (a unit test, a table in isolation) and `&ModelTableSchemas::new(model.tables())` everywhere a model is in scope — passing `NoOtherTables` where a model exists turns a valid lookup into "unknown lookup table".
+  - `validate_steps(table, source_columns, steps, schemas: &dyn TableSchemas)`
+  - `derive_pipeline_schema(table, source_columns, steps, schemas: &dyn TableSchemas)`
+  - `derive_step_schema(table, index, input, step, schemas: &dyn TableSchemas)`
+  - `apply_steps(table, input, source_columns, steps, upto, udfs, inputs: &StepInputs)`
+- **Refresh is now ordered.** `refresh_all_in_memory` phase 2 and `refresh_stale` both walk `pipeline_refresh_order` (Kahn) instead of model order, so a target is stored before any dependent transforms against it. `refresh_table(A)` **auto-refreshes an uncached target depth-first** — otherwise the first refresh after opening a file joins against nothing and produces a column of NULLs indistinguishable from real "no match" data. A cached-but-stale target is used as-is; `refresh_stale` re-syncs it.
+- **`RefreshReport` gained `skipped: Vec<RefreshSkip { table, blocked_by, detail }>` — hosts should render it.** When a target's refresh FAILS, its dependents are not rebuilt: doing so would join against the target's previous rows and then report success, which is a wrong answer wearing a green badge. They are reported as skipped, naming the table holding them back.
+- **Cross-run staleness.** The in-memory cache now stamps a monotonic **generation** on every store (`InMemoryCache::generation`), and a dependent records the generation of each table it looked up. Refreshing B alone therefore makes A stale on a LATER `refresh_stale` call — invisible to every timestamp and fingerprint strategy, because A's own source never changed.
+- **Cache identity is dependency-aware.** `cache_identity(tables, table)` post-order folds a table's own `schema_hash` with each dependency's identity, and the disk cache stores that instead of the bare hash (metadata key `schema_hash` → **`cache_identity`**). A table with no lookups gets its `schema_hash` verbatim, so an ordinary model's disk caches are unchanged. A consistently restored pair is NOT treated as stale; a dependent restored without its target goes stale the moment the target arrives.
+- **Cycles are refused at build.** `DataModelBuilder::build` calls `pipeline_refresh_order`, so a model file whose pipelines form a loop fails to LOAD with an error naming the members, and an edit that would close a loop is refused with the previous model standing.
+- **Invalidation is transitive.** Editing a pipeline drops the caches of every table that looks up into it, and everything that looks up into THOSE. Hosts should call `drop_table_cache_and_dependents` with the reshaped tables as seeds rather than dropping caches one by one.
+- **Refused, deliberately:** a `LOOKUPVALUE(...)` spelling inside a step expression. The expression gate (`parse_row_expression` → `ensure_row_level`) is ONE allowlist shared by four surfaces — `filterRows`, `addColumn`, `transformColumn` and a groupBy aggregate formula — so admitting the variant would leak it into aggregate formulas with no implementation behind it. The refusal names the step instead. Also refused: a self-target, an unknown target, missing key/take columns, and an output name that collides with an existing column.
 
 ---
 

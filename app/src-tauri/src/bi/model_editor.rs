@@ -862,6 +862,7 @@ fn drop_caches_for_reshaped_tables(
     before: &bi_engine::DataModel,
     after: &bi_engine::DataModel,
 ) {
+    let mut reshaped: Vec<String> = Vec::new();
     for table in after.tables() {
         let previous = match before.table(table.name()) {
             Ok(previous) => pipeline_identity(previous),
@@ -870,9 +871,16 @@ fn drop_caches_for_reshaped_tables(
             Err(_) => (None, None),
         };
         if previous != pipeline_identity(table) {
-            engine.drop_table_cache(table.name());
+            reshaped.push(table.name().to_string());
         }
     }
+    // The reshaped tables are only the SEEDS. A table whose pipeline looks up
+    // one of them folded its rows into its own cached output, so it is wrong
+    // now too — and so is anything that looked up THAT. Walking the reverse
+    // edges is the engine's job: it owns the dependency graph, and a copy of
+    // that walk here would be a second source of truth that drifts on the
+    // first change to the step catalog.
+    engine.drop_table_cache_and_dependents(&reshaped);
 }
 
 async fn install_base_model(
@@ -6254,8 +6262,10 @@ pub async fn bi_model_transform(
                         .iter()
                         .filter_map(|s| serde_json::to_value(s).ok())
                         .collect();
+                    let schemas = bi_engine::ModelTableSchemas::new(base.tables());
                     let (columns, diagnostics) =
-                        match bi_engine::validate_steps(&table, &source_columns, &parsed) {
+                        match bi_engine::validate_steps(&table, &source_columns, &parsed, &schemas)
+                        {
                             Ok(columns) => (transform_columns_to_dto(&columns), Vec::new()),
                             Err(error) => {
                                 let mut diagnostic = transform_diagnostic(&error, &parsed);
@@ -6267,6 +6277,7 @@ pub async fn bi_model_transform(
                                     &table,
                                     &source_columns,
                                     &parsed[..diagnostic.index.min(parsed.len())],
+                                    &schemas,
                                 )
                                 .unwrap_or_else(|_| source_columns.clone());
                                 (transform_columns_to_dto(&partial), vec![diagnostic])
@@ -6352,7 +6363,9 @@ pub async fn bi_model_transform(
                 .map(|b| b.source_columns.clone())
                 .unwrap_or_else(|| t.columns().to_vec());
 
-            let result = match bi_engine::validate_steps(&table, &source_columns, &parsed) {
+            let schemas = bi_engine::ModelTableSchemas::new(base.tables());
+            let result = match bi_engine::validate_steps(&table, &source_columns, &parsed, &schemas)
+            {
                 Ok(columns) => TransformSchemaResult {
                     columns: transform_columns_to_dto(&columns),
                     diagnostics: Vec::new(),
@@ -6366,6 +6379,7 @@ pub async fn bi_model_transform(
                         &table,
                         &source_columns,
                         &parsed[..diagnostic.index.min(parsed.len())],
+                        &schemas,
                     )
                     .unwrap_or_else(|_| source_columns.clone());
                     TransformSchemaResult {
@@ -9561,7 +9575,13 @@ mod tests {
             Column::new("amount", DataType::Float64),
         ];
         let derived =
-            bi_engine::derive_pipeline_schema("Sales", &source_columns, &steps).unwrap();
+            bi_engine::derive_pipeline_schema(
+                "Sales",
+                &source_columns,
+                &steps,
+                &bi_engine::NoOtherTables,
+            )
+            .unwrap();
         let mut binding = bi_engine::TableSourceBinding::new("src", "public", "sales");
         if !steps.is_empty() {
             binding = binding
@@ -9642,12 +9662,74 @@ mod tests {
             bi_engine::Column::new("a", bi_engine::DataType::Int64),
             bi_engine::Column::new("keep", bi_engine::DataType::String),
         ];
-        let error = bi_engine::validate_steps("T", &columns, &steps)
+        let error = bi_engine::validate_steps("T", &columns, &steps, &bi_engine::NoOtherTables)
             .expect_err("fillDown over a column that does not exist must be refused");
         let mut diagnostic = transform_diagnostic(&error, &steps);
         assert_eq!(diagnostic.index, 1, "the second step is the bad one");
         diagnostic.line = lines.get(diagnostic.index).copied();
         assert_eq!(diagnostic.line, Some(3), "which starts on the third line");
+    }
+
+    /// The gateway's `("transform", "upsert")` arm takes RAW JSON and hands it
+    /// to `parse_transform_steps`, so the only thing standing between a script
+    /// and a wrong pipeline is serde. A lookup is the step most likely to
+    /// break there: it is the first with nested objects on both sides, and its
+    /// `outputName` is skip-if-None, so an empty string would round-trip as a
+    /// rename to `""` rather than as "keep the target's name".
+    #[test]
+    fn a_lookup_step_survives_the_gateways_raw_json_round_trip() {
+        let raw = serde_json::json!({
+            "type": "lookupColumn",
+            "table": "Customers",
+            "keys": [
+                { "host": "customer_id", "target": "id" },
+                { "host": "region", "target": "region" }
+            ],
+            "takes": [
+                { "column": "name" },
+                { "column": "segment", "outputName": "customer_segment" }
+            ]
+        });
+
+        let parsed = parse_transform_steps(Some(vec![raw.clone()]))
+            .expect("the gateway's own JSON shape must parse");
+        assert_eq!(parsed.len(), 1);
+
+        match &parsed[0] {
+            bi_engine::TransformStep::LookupColumn { table, keys, takes } => {
+                assert_eq!(table, "Customers");
+                assert_eq!(keys.len(), 2, "a composite key must not be flattened");
+                assert_eq!(keys[1].host, "region");
+                assert_eq!(keys[1].target, "region");
+                assert_eq!(takes.len(), 2);
+                assert_eq!(takes[0].column, "name");
+                assert_eq!(
+                    takes[0].output_name, None,
+                    "an absent outputName means 'keep the target's name', not ''"
+                );
+                assert_eq!(takes[1].output_name.as_deref(), Some("customer_segment"));
+            }
+            other => panic!("parsed as {other:?}, not a lookup"),
+        }
+
+        // And back out again byte-identically — this is what a host reads when
+        // it asks for the pipeline, so a drift here is a silently different
+        // step in the editor than the one in the model.
+        let reserialized = serde_json::to_value(&parsed[0]).unwrap();
+        assert_eq!(reserialized, raw);
+    }
+
+    #[test]
+    fn a_step_with_an_unknown_tag_is_refused_by_index() {
+        // The gateway's fail-closed edge: an internally tagged enum cannot
+        // ignore a tag it does not know, and the caller must be told WHICH
+        // step it was.
+        let error = parse_transform_steps(Some(vec![
+            serde_json::json!({ "type": "removeColumns", "columns": ["a"] }),
+            serde_json::json!({ "type": "mergeTable", "table": "Other" }),
+        ]))
+        .expect_err("a step tag this build does not have must be refused");
+        assert!(error.contains("Step 1"), "must name the step: {error}");
     }
 
     #[test]
@@ -9690,7 +9772,13 @@ mod tests {
                 Column::new("amount", DataType::Float64),
             ];
             let derived =
-                bi_engine::derive_pipeline_schema("Sales", &source_columns, &steps).unwrap();
+                bi_engine::derive_pipeline_schema(
+                "Sales",
+                &source_columns,
+                &steps,
+                &bi_engine::NoOtherTables,
+            )
+            .unwrap();
             let mut binding = bi_engine::TableSourceBinding::new("src", "public", "sales");
             if !steps.is_empty() {
                 binding = binding

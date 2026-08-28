@@ -36,6 +36,68 @@ impl ColumnRename {
     }
 }
 
+/// One key pair of a [`LookupColumn`](super::TransformStep::LookupColumn)
+/// step: a column of THIS table matched against a column of the target.
+///
+/// Several pairs are ANDed, which is how a composite key is expressed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LookupKey {
+    /// The column on the table being transformed.
+    pub host: String,
+    /// The column on the target table it must equal.
+    pub target: String,
+}
+
+impl LookupKey {
+    /// Match `host` against `target`.
+    pub fn new(host: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            target: target.into(),
+        }
+    }
+}
+
+/// One column a [`LookupColumn`](super::TransformStep::LookupColumn) step
+/// brings back from the target table.
+///
+/// Several takes ride ONE join — pulling three columns from a dimension costs
+/// one pass over it, not three.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LookupTake {
+    /// The column to read from the target table.
+    pub column: String,
+    /// The name it lands under on this table. Absent means "the same name",
+    /// which is the common case and so is not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_name: Option<String>,
+}
+
+impl LookupTake {
+    /// Take `column` under its own name.
+    pub fn new(column: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            output_name: None,
+        }
+    }
+
+    /// Take `column` and rename it to `output_name`.
+    pub fn renamed(column: impl Into<String>, output_name: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            output_name: Some(output_name.into()),
+        }
+    }
+
+    /// The name this take produces on the host table.
+    pub fn output(&self) -> &str {
+        self.output_name.as_deref().unwrap_or(&self.column)
+    }
+}
+
 /// Re-type one column, as carried by
 /// [`TransformStep::ChangeType`](super::TransformStep::ChangeType).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

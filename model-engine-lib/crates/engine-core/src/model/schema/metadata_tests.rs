@@ -74,7 +74,10 @@ fn model_format_version_is_current() {
     // ops, and the ContextOp clear/reset variants became struct variants.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 27);
+    // v28 added the lookupColumn step (TransformStep::LookupColumn) - the
+    // first step that reads another table, bringing refresh ordering and
+    // build-time cycle rejection with it.
+    assert_eq!(MODEL_FORMAT_VERSION, 28);
 }
 
 #[test]

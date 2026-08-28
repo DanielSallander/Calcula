@@ -126,7 +126,12 @@ impl Engine {
 
         // Validate before fetching. A typo in a half-typed expression should
         // come back instantly, not after a round trip to the database.
-        validate_steps(&request.table, &source_columns, &request.steps)?;
+        validate_steps(
+            &request.table,
+            &source_columns,
+            &request.steps,
+            &engine_core::transform::ModelTableSchemas::new(self.model.tables()),
+        )?;
 
         let cancelled = || {
             EngineError::InvalidData(format!(
@@ -209,6 +214,11 @@ impl Engine {
             &request.steps,
             upto,
             self.effective_udfs.as_ref(),
+            // The target's rows come from the CACHE, never a second live
+            // fetch: this whole preview runs under the connection's engine
+            // guard, and a second source round-trip would double how long
+            // every other query waits behind it.
+            &self.step_inputs_for(&request.steps)?,
         )
         .await?;
 
@@ -217,7 +227,12 @@ impl Engine {
         // render a value the refresh would store differently (a generated
         // aggregate coming back wider than the step declares), which makes the
         // preview a worse guide the more the user relies on it.
-        let derived = derive_pipeline_schema(&request.table, &source_columns, previewed)?;
+        let derived = derive_pipeline_schema(
+            &request.table,
+            &source_columns,
+            previewed,
+            &engine_core::transform::ModelTableSchemas::new(self.model.tables()),
+        )?;
         let batch = conform_to_declared(
             &request.table,
             previewed.len().saturating_sub(1),

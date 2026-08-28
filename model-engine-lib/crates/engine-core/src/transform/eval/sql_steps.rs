@@ -16,7 +16,7 @@ use crate::model::Column;
 use crate::transform::eval::step_error;
 use crate::transform::infer::infer_parsed_type;
 use crate::transform::literal::typed_sql_literal;
-use crate::transform::parts::{GroupAggregate, TextOp};
+use crate::transform::parts::{GroupAggregate, LookupKey, LookupTake, TextOp};
 use crate::transform::rules_rows::aggregate_output_type;
 use crate::transform::validate::parse_row_expression;
 use crate::types::DataType;
@@ -51,7 +51,33 @@ impl SqlStep<'_> {
 /// Run one generated statement over `batch` and return the result as a single
 /// batch.
 async fn run_sql(step: &SqlStep<'_>, batch: RecordBatch, sql: &str) -> EngineResult<RecordBatch> {
+    run_sql_inner(step, batch, None, sql).await
+}
+
+/// [`run_sql`] with a second table registered as the lookup target.
+///
+/// Separate rather than an `Option` on every call because exactly one step
+/// needs it, and the registration name is part of the SQL those statements
+/// generate.
+async fn run_sql_with_lookup(
+    step: &SqlStep<'_>,
+    batch: RecordBatch,
+    target: RecordBatch,
+    sql: &str,
+) -> EngineResult<RecordBatch> {
+    run_sql_inner(step, batch, Some(target), sql).await
+}
+
+async fn run_sql_inner(
+    step: &SqlStep<'_>,
+    batch: RecordBatch,
+    target: Option<RecordBatch>,
+    sql: &str,
+) -> EngineResult<RecordBatch> {
     let ctx = session_context_with_udfs(step.udfs);
+    if let Some(target) = target {
+        ctx.register_batch(LOOKUP, target)?;
+    }
     ctx.register_batch(INPUT, batch)?;
     let frame = ctx.sql(sql).await.map_err(|e| step.error(format!("{e}")))?;
     let schema: arrow::datatypes::SchemaRef =
@@ -193,6 +219,108 @@ fn local_sql_type(data_type: &DataType) -> String {
         DataType::Date => "DATE".to_string(),
         DataType::Timestamp => "TIMESTAMP".to_string(),
     }
+}
+
+/// The name the lookup target is registered under, beside [`INPUT`].
+const LOOKUP: &str = "_lk";
+
+/// `lookupColumn`: bring columns across from another table, matched on a key.
+///
+/// # The join cannot multiply rows
+///
+/// The target is joined as a subquery **grouped by exactly the join keys**, so
+/// it contributes at most one row per key — by the shape of the query, on
+/// every path, with no runtime cardinality check to forget. That is the same
+/// guarantee (and the same `MIN`-on-ties resolution) the engine's calculated
+/// -column `LOOKUPVALUE` has always had, so the two surfaces cannot disagree
+/// about what a duplicate key means.
+///
+/// `LEFT` keeps every host row, so a key with no match yields null rather than
+/// dropping the row — which is why derivation marks every output column
+/// nullable.
+pub(super) async fn lookup_column(
+    step: &SqlStep<'_>,
+    batch: RecordBatch,
+    target: RecordBatch,
+    keys: &[LookupKey],
+    takes: &[LookupTake],
+) -> EngineResult<RecordBatch> {
+    let target_keys: Vec<String> = keys
+        .iter()
+        .map(|key| quote_ident_double(&key.target))
+        .collect();
+
+    // One grouped subquery serves every take: three columns from a dimension
+    // cost one pass over it, not three.
+    let mut projected: Vec<String> = target_keys.clone();
+    for (position, take) in takes.iter().enumerate() {
+        projected.push(format!(
+            "MIN({}) AS {}",
+            quote_ident_double(&take.column),
+            // A positional alias, so two takes of the same target column (or a
+            // take whose name collides with a key) cannot shadow each other
+            // inside the subquery. The outer SELECT renames to the real output.
+            quote_ident_double(&format!("_v{position}"))
+        ));
+    }
+    let deduplicated = format!(
+        "SELECT {} FROM {LOOKUP} GROUP BY {}",
+        projected.join(", "),
+        target_keys.join(", ")
+    );
+
+    let on = keys
+        .iter()
+        .map(|key| {
+            format!(
+                "_h.{} = _lkd.{}",
+                quote_ident_double(&key.host),
+                quote_ident_double(&key.target)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    // A JOIN does not preserve input row order, and this pipeline's row order
+    // is MEANINGFUL: `keepRows`/`removeRows` address positions, `fillDown`
+    // carries a value downwards, and `removeDuplicates` keeps the FIRST row.
+    // A lookup that quietly reshuffled would corrupt every one of them — and
+    // silently, since the row COUNT stays right. So the host is numbered
+    // before the join and sorted back afterwards; the ordinal never reaches
+    // the output because the select list names the real columns rather than
+    // using `*`.
+    const ORDINAL: &str = "_lk_ord";
+    let host_columns: Vec<String> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| quote_ident_double(field.name()))
+        .collect();
+    let numbered_host = format!(
+        "SELECT {}, ROW_NUMBER() OVER () AS {} FROM {INPUT}",
+        host_columns.join(", "),
+        quote_ident_double(ORDINAL)
+    );
+
+    let mut select: Vec<String> = host_columns
+        .iter()
+        .map(|column| format!("_h.{column}"))
+        .collect();
+    for (position, take) in takes.iter().enumerate() {
+        select.push(format!(
+            "_lkd.{} AS {}",
+            quote_ident_double(&format!("_v{position}")),
+            quote_ident_double(take.output())
+        ));
+    }
+
+    let sql = format!(
+        "SELECT {} FROM ({numbered_host}) AS _h LEFT JOIN ({deduplicated}) AS _lkd ON {on} \
+         ORDER BY _h.{}",
+        select.join(", "),
+        quote_ident_double(ORDINAL)
+    );
+    run_sql_with_lookup(step, batch, target, &sql).await
 }
 
 /// `splitColumn`.

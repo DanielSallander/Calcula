@@ -25,7 +25,8 @@
 
 use crate::compute::aggregate::AggregateOp;
 use crate::transform::parts::{
-    CastErrorPolicy, ColumnRename, GroupAggregate, RowRange, SortKey, TypeChange,
+    CastErrorPolicy, ColumnRename, GroupAggregate, LookupKey, LookupTake, RowRange, SortKey,
+    TypeChange,
 };
 use crate::transform::TransformStep;
 use crate::types::DataType;
@@ -873,6 +874,41 @@ fn assemble(
                 Some(option) => Some(data_type_of(option.value.single_atom(&option.key)?)?),
                 None => None,
             },
+        },
+        "lookupColumn" => TransformStep::LookupColumn {
+            table: text(options, "table")?,
+            keys: find_all(options, &["on", "keys"])
+                .iter()
+                .flat_map(|option| option.value.elements.iter())
+                .map(|element| {
+                    Ok(LookupKey::new(
+                        element
+                            .atom_at(0, "this table's column, as in on=customer_id:id")?
+                            .text
+                            .clone(),
+                        element
+                            .atom_at(1, "the target's column, as in on=customer_id:id")?
+                            .text
+                            .clone(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, ScriptError>>()?,
+            takes: find_all(options, &["take", "takes"])
+                .iter()
+                .flat_map(|option| option.value.elements.iter())
+                .map(|element| {
+                    let column = element
+                        .atom_at(0, "a column to take, as in take=name")?
+                        .text
+                        .clone();
+                    // A second atom renames it; its absence means "keep the
+                    // name", which is what serde omits.
+                    Ok(match element.atoms.get(1) {
+                        Some(output) => LookupTake::renamed(column, output.text.clone()),
+                        None => LookupTake::new(column),
+                    })
+                })
+                .collect::<Result<Vec<_>, ScriptError>>()?,
         },
         "splitColumn" => TransformStep::SplitColumn {
             column: text(options, "column")?,

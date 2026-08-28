@@ -41,9 +41,16 @@ struct TableCacheMetadata {
     /// marks an entry that was already maximally stale when saved.
     #[serde(default)]
     age_ms: u64,
-    /// Schema hash of the table at save time (see `Table::schema_hash`).
+    /// The table's cache identity at save time
+    /// (see [`engine_core::transform::cache_identity`]).
+    ///
+    /// Not merely `Table::schema_hash`: for a table whose pipeline looks up
+    /// another, this additionally folds in that table's identity. Otherwise a
+    /// restored `Orders` keeps columns joined out of a `Customers` that has
+    /// since been reshaped — the entry validates, and the wrong rows are
+    /// served. For a table with no lookups the two are the same string.
     #[serde(default)]
-    schema_hash: String,
+    cache_identity: String,
     /// Number of rows in the saved batch (diagnostic only).
     #[serde(default)]
     row_count: u64,
@@ -196,8 +203,8 @@ impl Engine {
 
         for table_name in self.cache.table_names() {
             // Only persist tables that are in the model and marked InMemory.
-            let table = match self.model.table(table_name) {
-                Ok(t) if t.is_in_memory() => t,
+            match self.model.table(table_name) {
+                Ok(t) if t.is_in_memory() => {}
                 _ => continue,
             };
 
@@ -251,7 +258,10 @@ impl Engine {
                 table_name.to_string(),
                 TableCacheMetadata {
                     age_ms,
-                    schema_hash: table.schema_hash(),
+                    cache_identity: engine_core::transform::cache_identity(
+                        self.model.tables(),
+                        table_name,
+                    ),
                     row_count: batch.num_rows() as u64,
                     fingerprint: None,
                     fingerprints,
@@ -330,9 +340,12 @@ impl Engine {
                 _ => continue,
             };
 
-            // Validate schema hash.
-            if entry_meta.schema_hash != table.schema_hash() {
-                continue; // Schema changed — skip, will be re-fetched.
+            // Validate the cache identity: this table's own shape AND the
+            // shape of everything its pipeline looks up.
+            if entry_meta.cache_identity
+                != engine_core::transform::cache_identity(self.model.tables(), table_name)
+            {
+                continue; // Shape changed somewhere — skip, will be re-fetched.
             }
 
             // Resolve the cache file path. New metadata carries the
@@ -423,6 +436,21 @@ impl Engine {
             // Loaded data replaces cache contents — invalidate query results,
             // matching every other cache mutation (refresh/auto-tier).
             self.query_cache.lock().invalidate_all();
+
+            // Everything restored here was saved in ONE pass, so a restored
+            // dependent genuinely was computed from the restored target's
+            // rows. Recording that keeps `refresh_stale` from treating every
+            // lookup table as stale the moment a file is reopened — which
+            // would refetch the whole chain and make the disk cache useless
+            // for exactly the tables that cost the most to rebuild.
+            //
+            // A target that was NOT restored (its own identity failed, or its
+            // file is gone) is simply absent from the recording, so the
+            // dependent goes stale as soon as that target is fetched — which
+            // is the honest answer.
+            for table_name in &loaded {
+                self.record_transform_dependencies(table_name);
+            }
         }
 
         Ok(loaded)
@@ -440,7 +468,7 @@ mod tests {
             "t".to_string(),
             TableCacheMetadata {
                 age_ms: 1234,
-                schema_hash: "abc".to_string(),
+                cache_identity: "abc".to_string(),
                 row_count: 10,
                 fingerprint: None,
                 fingerprints: BTreeMap::from([("42".to_string(), "fp".to_string())]),
@@ -458,7 +486,7 @@ mod tests {
         assert_eq!(parsed.saved_at_unix_ms, Some(1_760_000_000_000));
         let t = &parsed.tables["t"];
         assert_eq!(t.age_ms, 1234);
-        assert_eq!(t.schema_hash, "abc");
+        assert_eq!(t.cache_identity, "abc");
         assert_eq!(t.row_count, 10);
         assert_eq!(t.fingerprints["42"], "fp");
         assert!(t.fingerprint.is_none());

@@ -241,7 +241,8 @@ pub(super) fn classify_query_filters(
 
     // Scoped scalar filters (explicit level, optional explicit table).
     for f in &request.scoped_filters {
-        let owners = resolve_scoped_owners(model, f.table.as_deref(), &f.condition.column, f.level)?;
+        let owners =
+            resolve_scoped_owners(model, f.table.as_deref(), &f.condition.column, f.level)?;
         let contested_owner: Vec<&String> = owners
             .iter()
             .filter(|t| contesting_measure(&contexts, t, &f.condition.column, f.level).is_some())

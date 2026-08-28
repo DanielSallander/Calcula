@@ -78,7 +78,7 @@ describe("transform script vocabulary — TypeScript must match the engine", () 
     const tags = engineStepTags(readVocabulary());
     // Non-vacuity first: a regex that matched nothing would make this test
     // pass against an empty list.
-    expect(tags.length).toBe(18);
+    expect(tags.length).toBe(19);
     expect([...TRANSFORM_STEP_TYPES]).toEqual(tags);
   });
 
@@ -116,7 +116,7 @@ describe("transform script vocabulary — TypeScript must match the engine", () 
 
   it("the two steps `transform … rename` reaches into still carry the field it writes", () => {
     // `renameStepOutput` is the last place outside the engine that reads a
-    // step's fields. It touches two of seventeen tags; if either loses the
+    // step's fields. It touches two of nineteen tags; if either loses the
     // field it writes, this names it instead of the CLI writing a step the
     // backend silently drops.
     const step = fs.readFileSync(STEP_RS, "utf8");

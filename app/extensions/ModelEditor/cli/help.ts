@@ -249,6 +249,14 @@ model all read exactly the same text:
   keepRows range=first:100         removeRows range=range:0:10
   unpivot columns=Jan,Feb nameColumn=Month valueColumn=Amount
   pivot nameColumn=Month valueColumn=Amount aggregate=Sum valueNames=Jan,Feb
+  lookupColumn table=Customers on=customer_id:id take=name take=segment:seg
+
+  A lookupColumn brings columns across from ANOTHER table in this model,
+  matched on one or more key pairs (repeat on=, they are ANDed). It never adds
+  rows: several matches on the other side resolve to the smallest value, no
+  match gives a blank. Every take= rides one join, so three cost no more than
+  one. The target must be an Import table that is not this one, and the model
+  refuses a loop. On refresh the target is loaded first.
 
   Option keys are matched case-insensitively, and the older spellings still
   read (column=/newname=, type=, values=, matchentire=). Types are the engine's

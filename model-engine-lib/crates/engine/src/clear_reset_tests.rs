@@ -429,7 +429,10 @@ async fn grouped_axis_spanning_clear_with_slicer_still_fails_closed() {
     let mut req = request(&["Revenue", "TotalViaClear"]);
     req.filters = vec![FilterCondition::new("name", FilterOperator::Equal, "Bikes")];
     let err = engine.query(req).await;
-    assert!(err.is_err(), "axis-spanning contested clear must fail closed");
+    assert!(
+        err.is_err(),
+        "axis-spanning contested clear must fail closed"
+    );
     let msg = format!("{}", err.unwrap_err());
     assert!(
         msg.contains("axis") || msg.contains("per-measure filter removal"),

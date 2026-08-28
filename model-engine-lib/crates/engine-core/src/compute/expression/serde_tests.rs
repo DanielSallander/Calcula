@@ -93,7 +93,10 @@ fn clear_level_serialization_contract() {
         vec![ClearTarget::Table("dim_product".into())],
     );
     let json = serde_json::to_string(&bare).unwrap();
-    assert!(!json.contains("level"), "bare CLEAR must skip level: {json}");
+    assert!(
+        !json.contains("level"),
+        "bare CLEAR must skip level: {json}"
+    );
 
     // ...and pre-v27 JSON without the field deserializes as None (the live
     // registry model carries such Clear nodes).

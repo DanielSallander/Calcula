@@ -99,7 +99,9 @@ impl Engine {
         // The cached rows were produced by the OLD pipeline, so they are the
         // wrong rows now. Dropping them is what makes the edit take effect on
         // the next query rather than at some later refresh.
-        self.drop_table_cache(table);
+        // Transitive: a table whose pipeline looks up into THIS one folded
+        // its rows into its own cached output, so it is stale too.
+        self.drop_table_cache_and_dependents(&[table.to_string()]);
         deferred
     }
 
@@ -176,7 +178,12 @@ impl Engine {
         let derived = if binding.transformations.is_empty() {
             fresh.clone()
         } else {
-            derive_pipeline_schema(table, &fresh, &binding.transformations)?
+            derive_pipeline_schema(
+                table,
+                &fresh,
+                &binding.transformations,
+                &engine_core::transform::ModelTableSchemas::new(self.model.tables()),
+            )?
         };
 
         let mut updated_binding = binding.clone();
@@ -224,7 +231,9 @@ impl Engine {
         // Same ordering rule as `set_table_transformations`: install, finish,
         // then surface any deferred script error.
         let deferred = self.set_model(new_model);
-        self.drop_table_cache(table);
+        // Transitive: a table whose pipeline looks up into THIS one folded
+        // its rows into its own cached output, so it is stale too.
+        self.drop_table_cache_and_dependents(&[table.to_string()]);
         deferred.map(|()| diff)
     }
 }

@@ -46,6 +46,7 @@ export const TRANSFORM_STEP_TYPES = [
   "filterRows",
   "addColumn",
   "transformColumn",
+  "lookupColumn",
   "splitColumn",
   "replaceValues",
   "textTransform",
@@ -96,6 +97,9 @@ export const TRANSFORM_STEP_OPTIONS: CliOptionSpec[] = [
   { key: "valueColumn", type: "string", help: "unpivot/pivot: the value column" },
   { key: "aggregate", type: "string", help: "pivot: the aggregation in each cell (Sum, Count, ...)" },
   { key: "valueNames", type: "list", aliases: ["values"], help: "pivot: the declared distinct values, in output-column order" },
+  { key: "table", type: "string", help: "lookupColumn: the model table to bring columns across from" },
+  { key: "on", type: "string", help: "lookupColumn: one key pair, written hostColumn:targetColumn (repeatable, ANDed)" },
+  { key: "take", type: "string", help: "lookupColumn: one column to bring across, or column:newName (repeatable)" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -142,7 +146,7 @@ export function stepInsertPosition(at: number, count: number, line: number): num
  *  really exists in the step, and says so plainly when the step has none.
  *
  *  This is the one place outside the engine that still reads a step's fields.
- *  It touches two of seventeen tags and is checked by the drift test, which
+ *  It touches two of nineteen tags and is checked by the drift test, which
  *  asserts both still carry the field this reaches for. */
 export function renameStepOutput(
   step: TransformStepDto,

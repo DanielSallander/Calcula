@@ -976,6 +976,175 @@ export function StepConfigForm({
           </>
         );
 
+      case "lookupColumn": {
+        // Every table's full column list is already client-side on `overview`,
+        // so the pickers need no round trip — the same reason this form can
+        // offer the TARGET's columns as readily as this table's.
+        const target = overview.tables.find(
+          (t) => t.name.toLowerCase() === (step.table ?? "").toLowerCase(),
+        );
+        const targetColumns = target?.columns ?? [];
+        const keys = step.keys ?? [];
+        const takes = step.takes ?? [];
+
+        // A calculated table has no `isCalculated` flag on the DTO; it is the
+        // derived table of a materialized global, so its name matches one.
+        // Excluding it here is a convenience — the engine refuses it by name
+        // either way, and that refusal stays the authority.
+        const materialized = new Set(
+          overview.globalVariables
+            .filter((g) => !g.dynamic)
+            .map((g) => g.name.toLowerCase()),
+        );
+        const candidates = overview.tables.filter(
+          (t) =>
+            t.name.toLowerCase() !== tableName.toLowerCase() &&
+            t.storageMode !== "DirectQuery" &&
+            !materialized.has(t.name.toLowerCase()),
+        );
+
+        const setKey = (i: number, patchKey: Partial<{ host: string; target: string }>) =>
+          patch({ keys: keys.map((k, n) => (n === i ? { ...k, ...patchKey } : k)) });
+        const setTake = (
+          i: number,
+          patchTake: Partial<{ column: string; outputName?: string }>,
+        ) => patch({ takes: takes.map((t, n) => (n === i ? { ...t, ...patchTake } : t)) });
+
+        return (
+          <>
+            <Field
+              label="Table to look up"
+              hint="Any Import table in this model except this one. Its rows are joined from the model's own cache at refresh, so it is refreshed first."
+            >
+              <select
+                style={{ ...styles.input, width: 260 }}
+                value={step.table ?? ""}
+                disabled={readOnly}
+                onChange={(e) =>
+                  // Changing the table invalidates every column chosen from
+                  // the old one. Clearing is honest; keeping them would show
+                  // names that silently do not exist.
+                  patch({ table: e.target.value, keys: [], takes: [] })
+                }
+              >
+                <option value="">(table)</option>
+                {step.table !== undefined &&
+                  step.table !== "" &&
+                  !candidates.some((t) => t.name === step.table) && (
+                    <option value={step.table}>{step.table} (not available)</option>
+                  )}
+                {candidates.map((t) => (
+                  <option key={t.name} value={t.name}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            <Field
+              label="Matched on"
+              hint="Every pair must match (AND). This never adds rows: if the other table has several matching rows, the smallest value wins; if it has none, the result is blank."
+            >
+              {keys.length === 0 && (
+                <div style={styles.hint}>
+                  No key yet — the step needs at least one pair to match on.
+                </div>
+              )}
+              {keys.map((k, i) => (
+                <div
+                  key={i}
+                  style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}
+                >
+                  <ColumnSelect
+                    value={k.host}
+                    columns={inputColumns}
+                    disabled={readOnly}
+                    placeholder="(this table)"
+                    onChange={(host) => setKey(i, { host })}
+                  />
+                  <span style={{ ...styles.muted, fontSize: 11 }}>=</span>
+                  <ColumnSelect
+                    value={k.target}
+                    columns={targetColumns}
+                    disabled={readOnly || !step.table}
+                    placeholder="(other table)"
+                    onChange={(t) => setKey(i, { target: t })}
+                  />
+                  <button
+                    style={styles.smallBtn}
+                    disabled={readOnly}
+                    title="Remove this key pair"
+                    onClick={() => patch({ keys: keys.filter((_, n) => n !== i) })}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                style={styles.smallBtn}
+                disabled={readOnly || !step.table}
+                onClick={() => patch({ keys: [...keys, { host: "", target: "" }] })}
+              >
+                Add key pair
+              </button>
+            </Field>
+
+            <Field
+              label="Columns to bring across"
+              hint="Leave the name blank to keep the other table's own column name. Every column here rides ONE join, so taking three costs no more than taking one."
+            >
+              {takes.length === 0 && (
+                <div style={styles.hint}>
+                  No columns chosen — the step would add nothing.
+                </div>
+              )}
+              {takes.map((t, i) => (
+                <div
+                  key={i}
+                  style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}
+                >
+                  <ColumnSelect
+                    value={t.column}
+                    columns={targetColumns}
+                    disabled={readOnly || !step.table}
+                    placeholder="(other table)"
+                    onChange={(column) => setTake(i, { column })}
+                  />
+                  <span style={{ ...styles.muted, fontSize: 11 }}>as</span>
+                  <input
+                    style={{ ...styles.input, flex: 1, minWidth: 0 }}
+                    value={t.outputName ?? ""}
+                    placeholder={t.column || "(same name)"}
+                    disabled={readOnly}
+                    onChange={(e) =>
+                      // Empty means "keep the target's name", which the engine
+                      // spells as an ABSENT field, not an empty string — the
+                      // round-trip assertion compares steps for equality.
+                      setTake(i, { outputName: e.target.value === "" ? undefined : e.target.value })
+                    }
+                  />
+                  <button
+                    style={styles.smallBtn}
+                    disabled={readOnly}
+                    title="Remove this column"
+                    onClick={() => patch({ takes: takes.filter((_, n) => n !== i) })}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                style={styles.smallBtn}
+                disabled={readOnly || !step.table}
+                onClick={() => patch({ takes: [...takes, { column: "" }] })}
+              >
+                Add column
+              </button>
+            </Field>
+          </>
+        );
+      }
+
       default:
         return (
           <div style={styles.hint}>
