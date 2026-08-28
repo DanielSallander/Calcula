@@ -24,11 +24,11 @@ pub fn has_measure_ref(expr: &Expression) -> bool {
         Expression::Aggregate { operand, .. } => has_measure_ref(operand),
         Expression::Keep { expr, .. }
         | Expression::Clear { expr, .. }
-        | Expression::Reset { expr }
+        | Expression::Reset { expr, .. }
         | Expression::ClearInner { expr, .. }
         | Expression::ClearOuter { expr, .. }
         | Expression::ResetInner { expr }
-        | Expression::ResetOuter { expr }
+        | Expression::ResetOuter { expr, .. }
         | Expression::Traverse { expr, .. }
         | Expression::Using { expr, .. }
         | Expression::UseRelationship { expr, .. }
@@ -171,12 +171,15 @@ fn expand_measure_refs_inner(
         Expression::Clear {
             expr: inner,
             targets,
+            level,
         } => Ok(Expression::Clear {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
             targets: targets.clone(),
+            level: *level,
         }),
-        Expression::Reset { expr: inner } => Ok(Expression::Reset {
+        Expression::Reset { expr: inner, level } => Ok(Expression::Reset {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            level: *level,
         }),
         Expression::Traverse { expr: inner, path } => Ok(Expression::Traverse {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
@@ -206,15 +209,18 @@ fn expand_measure_refs_inner(
         Expression::ClearOuter {
             expr: inner,
             targets,
+            level,
         } => Ok(Expression::ClearOuter {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
             targets: targets.clone(),
+            level: *level,
         }),
         Expression::ResetInner { expr: inner } => Ok(Expression::ResetInner {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
         }),
-        Expression::ResetOuter { expr: inner } => Ok(Expression::ResetOuter {
+        Expression::ResetOuter { expr: inner, level } => Ok(Expression::ResetOuter {
             expr: Box::new(expand_measure_refs_inner(inner, model, visited)?),
+            level: *level,
         }),
         Expression::KeepIn {
             expr: inner,
@@ -549,11 +555,11 @@ pub fn infer_fact_table(expr: &Expression) -> Option<String> {
         Expression::Not(inner) | Expression::IsBlank(inner) => infer_fact_table(inner),
         Expression::Keep { expr, .. }
         | Expression::Clear { expr, .. }
-        | Expression::Reset { expr }
+        | Expression::Reset { expr, .. }
         | Expression::ClearInner { expr, .. }
         | Expression::ClearOuter { expr, .. }
         | Expression::ResetInner { expr }
-        | Expression::ResetOuter { expr }
+        | Expression::ResetOuter { expr, .. }
         | Expression::Traverse { expr, .. }
         | Expression::Using { expr, .. }
         | Expression::UseRelationship { expr, .. }

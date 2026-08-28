@@ -269,9 +269,13 @@ fn expression_to_source_sql_with_clear(
     use engine_core::model::ClearTarget;
 
     match expr {
+        // Level ceilings affect outer-filter stripping only, which never
+        // happens on the pushed path; the axis half rendered here is
+        // level-independent.
         Expression::Clear {
             expr: inner,
             targets,
+            level: _,
         } => {
             // Generate the inner expression SQL (may have KEEP → CASE WHEN).
             let inner_sql = expression_to_source_sql_with_clear(inner, registry, group_by)?;

@@ -274,9 +274,9 @@ impl<'a> ProjectionCollector<'a> {
                             self.add_in_predicate(p);
                         }
                     }
-                    ContextOp::Clear(targets)
+                    ContextOp::Clear { targets, .. }
                     | ContextOp::ClearInner(targets)
-                    | ContextOp::ClearOuter(targets) => {
+                    | ContextOp::ClearOuter { targets, .. } => {
                         for target in targets {
                             if let ClearTarget::Column { table, column } = target {
                                 self.add(table, column);
@@ -289,7 +289,9 @@ impl<'a> ProjectionCollector<'a> {
                             self.add_relationship_conditions(rel);
                         }
                     }
-                    ContextOp::Reset | ContextOp::ResetInner | ContextOp::ResetOuter => {}
+                    ContextOp::Reset { .. }
+                    | ContextOp::ResetInner
+                    | ContextOp::ResetOuter { .. } => {}
                 }
             }
         }
@@ -566,6 +568,7 @@ impl<'a> ProjectionCollector<'a> {
             Expression::Clear {
                 expr: inner,
                 targets,
+                ..
             }
             | Expression::ClearInner {
                 expr: inner,
@@ -574,6 +577,7 @@ impl<'a> ProjectionCollector<'a> {
             | Expression::ClearOuter {
                 expr: inner,
                 targets,
+                ..
             } => {
                 self.walk(inner);
                 for target in targets {
@@ -592,9 +596,9 @@ impl<'a> ProjectionCollector<'a> {
                     self.add(table, column);
                 }
             }
-            Expression::Reset { expr: inner }
+            Expression::Reset { expr: inner, .. }
             | Expression::ResetInner { expr: inner }
-            | Expression::ResetOuter { expr: inner } => self.walk(inner),
+            | Expression::ResetOuter { expr: inner, .. } => self.walk(inner),
             Expression::Traverse { expr: inner, path } => {
                 self.walk(inner);
                 for pair in path.hops.windows(2) {

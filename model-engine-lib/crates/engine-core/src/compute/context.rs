@@ -26,6 +26,69 @@ pub enum FilterSource {
     GroupBy,
 }
 
+/// Filter level of the group-by axis (pivot row/column context).
+pub const LEVEL_AXIS: u8 = 0;
+/// Default filter level of report slicers / query-level filters.
+pub const LEVEL_SLICER: u8 = 1;
+/// Highest assignable filter level.
+pub const LEVEL_MAX: u8 = 9;
+
+/// A contiguous range of filter levels affected by a clear/reset operation.
+///
+/// Level 0 is the group-by axis; level 1 is ordinary report slicers; levels
+/// 2..=[`LEVEL_MAX`] are pinned filters. Each clear op denotes a range:
+/// `CLEAR_INNER` is `[0,0]`, `CLEAR` is `[0,1]` (or `[0,n]` with `LEVEL n`),
+/// `CLEAR_OUTER` is `[1,1]` (or `[1,n]`). Floors are always 0 or 1, so the
+/// union of any two ranges is itself a contiguous range and [`Self::union`]
+/// is exact — it never over-clears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelRange {
+    /// Lowest level cleared (0 = axis included, 1 = axis kept).
+    pub floor: u8,
+    /// Highest level cleared.
+    pub ceiling: u8,
+}
+
+impl LevelRange {
+    /// The axis-only range `[0,0]` (`CLEAR_INNER` / `RESET_INNER`).
+    pub const fn axis_only() -> Self {
+        Self {
+            floor: LEVEL_AXIS,
+            ceiling: LEVEL_AXIS,
+        }
+    }
+
+    /// The range `[0,ceiling]` (`CLEAR` / `RESET`, default ceiling 1).
+    pub const fn through(ceiling: u8) -> Self {
+        Self {
+            floor: LEVEL_AXIS,
+            ceiling,
+        }
+    }
+
+    /// The axis-keeping range `[1,ceiling]` (`CLEAR_OUTER` / `RESET_OUTER`).
+    pub const fn outer(ceiling: u8) -> Self {
+        Self {
+            floor: LEVEL_SLICER,
+            ceiling,
+        }
+    }
+
+    /// Whether `level` falls inside this range.
+    pub const fn contains(&self, level: u8) -> bool {
+        self.floor <= level && level <= self.ceiling
+    }
+
+    /// The union of two ranges (min floor, max ceiling). Exact for the ranges
+    /// this module produces: floors are 0 or 1, so the set union is contiguous.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            floor: self.floor.min(other.floor),
+            ceiling: self.ceiling.max(other.ceiling),
+        }
+    }
+}
+
 /// A resolved filter condition ready for SQL generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedFilter {
@@ -39,10 +102,16 @@ pub struct ResolvedFilter {
     pub value: String,
     /// Where this filter originated.
     pub source: FilterSource,
+    /// Filter level for [`FilterSource::Query`] filters — [`LEVEL_SLICER`]
+    /// for ordinary slicers, 2..=[`LEVEL_MAX`] for pinned filters. Ignored
+    /// for [`FilterSource::GroupBy`] (the axis is level 0 by definition; see
+    /// [`Self::effective_level`]).
+    pub level: u8,
 }
 
 impl ResolvedFilter {
-    /// Create a new resolved filter with the default [`FilterSource::Query`] source.
+    /// Create a new resolved filter with the default [`FilterSource::Query`]
+    /// source at [`LEVEL_SLICER`].
     pub fn new(
         table: impl Into<String>,
         column: impl Into<String>,
@@ -55,13 +124,15 @@ impl ResolvedFilter {
             operator,
             value: value.into(),
             source: FilterSource::Query,
+            level: LEVEL_SLICER,
         }
     }
 
     /// Create from a [`FilterPredicate`].
     ///
-    /// Defaults to [`FilterSource::Query`]. Callers should set `source`
-    /// explicitly when constructing filters from group-by context.
+    /// Defaults to [`FilterSource::Query`] at [`LEVEL_SLICER`]. Callers
+    /// should set `source` explicitly when constructing filters from
+    /// group-by context.
     pub fn from_predicate(predicate: &FilterPredicate) -> Self {
         Self {
             table: predicate.table.clone(),
@@ -69,6 +140,7 @@ impl ResolvedFilter {
             operator: predicate.operator,
             value: predicate.value.clone(),
             source: FilterSource::Query,
+            level: LEVEL_SLICER,
         }
     }
 
@@ -76,6 +148,23 @@ impl ResolvedFilter {
     pub fn with_source(mut self, source: FilterSource) -> Self {
         self.source = source;
         self
+    }
+
+    /// Return a copy with the given filter level (pinned filters are ≥ 2).
+    pub fn with_level(mut self, level: u8) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// The filter level this filter occupies for clear/reset purposes:
+    /// group-by (axis) filters sit at [`LEVEL_AXIS`] regardless of their
+    /// `level` field; query-level filters sit at their assigned level
+    /// ([`LEVEL_SLICER`] by default, higher when pinned).
+    pub fn effective_level(&self) -> u8 {
+        match self.source {
+            FilterSource::GroupBy => LEVEL_AXIS,
+            FilterSource::Query => self.level,
+        }
     }
 
     /// Render this filter as a SQL condition: `table_alias."column" op value`.
@@ -142,24 +231,16 @@ pub struct ResolvedInFilter {
 pub struct EvaluationContext {
     /// Active filter conditions (all AND'd together).
     pub filters: Vec<ResolvedFilter>,
-    /// Dimensions that have been cleared — targets both sources.
-    pub cleared_columns: HashSet<(String, String)>,
-    /// Tables that have been fully cleared — targets both sources.
-    pub cleared_tables: HashSet<String>,
-    /// Whether all filters have been reset — targets both sources.
-    pub is_reset: bool,
-    /// Dimensions cleared for inner (group-by) filters only.
-    pub cleared_inner_columns: HashSet<(String, String)>,
-    /// Tables cleared for inner (group-by) filters only.
-    pub cleared_inner_tables: HashSet<String>,
-    /// Whether inner (group-by) filters have been reset.
-    pub is_reset_inner: bool,
-    /// Dimensions cleared for outer (query-level) filters only.
-    pub cleared_outer_columns: HashSet<(String, String)>,
-    /// Tables cleared for outer (query-level) filters only.
-    pub cleared_outer_tables: HashSet<String>,
-    /// Whether outer (query-level) filters have been reset.
-    pub is_reset_outer: bool,
+    /// Per-column clears — each key maps to the [`LevelRange`] it clears.
+    /// `CLEAR(t[c])` records `[0,1]`, `CLEAR_INNER(t[c])` `[0,0]`,
+    /// `CLEAR_OUTER(t[c])` `[1,1]`; repeated clears union their ranges.
+    pub cleared_columns: HashMap<(String, String), LevelRange>,
+    /// Whole-table clears — each table maps to the [`LevelRange`] it clears.
+    pub cleared_tables: HashMap<String, LevelRange>,
+    /// Reset state: the [`LevelRange`] cleared across ALL tables, if any.
+    /// `RESET()` records `[0,1]`, `RESET_INNER()` `[0,0]`, `RESET_OUTER()`
+    /// `[1,1]`; repeated resets union their ranges.
+    pub reset: Option<LevelRange>,
     /// Explicit relationship traversal paths (overrides model defaults).
     pub traversals: Vec<RelationshipPath>,
     /// IN-membership filters (resolved from `keep_in()` expressions).
@@ -213,61 +294,132 @@ impl EvaluationContext {
         model.find_relationship(table_a, table_b)
     }
 
-    /// Apply outer filters, respecting clear/reset operations and filter sources.
+    /// Record a clear of `targets` over `range`, unioning with prior clears
+    /// of the same target.
+    pub fn record_clear(&mut self, targets: &[ClearTarget], range: LevelRange) {
+        for target in targets {
+            match target {
+                ClearTarget::Column { table, column } => {
+                    self.cleared_columns
+                        .entry((table.clone(), column.clone()))
+                        .and_modify(|r| *r = r.union(range))
+                        .or_insert(range);
+                }
+                ClearTarget::Table(table) => {
+                    self.cleared_tables
+                        .entry(table.clone())
+                        .and_modify(|r| *r = r.union(range))
+                        .or_insert(range);
+                }
+            }
+        }
+    }
+
+    /// Record a reset over `range`, unioning with any prior reset.
+    pub fn record_reset(&mut self, range: LevelRange) {
+        self.reset = Some(match self.reset {
+            Some(existing) => existing.union(range),
+            None => range,
+        });
+    }
+
+    /// Whether the reset state (if any) covers `level`.
+    pub fn reset_at(&self, level: u8) -> bool {
+        self.reset.is_some_and(|r| r.contains(level))
+    }
+
+    /// True when any clear/reset/clear-except state is present, from any source.
+    pub fn has_clear_or_reset(&self) -> bool {
+        self.reset.is_some()
+            || !self.cleared_tables.is_empty()
+            || !self.cleared_columns.is_empty()
+            || !self.clear_except.is_empty()
+    }
+
+    /// Case-insensitive: does some whole-table clear on `table_lc` cover `level`?
+    pub fn table_cleared_at_ci(&self, table_lc: &str, level: u8) -> bool {
+        self.cleared_tables
+            .iter()
+            .any(|(t, r)| t.eq_ignore_ascii_case(table_lc) && r.contains(level))
+    }
+
+    /// Case-insensitive: does some per-column clear on `(table_lc, column_lc)`
+    /// cover `level`?
+    pub fn column_cleared_at_ci(&self, table_lc: &str, column_lc: &str, level: u8) -> bool {
+        self.cleared_columns.iter().any(|((t, c), r)| {
+            t.eq_ignore_ascii_case(table_lc)
+                && c.eq_ignore_ascii_case(column_lc)
+                && r.contains(level)
+        })
+    }
+
+    /// Case-insensitive: does a CLEAREXCEPT on `table_lc` clear `column_lc`
+    /// (i.e. the table has an entry and the column is not preserved)?
+    /// CLEAREXCEPT clears levels 0..=[`LEVEL_SLICER`] of non-preserved columns.
+    pub fn clear_except_clears_ci(&self, table_lc: &str, column_lc: &str) -> bool {
+        self.clear_except.iter().any(|(et, preserved)| {
+            et.eq_ignore_ascii_case(table_lc)
+                && !preserved.iter().any(|p| p.eq_ignore_ascii_case(column_lc))
+        })
+    }
+
+    /// Case-insensitive: does this context remove a query-level filter on
+    /// `(table, column)` sitting at `level`? Combines reset, whole-table and
+    /// per-column clears, and CLEAREXCEPT (which reaches levels 0..=1 only).
+    /// This is the single predicate deciding whether a measure evaluates
+    /// without a given request filter.
+    pub fn clears_query_filter_ci(&self, table: &str, column: &str, level: u8) -> bool {
+        self.reset_at(level)
+            || self.table_cleared_at_ci(table, level)
+            || self.column_cleared_at_ci(table, column, level)
+            || (level <= LEVEL_SLICER && self.clear_except_clears_ci(table, column))
+    }
+
+    /// Apply outer filters, respecting clear/reset operations and filter levels.
     ///
     /// Returns a new list of effective filters combining the inner context
-    /// modifications with the provided outer filters. Source-specific operations
-    /// (`clear_inner`, `clear_outer`, `reset_inner`, `reset_outer`) only affect
-    /// filters from the matching source.
+    /// modifications with the provided outer filters. Each outer filter is
+    /// dropped when a reset, a whole-table clear, a per-column clear, or a
+    /// CLEAREXCEPT covers its [`ResolvedFilter::effective_level`]; level-based
+    /// ops (`clear_inner`/`clear_outer`/…) thereby only affect filters from
+    /// the matching source.
     pub fn effective_filters(&self, outer_filters: &[ResolvedFilter]) -> Vec<ResolvedFilter> {
         let mut result = Vec::new();
 
-        if !self.is_reset {
-            for f in outer_filters {
-                // Source-specific reset: skip if this source was reset
-                if self.is_reset_inner && f.source == FilterSource::GroupBy {
-                    continue;
-                }
-                if self.is_reset_outer && f.source == FilterSource::Query {
-                    continue;
-                }
+        for f in outer_filters {
+            let level = f.effective_level();
 
-                let key = (f.table.clone(), f.column.clone());
+            if self.reset_at(level) {
+                continue;
+            }
 
-                // Both-source clear (existing behavior)
-                if self.cleared_columns.contains(&key) {
-                    continue;
-                }
-                if self.cleared_tables.contains(&f.table) {
-                    continue;
-                }
+            let key = (f.table.clone(), f.column.clone());
+            if self
+                .cleared_columns
+                .get(&key)
+                .is_some_and(|r| r.contains(level))
+            {
+                continue;
+            }
+            if self
+                .cleared_tables
+                .get(&f.table)
+                .is_some_and(|r| r.contains(level))
+            {
+                continue;
+            }
 
-                // CLEAREXCEPT: clear all filters on the table except preserved columns
+            // CLEAREXCEPT: clear all filters on the table (levels 0..=1)
+            // except preserved columns.
+            if level <= LEVEL_SLICER {
                 if let Some(preserved) = self.clear_except.get(&f.table) {
                     if !preserved.contains(&f.column) {
                         continue; // not preserved → cleared
                     }
                 }
-
-                // Source-specific column clear
-                if f.source == FilterSource::GroupBy && self.cleared_inner_columns.contains(&key) {
-                    continue;
-                }
-                if f.source == FilterSource::Query && self.cleared_outer_columns.contains(&key) {
-                    continue;
-                }
-
-                // Source-specific table clear
-                if f.source == FilterSource::GroupBy && self.cleared_inner_tables.contains(&f.table)
-                {
-                    continue;
-                }
-                if f.source == FilterSource::Query && self.cleared_outer_tables.contains(&f.table) {
-                    continue;
-                }
-
-                result.push(f.clone());
             }
+
+            result.push(f.clone());
         }
 
         // Add all keep() filters (expression-level — these always apply)
@@ -275,6 +427,32 @@ impl EvaluationContext {
 
         result
     }
+}
+
+/// Resolve an optional clear-level ceiling: None ≡ [`LEVEL_SLICER`]. Values
+/// above [`LEVEL_MAX`] are refused — the parser never produces them, but a
+/// hand-edited model JSON could carry any u8 (fail closed).
+fn clear_ceiling(level: Option<u8>) -> EngineResult<u8> {
+    match level {
+        None => Ok(LEVEL_SLICER),
+        Some(n) if n <= LEVEL_MAX => Ok(n),
+        Some(n) => Err(EngineError::InvalidData(format!(
+            "clear level {n} exceeds the maximum filter level {LEVEL_MAX}"
+        ))),
+    }
+}
+
+/// Resolve an optional ceiling for the outer (`floor` 1) clear variants:
+/// level 0 is the axis, which CLEAR_OUTER/RESET_OUTER keep by definition.
+fn outer_ceiling(level: Option<u8>) -> EngineResult<u8> {
+    let ceiling = clear_ceiling(level)?;
+    if ceiling < LEVEL_SLICER {
+        return Err(EngineError::InvalidData(
+            "CLEAR_OUTER/RESET_OUTER keep the axis (level 0); their level must be at least 1"
+                .into(),
+        ));
+    }
+    Ok(ceiling)
 }
 
 /// Resolves context operations in an expression tree into a flat [`EvaluationContext`].
@@ -406,68 +584,47 @@ impl<'a> ContextResolver<'a> {
                 Ok(inner)
             }
 
-            Expression::Clear { expr, targets } => {
+            Expression::Clear {
+                expr,
+                targets,
+                level,
+            } => {
                 let inner = self.walk(expr, ctx)?;
-                for target in targets {
-                    match target {
-                        ClearTarget::Column { table, column } => {
-                            ctx.cleared_columns.insert((table.clone(), column.clone()));
-                        }
-                        ClearTarget::Table(table) => {
-                            ctx.cleared_tables.insert(table.clone());
-                        }
-                    }
-                }
+                ctx.record_clear(targets, LevelRange::through(clear_ceiling(*level)?));
                 Ok(inner)
             }
 
-            Expression::Reset { expr } => {
+            Expression::Reset { expr, level } => {
                 let inner = self.walk(expr, ctx)?;
-                ctx.is_reset = true;
+                ctx.record_reset(LevelRange::through(clear_ceiling(*level)?));
                 Ok(inner)
             }
 
             Expression::ClearInner { expr, targets } => {
                 let inner = self.walk(expr, ctx)?;
-                for target in targets {
-                    match target {
-                        ClearTarget::Column { table, column } => {
-                            ctx.cleared_inner_columns
-                                .insert((table.clone(), column.clone()));
-                        }
-                        ClearTarget::Table(table) => {
-                            ctx.cleared_inner_tables.insert(table.clone());
-                        }
-                    }
-                }
+                ctx.record_clear(targets, LevelRange::axis_only());
                 Ok(inner)
             }
 
-            Expression::ClearOuter { expr, targets } => {
+            Expression::ClearOuter {
+                expr,
+                targets,
+                level,
+            } => {
                 let inner = self.walk(expr, ctx)?;
-                for target in targets {
-                    match target {
-                        ClearTarget::Column { table, column } => {
-                            ctx.cleared_outer_columns
-                                .insert((table.clone(), column.clone()));
-                        }
-                        ClearTarget::Table(table) => {
-                            ctx.cleared_outer_tables.insert(table.clone());
-                        }
-                    }
-                }
+                ctx.record_clear(targets, LevelRange::outer(outer_ceiling(*level)?));
                 Ok(inner)
             }
 
             Expression::ResetInner { expr } => {
                 let inner = self.walk(expr, ctx)?;
-                ctx.is_reset_inner = true;
+                ctx.record_reset(LevelRange::axis_only());
                 Ok(inner)
             }
 
-            Expression::ResetOuter { expr } => {
+            Expression::ResetOuter { expr, level } => {
                 let inner = self.walk(expr, ctx)?;
-                ctx.is_reset_outer = true;
+                ctx.record_reset(LevelRange::outer(outer_ceiling(*level)?));
                 Ok(inner)
             }
 
@@ -1012,52 +1169,23 @@ impl<'a> ContextResolver<'a> {
                         ctx.filters.push(ResolvedFilter::from_predicate(filter));
                     }
                 }
-                ContextOp::Clear(targets) => {
-                    for target in targets {
-                        match target {
-                            ClearTarget::Column { table, column } => {
-                                ctx.cleared_columns.insert((table.clone(), column.clone()));
-                            }
-                            ClearTarget::Table(table) => {
-                                ctx.cleared_tables.insert(table.clone());
-                            }
-                        }
-                    }
+                ContextOp::Clear { targets, level } => {
+                    ctx.record_clear(targets, LevelRange::through(clear_ceiling(*level)?));
                 }
-                ContextOp::Reset => {
-                    ctx.is_reset = true;
+                ContextOp::Reset { level } => {
+                    ctx.record_reset(LevelRange::through(clear_ceiling(*level)?));
                 }
                 ContextOp::ClearInner(targets) => {
-                    for target in targets {
-                        match target {
-                            ClearTarget::Column { table, column } => {
-                                ctx.cleared_inner_columns
-                                    .insert((table.clone(), column.clone()));
-                            }
-                            ClearTarget::Table(table) => {
-                                ctx.cleared_inner_tables.insert(table.clone());
-                            }
-                        }
-                    }
+                    ctx.record_clear(targets, LevelRange::axis_only());
                 }
-                ContextOp::ClearOuter(targets) => {
-                    for target in targets {
-                        match target {
-                            ClearTarget::Column { table, column } => {
-                                ctx.cleared_outer_columns
-                                    .insert((table.clone(), column.clone()));
-                            }
-                            ClearTarget::Table(table) => {
-                                ctx.cleared_outer_tables.insert(table.clone());
-                            }
-                        }
-                    }
+                ContextOp::ClearOuter { targets, level } => {
+                    ctx.record_clear(targets, LevelRange::outer(outer_ceiling(*level)?));
                 }
                 ContextOp::ResetInner => {
-                    ctx.is_reset_inner = true;
+                    ctx.record_reset(LevelRange::axis_only());
                 }
-                ContextOp::ResetOuter => {
-                    ctx.is_reset_outer = true;
+                ContextOp::ResetOuter { level } => {
+                    ctx.record_reset(LevelRange::outer(outer_ceiling(*level)?));
                 }
                 ContextOp::KeepIn(predicates) => {
                     for pred in predicates {
@@ -1230,6 +1358,7 @@ mod tests {
             operator: ComparisonOp::Equal,
             value: "US".into(),
             source: FilterSource::Query,
+            level: 1,
         };
         let sql = filter.to_sql_condition("t", &model);
         assert_eq!(sql, "t.\"evil\"\"name\" = 'US'");
@@ -1281,12 +1410,18 @@ mod tests {
             ))
             .add_context(ContextDefinition::new(
                 "ctx_no_region",
-                vec![ContextOp::Clear(vec![ClearTarget::Column {
-                    table: "Sales".into(),
-                    column: "region".into(),
-                }])],
+                vec![ContextOp::Clear {
+                    targets: vec![ClearTarget::Column {
+                        table: "Sales".into(),
+                        column: "region".into(),
+                    }],
+                    level: None,
+                }],
             ))
-            .add_context(ContextDefinition::new("ctx_reset", vec![ContextOp::Reset]))
+            .add_context(ContextDefinition::new(
+                "ctx_reset",
+                vec![ContextOp::Reset { level: None }],
+            ))
             .build()
             .unwrap()
     }
@@ -1300,7 +1435,7 @@ mod tests {
 
         assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert!(ctx.filters.is_empty());
-        assert!(!ctx.is_reset);
+        assert!(ctx.reset.is_none());
     }
 
     #[test]
@@ -1374,9 +1509,10 @@ mod tests {
         );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx
-            .cleared_columns
-            .contains(&("Sales".into(), "region".into())));
+        assert_eq!(
+            ctx.cleared_columns.get(&("Sales".into(), "region".into())),
+            Some(&LevelRange::through(LEVEL_SLICER))
+        );
     }
 
     #[test]
@@ -1386,7 +1522,7 @@ mod tests {
         let expression = expr::agg(AggregateOp::Sum, expr::reset(expr::col("amount")));
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx.is_reset);
+        assert_eq!(ctx.reset, Some(LevelRange::through(LEVEL_SLICER)));
     }
 
     #[test]
@@ -1419,8 +1555,10 @@ mod tests {
         ];
 
         let mut ctx = EvaluationContext::new();
-        ctx.cleared_columns
-            .insert(("Sales".into(), "region".into()));
+        ctx.cleared_columns.insert(
+            ("Sales".into(), "region".into()),
+            LevelRange::through(LEVEL_SLICER),
+        );
 
         let effective = ctx.effective_filters(&outer);
         // Only year=2024 passes through (region was cleared)
@@ -1438,7 +1576,7 @@ mod tests {
         )];
 
         let mut ctx = EvaluationContext::new();
-        ctx.is_reset = true;
+        ctx.record_reset(LevelRange::through(LEVEL_SLICER));
 
         let effective = ctx.effective_filters(&outer);
         assert!(effective.is_empty());
@@ -1455,8 +1593,10 @@ mod tests {
         )];
 
         let mut ctx = EvaluationContext::new();
-        ctx.cleared_columns
-            .insert(("Calendar".into(), "year".into()));
+        ctx.cleared_columns.insert(
+            ("Calendar".into(), "year".into()),
+            LevelRange::through(LEVEL_SLICER),
+        );
         ctx.filters.push(ResolvedFilter::new(
             "Calendar",
             "year",
@@ -1507,9 +1647,10 @@ mod tests {
         );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx
-            .cleared_columns
-            .contains(&("Sales".into(), "region".into())));
+        assert_eq!(
+            ctx.cleared_columns.get(&("Sales".into(), "region".into())),
+            Some(&LevelRange::through(LEVEL_SLICER))
+        );
     }
 
     #[test]
@@ -1522,7 +1663,7 @@ mod tests {
         );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx.is_reset);
+        assert_eq!(ctx.reset, Some(LevelRange::through(LEVEL_SLICER)));
     }
 
     #[test]
@@ -1591,7 +1732,7 @@ mod tests {
         assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
         assert!(ctx
             .cleared_columns
-            .contains(&("Calendar".into(), "year".into())));
+            .contains_key(&("Calendar".into(), "year".into())));
         assert_eq!(ctx.filters.len(), 1);
         assert_eq!(ctx.filters[0].value, "2024");
 
@@ -1617,7 +1758,10 @@ mod tests {
         );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx.cleared_tables.contains("Sales"));
+        assert_eq!(
+            ctx.cleared_tables.get("Sales"),
+            Some(&LevelRange::through(LEVEL_SLICER))
+        );
 
         // All Sales filters should be cleared
         let outer = vec![
@@ -1641,8 +1785,10 @@ mod tests {
         ];
 
         let mut ctx = EvaluationContext::new();
-        ctx.cleared_inner_columns
-            .insert(("Sales".into(), "region".into()));
+        ctx.cleared_columns.insert(
+            ("Sales".into(), "region".into()),
+            LevelRange::axis_only(),
+        );
 
         let effective = ctx.effective_filters(&outer);
         // GroupBy region filter cleared, Query year filter kept
@@ -1660,8 +1806,10 @@ mod tests {
         ];
 
         let mut ctx = EvaluationContext::new();
-        ctx.cleared_outer_columns
-            .insert(("Calendar".into(), "year".into()));
+        ctx.cleared_columns.insert(
+            ("Calendar".into(), "year".into()),
+            LevelRange::outer(LEVEL_SLICER),
+        );
 
         let effective = ctx.effective_filters(&outer);
         // Query year filter cleared, GroupBy region filter kept
@@ -1679,7 +1827,7 @@ mod tests {
         ];
 
         let mut ctx = EvaluationContext::new();
-        ctx.is_reset_inner = true;
+        ctx.record_reset(LevelRange::axis_only());
 
         let effective = ctx.effective_filters(&outer);
         // All GroupBy filters removed, Query filters kept
@@ -1698,7 +1846,7 @@ mod tests {
         ];
 
         let mut ctx = EvaluationContext::new();
-        ctx.is_reset_outer = true;
+        ctx.record_reset(LevelRange::outer(LEVEL_SLICER));
 
         let effective = ctx.effective_filters(&outer);
         // All Query filters removed, GroupBy filters kept
@@ -1717,8 +1865,10 @@ mod tests {
         ];
 
         let mut ctx = EvaluationContext::new();
-        ctx.cleared_columns
-            .insert(("Sales".into(), "region".into()));
+        ctx.cleared_columns.insert(
+            ("Sales".into(), "region".into()),
+            LevelRange::through(LEVEL_SLICER),
+        );
 
         let effective = ctx.effective_filters(&outer);
         // Both sources cleared
@@ -1742,10 +1892,11 @@ mod tests {
         let (stripped, ctx) = resolver.resolve(&expression).unwrap();
 
         assert_eq!(stripped.to_sql_string().unwrap(), "SUM(\"amount\")");
-        assert!(ctx
-            .cleared_inner_columns
-            .contains(&("Sales".into(), "region".into())));
-        assert!(ctx.cleared_columns.is_empty()); // not in both-source set
+        // Axis-only range: the slicer level is NOT covered.
+        assert_eq!(
+            ctx.cleared_columns.get(&("Sales".into(), "region".into())),
+            Some(&LevelRange::axis_only())
+        );
     }
 
     #[test]
@@ -1761,8 +1912,11 @@ mod tests {
         );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx.cleared_outer_tables.contains("Calendar"));
-        assert!(ctx.cleared_tables.is_empty());
+        // Outer range: the axis level is NOT covered.
+        assert_eq!(
+            ctx.cleared_tables.get("Calendar"),
+            Some(&LevelRange::outer(LEVEL_SLICER))
+        );
     }
 
     #[test]
@@ -1772,9 +1926,7 @@ mod tests {
         let expression = expr::agg(AggregateOp::Sum, expr::reset_inner(expr::col("amount")));
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx.is_reset_inner);
-        assert!(!ctx.is_reset);
-        assert!(!ctx.is_reset_outer);
+        assert_eq!(ctx.reset, Some(LevelRange::axis_only()));
     }
 
     #[test]
@@ -1784,9 +1936,102 @@ mod tests {
         let expression = expr::agg(AggregateOp::Sum, expr::reset_outer(expr::col("amount")));
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx.is_reset_outer);
-        assert!(!ctx.is_reset);
-        assert!(!ctx.is_reset_inner);
+        assert_eq!(ctx.reset, Some(LevelRange::outer(LEVEL_SLICER)));
+    }
+
+    #[test]
+    fn resolve_clear_with_level_records_range() {
+        let model = test_model();
+        let resolver = ContextResolver::new(&model);
+        let expression = expr::agg(
+            AggregateOp::Sum,
+            expr::clear_at(
+                expr::col("amount"),
+                vec![ClearTarget::Table("Products".into())],
+                Some(2),
+            ),
+        );
+        let (_, ctx) = resolver.resolve(&expression).unwrap();
+        assert_eq!(
+            ctx.cleared_tables.get("Products"),
+            Some(&LevelRange::through(2))
+        );
+
+        let expression = expr::agg(AggregateOp::Sum, expr::reset_at(expr::col("amount"), Some(3)));
+        let (_, ctx) = resolver.resolve(&expression).unwrap();
+        assert_eq!(ctx.reset, Some(LevelRange::through(3)));
+    }
+
+    #[test]
+    fn resolve_rejects_out_of_range_levels_fail_closed() {
+        // The parser never produces these, but a hand-edited model JSON could.
+        let model = test_model();
+        let resolver = ContextResolver::new(&model);
+
+        let too_high = expr::agg(
+            AggregateOp::Sum,
+            expr::clear_at(
+                expr::col("amount"),
+                vec![ClearTarget::Table("Products".into())],
+                Some(200),
+            ),
+        );
+        assert!(resolver.resolve(&too_high).is_err());
+
+        // Outer variants cannot express level 0 (the axis is kept).
+        let outer_zero = expr::agg(
+            AggregateOp::Sum,
+            expr::clear_outer_at(
+                expr::col("amount"),
+                vec![ClearTarget::Table("Products".into())],
+                Some(0),
+            ),
+        );
+        assert!(resolver.resolve(&outer_zero).is_err());
+    }
+
+    #[test]
+    fn level_range_union_is_exact() {
+        // Floors are only ever 0 or 1, so min/max union equals set union.
+        let axis = LevelRange::axis_only();
+        let outer2 = LevelRange::outer(2);
+        let both = axis.union(outer2);
+        assert_eq!(both, LevelRange { floor: 0, ceiling: 2 });
+        for level in 0..=9u8 {
+            assert_eq!(
+                both.contains(level),
+                axis.contains(level) || outer2.contains(level)
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_filter_survives_bare_clear_but_not_leveled_clear() {
+        // A level-2 (pinned) filter: bare CLEAR ([0,1]) leaves it in place;
+        // CLEAR(…, LEVEL 2) ([0,2]) strips it.
+        let mut pinned = ResolvedFilter::new("Sales", "region", ComparisonOp::Equal, "US");
+        pinned.level = 2;
+        let outer = vec![pinned];
+
+        let mut bare = EvaluationContext::new();
+        bare.record_clear(
+            &[ClearTarget::Table("Sales".into())],
+            LevelRange::through(LEVEL_SLICER),
+        );
+        assert_eq!(bare.effective_filters(&outer).len(), 1);
+
+        let mut leveled = EvaluationContext::new();
+        leveled.record_clear(&[ClearTarget::Table("Sales".into())], LevelRange::through(2));
+        assert!(leveled.effective_filters(&outer).is_empty());
+
+        // RESET behaves the same way across all tables.
+        let mut bare_reset = EvaluationContext::new();
+        bare_reset.record_reset(LevelRange::through(LEVEL_SLICER));
+        assert_eq!(bare_reset.effective_filters(&outer).len(), 1);
+
+        let mut leveled_reset = EvaluationContext::new();
+        leveled_reset.record_reset(LevelRange::through(2));
+        assert!(leveled_reset.effective_filters(&outer).is_empty());
     }
 
     // --- Table variable resolution tests ---
@@ -2184,14 +2429,17 @@ mod tests {
             ))
             .add_context(ContextDefinition::new(
                 "ctx_clear_region",
-                vec![ContextOp::Clear(vec![ClearTarget::Column {
-                    table: "Sales".into(),
-                    column: "region".into(),
-                }])],
+                vec![ContextOp::Clear {
+                    targets: vec![ClearTarget::Column {
+                        table: "Sales".into(),
+                        column: "region".into(),
+                    }],
+                    level: None,
+                }],
             ))
             .add_context(ContextDefinition::new(
                 "ctx_reset_all",
-                vec![ContextOp::Reset],
+                vec![ContextOp::Reset { level: None }],
             ))
             .build()
             .unwrap()
@@ -2246,9 +2494,10 @@ mod tests {
         );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx
-            .cleared_columns
-            .contains(&("Sales".into(), "region".into())));
+        assert_eq!(
+            ctx.cleared_columns.get(&("Sales".into(), "region".into())),
+            Some(&LevelRange::through(LEVEL_SLICER))
+        );
     }
 
     #[test]
@@ -2263,7 +2512,7 @@ mod tests {
         );
         let (_, ctx) = resolver.resolve(&expression).unwrap();
 
-        assert!(ctx.is_reset);
+        assert_eq!(ctx.reset, Some(LevelRange::through(LEVEL_SLICER)));
     }
 
     #[test]

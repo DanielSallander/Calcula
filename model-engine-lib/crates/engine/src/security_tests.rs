@@ -512,6 +512,10 @@ async fn reset_cannot_bypass_role_restriction() {
                 operation: AggregateOp::Sum,
                 operand: Box::new(Expression::Reset {
                     expr: Box::new(expression::qualified_col("Sales", "amount")),
+                    // Even the maximum filter level cannot reach RLS
+                    // predicates — they are sealed into the fetch, outside
+                    // the level model entirely.
+                    level: Some(9),
                 }),
             },
         ))

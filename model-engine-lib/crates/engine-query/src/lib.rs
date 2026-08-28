@@ -26,7 +26,7 @@ pub use planner::{
 pub use registry::{AnyConnector, SourceBinding, SourceRegistry};
 pub use request::{
     CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy, InFilter,
-    LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, TotalsMode,
-    GROUPING_ID_COLUMN,
+    LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, ScopedFilter,
+    ScopedInFilter, TotalsMode, GROUPING_ID_COLUMN,
 };
 pub use rest_connector::{RestConnector, REST_SOURCE_SCHEMA};

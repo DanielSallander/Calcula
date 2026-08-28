@@ -50,7 +50,11 @@ pub const CALA_BASE_FORMAT_VERSION: u32 = 1;
 ///
 /// v7 adds the DYNAMIC-ARRAY SPILL EXTENT on each array origin
 /// (`SPILL_EXTENT_MIN_FORMAT_VERSION`).
-pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 7;
+///
+/// v8 adds PINNED FILTER LEVELS — `filterLevel` on slicers and ribbon
+/// filters, and `engine_filters` on pivot definitions
+/// (`PINNED_FILTER_MIN_FORMAT_VERSION`).
+pub const CALA_MAX_SUPPORTED_FORMAT_VERSION: u32 = 8;
 
 /// Minimum `.cala` format version a reader must be to handle
 /// `pending_recalc.json` — the record of which cells a cancelled
@@ -131,6 +135,25 @@ pub const SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION: u32 = 6;
 /// Stamped ONLY when some cell actually carries an extent, so a workbook with
 /// no dynamic array still writes v1-v6 and stays openable by older builds.
 pub const SPILL_EXTENT_MIN_FORMAT_VERSION: u32 = 7;
+
+/// Minimum `.cala` format version a reader must be to handle PINNED FILTER
+/// LEVELS — `filterLevel` (> 1) on a slicer or ribbon filter, and the
+/// `engine_filters` a pinned selection writes into a BI pivot definition.
+///
+/// THE TEST THIS PASSES: would an older reader MISHANDLE the document? Yes,
+/// in the wrong-numbers class. An older reader drops both fields on its next
+/// save: the slicer comes back at level 1 and the pivot loses its
+/// engine-routed filter. A pin exists precisely so that measures using
+/// `CLEAR`/`RESET` keep respecting the filter — un-pinned, those measures
+/// silently start stripping it, and the pivot additionally comes back
+/// UNFILTERED on the pinned field (the pin's host-side mask is deliberately
+/// empty). Numbers change with no error anywhere. Refusing the open is the
+/// honest failure.
+///
+/// Stamped ONLY when some slicer/ribbon filter is actually pinned (level
+/// > 1) or some pivot carries an engine filter, so an ordinary workbook
+/// keeps the lowest version that can express it.
+pub const PINNED_FILTER_MIN_FORMAT_VERSION: u32 = 8;
 
 /// Raise (never lower) a manifest's `format_version` to the minimum a present
 /// feature requires. Idempotent, and safe to call once per feature.

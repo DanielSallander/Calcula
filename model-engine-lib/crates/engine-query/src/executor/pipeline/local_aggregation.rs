@@ -56,6 +56,46 @@ fn role_comparison_to_operator(op: ComparisonOp) -> FilterOperator {
     }
 }
 
+/// Render a contested IN-list filter as a typed `Expression::InList` over the
+/// qualified column, for conditional aggregation. Values are typed by the
+/// column's model data type (numeric columns get numeric literals) so the
+/// comparison never depends on implicit casts. An EMPTY list matches nothing
+/// (`FALSE`) — never everything.
+fn contested_in_list_expression(
+    model: &DataModel,
+    cf: &crate::planner::ContestedFilter,
+    values: &[String],
+) -> Expression {
+    if values.is_empty() {
+        return Expression::LiteralBool(false);
+    }
+    let needs_quoting = model
+        .table(&cf.table)
+        .ok()
+        .and_then(|t| t.column(&cf.column).ok())
+        .map(|c| c.data_type().needs_sql_quoting())
+        .unwrap_or(true);
+    let literals: Vec<Expression> = values
+        .iter()
+        .map(|v| {
+            if !needs_quoting {
+                if let Ok(n) = v.parse::<f64>() {
+                    return Expression::LiteralFloat(n);
+                }
+            }
+            Expression::LiteralString(v.clone())
+        })
+        .collect();
+    Expression::InList {
+        expr: Box::new(Expression::QualifiedColumnRef {
+            table_or_var: cf.table.clone(),
+            column: cf.column.clone(),
+        }),
+        values: literals,
+        negated: false,
+    }
+}
+
 /// Convert a role [`FilterPredicate`] into a connector [`FilterCondition`]
 /// (column / op / value — placed on the fetch of the predicate's own table).
 fn role_filter_condition(predicate: &FilterPredicate) -> FilterCondition {
@@ -135,6 +175,7 @@ impl QueryExecutor {
         limit: Option<usize>,
         totals: TotalsMode,
         hierarchy: Option<&crate::planner::HierarchySpec>,
+        contested_filters: &[crate::planner::ContestedFilter],
         model: &DataModel,
         registry: &SourceRegistry,
         cache: Option<&InMemoryCache>,
@@ -1085,10 +1126,31 @@ impl QueryExecutor {
             .iter()
             .partition(|m| m.expression().has_query_bindings());
 
+        // Per-measure removal of a contested request filter is supported only
+        // on the single-fact main SQL path below: the two-stage paths
+        // (QUERY-in-VAR, window/TI, multi-fact, pre-aggregate, split
+        // override) and compound-with-context measures resolve their
+        // sub-contexts independently and would silently ignore the filter.
+        // Refuse those combinations with a precise error instead.
+        let reject_contested = |path: &str| -> QueryResult<()> {
+            if let Some(cf) = contested_filters.first() {
+                return Err(crate::error::QueryError::InvalidQuery(format!(
+                    "a measure clears request filter '{}[{}]' (level {}); per-measure filter \
+                     removal is currently supported only for plain aggregate measures on the \
+                     single-fact local path, not for {path}. Remove the clearing measure from \
+                     this request, pin the filter above the clear's LEVEL, or use \
+                     CLEAR_INNER/RESET_INNER for axis-only clearing",
+                    cf.table, cf.column, cf.level
+                )));
+            }
+            Ok(())
+        };
+
         // If we have QUERY-in-VAR measures, evaluate them via two-stage aggregation.
         // Result rows are assembled outside the final SQL — apply ORDER BY /
         // LIMIT as a final Arrow-level step.
         if !query_measures.is_empty() {
+            reject_contested("QUERY-in-VAR measures")?;
             // Fail closed rather than return a mis-shaped result: the
             // QUERY-in-VAR evaluator emits one batch per measure and only the
             // QUERY measures (any non-QUERY measures are dropped), so combining
@@ -1132,6 +1194,7 @@ impl QueryExecutor {
         // If we have window measures, evaluate them via two-stage window execution
         // (ordered at the Arrow level afterwards).
         if !window_measures.is_empty() {
+            reject_contested("window / running / time-intelligence measures")?;
             // FILTER-CONTEXT time intelligence (YTD/QTD/MTD, DATESINPERIOD,
             // CLOSING/OPENINGBALANCE, PRIORYEAR/PRIORPERIOD) lowers to an ordinary
             // `Keep(Clear(inner),[range])` aggregate, so it composes with ROLLUP
@@ -1220,6 +1283,8 @@ impl QueryExecutor {
                 None,
                 totals,
                 hierarchy,
+                // Contested filters were rejected above for the window path.
+                &[],
                 model,
                 registry,
                 cache,
@@ -1252,6 +1317,7 @@ impl QueryExecutor {
         // The combined FULL OUTER JOIN result is ordered at the Arrow level.
         let measure_groups = partition_measures_by_table(measures);
         if measure_groups.len() > 1 {
+            reject_contested("measures from multiple fact tables in one request")?;
             if rollup {
                 return Err(totals_unsupported(
                     "measures from multiple fact tables in one request",
@@ -1274,6 +1340,29 @@ impl QueryExecutor {
         let fact_table = &measures[0].table().to_lowercase();
         let fact_model_name = measures[0].table();
 
+        // A contested filter's condition is rendered per measure over the
+        // JOINed dimension — the join must be a safe direct join (an EXISTS
+        // fallback would land in the statement's WHERE and apply to every
+        // measure, silently un-clearing the clearing measures). Fail closed
+        // for unsafe relationships.
+        for cf in contested_filters {
+            if !cf.table.eq_ignore_ascii_case(fact_model_name) {
+                let safe = model
+                    .find_relationship(fact_model_name, &cf.table)
+                    .map(|rel| rel.is_safe_for_direct_join())
+                    .unwrap_or(false);
+                if !safe {
+                    return Err(crate::error::QueryError::InvalidQuery(format!(
+                        "a measure clears request filter '{}[{}]' (level {}), but '{}' is not \
+                         reachable from '{fact_model_name}' through a safe direct-join \
+                         relationship; per-measure filter removal cannot be applied — remove \
+                         the clearing measure or the filter",
+                        cf.table, cf.column, cf.level, cf.table
+                    )));
+                }
+            }
+        }
+
         // Detect GROUP BY dimensions with unsafe relationships (ManyToMany,
         // non-equi). These require pre-aggregation to avoid row explosion.
         let unsafe_group_by_dims: Vec<&ColumnRef> = group_by
@@ -1288,6 +1377,9 @@ impl QueryExecutor {
             .collect();
 
         if !unsafe_group_by_dims.is_empty() {
+            reject_contested(
+                "GROUP BY dimensions reached through many-to-many or non-equi relationships",
+            )?;
             if rollup {
                 return Err(totals_unsupported(
                     "GROUP BY dimensions reached through many-to-many or non-equi relationships",
@@ -1443,6 +1535,10 @@ impl QueryExecutor {
         // via the standard path, unsafe override measures via pre-aggregation,
         // then combine via FULL OUTER JOIN.
         if !unsafe_override_measures.is_empty() {
+            reject_contested(
+                "USERELATIONSHIP overrides targeting a group-by dimension through a \
+                 many-to-many or non-equi relationship",
+            )?;
             if rollup {
                 return Err(totals_unsupported(
                     "USERELATIONSHIP overrides targeting a group-by dimension \
@@ -1518,6 +1614,17 @@ impl QueryExecutor {
                         | Expression::If { .. }
                 );
 
+            // A compound measure resolves each sub-aggregate's context
+            // independently (`resolve_compound_sql` / `hoist_measure_sql`),
+            // which does not yet thread contested filters — its subterms
+            // would silently keep (or silently drop) a filter another
+            // subterm cleared. Fail closed.
+            if is_compound_with_context {
+                reject_contested(&format!(
+                    "the compound measure '{name}' (independent sub-expression contexts)"
+                ))?;
+            }
+
             // Percent-of-parent: a CLEAR/RESET that keeps a surviving group-by
             // column in its partition. A window aggregate cannot nest in a scalar
             // expression (nor be a scalar subquery), so hoist the measure's
@@ -1568,7 +1675,39 @@ impl QueryExecutor {
                     model,
                 )
                 .await?;
-                let effective = eval_ctx.effective_filters(&[]);
+                let mut effective = eval_ctx.effective_filters(&[]);
+
+                // Per-measure application of CONTESTED request filters: a
+                // measure whose clear range covers a filter's level evaluates
+                // WITHOUT it (REMOVEFILTERS); every other measure gets the
+                // filter as a conditional-aggregation condition, exactly like
+                // a KEEP filter. Scalar predicates ride the `effective` list;
+                // IN-lists become expression conditions.
+                let mut contested_conditions: Vec<Expression> = Vec::new();
+                let mut dropped_contested = false;
+                for cf in contested_filters {
+                    if eval_ctx.clears_query_filter_ci(&cf.table, &cf.column, cf.level) {
+                        dropped_contested = true;
+                        continue;
+                    }
+                    match &cf.predicate {
+                        crate::planner::ContestedPredicate::Compare { operator, value } => {
+                            effective.push(
+                                engine_core::compute::context::ResolvedFilter::new(
+                                    cf.table.clone(),
+                                    cf.column.clone(),
+                                    *operator,
+                                    value.clone(),
+                                )
+                                .with_level(cf.level),
+                            );
+                        }
+                        crate::planner::ContestedPredicate::InList { values } => {
+                            contested_conditions
+                                .push(contested_in_list_expression(model, cf, values));
+                        }
+                    }
+                }
 
                 // Record tables that need JOINs from resolved filters.
                 for f in &effective {
@@ -1576,8 +1715,15 @@ impl QueryExecutor {
                         context_join_tables.push(f.table.clone());
                     }
                 }
-                // Record tables from expression conditions.
-                for cond in &eval_ctx.conditions {
+                // Record tables from expression conditions (measure KEEP
+                // conditions plus surviving contested IN-lists).
+                let merged_conditions: Vec<Expression> = eval_ctx
+                    .conditions
+                    .iter()
+                    .cloned()
+                    .chain(contested_conditions)
+                    .collect();
+                for cond in &merged_conditions {
                     collect_qualified_tables(cond, fact_model_name, &mut context_join_tables);
                 }
 
@@ -1591,17 +1737,17 @@ impl QueryExecutor {
                 );
 
                 let has_case = !effective.is_empty()
-                    || !eval_ctx.conditions.is_empty()
+                    || !merged_conditions.is_empty()
                     || !in_conditions.is_empty();
 
                 // Inner aggregate SQL: CASE WHEN when KEEP filters/conditions are
                 // present, else the plain aggregate.
                 let inner_sql = if has_case {
-                    let mut condition = if !effective.is_empty() || !eval_ctx.conditions.is_empty()
+                    let mut condition = if !effective.is_empty() || !merged_conditions.is_empty()
                     {
                         build_condition_sql_with_conditions(
                             &effective,
-                            &eval_ctx.conditions,
+                            &merged_conditions,
                             fact_table,
                             fact_model_name,
                             model,
@@ -1633,6 +1779,23 @@ impl QueryExecutor {
                 // partition), so it is not tracked as a CASE WHEN measure.
                 match axis_clear_partition(&eval_ctx, &group_columns) {
                     Some(partition) => {
+                        // A measure that both DROPS a contested filter and
+                        // spans result rows with its window (some axis column
+                        // actually removed from the partition) would sum over
+                        // the row-domain-filtered groups — under-counting the
+                        // cleared total whenever a group has no row matching
+                        // the contested filters. A full partition (identity
+                        // window: the clear targets no axis column) never
+                        // spans rows and stays correct. Fail closed otherwise.
+                        if dropped_contested && partition.len() != group_columns.len() {
+                            return Err(crate::error::QueryError::InvalidQuery(format!(
+                                "measure '{name}' clears a request filter AND the group-by \
+                                 axis; combining per-measure filter removal with an \
+                                 axis-spanning re-aggregation is not supported yet — clear \
+                                 only the off-axis table, or remove the filter from the \
+                                 request"
+                            )));
+                        }
                         let wrapped = wrap_axis_clear(inner_sql, &stripped_expr, &partition, name)?;
                         format!("{wrapped} AS {}", quote_ident_double(name))
                     }
@@ -1953,13 +2116,54 @@ impl QueryExecutor {
             // HAVING clause: exclude groups where all CASE-WHEN measures are NULL.
             // Without this, groups with no matching rows produce NULL aggregates
             // instead of being omitted (as a WHERE-based filter would).
+            let mut having_clauses: Vec<String> = Vec::new();
             if !case_when_measures.is_empty() {
                 let having_parts: Vec<String> = case_when_measures
                     .iter()
                     .map(|m| format!("{} IS NOT NULL", quote_ident_double(m)))
                     .collect();
+                having_clauses.push(format!("({})", having_parts.join(" OR ")));
+            }
+            // Row-domain probe for contested filters: the result's rows always
+            // honor every request filter at every level — a CLEAR widens what
+            // a measure aggregates over, never which rows the result shows.
+            // Contested filters are not in any fetch WHERE, so re-impose the
+            // row domain here: keep only groups with at least one row
+            // matching ALL contested predicates.
+            if !contested_filters.is_empty() {
+                let mut probe_filters: Vec<engine_core::compute::context::ResolvedFilter> =
+                    Vec::new();
+                let mut probe_conditions: Vec<Expression> = Vec::new();
+                for cf in contested_filters {
+                    match &cf.predicate {
+                        crate::planner::ContestedPredicate::Compare { operator, value } => {
+                            probe_filters.push(engine_core::compute::context::ResolvedFilter::new(
+                                cf.table.clone(),
+                                cf.column.clone(),
+                                *operator,
+                                value.clone(),
+                            ));
+                        }
+                        crate::planner::ContestedPredicate::InList { values } => {
+                            probe_conditions.push(contested_in_list_expression(model, cf, values));
+                        }
+                    }
+                }
+                let probe_condition = build_condition_sql_with_conditions(
+                    &probe_filters,
+                    &probe_conditions,
+                    fact_table,
+                    fact_model_name,
+                    model,
+                    &std::collections::HashMap::new(),
+                )?;
+                having_clauses.push(format!(
+                    "SUM(CASE WHEN {probe_condition} THEN 1 ELSE 0 END) > 0"
+                ));
+            }
+            if !having_clauses.is_empty() {
                 sql.push_str(" HAVING ");
-                sql.push_str(&having_parts.join(" OR "));
+                sql.push_str(&having_clauses.join(" AND "));
             }
         }
 

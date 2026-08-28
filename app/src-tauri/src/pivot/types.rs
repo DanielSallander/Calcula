@@ -606,6 +606,20 @@ pub struct ApplyPivotFilterRequest {
     pub field_index: usize,
     /// Filters to apply
     pub filters: PivotFilters,
+    /// Filter level: 1 = ordinary (host-side mask, the default), 2..=9 =
+    /// PINNED — on a BI pivot the selection is routed INSIDE the engine
+    /// query as a level-tagged filter so measure CLEAR/RESET semantics
+    /// honor it (origin-preserving; carries the owning slicer id).
+    #[serde(default = "default_apply_filter_level")]
+    pub filter_level: u8,
+    /// The slicer applying this filter, for provenance (None for the
+    /// pivot's own dropdown / the filter pane).
+    #[serde(default)]
+    pub slicer_id: Option<String>,
+}
+
+pub(crate) fn default_apply_filter_level() -> u8 {
+    1
 }
 
 /// Request to clear pivot field filters.
@@ -1985,4 +1999,41 @@ pub struct BiHierarchyFieldRef {
     /// Currently expanded node paths (e.g., ["USA", "USA|California"]).
     #[serde(default)]
     pub expanded: Vec<String>,
+}
+#[cfg(test)]
+mod filter_level_wire_tests {
+    use super::*;
+
+    /// EVERY existing caller omits `filterLevel` — the pivot's own dropdown,
+    /// the filter pane, macros, `.calp` pulls. Defaulting anything but 1
+    /// would silently PIN those filters, so a measure's `CLEAR` would stop
+    /// removing them and numbers would change with no user action.
+    #[test]
+    fn an_apply_request_without_a_level_is_an_ordinary_level_1_filter() {
+        let json = r#"{
+            "pivotId": "0198f0a0-0000-7000-8000-000000000001",
+            "fieldIndex": 3,
+            "filters": { "manualFilter": { "selectedItems": ["SE"] } }
+        }"#;
+        let req: ApplyPivotFilterRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.filter_level, 1);
+        assert_eq!(req.slicer_id, None);
+    }
+
+    /// A pinned request carries its level AND its origin: the slicer id is
+    /// what lets the pin be stored separately from the field's own dropdown
+    /// mask instead of clobbering it.
+    #[test]
+    fn a_pinned_apply_request_carries_its_level_and_origin() {
+        let json = r#"{
+            "pivotId": "0198f0a0-0000-7000-8000-000000000001",
+            "fieldIndex": 3,
+            "filters": { "manualFilter": { "selectedItems": ["SE"] } },
+            "filterLevel": 2,
+            "slicerId": "slicer-7"
+        }"#;
+        let req: ApplyPivotFilterRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.filter_level, 2);
+        assert_eq!(req.slicer_id.as_deref(), Some("slicer-7"));
+    }
 }

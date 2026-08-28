@@ -321,6 +321,39 @@ pub(crate) fn query_cache_key(
         hash_filter_condition(f, &mut hasher);
     }
 
+    // Level-tagged scoped filters. Table attribution AND level are part of
+    // the key: the level decides which measures evaluate without the filter
+    // (a pinned filter survives bare CLEAR), so two requests differing only
+    // in a filter's level must never share a cached result.
+    request.scoped_filters.len().hash(&mut hasher);
+    for f in &request.scoped_filters {
+        match &f.table {
+            Some(t) => {
+                1u8.hash(&mut hasher);
+                t.hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+        hash_filter_condition(&f.condition, &mut hasher);
+        f.level.hash(&mut hasher);
+    }
+    request.scoped_in_filters.len().hash(&mut hasher);
+    for f in &request.scoped_in_filters {
+        match &f.table {
+            Some(t) => {
+                1u8.hash(&mut hasher);
+                t.hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+        f.filter.column.hash(&mut hasher);
+        f.filter.values.len().hash(&mut hasher);
+        for v in &f.filter.values {
+            v.hash(&mut hasher);
+        }
+        f.level.hash(&mut hasher);
+    }
+
     // Lookups (order matters).
     request.lookups.len().hash(&mut hasher);
     for l in &request.lookups {

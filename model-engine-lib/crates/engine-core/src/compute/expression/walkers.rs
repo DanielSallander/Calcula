@@ -49,11 +49,11 @@ impl Expression {
             }
             Expression::Keep { expr, .. }
             | Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
@@ -324,11 +324,11 @@ impl Expression {
                 expr.collect_context_filter_tables(tables);
             }
             Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. } => {
@@ -586,11 +586,11 @@ impl Expression {
                 }
             }
             Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
@@ -842,11 +842,11 @@ impl Expression {
                 }
             }
             Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
@@ -1039,11 +1039,11 @@ impl Expression {
                 }
             }
             Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
@@ -1251,11 +1251,11 @@ pub(crate) fn child_expressions(expr: &Expression) -> Vec<&Expression> {
         | Expression::HasOneValue { column: inner }
         | Expression::Aggregate { operand: inner, .. }
         | Expression::Clear { expr: inner, .. }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ClearInner { expr: inner, .. }
         | Expression::ClearOuter { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner }
+        | Expression::ResetOuter { expr: inner, .. }
         | Expression::Traverse { expr: inner, .. }
         | Expression::Using { expr: inner, .. }
         | Expression::UseRelationship { expr: inner, .. }

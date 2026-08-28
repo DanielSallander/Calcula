@@ -125,6 +125,15 @@ pub struct RibbonFilter {
     /// Number of button rows (for Buttons display mode, 0 = auto)
     #[serde(default)]
     pub button_rows: u32,
+    /// Filter level: 1 = ordinary (default), 2..=9 = PINNED — a pinned
+    /// filter survives a measure's bare `CLEAR`/`RESET`/`CLEAREXCEPT` and is
+    /// stripped only by `CLEAR(…, LEVEL n)` at or above its level.
+    #[serde(default = "default_filter_level")]
+    pub filter_level: u8,
+}
+
+pub(crate) fn default_filter_level() -> u8 {
+    1
 }
 
 /// Operator for advanced filter conditions.
@@ -258,6 +267,8 @@ pub struct UpdateRibbonFilterParams {
     pub sort_no_data_last: Option<bool>,
     pub show_select_all: Option<bool>,
     pub single_select: Option<bool>,
+    /// New filter level (1 = ordinary, 2..=9 = pinned).
+    pub filter_level: Option<u8>,
 }
 
 // ============================================================================

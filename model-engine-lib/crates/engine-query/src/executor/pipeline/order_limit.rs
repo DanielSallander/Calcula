@@ -797,6 +797,7 @@ mod totals {
             None,
             TotalsMode::Rollup,
             None,
+            &[],
             &model,
             &registry,
             Some(&cache),

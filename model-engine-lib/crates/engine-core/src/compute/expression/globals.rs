@@ -110,9 +110,9 @@ fn collect_query_global_refs(
         Expression::Not(inner)
         | Expression::IsBlank(inner)
         | Expression::HasOneValue { column: inner }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner } => {
+        | Expression::ResetOuter { expr: inner, .. } => {
             collect_query_global_refs(inner, model, found);
         }
         Expression::Keep { expr, .. }

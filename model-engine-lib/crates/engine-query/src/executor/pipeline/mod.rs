@@ -164,6 +164,7 @@ impl QueryExecutor {
                 limit,
                 totals,
                 hierarchy,
+                contested_filters,
             } => {
                 Self::execute_local_aggregation(
                     fetches,
@@ -174,6 +175,7 @@ impl QueryExecutor {
                     *limit,
                     *totals,
                     hierarchy.as_ref(),
+                    contested_filters,
                     model,
                     registry,
                     cache,

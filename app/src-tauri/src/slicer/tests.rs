@@ -99,6 +99,7 @@ mod tests {
             autogrid: true,
             item_padding: 0.0,
             button_radius: 2.0,
+            filter_level: 1,
             connected_sources: vec![SlicerConnection {
                 source_type: SlicerSourceType::Table,
                 source_id: table_id,
@@ -173,6 +174,7 @@ mod tests {
             autogrid: true,
             item_padding: 0.0,
             button_radius: 2.0,
+            filter_level: 1,
             connected_sources: vec![],
         };
 
@@ -314,6 +316,7 @@ mod restore_tests {
             autogrid: true,
             item_padding: 0.0,
             button_radius: 4.0,
+            filter_level: 1,
             computed_properties: vec![::persistence::SavedSlicerComputedProperty {
                 id: prop_id,
                 attribute: "headerText".to_string(),

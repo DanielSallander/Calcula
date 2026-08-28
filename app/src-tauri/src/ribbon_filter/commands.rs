@@ -79,6 +79,7 @@ pub fn create_ribbon_filter(
         order: params.order.unwrap_or(0),
         button_columns: 2,
         button_rows: 0,
+        filter_level: crate::ribbon_filter::types::default_filter_level(),
     };
 
     log_debug!(
@@ -179,6 +180,12 @@ pub fn update_ribbon_filter(
 ) -> Result<RibbonFilter, String> {
     log_debug!("RIBBON_FILTER", "update_ribbon_filter id={}", filter_id);
 
+    // Gate before the mutating effect: a misleveled pin silently changes
+    // which measures respect the filter, so refuse out-of-range levels.
+    if let Some(level) = params.filter_level {
+        crate::slicer::types::validate_filter_level(level)?;
+    }
+
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut filters = ribbon_filter_state.filters.write(&effect).unwrap();
     let filter = filters
@@ -252,6 +259,9 @@ pub fn update_ribbon_filter(
     }
     if let Some(single_select) = params.single_select {
         filter.single_select = single_select;
+    }
+    if let Some(filter_level) = params.filter_level {
+        filter.filter_level = filter_level;
     }
 
     Ok(filter.clone())

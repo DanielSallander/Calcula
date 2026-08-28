@@ -763,6 +763,52 @@ pub struct QueryRequest {
     /// and after [`measure_filters`](Self::measure_filters), before `order_by` +
     /// `limit`. `None` (default) applies no top-N. See [`TopN`].
     pub top_n: Option<TopN>,
+    /// Level-tagged scalar filters, ANDed with [`filters`](Self::filters).
+    ///
+    /// Unlike `filters`, each entry carries its owning table and a filter
+    /// **level** (1 = ordinary slicer, 2..=9 = pinned). A measure whose
+    /// `CLEAR`/`RESET` range covers the entry's level evaluates **without**
+    /// it (per-measure removal); every other measure — and the result's row
+    /// domain — honors it. Entries at level 2+ survive bare `CLEAR`/`RESET`.
+    /// Legacy `filters`/`in_filters`/`or_filters` behave as level 1 with no
+    /// table attribution. Empty (default) adds no scoped filter. See
+    /// [`ScopedFilter`].
+    pub scoped_filters: Vec<ScopedFilter>,
+    /// Level-tagged `IN`-list slicers, ANDed with [`filters`](Self::filters).
+    ///
+    /// The level-aware counterpart of [`in_filters`](Self::in_filters) —
+    /// slicer selections are IN-lists, so a pinned slicer arrives here. Same
+    /// per-measure removal semantics as [`scoped_filters`](Self::scoped_filters).
+    /// See [`ScopedInFilter`].
+    pub scoped_in_filters: Vec<ScopedInFilter>,
+}
+
+/// A query-level scalar filter with explicit table attribution and a filter
+/// level (see [`QueryRequest::scoped_filters`]).
+#[derive(Debug, Clone)]
+pub struct ScopedFilter {
+    /// The owning table. `None` resolves by column-name ownership like the
+    /// legacy [`QueryRequest::filters`] list (and fails closed when the
+    /// column name is ambiguous across tables and a measure contests it).
+    pub table: Option<String>,
+    /// The filter condition (column / operator / value / render kind).
+    pub condition: FilterCondition,
+    /// Filter level: 1 = ordinary slicer, 2..=9 = pinned. Level 0 (the
+    /// group-by axis) cannot be expressed as a request filter; the planner
+    /// refuses it.
+    pub level: u8,
+}
+
+/// A query-level `IN`-list slicer with explicit table attribution and a
+/// filter level (see [`QueryRequest::scoped_in_filters`]).
+#[derive(Debug, Clone)]
+pub struct ScopedInFilter {
+    /// The owning table. `None` resolves by column-name ownership.
+    pub table: Option<String>,
+    /// The IN-list slicer (`column IN (values)`; empty matches nothing).
+    pub filter: InFilter,
+    /// Filter level: 1 = ordinary slicer, 2..=9 = pinned.
+    pub level: u8,
 }
 
 /// A request for the **raw fact rows** behind a pivot cell (drillthrough /

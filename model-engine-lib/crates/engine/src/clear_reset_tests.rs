@@ -21,8 +21,8 @@ use arrow::record_batch::RecordBatch;
 
 use crate::{
     expression_measure, parse_measure, sum_measure, Column, ColumnRef, DataModel, DataType, Engine,
-    FilterCondition, FilterOperator, QueryRequest, Relationship, SourceBinding, StorageMode, Table,
-    TotalsMode,
+    FilterCondition, FilterOperator, QueryRequest, Relationship, ScopedFilter, SourceBinding,
+    StorageMode, Table, TotalsMode,
 };
 
 fn clear_model() -> DataModel {
@@ -73,6 +73,11 @@ fn clear_model() -> DataModel {
         .add_measure(expression_measure(
             "TotalViaClear",
             parse_measure("SUM(Sales[amount], CLEAR(Product))").unwrap(),
+        ))
+        // Escalated clear: reaches filters pinned at level 2.
+        .add_measure(expression_measure(
+            "TotalBustPin",
+            parse_measure("SUM(Sales[amount], CLEAR(Product, LEVEL 2))").unwrap(),
         ))
         .add_measure(expression_measure(
             "AvgClear",
@@ -374,9 +379,10 @@ async fn compound_percent_of_grand_total_via_reset() {
 
 #[tokio::test]
 async fn reset_with_slicer_on_cleared_table_fails_closed() {
-    // A slicer on Product + RESET (which must remove it under REMOVEFILTERS
-    // semantics) is not yet supported → typed error, never a silently
-    // slicer-respecting number.
+    // A slicer on Product + a COMPOUND measure whose RESET must remove it
+    // (REMOVEFILTERS semantics): per-measure filter removal does not yet
+    // thread through compound sub-expression contexts → typed error, never a
+    // silently slicer-respecting number.
     let engine = clear_engine();
     let mut req = request(&["Revenue", "PctOfTotal"]);
     req.filters = vec![FilterCondition::new("name", FilterOperator::Equal, "Bikes")];
@@ -384,9 +390,132 @@ async fn reset_with_slicer_on_cleared_table_fails_closed() {
     assert!(err.is_err(), "RESET over a sliced table must fail closed");
     let msg = format!("{}", err.unwrap_err());
     assert!(
-        msg.contains("slicer"),
-        "error should mention the slicer restriction, got: {msg}"
+        msg.contains("per-measure filter removal") || msg.contains("clears request filter"),
+        "error should explain the contested-filter restriction, got: {msg}"
     );
+}
+
+#[tokio::test]
+async fn scalar_clear_now_strips_the_slicer() {
+    // NEW with filter levels: a plain aggregate measure whose CLEAR covers an
+    // ordinary (level-1) slicer evaluates WITHOUT it — the filter is hoisted
+    // out of the fetch WHERE and applied per measure. Scalar (no group_by)
+    // request: Revenue honors the slicer (130), TotalViaClear ignores it and
+    // returns the true grand total (190) — a query that previously refused.
+    let engine = clear_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into(), "TotalViaClear".into()],
+        filters: vec![FilterCondition::new("name", FilterOperator::Equal, "Bikes")],
+        ..Default::default()
+    };
+    let batches = engine.query(req).await.unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+    let revenue = as_f64(batches[0].column(0).as_ref(), 0);
+    let cleared = as_f64(batches[0].column(1).as_ref(), 0);
+    assert!((revenue - 130.0).abs() < 1e-9, "Revenue got {revenue}");
+    assert!(
+        (cleared - 190.0).abs() < 1e-9,
+        "TotalViaClear must ignore the slicer, got {cleared}"
+    );
+}
+
+#[tokio::test]
+async fn grouped_axis_spanning_clear_with_slicer_still_fails_closed() {
+    // Grouped by Product[name], the same clearing measure would broadcast via
+    // a window over the row-domain-filtered groups — which would produce the
+    // VISIBLE total (130), not the cleared total (190). Fail closed rather
+    // than return the wrong number.
+    let engine = clear_engine();
+    let mut req = request(&["Revenue", "TotalViaClear"]);
+    req.filters = vec![FilterCondition::new("name", FilterOperator::Equal, "Bikes")];
+    let err = engine.query(req).await;
+    assert!(err.is_err(), "axis-spanning contested clear must fail closed");
+    let msg = format!("{}", err.unwrap_err());
+    assert!(
+        msg.contains("axis") || msg.contains("per-measure filter removal"),
+        "got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn pinned_filter_survives_bare_clear_end_to_end() {
+    // THE pin scenario: the same filter, pinned at level 2 (a scoped filter),
+    // is OUT OF RANGE of bare CLEAR ([0,1]) — the measure that previously
+    // required CLEAREXCEPT boilerplate (or failed closed) now just works,
+    // and the "total" respects the pin: 130, not 190.
+    let engine = clear_engine();
+    let mut req = request(&["Revenue", "TotalViaClear"]);
+    req.scoped_filters = vec![ScopedFilter {
+        table: Some("Product".into()),
+        condition: FilterCondition::new("name", FilterOperator::Equal, "Bikes"),
+        level: 2,
+    }];
+    let batches = engine.query(req).await.unwrap();
+    let rev = grouped(&batches, "Revenue");
+    let tot = grouped(&batches, "TotalViaClear");
+    assert_eq!(rev.get("Bikes"), Some(&130.0));
+    assert_eq!(
+        tot.get("Bikes"),
+        Some(&130.0),
+        "bare CLEAR must NOT strip a level-2 pinned filter"
+    );
+    assert!(
+        !rev.contains_key("Helmets"),
+        "the pinned filter restricts the row domain"
+    );
+}
+
+#[tokio::test]
+async fn clear_level_busts_the_pin() {
+    // CLEAR(Product, LEVEL 2) reaches the level-2 pin: the pinned filter is
+    // contested and hoisted; the escalated measure returns the true grand
+    // total while Revenue still honors the pin. (Scalar request — the
+    // axis-spanning grouped form fails closed, tested above.)
+    let engine = clear_engine();
+    let req = QueryRequest {
+        measures: vec!["Revenue".into(), "TotalBustPin".into()],
+        scoped_filters: vec![ScopedFilter {
+            table: Some("Product".into()),
+            condition: FilterCondition::new("name", FilterOperator::Equal, "Bikes"),
+            level: 2,
+        }],
+        ..Default::default()
+    };
+    let batches = engine.query(req).await.unwrap();
+    let revenue = as_f64(batches[0].column(0).as_ref(), 0);
+    let busted = as_f64(batches[0].column(1).as_ref(), 0);
+    assert!((revenue - 130.0).abs() < 1e-9, "Revenue got {revenue}");
+    assert!(
+        (busted - 190.0).abs() < 1e-9,
+        "CLEAR(…, LEVEL 2) must strip the level-2 pin, got {busted}"
+    );
+}
+
+#[tokio::test]
+async fn pin_level_out_of_range_fails_closed() {
+    // A scoped filter with an invalid level (0 = the axis, or above the
+    // maximum) must refuse — a silently misleveled pin would change which
+    // measures respect it.
+    let engine = clear_engine();
+    for bad_level in [0u8, 10] {
+        let mut req = request(&["Revenue"]);
+        req.scoped_filters = vec![ScopedFilter {
+            table: Some("Product".into()),
+            condition: FilterCondition::new("name", FilterOperator::Equal, "Bikes"),
+            level: bad_level,
+        }];
+        let err = engine.query(req).await;
+        assert!(err.is_err(), "level {bad_level} must be refused");
+    }
+    // An unknown table on a scoped filter fails closed too (a filter applied
+    // to nothing would silently widen the result).
+    let mut req = request(&["Revenue"]);
+    req.scoped_filters = vec![ScopedFilter {
+        table: Some("Prodcut".into()), // misspelled
+        condition: FilterCondition::new("name", FilterOperator::Equal, "Bikes"),
+        level: 2,
+    }];
+    assert!(engine.query(req).await.is_err());
 }
 
 #[tokio::test]

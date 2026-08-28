@@ -26,6 +26,7 @@ Used as a context modifier — does not return a value on its own. The enclosing
 - Particularly useful for percentage-of-parent calculations where you want to clear detail-level filters but keep a higher-level grouping filter.
 - CLEAREXCEPT is equivalent to using [CLEAR](CLEAR.md) on every column of the table except the ones listed, but more concise and maintainable.
 - Multiple columns can be preserved. Filters on unlisted columns are removed.
+- CLEAREXCEPT clears filter levels 0–1 of the non-preserved columns (the group-by axis and ordinary slicers/query-level filters — see [CLEAR](CLEAR.md) for the level table), so **pinned filters (level 2+) survive it**. There is no `LEVEL` argument in this version. Pinning a filter is often the cleaner alternative to growing an except-list: pin it once, and every CLEAR and CLEAREXCEPT measure leaves it alone automatically.
 - CLEAREXCEPT forces local computation (measures using it cannot be pushed down).
 
 ## Example 1: Percentage of category

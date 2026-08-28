@@ -1,6 +1,6 @@
 # RESET_INNER
 
-Removes all group-by (inner) filters from the evaluation context, while keeping query-level (outer) filters intact.
+Removes all group-by (inner) filters from the evaluation context, while keeping query-level (outer) filters intact. In filter-level terms, RESET_INNER is the fixed **level-0** reset: it removes only the query's own group-by axis.
 
 ## Syntax
 
@@ -24,6 +24,7 @@ The result of the aggregation function, computed with all group-by filters remov
   - **Inner (group-by):** Filters from the matrix row/column context — the current grouping level.
   - **Outer (query-level):** Slicer/page filters from the query's `filters` parameter.
 - RESET_INNER removes **all** inner filters. Use [CLEAR_INNER](CLEAR_INNER.md) to remove only specific table/column filters.
+- RESET_INNER does **not** accept a `LEVEL` argument — it is fixed at level 0. Passing one is a parse error whose hint points to [RESET](RESET.md), which accepts `RESET(LEVEL n)`. (`RESET(LEVEL 0)` canonicalizes to RESET_INNER.)
 - Use [RESET](RESET.md) to remove all filters from both sources.
 - This is useful when you want a total across all group-by dimensions that still respects the user's slicer selections.
 

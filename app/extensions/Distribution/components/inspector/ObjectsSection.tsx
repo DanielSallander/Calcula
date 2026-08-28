@@ -174,6 +174,7 @@ export function ObjectsSection({
               <th style={thStyle}>Name</th>
               <th style={thStyle}>Sheet</th>
               <th style={thStyle}>Field</th>
+              <th style={thStyle}>Level</th>
             </tr>
           </thead>
           <tbody>
@@ -182,6 +183,16 @@ export function ObjectsSection({
                 <td style={tdStyle}>{s.name}</td>
                 <td style={tdStyle}>{s.sheetName}</td>
                 <td style={tdStyle}>{s.fieldName}</td>
+                <td
+                  style={tdStyle}
+                  title={
+                    (s.filterLevel ?? 1) >= 2
+                      ? "Pinned: this filter keeps applying even to measures that use CLEAR or RESET"
+                      : "Ordinary filter: a measure's CLEAR or RESET removes it"
+                  }
+                >
+                  {(s.filterLevel ?? 1) >= 2 ? `pinned (${s.filterLevel})` : "1"}
+                </td>
               </tr>
             ))}
           </tbody>

@@ -4,7 +4,7 @@
 use datafusion::prelude::SessionContext;
 use engine_core::compute::aggregate::AggregateOp;
 use engine_core::compute::context::{
-    format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter,
+    format_filter_value, ContextResolver, EvaluationContext, ResolvedFilter, LEVEL_AXIS,
 };
 use engine_core::compute::expression::{
     DataFusionDialect, Expression, LowercaseTableQualifier, SqlRenderer,
@@ -367,27 +367,14 @@ pub(super) struct GroupColumn {
     pub sql: String,
 }
 
-fn lc_has(set: &std::collections::HashSet<String>, target_lc: &str) -> bool {
-    set.iter().any(|s| s.eq_ignore_ascii_case(target_lc))
-}
-
-fn lc_pair_has(set: &std::collections::HashSet<(String, String)>, t_lc: &str, c_lc: &str) -> bool {
-    set.iter()
-        .any(|(t, c)| t.eq_ignore_ascii_case(t_lc) && c.eq_ignore_ascii_case(c_lc))
-}
-
-/// Does `ctx` clear the group-by AXIS filter on `(table, column)`? Both-source
-/// (`CLEAR`/`CLEAREXCEPT`) and inner (`CLEAR_INNER`) clears remove the axis
-/// grouping; outer clears (`CLEAR_OUTER`) target only slicers and never touch
-/// the partition.
+/// Does `ctx` clear the group-by AXIS filter on `(table, column)`? Any clear
+/// whose level range includes [`LEVEL_AXIS`] (`CLEAR`/`CLEAR_INNER`/
+/// `CLEAREXCEPT`) removes the axis grouping; outer clears (`CLEAR_OUTER`,
+/// range `[1,…]`) target only slicers and never touch the partition.
 fn column_axis_cleared(ctx: &EvaluationContext, t_lc: &str, c_lc: &str) -> bool {
-    lc_has(&ctx.cleared_tables, t_lc)
-        || lc_has(&ctx.cleared_inner_tables, t_lc)
-        || lc_pair_has(&ctx.cleared_columns, t_lc, c_lc)
-        || lc_pair_has(&ctx.cleared_inner_columns, t_lc, c_lc)
-        || ctx.clear_except.iter().any(|(et, preserved)| {
-            et.eq_ignore_ascii_case(t_lc) && !preserved.iter().any(|p| p.eq_ignore_ascii_case(c_lc))
-        })
+    ctx.table_cleared_at_ci(t_lc, LEVEL_AXIS)
+        || ctx.column_cleared_at_ci(t_lc, c_lc, LEVEL_AXIS)
+        || ctx.clear_except_clears_ci(t_lc, c_lc)
 }
 
 /// If `ctx` clears the group-by axis, return the surviving `PARTITION BY`
@@ -398,17 +385,14 @@ pub(super) fn axis_clear_partition(
     ctx: &EvaluationContext,
     group_columns: &[GroupColumn],
 ) -> Option<Vec<String>> {
-    let axis_clearing = ctx.is_reset
-        || ctx.is_reset_inner
-        || !ctx.cleared_tables.is_empty()
-        || !ctx.cleared_columns.is_empty()
-        || !ctx.cleared_inner_tables.is_empty()
-        || !ctx.cleared_inner_columns.is_empty()
+    let axis_clearing = ctx.reset_at(LEVEL_AXIS)
+        || ctx.cleared_tables.values().any(|r| r.contains(LEVEL_AXIS))
+        || ctx.cleared_columns.values().any(|r| r.contains(LEVEL_AXIS))
         || !ctx.clear_except.is_empty();
     if !axis_clearing {
         return None;
     }
-    if ctx.is_reset || ctx.is_reset_inner {
+    if ctx.reset_at(LEVEL_AXIS) {
         return Some(Vec::new());
     }
     Some(

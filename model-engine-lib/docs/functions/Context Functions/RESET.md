@@ -1,16 +1,26 @@
 # RESET
 
-Removes all filters from the evaluation context. The measure is computed against the full, unfiltered dataset.
+Removes all filters from the evaluation context. The measure is computed against the full, unfiltered dataset. Pinned filters survive unless an explicit `LEVEL` includes them.
 
 ## Syntax
+
+Remove all ordinary filters:
 
 ```
 SUM(table[column], RESET())
 ```
 
+Remove filters up to and including a pinned level:
+
+```
+SUM(table[column], RESET(LEVEL n))
+```
+
 ### Parameters
 
-RESET takes no parameters.
+| Parameter | Definition |
+|-----------|------------|
+| `LEVEL n` | Optional. Extends the reset to pinned filters: removes filter levels 0 through `n` (n = 0..9) across **all** tables. Without it, RESET removes levels 0–1 only. |
 
 ## Return value
 
@@ -19,7 +29,9 @@ The result of the aggregation function, computed over the entire dataset with no
 ## Remarks
 
 - RESET is always used as the **second argument** to an aggregation function (SUM, COUNT, AVG, MIN, MAX, DISTINCTCOUNT). It cannot be used standalone.
-- RESET removes **all** filters — both query-level filters and group-by filters. The measure sees every row in the table.
+- RESET removes **all** ordinary filters — both group-by filters (level 0) and query-level filters (level 1) — across all tables. The measure sees every row in the table.
+- **Pinned** filters (levels 2–9 — filters marked as structural when added to the request) **survive a bare RESET()**. Use `RESET(LEVEL n)` to remove filter levels 0 through `n`, pins included. See [CLEAR](CLEAR.md) for the full level table.
+- `RESET(LEVEL 0)` canonicalizes to [RESET_INNER](RESET_INNER.md) and `RESET(LEVEL 1)` to bare RESET — a saved formula renders back in the canonical spelling. `LEVEL` must be the last (here: only) argument; a non-integer or out-of-range level (10 or higher) is a parse error.
 - RESET is equivalent to calling [CLEAR](CLEAR.md) on every table in the model.
 - To remove filters from only one source (query-level or group-by), use [RESET_INNER](RESET_INNER.md) or [RESET_OUTER](RESET_OUTER.md) instead.
 - To remove filters on only specific tables or columns, use [CLEAR](CLEAR.md) instead.

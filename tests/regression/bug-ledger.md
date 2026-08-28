@@ -3,7 +3,7 @@
 Bugs found by the automated soak/oracle system.
 GENERATED from bug-ledger.json by tests/soak/bug-ledger.mjs — do not edit by hand.
 
-Total: 107 | Open: 2 | Triaged: 0 | Fixed: 105 | Other: 0
+Total: 110 | Open: 3 | Triaged: 0 | Fixed: 107 | Other: 0
 
 ## BUG-0086 `[fixed]`
 
@@ -1310,4 +1310,28 @@ A MALFORMED autofilters.json SILENTLY DELETES EVERY AUTOFILTER IN THE WORKBOOK, 
 **Oracle:** icon-glyph-from-wrong-rule
 
 THE CONDITIONAL-FORMATTING ICON A USER SEES CAN COME FROM A DISABLED RULE. The drawn glyph is a JOIN OF TWO INDEPENDENT LOOKUPS that can disagree: (1) the icon INDEX comes from the backend, which cascades correctly — it skips !enabled, honours stop_if_true, and respects priority; (2) the icon SET (which glyph family) comes from `findMatchingRuleId(row, col, "iconSet")` (app/extensions/ConditionalFormatting/lib/cfStore.ts:254-274), which matches on rule TYPE and geometric range containment ONLY. It does not read `rule.enabled`, does not honour `stop_if_true`, does not consider priority, and returns the FIRST match in array order. CONSEQUENCE: a DISABLED five-icon rule listed before an enabled three-icon rule over the same range makes the renderer draw a five-arrow glyph indexed 0..2 — a picture assembled from two different rules, one of which the user switched off. AND A HARD-CODED FALLBACK: when no rule id resolves, the renderer silently draws `threeTrafficLights1` (iconSetRenderer.ts:60) rather than nothing, so a cell can show traffic lights that no rule asked for. WHY IT MATTERS BEYOND THE PICTURE: 'sort by the icon I can see' has no referent while the displayed icon is not a single value. This is the prerequisite for BUG-0104's icon sorting, not a cosmetic sibling of it — sorting on a glyph the renderer computed from a disabled rule would produce an order the user cannot explain from what is on screen.
+
+
+## BUG-0108 `[open]`
+
+**Found:** 2026-08-28 (review)
+**Oracle:** bi-pivot-visible-total-ignores-slicer-mask
+
+PERCENT-OF-VISIBLE-TOTAL MEASURES ARE WRONG IN A SLICER-FILTERED BI PIVOT. BI pivots send the engine NO filters: every surface (axis, pane, slicer) becomes a group_by column and filtering is a host-side hidden_items mask over the cached grouped result (app/src-tauri/src/pivot/commands.rs — update_bi_pivot_fields builds QueryRequest { filters: vec![] }). A measure using CLEAR_INNER/ALLSELECTED (share-of-visible-total) is rendered by the engine as a window over the grouped result BEFORE the host mask exists — so its denominator includes rows the host hides afterwards. Additionally, engine-computed subtotal/grand-total overrides (BiTotalsPlan) are skipped whenever ANY hidden_items are active, so ratio-valued leaf rows get additively summed totals. Two mechanisms, both silent.
+
+
+## BUG-0109 `[fixed]`
+
+**Found:** 2026-08-28 (review)
+**Oracle:** postgres-clear-window-hardcodes-sum
+
+THE PUSHED (POSTGRESQL) CLEAR/CLEAREXCEPT RENDER RE-AGGREGATED EVERY AGGREGATE WITH SUM. expr_to_sql_with_clear (model-engine-lib/crates/engine-connectors/src/postgres.rs) emitted SUM(inner) OVER (PARTITION BY ...) regardless of the wrapped aggregate, while the local path (clear_reagg_fn, engine-query executor/pipeline/sql.rs) re-sums only additive aggregates, carries MIN/MAX, and fails closed on the rest. A MIN(x, CLEAR(dim)) measure pushed to PostgreSQL silently returned a SUM. Pushed and local paths disagreed on the same formula.
+
+
+## BUG-0110 `[fixed]`
+
+**Found:** 2026-08-28 (review)
+**Oracle:** slicer-clobbers-axis-field-dropdown-filter
+
+A SLICER ON AN AXIS FIELD OVERWRITES THE FIELD DROPDOWN FILTER (AND VICE VERSA). apply_pivot_filter carries no origin: a slicer selection and the pivot field dropdown write the SAME hidden_items on the same field (app/src-tauri/src/pivot/commands.rs), so whichever applied last wins and the other surface shows state it no longer controls. Origin is unrecoverable at the IPC boundary (payload is {pivotId, fieldIndex, manualFilter}).
 

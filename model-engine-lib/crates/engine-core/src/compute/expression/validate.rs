@@ -203,11 +203,11 @@ impl Expression {
             // (clear targets, traversal paths, context/relationship names)
             // that are resolved against the model, never rendered raw.
             Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }

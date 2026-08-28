@@ -1663,7 +1663,14 @@ pub async fn run_bi_query(
             .collect(),
         filters: filters
             .into_iter()
-            .map(|(table, column, operator, value)| BiFilter { table, column, operator, value })
+            .map(|(table, column, operator, value)| BiFilter {
+                table,
+                column,
+                operator,
+                value,
+                // MCP-issued filters are ordinary slicers (level 1).
+                level: 1,
+            })
             .collect(),
     };
     let query_request = crate::bi::commands::build_engine_query(&request);

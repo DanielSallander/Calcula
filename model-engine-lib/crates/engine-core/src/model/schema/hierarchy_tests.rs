@@ -109,7 +109,7 @@ fn rejects_hierarchy_name_collision_with_context() {
     use crate::model::context::{ContextDefinition, ContextOp};
     use crate::model::hierarchy::HierarchyLevel;
 
-    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset]);
+    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset { level: None }]);
     let h = Hierarchy::new(
         "my_ctx",
         "dim_geography",

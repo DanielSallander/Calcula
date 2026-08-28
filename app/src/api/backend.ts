@@ -3530,6 +3530,10 @@ export interface BiFilter {
   table: string;
   operator: string;
   value: string;
+  /** Filter level: 1 = ordinary slicer (default when omitted), 2-9 = pinned —
+   * a pinned filter survives a measure's bare CLEAR/RESET and is stripped
+   * only by an explicit `CLEAR(…, LEVEL n)` at or above its level. */
+  level?: number;
 }
 
 export interface BiQueryResult {
@@ -4120,6 +4124,9 @@ export interface ContextOpDto {
   inPredicates: InPredicateDto[];
   inheritContext?: string | null;
   relationshipName?: string | null;
+  /** Level ceiling for clear/clearOuter/reset/resetOuter (`CLEAR(…, LEVEL n)`);
+   * absent for the canonical bare forms (which clear levels 0-1). */
+  level?: number | null;
 }
 
 export interface ModelContextInfo {
@@ -5227,6 +5234,10 @@ export interface TestFilterDto {
   /** "=" | "!=" | ">" | ">=" | "<" | "<=" */
   operator: string;
   value: string;
+  /** Filter level: 1 = ordinary slicer (default when omitted), 2-9 = pinned —
+   * survives a measure's bare CLEAR/RESET; stripped only by
+   * `CLEAR(…, LEVEL n)` at or above its level. */
+  level?: number;
 }
 
 export interface ResultColumnDto {

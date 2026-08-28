@@ -32,15 +32,16 @@ mod validate;
 mod walkers;
 
 pub use builders::{
-    agg, and, blank, block, block_with_globals, call, clear, clear_except, clear_inner,
-    clear_outer, closing_balance, coalesce, col, compare, count_rows, dates_between,
-    dates_in_period, datetime_fn, expr_literal_from_arrow, expr_literal_from_scalar,
-    first_non_blank, first_value, has_one_value, if_error, if_expr, index_expr, is_blank,
-    is_filtered, is_in_scope, iterate, keep, keep_conditions, keep_in, keep_vars, last_non_blank,
-    lit, lit_bool, lit_int, lit_str, next_day, not, offset_expr, opening_balance, or, percentile,
-    period_shift, previous_day, qualified_col, query_expr, query_expr_with_top, reset, reset_inner,
-    reset_outer, safe_divide, scalar_fn, selected_value, switch, table_ref, text_fn, this_row,
-    to_date, traverse, use_relationship, using, window_expr, xor,
+    agg, and, blank, block, block_with_globals, call, clear, clear_at, clear_except, clear_inner,
+    clear_outer, clear_outer_at, closing_balance, coalesce, col, compare, count_rows,
+    dates_between, dates_in_period, datetime_fn, expr_literal_from_arrow,
+    expr_literal_from_scalar, first_non_blank, first_value, has_one_value, if_error, if_expr,
+    index_expr, is_blank, is_filtered, is_in_scope, iterate, keep, keep_conditions, keep_in,
+    keep_vars, last_non_blank, lit, lit_bool, lit_int, lit_str, next_day, not, offset_expr,
+    opening_balance, or, percentile, period_shift, previous_day, qualified_col, query_expr,
+    query_expr_with_top, reset, reset_at, reset_inner, reset_outer, reset_outer_at, safe_divide,
+    scalar_fn, selected_value, switch, table_ref, text_fn, this_row, to_date, traverse,
+    use_relationship, using, window_expr, xor,
 };
 pub use fold::{const_fold_scalar, ConstFold, FoldValue};
 pub use format::{expression_to_formula, measure_to_formula};
@@ -284,19 +285,28 @@ pub enum Expression {
     },
     /// Remove filters on specific dimensions from the evaluation context.
     ///
-    /// `clear(expr, targets...)` — removes outer filters on specified columns/tables.
+    /// `clear(expr, targets...)` — removes filters at levels `[0, level]` on
+    /// the specified columns/tables (`level` None ≡ 1: axis + ordinary
+    /// slicers; pinned filters at higher levels survive).
     Clear {
         /// The inner expression to evaluate with filters removed.
         expr: Box<Expression>,
         /// Dimensions to clear.
         targets: Vec<ClearTarget>,
+        /// Highest filter level cleared (`CLEAR(…, LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
     },
     /// Remove ALL filters from the evaluation context.
     ///
-    /// `reset(expr)` — evaluates the inner expression against the full unfiltered data.
+    /// `reset(expr)` — clears levels `[0, level]` across all tables
+    /// (`level` None ≡ 1; pinned filters at higher levels survive).
     Reset {
         /// The inner expression to evaluate without any filters.
         expr: Box<Expression>,
+        /// Highest filter level cleared (`RESET(LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
     },
     /// Force explicit relationship traversal.
     ///
@@ -339,13 +349,16 @@ pub enum Expression {
     },
     /// Clear only outer (query-level) filters on specific dimensions.
     ///
-    /// `clear_outer(expr, targets...)` — removes slicer/page filters,
-    /// leaving group-by context filters intact.
+    /// `clear_outer(expr, targets...)` — removes filters at levels
+    /// `[1, level]` (`level` None ≡ 1), leaving the group-by axis intact.
     ClearOuter {
         /// The inner expression to evaluate with outer filters removed.
         expr: Box<Expression>,
         /// Dimensions to clear from outer context.
         targets: Vec<ClearTarget>,
+        /// Highest filter level cleared (`CLEAR_OUTER(…, LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
     },
     /// Remove ALL inner (group-by) filters from the evaluation context.
     ///
@@ -356,10 +369,14 @@ pub enum Expression {
     },
     /// Remove ALL outer (query-level) filters from the evaluation context.
     ///
-    /// `reset_outer(expr)` — removes slicer/page filters, keeps group-by filters.
+    /// `reset_outer(expr)` — clears levels `[1, level]` across all tables
+    /// (`level` None ≡ 1), keeping the group-by axis.
     ResetOuter {
         /// The inner expression to evaluate without query-level filters.
         expr: Box<Expression>,
+        /// Highest filter level cleared (`RESET_OUTER(LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
     },
     /// Reference to another measure by name.
     ///

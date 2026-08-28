@@ -328,6 +328,16 @@ pub struct BiFilter {
     pub table: String,
     pub operator: String,
     pub value: String,
+    /// Filter level: 1 = ordinary slicer (default), 2..=9 = pinned — a
+    /// pinned filter survives a measure's bare `CLEAR`/`RESET` and is only
+    /// stripped by an explicit `CLEAR(…, LEVEL n)` at or above its level.
+    #[serde(default = "default_filter_level")]
+    pub level: u8,
+}
+
+/// Serde default for [`BiFilter::level`]: the ordinary-slicer level.
+fn default_filter_level() -> u8 {
+    1
 }
 
 /// A cross-filter constraint: only include rows where the given column's value

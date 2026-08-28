@@ -613,6 +613,7 @@ mod tests {
                     operator: ComparisonOp::Equal,
                     value: "P2".to_string(),
                     source: crate::compute::context::FilterSource::Query,
+                    level: 1,
                 }],
             )
             .await

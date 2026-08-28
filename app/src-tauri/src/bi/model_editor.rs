@@ -1839,6 +1839,10 @@ pub struct ContextOpDto {
     pub inherit_context: Option<String>,
     #[serde(default)]
     pub relationship_name: Option<String>,
+    /// Level ceiling for clear/clearOuter/reset/resetOuter ops
+    /// (`CLEAR(…, LEVEL n)`); absent for the canonical bare forms.
+    #[serde(default)]
+    pub level: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2226,6 +2230,7 @@ fn context_op_to_dto(op: &bi_engine::ContextOp) -> ContextOpDto {
         in_predicates: Vec::new(),
         inherit_context: None,
         relationship_name: None,
+        level: None,
     };
     match op {
         bi_engine::ContextOp::Keep(filters) => {
@@ -2236,21 +2241,29 @@ fn context_op_to_dto(op: &bi_engine::ContextOp) -> ContextOpDto {
             dto.r#type = "keepIn".to_string();
             dto.in_predicates = preds.iter().map(in_predicate_to_dto).collect();
         }
-        bi_engine::ContextOp::Clear(targets) => {
+        bi_engine::ContextOp::Clear { targets, level } => {
             dto.r#type = "clear".to_string();
             dto.clear_targets = targets.iter().map(clear_target_to_dto).collect();
+            dto.level = *level;
         }
         bi_engine::ContextOp::ClearInner(targets) => {
             dto.r#type = "clearInner".to_string();
             dto.clear_targets = targets.iter().map(clear_target_to_dto).collect();
         }
-        bi_engine::ContextOp::ClearOuter(targets) => {
+        bi_engine::ContextOp::ClearOuter { targets, level } => {
             dto.r#type = "clearOuter".to_string();
             dto.clear_targets = targets.iter().map(clear_target_to_dto).collect();
+            dto.level = *level;
         }
-        bi_engine::ContextOp::Reset => dto.r#type = "reset".to_string(),
+        bi_engine::ContextOp::Reset { level } => {
+            dto.r#type = "reset".to_string();
+            dto.level = *level;
+        }
         bi_engine::ContextOp::ResetInner => dto.r#type = "resetInner".to_string(),
-        bi_engine::ContextOp::ResetOuter => dto.r#type = "resetOuter".to_string(),
+        bi_engine::ContextOp::ResetOuter { level } => {
+            dto.r#type = "resetOuter".to_string();
+            dto.level = *level;
+        }
         bi_engine::ContextOp::Inherit(name) => {
             dto.r#type = "inherit".to_string();
             dto.inherit_context = Some(name.clone());
@@ -9083,6 +9096,16 @@ pub struct TestFilterDto {
     /// "=" | "!=" | ">" | ">=" | "<" | "<="
     pub operator: String,
     pub value: String,
+    /// Filter level: 1 = ordinary slicer (default), 2..=9 = pinned — a
+    /// pinned filter survives a measure's bare CLEAR/RESET and is stripped
+    /// only by `CLEAR(…, LEVEL n)` at or above its level.
+    #[serde(default = "default_test_filter_level")]
+    pub level: u8,
+}
+
+/// Serde default for [`TestFilterDto::level`]: the ordinary-slicer level.
+fn default_test_filter_level() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9289,14 +9312,21 @@ pub async fn bi_model_test_query(
         .iter()
         .map(|g| bi_engine::ColumnRef::new(&g.table, &g.column))
         .collect();
-    let filter_conds: Vec<bi_engine::FilterCondition> = filters
+    // Filters travel as SCOPED filters so their level is honored: an
+    // ordinary (level 1) filter behaves as before, a pinned (level 2+) one
+    // survives a measure's bare CLEAR/RESET.
+    let filter_conds: Vec<bi_engine::ScopedFilter> = filters
         .iter()
         .map(|f| {
-            Ok(bi_engine::FilterCondition::new(
-                f.column.clone(),
-                filter_operator_from_str(&f.operator)?,
-                f.value.clone(),
-            ))
+            Ok(bi_engine::ScopedFilter {
+                table: None, // resolved by column-name ownership, as before
+                condition: bi_engine::FilterCondition::new(
+                    f.column.clone(),
+                    filter_operator_from_str(&f.operator)?,
+                    f.value.clone(),
+                ),
+                level: f.level,
+            })
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -9349,7 +9379,7 @@ pub async fn bi_model_test_query(
     let request = bi_engine::QueryRequest {
         measures,
         group_by: group_refs,
-        filters: filter_conds,
+        scoped_filters: filter_conds,
         order_by,
         measure_filters: measure_filter_conds,
         top_n: top_n_req,
@@ -9943,7 +9973,7 @@ mod tests {
         // (context_op_to_dto). Cover every variant through one definition.
         let ctx = bi_engine::parse_context(
             "everything",
-            r#"base_ctx, KEEP(Sales, Sales[country] = "US", Sales[cust] IN TopCustomers[id]), CLEAR(Cal[Year], Products), CLEAR_INNER(Cal), CLEAR_OUTER(Sales[region]), RESET(), RESET_INNER(), RESET_OUTER(), USERELATIONSHIP("Sales_Date")"#,
+            r#"base_ctx, KEEP(Sales, Sales[country] = "US", Sales[cust] IN TopCustomers[id]), CLEAR(Cal[Year], Products), CLEAR(Pinned, LEVEL 2), CLEAR_INNER(Cal), CLEAR_OUTER(Sales[region]), RESET(), RESET_INNER(), RESET_OUTER(LEVEL 3), USERELATIONSHIP("Sales_Date")"#,
         )
         .unwrap();
 
@@ -9953,7 +9983,7 @@ mod tests {
         assert_eq!(
             types,
             [
-                "inherit", "keep", "keepIn", "clear", "clearInner", "clearOuter",
+                "inherit", "keep", "keepIn", "clear", "clear", "clearInner", "clearOuter",
                 "reset", "resetInner", "resetOuter", "useRelationship"
             ]
         );
@@ -9964,7 +9994,11 @@ mod tests {
         assert_eq!(dtos[3].clear_targets[0].kind, "column");
         assert_eq!(dtos[3].clear_targets[0].column.as_deref(), Some("Year"));
         assert_eq!(dtos[3].clear_targets[1].kind, "table");
-        assert_eq!(dtos[9].relationship_name.as_deref(), Some("Sales_Date"));
+        // The bare clear carries no level; the leveled one carries its ceiling.
+        assert_eq!(dtos[3].level, None);
+        assert_eq!(dtos[4].level, Some(2));
+        assert_eq!(dtos[9].level, Some(3));
+        assert_eq!(dtos[10].relationship_name.as_deref(), Some("Sales_Date"));
 
         // The canonical text form parses back to the same definition.
         assert_eq!(bi_engine::parse_context("everything", &ctx.to_text()).unwrap(), ctx);

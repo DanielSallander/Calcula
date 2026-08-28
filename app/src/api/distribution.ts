@@ -1680,6 +1680,10 @@ export interface InspectorSlicerInfo {
   name: string;
   sheetName: string;
   fieldName: string;
+  /** Filter level: 1 = ordinary, 2-9 = PINNED. A pin changes what the
+   * package's measures return (a CLEAR/RESET measure keeps respecting it),
+   * so it is surfaced before subscribing. */
+  filterLevel: number;
 }
 
 export interface InspectorPaneControlInfo {

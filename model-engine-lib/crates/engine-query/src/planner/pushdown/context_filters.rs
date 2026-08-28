@@ -70,11 +70,11 @@ fn collect_keep_predicates_recursive(expr: &Expression, out: &mut Vec<FilterPred
             collect_keep_predicates_recursive(inner, out);
         }
         Expression::Clear { expr: inner, .. }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ClearInner { expr: inner, .. }
         | Expression::ClearOuter { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner }
+        | Expression::ResetOuter { expr: inner, .. }
         | Expression::Traverse { expr: inner, .. }
         | Expression::Using { expr: inner, .. }
         | Expression::KeepIn { expr: inner, .. } => {

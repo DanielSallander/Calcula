@@ -219,10 +219,10 @@ Functions that modify the evaluation context — the set of filters applied when
 | Function | Description |
 |----------|-------------|
 | [KEEP](Context%20Functions/KEEP.md) | Adds filter conditions to the evaluation context |
-| [CLEAR](Context%20Functions/CLEAR.md) | Removes filters (axis + slicers) on a specific table or column |
-| [RESET](Context%20Functions/RESET.md) | Removes all filters from the evaluation context |
-| [CLEAREXCEPT](Context%20Functions/CLEAREXCEPT.md) | Clears all filters on a table except specified columns (like DAX's ALLEXCEPT) |
-| [ALLSELECTED](Context%20Functions/ALLSELECTED.md) | Removes group-by (visual) filters but keeps slicers (DAX-compatible spelling of the inner-clear family) |
+| [CLEAR](Context%20Functions/CLEAR.md) | Removes filters (axis + slicers, levels 0–1) on a specific table or column; `CLEAR(…, LEVEL n)` extends to pinned filters |
+| [RESET](Context%20Functions/RESET.md) | Removes all filters (levels 0–1) on every table; `RESET(LEVEL n)` extends to pinned filters |
+| [CLEAREXCEPT](Context%20Functions/CLEAREXCEPT.md) | Clears all filters on a table except specified columns (like DAX's ALLEXCEPT); pinned filters survive it |
+| [ALLSELECTED](Context%20Functions/ALLSELECTED.md) | Removes group-by (visual) filters but keeps slicers (DAX-compatible spelling of the level-0 inner-clear family) |
 | [NOT IN](Context%20Functions/NOT_IN.md) | Anti-membership: keep rows whose value is NOT in a literal or variable set |
 | [TREATAS](Context%20Functions/TREATAS.md) | Applies one column's values as a virtual filter on another, unrelated table |
 | [USERELATIONSHIP](Context%20Functions/USERELATIONSHIP.md) | Activates an inactive relationship for the measure's evaluation |
@@ -230,16 +230,18 @@ Functions that modify the evaluation context — the set of filters applied when
 
 ### Source-Specific Context Functions
 
-These are advanced variants of CLEAR and RESET that target only one filter source. Filters come from two sources: **inner** (group-by context) and **outer** (query-level slicer filters).
+These are advanced variants of CLEAR and RESET that target only one filter source. Every filter that reaches a measure sits on a **level**: level 0 is the group-by axis (inner), level 1 is ordinary slicers and query-level filters (outer), and levels 2–9 are **pinned** filters — filters marked as structural when added to the request. Each function removes a contiguous level range.
 
 | Function | Clears | Keeps |
 |----------|--------|-------|
-| [CLEAR_INNER](Context%20Functions/CLEAR_INNER.md) | Group-by filters on specified targets | Query-level filters |
-| [CLEAR_OUTER](Context%20Functions/CLEAR_OUTER.md) | Query-level filters on specified targets | Group-by filters |
-| [RESET_INNER](Context%20Functions/RESET_INNER.md) | All group-by filters | Query-level filters |
-| [RESET_OUTER](Context%20Functions/RESET_OUTER.md) | All query-level filters | Group-by filters |
+| [CLEAR_INNER](Context%20Functions/CLEAR_INNER.md) | Group-by filters on specified targets (level 0 only; no LEVEL argument) | Query-level filters |
+| [CLEAR_OUTER](Context%20Functions/CLEAR_OUTER.md) | Query-level filters on specified targets (level 1; `LEVEL n` extends to levels 1–n) | Group-by filters |
+| [RESET_INNER](Context%20Functions/RESET_INNER.md) | All group-by filters (level 0 only; no LEVEL argument) | Query-level filters |
+| [RESET_OUTER](Context%20Functions/RESET_OUTER.md) | All query-level filters (level 1; `LEVEL n` extends to levels 1–n) | Group-by filters |
 
-> **Note on execution (local / in-memory path).** `CLEAR`/`RESET`/`CLEAREXCEPT`/`CLEAR_INNER` re-aggregate over the surviving group-by partition, so percent-of-total and percent-of-parent compute correctly. Three cases **fail closed** with a typed error rather than return a wrong number: (1) clearing a table that also carries a **report slicer** (slicer removal is not yet wired — use `CLEAR_INNER` for axis-only, or remove the slicer); (2) a **non-additive** aggregate under CLEAR (`AVG`, `DISTINCTCOUNT`, `MEDIAN`, …) — only `SUM`/`COUNT`/`COUNTROWS`/`MIN`/`MAX` recombine; (3) **percent-of-parent** combined with totals, lookups, hierarchies, or context columns.
+Pinned filters sit **out of range** of bare `CLEAR`/`RESET`/`CLEAREXCEPT` (which cover levels 0–1), so pinning a filter once keeps it alive through every existing clearing measure — no except-list boilerplate. `LEVEL 0` canonicalizes to the INNER spelling and `LEVEL 1` to the bare form; a saved formula renders back canonically.
+
+> **Note on execution (local / in-memory path).** `CLEAR`/`RESET`/`CLEAREXCEPT`/`CLEAR_INNER` re-aggregate over the surviving group-by partition, so percent-of-total and percent-of-parent compute correctly. Clearing an ordinary (level-1) slicer from inside a measure executes for plain aggregate measures: the filter is applied **per measure** — the clearing measure evaluates without it, other measures keep it, and the result's rows still honor every filter; the same applies to a pinned filter reached by `CLEAR(…, LEVEL n)`. Cases that **fail closed** with a typed error rather than return a wrong number: (1) **compound measures** (e.g. DIVIDE percent-of-total shapes) whose clear contests a request filter, a contested clear combined with an **axis-spanning window re-aggregation** (e.g. grouped broadcast totals over a sliced table), **OR slicers**, **ROLLUP totals**, and multi-fact/window/pre-aggregate paths; (2) a **non-additive** aggregate under CLEAR (`AVG`, `DISTINCTCOUNT`, `MEDIAN`, …) — only `SUM`/`COUNT`/`COUNTROWS`/`MIN`/`MAX` recombine; (3) **percent-of-parent** combined with totals, lookups, hierarchies, or context columns. Pinned filters need none of this: a pin simply sits out of range of bare `CLEAR`/`RESET`, so those queries run everywhere.
 
 ## Relationship and Hierarchy Functions
 

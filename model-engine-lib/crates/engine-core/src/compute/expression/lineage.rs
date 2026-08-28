@@ -178,11 +178,11 @@ fn walk(
             walk(operand, measure_names, global_names, block_vars, deps);
         }
         Expression::Clear { expr: inner, .. }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ClearInner { expr: inner, .. }
         | Expression::ClearOuter { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner }
+        | Expression::ResetOuter { expr: inner, .. }
         | Expression::Not(inner)
         | Expression::IsBlank(inner)
         | Expression::HasOneValue { column: inner } => {

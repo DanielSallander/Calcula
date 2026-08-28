@@ -25,6 +25,7 @@ The result of the aggregation function, computed with the targeted group-by filt
 
 - ALLSELECTED is always used as the **second argument** to an aggregation function. It cannot be used standalone.
 - It is an **alias**: `ALLSELECTED()` parses to `RESET_INNER()` and `ALLSELECTED(target)` parses to `CLEAR_INNER(target)` — evaluation and persistence are shared, and a saved formula renders back in the RESET_INNER/CLEAR_INNER spelling.
+- Like the level-0 (inner) family it aliases, ALLSELECTED takes **no** `LEVEL` argument — it is fixed at level 0, the group-by axis. Passing one is a parse error; use [CLEAR](CLEAR.md) with `CLEAR(…, LEVEL n)` to clear deeper filter levels.
 - This matches DAX's `ALLSELECTED`: the classic "% of visible total" — each row divided by the total of everything the user's slicers allow, regardless of the row axis.
 - Filters have two sources:
   - **Inner (group-by):** filters from the matrix row/column context — the current grouping level.

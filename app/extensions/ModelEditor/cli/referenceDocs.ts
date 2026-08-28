@@ -1083,9 +1083,10 @@ Operations:
 | \`KEEP(t, t[col] = v, …)\` | add filters (AND with the current context) |
 | \`t[col] IN var[col]\` (inside KEEP) | membership in a table variable (\`NOT IN\` negates) |
 | \`t[col] = USERNAME()\` / \`CUSTOMDATA()\` | dynamic identity-resolved filter |
-| \`CLEAR(t)\` / \`CLEAR(t[col])\` | remove filters on a table / column |
+| \`CLEAR(t)\` / \`CLEAR(t[col])\` | remove filters on a table / column (levels 0-1; pinned filters survive) |
+| \`CLEAR(t, LEVEL n)\` | remove filters up to level n (2-9 reach pinned filters) |
 | \`CLEAR_INNER(…)\` / \`CLEAR_OUTER(…)\` | clear only group-by / only query-level filters |
-| \`RESET()\` / \`RESET_INNER()\` / \`RESET_OUTER()\` | remove all filters for the scope |
+| \`RESET()\` / \`RESET_INNER()\` / \`RESET_OUTER()\` | remove all filters for the scope (\`RESET(LEVEL n)\` reaches pins) |
 | \`USERELATIONSHIP("name")\` | activate an inactive relationship |
 | \`other_context\` | inherit all of another context's operations |
 

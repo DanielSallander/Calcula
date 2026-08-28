@@ -6,6 +6,7 @@ mod context_filters;
 mod hierarchy;
 mod lookups;
 mod projection;
+mod scoped_filters;
 mod security;
 mod source_sql;
 #[cfg(test)]
@@ -13,6 +14,7 @@ mod test_util;
 mod totals_order;
 
 pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
+pub use scoped_filters::{ContestedFilter, ContestedPredicate};
 
 // Re-exported for the executor's drillthrough path (`executor::pipeline::detail`),
 // which must enforce the *same* RLS relevance / fail-closed check and seal the
@@ -21,6 +23,7 @@ pub use hierarchy::{effective_group_by, HierarchyLevelSpec, HierarchySpec};
 pub(crate) use security::{rls_relevance, role_conditions_for_table};
 
 use engine_connectors::{AggregateExpr, FetchRequest, FilterCondition};
+use engine_core::compute::context::LEVEL_SLICER;
 use engine_core::compute::expression::{expand_measure_refs, infer_fact_table, FilterPredicate};
 use engine_core::compute::measure::Measure;
 use engine_core::model::DataModel;
@@ -37,6 +40,7 @@ use context_filters::compute_pushable_context_filters;
 pub(crate) use hierarchy::resolve_hierarchy;
 use lookups::resolve_lookups;
 use projection::compute_table_projections;
+use scoped_filters::classify_query_filters;
 use source_sql::{aggregate_op_to_function, build_join_aggregation_request, has_unpushable_ops};
 use totals_order::{
     build_pushed_order_by, canonical_effective_order, order_requires_sort_substitution,
@@ -101,6 +105,11 @@ pub enum QueryPlan {
         ///
         /// [`RaggedBehavior`]: engine_core::model::RaggedBehavior
         hierarchy: Option<HierarchySpec>,
+        /// Request filters some measure clears at (or above) their level.
+        /// Withheld from every fetch's WHERE; the executor applies each per
+        /// measure — clearing measures evaluate without it (REMOVEFILTERS),
+        /// everything else gets it as a conditional-aggregation condition.
+        contested_filters: Vec<ContestedFilter>,
     },
 }
 
@@ -301,97 +310,6 @@ fn fetch_target_for(
             }
         }
     }
-}
-
-fn lc_set_has(set: &std::collections::HashSet<String>, target_lc: &str) -> bool {
-    set.iter().any(|s| s.eq_ignore_ascii_case(target_lc))
-}
-
-fn lc_pair_set_has(
-    set: &std::collections::HashSet<(String, String)>,
-    table_lc: &str,
-    column_lc: &str,
-) -> bool {
-    set.iter()
-        .any(|(t, c)| t.eq_ignore_ascii_case(table_lc) && c.eq_ignore_ascii_case(column_lc))
-}
-
-/// Fail closed when a measure clears a table/column — via a **both-source**
-/// (`CLEAR`/`RESET`/`CLEAREXCEPT`) or **outer** (`CLEAR_OUTER`/`RESET_OUTER`)
-/// context op — that the request currently restricts with a report slicer.
-///
-/// The chosen semantics are REMOVEFILTERS: `CLEAR`/`RESET` remove BOTH the
-/// group-by axis and report slicers. The axis half is delivered by the window
-/// (`OVER (PARTITION BY …)`) render; the slicer half would require fetching the
-/// cleared table *unfiltered*, which is not yet wired. Rather than silently
-/// return an axis-only (slicer-respecting) number — wrong under the chosen
-/// semantics, and inconsistent between the pushed and local paths — we refuse.
-/// Axis-only clearing is available today via `CLEAR_INNER`/`RESET_INNER`, which
-/// never touch slicers (and never reach this guard).
-///
-/// Runs before path selection so the pushed and local paths behave identically.
-fn validate_no_slicer_clear(request: &QueryRequest, model: &DataModel) -> QueryResult<()> {
-    use engine_core::compute::context::ContextResolver;
-
-    // (owner_table_lc, column_lc) for every report slicer column.
-    let mut sliced_cols: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
-    let slicer_columns = request
-        .filters
-        .iter()
-        .map(|f| f.column.as_str())
-        .chain(request.or_filters.iter().map(|f| f.column.as_str()))
-        .chain(request.in_filters.iter().map(|f| f.column.as_str()));
-    for col in slicer_columns {
-        for t in model.tables().iter().filter(|t| t.column(col).is_ok()) {
-            sliced_cols.insert((t.name().to_lowercase(), col.to_lowercase()));
-        }
-    }
-    if sliced_cols.is_empty() {
-        return Ok(());
-    }
-
-    for m_name in &request.measures {
-        // Missing / unresolvable measures are reported by the normal path.
-        let Ok(measure) = model.measure(m_name) else {
-            continue;
-        };
-        let Ok(expanded) = expand_measure_refs(measure.expression(), model) else {
-            continue;
-        };
-        let Ok((_, ctx)) = ContextResolver::new(model).resolve(&expanded) else {
-            continue;
-        };
-
-        // `is_reset` / `is_reset_outer` drop ALL query-level filters — any slicer
-        // present is one they would need to strip. `is_reset_inner` is axis-only.
-        let clears_all_slicers = ctx.is_reset || ctx.is_reset_outer;
-        let offending = if clears_all_slicers {
-            sliced_cols.iter().next()
-        } else {
-            sliced_cols.iter().find(|(t, c)| {
-                lc_set_has(&ctx.cleared_tables, t)
-                    || lc_set_has(&ctx.cleared_outer_tables, t)
-                    || lc_pair_set_has(&ctx.cleared_columns, t, c)
-                    || lc_pair_set_has(&ctx.cleared_outer_columns, t, c)
-                    || ctx.clear_except.iter().any(|(et, preserved)| {
-                        et.eq_ignore_ascii_case(t)
-                            && !preserved.iter().any(|p| p.eq_ignore_ascii_case(c))
-                    })
-            })
-        };
-
-        if let Some((t, c)) = offending {
-            return Err(QueryError::InvalidQuery(format!(
-                "measure '{m_name}' clears '{t}[{c}]' (via CLEAR/RESET/CLEAREXCEPT or \
-                 CLEAR_OUTER/RESET_OUTER), which the query currently restricts with a report \
-                 slicer. Removing a report slicer from inside a measure (REMOVEFILTERS \
-                 semantics) is not yet supported. Use CLEAR_INNER/RESET_INNER to ignore only \
-                 the group-by axis while keeping slicers, or remove the slicer from the request."
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// The pushdown planner analyzes a query request and produces an execution plan.
@@ -642,11 +560,16 @@ impl PushdownPlanner {
         // Validate ORDER BY targets against group_by and measures.
         validate_order_by(request)?;
 
-        // Fail closed (both paths) when a measure's CLEAR/RESET/CLEAR_OUTER would
-        // need to remove a report slicer — slicer removal is not yet wired, so
-        // returning an axis-only number would be silently wrong under the chosen
-        // REMOVEFILTERS semantics. Axis-only clearing (CLEAR_INNER) is unaffected.
-        validate_no_slicer_clear(request, model)?;
+        // Classify every request filter (legacy and scoped) as fetch-time or
+        // CONTESTED — contested filters are cleared by some measure at or
+        // above their level, so they are withheld from every fetch's WHERE
+        // and applied per measure by the local executor (REMOVEFILTERS
+        // semantics). Non-hoistable contested shapes (OR slicers, ambiguous
+        // owners, ROLLUP) fail closed here, before path selection, so pushed
+        // and local behave identically. Axis-only clearing (CLEAR_INNER) is
+        // unaffected, and pinned (level 2+) filters are simply out of range
+        // of bare CLEAR/RESET — they stay on the fetch path.
+        let scoped_plan = classify_query_filters(request, model)?;
 
         // Validate ROLLUP totals constraints (see `TotalsMode` docs).
         validate_totals(request)?;
@@ -802,6 +725,19 @@ impl PushdownPlanner {
                 }
             };
 
+        // Scoped-filter owner tables must be fetched: an uncontested scoped
+        // filter restricts the fact through the two-phase propagation like a
+        // legacy slicer, and a CONTESTED filter's table must be joinable in
+        // the local SQL for per-measure conditional aggregation.
+        let scoped_filter_tables: Vec<&str> = scoped_plan
+            .fetch_scalar
+            .iter()
+            .flat_map(|(owners, _)| owners.iter())
+            .chain(scoped_plan.fetch_in.iter().flat_map(|(owners, _)| owners.iter()))
+            .chain(scoped_plan.contested.iter().map(|c| &c.table))
+            .map(|s| s.as_str())
+            .collect();
+
         // Collect all referenced tables (deduplication happens below).
         let referenced_tables: Vec<&str> = measure_tables
             .iter()
@@ -816,6 +752,7 @@ impl PushdownPlanner {
             .chain(context_ref_tables.iter().map(|s| s.as_str()))
             .chain(in_filter_tables.iter().copied())
             .chain(or_filter_table.iter().copied())
+            .chain(scoped_filter_tables.iter().copied())
             .collect();
 
         // A scalar request filter (`request.filters`) whose column is owned by
@@ -944,7 +881,14 @@ impl PushdownPlanner {
         // dimension the pushed paths never join).
         let has_in_filters = !request.in_filters.is_empty()
             || !request.or_filters.is_empty()
-            || !scalar_filter_only_tables.is_empty();
+            || !scalar_filter_only_tables.is_empty()
+            // Scoped (level-tagged) filters and contested filters always take
+            // the local path: scoped filters carry explicit table attribution
+            // the pushed builders do not thread, and contested filters are
+            // applied per measure in the local SQL.
+            || !request.scoped_filters.is_empty()
+            || !request.scoped_in_filters.is_empty()
+            || !scoped_plan.contested.is_empty();
 
         // Statistical aggregates (MEDIAN, STDEV, etc.) cannot be pushed down.
         let all_pushable = measures.iter().all(|m| {
@@ -1385,8 +1329,38 @@ impl PushdownPlanner {
             .cloned()
             .chain(context_scalar_measures.iter().cloned())
             .collect();
+        // Scoped and contested filter columns must survive projection: a
+        // contested condition is rendered in the LOCAL SQL (CASE WHEN over
+        // the joined dimension), so its column has to be in the fetched
+        // batch. `compute_table_projections` derives filter columns from
+        // `request.filters` only — hand it a widened request whose filter
+        // list also names every scoped/contested column (values are ignored
+        // by projection).
+        let projection_request: QueryRequest;
+        let projection_request_ref: &QueryRequest = if request.scoped_filters.is_empty()
+            && request.scoped_in_filters.is_empty()
+        {
+            request
+        } else {
+            let mut widened = request.clone();
+            widened.filters.extend(
+                request
+                    .scoped_filters
+                    .iter()
+                    .map(|f| f.condition.clone())
+                    .chain(request.scoped_in_filters.iter().map(|f| {
+                        FilterCondition::new(
+                            f.filter.column.clone(),
+                            engine_connectors::FilterOperator::Equal,
+                            String::new(),
+                        )
+                    })),
+            );
+            projection_request = widened;
+            &projection_request
+        };
         let projections = compute_table_projections(
-            request,
+            projection_request_ref,
             model,
             &projection_measures,
             &projection_tables,
@@ -1405,21 +1379,38 @@ impl PushdownPlanner {
             if seen_tables.insert(*table_name) {
                 let (fetch_schema, fetch_table) = fetch_target_for(registry, model, table_name)?;
 
-                // Push filters that apply to this table.
+                // Push filters that apply to this table. CONTESTED entries
+                // (withheld indexes) are excluded — baking them into the
+                // fetch WHERE would delete the rows a clearing measure must
+                // aggregate; the executor applies them per measure instead.
                 let mut table_filters: Vec<FilterCondition> = request
                     .filters
                     .iter()
-                    .filter(|f| {
+                    .enumerate()
+                    .filter(|(idx, f)| {
                         // Simple heuristic: filter applies to this table if the
                         // column exists in the model table.
-                        model
-                            .table(table_name)
-                            .ok()
-                            .and_then(|t| t.column(&f.column).ok())
-                            .is_some()
+                        !scoped_plan.withheld_legacy_filters.contains(idx)
+                            && model
+                                .table(table_name)
+                                .ok()
+                                .and_then(|t| t.column(&f.column).ok())
+                                .is_some()
                     })
-                    .cloned()
+                    .map(|(_, f)| f.clone())
                     .collect();
+
+                // Uncontested scoped scalar filters attached to their owner
+                // table(s) — explicit attribution, no ownership heuristic.
+                table_filters.extend(
+                    scoped_plan
+                        .fetch_scalar
+                        .iter()
+                        .filter(|(owners, _)| {
+                            owners.iter().any(|o| o.eq_ignore_ascii_case(table_name))
+                        })
+                        .map(|(_, cond)| cond.clone()),
+                );
 
                 // Add pushable context filters for this table.
                 if let Some(context_filters) = pushable_context_filters.get(*table_name) {
@@ -1437,18 +1428,32 @@ impl PushdownPlanner {
                 // User IN-list slicers whose column lives on this table, as
                 // pushed `column IN (...)` conditions. Integer columns render
                 // bare (sargable); other types render escaped/quoted text.
-                let table_in_filters: Vec<engine_connectors::InFilterCondition> = request
+                // Contested entries are withheld, exactly like scalar ones.
+                let mut table_in_filters: Vec<engine_connectors::InFilterCondition> = request
                     .in_filters
                     .iter()
-                    .filter(|f| {
-                        model
-                            .table(table_name)
-                            .ok()
-                            .and_then(|t| t.column(&f.column).ok())
-                            .is_some()
+                    .enumerate()
+                    .filter(|(idx, f)| {
+                        !scoped_plan.withheld_legacy_in.contains(idx)
+                            && model
+                                .table(table_name)
+                                .ok()
+                                .and_then(|t| t.column(&f.column).ok())
+                                .is_some()
                     })
-                    .map(|f| in_filter_condition(model, table_name, f))
+                    .map(|(_, f)| in_filter_condition(model, table_name, f))
                     .collect();
+
+                // Uncontested scoped IN-list slicers for this table.
+                table_in_filters.extend(
+                    scoped_plan
+                        .fetch_in
+                        .iter()
+                        .filter(|(owners, _)| {
+                            owners.iter().any(|o| o.eq_ignore_ascii_case(table_name))
+                        })
+                        .map(|(_, cond)| cond.clone()),
+                );
 
                 // A cross-column OR slicer (DNF: each condition its own group →
                 // OR-combined) goes on the single table that owns its columns.
@@ -1534,6 +1539,7 @@ impl PushdownPlanner {
                 limit: request.limit,
                 totals: request.totals,
                 hierarchy: hierarchy_spec,
+                contested_filters: scoped_plan.contested,
             },
             diagnostics,
         ))

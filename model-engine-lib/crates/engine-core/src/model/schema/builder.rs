@@ -679,12 +679,12 @@ impl DataModelBuilder {
                     // These operations carry only lookup keys (table /
                     // column / context / relationship names) that are
                     // resolved against the model, never rendered raw.
-                    ContextOp::Clear(_)
+                    ContextOp::Clear { .. }
                     | ContextOp::ClearInner(_)
-                    | ContextOp::ClearOuter(_)
-                    | ContextOp::Reset
+                    | ContextOp::ClearOuter { .. }
+                    | ContextOp::Reset { .. }
                     | ContextOp::ResetInner
-                    | ContextOp::ResetOuter
+                    | ContextOp::ResetOuter { .. }
                     | ContextOp::Inherit(_)
                     | ContextOp::UseRelationship(_) => {}
                 }

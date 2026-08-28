@@ -4,7 +4,8 @@ pub mod explain;
 pub mod pushdown;
 
 pub use pushdown::{
-    effective_group_by, HierarchyLevelSpec, HierarchySpec, LookupSpec, PushdownPlanner, QueryPlan,
+    effective_group_by, ContestedFilter, ContestedPredicate, HierarchyLevelSpec, HierarchySpec,
+    LookupSpec, PushdownPlanner, QueryPlan,
 };
 
 // RLS helpers shared with the executor's drillthrough path so it enforces the

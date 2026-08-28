@@ -399,9 +399,9 @@ fn infer_aggregate_type(
         | Expression::ClearInner { expr, .. }
         | Expression::ClearOuter { expr, .. }
         | Expression::ClearExcept { expr, .. }
-        | Expression::Reset { expr }
+        | Expression::Reset { expr, .. }
         | Expression::ResetInner { expr }
-        | Expression::ResetOuter { expr }
+        | Expression::ResetOuter { expr, .. }
         | Expression::KeepIn { expr, .. }
         | Expression::Traverse { expr, .. }
         | Expression::Using { expr, .. }

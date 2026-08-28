@@ -4,13 +4,23 @@ Removes all query-level (outer) filters from the evaluation context, while keepi
 
 ## Syntax
 
+Remove all ordinary query-level filters:
+
 ```
 SUM(table[column], RESET_OUTER())
 ```
 
+Remove query-level filters up to and including a pinned level:
+
+```
+SUM(table[column], RESET_OUTER(LEVEL n))
+```
+
 ### Parameters
 
-RESET_OUTER takes no parameters.
+| Parameter | Definition |
+|-----------|------------|
+| `LEVEL n` | Optional. Extends the reset to pinned filters: removes filter levels 1 through `n` (n = 1..9) across **all** tables. `LEVEL` must be at least 1 — `LEVEL 0` is a parse error, because RESET_OUTER never touches the level-0 axis. |
 
 ## Return value
 
@@ -23,7 +33,7 @@ The result of the aggregation function, computed with all query-level filters re
 - Filters have two sources:
   - **Inner (group-by):** Filters from the matrix row/column context — the current grouping level.
   - **Outer (query-level):** Slicer/page filters from the query's `filters` parameter.
-- RESET_OUTER removes **all** outer filters. Use [CLEAR_OUTER](CLEAR_OUTER.md) to remove only specific table/column filters.
+- RESET_OUTER removes **all** ordinary outer filters (level 1). **Pinned** filters (levels 2–9 — see [CLEAR](CLEAR.md) for the level table) survive the bare form; `RESET_OUTER(LEVEL n)` removes levels 1 through `n`. The axis (level 0) is always kept. Use [CLEAR_OUTER](CLEAR_OUTER.md) to remove only specific table/column filters.
 - Use [RESET](RESET.md) to remove all filters from both sources.
 - This is useful when you want a measure that ignores all slicers but still breaks down correctly by the current grouping.
 

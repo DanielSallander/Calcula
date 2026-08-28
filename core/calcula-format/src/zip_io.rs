@@ -18,7 +18,7 @@ use crate::features::scheduled_jobs::{
 // authoring transcript takes a feature id and no link in the version chain.
 use crate::features::script_authoring::{SCRIPT_AUTHORING_FEATURE, SCRIPT_AUTHORING_FILE};
 use crate::manifest::{
-    stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION,
+    stamp_feature_format_version, Manifest, CALA_BASE_FORMAT_VERSION, PINNED_FILTER_MIN_FORMAT_VERSION,
     PENDING_RECALC_MIN_FORMAT_VERSION, SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION,
     SHEET_VIEW_MIN_FORMAT_VERSION,
     SPILL_EXTENT_MIN_FORMAT_VERSION,
@@ -220,6 +220,27 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     {
         manifest.features.push("spill_extents".to_string());
         stamp_feature_format_version(&mut manifest, SPILL_EXTENT_MIN_FORMAT_VERSION);
+    }
+    // Pinned filter levels. A pin exists so measures using CLEAR/RESET keep
+    // respecting the filter; an older reader drops the level (and the pivot's
+    // engine filter) on its next save, so those measures silently start
+    // stripping it and the pivot comes back UNFILTERED on the pinned field —
+    // wrong numbers with no error anywhere (see
+    // PINNED_FILTER_MIN_FORMAT_VERSION). Stamped only when something is
+    // actually pinned, so ordinary workbooks stay v1-v7.
+    if workbook.slicers.iter().any(|s| s.filter_level > 1)
+        || workbook.ribbon_filters.iter().any(|f| f.filter_level > 1)
+        || workbook.pivot_definitions.iter().any(|d| {
+            // The definition is opaque JSON here (persistence stays
+            // decoupled from pivot-engine); probe the field directly.
+            d.definition
+                .get("engine_filters")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty())
+        })
+    {
+        manifest.features.push("pinned_filters".to_string());
+        stamp_feature_format_version(&mut manifest, PINNED_FILTER_MIN_FORMAT_VERSION);
     }
     manifest.features.push("theme".to_string());
 
@@ -1706,6 +1727,9 @@ mod tests {
                 source_type: persistence::SavedSlicerSourceType::BiConnection,
                 source_id: conn_id,
             }],
+            // Pinned: exercises both the filterLevel round-trip and the
+            // conditional v8 stamp (asserted below).
+            filter_level: 2,
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -1714,6 +1738,18 @@ mod tests {
         let loaded = read_calcula(&path).unwrap();
 
         assert_eq!(loaded.slicers.len(), 1);
+        assert_eq!(
+            loaded.slicers[0].filter_level, 2,
+            "a pinned slicer's filter level must round-trip — dropping it \
+             silently un-pins the filter and changes CLEAR-measure values"
+        );
+        // ...and the pin takes its link in the format-version chain: an older
+        // reader would drop the level on its next save, silently un-pinning
+        // the filter (wrong numbers, no error). Refusing the open is the
+        // honest failure.
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, PINNED_FILTER_MIN_FORMAT_VERSION);
+        assert!(manifest.features.iter().any(|f| f == "pinned_filters"));
         let cs = &loaded.slicers[0].connected_sources;
         assert_eq!(cs.len(), 1, "the BI connected-source must survive");
         assert!(
@@ -1760,6 +1796,7 @@ mod tests {
             order: 0,
             button_columns: 2,
             button_rows: 0,
+            filter_level: 1,
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -1911,6 +1948,49 @@ mod tests {
         let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(manifest.format_version, PENDING_RECALC_MIN_FORMAT_VERSION);
         assert!(manifest.features.iter().any(|f| f == "pending_recalc"));
+    }
+
+    /// An ORDINARY (level-1) slicer must NOT stamp the pinned-filter version —
+    /// only an actual pin warrants demanding a newer reader.
+    #[test]
+    fn test_an_ordinary_slicer_does_not_stamp_the_pinned_filter_version() {
+        let mut workbook = make_test_workbook();
+        let sheet_id = workbook.sheets[0].id;
+        workbook.slicers.push(persistence::SavedSlicer {
+            id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            name: "Region".to_string(),
+            header_text: None,
+            sheet_id,
+            x: 0.0, y: 0.0, width: 200.0, height: 150.0,
+            source_type: persistence::SavedSlicerSourceType::Table,
+            cache_source_id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            field_name: "Region".to_string(),
+            selected_items: None,
+            show_header: true,
+            columns: 1,
+            style_preset: "default".to_string(),
+            selection_mode: Default::default(),
+            hide_no_data: false,
+            indicate_no_data: true,
+            sort_no_data_last: true,
+            force_selection: false,
+            show_select_all: false,
+            arrangement: Default::default(),
+            rows: 0,
+            item_gap: 4.0,
+            autogrid: true,
+            item_padding: 0.0,
+            button_radius: 4.0,
+            computed_properties: Vec::new(),
+            connected_sources: Vec::new(),
+            filter_level: 1,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary-slicer.cala");
+        write_calcula(&workbook, &path).unwrap();
+        let manifest = read_calcula_manifest(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(manifest.format_version < PINNED_FILTER_MIN_FORMAT_VERSION);
+        assert!(!manifest.features.iter().any(|f| f == "pinned_filters"));
     }
 
     /// A fully-calculated workbook must carry NO marker and must NOT be stamped

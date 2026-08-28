@@ -1477,6 +1477,7 @@ fn slicer_to_saved(slicer: &crate::slicer::Slicer, sheet_ids: &[SheetId]) -> Opt
                 source_id: c.source_id,
             }
         }).collect(),
+        filter_level: slicer.filter_level,
     })
 }
 
@@ -1544,6 +1545,7 @@ pub(crate) fn saved_slicer_to_slicer_at(
                 source_id: c.source_id,
             }
         }).collect(),
+        filter_level: saved.filter_level,
     }
 }
 
@@ -1730,6 +1732,7 @@ fn ribbon_filter_to_saved(f: &crate::ribbon_filter::RibbonFilter) -> persistence
         order: f.order,
         button_columns: f.button_columns,
         button_rows: f.button_rows,
+        filter_level: f.filter_level,
     }
 }
 
@@ -1784,6 +1787,7 @@ pub(crate) fn saved_to_ribbon_filter(saved: &persistence::SavedRibbonFilter) -> 
         order: saved.order,
         button_columns: saved.button_columns,
         button_rows: saved.button_rows,
+        filter_level: saved.filter_level,
     }
 }
 

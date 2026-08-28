@@ -70,6 +70,7 @@ fn slicer(name: &str, source_type: SlicerSourceType, cache: EntityId, connected:
         autogrid: true,
         item_padding: 0.0,
         button_radius: 2.0,
+        filter_level: 1,
         connected_sources: connected
             .into_iter()
             .map(|source_id| SlicerConnection { source_type, source_id })
@@ -125,6 +126,7 @@ fn ribbon_filter(name: &str) -> RibbonFilter {
         order: 0,
         button_columns: 2,
         button_rows: 0,
+        filter_level: 1,
     }
 }
 

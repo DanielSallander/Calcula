@@ -174,7 +174,7 @@ export async function syncReportConnections(
     for (const conn of removed) {
       try {
         if (conn.sourceType === "pivot") {
-          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, null, slicer.sheetIndex);
+          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, null, slicer.sheetIndex, slicer.filterLevel ?? 1, slicer.id);
         } else {
           await applyTableFilterForSource(conn.sourceId, slicer.fieldName, null, slicer.sheetIndex);
         }
@@ -188,7 +188,7 @@ export async function syncReportConnections(
     for (const conn of added) {
       try {
         if (conn.sourceType === "pivot") {
-          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
+          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex, slicer.filterLevel ?? 1, slicer.id);
         } else {
           await applyTableFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
         }
@@ -227,7 +227,7 @@ export async function applySlicerFilter(slicer: Slicer): Promise<void> {
     for (const conn of connected) {
       try {
         if (conn.sourceType === "pivot") {
-          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
+          await applyPivotFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex, slicer.filterLevel ?? 1, slicer.id);
         } else {
           await applyTableFilterForSource(conn.sourceId, slicer.fieldName, slicer.selectedItems, slicer.sheetIndex);
         }
@@ -363,6 +363,8 @@ async function applyPivotFilterForSource(
   fieldName: string,
   selectedItems: string[] | null,
   _sheetIndex: number,
+  filterLevel: number = 1,
+  slicerId?: string,
 ): Promise<void> {
   let fieldIndex = await resolveFieldIndex(pivotId, fieldName);
 
@@ -388,6 +390,11 @@ async function applyPivotFilterForSource(
         filters: {
           manualFilter: { selectedItems },
         },
+        // Level >= 2 routes the selection INSIDE the BI query (a pinned
+        // filter that measure CLEAR/RESET semantics honor); the slicer id
+        // preserves origin.
+        filterLevel,
+        slicerId,
       },
     });
   }

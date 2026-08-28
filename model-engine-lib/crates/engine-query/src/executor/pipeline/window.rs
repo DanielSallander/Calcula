@@ -864,16 +864,7 @@ impl QueryExecutor {
         let has_conditions = !eval_ctx.conditions.is_empty();
 
         // Any clear/reset/relationship-override/traversal of any kind.
-        let has_clear_or_reset = eval_ctx.is_reset
-            || eval_ctx.is_reset_inner
-            || eval_ctx.is_reset_outer
-            || !eval_ctx.cleared_columns.is_empty()
-            || !eval_ctx.cleared_tables.is_empty()
-            || !eval_ctx.cleared_inner_columns.is_empty()
-            || !eval_ctx.cleared_inner_tables.is_empty()
-            || !eval_ctx.cleared_outer_columns.is_empty()
-            || !eval_ctx.cleared_outer_tables.is_empty()
-            || !eval_ctx.clear_except.is_empty();
+        let has_clear_or_reset = eval_ctx.has_clear_or_reset();
         let has_overrides = !eval_ctx.relationship_overrides.is_empty();
         let has_traversals = !eval_ctx.traversals.is_empty();
 
@@ -913,16 +904,7 @@ impl QueryExecutor {
     ) -> QueryResult<()> {
         let has_conditions = !eval_ctx.conditions.is_empty();
         let has_in_filters = !eval_ctx.in_filters.is_empty();
-        let has_clear_or_reset = eval_ctx.is_reset
-            || eval_ctx.is_reset_inner
-            || eval_ctx.is_reset_outer
-            || !eval_ctx.cleared_columns.is_empty()
-            || !eval_ctx.cleared_tables.is_empty()
-            || !eval_ctx.cleared_inner_columns.is_empty()
-            || !eval_ctx.cleared_inner_tables.is_empty()
-            || !eval_ctx.cleared_outer_columns.is_empty()
-            || !eval_ctx.cleared_outer_tables.is_empty()
-            || !eval_ctx.clear_except.is_empty();
+        let has_clear_or_reset = eval_ctx.has_clear_or_reset();
         let has_overrides = !eval_ctx.relationship_overrides.is_empty();
         let has_traversals = !eval_ctx.traversals.is_empty();
 
@@ -2029,16 +2011,7 @@ fn reject_compound_outer_context(
     let trivial = eval_ctx.filters.is_empty()
         && eval_ctx.in_filters.is_empty()
         && eval_ctx.conditions.is_empty()
-        && !eval_ctx.is_reset
-        && !eval_ctx.is_reset_inner
-        && !eval_ctx.is_reset_outer
-        && eval_ctx.cleared_columns.is_empty()
-        && eval_ctx.cleared_tables.is_empty()
-        && eval_ctx.cleared_inner_columns.is_empty()
-        && eval_ctx.cleared_inner_tables.is_empty()
-        && eval_ctx.cleared_outer_columns.is_empty()
-        && eval_ctx.cleared_outer_tables.is_empty()
-        && eval_ctx.clear_except.is_empty()
+        && !eval_ctx.has_clear_or_reset()
         && eval_ctx.relationship_overrides.is_empty()
         && eval_ctx.traversals.is_empty();
     if !trivial {

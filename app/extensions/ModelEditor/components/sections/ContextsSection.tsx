@@ -71,7 +71,7 @@ export function ContextsSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
                 <strong>{c.name}</strong>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 3, alignItems: "center" }}>
                   {c.operations.map((op, i) => (
-                    <Badge key={i}>{op.type}</Badge>
+                    <Badge key={i}>{op.level != null ? `${op.type} · level ${op.level}` : op.type}</Badge>
                   ))}
                 </div>
                 <div
@@ -252,14 +252,15 @@ function ContextEditorModal({
         value={expression}
         onChange={setExpression}
         label="Definition"
-        hint="Comma-separated operations: KEEP, CLEAR, CLEAR_INNER/OUTER, RESET(_INNER/_OUTER), USERELATIONSHIP, or a context name to inherit."
+        hint="Comma-separated operations: KEEP, CLEAR, CLEAR_INNER/OUTER, RESET(_INNER/_OUTER), USERELATIONSHIP, or a context name to inherit. Add LEVEL n as a clear's last argument to also strip pinned filters."
         hintTitle={
           'Examples:\n' +
           'KEEP(dim_date, dim_date[year] = 2024) — add filters (values may be USERNAME() / CUSTOMDATA())\n' +
           'KEEP(fact, fact[productid] IN premium[id]) — membership in a table variable (also NOT IN)\n' +
-          'CLEAR(Sales[region]), CLEAR(dim_date) — remove filters on a column / table\n' +
+          'CLEAR(Sales[region]), CLEAR(dim_date) — remove filters on a column / table (levels 0-1; pinned filters survive)\n' +
+          'CLEAR(dim_date, LEVEL 2) — also strip filters pinned at level 2\n' +
           'CLEAR_INNER(...) / CLEAR_OUTER(...) — clear only group-by / only query-level filters\n' +
-          'RESET(), RESET_INNER(), RESET_OUTER() — remove all filters for the scope\n' +
+          'RESET(), RESET_INNER(), RESET_OUTER() — remove all filters for the scope (RESET(LEVEL n) reaches pins)\n' +
           'USERELATIONSHIP("ShipDate") — activate an inactive relationship\n' +
           'other_context — inherit all of another context’s operations'
         }

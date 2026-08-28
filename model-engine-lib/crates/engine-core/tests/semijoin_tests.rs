@@ -596,6 +596,7 @@ async fn semijoin_scalar_filter_lte() {
                 operator: ComparisonOp::Equal,
                 value: "2020".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -1552,6 +1553,7 @@ async fn semijoin_scalar_multiple_dim_filters() {
                     operator: ComparisonOp::Equal,
                     value: "2021".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
                 ResolvedFilter {
                     table: "DateDim".to_string(),
@@ -1559,6 +1561,7 @@ async fn semijoin_scalar_multiple_dim_filters() {
                     operator: ComparisonOp::Equal,
                     value: "Q1".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
             ],
         )
@@ -1895,6 +1898,7 @@ async fn safe_join_with_unsafe_dim_filter() {
                 operator: ComparisonOp::Equal,
                 value: "2020".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -2457,6 +2461,7 @@ async fn clear_unsafe_dim_removes_date_filter() {
                     expr::qualified_col("Sales", "amount"),
                 )),
                 targets: vec![engine_core::model::ClearTarget::Table("DateDim".into())],
+                level: None,
             },
         ))
         .build()
@@ -2475,6 +2480,7 @@ async fn clear_unsafe_dim_removes_date_filter() {
                 operator: ComparisonOp::Equal,
                 value: "2020".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -2588,6 +2594,7 @@ async fn safe_group_by_with_unsafe_scalar_filter() {
                 operator: ComparisonOp::Equal,
                 value: "2021".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -2818,6 +2825,7 @@ async fn cumulative_with_outer_filter_on_safe_dim() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -3580,6 +3588,7 @@ async fn clear_safe_dim_with_cumulative_group() {
         Expression::Clear {
             expr: Box::new(sum_amount()),
             targets: vec![engine_core::model::ClearTarget::Table("Products".into())],
+            level: None,
         },
     );
 
@@ -3622,6 +3631,7 @@ async fn clear_safe_dim_with_cumulative_group() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -3660,6 +3670,7 @@ async fn pct_of_total_clear_with_cumulative() {
             Expression::Clear {
                 expr: Box::new(sum_amount()),
                 targets: vec![engine_core::model::ClearTarget::Table("Products".into())],
+                level: None,
             },
             Some(expr::lit_int(0)),
         ),
@@ -3706,6 +3717,7 @@ async fn pct_of_total_clear_with_cumulative() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -4065,6 +4077,7 @@ fn clear_table(inner: Expression, table: &str) -> Expression {
     Expression::Clear {
         expr: Box::new(inner),
         targets: vec![engine_core::model::ClearTarget::Table(table.into())],
+        level: None,
     }
 }
 
@@ -4075,6 +4088,7 @@ fn clear_column(inner: Expression, table: &str, column: &str) -> Expression {
             table: table.into(),
             column: column.into(),
         }],
+        level: None,
     }
 }
 
@@ -4133,6 +4147,7 @@ async fn reset_inner_scalar() {
                 operator: ComparisonOp::Equal,
                 value: "North".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -4196,6 +4211,7 @@ async fn reset_outer_keeps_group_by_filter() {
                 operator: ComparisonOp::Equal,
                 value: "North".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -4268,6 +4284,7 @@ async fn clear_inner_scalar() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -4332,6 +4349,7 @@ async fn clear_outer_specific_table() {
                 operator: ComparisonOp::Equal,
                 value: "North".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -4470,6 +4488,7 @@ async fn clear_specific_column() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -4629,6 +4648,7 @@ async fn reset_all_in_compound_cumulative() {
             sum_amount(),
             Expression::Reset {
                 expr: Box::new(sum_amount()),
+                level: None,
             },
             Some(expr::lit_int(0)),
         ),
@@ -7928,6 +7948,7 @@ async fn two_outer_filters_with_cumulative() {
                     operator: ComparisonOp::Equal,
                     value: "Electronics".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
                 ResolvedFilter {
                     table: "Regions".to_string(),
@@ -7935,6 +7956,7 @@ async fn two_outer_filters_with_cumulative() {
                     operator: ComparisonOp::Equal,
                     value: "North".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
             ],
         )
@@ -8086,6 +8108,7 @@ async fn var_ref_inside_reset() {
             vec![("x".into(), sum_amount())],
             Expression::Reset {
                 expr: Box::new(expr::col("x")),
+                level: None,
             },
         ),
     );
@@ -8117,6 +8140,7 @@ async fn var_ref_inside_reset() {
                 operator: ComparisonOp::Equal,
                 value: "North".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -10209,6 +10233,7 @@ async fn between_multi_filter_compound() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -11462,6 +11487,7 @@ async fn empty_result_set() {
                 operator: ComparisonOp::Equal,
                 value: "NonExistent".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -12045,6 +12071,7 @@ async fn measure_ref_safe_filter_unsafe_group() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -12081,6 +12108,7 @@ async fn two_dim_filters_mixed_safety() {
                     operator: ComparisonOp::Equal,
                     value: "2021".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
                 ResolvedFilter {
                     table: "Regions".to_string(),
@@ -12088,6 +12116,7 @@ async fn two_dim_filters_mixed_safety() {
                     operator: ComparisonOp::Equal,
                     value: "North".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
             ],
         )
@@ -12604,6 +12633,7 @@ async fn three_outer_filters_scalar() {
                     operator: ComparisonOp::Equal,
                     value: "Electronics".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
                 ResolvedFilter {
                     table: "Regions".to_string(),
@@ -12611,6 +12641,7 @@ async fn three_outer_filters_scalar() {
                     operator: ComparisonOp::Equal,
                     value: "North".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
                 ResolvedFilter {
                     table: "DateDim".to_string(),
@@ -12618,6 +12649,7 @@ async fn three_outer_filters_scalar() {
                     operator: ComparisonOp::Equal,
                     value: "2021".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
             ],
         )
@@ -12719,6 +12751,7 @@ async fn between_measureref_compound_filtered() {
                 operator: ComparisonOp::Equal,
                 value: "North".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -12802,6 +12835,7 @@ async fn compound_unsafe_filter_safe_group() {
                 operator: ComparisonOp::Equal,
                 value: "2021".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -13061,6 +13095,7 @@ async fn three_filters_compound_grouped() {
                     operator: ComparisonOp::Equal,
                     value: "Electronics".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
                 ResolvedFilter {
                     table: "DateDim".to_string(),
@@ -13068,6 +13103,7 @@ async fn three_filters_compound_grouped() {
                     operator: ComparisonOp::Equal,
                     value: "2021".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
                 ResolvedFilter {
                     table: "Regions".to_string(),
@@ -13075,6 +13111,7 @@ async fn three_filters_compound_grouped() {
                     operator: ComparisonOp::Equal,
                     value: "North".to_string(),
                     source: engine_core::compute::context::FilterSource::Query,
+                    level: 1,
                 },
             ],
         )
@@ -13372,6 +13409,7 @@ async fn gte_relationship_with_safe_filter_and_group() {
                 operator: ComparisonOp::Equal,
                 value: "North".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await
@@ -13417,6 +13455,7 @@ async fn invariant_scalar_filtered_equals_single_group_cell() {
                 operator: ComparisonOp::Equal,
                 value: "Electronics".to_string(),
                 source: engine_core::compute::context::FilterSource::Query,
+                level: 1,
             }],
         )
         .await

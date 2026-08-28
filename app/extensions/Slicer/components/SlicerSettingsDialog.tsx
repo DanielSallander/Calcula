@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from "react";
 import type { DialogProps } from "@api";
 import { getSlicerById, updateSlicerAsync } from "../lib/slicerStore";
+import { applySlicerFilter } from "../lib/slicerFilterBridge";
 import { requestOverlayRedraw } from "@api/gridOverlays";
 import type { SlicerSelectionMode, SlicerArrangement } from "../lib/slicerTypes";
 import { getSlicerComputedAttributes } from "../lib/slicer-api";
@@ -89,6 +90,9 @@ export function SlicerSettingsDialog({
   const [forceSelection, setForceSelection] = useState(false);
   const [showSelectAll, setShowSelectAll] = useState(false);
 
+  // Filtering settings
+  const [filterLevel, setFilterLevel] = useState(1);
+
   // Data display settings
   const [hideNoData, setHideNoData] = useState(false);
   const [indicateNoData, setIndicateNoData] = useState(true);
@@ -122,6 +126,7 @@ export function SlicerSettingsDialog({
         setSingleSelect(slicer.selectionMode === "single");
         setForceSelection(slicer.forceSelection);
         setShowSelectAll(slicer.showSelectAll);
+        setFilterLevel(slicer.filterLevel ?? 1);
         setHideNoData(slicer.hideNoData);
         setIndicateNoData(slicer.indicateNoData);
         setSortNoDataLast(slicer.sortNoDataLast);
@@ -148,11 +153,13 @@ export function SlicerSettingsDialog({
     if (slicerId == null) return;
 
     const selectionMode: SlicerSelectionMode = singleSelect ? "single" : "standard";
+    const levelChanged = getSlicerById(slicerId)?.filterLevel !== filterLevel;
 
     await updateSlicerAsync(slicerId, {
       selectionMode,
       forceSelection,
       showSelectAll,
+      filterLevel,
       hideNoData,
       indicateNoData,
       sortNoDataLast,
@@ -164,6 +171,15 @@ export function SlicerSettingsDialog({
       itemPadding,
       buttonRadius,
     });
+    // A level change moves an ACTIVE selection between the host-side mask
+    // and the engine-routed (pinned) filter — re-apply so the connected
+    // pivots pick up the new routing.
+    if (levelChanged) {
+      const fresh = getSlicerById(slicerId);
+      if (fresh && fresh.selectedItems !== null) {
+        await applySlicerFilter(fresh);
+      }
+    }
     requestOverlayRedraw();
     handleClose();
   };
@@ -174,6 +190,7 @@ export function SlicerSettingsDialog({
     setSingleSelect(false);
     setForceSelection(false);
     setShowSelectAll(false);
+    setFilterLevel(1);
     setHideNoData(false);
     setIndicateNoData(true);
     setSortNoDataLast(true);
@@ -246,6 +263,31 @@ export function SlicerSettingsDialog({
               checked={showSelectAll}
               onChange={setShowSelectAll}
             />
+          </Section>
+
+          {/* Filtering Section */}
+          <Section title="Filtering">
+            <SelectRow
+              label="Filter level"
+              value={String(filterLevel)}
+              options={[
+                { value: "1", label: "1 — ordinary" },
+                { value: "2", label: "2 — pinned" },
+                { value: "3", label: "3 — pinned" },
+                { value: "4", label: "4 — pinned" },
+                { value: "5", label: "5 — pinned" },
+                { value: "6", label: "6 — pinned" },
+                { value: "7", label: "7 — pinned" },
+                { value: "8", label: "8 — pinned" },
+                { value: "9", label: "9 — pinned" },
+              ]}
+              onChange={(v) => setFilterLevel(Number(v))}
+            />
+            <div style={{ fontSize: 11, opacity: 0.75, padding: "2px 4px 4px" }}>
+              A pinned slicer (level 2+) keeps filtering even when a measure
+              uses CLEAR or RESET — only an explicit CLEAR(…, LEVEL n) at or
+              above its level removes it.
+            </div>
           </Section>
 
           {/* Data Display Section */}

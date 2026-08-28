@@ -61,6 +61,8 @@ export interface FilterDropdownProps {
   sortNoDataLast: boolean;
   showSelectAll: boolean;
   singleSelect: boolean;
+  /** Filter level: 1 = ordinary, 2-9 = pinned. */
+  filterLevel: number;
 }
 
 export function FilterDropdown({
@@ -84,6 +86,7 @@ export function FilterDropdown({
   sortNoDataLast,
   showSelectAll,
   singleSelect,
+  filterLevel,
   crossFilterSlicerTargets,
 }: FilterDropdownProps): React.ReactElement {
   const cachedFilters = getAllFilters();
@@ -436,6 +439,7 @@ export function FilterDropdown({
           sortNoDataLast={sortNoDataLast}
           showSelectAll={showSelectAll}
           singleSelect={singleSelect}
+          filterLevel={filterLevel}
           onClose={() => setPanelView("none")}
         />
       ) : panelView === "crossTargets" ? (
@@ -643,6 +647,7 @@ function FilterSettingsPanel({
   sortNoDataLast: initSortNoDataLast,
   showSelectAll: initShowSelectAll,
   singleSelect: initSingleSelect,
+  filterLevel: initFilterLevel,
   onClose,
 }: {
   filterId: string;
@@ -651,6 +656,7 @@ function FilterSettingsPanel({
   sortNoDataLast: boolean;
   showSelectAll: boolean;
   singleSelect: boolean;
+  filterLevel: number;
   onClose: () => void;
 }): React.ReactElement {
   const [localHideNoData, setLocalHideNoData] = useState(initHideNoData);
@@ -658,19 +664,28 @@ function FilterSettingsPanel({
   const [localSortNoDataLast, setLocalSortNoDataLast] = useState(initSortNoDataLast);
   const [localShowSelectAll, setLocalShowSelectAll] = useState(initShowSelectAll);
   const [localSingleSelect, setLocalSingleSelect] = useState(initSingleSelect);
+  const [localFilterLevel, setLocalFilterLevel] = useState(initFilterLevel || 1);
 
   const handleSave = useCallback(async () => {
-    await updateFilterAsync(filterId, {
+    const levelChanged = localFilterLevel !== (initFilterLevel || 1);
+    const updated = await updateFilterAsync(filterId, {
       hideNoData: localHideNoData,
       indicateNoData: localIndicateNoData,
       sortNoDataLast: localSortNoDataLast,
       showSelectAll: localShowSelectAll,
       singleSelect: localSingleSelect,
+      filterLevel: localFilterLevel,
     });
+    // A level change moves an ACTIVE selection between the host-side mask
+    // and the engine-routed (pinned) filter — re-apply so target pivots
+    // pick up the new routing.
+    if (levelChanged && updated && updated.selectedItems !== null) {
+      await applyRibbonFilter(updated);
+    }
     onClose();
   }, [
     filterId, localHideNoData, localIndicateNoData, localSortNoDataLast,
-    localShowSelectAll, localSingleSelect, onClose,
+    localShowSelectAll, localSingleSelect, localFilterLevel, initFilterLevel, onClose,
   ]);
 
   return (
@@ -683,6 +698,29 @@ function FilterSettingsPanel({
       </div>
       <SettingsToggle label="Single select" checked={localSingleSelect} onChange={setLocalSingleSelect} />
       <SettingsToggle label={'Show "Select all" option'} checked={localShowSelectAll} onChange={setLocalShowSelectAll} />
+
+      {/* Filtering */}
+      <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginTop: 8, marginBottom: 4 }}>
+        Filtering
+      </div>
+      <label
+        style={{ ...styles.itemRow, justifyContent: "space-between" }}
+        title="A pinned filter (level 2+) keeps filtering even when a measure uses CLEAR or RESET — only CLEAR(…, LEVEL n) at or above its level removes it."
+      >
+        <span style={{ fontSize: 11 }}>Filter level</span>
+        <select
+          value={String(localFilterLevel)}
+          onChange={(e) => setLocalFilterLevel(Number(e.target.value))}
+          style={{ fontSize: 11 }}
+        >
+          <option value="1">1 — ordinary</option>
+          {[2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
+            <option key={n} value={String(n)}>
+              {n} — pinned
+            </option>
+          ))}
+        </select>
+      </label>
 
       {/* Data display */}
       <div style={{ fontSize: 11, fontWeight: 600, color: "#555", marginTop: 8, marginBottom: 4 }}>

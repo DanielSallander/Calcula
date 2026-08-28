@@ -53,6 +53,13 @@ pub fn create_slicer(
         item_padding: 0.0,
         button_radius: 2.0,
         connected_sources: params.connected_sources,
+        filter_level: match params.filter_level {
+            Some(level) => {
+                crate::slicer::types::validate_filter_level(level)?;
+                level
+            }
+            None => crate::slicer::types::default_filter_level(),
+        },
     };
 
     log_debug!(
@@ -166,6 +173,12 @@ pub fn update_slicer(
 ) -> Result<Slicer, String> {
     log_debug!("SLICER", "update_slicer id={}", slicer_id);
 
+    // Gate before the mutating effect: a misleveled pin silently changes
+    // which measures respect the filter, so refuse out-of-range levels.
+    if let Some(level) = params.filter_level {
+        crate::slicer::types::validate_filter_level(level)?;
+    }
+
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut slicers = slicer_state.slicers.write(&effect).unwrap();
     let slicer = slicers
@@ -239,6 +252,9 @@ pub fn update_slicer(
     }
     if let Some(connected_sources) = params.connected_sources {
         slicer.connected_sources = connected_sources;
+    }
+    if let Some(filter_level) = params.filter_level {
+        slicer.filter_level = filter_level;
     }
 
     Ok(slicer.clone())
@@ -496,11 +512,12 @@ pub fn get_slicers_for_sheet(
 /// Cross-filtering: checks other slicers AND ribbon filters that share
 /// connected sources to determine which items still have matching data.
 #[tauri::command]
-pub fn get_slicer_items(
-    state: State<AppState>,
+pub async fn get_slicer_items(
+    state: State<'_, AppState>,
     pivot_state: State<'_, PivotState>,
-    slicer_state: State<SlicerState>,
-    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    slicer_state: State<'_, SlicerState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    bi_state: State<'_, crate::bi::types::BiState>,
     slicer_id: identity::EntityId,
 ) -> Result<Vec<SlicerItem>, String> {
     // Pre-resolve each active ribbon filter's cross-filter candidacy BEFORE
@@ -552,6 +569,9 @@ pub fn get_slicer_items(
             .collect()
     };
 
+    // Everything lock-holding happens in this block (the command is async —
+    // no guard may live across an await). Clones what phase 2 needs.
+    let (slicer, unique_values_sync, has_data_set, pinned_bi) = {
     let slicers = slicer_state.slicers.read().unwrap();
     let slicer = slicers
         .get(&slicer_id)
@@ -592,17 +612,56 @@ pub fn get_slicer_items(
         sibling_filters.extend(ribbon_siblings);
     }
 
-    let unique_values = match slicer.source_type {
-        SlicerSourceType::Table => get_table_column_values(&state, reference_source_id, &slicer.field_name)?,
-        SlicerSourceType::Pivot => get_pivot_field_values(&pivot_state, reference_source_id, &slicer.field_name)?,
-        SlicerSourceType::BiConnection => {
-            // BI connection items are fetched async via bi_get_column_values on the frontend
-            return Err("BiConnection source: use bi_get_column_values instead".to_string());
-        }
+    // A PINNED (level >= 2) pivot slicer's filter is routed INSIDE the BI
+    // query, so the pivot cache only holds the SELECTED values — cache
+    // uniques would make the unselected items vanish and the slicer could
+    // never re-expand. Fetch the full domain from the BI model instead
+    // (phase 2, async, after the locks drop).
+    let pinned_bi: Option<(crate::bi::types::ConnectionId, String, String)> = if slicer
+        .filter_level
+        >= 2
+        && slicer.source_type == SlicerSourceType::Pivot
+    {
+        let bi_meta = pivot_state.bi_metadata.read().unwrap();
+        bi_meta.get(&reference_source_id).and_then(|meta| {
+            let name = slicer.field_name.clone();
+            let table_names: Vec<&str> =
+                meta.model_tables.iter().map(|t| t.name.as_str()).collect();
+            let (table, column) = if name.contains('.') {
+                crate::pivot::commands::split_bi_field_key(&name, table_names.iter().copied())
+            } else {
+                let table_name = meta
+                    .model_tables
+                    .iter()
+                    .find(|t| t.columns.iter().any(|c| c.name == name))
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                (table_name, name)
+            };
+            (!table.is_empty()).then(|| (meta.connection_id, table, column))
+        })
+    } else {
+        None
     };
 
-    // Compute has_data by checking cross-slicer filters
-    let has_data_set = if sibling_filters.is_empty() {
+    let unique_values: Option<Vec<String>> = if pinned_bi.is_some() {
+        None // fetched async in phase 2
+    } else {
+        Some(match slicer.source_type {
+            SlicerSourceType::Table => get_table_column_values(&state, reference_source_id, &slicer.field_name)?,
+            SlicerSourceType::Pivot => get_pivot_field_values(&pivot_state, reference_source_id, &slicer.field_name)?,
+            SlicerSourceType::BiConnection => {
+                // BI connection items are fetched async via bi_get_column_values on the frontend
+                return Err("BiConnection source: use bi_get_column_values instead".to_string());
+            }
+        })
+    };
+
+    // Compute has_data by checking cross-slicer filters. A pinned slicer
+    // skips availability shading: its domain comes from the model, not the
+    // (already pin-filtered) cache, so cache-based availability would grey
+    // every unselected value as "no data".
+    let has_data_set = if sibling_filters.is_empty() || pinned_bi.is_some() {
         None // No cross-filtering needed, all items have data
     } else {
         match slicer.source_type {
@@ -616,6 +675,23 @@ pub fn get_slicer_items(
                 return Err("BiConnection source: use bi_get_column_available_values instead".to_string());
             }
         }
+    };
+
+    (slicer.clone(), unique_values, has_data_set, pinned_bi)
+    }; // locks drop here — phase 2 may await
+
+    let unique_values: Vec<String> = match (unique_values_sync, &pinned_bi) {
+        (Some(values), _) => values,
+        (None, Some((conn_id, table, column))) => {
+            crate::bi::commands::bi_get_column_values(
+                bi_state,
+                *conn_id,
+                table.clone(),
+                column.clone(),
+            )
+            .await?
+        }
+        (None, None) => Vec::new(),
     };
 
     // Build items with selection state and data availability

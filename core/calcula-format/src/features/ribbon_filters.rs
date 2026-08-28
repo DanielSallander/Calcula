@@ -61,10 +61,18 @@ pub struct RibbonFilterDef {
     pub button_columns: u32,
     #[serde(default)]
     pub button_rows: u32,
+    /// Filter level: 1 = ordinary (default), 2..=9 = pinned (survives a
+    /// measure's bare CLEAR/RESET).
+    #[serde(default = "default_filter_level")]
+    pub filter_level: u8,
 }
 
 fn default_unknown() -> String {
     "unknown".to_string()
+}
+
+fn default_filter_level() -> u8 {
+    1
 }
 
 fn default_connection_mode() -> String {
@@ -116,6 +124,7 @@ impl From<&SavedRibbonFilter> for RibbonFilterDef {
             order: f.order,
             button_columns: f.button_columns,
             button_rows: f.button_rows,
+            filter_level: f.filter_level,
         }
     }
 }
@@ -153,6 +162,7 @@ impl From<&RibbonFilterDef> for SavedRibbonFilter {
             order: f.order,
             button_columns: f.button_columns,
             button_rows: f.button_rows,
+            filter_level: f.filter_level,
         }
     }
 }

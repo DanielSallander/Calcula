@@ -261,6 +261,7 @@ mod tests {
             order,
             button_columns: 2,
             button_rows: 0,
+            filter_level: 1,
         }
     }
 

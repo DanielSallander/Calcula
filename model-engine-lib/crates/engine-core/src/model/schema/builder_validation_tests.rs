@@ -13,7 +13,7 @@ use crate::types::DataType;
 fn rejects_context_name_collision_with_table() {
     use crate::model::context::{ContextDefinition, ContextOp};
 
-    let ctx = ContextDefinition::new("Sales", vec![ContextOp::Reset]);
+    let ctx = ContextDefinition::new("Sales", vec![ContextOp::Reset { level: None }]);
 
     let result = DataModel::builder()
         .add_table(sales_table())
@@ -29,7 +29,7 @@ fn rejects_context_name_collision_with_table() {
 fn rejects_table_variable_name_collision_with_context() {
     use crate::model::context::{ContextDefinition, ContextOp};
 
-    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset]);
+    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset { level: None }]);
     let var = TableVariable::new("my_ctx", "Products", vec![]);
 
     let result = DataModel::builder()
@@ -349,7 +349,7 @@ fn rejects_global_variable_name_collision_with_table() {
 fn rejects_global_variable_name_collision_with_context() {
     use crate::model::context::{ContextDefinition, ContextOp};
 
-    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset]);
+    let ctx = ContextDefinition::new("my_ctx", vec![ContextOp::Reset { level: None }]);
 
     let result = DataModel::builder()
         .add_table(sales_table())

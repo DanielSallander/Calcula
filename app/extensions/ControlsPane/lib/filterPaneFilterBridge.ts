@@ -223,13 +223,18 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
       for (const pivotId of targetPivotIds) {
         // Collect all field names that need to be in this pivot's cache
         const allFieldNames: string[] = [];
-        const filtersForPivot: Array<{ fieldName: string; selectedItems: string[] }> = [];
+        const filtersForPivot: Array<{
+          fieldName: string;
+          selectedItems: string[];
+          filterLevel: number;
+        }> = [];
 
         // The current filter
         allFieldNames.push(filter.fieldName);
         filtersForPivot.push({
           fieldName: filter.fieldName,
           selectedItems: filter.selectedItems!,
+          filterLevel: filter.filterLevel ?? 1,
         });
 
         // Other active filters targeting the same pivot
@@ -240,6 +245,7 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
             filtersForPivot.push({
               fieldName: other.fieldName,
               selectedItems: other.selectedItems!,
+              filterLevel: other.filterLevel ?? 1,
             });
           }
         }
@@ -256,6 +262,9 @@ export async function applyRibbonFilter(filter: RibbonFilter): Promise<void> {
               pivotId,
               fieldIndex,
               filters: { manualFilter: { selectedItems: f.selectedItems } },
+              // Level >= 2 routes the selection INSIDE the BI query (a
+              // pinned filter that measure CLEAR/RESET semantics honor).
+              filterLevel: f.filterLevel,
             },
           });
         }

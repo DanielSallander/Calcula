@@ -542,8 +542,8 @@ fn rejects_duplicate_context_names() {
 
     let result = DataModel::builder()
         .add_table(sales_table())
-        .add_context(ContextDefinition::new("ctx", vec![ContextOp::Reset]))
-        .add_context(ContextDefinition::new("ctx", vec![ContextOp::Reset]))
+        .add_context(ContextDefinition::new("ctx", vec![ContextOp::Reset { level: None }]))
+        .add_context(ContextDefinition::new("ctx", vec![ContextOp::Reset { level: None }]))
         .build();
 
     assert!(result.is_err());

@@ -27,18 +27,41 @@ pub enum ClearTarget {
 pub enum ContextOp {
     /// Add filter conditions (AND with existing context).
     Keep(Vec<FilterPredicate>),
-    /// Remove filters on specific dimensions (both sources).
-    Clear(Vec<ClearTarget>),
-    /// Remove all filters (both sources).
-    Reset,
+    /// Remove filters at levels `[0, level]` on specific dimensions
+    /// (`level` None ≡ 1: axis + ordinary slicers; pinned filters survive).
+    Clear {
+        /// Dimensions to clear.
+        targets: Vec<ClearTarget>,
+        /// Highest filter level cleared (`CLEAR(…, LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
+    },
+    /// Remove all filters at levels `[0, level]` (`level` None ≡ 1).
+    Reset {
+        /// Highest filter level cleared (`RESET(LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
+    },
     /// Remove inner (group-by) filters on specific dimensions.
     ClearInner(Vec<ClearTarget>),
-    /// Remove outer (query-level) filters on specific dimensions.
-    ClearOuter(Vec<ClearTarget>),
+    /// Remove filters at levels `[1, level]` on specific dimensions,
+    /// keeping the group-by axis (`level` None ≡ 1).
+    ClearOuter {
+        /// Dimensions to clear.
+        targets: Vec<ClearTarget>,
+        /// Highest filter level cleared (`CLEAR_OUTER(…, LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
+    },
     /// Remove all inner (group-by) filters.
     ResetInner,
-    /// Remove all outer (query-level) filters.
-    ResetOuter,
+    /// Remove all filters at levels `[1, level]`, keeping the group-by axis
+    /// (`level` None ≡ 1).
+    ResetOuter {
+        /// Highest filter level cleared (`RESET_OUTER(LEVEL n)`); None ≡ 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<u8>,
+    },
     /// Apply IN-membership filters.
     KeepIn(Vec<InPredicate>),
     /// Inherit all operations from another named context.
@@ -101,6 +124,15 @@ fn clear_targets_to_text(targets: &[ClearTarget]) -> String {
         .join(", ")
 }
 
+/// Render an optional level ceiling as the trailing `, LEVEL n` argument
+/// (empty for the canonical bare form, i.e. `level` None or 1).
+fn level_suffix(level: Option<u8>) -> String {
+    match level {
+        Some(n) if n > 1 => format!(", LEVEL {n}"),
+        _ => String::new(),
+    }
+}
+
 impl ContextOp {
     /// Render this operation in the `CONTEXT` expression syntax accepted by
     /// [`parse_context`](crate::compute::parser::parse_context). Returns
@@ -118,16 +150,31 @@ impl ContextOp {
                 let parts: Vec<String> = preds.iter().map(in_predicate_to_text).collect();
                 Some(format!("KEEP({}, {})", first.table, parts.join(", ")))
             }
-            ContextOp::Clear(targets) => {
-                (!targets.is_empty()).then(|| format!("CLEAR({})", clear_targets_to_text(targets)))
-            }
+            ContextOp::Clear { targets, level } => (!targets.is_empty()).then(|| {
+                format!(
+                    "CLEAR({}{})",
+                    clear_targets_to_text(targets),
+                    level_suffix(*level)
+                )
+            }),
             ContextOp::ClearInner(targets) => (!targets.is_empty())
                 .then(|| format!("CLEAR_INNER({})", clear_targets_to_text(targets))),
-            ContextOp::ClearOuter(targets) => (!targets.is_empty())
-                .then(|| format!("CLEAR_OUTER({})", clear_targets_to_text(targets))),
-            ContextOp::Reset => Some("RESET()".to_string()),
+            ContextOp::ClearOuter { targets, level } => (!targets.is_empty()).then(|| {
+                format!(
+                    "CLEAR_OUTER({}{})",
+                    clear_targets_to_text(targets),
+                    level_suffix(*level)
+                )
+            }),
+            ContextOp::Reset { level } => match *level {
+                Some(n) if n > 1 => Some(format!("RESET(LEVEL {n})")),
+                _ => Some("RESET()".to_string()),
+            },
             ContextOp::ResetInner => Some("RESET_INNER()".to_string()),
-            ContextOp::ResetOuter => Some("RESET_OUTER()".to_string()),
+            ContextOp::ResetOuter { level } => match *level {
+                Some(n) if n > 1 => Some(format!("RESET_OUTER(LEVEL {n})")),
+                _ => Some("RESET_OUTER()".to_string()),
+            },
             ContextOp::Inherit(name) => Some(name.clone()),
             ContextOp::UseRelationship(name) => Some(format!("USERELATIONSHIP(\"{name}\")")),
         }
@@ -211,10 +258,13 @@ mod tests {
                     ComparisonOp::Equal,
                     "US",
                 )]),
-                ContextOp::Clear(vec![ClearTarget::Column {
-                    table: "Calendar".into(),
-                    column: "Year".into(),
-                }]),
+                ContextOp::Clear {
+                    targets: vec![ClearTarget::Column {
+                        table: "Calendar".into(),
+                        column: "Year".into(),
+                    }],
+                    level: None,
+                },
             ],
         );
         assert_eq!(ctx.name(), "test_ctx");
@@ -256,8 +306,33 @@ mod tests {
 
     #[test]
     fn context_with_reset() {
-        let ctx = ContextDefinition::new("no_filters", vec![ContextOp::Reset]);
+        let ctx = ContextDefinition::new("no_filters", vec![ContextOp::Reset { level: None }]);
         assert_eq!(ctx.operations().len(), 1);
-        assert_eq!(ctx.operations()[0], ContextOp::Reset);
+        assert_eq!(ctx.operations()[0], ContextOp::Reset { level: None });
+    }
+
+    #[test]
+    fn context_op_level_renders_and_canonicalizes() {
+        // Level 2 renders the LEVEL suffix; level 1 and None render the bare
+        // canonical form.
+        let t = |level| {
+            ContextOp::Clear {
+                targets: vec![ClearTarget::Table("Products".into())],
+                level,
+            }
+            .to_text()
+            .unwrap()
+        };
+        assert_eq!(t(Some(2)), "CLEAR(Products, LEVEL 2)");
+        assert_eq!(t(Some(1)), "CLEAR(Products)");
+        assert_eq!(t(None), "CLEAR(Products)");
+        assert_eq!(
+            ContextOp::Reset { level: Some(3) }.to_text().unwrap(),
+            "RESET(LEVEL 3)"
+        );
+        assert_eq!(
+            ContextOp::ResetOuter { level: Some(2) }.to_text().unwrap(),
+            "RESET_OUTER(LEVEL 2)"
+        );
     }
 }

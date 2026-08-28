@@ -117,11 +117,11 @@ fn collect_variable_names(expr: &Expression, model: &DataModel, names: &mut Vec<
             collect_variable_names(inner, model, names);
         }
         Expression::Clear { expr: inner, .. }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ClearInner { expr: inner, .. }
         | Expression::ClearOuter { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner }
+        | Expression::ResetOuter { expr: inner, .. }
         | Expression::Traverse { expr: inner, .. }
         | Expression::Using { expr: inner, .. }
         | Expression::KeepIn { expr: inner, .. } => {
@@ -263,11 +263,11 @@ fn collect_context_names_from_expr(expr: &Expression, model: &DataModel, names: 
             collect_context_names_from_expr(inner, model, names);
         }
         Expression::Clear { expr: inner, .. }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ClearInner { expr: inner, .. }
         | Expression::ClearOuter { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner }
+        | Expression::ResetOuter { expr: inner, .. }
         | Expression::Traverse { expr: inner, .. }
         | Expression::Using { expr: inner, .. }
         | Expression::KeepIn { expr: inner, .. } => {
@@ -413,11 +413,11 @@ fn collect_userelationship_names(expr: &Expression, names: &mut Vec<String>) {
         Expression::Keep { expr: inner, .. }
         | Expression::KeepIn { expr: inner, .. }
         | Expression::Clear { expr: inner, .. }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ClearInner { expr: inner, .. }
         | Expression::ClearOuter { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner }
+        | Expression::ResetOuter { expr: inner, .. }
         | Expression::Traverse { expr: inner, .. }
         | Expression::Using { expr: inner, .. } => {
             collect_userelationship_names(inner, names);
@@ -573,11 +573,11 @@ fn collect_query_names_recursive(expr: &Expression, names: &mut Vec<String>) {
         }
         Expression::Keep { expr: inner, .. }
         | Expression::Clear { expr: inner, .. }
-        | Expression::Reset { expr: inner }
+        | Expression::Reset { expr: inner, .. }
         | Expression::ClearInner { expr: inner, .. }
         | Expression::ClearOuter { expr: inner, .. }
         | Expression::ResetInner { expr: inner }
-        | Expression::ResetOuter { expr: inner }
+        | Expression::ResetOuter { expr: inner, .. }
         | Expression::Traverse { expr: inner, .. }
         | Expression::Using { expr: inner, .. }
         | Expression::KeepIn { expr: inner, .. } => {

@@ -113,57 +113,83 @@ impl Parser {
         })
     }
 
-    /// Parse `CLEAR(table)` or `CLEAR(table[column])`.
+    /// Parse `CLEAR(table)` / `CLEAR(table[column])` / `CLEAR(…, LEVEL n)`.
+    ///
+    /// `LEVEL 0` canonicalizes to `CLEAR_INNER` (axis-only) and `LEVEL 1` to
+    /// the bare form, so the AST always carries the canonical spelling.
     pub(super) fn parse_clear_call(&mut self) -> EngineResult<Expression> {
-        let targets = self.parse_clear_targets()?;
+        let (targets, level) = self.parse_clear_targets(true, "CLEAR")?;
         self.expect(&Token::RParen)?;
-        Ok(Expression::Clear {
-            expr: Box::new(expr::lit_int(0)), // placeholder
-            targets,
+        self.require_clear_targets(&targets, "CLEAR")?;
+        Ok(match level {
+            Some(0) => Expression::ClearInner {
+                expr: Box::new(expr::lit_int(0)), // placeholder
+                targets,
+            },
+            _ => Expression::Clear {
+                expr: Box::new(expr::lit_int(0)), // placeholder
+                targets,
+                level: canonical_level(level),
+            },
         })
     }
 
     /// Parse `CLEAR_INNER(table)` or `CLEAR_INNER(table[column])`.
     pub(super) fn parse_clear_inner_call(&mut self) -> EngineResult<Expression> {
-        let targets = self.parse_clear_targets()?;
+        let (targets, _) = self.parse_clear_targets(false, "CLEAR_INNER")?;
         self.expect(&Token::RParen)?;
+        self.require_clear_targets(&targets, "CLEAR_INNER")?;
         Ok(Expression::ClearInner {
             expr: Box::new(expr::lit_int(0)),
             targets,
         })
     }
 
-    /// Parse `CLEAR_OUTER(table)` or `CLEAR_OUTER(table[column])`.
+    /// Parse `CLEAR_OUTER(table)` / `CLEAR_OUTER(table[column])` /
+    /// `CLEAR_OUTER(…, LEVEL n)` (n ≥ 1 — the axis is kept by definition).
     pub(super) fn parse_clear_outer_call(&mut self) -> EngineResult<Expression> {
-        let targets = self.parse_clear_targets()?;
+        let (targets, level) = self.parse_clear_targets(true, "CLEAR_OUTER")?;
         self.expect(&Token::RParen)?;
+        self.require_clear_targets(&targets, "CLEAR_OUTER")?;
+        self.reject_outer_level_zero(level, "CLEAR_OUTER")?;
         Ok(Expression::ClearOuter {
             expr: Box::new(expr::lit_int(0)),
             targets,
+            level: canonical_level(level),
         })
     }
 
-    /// Parse RESET() — no arguments.
+    /// Parse `RESET()` or `RESET(LEVEL n)`.
+    ///
+    /// `LEVEL 0` canonicalizes to `RESET_INNER` and `LEVEL 1` to the bare form.
     pub(super) fn parse_reset_call(&mut self) -> EngineResult<Expression> {
-        self.expect(&Token::RParen)?;
-        Ok(Expression::Reset {
-            expr: Box::new(expr::lit_int(0)),
+        let level = self.parse_reset_level(true, "RESET")?;
+        Ok(match level {
+            Some(0) => Expression::ResetInner {
+                expr: Box::new(expr::lit_int(0)),
+            },
+            _ => Expression::Reset {
+                expr: Box::new(expr::lit_int(0)),
+                level: canonical_level(level),
+            },
         })
     }
 
     /// Parse RESET_INNER() — no arguments.
     pub(super) fn parse_reset_inner_call(&mut self) -> EngineResult<Expression> {
-        self.expect(&Token::RParen)?;
+        self.parse_reset_level(false, "RESET_INNER")?;
         Ok(Expression::ResetInner {
             expr: Box::new(expr::lit_int(0)),
         })
     }
 
-    /// Parse RESET_OUTER() — no arguments.
+    /// Parse `RESET_OUTER()` or `RESET_OUTER(LEVEL n)` (n ≥ 1).
     pub(super) fn parse_reset_outer_call(&mut self) -> EngineResult<Expression> {
-        self.expect(&Token::RParen)?;
+        let level = self.parse_reset_level(true, "RESET_OUTER")?;
+        self.reject_outer_level_zero(level, "RESET_OUTER")?;
         Ok(Expression::ResetOuter {
             expr: Box::new(expr::lit_int(0)),
+            level: canonical_level(level),
         })
     }
 
@@ -181,8 +207,9 @@ impl Parser {
                 expr: Box::new(expr::lit_int(0)),
             });
         }
-        let targets = self.parse_clear_targets()?;
+        let (targets, _) = self.parse_clear_targets(false, "ALLSELECTED")?;
         self.expect(&Token::RParen)?;
+        self.require_clear_targets(&targets, "ALLSELECTED")?;
         Ok(Expression::ClearInner {
             expr: Box::new(expr::lit_int(0)),
             targets,
@@ -206,15 +233,32 @@ impl Parser {
         })
     }
 
-    /// Parse one or more clear targets (table or table[column]), comma-separated.
-    fn parse_clear_targets(&mut self) -> EngineResult<Vec<ClearTarget>> {
+    /// Parse one or more clear targets (table or table[column]),
+    /// comma-separated, with an optional trailing `LEVEL n` argument.
+    ///
+    /// `LEVEL` is a *contextual* keyword: the identifier is claimed only when
+    /// the token after it is a number, so a table literally named `level`
+    /// still works as a target. When claimed, `LEVEL n` must be the last
+    /// argument. Functions with a fixed level (`CLEAR_INNER`, `ALLSELECTED`)
+    /// pass `allow_level: false` and get a targeted error instead.
+    fn parse_clear_targets(
+        &mut self,
+        allow_level: bool,
+        func: &str,
+    ) -> EngineResult<(Vec<ClearTarget>, Option<u8>)> {
         let mut targets = Vec::new();
+        let mut level = None;
         loop {
+            if self.peek_is_level_keyword() {
+                level = Some(self.parse_level_argument(allow_level, func)?);
+                break;
+            }
+
             let table = match self.advance()?.clone() {
                 Token::Ident(s) => s,
                 tok => {
                     return Err(
-                        self.parse_err_prev(format!("CLEAR: expected table name, got {tok:?}"))
+                        self.parse_err_prev(format!("{func}: expected table name, got {tok:?}"))
                     );
                 }
             };
@@ -225,7 +269,7 @@ impl Parser {
                     Token::Ident(s) => s,
                     tok => {
                         return Err(self
-                            .parse_err_prev(format!("CLEAR: expected column name, got {tok:?}")));
+                            .parse_err_prev(format!("{func}: expected column name, got {tok:?}")));
                     }
                 };
                 self.expect(&Token::RBracket)?;
@@ -249,7 +293,76 @@ impl Parser {
                 break;
             }
         }
-        Ok(targets)
+        Ok((targets, level))
+    }
+
+    /// Whether the upcoming tokens are the contextual `LEVEL n` phrase:
+    /// an identifier spelled LEVEL immediately followed by a number.
+    fn peek_is_level_keyword(&self) -> bool {
+        matches!(self.peek(), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("LEVEL"))
+            && matches!(self.tokens.get(self.pos + 1), Some(Token::Number(_)))
+    }
+
+    /// Consume `LEVEL n`, validate the level, and require that it is the last
+    /// argument (the next token must close the call).
+    fn parse_level_argument(&mut self, allow_level: bool, func: &str) -> EngineResult<u8> {
+        if !allow_level {
+            return Err(self.parse_err(format!(
+                "{func} does not take a LEVEL argument — its level is fixed (level 0, the \
+                 group-by axis); use CLEAR with LEVEL to clear higher filter levels"
+            )));
+        }
+        self.advance()?; // consume LEVEL
+        let level = match self.advance()?.clone() {
+            Token::Number(n) if n.fract() == 0.0 && (0.0..=9.0).contains(&n) => n as u8,
+            Token::Number(n) => {
+                return Err(self.parse_err_prev(format!(
+                    "LEVEL must be an integer between 0 and 9, got {n}"
+                )));
+            }
+            tok => {
+                return Err(self.parse_err_prev(format!("LEVEL: expected a number, got {tok:?}")));
+            }
+        };
+        if self.peek() != Some(&Token::RParen) {
+            return Err(self.parse_err(format!("{func}: LEVEL must be the last argument")));
+        }
+        Ok(level)
+    }
+
+    /// Parse the argument list of a RESET-family call: `)` or `LEVEL n)`.
+    fn parse_reset_level(&mut self, allow_level: bool, func: &str) -> EngineResult<Option<u8>> {
+        let level = if self.peek_is_level_keyword() {
+            Some(self.parse_level_argument(allow_level, func)?)
+        } else {
+            None
+        };
+        self.expect(&Token::RParen)?;
+        Ok(level)
+    }
+
+    /// A clear call needs at least one target (`CLEAR(LEVEL 2)` alone is
+    /// meaningless — RESET is the all-tables form).
+    fn require_clear_targets(&self, targets: &[ClearTarget], func: &str) -> EngineResult<()> {
+        if targets.is_empty() {
+            return Err(self.parse_err(format!(
+                "{func} requires at least one table or table[column] target; use RESET to clear \
+                 across all tables"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The outer variants keep the axis (level 0) by definition — `LEVEL 0`
+    /// cannot be expressed with them.
+    fn reject_outer_level_zero(&self, level: Option<u8>, func: &str) -> EngineResult<()> {
+        if level == Some(0) {
+            return Err(self.parse_err(format!(
+                "{func} keeps the group-by axis (level 0); its LEVEL must be at least 1 — use \
+                 CLEAR_INNER for axis-only clearing"
+            )));
+        }
+        Ok(())
     }
 
     /// Parse `table[column] op value`.
@@ -360,41 +473,62 @@ impl Parser {
             "CLEAR" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
-                let targets = self.parse_clear_targets()?;
+                let (targets, level) = self.parse_clear_targets(true, "CLEAR")?;
                 self.expect(&Token::RParen)?;
-                ContextOp::Clear(targets)
+                self.require_clear_targets(&targets, "CLEAR")?;
+                match level {
+                    Some(0) => ContextOp::ClearInner(targets),
+                    _ => ContextOp::Clear {
+                        targets,
+                        level: canonical_level(level),
+                    },
+                }
             }
             "CLEAR_INNER" | "CLEARINNER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
-                let targets = self.parse_clear_targets()?;
+                let (targets, _) = self.parse_clear_targets(false, "CLEAR_INNER")?;
                 self.expect(&Token::RParen)?;
+                self.require_clear_targets(&targets, "CLEAR_INNER")?;
                 ContextOp::ClearInner(targets)
             }
             "CLEAR_OUTER" | "CLEAROUTER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
-                let targets = self.parse_clear_targets()?;
+                let (targets, level) = self.parse_clear_targets(true, "CLEAR_OUTER")?;
                 self.expect(&Token::RParen)?;
-                ContextOp::ClearOuter(targets)
+                self.require_clear_targets(&targets, "CLEAR_OUTER")?;
+                self.reject_outer_level_zero(level, "CLEAR_OUTER")?;
+                ContextOp::ClearOuter {
+                    targets,
+                    level: canonical_level(level),
+                }
             }
             "RESET" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
-                self.expect(&Token::RParen)?;
-                ContextOp::Reset
+                let level = self.parse_reset_level(true, "RESET")?;
+                match level {
+                    Some(0) => ContextOp::ResetInner,
+                    _ => ContextOp::Reset {
+                        level: canonical_level(level),
+                    },
+                }
             }
             "RESET_INNER" | "RESETINNER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
-                self.expect(&Token::RParen)?;
+                self.parse_reset_level(false, "RESET_INNER")?;
                 ContextOp::ResetInner
             }
             "RESET_OUTER" | "RESETOUTER" => {
                 self.advance()?;
                 self.expect(&Token::LParen)?;
-                self.expect(&Token::RParen)?;
-                ContextOp::ResetOuter
+                let level = self.parse_reset_level(true, "RESET_OUTER")?;
+                self.reject_outer_level_zero(level, "RESET_OUTER")?;
+                ContextOp::ResetOuter {
+                    level: canonical_level(level),
+                }
             }
             "USERELATIONSHIP" => {
                 self.advance()?;
@@ -538,6 +672,16 @@ impl Parser {
     }
 }
 
+/// Canonicalize a parsed level ceiling: `LEVEL 1` is the bare form's own
+/// meaning, so it normalizes to None (and renders back without a suffix).
+/// `LEVEL 0` is lowered to the *_INNER variants by the callers before this.
+fn canonical_level(level: Option<u8>) -> Option<u8> {
+    match level {
+        Some(1) => None,
+        other => other,
+    }
+}
+
 /// Wrap an aggregate expression with a context operation.
 ///
 /// The context op was parsed as a placeholder Expression; here we extract
@@ -566,12 +710,14 @@ pub(super) fn wrap_context_op(
             in_predicates,
         }),
         Expression::TableRef(name) => Ok(expr::keep_vars(aggregate, vec![name])),
-        Expression::Clear { targets, .. } => Ok(expr::clear(aggregate, targets)),
-        Expression::Reset { .. } => Ok(expr::reset(aggregate)),
+        Expression::Clear { targets, level, .. } => Ok(expr::clear_at(aggregate, targets, level)),
+        Expression::Reset { level, .. } => Ok(expr::reset_at(aggregate, level)),
         Expression::ClearInner { targets, .. } => Ok(expr::clear_inner(aggregate, targets)),
-        Expression::ClearOuter { targets, .. } => Ok(expr::clear_outer(aggregate, targets)),
+        Expression::ClearOuter { targets, level, .. } => {
+            Ok(expr::clear_outer_at(aggregate, targets, level))
+        }
         Expression::ResetInner { .. } => Ok(expr::reset_inner(aggregate)),
-        Expression::ResetOuter { .. } => Ok(expr::reset_outer(aggregate)),
+        Expression::ResetOuter { level, .. } => Ok(expr::reset_outer_at(aggregate, level)),
         Expression::Using { context_name, .. } => Ok(expr::using(aggregate, context_name)),
         Expression::UseRelationship {
             relationship_name, ..
@@ -895,9 +1041,10 @@ mod tests {
         let ctx = parse_context("all_time", "CLEAR(dim_date)").unwrap();
         assert_eq!(ctx.operations().len(), 1);
         match &ctx.operations()[0] {
-            ContextOp::Clear(targets) => {
+            ContextOp::Clear { targets, level } => {
                 assert_eq!(targets.len(), 1);
                 assert!(matches!(&targets[0], ClearTarget::Table(t) if t == "dim_date"));
+                assert_eq!(*level, None);
             }
             _ => panic!("expected Clear"),
         }
@@ -907,7 +1054,7 @@ mod tests {
     fn parse_context_clear_column() {
         let ctx = parse_context("no_year", "CLEAR(dim_date[year])").unwrap();
         match &ctx.operations()[0] {
-            ContextOp::Clear(targets) => {
+            ContextOp::Clear { targets, .. } => {
                 assert!(matches!(
                     &targets[0],
                     ClearTarget::Column { table, column } if table == "dim_date" && column == "year"
@@ -921,7 +1068,7 @@ mod tests {
     fn parse_context_reset() {
         let ctx = parse_context("no_filters", "RESET()").unwrap();
         assert_eq!(ctx.operations().len(), 1);
-        assert_eq!(ctx.operations()[0], ContextOp::Reset);
+        assert_eq!(ctx.operations()[0], ContextOp::Reset { level: None });
     }
 
     #[test]
@@ -929,7 +1076,10 @@ mod tests {
         let ctx = parse_context("test", "CLEAR_INNER(dim_date), CLEAR_OUTER(dim_product)").unwrap();
         assert_eq!(ctx.operations().len(), 2);
         assert!(matches!(&ctx.operations()[0], ContextOp::ClearInner(_)));
-        assert!(matches!(&ctx.operations()[1], ContextOp::ClearOuter(_)));
+        assert!(matches!(
+            &ctx.operations()[1],
+            ContextOp::ClearOuter { .. }
+        ));
     }
 
     #[test]
@@ -937,7 +1087,44 @@ mod tests {
         let ctx = parse_context("test", "RESET_INNER(), RESET_OUTER()").unwrap();
         assert_eq!(ctx.operations().len(), 2);
         assert_eq!(ctx.operations()[0], ContextOp::ResetInner);
-        assert_eq!(ctx.operations()[1], ContextOp::ResetOuter);
+        assert_eq!(ctx.operations()[1], ContextOp::ResetOuter { level: None });
+    }
+
+    #[test]
+    fn parse_context_level_arguments() {
+        // LEVEL in a CONTEXT definition: canonicalization matches the measure
+        // grammar — LEVEL 0 lowers to the INNER variant, LEVEL 1 to the bare
+        // form, higher levels are carried.
+        let ctx = parse_context(
+            "lvl",
+            "CLEAR(dim_date, LEVEL 2), CLEAR(dim_product, LEVEL 0), CLEAR(dim_geo, LEVEL 1), \
+             RESET_OUTER(LEVEL 3)",
+        )
+        .unwrap();
+        assert_eq!(ctx.operations().len(), 4);
+        assert!(matches!(
+            &ctx.operations()[0],
+            ContextOp::Clear { level: Some(2), .. }
+        ));
+        assert!(matches!(&ctx.operations()[1], ContextOp::ClearInner(_)));
+        assert!(matches!(
+            &ctx.operations()[2],
+            ContextOp::Clear { level: None, .. }
+        ));
+        assert_eq!(ctx.operations()[3], ContextOp::ResetOuter { level: Some(3) });
+
+        // RESET(LEVEL 0) lowers to RESET_INNER.
+        let ctx = parse_context("lvl0", "RESET(LEVEL 0)").unwrap();
+        assert_eq!(ctx.operations()[0], ContextOp::ResetInner);
+
+        // Fixed-level ops refuse LEVEL; outer ops refuse LEVEL 0.
+        assert!(parse_context("bad", "CLEAR_INNER(dim_date, LEVEL 2)").is_err());
+        assert!(parse_context("bad", "RESET_INNER(LEVEL 2)").is_err());
+        assert!(parse_context("bad", "CLEAR_OUTER(dim_date, LEVEL 0)").is_err());
+        assert!(parse_context("bad", "RESET_OUTER(LEVEL 0)").is_err());
+        // Out-of-range and non-integer levels are refused.
+        assert!(parse_context("bad", "CLEAR(dim_date, LEVEL 10)").is_err());
+        assert!(parse_context("bad", "CLEAR(dim_date, LEVEL 2.5)").is_err());
     }
 
     #[test]
@@ -1089,21 +1276,31 @@ mod tests {
                     InPredicate::new("fact_sales", "productid", "premium", "id"),
                     InPredicate::new("fact_sales", "customerid", "vips", "id").with_negated(true),
                 ]),
-                ContextOp::Clear(vec![
-                    ClearTarget::Column {
-                        table: "dim_date".into(),
-                        column: "year".into(),
-                    },
-                    ClearTarget::Table("dim_geo".into()),
-                ]),
+                ContextOp::Clear {
+                    targets: vec![
+                        ClearTarget::Column {
+                            table: "dim_date".into(),
+                            column: "year".into(),
+                        },
+                        ClearTarget::Table("dim_geo".into()),
+                    ],
+                    level: None,
+                },
+                ContextOp::Clear {
+                    targets: vec![ClearTarget::Table("dim_pinned".into())],
+                    level: Some(2),
+                },
                 ContextOp::ClearInner(vec![ClearTarget::Table("dim_date".into())]),
-                ContextOp::ClearOuter(vec![ClearTarget::Column {
-                    table: "fact_sales".into(),
-                    column: "region".into(),
-                }]),
-                ContextOp::Reset,
+                ContextOp::ClearOuter {
+                    targets: vec![ClearTarget::Column {
+                        table: "fact_sales".into(),
+                        column: "region".into(),
+                    }],
+                    level: None,
+                },
+                ContextOp::Reset { level: None },
                 ContextOp::ResetInner,
-                ContextOp::ResetOuter,
+                ContextOp::ResetOuter { level: Some(3) },
                 ContextOp::UseRelationship("ShipDate".into()),
             ],
         );
@@ -1140,8 +1337,11 @@ mod tests {
             "sparse",
             vec![
                 ContextOp::Keep(Vec::new()),
-                ContextOp::Reset,
-                ContextOp::Clear(Vec::new()),
+                ContextOp::Reset { level: None },
+                ContextOp::Clear {
+                    targets: Vec::new(),
+                    level: None,
+                },
             ],
         );
         assert_eq!(ctx.to_text(), "RESET()");

@@ -121,12 +121,16 @@ String values use double quotes: `table[name] = "Bikes"`. Numeric values are unq
 ```text
 CLEAR(table_name)
 CLEAR(table[column])
+CLEAR(table[column], LEVEL n)
 ```
 
 **RESET** — removes all filters:
 ```text
 RESET()
+RESET(LEVEL n)
 ```
+
+**Filter levels** — every filter sits on a level: **0** = the query's own group-by axis, **1** = ordinary slicers and query-level filters, **2–9** = **pinned** filters (marked as structural when added to the request). Bare `CLEAR`/`RESET` remove levels 0–1, so pinned filters survive them; `LEVEL n` extends the range to 0–n. `CLEAR_OUTER`/`RESET_OUTER` also accept `LEVEL n` (removing levels 1–n; `LEVEL 0` is a parse error there), while `CLEAR_INNER`/`RESET_INNER`/`ALLSELECTED` are fixed at level 0 and take no LEVEL. `LEVEL` is a **contextual keyword** — claimed only when immediately followed by a number, so a table literally named `level` still works as a target — must be the **last** argument, and `n` must be an integer 0–9. `LEVEL 0` canonicalizes to `CLEAR_INNER`/`RESET_INNER` and `LEVEL 1` to the bare form; a saved formula renders back in the canonical spelling.
 
 **USING** — applies a named context:
 ```text
@@ -681,6 +685,8 @@ let grand_total = expr::agg(
 
 **What is removed.** `clear()` and `reset()` remove filters from **both** sources — the group-by axis *and* query-level slicers — matching DAX `ALL` / `REMOVEFILTERS`. The source-specific variants split this: `clear_inner()` / `reset_inner()` remove only the axis (keeping slicers, the "share of visible total" case), and `clear_outer()` / `reset_outer()` remove only slicers.
 
+**Filter levels.** Every filter that reaches a measure sits on a level: **0** = the group-by axis, **1** = ordinary slicers and query-level filters, **2–9** = **pinned** filters — filters marked as structural when added to the request (hosts let users pin slicers). Each clear function removes a contiguous level range: bare `CLEAR`/`RESET` cover levels 0–1, `CLEAR(…, LEVEL n)`/`RESET(LEVEL n)` cover 0–n, `CLEAR_OUTER`/`RESET_OUTER` cover 1–1 (or 1–n with `LEVEL n`; `LEVEL 0` is a parse error there), and `CLEAR_INNER`/`RESET_INNER`/`ALLSELECTED` are fixed at level 0 and take no LEVEL. Because a pin sits **out of range** of bare `CLEAR`/`RESET`/`CLEAREXCEPT`, pinning a filter once (level 2) keeps it alive through every existing clearing measure — no `CLEAREXCEPT` boilerplate. `LEVEL 0` canonicalizes to the INNER spelling and `LEVEL 1` to the bare form (a saved formula renders back canonically); `LEVEL` is a contextual keyword (claimed only when immediately followed by a number, so a table named `level` still works), must be the last argument, and out-of-range or non-integer levels are parse errors.
+
 **How it computes.** A cleared aggregate re-aggregates over the *surviving* group-by partition, so percentage measures compute correctly:
 
 ```
@@ -693,9 +699,11 @@ PctOfCategory = sum(Sales.Amount) / sum(clear_except(Sales.Amount, Products.Cate
 
 The grand-total case (`reset()`, or `clear()` of every axis dimension) is rendered as a scalar subquery; the partitioned case (percent-of-parent) as a two-level query with a `PARTITION BY` window. Both produce the same numbers on the local (in-memory) and pushed (PostgreSQL) paths.
 
+**Slicer removal.** Removing an ordinary (level-1) slicer from inside a measure **executes** for plain aggregate measures on the local path: the filter is applied **per measure** — the clearing measure evaluates without it, other measures keep it, and the result's rows still honor every filter. The same applies to a pinned filter reached by `CLEAR(…, LEVEL n)`. Pinned filters need none of this machinery to survive: a pin simply sits out of range of bare `CLEAR`/`RESET`, so those queries run everywhere.
+
 **When it refuses (fails closed with a typed `QueryError`, never a wrong number):**
 
-- **Slicer removal is not yet wired.** If `clear()`/`reset()`/`clear_except()`/`clear_outer()` would need to strip a **report slicer** on the cleared table, the query is refused. Use `clear_inner()` for axis-only clearing, or drop the slicer at the request layer. (This guard runs on both execution paths, so they always agree.)
+- **Contested clears in hard shapes.** A slicer- or pin-contesting clear still fails closed for: **compound measures** (e.g. DIVIDE percent-of-total shapes) whose clear contests a request filter; a contested clear combined with an **axis-spanning window re-aggregation** (e.g. grouped broadcast totals over a sliced table); **OR slicers**; **ROLLUP totals**; and multi-fact/window/pre-aggregate paths. Use `clear_inner()` for axis-only clearing, drop the slicer at the request layer — or pin it, which needs no clearing at all.
 - **Non-additive aggregate.** Only `SUM` / `COUNT` / `COUNTROWS` / `MIN` / `MAX` recombine over a cleared partition. `AVG` / `DISTINCTCOUNT` / `MEDIAN` / `STDEV` / … under `clear()` fail closed.
 - **Percent-of-parent shape.** The partitioned form (a `clear_except()` that keeps a surviving group-by column) is supported only in a plain grouped query — combined with rollup totals, lookups, hierarchies, or context columns it fails closed. Grand-total clearing has no such restriction.
 
@@ -746,6 +754,7 @@ CONTEXT ctx_no_region = CLEAR(Sales[region])
 CONTEXT ctx_fresh = RESET()
 CONTEXT ctx_no_inner_date = CLEAR_INNER(dim_date)
 CONTEXT ctx_no_outer_region = CLEAR_OUTER(Sales[region])
+CONTEXT ctx_ignore_pins = CLEAR(dim_date, LEVEL 2)
 CONTEXT ctx_derived = ctx_bikes, KEEP(dim_date, dim_date[year] = 2024)
 ```
 
@@ -761,9 +770,12 @@ Context operations available in definitions:
   `CUSTOMDATA()` — or an IN-membership `table[column] IN var[column]`
   (`NOT IN` negates). A KEEP mixing comparisons and memberships yields a
   `Keep` operation followed by a `KeepIn` operation
-- `CLEAR(table)` / `CLEAR(table[column])` — remove filters
-- `CLEAR_INNER(...)` / `CLEAR_OUTER(...)` — source-specific clearing
-- `RESET()` / `RESET_INNER()` / `RESET_OUTER()` — remove all filters
+- `CLEAR(table)` / `CLEAR(table[column])` — remove filters; an optional
+  trailing `LEVEL n` extends the clear to pinned filter levels
+- `CLEAR_INNER(...)` / `CLEAR_OUTER(...)` — source-specific clearing;
+  `CLEAR_OUTER` also accepts a trailing `LEVEL n` (n >= 1)
+- `RESET()` / `RESET_INNER()` / `RESET_OUTER()` — remove all filters;
+  `RESET` accepts `LEVEL n` and `RESET_OUTER` accepts `LEVEL n` (n >= 1)
 - `USERELATIONSHIP("name")` — activate an inactive relationship
 - Bare name (e.g., `ctx_2024`) — inherit all operations from another context
 

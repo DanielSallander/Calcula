@@ -297,26 +297,38 @@ impl Expression {
                 conditions: conditions.iter().map(|c| c.substitute_vars(env)).collect(),
                 in_predicates: in_predicates.clone(),
             },
-            Expression::Clear { expr, targets } => Expression::Clear {
+            Expression::Clear {
+                expr,
+                targets,
+                level,
+            } => Expression::Clear {
                 expr: Box::new(expr.substitute_vars(env)),
                 targets: targets.clone(),
+                level: *level,
             },
-            Expression::Reset { expr } => Expression::Reset {
+            Expression::Reset { expr, level } => Expression::Reset {
                 expr: Box::new(expr.substitute_vars(env)),
+                level: *level,
             },
             Expression::ClearInner { expr, targets } => Expression::ClearInner {
                 expr: Box::new(expr.substitute_vars(env)),
                 targets: targets.clone(),
             },
-            Expression::ClearOuter { expr, targets } => Expression::ClearOuter {
+            Expression::ClearOuter {
+                expr,
+                targets,
+                level,
+            } => Expression::ClearOuter {
                 expr: Box::new(expr.substitute_vars(env)),
                 targets: targets.clone(),
+                level: *level,
             },
             Expression::ResetInner { expr } => Expression::ResetInner {
                 expr: Box::new(expr.substitute_vars(env)),
             },
-            Expression::ResetOuter { expr } => Expression::ResetOuter {
+            Expression::ResetOuter { expr, level } => Expression::ResetOuter {
                 expr: Box::new(expr.substitute_vars(env)),
+                level: *level,
             },
             Expression::Traverse { expr, path } => Expression::Traverse {
                 expr: Box::new(expr.substitute_vars(env)),
@@ -956,26 +968,38 @@ impl Expression {
                     .collect(),
                 in_predicates: in_predicates.clone(),
             },
-            Expression::Clear { expr, targets } => Expression::Clear {
+            Expression::Clear {
+                expr,
+                targets,
+                level,
+            } => Expression::Clear {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
                 targets: targets.clone(),
+                level: *level,
             },
-            Expression::Reset { expr } => Expression::Reset {
+            Expression::Reset { expr, level } => Expression::Reset {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
+                level: *level,
             },
             Expression::ClearInner { expr, targets } => Expression::ClearInner {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
                 targets: targets.clone(),
             },
-            Expression::ClearOuter { expr, targets } => Expression::ClearOuter {
+            Expression::ClearOuter {
+                expr,
+                targets,
+                level,
+            } => Expression::ClearOuter {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
                 targets: targets.clone(),
+                level: *level,
             },
             Expression::ResetInner { expr } => Expression::ResetInner {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
             },
-            Expression::ResetOuter { expr } => Expression::ResetOuter {
+            Expression::ResetOuter { expr, level } => Expression::ResetOuter {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
+                level: *level,
             },
             Expression::Traverse { expr, path } => Expression::Traverse {
                 expr: Box::new(expr.substitute_selected_measure(replacement)),
@@ -1652,26 +1676,38 @@ pub fn resolve_is_filtered(
             conditions: conditions.iter().map(recurse).collect(),
             in_predicates: in_predicates.clone(),
         },
-        Expression::Clear { expr: e, targets } => Expression::Clear {
+        Expression::Clear {
+            expr: e,
+            targets,
+            level,
+        } => Expression::Clear {
             expr: Box::new(recurse(e)),
             targets: targets.clone(),
+            level: *level,
         },
         Expression::ClearInner { expr: e, targets } => Expression::ClearInner {
             expr: Box::new(recurse(e)),
             targets: targets.clone(),
         },
-        Expression::ClearOuter { expr: e, targets } => Expression::ClearOuter {
+        Expression::ClearOuter {
+            expr: e,
+            targets,
+            level,
+        } => Expression::ClearOuter {
             expr: Box::new(recurse(e)),
             targets: targets.clone(),
+            level: *level,
         },
-        Expression::Reset { expr: e } => Expression::Reset {
+        Expression::Reset { expr: e, level } => Expression::Reset {
             expr: Box::new(recurse(e)),
+            level: *level,
         },
         Expression::ResetInner { expr: e } => Expression::ResetInner {
             expr: Box::new(recurse(e)),
         },
-        Expression::ResetOuter { expr: e } => Expression::ResetOuter {
+        Expression::ResetOuter { expr: e, level } => Expression::ResetOuter {
             expr: Box::new(recurse(e)),
+            level: *level,
         },
         // Everything else (literals, column/measure refs, windows, time
         // intelligence, ...) — returned as-is; ISFILTERED inside those is out

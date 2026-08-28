@@ -156,7 +156,8 @@ pub use tokio_util::sync::CancellationToken;
 pub use engine_core::catalog::{function_catalog, FunctionInfo};
 pub use engine_core::compute::aggregate::AggregateOp;
 pub use engine_core::compute::context::{
-    ContextResolver, EvaluationContext, FilterSource, ResolvedFilter, ResolvedInFilter,
+    ContextResolver, EvaluationContext, FilterSource, LevelRange, ResolvedFilter,
+    ResolvedInFilter, LEVEL_AXIS, LEVEL_MAX, LEVEL_SLICER,
 };
 pub use engine_core::compute::expression::{
     self, expand_global_variables, expression_to_formula, extract_dependencies, infer_fact_table,
@@ -233,7 +234,8 @@ pub use engine_query::registry::{AnyConnector, SemiJoinConfig, SourceBinding, So
 pub use engine_query::request::{
     CalcGroupSelection, CalculationGroupApplication, ColumnRef, DetailRequest, HierarchyGroupBy,
     InFilter, LookupColumn, MeasureFilter, OrderByClause, OrderTarget, QueryRequest, RankBy,
-    ResultColumn, ResultColumnKind, TopN, TotalsMode, GROUPING_ID_COLUMN,
+    ResultColumn, ResultColumnKind, ScopedFilter, ScopedInFilter, TopN, TotalsMode,
+    GROUPING_ID_COLUMN,
 };
 pub use engine_query::rest_connector::{RestConnector, REST_SOURCE_SCHEMA};
 pub use engine_query::{

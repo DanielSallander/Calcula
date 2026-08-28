@@ -271,15 +271,24 @@ export function renderSlicer(ctx: OverlayRenderContext): void {
     c.fillStyle = colors.headerBg;
     c.fillRect(canvasX, canvasY, w, HEADER_HEIGHT);
 
+    // Pin badge for level-2+ slicers: the pin survives measure CLEAR/RESET,
+    // which changes what those measures compute — it must be visible.
+    const pinned = (slicer.filterLevel ?? 1) >= 2;
+    let textX = canvasX + 10;
+    if (pinned) {
+      drawPinGlyph(c, textX, canvasY + HEADER_HEIGHT / 2, colors.headerFg);
+      textX += 14;
+    }
+
     c.fillStyle = colors.headerFg;
     c.font = `bold 12px ${FONT_FAMILY}`;
     c.textAlign = "left";
     c.textBaseline = "middle";
     c.fillText(
       slicer.headerText ?? slicer.name,
-      canvasX + 10,
+      textX,
       canvasY + HEADER_HEIGHT / 2,
-      w - CLEAR_BUTTON_SIZE - 24,
+      w - CLEAR_BUTTON_SIZE - 24 - (pinned ? 14 : 0),
     );
 
     const isFiltered = slicer.selectedItems !== null;
@@ -520,6 +529,34 @@ function drawHScrollbar(
   c.beginPath();
   c.roundRect(thumbX, y + 1, thumbWidth, height - 2, (height - 2) / 2);
   c.fill();
+}
+
+// ============================================================================
+// Pin Glyph (level-2+ slicers)
+// ============================================================================
+
+/** A small pin glyph drawn left of the header text for pinned (level-2+)
+ * slicers: a filled circle head on a short angled needle. */
+function drawPinGlyph(
+  c: CanvasRenderingContext2D,
+  x: number,
+  centerY: number,
+  color: string,
+): void {
+  c.save();
+  c.strokeStyle = color;
+  c.fillStyle = color;
+  c.lineWidth = 1.5;
+  // Head: filled circle, upper-left.
+  c.beginPath();
+  c.arc(x + 4, centerY - 2.5, 3, 0, Math.PI * 2);
+  c.fill();
+  // Needle: angled line toward lower-right.
+  c.beginPath();
+  c.moveTo(x + 5.5, centerY - 0.5);
+  c.lineTo(x + 9, centerY + 4);
+  c.stroke();
+  c.restore();
 }
 
 // ============================================================================

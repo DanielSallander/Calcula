@@ -1712,6 +1712,7 @@ mod tests {
             autogrid: true,
             item_padding: 2.0,
             button_radius: 2.0,
+            filter_level: 1,
             computed_properties: Vec::new(),
             connected_sources: vec![persistence::SavedSlicerConnection {
                 source_type: persistence::SavedSlicerSourceType::Pivot,
@@ -1942,6 +1943,7 @@ mod tests {
             order: 2,
             button_columns: 2,
             button_rows: 0,
+            filter_level: 1,
         }];
 
         let publish_req = PublishRequest {

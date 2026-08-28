@@ -30,11 +30,11 @@ impl Expression {
             Expression::Aggregate { .. } => true,
             Expression::Keep { expr, .. }
             | Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }
@@ -914,6 +914,7 @@ mod tests {
         let clear_expr = Expression::Clear {
             expr: Box::new(agg(AggregateOp::Sum, col("amount"))),
             targets: vec![ClearTarget::Table("dim".to_string())],
+            level: None,
         };
         let expr = block(vec![("total".into(), clear_expr)], col("total"));
         assert!(expr.has_context_ops());

@@ -36,6 +36,10 @@ export interface RibbonFilter {
   order: number;
   buttonColumns: number;
   buttonRows: number;
+  /** Filter level: 1 = ordinary, 2-9 = PINNED — a pinned filter survives a
+   * measure's bare CLEAR/RESET/CLEAREXCEPT and is stripped only by an
+   * explicit `CLEAR(…, LEVEL n)` at or above its level. */
+  filterLevel: number;
 }
 
 export interface SlicerItem {
@@ -73,6 +77,8 @@ export interface UpdateRibbonFilterParams {
   sortNoDataLast?: boolean;
   showSelectAll?: boolean;
   singleSelect?: boolean;
+  /** New filter level (1 = ordinary, 2-9 = pinned). */
+  filterLevel?: number;
 }
 
 export type AdvancedFilterOperator =

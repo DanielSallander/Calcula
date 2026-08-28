@@ -31,6 +31,8 @@ interface FilterRow {
   column: string;
   operator: string;
   value: string;
+  /** Filter level: 1 = ordinary slicer, 2-9 = pinned (survives bare CLEAR/RESET). */
+  level: number;
 }
 
 interface SortRow {
@@ -127,7 +129,7 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
         groupBy: rows.filter((d) => d.table && d.column),
         filters: filters
           .filter((f) => f.column && f.value.trim() !== "")
-          .map((f) => ({ column: f.column, operator: f.operator, value: f.value })),
+          .map((f) => ({ column: f.column, operator: f.operator, value: f.value, level: f.level })),
         sort: sortDtos,
         measureFilters: mfDtos,
         topN: topNDto,
@@ -271,6 +273,23 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
                   setFilters((fs) => fs.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))
                 }
               />
+              <select
+                style={{ ...styles.input, width: 92 }}
+                title="Filter level: 1 = ordinary slicer; 2-9 = pinned — survives a measure's bare CLEAR/RESET, stripped only by CLEAR(…, LEVEL n)"
+                value={String(f.level)}
+                onChange={(e) =>
+                  setFilters((fs) =>
+                    fs.map((x, j) => (j === i ? { ...x, level: Number(e.target.value) } : x)),
+                  )
+                }
+              >
+                <option value="1">level 1</option>
+                {[2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
+                  <option key={n} value={String(n)}>
+                    pin {n}
+                  </option>
+                ))}
+              </select>
               <button style={styles.smallBtn} onClick={() => setFilters((fs) => fs.filter((_, j) => j !== i))}>
                 Remove
               </button>
@@ -280,7 +299,7 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             <button
               style={styles.smallBtn}
               onClick={() =>
-                setFilters((fs) => [...fs, { table: "", column: "", operator: "=", value: "" }])
+                setFilters((fs) => [...fs, { table: "", column: "", operator: "=", value: "", level: 1 }])
               }
             >
               Add filter

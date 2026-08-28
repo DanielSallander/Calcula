@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 108,
+  "nextId": 111,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4122,6 +4122,51 @@
         "digestDiffPaths": []
       },
       "notes": "The fix makes the displayed icon ONE value decided in one place: carry the icon SET (and the rule id) on the backend's per-cell evaluation result alongside the index it already returns, so the renderer reads a single resolved answer instead of re-deriving half of it with different rules. That deletes the second lookup rather than patching it, which matters because patching `findMatchingRuleId` to check `enabled` would still leave two implementations of the cascade that can drift. Expect visual-baseline churn on any workbook with overlapping or disabled icon rules — that churn IS the bug becoming visible. — CLOSED 2026-08-19. The icon is now ONE value: the backend carries the resolved icon SET (and the producing rule id) beside the index it already returned, stamped in the loop that applies enabled/priority/stop_if_true, so it is the correctly-cascaded answer by construction. The frontend's second search is DELETED rather than patched: teaching findMatchingRuleId about `enabled` would have left two implementations of the cascade that can drift, which is how this arose. The hard-coded threeTrafficLights1 fallback is gone too — a cell with an index but no resolved set is now SKIPPED, because a wrong glyph is indistinguishable from a right one on screen and that is exactly what let this survive. Also extracted `evaluate_conditional_formats_for`, a pure twin of the Tauri command taking explicit refs and an explicit rule list. The cascade had NO direct unit coverage before this, because the only entry point took State<AppState> and was hard-wired to the active sheet. Four tests now, including the exact defect shape (a disabled FiveArrows rule listed FIRST must not supply the glyph family for an enabled ThreeArrows rule) — sabotage-checked: dropping the carried set reds three of the four. That extraction is also step one of BUG-0104: sort and filter need to resolve icons for a NAMED sheet, not whichever one is on screen. NOT YET DONE, and worth knowing: no visual baseline covers overlapping or disabled icon rules, so the corpus did not move. The churn this fix would cause is the bug becoming visible, and its absence means the corpus never saw the bug either."
+    },
+    {
+      "id": "BUG-0108",
+      "status": "open",
+      "discovered": "2026-08-28",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found 2026-08-28 while designing filter levels (pinned slicers); confirmed by reading the pivot query assembly and the engine window render"
+      },
+      "violation": {
+        "oracleId": "bi-pivot-visible-total-ignores-slicer-mask",
+        "message": "PERCENT-OF-VISIBLE-TOTAL MEASURES ARE WRONG IN A SLICER-FILTERED BI PIVOT. BI pivots send the engine NO filters: every surface (axis, pane, slicer) becomes a group_by column and filtering is a host-side hidden_items mask over the cached grouped result (app/src-tauri/src/pivot/commands.rs — update_bi_pivot_fields builds QueryRequest { filters: vec![] }). A measure using CLEAR_INNER/ALLSELECTED (share-of-visible-total) is rendered by the engine as a window over the grouped result BEFORE the host mask exists — so its denominator includes rows the host hides afterwards. Additionally, engine-computed subtotal/grand-total overrides (BiTotalsPlan) are skipped whenever ANY hidden_items are active, so ratio-valued leaf rows get additively summed totals. Two mechanisms, both silent."
+      },
+      "notes": "Partially addressed 2026-08-28 by filter levels: a slicer PINNED at level 2+ is routed INSIDE the engine query (PivotDefinition.engine_filters -> scoped_in_filters), so pinned-slicer pivots compute correct denominators and keep their totals overrides (no masks). ORDINARY (level-1) slicers still use the host-side mask and still exhibit both mechanisms. Full fix requires routing level-1 slicer selections as engine filters too (the deliberate perf trade: masks avoid a re-query per slicer click) or re-querying totals grains with the mask expressed as filters. Repro sketch: BI pivot grouped by product, slicer on product limiting to one item, measure DIVIDE(SUM(x), SUM(x, ALLSELECTED())) — the ratio should be 1.0 for the only visible row; it is not."
+    },
+    {
+      "id": "BUG-0109",
+      "status": "fixed",
+      "discovered": "2026-08-28",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found 2026-08-28 while implementing filter levels; fixed in the same change"
+      },
+      "violation": {
+        "oracleId": "postgres-clear-window-hardcodes-sum",
+        "message": "THE PUSHED (POSTGRESQL) CLEAR/CLEAREXCEPT RENDER RE-AGGREGATED EVERY AGGREGATE WITH SUM. expr_to_sql_with_clear (model-engine-lib/crates/engine-connectors/src/postgres.rs) emitted SUM(inner) OVER (PARTITION BY ...) regardless of the wrapped aggregate, while the local path (clear_reagg_fn, engine-query executor/pipeline/sql.rs) re-sums only additive aggregates, carries MIN/MAX, and fails closed on the rest. A MIN(x, CLEAR(dim)) measure pushed to PostgreSQL silently returned a SUM. Pushed and local paths disagreed on the same formula."
+      },
+      "notes": "FIXED 2026-08-28 in the filter-levels change: postgres.rs now mirrors clear_reagg_fn — SUM/COUNT/COUNTROWS re-sum, MIN/MAX carry through, and every non-recombinable aggregate fails closed with a typed error instead of silently summing."
+    },
+    {
+      "id": "BUG-0110",
+      "status": "fixed",
+      "discovered": "2026-08-28",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "found 2026-08-28 while designing origin-preserving slicer IPC; the pinned path fixes it structurally for pinned slicers"
+      },
+      "violation": {
+        "oracleId": "slicer-clobbers-axis-field-dropdown-filter",
+        "message": "A SLICER ON AN AXIS FIELD OVERWRITES THE FIELD DROPDOWN FILTER (AND VICE VERSA). apply_pivot_filter carries no origin: a slicer selection and the pivot field dropdown write the SAME hidden_items on the same field (app/src-tauri/src/pivot/commands.rs), so whichever applied last wins and the other surface shows state it no longer controls. Origin is unrecoverable at the IPC boundary (payload is {pivotId, fieldIndex, manualFilter})."
+      },
+      "notes": "STRUCTURALLY FIXED FOR PINNED SLICERS 2026-08-28: the request now carries filterLevel + slicerId, and a pinned (level 2+) selection is stored as an origin-preserving PivotDefinition.engine_filters entry instead of hidden_items — it cannot collide with the dropdown mask. Level-1 slicers keep the legacy shared-mask behavior; carrying the slicerId further (per-origin masks) remains open."
     }
   ]
 }

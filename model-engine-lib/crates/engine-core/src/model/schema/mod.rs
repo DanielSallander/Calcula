@@ -510,8 +510,24 @@ use crate::model::writeback_column::WritebackColumn;
 ///   the reader can act on. Stamped only when a pipeline actually carries a
 ///   formula aggregate.
 ///
+/// - `27` — filter levels (`LEVEL n` on the clear family):
+///   [`Expression`](crate::compute::Expression)'s `Clear` / `Reset` /
+///   `ClearOuter` / `ResetOuter` variants and the matching
+///   [`ContextOp`](crate::model::context::ContextOp) operations gained an
+///   optional `level: u8` ceiling — `CLEAR(dim, LEVEL 2)` clears filter
+///   levels 0..=2, so filters pinned at higher levels survive ordinary
+///   clears. `ContextOp`'s clear/reset operations also changed from tuple to
+///   struct variants (`{"Clear": {"targets": […]}}` instead of
+///   `{"Clear": […]}`), a deliberate pre-production shape break.
+///
+///   The `Expression` field is additive serde, so a pre-v27 engine would
+///   deserialize a leveled measure and silently IGNORE the level — treating
+///   `CLEAR(dim, LEVEL 2)` as `CLEAR(dim)`, which changes what the measure
+///   computes once pinned filters exist. That is a misinterpretation, not a
+///   cosmetic loss, so the version gate refuses instead.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 26;
+pub const MODEL_FORMAT_VERSION: u32 = 27;
 
 /// A data model consisting of tables and relationships between them.
 ///

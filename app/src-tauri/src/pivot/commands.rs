@@ -3582,11 +3582,137 @@ pub async fn apply_pivot_filter(
             })
         };
 
+        // PINNED (level >= 2) filters on BI pivots are routed INSIDE the
+        // engine query as level-tagged IN-lists (`engine_filters` →
+        // `scoped_in_filters`) instead of host-side hidden_items masks, so
+        // measure CLEAR/RESET semantics honor them: a pin survives bare
+        // clears and is stripped only by `CLEAR(…, LEVEL n)` at or above its
+        // level. Origin-preserving: the owning slicer id is carried along.
+        let pinned_routed: bool = if request.filter_level >= 2 {
+            crate::slicer::types::validate_filter_level(request.filter_level)?;
+            let Some(ref manual) = request.filters.manual_filter else {
+                return Err(
+                    "pinned filter levels (2+) support item-selection filters only".to_string()
+                );
+            };
+            let bi_meta = pivot_state.bi_metadata.read().unwrap();
+            let Some(meta) = bi_meta.get(&request.pivot_id) else {
+                return Err(
+                    "pinned filter levels (2+) require a BI model pivot — a range/table pivot \
+                     has no engine query to route the pin into; use level 1 for this slicer"
+                        .to_string(),
+                );
+            };
+            let name = field_name.clone().ok_or_else(|| {
+                format!("unknown pivot field index {}", request.field_index)
+            })?;
+            let table_names: Vec<&str> =
+                meta.model_tables.iter().map(|t| t.name.as_str()).collect();
+            let (table, column) = if name.contains('.') {
+                split_bi_field_key(&name, table_names.iter().copied())
+            } else {
+                let table_name = meta
+                    .model_tables
+                    .iter()
+                    .find(|t| t.columns.iter().any(|c| c.name == name))
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                (table_name, name.clone())
+            };
+            if table.is_empty() {
+                return Err(format!(
+                    "cannot attribute field '{name}' to a model table; a mis-attributed pin \
+                     would silently mis-filter, so this fails closed"
+                ));
+            }
+
+            // The engine filter replaces any host-side mask for this field —
+            // a leftover mask would double-apply (and go stale).
+            for field in &mut definition.row_fields {
+                if field.source_index == request.field_index {
+                    field.hidden_items.clear();
+                }
+            }
+            for field in &mut definition.column_fields {
+                if field.source_index == request.field_index {
+                    field.hidden_items.clear();
+                }
+            }
+            for filter in &mut definition.filter_fields {
+                if filter.field.source_index == request.field_index {
+                    filter.field.hidden_items.clear();
+                }
+            }
+            // Keep the field in the query's GROUP BY so the cache shape (and
+            // every field index) is unchanged: an out-of-zone field needs a
+            // slicer_filters presence — with NO mask.
+            let in_zone = definition
+                .row_fields
+                .iter()
+                .any(|f| f.source_index == request.field_index)
+                || definition
+                    .column_fields
+                    .iter()
+                    .any(|f| f.source_index == request.field_index)
+                || definition
+                    .filter_fields
+                    .iter()
+                    .any(|f| f.field.source_index == request.field_index);
+            if let Some(sf) = definition
+                .slicer_filters
+                .iter_mut()
+                .find(|sf| sf.source_index == request.field_index)
+            {
+                sf.hidden_items.clear();
+            } else if !in_zone {
+                definition.slicer_filters.push(pivot_engine::SlicerFilter {
+                    source_index: request.field_index,
+                    hidden_items: Vec::new(),
+                });
+            }
+
+            // Upsert the engine filter, keyed by the stable field name.
+            let entry = pivot_engine::EngineFilter {
+                field_name: name.clone(),
+                table,
+                column,
+                selected_items: manual.selected_items.clone(),
+                level: request.filter_level,
+                slicer_id: request.slicer_id.clone(),
+            };
+            if let Some(existing) = definition
+                .engine_filters
+                .iter_mut()
+                .find(|ef| ef.field_name == name)
+            {
+                *existing = entry;
+            } else {
+                definition.engine_filters.push(entry);
+            }
+            true
+        } else {
+            false
+        };
+        // An ordinary (level-1) selection on a field that previously held a
+        // PIN drops the pin — the mask path below takes over, and the drop
+        // changes the engine query, so a BI re-query is still required.
+        let pin_dropped: bool = if !pinned_routed {
+            let before = definition.engine_filters.len();
+            if let Some(name) = field_name.as_deref() {
+                definition.engine_filters.retain(|ef| ef.field_name != name);
+            }
+            definition.engine_filters.len() != before
+        } else {
+            false
+        };
+
         // Find the field in row, column, or filter fields and update hidden_items
         let mut found = false;
 
         // Apply manual filter as hidden items
-        if let Some(ref manual) = request.filters.manual_filter {
+        if pinned_routed {
+            // Host-side masking skipped: the pin travels inside the engine query.
+        } else if let Some(ref manual) = request.filters.manual_filter {
             // Get all unique values for this field
             let all_values: Vec<String> = if let Some(items) = &calc_group_items {
                 items.clone()
@@ -3655,12 +3781,13 @@ pub async fn apply_pivot_filter(
 
         definition.bump_version();
 
-        if calc_group_items.is_some() {
-            // Calc-group selection changed: the local cache carries only the
-            // previously-applied item (or the no-item base rows), so
-            // recalculating from it would be wrong — fall through to the BI
-            // re-query (refresh reconstructs the request from the definition,
-            // including the hidden_items just applied).
+        if calc_group_items.is_some() || pinned_routed || pin_dropped {
+            // Calc-group selection changed, or an engine-routed (pinned)
+            // filter was added/replaced/dropped: the local cache was built
+            // for a DIFFERENT engine query, so recalculating from it would
+            // be wrong — fall through to the BI re-query (refresh
+            // reconstructs the request from the definition, including the
+            // engine filters and hidden_items just applied).
             None
         } else {
             let view = safe_calculate_pivot(definition, cache);
@@ -3756,9 +3883,21 @@ pub async fn clear_pivot_filter(
         // Also remove any slicer filters for this field
         definition.slicer_filters.retain(|sf| sf.source_index != request.field_index);
 
+        // And any engine-routed (pinned) filter: it lives INSIDE the engine
+        // query, so dropping it changes the query — the local cache is stale
+        // and a BI re-query is required (same fork as calc groups).
+        let engine_filter_dropped = {
+            let field_name = cache.fields.get(request.field_index).map(|f| f.name.clone());
+            let before = definition.engine_filters.len();
+            if let Some(name) = field_name.as_deref() {
+                definition.engine_filters.retain(|ef| ef.field_name != name);
+            }
+            definition.engine_filters.len() != before
+        };
+
         definition.bump_version();
 
-        if is_calc_group_field {
+        if is_calc_group_field || engine_filter_dropped {
             None
         } else {
             let view = safe_calculate_pivot(definition, cache);
@@ -6042,6 +6181,7 @@ pub async fn update_bi_pivot_fields(
         definition.calculated_fields.clear();
         definition.value_column_order.clear();
         definition.slicer_filters.clear();
+        definition.engine_filters.clear();
         definition.bump_version();
 
         let empty_cache = PivotCache::new(pivot_id, 0);
@@ -6528,10 +6668,37 @@ pub async fn update_bi_pivot_fields(
         && query_group_by.is_empty()
         && query_lookups.is_empty();
 
+    // Engine-routed (PINNED, level-2+) filters are DEFINITION state written
+    // by `apply_pivot_filter` and preserved across field updates. They travel
+    // INSIDE the query as level-tagged IN-lists (`scoped_in_filters`) — the
+    // one filter class the engine actually sees from a pivot — so measure
+    // CLEAR/RESET semantics honor them. Ordinary (level-1) filtering stays
+    // host-side (`hidden_items` masks over the cached result).
+    let scoped_in_filters: Vec<bi_engine::ScopedInFilter> = {
+        let pt = pivot_state.pivot_tables.read()
+            .map_err(|e| format!("pivot_tables lock poisoned: {}", e))?;
+        pt.get(&pivot_id)
+            .map(|(d, _)| {
+                d.engine_filters
+                    .iter()
+                    .map(|ef| bi_engine::ScopedInFilter {
+                        table: Some(ef.table.clone()),
+                        filter: bi_engine::InFilter::new(
+                            ef.column.clone(),
+                            ef.selected_items.iter().cloned(),
+                        ),
+                        level: ef.level,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let query_request = bi_engine::QueryRequest {
         measures: query_measures.clone(),
         group_by: query_group_by,
         filters: vec![],
+        scoped_in_filters,
         lookups: query_lookups,
         calculation_group: calc_group_app,
         ..Default::default()

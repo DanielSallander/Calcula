@@ -36,6 +36,7 @@ mod tests {
             order: 5,
             button_columns: 3,
             button_rows: 4,
+            filter_level: 1,
         }
     }
 
@@ -63,6 +64,7 @@ mod tests {
             order: 0,
             button_columns: 2,
             button_rows: 0,
+            filter_level: 1,
         }
     }
 

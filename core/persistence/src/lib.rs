@@ -1228,6 +1228,16 @@ pub struct SavedSlicer {
     /// Report Connections: pivots/tables that this slicer filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sources: Vec<SavedSlicerConnection>,
+    /// Filter level: 1 = ordinary slicer (default), 2..=9 = pinned (survives
+    /// a measure's bare CLEAR/RESET). Written as snake_case `filter_level`
+    /// here (`SavedSlicer` predates the camelCase convention) and as
+    /// camelCase `filterLevel` in the `.cala` `SlicerDef`.
+    #[serde(default = "default_filter_level")]
+    pub filter_level: u8,
+}
+
+fn default_filter_level() -> u8 {
+    1
 }
 
 /// A saved slicer computed property (formula-driven attribute).
@@ -1406,6 +1416,10 @@ pub struct SavedRibbonFilter {
     pub button_columns: u32,
     #[serde(default)]
     pub button_rows: u32,
+    /// Filter level: 1 = ordinary (default), 2..=9 = pinned (survives a
+    /// measure's bare CLEAR/RESET).
+    #[serde(default = "default_filter_level")]
+    pub filter_level: u8,
 }
 
 /// Saved advanced filter condition.

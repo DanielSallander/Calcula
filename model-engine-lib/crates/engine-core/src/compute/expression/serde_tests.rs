@@ -73,6 +73,43 @@ fn block_without_query_scoped_bindings_omits_the_field() {
 }
 
 #[test]
+fn clear_level_serialization_contract() {
+    use crate::model::context::ClearTarget;
+
+    // A leveled clear carries the field...
+    let expr = clear_at(
+        agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        vec![ClearTarget::Table("dim_product".into())],
+        Some(2),
+    );
+    let json = serde_json::to_string(&expr).unwrap();
+    assert!(json.contains("\"level\":2"), "got {json}");
+    let restored: Expression = serde_json::from_str(&json).unwrap();
+    assert!(matches!(restored, Expression::Clear { level: Some(2), .. }));
+
+    // ...the canonical bare form omits it entirely...
+    let bare = clear(
+        agg(AggregateOp::Sum, qualified_col("Sales", "amount")),
+        vec![ClearTarget::Table("dim_product".into())],
+    );
+    let json = serde_json::to_string(&bare).unwrap();
+    assert!(!json.contains("level"), "bare CLEAR must skip level: {json}");
+
+    // ...and pre-v27 JSON without the field deserializes as None (the live
+    // registry model carries such Clear nodes).
+    let legacy = r#"{"Clear":{"expr":{"Aggregate":{"operation":"Sum","operand":{"QualifiedColumnRef":{"table_or_var":"Sales","column":"amount"}}}},"targets":[{"Table":"dim_product"}]}}"#;
+    let restored: Expression = serde_json::from_str(legacy).unwrap();
+    assert!(matches!(restored, Expression::Clear { level: None, .. }));
+
+    // Reset / ResetOuter follow the same contract.
+    let r = reset_at(agg(AggregateOp::Sum, col("amount")), Some(3));
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(json.contains("\"level\":3"), "got {json}");
+    let r: Expression = serde_json::from_str(&json).unwrap();
+    assert!(matches!(r, Expression::Reset { level: Some(3), .. }));
+}
+
+#[test]
 fn keep_in_serialization_roundtrip() {
     let expr = keep_in(
         agg(AggregateOp::Sum, col("amount")),

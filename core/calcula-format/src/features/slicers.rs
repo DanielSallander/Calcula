@@ -57,6 +57,10 @@ pub struct SlicerDef {
     /// Report Connections: pivots/tables that this slicer filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sources: Vec<SlicerConnectionDef>,
+    /// Filter level: 1 = ordinary slicer (default), 2..=9 = pinned (survives
+    /// a measure's bare CLEAR/RESET).
+    #[serde(default = "default_filter_level")]
+    pub filter_level: u8,
 }
 
 /// JSON-friendly slicer connection (Report Connection) for the .cala format.
@@ -94,6 +98,10 @@ fn default_gap() -> f64 {
 
 fn default_button_radius() -> f64 {
     2.0
+}
+
+fn default_filter_level() -> u8 {
+    1
 }
 
 impl From<&SavedSlicer> for SlicerDef {
@@ -155,6 +163,7 @@ impl From<&SavedSlicer> for SlicerDef {
                     source_id: c.source_id,
                 }
             }).collect(),
+            filter_level: s.filter_level,
         }
     }
 }
@@ -218,6 +227,7 @@ impl From<&SlicerDef> for SavedSlicer {
                     source_id: c.source_id,
                 }
             }).collect(),
+            filter_level: s.filter_level,
         }
     }
 }

@@ -326,6 +326,34 @@ pub struct SlicerFilter {
     pub hidden_items: Vec<String>,
 }
 
+/// An ENGINE-ROUTED filter (a PINNED, level-2+ slicer on a BI pivot).
+///
+/// Unlike [`SlicerFilter`] — a host-side `hidden_items` mask over the cached
+/// grouped result — an engine filter travels INSIDE the BI query as a
+/// level-tagged IN-list (`scoped_in_filters`), so measure `CLEAR`/`RESET`
+/// semantics can see it: a pinned filter survives bare clears and is only
+/// stripped by `CLEAR(…, LEVEL n)` at or above its level. Keyed by the cache
+/// FIELD NAME (stable across cache rebuilds, unlike field indexes) with the
+/// owning model table/column resolved at apply time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineFilter {
+    /// Cache field name ("Table.Column" or a bare column name).
+    pub field_name: String,
+    /// The owning model table.
+    pub table: String,
+    /// The model column.
+    pub column: String,
+    /// Selected values — the filter KEEPS these (IN-list semantics; an empty
+    /// list keeps nothing).
+    pub selected_items: Vec<String>,
+    /// Filter level (2..=9; level-1 filters stay host-side masks).
+    pub level: u8,
+    /// The slicer that owns this filter, for provenance (None when applied
+    /// by a non-slicer caller).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slicer_id: Option<String>,
+}
+
 /// Types of filter conditions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FilterCondition {
@@ -636,6 +664,13 @@ pub struct PivotDefinition {
     #[serde(default)]
     pub slicer_filters: Vec<SlicerFilter>,
 
+    /// Engine-routed (PINNED, level-2+) filters for BI pivots: applied inside
+    /// the BI query as level-tagged IN-lists rather than as host-side
+    /// `hidden_items` masks, so measure CLEAR/RESET semantics honor them.
+    /// See [`EngineFilter`].
+    #[serde(default)]
+    pub engine_filters: Vec<EngineFilter>,
+
     /// Layout and display options.
     pub layout: PivotLayout,
 
@@ -769,6 +804,7 @@ impl PivotDefinition {
             value_fields: Vec::new(),
             filter_fields: Vec::new(),
             slicer_filters: Vec::new(),
+            engine_filters: Vec::new(),
             layout: PivotLayout::default(),
             destination: (0, 0),
             destination_sheet: None,
@@ -830,5 +866,69 @@ impl PivotDefinition {
     /// Returns the number of source columns.
     pub fn source_col_count(&self) -> u32 {
         self.source_end.1 - self.source_start.1 + 1
+    }
+}
+
+#[cfg(test)]
+mod engine_filter_tests {
+    use super::*;
+
+    fn pinned_definition() -> PivotDefinition {
+        let mut def = PivotDefinition::new(
+            identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            (0, 0),
+            (10, 5),
+        );
+        def.engine_filters.push(EngineFilter {
+            field_name: "dim_customer.country".into(),
+            table: "dim_customer".into(),
+            column: "country".into(),
+            selected_items: vec!["SE".into(), "NO".into()],
+            level: 2,
+            slicer_id: Some("slicer-1".into()),
+        });
+        def
+    }
+
+    /// An engine-routed (pinned) filter must survive the definition's JSON
+    /// round trip — the whole definition is persisted as opaque JSON in
+    /// `.cala`/`.calp`, so a dropped field silently un-pins the filter and
+    /// the pivot comes back UNFILTERED on that field (the pin deliberately
+    /// leaves no host-side mask behind).
+    #[test]
+    fn an_engine_filter_survives_the_definition_json_roundtrip() {
+        let def = pinned_definition();
+        let json = serde_json::to_string(&def).unwrap();
+        let back: PivotDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.engine_filters.len(), 1);
+        let ef = &back.engine_filters[0];
+        assert_eq!(ef.table, "dim_customer");
+        assert_eq!(ef.column, "country");
+        assert_eq!(ef.level, 2);
+        assert_eq!(ef.selected_items, vec!["SE".to_string(), "NO".to_string()]);
+        assert_eq!(ef.slicer_id.as_deref(), Some("slicer-1"));
+    }
+
+    /// A pre-pin definition (no `engine_filters` key at all) must still load:
+    /// the field is additive, so existing workbooks open unchanged.
+    #[test]
+    fn a_definition_without_engine_filters_still_loads() {
+        let def = pinned_definition();
+        let mut value = serde_json::to_value(&def).unwrap();
+        value.as_object_mut().unwrap().remove("engine_filters");
+        let back: PivotDefinition = serde_json::from_value(value).unwrap();
+        assert!(back.engine_filters.is_empty());
+    }
+
+    /// A brand-new definition has no engine filters — pinning is opt-in, so
+    /// an ordinary pivot never stamps the pinned-filter format version.
+    #[test]
+    fn a_new_definition_has_no_engine_filters() {
+        let def = PivotDefinition::new(
+            identity::EntityId::from_bytes(identity::generate_uuid_v7()),
+            (0, 0),
+            (1, 1),
+        );
+        assert!(def.engine_filters.is_empty());
     }
 }

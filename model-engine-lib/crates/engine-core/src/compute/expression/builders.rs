@@ -102,18 +102,34 @@ pub fn keep_conditions(expr: Expression, conditions: Vec<Expression>) -> Express
     }
 }
 
-/// Create a `clear()` expression — remove filters on specific dimensions.
+/// Create a `clear()` expression — remove filters on specific dimensions
+/// (levels 0..=1; pinned filters survive).
 pub fn clear(expr: Expression, targets: Vec<ClearTarget>) -> Expression {
+    clear_at(expr, targets, None)
+}
+
+/// Create a `clear()` expression with an explicit level ceiling
+/// (`CLEAR(…, LEVEL n)`); `level` None ≡ 1.
+pub fn clear_at(expr: Expression, targets: Vec<ClearTarget>, level: Option<u8>) -> Expression {
     Expression::Clear {
         expr: Box::new(expr),
         targets,
+        level,
     }
 }
 
-/// Create a `reset()` expression — remove ALL filters from context.
+/// Create a `reset()` expression — remove ALL filters from context
+/// (levels 0..=1; pinned filters survive).
 pub fn reset(expr: Expression) -> Expression {
+    reset_at(expr, None)
+}
+
+/// Create a `reset()` expression with an explicit level ceiling
+/// (`RESET(LEVEL n)`); `level` None ≡ 1.
+pub fn reset_at(expr: Expression, level: Option<u8>) -> Expression {
     Expression::Reset {
         expr: Box::new(expr),
+        level,
     }
 }
 
@@ -127,9 +143,20 @@ pub fn clear_inner(expr: Expression, targets: Vec<ClearTarget>) -> Expression {
 
 /// Create a `clear_outer()` expression — remove outer (query-level) filters on specific dimensions.
 pub fn clear_outer(expr: Expression, targets: Vec<ClearTarget>) -> Expression {
+    clear_outer_at(expr, targets, None)
+}
+
+/// Create a `clear_outer()` expression with an explicit level ceiling
+/// (`CLEAR_OUTER(…, LEVEL n)`); `level` None ≡ 1.
+pub fn clear_outer_at(
+    expr: Expression,
+    targets: Vec<ClearTarget>,
+    level: Option<u8>,
+) -> Expression {
     Expression::ClearOuter {
         expr: Box::new(expr),
         targets,
+        level,
     }
 }
 
@@ -142,8 +169,15 @@ pub fn reset_inner(expr: Expression) -> Expression {
 
 /// Create a `reset_outer()` expression — remove ALL outer (query-level) filters.
 pub fn reset_outer(expr: Expression) -> Expression {
+    reset_outer_at(expr, None)
+}
+
+/// Create a `reset_outer()` expression with an explicit level ceiling
+/// (`RESET_OUTER(LEVEL n)`); `level` None ≡ 1.
+pub fn reset_outer_at(expr: Expression, level: Option<u8>) -> Expression {
     Expression::ResetOuter {
         expr: Box::new(expr),
+        level,
     }
 }
 

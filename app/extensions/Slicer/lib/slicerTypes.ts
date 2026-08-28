@@ -45,6 +45,10 @@ export interface Slicer {
   itemPadding: number;
   buttonRadius: number;
   connectedSources: SlicerConnection[];
+  /** Filter level: 1 = ordinary slicer, 2-9 = PINNED — a pinned slicer's
+   * filter survives a measure's bare CLEAR/RESET/CLEAREXCEPT and is stripped
+   * only by an explicit `CLEAR(…, LEVEL n)` at or above its level. */
+  filterLevel: number;
 }
 
 export interface SlicerItem {
@@ -89,6 +93,8 @@ export interface UpdateSlicerParams {
   itemPadding?: number;
   buttonRadius?: number;
   connectedSources?: SlicerConnection[];
+  /** New filter level (1 = ordinary, 2-9 = pinned). */
+  filterLevel?: number;
 }
 
 // ============================================================================

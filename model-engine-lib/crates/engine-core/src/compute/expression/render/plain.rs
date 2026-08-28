@@ -80,11 +80,11 @@ impl<D: Dialect> SqlRenderer<'_, D> {
             // SQL. Context operations are resolved by the ContextResolver (or
             // excluded by the pushdown planner) before SQL generation.
             Expression::Clear { expr, .. }
-            | Expression::Reset { expr }
+            | Expression::Reset { expr, .. }
             | Expression::ClearInner { expr, .. }
             | Expression::ClearOuter { expr, .. }
             | Expression::ResetInner { expr }
-            | Expression::ResetOuter { expr }
+            | Expression::ResetOuter { expr, .. }
             | Expression::Traverse { expr, .. }
             | Expression::Using { expr, .. }
             | Expression::UseRelationship { expr, .. }

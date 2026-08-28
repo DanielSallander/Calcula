@@ -144,11 +144,22 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
           `${filter.fieldName}\nModel: ${connectionName ?? "(connection missing)"}\n` +
           (hasFilter
             ? `Filtered: ${localSelectedItems?.length ?? 0} of ${totalCount}`
-            : "No filter applied")
+            : "No filter applied") +
+          ((filter.filterLevel ?? 1) >= 2
+            ? `\nPinned (level ${filter.filterLevel}) — survives CLEAR in measures`
+            : "")
         }
       >
         <div style={styles.cardBody}>
           <div style={styles.topRow}>
+            {(filter.filterLevel ?? 1) >= 2 && (
+              <span
+                aria-label={`Pinned filter (level ${filter.filterLevel})`}
+                style={{ fontSize: 10, lineHeight: 1, marginRight: 2 }}
+              >
+                📌
+              </span>
+            )}
             <div style={styles.fieldName}>{shortName}:</div>
             <div style={styles.summary}>{summaryText}</div>
           </div>
@@ -195,6 +206,7 @@ export function RibbonFilterCard({ filter }: Props): React.ReactElement {
             sortNoDataLast={f.sortNoDataLast ?? true}
             showSelectAll={f.showSelectAll ?? false}
             singleSelect={f.singleSelect ?? false}
+            filterLevel={f.filterLevel ?? 1}
           />
         );
       })()}

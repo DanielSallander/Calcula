@@ -78,6 +78,15 @@ fn format_clear_targets(targets: &[ClearTarget]) -> String {
         .join(", ")
 }
 
+/// The trailing `, LEVEL n` argument for a clear/reset with an explicit level
+/// ceiling; empty for the canonical bare form (`level` None or 1).
+fn format_level_suffix(level: Option<u8>) -> String {
+    match level {
+        Some(n) if n > 1 => format!(", LEVEL {n}"),
+        _ => String::new(),
+    }
+}
+
 fn format_comparison_op(op: &ComparisonOp) -> &'static str {
     match op {
         ComparisonOp::Equal => "=",
@@ -398,13 +407,21 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
         Expression::Clear {
             expr: inner,
             targets,
+            level,
         } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
-            format!("CLEAR({inner_str}, {})", format_clear_targets(targets))
+            format!(
+                "CLEAR({inner_str}, {}{})",
+                format_clear_targets(targets),
+                format_level_suffix(*level)
+            )
         }
-        Expression::Reset { expr: inner } => {
+        Expression::Reset { expr: inner, level } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
-            format!("RESET({inner_str})")
+            match format_level_suffix(*level).as_str() {
+                "" => format!("RESET({inner_str})"),
+                suffix => format!("RESET({inner_str}{suffix})"),
+            }
         }
         Expression::Traverse { expr: inner, path } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
@@ -428,17 +445,25 @@ fn format_expr(expr: &Expression, table: &str, parent_prec: Precedence) -> Strin
         Expression::ClearOuter {
             expr: inner,
             targets,
+            level,
         } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
-            format!("CLEAROUTER({inner_str}, {})", format_clear_targets(targets))
+            format!(
+                "CLEAROUTER({inner_str}, {}{})",
+                format_clear_targets(targets),
+                format_level_suffix(*level)
+            )
         }
         Expression::ResetInner { expr: inner } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
             format!("RESETINNER({inner_str})")
         }
-        Expression::ResetOuter { expr: inner } => {
+        Expression::ResetOuter { expr: inner, level } => {
             let inner_str = format_expr(inner, table, Precedence::Lowest);
-            format!("RESETOUTER({inner_str})")
+            match format_level_suffix(*level).as_str() {
+                "" => format!("RESETOUTER({inner_str})"),
+                suffix => format!("RESETOUTER({inner_str}{suffix})"),
+            }
         }
         // Legacy form of KEEP carrying only IN-membership predicates; format it
         // with the modern KEEP syntax so the output round-trips through the parser.

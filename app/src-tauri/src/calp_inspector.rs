@@ -437,6 +437,11 @@ pub struct InspectorSlicerInfo {
     pub name: String,
     pub sheet_name: String,
     pub field_name: String,
+    /// Filter level: 1 = ordinary, 2..=9 = PINNED. Surfaced because a pin
+    /// changes what the package's measures return — a `CLEAR`/`RESET`
+    /// measure keeps respecting a pinned filter — so a subscriber
+    /// inspecting the package must be able to see it before subscribing.
+    pub filter_level: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -802,6 +807,13 @@ pub fn calp_inspector_overview(
                     &jstr(v, &["sheetId", "sheet_id"]).unwrap_or_default(),
                 ),
                 field_name: jstr(v, &["fieldName", "field_name"]).unwrap_or_default(),
+                // Dual-key like every other field here: `.calp` writes raw
+                // `SavedSlicer` (snake_case), `.cala` writes `SlicerDef`
+                // (camelCase). Absent = the ordinary level 1.
+                filter_level: jget(v, &["filterLevel"])
+                    .or_else(|| jget(v, &["filter_level"]))
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(1) as u8,
             })
             .collect();
 

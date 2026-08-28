@@ -574,6 +574,11 @@ fn now_iso() -> String {
 }
 
 /// Build an engine QueryRequest from BiQueryRequest.
+///
+/// Filters travel as SCOPED filters: each `BiFilter` carries its table, and
+/// its `level` (default 1) decides which measures' CLEAR/RESET can remove it
+/// — a level-2+ (pinned) filter survives a measure's bare CLEAR and is only
+/// stripped by an explicit `CLEAR(…, LEVEL n)` at or above its level.
 pub(crate) fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRequest {
     bi_engine::QueryRequest {
         measures: request.measures.clone(),
@@ -582,7 +587,7 @@ pub(crate) fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRe
             .iter()
             .map(|g| bi_engine::ColumnRef::new(&g.table, &g.column))
             .collect(),
-        filters: request
+        scoped_filters: request
             .filters
             .iter()
             .map(|f| {
@@ -598,7 +603,17 @@ pub(crate) fn build_engine_query(request: &BiQueryRequest) -> bi_engine::QueryRe
                     "<=" | "lte" => bi_engine::FilterOperator::LessThanOrEqual,
                     _ => bi_engine::FilterOperator::Equal,
                 };
-                bi_engine::FilterCondition::new(f.column.clone(), operator, f.value.clone())
+                bi_engine::ScopedFilter {
+                    // An empty table falls back to column-name ownership,
+                    // matching the legacy behavior for old callers.
+                    table: (!f.table.is_empty()).then(|| f.table.clone()),
+                    condition: bi_engine::FilterCondition::new(
+                        f.column.clone(),
+                        operator,
+                        f.value.clone(),
+                    ),
+                    level: f.level,
+                }
             })
             .collect(),
         lookups: vec![],

@@ -950,6 +950,102 @@ mod tests {
         assert!(matches!(e, Expression::ClearInner { .. }));
     }
 
+    // --- LEVEL argument tests ---
+
+    #[test]
+    fn parse_clear_level_argument() {
+        let e = parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 2))").unwrap();
+        match e {
+            Expression::Clear { targets, level, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(level, Some(2));
+            }
+            other => panic!("expected Clear, got {other:?}"),
+        }
+        // Multi-target with a trailing level.
+        let e =
+            parse_measure_expression("SUM(Sales[amount], CLEAR(Product, Cal[year], LEVEL 3))")
+                .unwrap();
+        match e {
+            Expression::Clear { targets, level, .. } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(level, Some(3));
+            }
+            other => panic!("expected Clear, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_clear_level_canonicalizes() {
+        // LEVEL 0 lowers to CLEAR_INNER; LEVEL 1 to the bare form.
+        let e = parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 0))").unwrap();
+        assert!(matches!(e, Expression::ClearInner { .. }));
+        let e = parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 1))").unwrap();
+        assert!(matches!(e, Expression::Clear { level: None, .. }));
+        let e = parse_measure_expression("SUM(Sales[amount], RESET(LEVEL 0))").unwrap();
+        assert!(matches!(e, Expression::ResetInner { .. }));
+        let e = parse_measure_expression("SUM(Sales[amount], RESET(LEVEL 2))").unwrap();
+        assert!(matches!(e, Expression::Reset { level: Some(2), .. }));
+        let e = parse_measure_expression("SUM(Sales[amount], RESET_OUTER(LEVEL 2))").unwrap();
+        assert!(matches!(
+            e,
+            Expression::ResetOuter { level: Some(2), .. }
+        ));
+    }
+
+    #[test]
+    fn parse_level_is_contextual_keyword() {
+        // A table literally named `level` still works as a clear target —
+        // the keyword is claimed only when followed by a number.
+        let e = parse_measure_expression("SUM(Sales[amount], CLEAR(level))").unwrap();
+        match e {
+            Expression::Clear { targets, level, .. } => {
+                assert!(
+                    matches!(
+                        &targets[0],
+                        crate::model::context::ClearTarget::Table(t) if t == "level"
+                    ),
+                    "expected Table(level) target"
+                );
+                assert_eq!(level, None);
+            }
+            other => panic!("expected Clear, got {other:?}"),
+        }
+        // ... and both together: target `level`, then the keyword.
+        let e = parse_measure_expression("SUM(Sales[amount], CLEAR(level, LEVEL 2))").unwrap();
+        assert!(matches!(e, Expression::Clear { level: Some(2), .. }));
+    }
+
+    #[test]
+    fn parse_level_rejections_fail_closed() {
+        // Fixed-level functions refuse LEVEL with a targeted hint.
+        let err = parse_measure_expression("SUM(Sales[amount], CLEAR_INNER(Product, LEVEL 2))")
+            .unwrap_err();
+        assert!(err.to_string().contains("does not take a LEVEL"), "{err}");
+        assert!(
+            parse_measure_expression("SUM(Sales[amount], ALLSELECTED(Product, LEVEL 2))").is_err()
+        );
+        assert!(parse_measure_expression("SUM(Sales[amount], RESET_INNER(LEVEL 2))").is_err());
+        // Outer variants keep the axis: LEVEL 0 is inexpressible.
+        assert!(
+            parse_measure_expression("SUM(Sales[amount], CLEAR_OUTER(Product, LEVEL 0))").is_err()
+        );
+        assert!(parse_measure_expression("SUM(Sales[amount], RESET_OUTER(LEVEL 0))").is_err());
+        // Out-of-range / non-integer levels.
+        assert!(
+            parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 10))").is_err()
+        );
+        assert!(
+            parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 2.5))").is_err()
+        );
+        // LEVEL must be the last argument.
+        assert!(
+            parse_measure_expression("SUM(Sales[amount], CLEAR(Product, LEVEL 2, Cal))").is_err()
+        );
+        // CLEAR with only a LEVEL and no target is refused.
+        assert!(parse_measure_expression("SUM(Sales[amount], CLEAR(LEVEL 2))").is_err());
+    }
+
     // --- parse_global tests ---
 
     #[test]

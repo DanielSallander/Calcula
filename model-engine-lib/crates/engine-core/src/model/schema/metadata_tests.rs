@@ -69,9 +69,12 @@ fn model_format_version_is_current() {
     // which rewrites an existing column with a row-level expression in place.
     // v26 added formula aggregates (GroupAggregate.expression) - the SUMIF
     // shape: an aggregate over a row-level formula instead of a column.
+    // v27 added filter levels (LEVEL n on the clear family): optional level
+    // ceilings on Clear/Reset/ClearOuter/ResetOuter expressions and context
+    // ops, and the ContextOp clear/reset variants became struct variants.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 26);
+    assert_eq!(MODEL_FORMAT_VERSION, 27);
 }
 
 #[test]

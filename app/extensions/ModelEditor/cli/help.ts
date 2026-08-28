@@ -147,7 +147,9 @@ const TOPICS: Record<string, string> = {
   rename context <old> <new>      delete context <pattern>
   Operations: KEEP (filters, IN/NOT IN memberships, USERNAME()/CUSTOMDATA()),
   CLEAR/CLEAR_INNER/CLEAR_OUTER, RESET/RESET_INNER/RESET_OUTER,
-  USERELATIONSHIP("name"), or another context's name to inherit.`,
+  USERELATIONSHIP("name"), or another context's name to inherit.
+  A clear's last argument may be LEVEL n (0-9): bare CLEAR/RESET cover
+  levels 0-1, so filters pinned at level 2+ survive them.`,
   contextcolumn: `Context columns (measure-driven columns):
   ls contextcolumns [pattern]     show contextcolumn <name>
   delete contextcolumn <pattern>

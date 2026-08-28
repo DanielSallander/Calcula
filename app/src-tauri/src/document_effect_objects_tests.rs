@@ -792,6 +792,7 @@ fn a_ribbon_filter_selection_change_dirties_like_its_pane_control_twin() {
                 order: 0,
                 button_columns: 2,
                 button_rows: 0,
+                filter_level: 1,
             },
         );
     }

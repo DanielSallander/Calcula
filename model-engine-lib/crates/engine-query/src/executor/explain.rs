@@ -117,10 +117,25 @@ impl super::QueryExecutor {
                 limit,
                 totals,
                 hierarchy,
+                contested_filters,
             } => {
                 let start = Instant::now();
 
                 let mut node = PlanNode::new(PlanOperation::LocalAggregation, "Local Aggregation");
+
+                // Surface per-measure filter removal in the explanation: a
+                // contested filter is applied per measure, not at fetch time,
+                // and which measures drop it depends on their clear ranges.
+                for cf in contested_filters {
+                    node.add_property(
+                        "contested_filter",
+                        PlanValue::Text(format!(
+                            "{}[{}] (level {}) — applied per measure; cleared by measures \
+                             whose CLEAR/RESET reaches level {}",
+                            cf.table, cf.column, cf.level, cf.level
+                        )),
+                    );
+                }
 
                 let batches = Self::execute_local_aggregation(
                     fetches,
@@ -131,6 +146,7 @@ impl super::QueryExecutor {
                     *limit,
                     *totals,
                     hierarchy.as_ref(),
+                    contested_filters,
                     model,
                     registry,
                     cache,

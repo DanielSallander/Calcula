@@ -1,6 +1,6 @@
 # CLEAR_INNER
 
-Removes group-by (inner) filters on a specific table or column from the evaluation context, while keeping query-level (outer) filters intact.
+Removes group-by (inner) filters on a specific table or column from the evaluation context, while keeping query-level (outer) filters intact. In filter-level terms, CLEAR_INNER is the fixed **level-0** clear: it removes only the query's own group-by axis.
 
 ## Syntax
 
@@ -36,6 +36,7 @@ The result of the aggregation function, computed with the specified group-by fil
   - **Inner (group-by):** Filters from the matrix row/column context — the current grouping level.
   - **Outer (query-level):** Slicer/page filters from the query's `filters` parameter.
 - CLEAR_INNER only removes inner (group-by) filters. Outer (query-level) filters remain active.
+- CLEAR_INNER does **not** accept a `LEVEL` argument — it is fixed at level 0. Passing one is a parse error whose hint points to [CLEAR](CLEAR.md), which accepts `CLEAR(…, LEVEL n)`. (`CLEAR(…, LEVEL 0)` canonicalizes to CLEAR_INNER.)
 - Use [CLEAR](CLEAR.md) to remove filters from both sources, or [CLEAR_OUTER](CLEAR_OUTER.md) to remove only query-level filters.
 - This is useful when you want a measure to show a total across all group-by values, but still respect any slicers the user has applied.
 

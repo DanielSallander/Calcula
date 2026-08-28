@@ -149,10 +149,33 @@ pub struct Slicer {
     /// Report Connections: pivots/tables that this slicer filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connected_sources: Vec<SlicerConnection>,
+    /// Filter level: 1 = ordinary slicer (default), 2..=9 = PINNED — a pinned
+    /// slicer's filter survives a measure's bare `CLEAR`/`RESET`/`CLEAREXCEPT`
+    /// and is stripped only by an explicit `CLEAR(…, LEVEL n)` at or above
+    /// its level. Validated to 1..=9 at the command boundary.
+    #[serde(default = "default_filter_level")]
+    pub filter_level: u8,
 }
 
 fn default_true() -> bool {
     true
+}
+
+pub(crate) fn default_filter_level() -> u8 {
+    1
+}
+
+/// The valid slicer filter-level range (1 = ordinary, 2..=9 = pinned).
+/// A misleveled pin would silently change which measures respect the filter,
+/// so out-of-range values are refused at the command boundary.
+pub fn validate_filter_level(level: u8) -> Result<(), String> {
+    if (1..=9).contains(&level) {
+        Ok(())
+    } else {
+        Err(format!(
+            "filter level {level} is out of range; levels are 1 (ordinary) through 9 (pinned)"
+        ))
+    }
 }
 
 fn default_gap() -> f64 {
@@ -202,6 +225,9 @@ pub struct CreateSlicerParams {
     pub connected_sources: Vec<SlicerConnection>,
     pub columns: Option<u32>,
     pub style_preset: Option<String>,
+    /// Initial filter level (1 = ordinary, 2..=9 = pinned); defaults to 1.
+    #[serde(default)]
+    pub filter_level: Option<u8>,
 }
 
 /// Deserialize `Option<Option<T>>` correctly from JSON (twin of the helper in
@@ -239,6 +265,8 @@ pub struct UpdateSlicerParams {
     pub item_padding: Option<f64>,
     pub button_radius: Option<f64>,
     pub connected_sources: Option<Vec<SlicerConnection>>,
+    /// New filter level (1 = ordinary, 2..=9 = pinned).
+    pub filter_level: Option<u8>,
 }
 
 // ============================================================================

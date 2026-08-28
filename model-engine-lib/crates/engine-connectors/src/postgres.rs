@@ -811,6 +811,44 @@ mod pg_dialect {
             .map_err(|e| ConnectorError::UnsupportedOperation(format!("PostgreSQL pushdown: {e}")))
     }
 
+    /// The window re-aggregation function for a CLEAR'd aggregate, mirroring
+    /// the local path's `clear_reagg_fn` (`executor/pipeline/sql.rs`): `SUM`
+    /// re-sums additive aggregates over the partition, MIN/MAX carry through,
+    /// and every other aggregate fails closed — it cannot be recombined from
+    /// per-group values. Digs through context wrappers to the aggregate the
+    /// clear re-combines.
+    fn clear_reagg_fn(expr: &Expression) -> Option<&'static str> {
+        use engine_core::compute::aggregate::AggregateOp;
+        match expr {
+            Expression::Aggregate { operation, .. } => match operation {
+                AggregateOp::Sum | AggregateOp::Count | AggregateOp::CountRows => Some("SUM"),
+                AggregateOp::Min => Some("MIN"),
+                AggregateOp::Max => Some("MAX"),
+                _ => None,
+            },
+            Expression::Keep { expr, .. }
+            | Expression::KeepIn { expr, .. }
+            | Expression::Clear { expr, .. }
+            | Expression::ClearExcept { expr, .. }
+            | Expression::Using { expr, .. }
+            | Expression::UseRelationship { expr, .. }
+            | Expression::Traverse { expr, .. } => clear_reagg_fn(expr),
+            _ => None,
+        }
+    }
+
+    /// The re-aggregation function for `inner`, or a fail-closed error naming
+    /// the label — never silently `SUM` a non-additive aggregate.
+    fn require_clear_reagg(inner: &Expression, label: &str) -> ConnectorResult<&'static str> {
+        clear_reagg_fn(inner).ok_or_else(|| {
+            ConnectorError::UnsupportedOperation(format!(
+                "PostgreSQL pushdown: {label} wraps an aggregate that cannot be recombined \
+                 from per-group values over the cleared partition; CLEAR/CLEAREXCEPT support \
+                 SUM, COUNT, COUNTROWS, MIN, and MAX here"
+            ))
+        })
+    }
+
     /// Render a full Expression with CLEAR/CLEAREXCEPT as window functions.
     ///
     /// NOT unified into [`SqlRenderer`]: the CLEAR-to-window translation
@@ -826,9 +864,14 @@ mod pg_dialect {
         use engine_core::model::ClearTarget;
 
         match expr {
+            // The `level` ceiling affects which OUTER (slicer) filters the
+            // clear strips — outer stripping never happens on the pushed
+            // path (contested filters force local aggregation), so only the
+            // level-independent axis half is rendered here.
             Expression::Clear {
                 expr: inner,
                 targets,
+                level: _,
             } => {
                 let inner_sql = expr_to_sql_with_clear(inner, table_map, group_by)?;
                 let partition_cols: Vec<String> = group_by
@@ -859,7 +902,8 @@ mod pg_dialect {
                 } else {
                     format!("OVER (PARTITION BY {})", partition_cols.join(", "))
                 };
-                Ok(format!("SUM({inner_sql}) {over}"))
+                let reagg = require_clear_reagg(inner, "CLEAR")?;
+                Ok(format!("{reagg}({inner_sql}) {over}"))
             }
             Expression::ClearExcept {
                 expr: inner,
@@ -890,7 +934,8 @@ mod pg_dialect {
                 } else {
                     format!("OVER (PARTITION BY {})", partition_cols.join(", "))
                 };
-                Ok(format!("SUM({inner_sql}) {over}"))
+                let reagg = require_clear_reagg(inner, "CLEAREXCEPT")?;
+                Ok(format!("{reagg}({inner_sql}) {over}"))
             }
             Expression::SafeDivide {
                 numerator,

@@ -1013,6 +1013,8 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("refresh_all_pivot_tables", "re-queries every pivot's source; the definitions are unchanged"),
     ("apply_pivot_filter", "sets one pivot's filter"),
     ("clear_pivot_filter", "clears one pivot's filter"),
+    ("get_slicer_items", "reads a slicer's item list; holds BiState only to fetch the full \
+      value domain of a PINNED slicer from the model (the pivot cache is pin-filtered)"),
     ("drill_through_to_sheet", "adds a sheet of detail rows"),
     ("create_pivot_from_bi_model", "adds a pivot"),
     // -- BI / report / script surfaces ----------------------------------------

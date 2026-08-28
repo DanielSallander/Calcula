@@ -240,6 +240,8 @@ impl ModelDataProvider for HostModelProvider {
                     column: f.column.clone(),
                     operator: f.operator.clone(),
                     value: f.value.clone(),
+                    // Script-issued filters are ordinary slicers (level 1).
+                    level: 1,
                 })
                 .collect(),
         };
