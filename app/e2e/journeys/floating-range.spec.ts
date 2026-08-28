@@ -72,6 +72,9 @@ interface FrInfo {
   colCount: number;
   x: number;
   y: number;
+  showTitle: boolean;
+  showColumnHeaders: boolean;
+  showRowHeaders: boolean;
 }
 
 const listFrs = (page: Page) => invoke<FrInfo[]>(page, "list_floating_ranges");
@@ -347,7 +350,237 @@ test.describe.serial("floating ranges, live", () => {
       }
     }
   });
+
+  // -------------------------------------------------------------------------
+  // The object right-click menu (2026-08-28)
+  //
+  // Core refuses to open the grid's CELL menu over a floating object and
+  // expects the owning extension to show its own. The FR registered its items
+  // into the grid registry instead, so nothing rendered them: the menu was
+  // registered, ordered, gated — and unreachable. Nothing caught it because
+  // the menu had no test of any kind, which is why this one asserts in BOTH
+  // directions (design mode shows it, run mode does not).
+  // -------------------------------------------------------------------------
+
+  test("right-clicking the object opens its own menu in Design Mode, and nothing in run mode", async ({
+    appPage: page,
+  }) => {
+    const fr = await createFr(page, "FloatE2E");
+    try {
+      // Run mode first: the negative control has to fail for the right reason,
+      // so it runs BEFORE the toggle rather than after it.
+      await setDesignMode(page, false);
+      await rightClickFr(page, 40, 8);
+      await page.waitForTimeout(300);
+      expect(await page.locator("[data-fr-context-menu]").count()).toBe(0);
+
+      await setDesignMode(page, true);
+      await rightClickFr(page, 40, 8);
+      const menu = page.locator("[data-fr-context-menu]");
+      await expect(menu).toBeVisible({ timeout: 3000 });
+      await expect(menu).toContainText("FloatE2E");
+      await expect(
+        menu.locator('[data-fr-menu-item="floatingRange.properties"]'),
+      ).toBeVisible();
+
+      // A 1x1 range cannot lose its last row or column, so those two entries
+      // must be absent — the gate is evaluated at OPEN time against the live
+      // window, not baked in at registration.
+      await expect(
+        menu.locator('[data-fr-menu-item="floatingRange.deleteLastRow"]'),
+      ).toHaveCount(0);
+
+      await menu.locator('[data-fr-menu-item="floatingRange.properties"]').click();
+      await expect(page.locator("[data-fr-properties-dialog]")).toBeVisible({
+        timeout: 3000,
+      });
+      await page.locator("[data-fr-properties-dialog] button", { hasText: "Cancel" }).click();
+      await expect(page.locator("[data-fr-properties-dialog]")).toHaveCount(0);
+    } finally {
+      await setDesignMode(page, false);
+      await deleteFr(page, fr.id);
+    }
+  });
+
+  test("the properties dialog hides chrome, and the choice survives save/reopen", async ({
+    appPage: page,
+  }) => {
+    const fr = await createFr(page, "FloatE2E");
+    let reopened = false;
+    try {
+      const before = await listFrs(page);
+      expect(before[0].showTitle).toBe(true);
+      expect(before[0].showColumnHeaders).toBe(true);
+      expect(before[0].showRowHeaders).toBe(true);
+
+      await setDesignMode(page, true);
+      await rightClickFr(page, 40, 8);
+      await page
+        .locator('[data-fr-menu-item="floatingRange.properties"]')
+        .click({ timeout: 3000 });
+      const dialog = page.locator("[data-fr-properties-dialog]");
+      await expect(dialog).toBeVisible({ timeout: 3000 });
+
+      // A MIXED combination on purpose: all-false would also pass if the flags
+      // were dropped and re-derived from a bool's `false` default.
+      await dialog.locator("[data-fr-show-title]").uncheck();
+      await dialog.locator("[data-fr-show-row-headers]").uncheck();
+      await dialog.locator("[data-fr-apply-button]").click();
+      await expect(dialog).toHaveCount(0);
+
+      const applied = await eventually(
+        () => listFrs(page),
+        (rows) => rows.length === 1 && rows[0].showTitle === false,
+        "hiding the title bar never reached the backend row",
+      );
+      expect(applied[0].showRowHeaders).toBe(false);
+      expect(applied[0].showColumnHeaders).toBe(true);
+
+      // .cala carries no format-version link for these, so the round trip is
+      // the only thing standing between "hidden" and "back next Monday".
+      await invoke(page, "save_file", { path: SAVED_DOC });
+      await page.waitForTimeout(500);
+      await fileApi(page, "newFile");
+      expect(await listFrs(page)).toEqual([]);
+
+      await fileApi(page, "openFileAtPath", SAVED_DOC);
+      reopened = true;
+      const restored = await eventually(
+        () => listFrs(page),
+        (rows) => rows.length === 1,
+        "the floating range did not survive the round trip",
+      );
+      expect(restored[0].showTitle).toBe(false);
+      expect(restored[0].showColumnHeaders).toBe(true);
+      expect(restored[0].showRowHeaders).toBe(false);
+    } finally {
+      await setDesignMode(page, false);
+      if (reopened) {
+        for (const fr2 of await listFrs(page)) await deleteFr(page, fr2.id);
+      } else {
+        await deleteFr(page, fr.id);
+      }
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Edit mode (2026-08-28)
+  //
+  // Core preventDefault()s the mousedown on a floating overlay body, so the
+  // FR editor's textarea never blurs and its deferred blur-commit never runs.
+  // The selection walked to the clicked cell while the FIRST cell stayed in
+  // edit mode — two cells apparently active at once.
+  // -------------------------------------------------------------------------
+
+  test("clicking another cell while editing commits the edit and closes the editor", async ({
+    appPage: page,
+  }) => {
+    const fr = await createFr(page, "FloatE2E");
+    try {
+      await frApi(page, "updateFloatingRange", [fr.id, { rowCount: 2, colCount: 2 }]);
+      await page.waitForTimeout(300);
+
+      const editor = page.locator("[data-fr-editor]");
+      await dblClickFrCell(page, 0, 0);
+      await expect(editor).toBeVisible({ timeout: 3000 });
+      await page.keyboard.type("42");
+
+      // The click under test: a DIFFERENT cell of the same range.
+      await clickFrCell(page, 0, 1);
+
+      await expect(editor).toBeHidden({ timeout: 3000 });
+      await eventually(
+        () => frCell(page, fr.id, 0, 0),
+        (v) => v === 42,
+        "the edit was abandoned instead of committed",
+      );
+
+      // And the click that lands on the cell being edited must NOT commit —
+      // that is the user reaching into their own editor to move the caret.
+      await dblClickFrCell(page, 1, 0);
+      await expect(editor).toBeVisible({ timeout: 3000 });
+      await page.keyboard.type("7");
+      await clickFrCell(page, 1, 0);
+      await page.waitForTimeout(400);
+      await expect(editor).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(editor).toBeHidden({ timeout: 3000 });
+    } finally {
+      await deleteFr(page, fr.id);
+    }
+  });
 });
+
+// ---------------------------------------------------------------------------
+// Interaction helpers — client coordinates for a point INSIDE the frame
+// ---------------------------------------------------------------------------
+
+/** Design Mode is a frontend session flag; drive it through its @api module. */
+async function setDesignMode(page: Page, on: boolean): Promise<void> {
+  await page.evaluate(async (value) => {
+    const mod = await (window as unknown as {
+      __calcImport: (u: string) => Promise<{ setDesignMode: (v: boolean) => void }>;
+    }).__calcImport(new URL("/src/api/designMode.ts", document.baseURI).href);
+    mod.setDesignMode(value);
+  }, on);
+  await page.waitForTimeout(150);
+}
+
+/**
+ * Client coordinates for a point `dx`/`dy` logical pixels into the floating
+ * frame. Sheet pixels -> canvas is the overlay's own formula (header gutters
+ * minus scroll); canvas -> client is the canvas LAYER's rect, which is the
+ * basis the extension itself converts against.
+ */
+async function frFramePoint(
+  page: Page,
+  dx: number,
+  dy: number,
+): Promise<{ x: number; y: number }> {
+  const geom = await readGridGeometry(page);
+  const canvasX = geom.rowHeaderWidth + FR_X - geom.scrollX + dx;
+  const canvasY = geom.colHeaderHeight + FR_Y - geom.scrollY + dy;
+  return page.evaluate(
+    ({ canvasX, canvasY, zoom }) => {
+      const layer = document.querySelector("[data-grid-canvas-layer]");
+      if (!layer) throw new Error("grid canvas layer not found");
+      const rect = layer.getBoundingClientRect();
+      return { x: rect.left + canvasX * zoom, y: rect.top + canvasY * zoom };
+    },
+    { canvasX, canvasY, zoom: geom.zoom },
+  );
+}
+
+async function rightClickFr(page: Page, dx: number, dy: number): Promise<void> {
+  const p = await frFramePoint(page, dx, dy);
+  await page.mouse.click(p.x, p.y, { button: "right" });
+}
+
+/** Frame-relative centre of a local cell, using the DEFAULT chrome + sizes
+ *  (these journeys never hide chrome before clicking). */
+function frCellOffset(row: number, col: number): { dx: number; dy: number } {
+  const ROW_HDR_W = 28;
+  const TITLE_H = 20;
+  const COL_HDR_H = 16;
+  const COL_W = 64.29;
+  const ROW_H = 20;
+  return {
+    dx: ROW_HDR_W + col * COL_W + COL_W / 2,
+    dy: TITLE_H + COL_HDR_H + row * ROW_H + ROW_H / 2,
+  };
+}
+
+async function clickFrCell(page: Page, row: number, col: number): Promise<void> {
+  const o = frCellOffset(row, col);
+  const p = await frFramePoint(page, o.dx, o.dy);
+  await page.mouse.click(p.x, p.y);
+}
+
+async function dblClickFrCell(page: Page, row: number, col: number): Promise<void> {
+  const o = frCellOffset(row, col);
+  const p = await frFramePoint(page, o.dx, o.dy);
+  await page.mouse.dblclick(p.x, p.y);
+}
 
 // The file-api helper (newFile / openFileAtPath), same idiom as
 // shapes-hometab.spec.ts.

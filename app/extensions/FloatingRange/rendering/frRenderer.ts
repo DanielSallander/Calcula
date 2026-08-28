@@ -27,8 +27,10 @@ import {
 } from "../lib/floatingRangeStore";
 import {
   FR_TITLE_H,
-  FR_COL_HDR_H,
-  FR_ROW_HDR_W,
+  frTitleH,
+  frColHdrH,
+  frRowHdrW,
+  frCellsTop,
   frColWidth,
   frRowHeight,
   frameWidth,
@@ -255,33 +257,46 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
   ctx.lineWidth = 1;
   ctx.strokeRect(canvasX + 0.5, canvasY + 0.5, w - 1, h - 1);
 
-  // ---- 2. Title bar (the Core-move grab zone) ----
-  ctx.fillStyle = COLORS.titleBg;
-  ctx.fillRect(canvasX, canvasY, w, FR_TITLE_H);
-  ctx.strokeStyle = COLORS.frameBorder;
-  ctx.beginPath();
-  ctx.moveTo(canvasX, canvasY + FR_TITLE_H + 0.5);
-  ctx.lineTo(canvasX + w, canvasY + FR_TITLE_H + 0.5);
-  ctx.stroke();
-  ctx.font = `600 ${CELL_FONT}`;
-  ctx.fillStyle = COLORS.titleText;
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(canvasX + 2, canvasY, w - 4, FR_TITLE_H);
-  ctx.clip();
-  ctx.fillText(entry.name, canvasX + 6, canvasY + FR_TITLE_H / 2 + 0.5);
-  ctx.restore();
+  // Chrome extents: 0 for whatever the object hides, which is what makes the
+  // three blocks below skippable WITHOUT leaving a gap — every coordinate here
+  // is derived from these, never from the raw constants.
+  const titleH = frTitleH(entry);
+  const colHdrH = frColHdrH(entry);
+  const rowHdrW = frRowHdrW(entry);
 
-  // ---- 3. Local headers (always on — they advertise the private A1 space) ----
-  const hdrTop = canvasY + FR_TITLE_H;
-  const cellsTop = hdrTop + FR_COL_HDR_H;
-  const cellsLeft = canvasX + FR_ROW_HDR_W;
+  // ---- 2. Title bar (the Core-move grab zone; optional) ----
+  if (titleH > 0) {
+    ctx.fillStyle = COLORS.titleBg;
+    ctx.fillRect(canvasX, canvasY, w, titleH);
+    ctx.strokeStyle = COLORS.frameBorder;
+    ctx.beginPath();
+    ctx.moveTo(canvasX, canvasY + titleH + 0.5);
+    ctx.lineTo(canvasX + w, canvasY + titleH + 0.5);
+    ctx.stroke();
+    ctx.font = `600 ${CELL_FONT}`;
+    ctx.fillStyle = COLORS.titleText;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(canvasX + 2, canvasY, w - 4, titleH);
+    ctx.clip();
+    ctx.fillText(entry.name, canvasX + 6, canvasY + titleH / 2 + 0.5);
+    ctx.restore();
+  }
+
+  // ---- 3. Local headers (optional — they advertise the private A1 space) ----
+  const hdrTop = canvasY + titleH;
+  const cellsTop = canvasY + frCellsTop(entry);
+  const cellsLeft = canvasX + rowHdrW;
 
   ctx.fillStyle = COLORS.headerBg;
-  ctx.fillRect(canvasX, hdrTop, w, FR_COL_HDR_H); // col header strip (incl. corner)
-  ctx.fillRect(canvasX, cellsTop, FR_ROW_HDR_W, h - FR_TITLE_H - FR_COL_HDR_H);
+  if (colHdrH > 0) {
+    ctx.fillRect(canvasX, hdrTop, w, colHdrH); // col header strip (incl. corner)
+  }
+  if (rowHdrW > 0) {
+    ctx.fillRect(canvasX, cellsTop, rowHdrW, h - frCellsTop(entry));
+  }
 
   ctx.font = `10px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif`;
   ctx.fillStyle = COLORS.headerText;
@@ -289,31 +304,35 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
 
   // Column letters.
   ctx.textAlign = "center";
-  {
+  if (colHdrH > 0) {
     let x = cellsLeft;
     for (let c = 0; c < entry.cols; c++) {
       const cw = frColWidth(entry, c);
-      ctx.fillText(columnToLetter(c), x + cw / 2, hdrTop + FR_COL_HDR_H / 2 + 0.5);
+      ctx.fillText(columnToLetter(c), x + cw / 2, hdrTop + colHdrH / 2 + 0.5);
       x += cw;
     }
   }
   // Row numbers.
-  {
+  if (rowHdrW > 0) {
     let y = cellsTop;
     for (let r = 0; r < entry.rows; r++) {
       const rh = frRowHeight(entry, r);
-      ctx.fillText(String(r + 1), canvasX + FR_ROW_HDR_W / 2, y + rh / 2 + 0.5);
+      ctx.fillText(String(r + 1), canvasX + rowHdrW / 2, y + rh / 2 + 0.5);
       y += rh;
     }
   }
 
-  // Header separators.
+  // Header separators — one per strip that is actually there.
   ctx.strokeStyle = COLORS.gridline;
   ctx.beginPath();
-  ctx.moveTo(canvasX, cellsTop + 0.5 - 1);
-  ctx.lineTo(canvasX + w, cellsTop + 0.5 - 1);
-  ctx.moveTo(cellsLeft + 0.5 - 1, hdrTop);
-  ctx.lineTo(cellsLeft + 0.5 - 1, canvasY + h);
+  if (colHdrH > 0) {
+    ctx.moveTo(canvasX, cellsTop + 0.5 - 1);
+    ctx.lineTo(canvasX + w, cellsTop + 0.5 - 1);
+  }
+  if (rowHdrW > 0) {
+    ctx.moveTo(cellsLeft + 0.5 - 1, hdrTop);
+    ctx.lineTo(cellsLeft + 0.5 - 1, canvasY + h);
+  }
   ctx.stroke();
 
   // ---- 4. Gridlines ----
@@ -448,11 +467,25 @@ export function hitTestFloatingRange(hitCtx: OverlayHitTestContext): boolean {
   );
 }
 
-/** "move" over the title bar (the grab zone); default elsewhere. */
+/**
+ * "move" wherever a drag would MOVE the object, "cell" wherever it would
+ * select. Must stay in lockstep with `claimsBodyDrag` (index.ts): with a title
+ * bar that is the title band; with the title bar hidden the whole body is the
+ * grab zone, but only in design mode, because that is the only mode in which
+ * Core will start a move at all.
+ */
 export function getFrCursor(hitCtx: OverlayHitTestContext): string | null {
   const b = hitCtx.floatingCanvasBounds;
   if (!b) return null;
-  const dy = hitCtx.canvasY - b.y;
-  if (dy >= 0 && dy < FR_TITLE_H) return "move";
-  return "cell";
+  const frId = hitCtx.region.data?.frId as string | undefined;
+  const entry = frId ? getFloatingRangeById(frId) : null;
+  if (!entry) return null;
+  if (entry.showTitle) {
+    const dy = hitCtx.canvasY - b.y;
+    return dy >= 0 && dy < FR_TITLE_H ? "move" : "cell";
+  }
+  // `movable` is the flag Core actually consults, and the store publishes it
+  // from the design-mode state — reading it here keeps the cursor honest
+  // instead of promising a move that Core will refuse.
+  return hitCtx.region.data?.movable === true ? "move" : "cell";
 }

@@ -44,6 +44,12 @@ export interface FloatingRangeInfo {
   colWidths: Record<number, number>;
   /** Per-row height overrides (px); absent rows use the default. */
   rowHeights: Record<number, number>;
+  /** Frame chrome. The title bar carries the name AND is the move grab zone;
+   *  the other two are the object's own A1 column letters / row numbers. The
+   *  frame size DERIVES from these, so hiding one SHRINKS the object. */
+  showTitle: boolean;
+  showColumnHeaders: boolean;
+  showRowHeaders: boolean;
   /** The FR's name — lives in the SHARED sheet namespace (=Name!A1 works). */
   name: string;
   /** Live index of the backing sheet (for event filtering ONLY, never addressing). */
@@ -52,12 +58,19 @@ export interface FloatingRangeInfo {
   hostSheetIndex: number;
 }
 
-/** Partial geometry/window update for update_floating_range. */
+/**
+ * Partial geometry/window/chrome update for update_floating_range. An ABSENT
+ * flag means "leave it alone" — `false` is a real value, so never spread a
+ * `?? false` into one of these.
+ */
 export interface FloatingRangePatch {
   x?: number;
   y?: number;
   rowCount?: number;
   colCount?: number;
+  showTitle?: boolean;
+  showColumnHeaders?: boolean;
+  showRowHeaders?: boolean;
 }
 
 /** Backend-enforced window bounds (1..MAX each). */

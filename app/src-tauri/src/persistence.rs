@@ -2008,6 +2008,9 @@ pub(crate) fn collect_floating_ranges_for_save(
             col_count: fr.col_count,
             col_widths: fr.col_widths.clone(),
             row_heights: fr.row_heights.clone(),
+            show_title: fr.show_title,
+            show_column_headers: fr.show_column_headers,
+            show_row_headers: fr.show_row_headers,
         })
         .collect();
     saved.sort_by_key(|fr| fr.id.to_string());
@@ -2060,6 +2063,9 @@ pub(crate) fn restore_floating_ranges(
             col_count: s.col_count.max(1),
             col_widths: s.col_widths.clone(),
             row_heights: s.row_heights.clone(),
+            show_title: s.show_title,
+            show_column_headers: s.show_column_headers,
+            show_row_headers: s.show_row_headers,
         });
     }
     // Orphan sweep (log only — see the doc comment).

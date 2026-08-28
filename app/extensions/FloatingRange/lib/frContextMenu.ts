@@ -1,24 +1,34 @@
 //! FILENAME: app/extensions/FloatingRange/lib/frContextMenu.ts
-// PURPOSE: Grid context-menu items for a selected floating range (Add/Delete
-//          Row/Column, Rename…, Properties…, Delete).
-// CONTEXT: Precedent Controls/lib/controlContextMenu.ts — registered through
-//          gridExtensions, items gated on the FR object selection so they only
-//          appear when one is selected. Actions are injected by index.ts (the
-//          lifecycle owner) to keep this module free of backend plumbing.
+// PURPOSE: The item MODEL for a floating range's own right-click menu
+//          (Add/Delete Row/Column, Rename…, Properties…, Delete).
+// CONTEXT: These items used to be registered into `gridExtensions`, the
+//          registry only `GridContextMenuHost` renders — and that host is only
+//          opened by `AppEvents.CONTEXT_MENU_REQUEST`, which Core deliberately
+//          does NOT emit for a right-click that lands on a floating object
+//          ("Cell options on an object right-click are always wrong",
+//          Spreadsheet.tsx). The items were therefore UNREACHABLE by
+//          right-clicking the object they belong to: registered, ordered,
+//          gated, and dead.
+//
+//          The working precedent is Charts / Slicer / TimelineSlicer: the
+//          object's extension owns a capture-phase `contextmenu` listener and
+//          shows its OWN overlay menu. That is what index.ts now does, and
+//          this module is reduced to the part worth keeping — the item list —
+//          so the menu component stays a renderer and the actions stay with
+//          the lifecycle owner.
 
-import { gridExtensions } from "@api";
-import type { GridContextMenuItem } from "@api/extensions";
-import { getSelectedFloatingRange } from "./frSelection";
-
-const ITEM_IDS = [
-  "floatingRange.addRow",
-  "floatingRange.addColumn",
-  "floatingRange.deleteLastRow",
-  "floatingRange.deleteLastColumn",
-  "floatingRange.rename",
-  "floatingRange.properties",
-  "floatingRange.delete",
-];
+/** One entry in the floating-range object menu. */
+export interface FrMenuItem {
+  id: string;
+  label: string;
+  shortcut?: string;
+  /** Hidden entirely when false (never rendered greyed out). */
+  enabled: boolean;
+  separatorAfter?: boolean;
+  /** Marks a destructive action so the menu can paint it as one. */
+  destructive?: boolean;
+  run(): void;
+}
 
 export interface FrContextMenuHandlers {
   addRow(frId: string): void;
@@ -32,94 +42,61 @@ export interface FrContextMenuHandlers {
   getCounts(frId: string): { rows: number; cols: number } | null;
 }
 
-function selectedId(): string | null {
-  return getSelectedFloatingRange();
-}
-
 /**
- * Register the context menu items. Returns a cleanup that unregisters them.
+ * Build the menu for one floating range. Evaluated at OPEN time, so the
+ * shrink items reflect the window the object has right now.
  */
-export function registerFrContextMenu(handlers: FrContextMenuHandlers): () => void {
-  const withSelected = (fn: (frId: string) => void) => () => {
-    const id = selectedId();
-    if (id) fn(id);
-  };
-
-  const items: GridContextMenuItem[] = [
+export function buildFrContextMenu(
+  frId: string,
+  handlers: FrContextMenuHandlers,
+): FrMenuItem[] {
+  const counts = handlers.getCounts(frId);
+  return [
     {
       id: "floatingRange.addRow",
       label: "Add Row",
-      group: "floatingRange",
-      order: 1,
-      visible: () => selectedId() !== null,
-      onClick: withSelected(handlers.addRow),
+      enabled: true,
+      run: () => handlers.addRow(frId),
     },
     {
       id: "floatingRange.addColumn",
       label: "Add Column",
-      group: "floatingRange",
-      order: 2,
-      visible: () => selectedId() !== null,
-      onClick: withSelected(handlers.addColumn),
+      enabled: true,
+      run: () => handlers.addColumn(frId),
     },
     {
       id: "floatingRange.deleteLastRow",
       label: "Delete Last Row",
-      group: "floatingRange",
-      order: 3,
-      visible: () => {
-        const id = selectedId();
-        if (!id) return false;
-        return (handlers.getCounts(id)?.rows ?? 1) > 1;
-      },
-      onClick: withSelected(handlers.deleteLastRow),
+      enabled: (counts?.rows ?? 1) > 1,
+      run: () => handlers.deleteLastRow(frId),
     },
     {
       id: "floatingRange.deleteLastColumn",
       label: "Delete Last Column",
-      group: "floatingRange",
-      order: 4,
-      visible: () => {
-        const id = selectedId();
-        if (!id) return false;
-        return (handlers.getCounts(id)?.cols ?? 1) > 1;
-      },
+      enabled: (counts?.cols ?? 1) > 1,
       separatorAfter: true,
-      onClick: withSelected(handlers.deleteLastColumn),
+      run: () => handlers.deleteLastColumn(frId),
     },
     {
       id: "floatingRange.rename",
       label: "Rename…",
-      group: "floatingRange",
-      order: 10,
-      visible: () => selectedId() !== null,
-      onClick: withSelected(handlers.rename),
+      enabled: true,
+      run: () => handlers.rename(frId),
     },
     {
       id: "floatingRange.properties",
       label: "Properties…",
-      group: "floatingRange",
-      order: 11,
-      visible: () => selectedId() !== null,
+      enabled: true,
       separatorAfter: true,
-      onClick: withSelected(handlers.properties),
+      run: () => handlers.properties(frId),
     },
     {
       id: "floatingRange.delete",
       label: "Delete",
       shortcut: "Del",
-      group: "floatingRange",
-      order: 20,
-      visible: () => selectedId() !== null,
-      onClick: withSelected(handlers.deleteObject),
+      enabled: true,
+      destructive: true,
+      run: () => handlers.deleteObject(frId),
     },
   ];
-
-  gridExtensions.registerContextMenuItems(items);
-
-  return () => {
-    for (const id of ITEM_IDS) {
-      gridExtensions.unregisterContextMenuItem(id);
-    }
-  };
 }

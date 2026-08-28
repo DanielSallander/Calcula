@@ -16,16 +16,46 @@ import {
 // Frame chrome constants
 // ============================================================================
 
-/** Title bar height (the Core-move grab zone). */
+/** Title bar height WHEN SHOWN (the Core-move grab zone). */
 export const FR_TITLE_H = 20;
-/** Local column-header strip height (A, B, C, …). */
+/** Local column-header strip height WHEN SHOWN (A, B, C, …). */
 export const FR_COL_HDR_H = 16;
-/** Local row-header strip width (1, 2, 3, …). */
+/** Local row-header strip width WHEN SHOWN (1, 2, 3, …). */
 export const FR_ROW_HDR_W = 28;
 
 /** Default cell sizes — the grid's own defaults (Excel-parity 64.29 x 20). */
 export const FR_DEFAULT_COL_W = 64.29;
 export const FR_DEFAULT_ROW_H = 20;
+
+// ============================================================================
+// Chrome extents — the ONLY readers of the three visibility flags
+// ============================================================================
+//
+// Every piece of frame math below (and in frRenderer / index.ts / frEditor)
+// goes through these three, never the raw constants. A hidden strip is ZERO
+// pixels wide/tall, so the frame SHRINKS and every derived coordinate — cell
+// origins, hit zones, the resize quantization, the editor's DOM rect — moves
+// with it. That is what makes hiding chrome one edit instead of thirty.
+
+/** Title-bar height for this entry: 0 when hidden. */
+export function frTitleH(entry: FloatingRangeEntry): number {
+  return entry.showTitle ? FR_TITLE_H : 0;
+}
+
+/** Column-header strip height for this entry: 0 when hidden. */
+export function frColHdrH(entry: FloatingRangeEntry): number {
+  return entry.showColumnHeaders ? FR_COL_HDR_H : 0;
+}
+
+/** Row-header gutter width for this entry: 0 when hidden. */
+export function frRowHdrW(entry: FloatingRangeEntry): number {
+  return entry.showRowHeaders ? FR_ROW_HDR_W : 0;
+}
+
+/** Top of the cell area, relative to the frame origin (title + col header). */
+export function frCellsTop(entry: FloatingRangeEntry): number {
+  return frTitleH(entry) + frColHdrH(entry);
+}
 
 // ============================================================================
 // Per-index sizes (override maps with defaults)
@@ -59,14 +89,14 @@ export function contentHeight(entry: FloatingRangeEntry): number {
   return h;
 }
 
-/** Derived frame width: local row header + cells. */
+/** Derived frame width: local row header (if shown) + cells. */
 export function frameWidth(entry: FloatingRangeEntry): number {
-  return FR_ROW_HDR_W + contentWidth(entry);
+  return frRowHdrW(entry) + contentWidth(entry);
 }
 
-/** Derived frame height: title bar + local col header + cells. */
+/** Derived frame height: title bar + local col header (each if shown) + cells. */
 export function frameHeight(entry: FloatingRangeEntry): number {
-  return FR_TITLE_H + FR_COL_HDR_H + contentHeight(entry);
+  return frCellsTop(entry) + contentHeight(entry);
 }
 
 /** Frame size for arbitrary counts (resize-ghost math), using this entry's
@@ -76,9 +106,9 @@ export function frameSizeForCounts(
   rows: number,
   cols: number,
 ): { width: number; height: number } {
-  let w = FR_ROW_HDR_W;
+  let w = frRowHdrW(entry);
   for (let c = 0; c < cols; c++) w += frColWidth(entry, c);
-  let h = FR_TITLE_H + FR_COL_HDR_H;
+  let h = frCellsTop(entry);
   for (let r = 0; r < rows; r++) h += frRowHeight(entry, r);
   return { width: w, height: h };
 }
@@ -93,9 +123,9 @@ export function localCellOrigin(
   row: number,
   col: number,
 ): { x: number; y: number } {
-  let x = FR_ROW_HDR_W;
+  let x = frRowHdrW(entry);
   for (let c = 0; c < col; c++) x += frColWidth(entry, c);
-  let y = FR_TITLE_H + FR_COL_HDR_H;
+  let y = frCellsTop(entry);
   for (let r = 0; r < row; r++) y += frRowHeight(entry, r);
   return { x, y };
 }
@@ -111,6 +141,11 @@ export type FrHitZone =
 /**
  * Map a frame-relative point to a zone + local cell. A linear walk — fine at
  * v1 scale (windows are bounded at 1000 x 256 and typically tiny).
+ *
+ * A hidden strip must yield NO zone of its own, and it does so structurally:
+ * with `frTitleH` at 0 the `dy < titleH` test can never pass, with `frColHdrH`
+ * at 0 the col-header band is empty, and with `frRowHdrW` at 0 `colX` is never
+ * negative. Nothing here needs an `if (showX)` — the extents already say it.
  */
 export function localCellFromPoint(
   entry: FloatingRangeEntry,
@@ -120,10 +155,12 @@ export function localCellFromPoint(
   if (dx < 0 || dy < 0 || dx > frameWidth(entry) || dy > frameHeight(entry)) {
     return { zone: "outside" };
   }
-  if (dy < FR_TITLE_H) return { zone: "title" };
+  const titleH = frTitleH(entry);
+  const cellsTop = frCellsTop(entry);
+  if (dy < titleH) return { zone: "title" };
 
   // Column from x (points in the local row-header gutter clamp to col 0's edge).
-  const colX = dx - FR_ROW_HDR_W;
+  const colX = dx - frRowHdrW(entry);
   let col = 0;
   if (colX >= 0) {
     let acc = 0;
@@ -137,13 +174,16 @@ export function localCellFromPoint(
     }
   }
 
-  if (dy < FR_TITLE_H + FR_COL_HDR_H) {
-    if (colX < 0) return { zone: "title" }; // top-left corner box: treat as chrome
+  if (dy < cellsTop) {
+    // Top-left corner box. With no title bar there is nothing to grab there,
+    // so it reads as the row-header gutter it sits above rather than as a
+    // move zone that does not exist.
+    if (colX < 0) return entry.showTitle ? { zone: "title" } : { zone: "rowHeader", row: 0 };
     return { zone: "colHeader", col };
   }
 
   // Row from y.
-  const rowY = dy - FR_TITLE_H - FR_COL_HDR_H;
+  const rowY = dy - cellsTop;
   let row = 0;
   let acc = 0;
   for (let r = 0; r < entry.rows; r++) {
@@ -174,8 +214,8 @@ export function bestCountsForSize(
   width: number,
   height: number,
 ): { rows: number; cols: number } {
-  const targetW = width - FR_ROW_HDR_W;
-  const targetH = height - FR_TITLE_H - FR_COL_HDR_H;
+  const targetW = width - frRowHdrW(entry);
+  const targetH = height - frCellsTop(entry);
 
   let cols = 1;
   {

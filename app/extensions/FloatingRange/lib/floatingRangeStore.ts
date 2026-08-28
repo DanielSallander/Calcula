@@ -46,6 +46,10 @@ export interface FloatingRangeEntry {
   cols: number;
   colWidths: Record<number, number>;
   rowHeights: Record<number, number>;
+  /** Frame chrome (see frDimensions: the frame size DERIVES from these). */
+  showTitle: boolean;
+  showColumnHeaders: boolean;
+  showRowHeaders: boolean;
 }
 
 /** Overlay region type — matches the registerGridOverlay registration. */
@@ -106,6 +110,12 @@ export function fromInfo(info: FloatingRangeInfo): FloatingRangeEntry {
     cols: Math.max(1, Math.trunc(finiteNumber(info.colCount, 1))),
     colWidths: normalizeSizeMap(info.colWidths),
     rowHeights: normalizeSizeMap(info.rowHeights),
+    // `!== false`, not `=== true`: the backend defaults these to true, so an
+    // info that predates the field (or a hand-built test double) must land on
+    // SHOWN. `Boolean(undefined)` would silently strip every FR's chrome.
+    showTitle: info.showTitle !== false,
+    showColumnHeaders: info.showColumnHeaders !== false,
+    showRowHeaders: info.showRowHeaders !== false,
   };
 }
 
@@ -123,6 +133,9 @@ export function toInfo(entry: FloatingRangeEntry): FloatingRangeInfo {
     colCount: entry.cols,
     colWidths: { ...entry.colWidths },
     rowHeights: { ...entry.rowHeights },
+    showTitle: entry.showTitle,
+    showColumnHeaders: entry.showColumnHeaders,
+    showRowHeaders: entry.showRowHeaders,
     name: entry.name,
     backingSheetIndex: entry.backingSheetIndex,
     hostSheetIndex: entry.sheetIndex,

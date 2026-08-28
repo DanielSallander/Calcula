@@ -224,6 +224,11 @@ pub(crate) fn create_floating_range_inner(
             col_count: 1,
             col_widths: Default::default(),
             row_heights: Default::default(),
+            // A new object advertises its private A1 space: name bar, column
+            // letters, row numbers. `update_floating_range` turns them off.
+            show_title: true,
+            show_column_headers: true,
+            show_row_headers: true,
         };
         state
             .floating_ranges
@@ -332,6 +337,15 @@ pub(crate) fn update_floating_range_inner(
         if let Some(cc) = patch.col_count {
             row.col_count = cc;
         }
+        if let Some(v) = patch.show_title {
+            row.show_title = v;
+        }
+        if let Some(v) = patch.show_column_headers {
+            row.show_column_headers = v;
+        }
+        if let Some(v) = patch.show_row_headers {
+            row.show_row_headers = v;
+        }
         (previous, row.clone())
     };
 
@@ -339,15 +353,23 @@ pub(crate) fn update_floating_range_inner(
     // precedes the state locks in the canonical order). No entry for a
     // no-op patch: a step that restores the state it is already in reads,
     // from the keyboard, as a swallowed undo.
+    let chrome_changed = previous.show_title != updated.show_title
+        || previous.show_column_headers != updated.show_column_headers
+        || previous.show_row_headers != updated.show_row_headers;
     if previous.x != updated.x
         || previous.y != updated.y
         || previous.row_count != updated.row_count
         || previous.col_count != updated.col_count
+        || chrome_changed
     {
         let description = if previous.row_count != updated.row_count
             || previous.col_count != updated.col_count
         {
             "Resize floating range"
+        } else if chrome_changed {
+            // Chrome is undoable in its own right: hiding a strip SHRINKS the
+            // frame, so it is a visible layout change, not a view preference.
+            "Change floating range chrome"
         } else {
             "Move floating range"
         };

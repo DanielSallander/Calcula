@@ -16,6 +16,7 @@ import {
   emitAppEvent,
   showToast,
   showDialog,
+  showOverlay,
   registerFloatingRangeProvider,
   type CellValuesChangedPayload,
 } from "@api";
@@ -25,7 +26,7 @@ import {
   type OverlayHitTestContext,
 } from "@api/gridOverlays";
 import { confirmAsync, promptAsync } from "@api/dialogs";
-import { onDesignModeChange } from "@api/designMode";
+import { getDesignMode, onDesignModeChange } from "@api/designMode";
 import { getGridStateSnapshot, rowHeaderGutter, colHeaderGutter } from "@api/grid";
 import {
   isGlobalFormulaMode,
@@ -66,9 +67,8 @@ import {
   frameHeight,
   frameSizeForCounts,
   bestCountsForSize,
-  FR_TITLE_H,
-  FR_COL_HDR_H,
-  FR_ROW_HDR_W,
+  frRowHdrW,
+  frCellsTop,
 } from "./lib/frDimensions";
 import {
   selectFloatingRange,
@@ -94,12 +94,18 @@ import {
 import {
   openFrEditor,
   cancelFrEditor,
+  commitFrEditor,
+  getFrEditorCell,
   isFrEditorOpen,
   destroyFrEditor,
 } from "./editor/frEditor";
 import { buildQualifiedRef } from "./lib/frRefs";
-import { registerFrContextMenu } from "./lib/frContextMenu";
+import {
+  buildFrContextMenu,
+  type FrContextMenuHandlers,
+} from "./lib/frContextMenu";
 import { FloatingRangePropertiesDialog } from "./components/FloatingRangePropertiesDialog";
+import { FloatingRangeContextMenu } from "./components/FloatingRangeContextMenu";
 
 // ============================================================================
 // State
@@ -108,6 +114,7 @@ import { FloatingRangePropertiesDialog } from "./components/FloatingRangePropert
 const cleanupFns: (() => void)[] = [];
 
 const FR_PROPERTIES_DIALOG_ID = "floatingRange.properties";
+const FR_CONTEXT_MENU_ID = "floatingRange:contextMenu";
 
 /** Double-click detection: Core dispatches no dblclick to overlays, so two
  *  bodyDragStart hits on the same local cell within 350 ms open the editor. */
@@ -148,14 +155,43 @@ function clientToCanvas(clientX: number, clientY: number): { x: number; y: numbe
   return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
 }
 
+/**
+ * The floating range whose FRAME contains a logical-canvas point, or null.
+ * Active sheet only (that is what publishes regions), last one first so the
+ * topmost of two overlapping frames wins — the same order Core's own
+ * `findFloatingRegionAt` walks.
+ */
+function frameAtCanvasPoint(
+  canvasX: number,
+  canvasY: number,
+): FloatingRangeEntry | null {
+  const active = getAllFloatingRanges().filter(
+    (e) => e.sheetIndex === getFrActiveSheetIndex(),
+  );
+  for (let i = active.length - 1; i >= 0; i--) {
+    const entry = active[i];
+    const b = frameCanvasBounds(entry);
+    if (!b) continue;
+    if (
+      canvasX >= b.x &&
+      canvasX <= b.x + b.width &&
+      canvasY >= b.y &&
+      canvasY <= b.y + b.height
+    ) {
+      return entry;
+    }
+  }
+  return null;
+}
+
 /** Clamp a frame-relative point into the cells area and resolve its cell. */
 function clampedCellFromFramePoint(
   entry: FloatingRangeEntry,
   dx: number,
   dy: number,
 ): { row: number; col: number } {
-  const minX = FR_ROW_HDR_W;
-  const minY = FR_TITLE_H + FR_COL_HDR_H;
+  const minX = frRowHdrW(entry);
+  const minY = frCellsTop(entry);
   const cx = Math.min(Math.max(dx, minX), frameWidth(entry) - 0.01);
   const cy = Math.min(Math.max(dy, minY), frameHeight(entry) - 0.01);
   const hit = localCellFromPoint(entry, cx, cy);
@@ -165,6 +201,43 @@ function clampedCellFromFramePoint(
 
 function externalTargetExpecting(): boolean {
   return getExternalFormulaTarget()?.isExpectingReference() === true;
+}
+
+/**
+ * COMMIT BEFORE SELECT — the FR's own `onCommitBeforeSelect`.
+ *
+ * Core `preventDefault()`s the mousedown for every floating-overlay body hit
+ * (`overlayMoveHandlers.ts`), which cancels the browser's focus transfer: the
+ * editor's textarea NEVER blurs, so `frEditor.handleBlur` — the only other
+ * commit-on-click-away path — is unreachable for any click that starts inside
+ * the grid. Without this the old cell stays in edit mode while the selection
+ * walks off to the clicked one (the reported glitch). The main grid does not
+ * rely on blur either; it awaits an explicit commit inside the mousedown
+ * (`cellSelectionHandlers.ts`), and this is the same move.
+ *
+ * `target` is the cell the click resolved to, or null for a click that is not
+ * on a cell at all (title bar, row/column header). A click on the cell being
+ * edited is NOT a commit — that is the user placing the caret inside their own
+ * editor.
+ */
+function commitFrEditorBeforeSelect(
+  frId: string,
+  target: { row: number; col: number } | null,
+): void {
+  const editing = getFrEditorCell();
+  if (!editing) return;
+  if (
+    target &&
+    editing.frId === frId &&
+    editing.row === target.row &&
+    editing.col === target.col
+  ) {
+    return;
+  }
+  // Fire-and-forget is correct: commitFrEditor tears the editor down
+  // SYNCHRONOUSLY before its first await, so the selection written on the next
+  // line already sees a closed editor.
+  void commitFrEditor(null);
 }
 
 // ============================================================================
@@ -351,9 +424,27 @@ function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
     return true;
   }
 
+  // The FR's commit-before-select. This is the ONE mousedown hook Core calls
+  // for every zone — including the title bar, which dispatches no
+  // bodyDragStart — so it is the only place that can cover all of them.
+  commitFrEditorBeforeSelect(
+    frId,
+    hit.zone === "cells" ? { row: hit.row, col: hit.col } : null,
+  );
+
   // Title bar: Core runs the normal move path (floatingObject:selected has
   // already been dispatched, so the object still gets selected).
   if (hit.zone === "title") return false;
+
+  // No title bar = no grab zone. Rather than leave the object strandable,
+  // DESIGN MODE takes the whole body as the move handle — the Charts/Controls
+  // convention for an object with no title. Run mode is unchanged: the body
+  // still selects and edits cells, which is the working-surface doctrine in
+  // syncFloatingRangeRegions. Gated on `movable` (which the store publishes
+  // from the design-mode state) so the claim can never hand Core a drag it
+  // will refuse, leaving the click doing nothing at all.
+  if (!entry.showTitle && ctx.region.data?.movable === true) return false;
+
   // Headers + cells: the FR owns the interaction (local selection).
   return true;
 }
@@ -719,55 +810,122 @@ function activate(context: ExtensionContext): void {
     context.ui.menus.unregisterItem("insert", "insert.floatingRange"),
   );
 
-  // 5. Context menu.
-  cleanupFns.push(
-    registerFrContextMenu({
-      addRow: (frId) => {
+  // 5. Object right-click menu.
+  //
+  //    Core does NOT open the grid's cell menu over a floating object and
+  //    expects the owning extension to show its own from a capture-phase
+  //    contextmenu listener (Charts / Slicer / TimelineSlicer all do). The FR
+  //    never registered one, so its menu — Properties… included — could not be
+  //    reached by right-clicking the object at all.
+  //
+  //    DESIGN MODE gates it, for the same reason it gates move and resize: the
+  //    items here are AUTHORING acts on the object (grow it, rename it, delete
+  //    it, change its chrome), while run mode treats the range as a working
+  //    surface whose cells select and edit.
+  const menuHandlers: FrContextMenuHandlers = {
+    addRow: (frId) => {
+      const entry = getFloatingRangeById(frId);
+      if (entry) void resizeFr(frId, entry.rows + 1, entry.cols);
+    },
+    addColumn: (frId) => {
+      const entry = getFloatingRangeById(frId);
+      if (entry) void resizeFr(frId, entry.rows, entry.cols + 1);
+    },
+    deleteLastRow: (frId) => {
+      const entry = getFloatingRangeById(frId);
+      if (entry && entry.rows > 1) void resizeFr(frId, entry.rows - 1, entry.cols);
+    },
+    deleteLastColumn: (frId) => {
+      const entry = getFloatingRangeById(frId);
+      if (entry && entry.cols > 1) void resizeFr(frId, entry.rows, entry.cols - 1);
+    },
+    rename: (frId) => {
+      void (async () => {
         const entry = getFloatingRangeById(frId);
-        if (entry) void resizeFr(frId, entry.rows + 1, entry.cols);
-      },
-      addColumn: (frId) => {
-        const entry = getFloatingRangeById(frId);
-        if (entry) void resizeFr(frId, entry.rows, entry.cols + 1);
-      },
-      deleteLastRow: (frId) => {
-        const entry = getFloatingRangeById(frId);
-        if (entry && entry.rows > 1) void resizeFr(frId, entry.rows - 1, entry.cols);
-      },
-      deleteLastColumn: (frId) => {
-        const entry = getFloatingRangeById(frId);
-        if (entry && entry.cols > 1) void resizeFr(frId, entry.rows, entry.cols - 1);
-      },
-      rename: (frId) => {
-        void (async () => {
-          const entry = getFloatingRangeById(frId);
-          if (!entry) return;
-          const name = await promptAsync(
-            "New name (shared with sheet names; renaming updates referencing formulas and clears the undo history):",
-            { title: "Rename Floating Range", defaultValue: entry.name },
+        if (!entry) return;
+        const name = await promptAsync(
+          "New name (shared with sheet names; renaming updates referencing formulas and clears the undo history):",
+          { title: "Rename Floating Range", defaultValue: entry.name },
+        );
+        if (name === null) return;
+        const trimmed = name.trim();
+        if (!trimmed || trimmed === entry.name) return;
+        try {
+          await renameFr(frId, trimmed);
+        } catch (err) {
+          showToast(
+            `The floating range could not be renamed: ${err instanceof Error ? err.message : String(err)}`,
+            { type: "error" },
           );
-          if (name === null) return;
-          const trimmed = name.trim();
-          if (!trimmed || trimmed === entry.name) return;
-          try {
-            await renameFr(frId, trimmed);
-          } catch (err) {
-            showToast(
-              `The floating range could not be renamed: ${err instanceof Error ? err.message : String(err)}`,
-              { type: "error" },
-            );
-          }
-        })();
+        }
+      })();
+    },
+    properties: (frId) => {
+      showDialog(FR_PROPERTIES_DIALOG_ID, { frId });
+    },
+    deleteObject: (frId) => void confirmAndDeleteFr(frId),
+    getCounts: (frId) => {
+      const entry = getFloatingRangeById(frId);
+      return entry ? { rows: entry.rows, cols: entry.cols } : null;
+    },
+};
+
+  context.ui.overlays.register({
+    id: FR_CONTEXT_MENU_ID,
+    component: FloatingRangeContextMenu,
+    layer: "dropdown",
+  });
+  cleanupFns.push(() => context.ui.overlays.unregister(FR_CONTEXT_MENU_ID));
+
+  const handleFrContextMenu = (e: MouseEvent) => {
+    if (e.shiftKey) return; // Shift+right-click = the browser's own menu
+    if (!getDesignMode()) return;
+
+    // The listener is on `window`, so it sees right-clicks in dialogs and side
+    // panels too. Those have client coordinates that can map INTO an FR's
+    // frame once converted to the canvas basis, which would pop an object menu
+    // from a click that never touched the grid. Containment settles it before
+    // any geometry runs. Text fields keep their own menu.
+    const target = e.target as HTMLElement | null;
+    const layer = document.querySelector("[data-grid-canvas-layer]");
+    if (!target || !layer || !layer.contains(target)) return;
+    if (
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.isContentEditable
+    ) {
+      return;
+    }
+
+    const point = clientToCanvas(e.clientX, e.clientY);
+    if (!point) return;
+    const entry = frameAtCanvasPoint(point.x, point.y);
+    if (!entry) return;
+
+    // preventDefault ALSO satisfies Core's `defaultPrevented` check, so the
+    // grid's handler stands down even before its own floating-region test.
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Right-click selects, exactly as left-click does. Core's mousedown has
+    // usually done this already (it dispatches floatingObject:selected for
+    // every button), but a menu opened by a keyboard Menu key has had no
+    // mousedown at all.
+    selectFloatingRange(entry.id);
+    requestOverlayRedraw();
+
+    showOverlay(FR_CONTEXT_MENU_ID, {
+      data: {
+        frId: entry.id,
+        screenX: e.clientX,
+        screenY: e.clientY,
+        items: buildFrContextMenu(entry.id, menuHandlers),
       },
-      properties: (frId) => {
-        showDialog(FR_PROPERTIES_DIALOG_ID, { frId });
-      },
-      deleteObject: (frId) => void confirmAndDeleteFr(frId),
-      getCounts: (frId) => {
-        const entry = getFloatingRangeById(frId);
-        return entry ? { rows: entry.rows, cols: entry.cols } : null;
-      },
-    }),
+    });
+  };
+  window.addEventListener("contextmenu", handleFrContextMenu, true);
+  cleanupFns.push(() =>
+    window.removeEventListener("contextmenu", handleFrContextMenu, true),
   );
 
   // 6. Properties dialog.
@@ -817,6 +975,14 @@ function activate(context: ExtensionContext): void {
         : "none";
       if (sig !== lastSelectionSig) {
         lastSelectionSig = sig;
+        // Same commit-before-select rule, for the click that lands on an
+        // ORDINARY grid cell: that mousedown is preventDefault'd too, so the
+        // editor would otherwise sit open over a grid the user has moved on
+        // from. Never while a reference is being picked — that click is
+        // FEEDING the editor, and the grid selection does not move for it.
+        if (isFrEditorOpen() && !externalTargetExpecting()) {
+          void commitFrEditor(null);
+        }
         deselectAllFloatingRanges();
         clearLocalSelection();
         requestOverlayRedraw();

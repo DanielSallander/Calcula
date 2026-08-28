@@ -487,6 +487,22 @@ pub struct SavedFloatingRange {
     pub col_widths: HashMap<u32, f64>,
     #[serde(default)]
     pub row_heights: HashMap<u32, f64>,
+    /// Frame chrome visibility: the name/title bar, the object's own column
+    /// letters, the object's own row numbers. Default TRUE — a file written
+    /// before these existed had all three, so `default_true` (not the derived
+    /// `false`) is what makes an old document reopen looking the same.
+    ///
+    /// No format_version link, matching the `floating_ranges` section itself
+    /// (see `zip_io.rs`: feature id only). An older reader that ignores these
+    /// shows the chrome instead of hiding it — the cells and their values are
+    /// all still there, so the loss is cosmetic and VISIBLE, never a document
+    /// that comes back looking like something it is not.
+    #[serde(default = "default_true")]
+    pub show_title: bool,
+    #[serde(default = "default_true")]
+    pub show_column_headers: bool,
+    #[serde(default = "default_true")]
+    pub show_row_headers: bool,
 }
 
 /// A sparkline entry persisted in the workbook.

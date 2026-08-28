@@ -13,6 +13,7 @@ import {
   renameFloatingRange,
   FLOATING_RANGE_MAX_ROWS,
   FLOATING_RANGE_MAX_COLS,
+  type FloatingRangePatch,
 } from "@api/floatingRanges";
 import { AppEvents, emitAppEvent } from "@api/events";
 import { requestOverlayRedraw } from "@api/gridOverlays";
@@ -68,6 +69,7 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     gap: 10,
     flex: 1,
+    overflowY: "auto",
   },
   label: { marginBottom: 4, color: "#555" },
   input: {
@@ -81,6 +83,20 @@ const styles: Record<string, React.CSSProperties> = {
   row: { display: "flex", gap: 10 },
   stepper: { width: 90 },
   warning: { color: "#b42318" },
+  fieldset: {
+    border: "1px solid #e0e0e0",
+    borderRadius: 4,
+    padding: "8px 10px 10px",
+    margin: 0,
+  },
+  legend: { color: "#555", padding: "0 4px", fontSize: 12 },
+  check: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "2px 0",
+    cursor: "pointer",
+  },
   footer: {
     display: "flex",
     justifyContent: "flex-end",
@@ -111,13 +127,18 @@ export function FloatingRangePropertiesDialog(
   props: DialogProps,
 ): React.ReactElement | null {
   const { isOpen, onClose, data } = props;
-  const win = useDialogWindow({ minWidth: 320, minHeight: 220 });
+  // Taller than the original 220: the "Show" group has to fit without the
+  // footer buttons being pushed out of a resized-down window.
+  const win = useDialogWindow({ minWidth: 320, minHeight: 420 });
 
   const frId = typeof data?.frId === "string" ? data.frId : null;
 
   const [name, setName] = useState("");
   const [rows, setRows] = useState(1);
   const [cols, setCols] = useState(1);
+  const [showTitle, setShowTitle] = useState(true);
+  const [showColumnHeaders, setShowColumnHeaders] = useState(true);
+  const [showRowHeaders, setShowRowHeaders] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -131,6 +152,9 @@ export function FloatingRangePropertiesDialog(
       setName(entry.name);
       setRows(entry.rows);
       setCols(entry.cols);
+      setShowTitle(entry.showTitle);
+      setShowColumnHeaders(entry.showColumnHeaders);
+      setShowRowHeaders(entry.showRowHeaders);
     }
     // `win` is stable for the dialog's lifetime; re-running on it would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,11 +175,22 @@ export function FloatingRangePropertiesDialog(
     try {
       const nextRows = clampRows(rows);
       const nextCols = clampCols(cols);
-      if (nextRows !== entry.rows || nextCols !== entry.cols) {
-        const info = await updateFloatingRange(frId, {
-          rowCount: nextRows,
-          colCount: nextCols,
-        });
+      // One patch for size AND chrome: both change the DERIVED frame, so
+      // sending them together means one backend write and one undo step.
+      // Only the fields that actually differ are sent — an absent flag means
+      // "leave it alone", and a no-op patch records no undo entry at all.
+      const patch: FloatingRangePatch = {};
+      if (nextRows !== entry.rows) patch.rowCount = nextRows;
+      if (nextCols !== entry.cols) patch.colCount = nextCols;
+      if (showTitle !== entry.showTitle) patch.showTitle = showTitle;
+      if (showColumnHeaders !== entry.showColumnHeaders) {
+        patch.showColumnHeaders = showColumnHeaders;
+      }
+      if (showRowHeaders !== entry.showRowHeaders) {
+        patch.showRowHeaders = showRowHeaders;
+      }
+      if (Object.keys(patch).length > 0) {
+        const info = await updateFloatingRange(frId, patch);
         upsertFromInfo(info);
         invalidateFrCache(frId);
       }
@@ -229,6 +264,44 @@ export function FloatingRangePropertiesDialog(
                 onChange={(e) => setCols(clampCols(Number(e.target.value)))}
               />
             </div>
+          </div>
+
+          <fieldset style={styles.fieldset}>
+            <legend style={styles.legend}>Show</legend>
+            <label style={styles.check}>
+              <input
+                type="checkbox"
+                data-fr-show-title=""
+                checked={showTitle}
+                onChange={(e) => setShowTitle(e.target.checked)}
+              />
+              Title bar (the range&apos;s name)
+            </label>
+            <label style={styles.check}>
+              <input
+                type="checkbox"
+                data-fr-show-column-headers=""
+                checked={showColumnHeaders}
+                onChange={(e) => setShowColumnHeaders(e.target.checked)}
+              />
+              Column headers (A, B, C…)
+            </label>
+            <label style={styles.check}>
+              <input
+                type="checkbox"
+                data-fr-show-row-headers=""
+                checked={showRowHeaders}
+                onChange={(e) => setShowRowHeaders(e.target.checked)}
+              />
+              Row gutter (1, 2, 3…)
+            </label>
+          </fieldset>
+
+          <div style={{ color: "#777", fontSize: 12 }}>
+            Hiding a strip makes the range smaller — the cells stay put and the
+            frame shrinks around them. With the title bar hidden there is
+            nothing left to grab, so in Design Mode a drag anywhere on the range
+            moves it.
           </div>
 
           <div style={{ color: "#777", fontSize: 12 }}>

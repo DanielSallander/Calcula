@@ -2492,6 +2492,26 @@ pub struct FloatingRange {
     pub col_widths: std::collections::HashMap<u32, f64>,
     #[serde(default)]
     pub row_heights: std::collections::HashMap<u32, f64>,
+    /// Frame chrome visibility. `show_title` is the name bar (which is ALSO
+    /// the move grab zone — see the frontend's claimsBodyDrag: with it hidden,
+    /// design mode moves the object by its body instead); the other two are
+    /// the object's own A1 column-letter strip and row-number gutter.
+    ///
+    /// Default TRUE, hence `default = "default_true"` and not plain
+    /// `#[serde(default)]`: a bool's Default is FALSE, so the cheap spelling
+    /// would make every pre-existing row load with all its chrome stripped.
+    /// The frame's width and height DERIVE from these, so a hidden strip is a
+    /// smaller object, not a blank one.
+    #[serde(default = "default_true")]
+    pub show_title: bool,
+    #[serde(default = "default_true")]
+    pub show_column_headers: bool,
+    #[serde(default = "default_true")]
+    pub show_row_headers: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// What the frontend needs to render/address a floating range: the persisted
@@ -2517,6 +2537,16 @@ pub struct FloatingRangePatch {
     pub y: Option<f64>,
     pub row_count: Option<u32>,
     pub col_count: Option<u32>,
+    /// Chrome visibility (see `FloatingRange`). `#[serde(default)]` so a caller
+    /// that only moves or resizes may keep sending the four-field patch it
+    /// always sent — an ABSENT flag means "leave it alone", which is not the
+    /// same as `Some(false)`.
+    #[serde(default)]
+    pub show_title: Option<bool>,
+    #[serde(default)]
+    pub show_column_headers: Option<bool>,
+    #[serde(default)]
+    pub show_row_headers: Option<bool>,
 }
 
 /// Default row height and column width for the workbook.

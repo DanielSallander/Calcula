@@ -33,6 +33,9 @@ fn grow(wb: &Workbook, id: identity::EntityId, rows: u32, cols: u32) {
             y: None,
             row_count: Some(rows),
             col_count: Some(cols),
+            show_title: None,
+            show_column_headers: None,
+            show_row_headers: None,
         },
     )
     .expect("grow window");

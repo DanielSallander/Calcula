@@ -65,6 +65,9 @@ function makeInfo(overrides: Partial<FloatingRangeInfo> = {}): FloatingRangeInfo
     colCount: 3,
     colWidths: {},
     rowHeights: {},
+    showTitle: true,
+    showColumnHeaders: true,
+    showRowHeaders: true,
     name: "Float1",
     backingSheetIndex: 2,
     hostSheetIndex: 0,
@@ -135,6 +138,29 @@ describe("fromInfo normalization", () => {
     expect(entry.name).toBe("Float");
   });
 
+  it("carries the three chrome flags through independently", () => {
+    const entry = fromInfo(
+      makeInfo({ showTitle: false, showColumnHeaders: true, showRowHeaders: false }),
+    );
+    expect(entry.showTitle).toBe(false);
+    expect(entry.showColumnHeaders).toBe(true);
+    expect(entry.showRowHeaders).toBe(false);
+  });
+
+  it("treats a MISSING chrome flag as shown, never as hidden", () => {
+    // The backend defaults these to true, so `Boolean(undefined)` at this
+    // boundary would strip the chrome off every range whose info predates the
+    // field. `!== false` is the only reading that survives that.
+    const bare = makeInfo();
+    delete (bare as Partial<FloatingRangeInfo>).showTitle;
+    delete (bare as Partial<FloatingRangeInfo>).showColumnHeaders;
+    delete (bare as Partial<FloatingRangeInfo>).showRowHeaders;
+    const entry = fromInfo(bare);
+    expect(entry.showTitle).toBe(true);
+    expect(entry.showColumnHeaders).toBe(true);
+    expect(entry.showRowHeaders).toBe(true);
+  });
+
   it("round-trips through toInfo (the provider seam's list shape)", () => {
     const info = makeInfo({ rowCount: 4, colCount: 2, x: 10, y: 20 });
     const roundTripped = toInfo(fromInfo(info));
@@ -196,6 +222,52 @@ describe("syncFloatingRangeRegions", () => {
       rows: 2,
       cols: 3,
     });
+  });
+
+  it("SHRINKS the published region by exactly the chrome it hides", () => {
+    // The region rect is the object's hit box, its move box and its resize
+    // box. If hiding a strip did not shrink it, the object would keep an
+    // invisible band of empty pixels that still swallows clicks.
+    upsertFromInfo(
+      makeInfo({
+        id: "e",
+        hostSheetIndex: 0,
+        rowCount: 2,
+        colCount: 3,
+        showTitle: false,
+        showColumnHeaders: false,
+        showRowHeaders: false,
+      }),
+    );
+    setFrActiveSheetIndex(0);
+    syncFloatingRangeRegions();
+
+    const region = getGridRegions().find((r) => r.id === "fr-e");
+    expect(region!.floating!.width).toBeCloseTo(3 * FR_DEFAULT_COL_W, 5);
+    expect(region!.floating!.height).toBeCloseTo(2 * FR_DEFAULT_ROW_H, 5);
+  });
+
+  it("removes only the strips that are hidden", () => {
+    upsertFromInfo(
+      makeInfo({
+        id: "f",
+        hostSheetIndex: 0,
+        rowCount: 2,
+        colCount: 3,
+        showTitle: false,
+        showColumnHeaders: true,
+        showRowHeaders: false,
+      }),
+    );
+    setFrActiveSheetIndex(0);
+    syncFloatingRangeRegions();
+
+    const region = getGridRegions().find((r) => r.id === "fr-f");
+    expect(region!.floating!.width).toBeCloseTo(3 * FR_DEFAULT_COL_W, 5);
+    expect(region!.floating!.height).toBeCloseTo(
+      FR_COL_HDR_H + 2 * FR_DEFAULT_ROW_H,
+      5,
+    );
   });
 
   it("gates move/resize on DESIGN MODE — the button rule, not the shape rule", () => {

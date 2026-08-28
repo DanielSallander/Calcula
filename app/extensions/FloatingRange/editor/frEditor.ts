@@ -61,8 +61,37 @@ let textarea: HTMLTextAreaElement | null = null;
 let unregisterExtTarget: (() => void) | null = null;
 let removeAcceptedListener: (() => void) | null = null;
 
-/** Set by a reference insertion so the imminent blur does not commit. */
+/**
+ * Set by a reference insertion so the imminent blur does not commit.
+ *
+ * BOUNDED, because it used to latch: the picking click lands inside the grid,
+ * where Core `preventDefault()`s the mousedown, so no blur is fired and the
+ * flag's only reader never runs to clear it. It then survived until the user's
+ * NEXT genuine focus departure — a click on the ribbon or the formula bar —
+ * where it swallowed the commit for an edit that had nothing to do with the
+ * pick, leaving the editor open over an uncommitted value. The window only has
+ * to outlive handleBlur's own 150 ms defer.
+ */
 let suppressBlurCommit = false;
+let suppressBlurTimer: number | null = null;
+const SUPPRESS_BLUR_MS = 400;
+
+function suppressNextBlurCommit(): void {
+  suppressBlurCommit = true;
+  if (suppressBlurTimer !== null) clearTimeout(suppressBlurTimer);
+  suppressBlurTimer = window.setTimeout(() => {
+    suppressBlurCommit = false;
+    suppressBlurTimer = null;
+  }, SUPPRESS_BLUR_MS);
+}
+
+function clearSuppressBlurCommit(): void {
+  suppressBlurCommit = false;
+  if (suppressBlurTimer !== null) {
+    clearTimeout(suppressBlurTimer);
+    suppressBlurTimer = null;
+  }
+}
 /** Set while a commit/cancel is tearing the editor down. */
 let closing = false;
 
@@ -158,7 +187,7 @@ export function openFrEditor(
   }
 
   editorState = { frId, row, col, touched: initialValue !== null };
-  suppressBlurCommit = false;
+  clearSuppressBlurCommit();
   closing = false;
 
   el.value = initialValue ?? "";
@@ -233,6 +262,7 @@ async function loadInitialValue(
 function teardown(): void {
   closing = true;
   editorState = null;
+  clearSuppressBlurCommit();
   if (unregisterExtTarget) {
     unregisterExtTarget();
     unregisterExtTarget = null;
@@ -307,7 +337,7 @@ function insertTextAtCursor(text: string): void {
   const pos = start + text.length;
   // The click that picked the reference is about to blur (or already blurred)
   // the textarea — that blur must not commit a half-typed formula.
-  suppressBlurCommit = true;
+  suppressNextBlurCommit();
   textarea.focus();
   textarea.setSelectionRange(pos, pos);
   emitAutocompleteInput();
@@ -389,11 +419,15 @@ function handleBlur(): void {
   // within the same interaction; only a GENUINE focus departure commits.
   window.setTimeout(() => {
     if (!editorState || editorState !== st) return;
+    // Focus check FIRST: a reference pick refocuses the textarea, so this
+    // alone already covers the case the suppress flag was added for — and
+    // reaching it first means the flag is not consumed by a blur that was
+    // never a departure in the first place.
+    if (textarea && document.activeElement === textarea) return;
     if (suppressBlurCommit) {
-      suppressBlurCommit = false;
+      clearSuppressBlurCommit();
       return;
     }
-    if (textarea && document.activeElement === textarea) return;
     void commitFrEditor(null);
   }, 150);
 }

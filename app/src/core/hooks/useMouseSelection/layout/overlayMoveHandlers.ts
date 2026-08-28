@@ -199,6 +199,26 @@ export function createOverlayMoveHandlers(
     const hit = checkOverlayBody(mouseX, mouseY);
     if (!hit || !hit.region.floating) return false;
 
+    // checkOverlayBody is pure GEOMETRY — it never looks at what the mouse
+    // actually landed on. An extension may stack real DOM over the canvas
+    // (the Floating Range cell editor's <textarea> is the live example, and
+    // the updateHtmlOverlay contract invites more), and those coordinates sit
+    // inside the overlay's own rect. Claiming that mousedown would
+    // preventDefault the browser's caret placement and text drag-selection
+    // inside the control, and would re-select the object underneath its own
+    // editor. Consume the event so no cell-selection handler runs, but leave
+    // the default action alone: the control owns its own mousedown.
+    const target = event.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable)
+    ) {
+      return true;
+    }
+
     const region = hit.region;
     event.preventDefault();
 

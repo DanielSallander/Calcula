@@ -125,6 +125,9 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
             y: None,
             row_count: Some(5),
             col_count: Some(3),
+            show_title: None,
+            show_column_headers: None,
+            show_row_headers: None,
         },
     )
     .expect("update");
@@ -144,7 +147,15 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
         &wb.state,
         &wb.file,
         info.range.id,
-        FloatingRangePatch { x: Some(240.0), y: None, row_count: None, col_count: None },
+        FloatingRangePatch {
+            x: Some(240.0),
+            y: None,
+            row_count: None,
+            col_count: None,
+            show_title: None,
+            show_column_headers: None,
+            show_row_headers: None,
+        },
     )
     .expect("no-op update");
     assert_eq!(
@@ -158,22 +169,27 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
 fn update_refuses_out_of_bounds_windows() {
     let wb = Workbook::new(1);
     let info = create(&wb, None);
+    let no_chrome_change = FloatingRangePatch {
+        x: None,
+        y: None,
+        row_count: None,
+        col_count: None,
+        show_title: None,
+        show_column_headers: None,
+        show_row_headers: None,
+    };
     for patch in [
-        FloatingRangePatch { x: None, y: None, row_count: Some(0), col_count: None },
+        FloatingRangePatch { row_count: Some(0), ..no_chrome_change.clone() },
         FloatingRangePatch {
-            x: None,
-            y: None,
             row_count: Some(crate::floating_range::MAX_FLOATING_RANGE_ROWS + 1),
-            col_count: None,
+            ..no_chrome_change.clone()
         },
         FloatingRangePatch {
-            x: None,
-            y: None,
-            row_count: None,
             col_count: Some(crate::floating_range::MAX_FLOATING_RANGE_COLS + 1),
+            ..no_chrome_change.clone()
         },
-        FloatingRangePatch { x: Some(f64::NAN), y: None, row_count: None, col_count: None },
-        FloatingRangePatch { x: Some(-1.0), y: None, row_count: None, col_count: None },
+        FloatingRangePatch { x: Some(f64::NAN), ..no_chrome_change.clone() },
+        FloatingRangePatch { x: Some(-1.0), ..no_chrome_change.clone() },
     ] {
         crate::floating_range::update_floating_range_inner(&wb.state, &wb.file, info.range.id, patch)
             .expect_err("bounds must refuse");
@@ -326,7 +342,17 @@ fn floating_ranges_survive_a_collect_restore_round_trip() {
         &wb.state,
         &wb.file,
         info.range.id,
-        FloatingRangePatch { x: Some(120.0), y: Some(80.0), row_count: Some(4), col_count: Some(2) },
+        FloatingRangePatch {
+            x: Some(120.0),
+            y: Some(80.0),
+            row_count: Some(4),
+            col_count: Some(2),
+            // Chrome is part of the row, so the round trip must carry it: this
+            // asserts a NON-default combination survives save -> restore.
+            show_title: Some(false),
+            show_column_headers: Some(true),
+            show_row_headers: Some(false),
+        },
     )
     .expect("shape it");
 
@@ -351,6 +377,40 @@ fn floating_ranges_survive_a_collect_restore_round_trip() {
     assert_eq!((r.range.x, r.range.y), (120.0, 80.0));
     assert_eq!((r.range.row_count, r.range.col_count), (4, 2));
     assert_eq!(r.backing_sheet_index, info.backing_sheet_index);
+    // The three flags must survive INDEPENDENTLY. A `#[serde(default)]` on a
+    // bool defaults to FALSE, so a mixed combination is the only one that can
+    // tell "carried through" apart from "reset to the derived default" — all
+    // three false would pass with the flags dropped entirely.
+    assert_eq!(
+        (
+            r.range.show_title,
+            r.range.show_column_headers,
+            r.range.show_row_headers
+        ),
+        (false, true, false),
+        "chrome visibility must round-trip field by field"
+    );
+}
+
+/// The JSON shape, not just the in-process struct copy: a file written before
+/// the chrome flags existed has no such keys, and `default_true` is what makes
+/// it reopen with its title bar and headers instead of a bare block of cells.
+#[test]
+fn a_saved_row_without_chrome_keys_loads_with_all_chrome_shown() {
+    let json = r#"{
+        "id": "01890000-0000-7000-8000-000000000001",
+        "backingSheetId": "01890000-0000-7000-8000-000000000002",
+        "hostSheetId": "01890000-0000-7000-8000-000000000003",
+        "x": 10.0,
+        "y": 20.0,
+        "rowCount": 3,
+        "colCount": 2
+    }"#;
+    let saved: ::persistence::SavedFloatingRange =
+        serde_json::from_str(json).expect("a pre-chrome row must still parse");
+    assert!(saved.show_title);
+    assert!(saved.show_column_headers);
+    assert!(saved.show_row_headers);
 }
 
 #[test]

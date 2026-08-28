@@ -604,6 +604,32 @@ syntax error, or the Vite dep-optimizer 504 of §37c happens before there is a b
 The E2E startup guard can now *detect* that state and fail the run; the **product** still shows the
 user nothing.
 
+### 2.x On-grid CONTROLS have no reachable right-click menu — **OPEN, found 2026-08-28**
+
+`app/extensions/Controls/lib/controlContextMenu.ts:402` registers the control's z-order / flip /
+delete items into `gridExtensions`. That registry is rendered only by `GridContextMenuHost`
+(`app/src/shell/Overlays/GridContextMenuHost.tsx:74`), which opens only on
+`AppEvents.CONTEXT_MENU_REQUEST` — and Core deliberately does **not** emit that event for a
+right-click that lands on a floating object (`app/src/core/components/Spreadsheet/Spreadsheet.tsx:1009`,
+"Cell options on an object right-click are always wrong"). Controls' regions carry a `floating`
+rect (`app/extensions/Controls/lib/floatingStore.ts:633`), so every right-click on a control takes
+that early return. The items are registered, ordered, gated — and unreachable by right-clicking the
+object they belong to.
+
+**This is the same defect the Floating Range had**, fixed 2026-08-28 by giving the FR its own
+capture-phase `contextmenu` listener and object menu (the Charts / Slicer / TimelineSlicer
+precedent the Spreadsheet.tsx comment already assumes). Controls was the extension the FR copied
+its registration from, so the precedent it followed had itself never been verified end to end.
+
+Not fixed here because it is a second extension with its own menu semantics and its own
+design-mode question, and nothing in the reported work touched it. The FR fix is the worked
+example to copy: `app/extensions/FloatingRange/index.ts` (listener + overlay registration) and
+`app/extensions/FloatingRange/lib/frContextMenu.ts` (the item model, kept separate from the
+renderer). Note the accidental path that hides it in casual testing: right-clicking a grid cell
+that is *already inside the current selection* leaves the object selection intact
+(`app/src/core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts:107`), so the object's
+items can appear on a cell far from the object — which looks like the menu working.
+
 ---
 
 ## 3. How to keep this file honest
