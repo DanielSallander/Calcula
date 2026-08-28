@@ -453,6 +453,7 @@ transform table Sales clear
 | \`changeType\` | \`cast=Qty:Int64\` (repeat per column) \`[onError=fail\\|null]\` |
 | \`filterRows\` | \`= <row condition>\` |
 | \`addColumn\` | \`name=Margin [dataType=Float64] = <expression>\` |
+| \`transformColumn\` | \`column=Status [dataType=String] = <expression>\` — rewrite **in place** |
 | \`splitColumn\` | \`column=Name delimiter="," parts=2 [keepOriginal=true]\` |
 | \`replaceValues\` | \`column=Region find="x" [replace="y"] [matchEntireValue=true]\` |
 | \`textTransform\` | \`columns=A,B operation=trim\\|clean\\|upper\\|lower\` |
@@ -485,6 +486,44 @@ when it is planned.
 \`addColumn\`'s new column, or a one-rename \`renameColumns\`' target. The
 engine's steps carry no display label, so any other step type refuses the
 rename rather than accepting a name that would be dropped on the next save.
+
+## Writing a step as a formula
+
+Three steps take an \`= <expression>\`, and an expression is a **formula over
+this table's columns**, written the way a formula in the grid is:
+
+\`\`\`
+transform table Sales add transformColumn column=Status = UPPER(TRIM([Status]))
+transform table Sales add transformColumn column=Phone  = SUBSTITUTE([Phone], "-", "")
+transform table Sales add addColumn name=Code = LEFT([SKU], 3)
+transform table Sales add addColumn name=Margin = ([Amount] - [Cost]) / [Amount]
+transform table Sales add filterRows = [Amount] > 0 AND [Status] <> "cancelled"
+\`\`\`
+
+\`transformColumn\` is the one to reach for when a column needs *cleaning*: it
+rewrites the column in place, keeping its position and its formatting. Adding a
+column, dropping the old one and renaming loses both.
+
+A column is written \`[Bracketed]\`, bare, or \`Table[Qualified]\` — all three
+mean the same thing, so the spelling that comes to hand is the right one.
+
+**83 row-level functions** are available, the same catalog a measure uses minus
+everything that needs a finished model:
+
+| | |
+| --- | --- |
+| Text | \`LEFT RIGHT MID LEN TRIM UPPER LOWER SUBSTITUTE REPLACE FIND SEARCH SPLIT CONCATENATE EXACT CONTAINS STARTSWITH ENDSWITH INITCAP LPAD RPAD REVERSE FORMAT VALUE\` |
+| Date | \`YEAR MONTH DAY QUARTER DATE DATEDIFF DATEADD TODAY NOW DATETRUNC EOMONTH LASTDAY DAYOFWEEK WEEKNUM MONTHNAME\` |
+| Math | \`ABS ROUND ROUNDUP ROUNDDOWN INT TRUNC CEILING FLOOR MOD POWER SQRT LN LOG10 SIGN EXP\` |
+| Logic | \`IF SWITCH AND OR NOT XOR COALESCE ISBLANK BLANK DIVIDE GREATEST LEAST NULLIF IFERROR\` |
+
+Plus calls to your own [script functions](scriptfunction.md).
+
+**Aggregates are not.** \`SUM\`, \`COUNT\` and friends are refused by name — a
+step computes one value per row, so use a \`groupBy\` step. Nor is \`RELATED\` or
+a measure reference: the table has not joined the model yet. Two smaller
+spellings to know: an \`IN\` list takes **braces** (\`[Status] IN {"a", "b"}\`),
+and \`DATEDIFF\`'s interval is a bare keyword (\`DATEDIFF([Date], TODAY(), DAY)\`).
 
 ## Editing the whole pipeline at once
 

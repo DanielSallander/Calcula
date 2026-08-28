@@ -63,6 +63,12 @@ export const STEP_TYPES: StepTypeInfo[] = [
     hint: "Append a computed column, evaluated once per row over this table's columns.",
   },
   {
+    value: "transformColumn",
+    label: "Transform column (formula)",
+    group: "Columns",
+    hint: "Rewrite an existing column with a formula, in place — UPPER([status]), LEFT([sku], 3), ROUND([amount] * 1.25, 2). The column keeps its position and its formatting; the formula reads the value before this step.",
+  },
+  {
     value: "splitColumn",
     label: "Split column",
     group: "Columns",
@@ -238,6 +244,8 @@ export function defaultStep(type: string, columns: ModelColumnInfo[]): Transform
       };
     case "addColumn":
       return { type, name: "NewColumn", expression: "" };
+    case "transformColumn":
+      return { type, column: first, expression: first ? `[${first}]` : "" };
     case "splitColumn":
       return { type, column: firstText, delimiter: ",", parts: 2, keepOriginal: false };
     case "filterRows":
@@ -301,6 +309,8 @@ export function describeStep(step: TransformStepDto): string {
       return "Filter rows";
     case "addColumn":
       return step.name ? `Add column ${step.name}` : "Add column";
+    case "transformColumn":
+      return step.column ? `Transform ${step.column}` : "Transform column";
     case "splitColumn":
       return step.column ? `Split ${step.column}` : "Split column";
     case "replaceValues":
@@ -371,6 +381,7 @@ export function stepDetail(step: TransformStepDto): string {
     case "filterRows":
       return step.condition ?? "";
     case "addColumn":
+    case "transformColumn":
       return step.expression ?? "";
     case "splitColumn":
       return `on "${step.delimiter ?? ""}" into ${step.parts ?? 0} parts`;

@@ -536,6 +536,7 @@ export function TransformEditorModal({
                   connectionId={connectionId}
                   tableName={table.name}
                   initialScript={scriptSeed}
+                  sourceColumns={sourceColumns}
                   readOnly={readOnly}
                   onParsed={onScriptParsed}
                   onParseStateChange={setScriptParses}

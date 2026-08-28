@@ -47,6 +47,7 @@
 
 mod apply_to_model;
 mod eval;
+mod functions;
 mod infer;
 mod literal;
 mod parts;
@@ -64,6 +65,7 @@ pub(crate) mod test_support;
 
 pub use apply_to_model::with_table_transformations;
 pub use eval::{apply_steps, conform_to_declared};
+pub use functions::row_level_function_names;
 pub use parts::{
     CastErrorPolicy, ColumnRename, GroupAggregate, RowRange, SortKey, TextOp, TypeChange,
 };

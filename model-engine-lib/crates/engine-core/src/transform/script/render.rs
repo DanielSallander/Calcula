@@ -147,6 +147,17 @@ fn statement_parts(step: &TransformStep) -> (Vec<String>, Option<String>) {
             }
             (options, Some(expression.clone()))
         }
+        TransformStep::TransformColumn {
+            column,
+            expression,
+            data_type,
+        } => {
+            let mut options = vec![format!("column={}", name(column))];
+            if let Some(data_type) = data_type {
+                options.push(format!("dataType={}", render_data_type(data_type)));
+            }
+            (options, Some(expression.clone()))
+        }
         TransformStep::SplitColumn {
             column,
             delimiter,

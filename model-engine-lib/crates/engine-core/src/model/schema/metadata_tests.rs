@@ -65,9 +65,11 @@ fn model_format_version_is_current() {
     // expression forms, and Day granularity.
     // v24 added table transformations (TableSourceBinding transformations /
     // source_columns) and the persisted SQL source_query.
+    // v25 added the transformColumn step (TransformStep::TransformColumn),
+    // which rewrites an existing column with a row-level expression in place.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 24);
+    assert_eq!(MODEL_FORMAT_VERSION, 25);
 }
 
 #[test]

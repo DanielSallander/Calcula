@@ -116,6 +116,10 @@ const ADD_COLUMN: &[OptionSpec] = &[
     opt!("name" -> "name", "the new column's name"),
     opt!(optional "dataType" -> "dataType", "declared type; omit to infer from the expression"),
 ];
+const TRANSFORM_COLUMN: &[OptionSpec] = &[
+    opt!("column" -> "column", "the existing column to rewrite"),
+    opt!(optional "dataType" -> "dataType", "declared type; omit to infer from the expression"),
+];
 const SPLIT_COLUMN: &[OptionSpec] = &[
     opt!("column" -> "column", "the text column to split"),
     opt!("delimiter" -> "delimiter", "the literal delimiter, not a pattern"),
@@ -207,6 +211,13 @@ pub(crate) const STEPS: &[StepVocabulary] = &[
         takes_expression: true,
         expression_field: "expression",
         help: "append a computed column",
+    },
+    StepVocabulary {
+        tag: "transformColumn",
+        options: TRANSFORM_COLUMN,
+        takes_expression: true,
+        expression_field: "expression",
+        help: "rewrite an existing column with a formula, in place",
     },
     StepVocabulary {
         tag: "splitColumn",
@@ -321,6 +332,7 @@ pub(crate) fn step_by_tag(word: &str) -> Option<&'static StepVocabulary> {
         "changetypes" | "casttype" => "changeType",
         "filter" | "filterrow" => "filterRows",
         "split" => "splitColumn",
+        "transformcolumns" | "changecolumn" | "setcolumn" => "transformColumn",
         "replace" => "replaceValues",
         "text" => "textTransform",
         "dedupe" | "distinct" => "removeDuplicates",

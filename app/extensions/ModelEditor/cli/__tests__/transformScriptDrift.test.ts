@@ -78,7 +78,7 @@ describe("transform script vocabulary — TypeScript must match the engine", () 
     const tags = engineStepTags(readVocabulary());
     // Non-vacuity first: a regex that matched nothing would make this test
     // pass against an empty list.
-    expect(tags.length).toBe(17);
+    expect(tags.length).toBe(18);
     expect([...TRANSFORM_STEP_TYPES]).toEqual(tags);
   });
 

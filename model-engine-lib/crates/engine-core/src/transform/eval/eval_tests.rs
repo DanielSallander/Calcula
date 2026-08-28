@@ -268,6 +268,132 @@ async fn add_column_can_use_a_conditional() {
 }
 
 #[tokio::test]
+async fn transform_column_rewrites_in_place_and_keeps_its_position() {
+    // The formula surface's headline: reshape a column rather than append one.
+    let batch = run_checked(&[TransformStep::TransformColumn {
+        column: "status".into(),
+        expression: "UPPER([status])".into(),
+        data_type: None,
+    }])
+    .await;
+    let schema = batch.schema();
+    let fields: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert!(
+        fields.contains(&"status"),
+        "the column is rewritten, not replaced by a new one: {fields:?}"
+    );
+    let values = strings(&batch, "status");
+    for value in values.iter().flatten() {
+        assert_eq!(
+            value,
+            &value.to_uppercase(),
+            "every non-null value went through the formula"
+        );
+    }
+}
+
+#[tokio::test]
+async fn transform_column_reads_the_pre_step_value() {
+    // `[amount]` on the right-hand side is the value BEFORE this step, because
+    // SQL evaluates a select list against the input row. The alternative
+    // reading — that it sees its own output — would make the step meaningless.
+    let batch = run_checked(&[TransformStep::TransformColumn {
+        column: "amount".into(),
+        expression: "[amount] * 2".into(),
+        data_type: None,
+    }])
+    .await;
+    let doubled = floats(&batch, "amount");
+    let original = floats(&run_checked(&[]).await, "amount");
+    for (a, b) in doubled.iter().zip(original.iter()) {
+        match (a, b) {
+            (Some(a), Some(b)) => assert!((a - b * 2.0).abs() < 1e-9, "{a} != 2 * {b}"),
+            (None, None) => {}
+            other => panic!("null mismatch: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn two_transform_column_steps_on_one_column_compose() {
+    // Each step sees the previous step's OUTPUT — the ordinary pipeline
+    // semantics — while the expression inside one step sees its own input.
+    let batch = run_checked(&[
+        TransformStep::TransformColumn {
+            column: "amount".into(),
+            expression: "[amount] * 2".into(),
+            data_type: None,
+        },
+        TransformStep::TransformColumn {
+            column: "amount".into(),
+            expression: "[amount] + 1".into(),
+            data_type: None,
+        },
+    ])
+    .await;
+    let result = floats(&batch, "amount");
+    let original = floats(&run_checked(&[]).await, "amount");
+    for (a, b) in result.iter().zip(original.iter()) {
+        match (a, b) {
+            (Some(a), Some(b)) => assert!((a - (b * 2.0 + 1.0)).abs() < 1e-9, "{a}"),
+            (None, None) => {}
+            other => panic!("null mismatch: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_bracketed_column_evaluates_the_same_as_a_bare_one() {
+    // Bracket resolution must reach the REFRESH path, not only validation. It
+    // would otherwise pass model build and fail at refresh as a measure
+    // reference — validated on one path, broken on the other.
+    let bracketed = run_checked(&[TransformStep::AddColumn {
+        name: "m1".into(),
+        expression: "[amount] - [cost]".into(),
+        data_type: None,
+    }])
+    .await;
+    let bare = run_checked(&[TransformStep::AddColumn {
+        name: "m2".into(),
+        expression: "amount - cost".into(),
+        data_type: None,
+    }])
+    .await;
+    assert_eq!(floats(&bracketed, "m1"), floats(&bare, "m2"));
+}
+
+#[tokio::test]
+async fn a_declared_type_is_cast_mid_pipeline_so_a_later_step_agrees() {
+    // `conform_to_declared` runs ONCE, after the whole pipeline. So without a
+    // cast here the batch and the derived schema disagree from this step on,
+    // and the NEXT step type-checks against derivation. The text step after it
+    // is what makes this test non-vacuous.
+    let batch = run_checked(&[
+        TransformStep::TransformColumn {
+            column: "amount".into(),
+            // The declared type does the conversion: the expression is
+            // numeric, the column becomes text.
+            expression: "[amount]".into(),
+            data_type: Some(DataType::String),
+        },
+        TransformStep::TextTransform {
+            columns: vec!["amount".into()],
+            operation: TextOp::Trim,
+        },
+    ])
+    .await;
+    assert_eq!(
+        batch
+            .schema()
+            .field_with_name("amount")
+            .unwrap()
+            .data_type(),
+        &arrow::datatypes::DataType::Utf8,
+        "the declared type reached the batch, so the text step could run"
+    );
+}
+
+#[tokio::test]
 async fn split_column_splits_and_nulls_absent_parts() {
     let batch = run_checked(&[TransformStep::SplitColumn {
         column: "status".into(),

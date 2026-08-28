@@ -135,6 +135,18 @@ pub fn derive_step_schema(
             expression,
             data_type.as_ref(),
         )?,
+        TransformStep::TransformColumn {
+            column,
+            expression,
+            data_type,
+        } => rules_columns::transform_column(
+            table,
+            step_index,
+            input,
+            column,
+            expression,
+            data_type.as_ref(),
+        )?,
         TransformStep::SplitColumn {
             column,
             delimiter,

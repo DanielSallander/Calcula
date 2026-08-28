@@ -5094,6 +5094,14 @@ export interface FunctionDefDto {
   name: string;
   description: string;
   signature: string;
+  /** Whether a TRANSFORMATION STEP's expression may call this function.
+   *
+   *  Derived by the engine from the transform allowlist, so it cannot drift
+   *  from what a step actually accepts: a step computes one value per row, so
+   *  aggregations (`SUM`) and anything needing a finished model (`RELATED`)
+   *  are false. Completion in a transform expression must filter on this —
+   *  offering a function the step refuses is a lie the author pays for. */
+  rowLevel: boolean;
 }
 
 export async function biModelFunctionCatalog(): Promise<FunctionDefDto[]> {

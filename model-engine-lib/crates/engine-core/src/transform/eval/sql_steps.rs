@@ -9,7 +9,6 @@
 use arrow::record_batch::RecordBatch;
 
 use crate::compute::aggregate::AggregateOp;
-use crate::compute::parser::parse_refresh_filter;
 use crate::compute::sql_util::{quote_ident_double, sql_quote_literal};
 use crate::compute::udf::{session_context_with_udfs, UdfRegistry};
 use crate::error::EngineResult;
@@ -18,6 +17,7 @@ use crate::transform::eval::step_error;
 use crate::transform::literal::typed_sql_literal;
 use crate::transform::parts::{GroupAggregate, TextOp};
 use crate::transform::rules_rows::aggregate_output_type;
+use crate::transform::validate::parse_row_expression;
 use crate::types::DataType;
 
 /// The name the input batch is registered under. Underscore-prefixed so it
@@ -74,12 +74,19 @@ async fn run_sql(step: &SqlStep<'_>, batch: RecordBatch, sql: &str) -> EngineRes
 
 /// Render a step's expression source as a SQL fragment.
 ///
-/// Model build-time validation already established that the expression parses
-/// and is row-level; this re-parses because the pipeline stores text, and
-/// fails with a step-anchored error if a hand-edited model file slipped
-/// something through.
-fn expression_sql(step: &SqlStep<'_>, source: &str) -> EngineResult<String> {
-    let parsed = parse_refresh_filter(source).map_err(|e| step.error(format!("{e}")))?;
+/// Goes through the SAME `parse_row_expression` the validator uses, taking the
+/// step's input schema with it. That matters twice over:
+///
+/// * **Brackets resolve here too.** `[status]` is a measure reference to the
+///   bare parser and a column only after resolution, which needs the schema.
+///   Parsing without it would let `LEFT([status], 3)` pass model build and then
+///   fail at refresh — validated on one path, broken on the other.
+/// * **The allowlist runs on the refresh path.** `apply_steps` calls
+///   `derive_step_schema` but never `validate_steps`, so before this a
+///   hand-edited model file's expression reached SQL generation
+///   allowlist-unchecked. Now every path parses the same way.
+fn expression_sql(step: &SqlStep<'_>, input: &[Column], source: &str) -> EngineResult<String> {
+    let parsed = parse_row_expression(step.table, step.index, input, source)?;
     parsed
         .to_sql_string()
         .map_err(|e| step.error(format!("{e}")))
@@ -109,9 +116,10 @@ fn select_list_with(batch: &RecordBatch, overrides: &[(String, String)]) -> Stri
 pub(super) async fn filter_rows(
     step: &SqlStep<'_>,
     batch: RecordBatch,
+    input: &[Column],
     condition: &str,
 ) -> EngineResult<RecordBatch> {
-    let predicate = expression_sql(step, condition)?;
+    let predicate = expression_sql(step, input, condition)?;
     let sql = format!("SELECT * FROM {INPUT} WHERE {predicate}");
     run_sql(step, batch, &sql).await
 }
@@ -120,15 +128,70 @@ pub(super) async fn filter_rows(
 pub(super) async fn add_column(
     step: &SqlStep<'_>,
     batch: RecordBatch,
+    input: &[Column],
     name: &str,
     expression: &str,
 ) -> EngineResult<RecordBatch> {
-    let value = expression_sql(step, expression)?;
+    let value = expression_sql(step, input, expression)?;
     let sql = format!(
         "SELECT *, {value} AS {} FROM {INPUT}",
         quote_ident_double(name)
     );
     run_sql(step, batch, &sql).await
+}
+
+/// `transformColumn`: rewrite one existing column with a row-level expression,
+/// in place.
+///
+/// Rides `select_list_with`, exactly as `replaceValues` and `textTransform` do,
+/// which is what keeps the column in its original POSITION rather than moving
+/// it to the end the way an add-then-drop-then-rename would.
+///
+/// The right-hand side reads the column's PRE-STEP value: SQL evaluates a
+/// select list against the input row, so `net = [net] - [discount]` means what
+/// it looks like it means, and two such steps compose.
+pub(super) async fn transform_column(
+    step: &SqlStep<'_>,
+    batch: RecordBatch,
+    input: &[Column],
+    column: &str,
+    expression: &str,
+    declared_type: Option<&DataType>,
+) -> EngineResult<RecordBatch> {
+    let value = expression_sql(step, input, expression)?;
+    // A DECLARED type is a promise the terminal conform cannot keep mid-way:
+    // it runs once, after the whole pipeline, against the table's columns. A
+    // later step that type-checks against this column (a cast, a text step, an
+    // aggregate) consults DERIVATION, not the batch — so without this cast the
+    // two disagree from here on. Rendered through the dialect the session
+    // actually uses.
+    let value = match declared_type {
+        Some(data_type) => format!("CAST({value} AS {})", local_sql_type(data_type)),
+        None => value,
+    };
+    let select = select_list_with(&batch, &[(column.to_string(), value)]);
+    let sql = format!("SELECT {select} FROM {INPUT}");
+    run_sql(step, batch, &sql).await
+}
+
+/// The local (DataFusion) spelling of a declared type, for the cast above.
+///
+/// Deliberately narrow: this renders into the SAME session
+/// [`run_sql`] executes in, never into a connector's dialect. Pushing a step
+/// into a source is a separate problem with a separate renderer, and a fixed
+/// literal here would be a spelling to unpick later — see the dialect note in
+/// the host-integration changelog.
+fn local_sql_type(data_type: &DataType) -> String {
+    match data_type {
+        DataType::Int32 => "INT".to_string(),
+        DataType::Int64 => "BIGINT".to_string(),
+        DataType::Float64 => "DOUBLE".to_string(),
+        DataType::Decimal(precision, scale) => format!("DECIMAL({precision}, {scale})"),
+        DataType::String => "VARCHAR".to_string(),
+        DataType::Boolean => "BOOLEAN".to_string(),
+        DataType::Date => "DATE".to_string(),
+        DataType::Timestamp => "TIMESTAMP".to_string(),
+    }
 }
 
 /// `splitColumn`.

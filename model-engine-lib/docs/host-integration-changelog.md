@@ -63,6 +63,25 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 
 ---
 
+## Formulas that reshape — `transformColumn`, bracketed columns, and two closed validation holes (format version 25)
+
+A transformation step's expression could only ever ADD a column. It can now rewrite one, and the spelling an author reaches for first finally works.
+
+- **New step: `TransformStep::TransformColumn { column, expression, data_type }`** — rewrites an existing column with a row-level expression, in place. It is `AddColumn` with three schema-only differences: it LOCATES the column instead of refusing it, REPLACES rather than pushes, and keeps the column's identity while changing its type. That last point is the reason it exists: the add-then-drop-then-rename workaround moves the column to the end and rebuilds it with `Column::new`, clearing display name, description, hidden flag, sort-by, default aggregation, date role and format string.
+  - The expression reads the column's value **before** the step (SQL evaluates a select list against the input row), so `net = [net] - [discount]` means what it appears to and two such steps compose.
+  - The output type is the **inferred** type, never the column's old one. `LEN(status)` over a text column produces a number; keeping the old type would make the terminal conform cast the answer away.
+  - The result is always nullable — a row-level expression can produce null from null inputs. Applying it to a column the model declares non-nullable makes declared ≠ derived, and the model will not load until the declared column is edited.
+  - A **declared** `data_type` is honoured mid-pipeline with a CAST, because `conform_to_declared` runs once at the END and a later step type-checks against derivation rather than against the batch.
+- **`[Name]` now means a COLUMN inside a transform expression.** A leading bracket is a measure reference everywhere else in this language, so `LEFT([status], 3)` used to parse as `LEFT(MeasureRef("status"), 3)` and be refused, while `LEFT(status, 3)` worked. Resolution happens after the parse and before the allowlist, from the step's input SCHEMA, so it widens what parses and never what is allowed: a bracketed name that is not a column of that step is still a measure reference and still refused. All three spellings — `status`, `[status]`, `Sales[status]` — now produce the same node.
+- **Two validation holes closed, both at the choke point rather than one at a time.**
+  - `add_column`'s declared-type branch never touched the expression (`infer_expression_type` was its only route to the parser), so `addColumn name=x dataType=Int64 = SUM(amount)` passed validation, passed schema derivation, passed model load, and died at refresh as a raw DataFusion planner error. Both column rules now parse unconditionally.
+  - `apply_steps` calls `derive_step_schema` per step but never `validate_steps`, so an expression reaching SQL generation on the REFRESH path was allowlist-unchecked. `expression_sql` now takes the step's input schema and goes through the same `parse_row_expression` the validator uses — which bracket resolution required anyway, since a formula validated at model build would otherwise fail at refresh.
+- **New public API:** `row_level_function_names() -> &'static BTreeSet<String>` — every catalog function a step's expression may call, **derived** by probing the allowlist rather than declared beside it. A host filtering completion on this cannot offer a function the step will refuse; a function the probes do not fit is merely unoffered. Cached for the process.
+- **`MODEL_FORMAT_VERSION` 24 → 25**, stamped **only** when a pipeline actually uses `transformColumn`. An internally tagged enum cannot ignore an unknown tag, so a pre-v25 engine refuses the whole model rather than silently dropping the step; the version gate turns that into "update the application" instead of a serde error about an unknown variant.
+- **Calcula action.** Add `transformColumn` to any step picker and to the script vocabulary mirror (the drift test names it). Filter transform-expression completion on `row_level_function_names()` and draw its column list from the step's DERIVED INPUT schema, not the table's final columns — a step's expression sees neither what a later step renames nor what the model ends up with. Stamp `format_version >= 25` when a pipeline carries the new step.
+
+---
+
 ## Applied-steps SCRIPT — a text projection of a transformation pipeline (no format change)
 
 A table's transformation pipeline can now be **rendered as text and parsed back**, so a host can offer the equivalent of Power Query's Advanced Editor: the whole pipeline in one editable buffer instead of one form per step.

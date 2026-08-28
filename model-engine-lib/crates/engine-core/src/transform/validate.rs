@@ -65,9 +65,47 @@ pub(crate) fn parse_row_expression(
         other => transform_error(table, step_index, other.to_string()),
     })?;
 
+    // `[Name]` means a COLUMN here, before the allowlist sees it.
+    //
+    // A leading bracket is a measure reference everywhere else in this language
+    // (`parser::grammar`, `parse_atom` routes `[` to `parse_measure_ref`), so
+    // without this `LEFT([status], 3)` parses as `LEFT(MeasureRef("status"), 3)`
+    // and is refused — while `LEFT(status, 3)` works. That is the spelling an
+    // author reaches for first: our own CLI reference taught the bracketed form
+    // for a year before anyone noticed the engine refused it.
+    //
+    // Resolving rather than teaching the prohibition is safe HERE and only
+    // here: a step runs before its table joins the model, so there is no filter
+    // context and no measure to be confused with. A bracketed name that is NOT
+    // a column of this step's input is left untouched and still fails as a
+    // measure reference a moment later — so this widens what parses, never what
+    // is allowed.
+    let parsed = resolve_bracketed_columns(&parsed, input);
+
     ensure_row_level(table, step_index, &parsed)?;
     ensure_columns_exist(table, step_index, input, &parsed)?;
     Ok(parsed)
+}
+
+/// Rewrite every `MeasureRef` naming a column of `input` into a `ColumnRef`.
+///
+/// Pure and data-free: the substitution environment is built from the step's
+/// input SCHEMA, so this cannot make schema derivation depend on values.
+///
+/// Reuses [`Expression::substitute_measure_refs`], which already recurses
+/// through every non-leaf variant the allowlist admits — writing a second
+/// walker here would be a second thing to keep in step with the enum.
+fn resolve_bracketed_columns(expression: &Expression, input: &[Column]) -> Expression {
+    let env: std::collections::HashMap<String, Expression> = input
+        .iter()
+        .map(|column| {
+            (
+                column.name().to_string(),
+                Expression::ColumnRef(column.name().to_string()),
+            )
+        })
+        .collect();
+    expression.substitute_measure_refs(&env)
 }
 
 /// Reject any construct that is not a per-row computation over this table.
@@ -326,6 +364,112 @@ mod tests {
     fn a_measure_reference_is_rejected() {
         let err = check("[Revenue]").unwrap_err();
         assert!(err.to_string().contains("measure"), "got {err}");
+    }
+
+    #[test]
+    fn a_bracketed_name_resolves_to_a_column_of_this_step() {
+        // THE spelling an author reaches for first. A leading `[` is a measure
+        // reference everywhere else in this language, so before bracket
+        // resolution `LEFT([status], 3)` was refused while `LEFT(status, 3)`
+        // worked — and our own CLI reference taught the refused form.
+        for expression in [
+            "[amount] > 0",
+            "LEFT([status], 3)",
+            "UPPER(TRIM([status]))",
+            "IF(ISBLANK([status]), \"none\", UPPER([status]))",
+            "[amount] - [cost]",
+        ] {
+            assert!(
+                parse_row_expression("Sales", 0, &source_schema(), expression).is_ok(),
+                "{expression} must resolve its bracketed columns"
+            );
+        }
+    }
+
+    #[test]
+    fn all_three_spellings_of_a_column_agree() {
+        // Bare, bracketed and qualified must parse to the SAME tree, or the
+        // three surfaces that write them would mean different things.
+        let bare = parse_row_expression("Sales", 0, &source_schema(), "LEFT(status, 3)").unwrap();
+        let bracketed =
+            parse_row_expression("Sales", 0, &source_schema(), "LEFT([status], 3)").unwrap();
+        assert_eq!(
+            format!("{bare:?}"),
+            format!("{bracketed:?}"),
+            "a bracketed column must resolve to exactly the bare column's node"
+        );
+        assert!(
+            parse_row_expression("Sales", 0, &source_schema(), "LEFT(Sales[status], 3)").is_ok(),
+            "the qualified spelling keeps working"
+        );
+    }
+
+    #[test]
+    fn a_bracketed_name_that_is_not_a_column_is_still_a_measure_reference() {
+        // The half that keeps this fail-closed. Resolution widens what PARSES,
+        // never what is ALLOWED: a bracketed name absent from the step's input
+        // is left as a measure reference and refused by the allowlist, with the
+        // message that names measures.
+        let err = check("[Revenue] > 0").unwrap_err();
+        assert!(err.to_string().contains("measure"), "got {err}");
+
+        // Including when nested inside a function that would otherwise hide it.
+        let err = check("LEFT([Revenue], 3)").unwrap_err();
+        assert!(err.to_string().contains("measure"), "got {err}");
+    }
+
+    #[test]
+    fn resolution_reaches_every_nesting_the_allowlist_admits() {
+        // `substitute_measure_refs` recurses by hand, and its trailing
+        // `_ => self.clone()` arm is NOT compiler-enforced the way
+        // `child_expressions` is. So a variant that stops recursing would
+        // silently leave a MeasureRef inside — and the step would fail with a
+        // message about measures for an expression that names only columns.
+        for expression in [
+            "IF([amount] > 0, UPPER([status]), LOWER([status]))",
+            // SWITCH matches a VALUE against cases. The spreadsheet
+            // `SWITCH(TRUE(), cond, ...)` idiom does not parse here — SWITCH's
+            // grammar calls `parse_expression`, which does not accept a
+            // comparison — so the condition-ladder spelling is `IF` nesting.
+            "SWITCH([status], \"open\", 1, \"closed\", 2, 0)",
+            "COALESCE([status], [region], \"none\")",
+            "DIVIDE([amount], [cost], 0)",
+            "IFERROR(LEFT([status], 3), \"?\")",
+            "GREATEST([amount], [cost])",
+            // The IN list takes BRACES, not parentheses.
+            "[status] IN {\"a\", \"b\"}",
+            "NOT(ISBLANK([status]))",
+            "[amount] > 0 AND [cost] > 0 OR NOT([amount] > 100)",
+            "CONCATENATE(UPPER(TRIM([status])), LEFT([region], 2))",
+            // The interval is a KEYWORD, not a string.
+            "DATEDIFF([order_date], TODAY(), DAY)",
+            "NULLIF([amount], [cost])",
+        ] {
+            let outcome = parse_row_expression("Sales", 0, &source_schema(), expression);
+            assert!(
+                outcome.is_ok(),
+                "resolution did not reach into {expression}: {:?}",
+                outcome.err()
+            );
+        }
+    }
+
+    #[test]
+    fn the_unbracketed_spellings_keep_working() {
+        // Nothing was taken away: bare and qualified names are unchanged.
+        for expression in [
+            "LEFT(status, 3)",
+            "LEFT(Sales[status], 3)",
+            "UPPER(TRIM(status))",
+            "SUBSTITUTE(status, \"-\", \"\")",
+            "IF(amount > 0, \"pos\", \"neg\")",
+            "ROUND(amount * 1.25, 2)",
+        ] {
+            assert!(
+                parse_row_expression("Sales", 0, &source_schema(), expression).is_ok(),
+                "{expression} must keep parsing"
+            );
+        }
     }
 
     #[test]

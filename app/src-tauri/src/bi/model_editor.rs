@@ -7640,6 +7640,12 @@ pub struct FunctionDefDto {
     pub name: String,
     pub description: String,
     pub signature: String,
+    /// Whether a TRANSFORMATION STEP's expression may call this function.
+    ///
+    /// Derived from the transform allowlist rather than declared, so it cannot
+    /// drift from what a step actually accepts. A step computes one value per
+    /// row, so aggregations and anything needing a finished model are false.
+    pub row_level: bool,
 }
 
 /// The engine's built-in function catalog (static; drives the formula editor's
@@ -7647,12 +7653,18 @@ pub struct FunctionDefDto {
 #[tauri::command]
 pub fn bi_model_function_catalog(window: tauri::Window) -> Result<Vec<FunctionDefDto>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN_AND_MODEL_EDITOR)?;
+    // `rowLevel` is DERIVED from the transform allowlist, not declared beside
+    // it: a step refuses `SUM`, so an editor that offers it in a transform
+    // expression is lying to the author. Deriving means the flag cannot drift —
+    // a function added to the catalog is classified the day it appears.
+    let row_level = bi_engine::row_level_function_names();
     Ok(bi_engine::function_catalog()
         .iter()
         .map(|f| FunctionDefDto {
             name: f.name.to_string(),
             description: f.description.to_string(),
             signature: f.signature.to_string(),
+            row_level: row_level.contains(f.name),
         })
         .collect())
 }

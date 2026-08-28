@@ -866,6 +866,14 @@ fn assemble(
                 None => None,
             },
         },
+        "transformColumn" => TransformStep::TransformColumn {
+            column: text(options, "column")?,
+            expression: expression.unwrap_or_default(),
+            data_type: match find_all(options, &["dataType", "type"]).first() {
+                Some(option) => Some(data_type_of(option.value.single_atom(&option.key)?)?),
+                None => None,
+            },
+        },
         "splitColumn" => TransformStep::SplitColumn {
             column: text(options, "column")?,
             delimiter: text(options, "delimiter")?,

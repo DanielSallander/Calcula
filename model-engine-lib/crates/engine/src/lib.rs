@@ -202,9 +202,10 @@ pub use engine_core::store::{ColumnStore, InMemoryCache, TableData};
 pub use engine_core::transform::{
     apply_steps, conform_to_declared, derive_pipeline_schema, derive_step_schema,
     parse_placed_statement, parse_script, parse_statement, pipeline_fingerprint, render_script,
-    render_statement, schemas_match, script_vocabulary, validate_steps, with_table_transformations,
-    CastErrorPolicy, ColumnRename, GroupAggregate, OptionSpec, PlacedStep, RowRange, ScriptError,
-    ScriptVocabulary, SortKey, StepVocabulary, TextOp, TransformStep, TypeChange,
+    render_statement, row_level_function_names, schemas_match, script_vocabulary, validate_steps,
+    with_table_transformations, CastErrorPolicy, ColumnRename, GroupAggregate, OptionSpec,
+    PlacedStep, RowRange, ScriptError, ScriptVocabulary, SortKey, StepVocabulary, TextOp,
+    TransformStep, TypeChange,
 };
 pub use engine_core::types::{DataType, TableColumn, Value};
 pub use function_docs::{function_docs, FunctionDoc};

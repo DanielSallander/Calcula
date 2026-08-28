@@ -4,9 +4,12 @@
 //          accumulates operands from a step type it is not.
 //
 // The two expression steps (filterRows / addColumn) reuse the Model Editor's
-// existing Monaco expression surface (ExpressionEditorModal) rather than
-// growing a third editor — the same nesting PhysicalColumnModal already does
-// for a column's lookup expression.
+// TRANSFORM-SCOPED formula editor (FormulaField), not the measure editor. A
+// step runs before its table joins the model, so the measure surface offers
+// VAR/GVAR/RETURN that cannot parse here, the whole function catalog including
+// the aggregates a step refuses, and columns drawn from the table's FINAL model
+// columns rather than the schema reaching this step. All three produce a broken
+// formula, so the fix was a scoped surface rather than a better hint.
 
 import React, { useState } from "react";
 import type {
@@ -16,7 +19,7 @@ import type {
   TransformStepDto,
 } from "@api";
 import { Field, styles } from "../editorShared";
-import { ExpressionEditorModal } from "../ExpressionEditorModal";
+import { FormulaField } from "./FormulaField";
 import {
   AGGREGATE_OPS,
   COUNT_ROWS,
@@ -67,7 +70,6 @@ export function StepConfigForm({
    *  column — how a pivot step's DECLARED value names get filled in. */
   onDetectPivotValues: (nameColumn: string) => Promise<string[]>;
 }): React.ReactElement {
-  const [expressionEditor, setExpressionEditor] = useState<"condition" | "expression" | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
 
@@ -284,22 +286,14 @@ export function StepConfigForm({
                 onChange={(e) => patch({ name: e.target.value })}
               />
             </Field>
-            <Field
-              label="Expression"
-              hint={`Evaluated once per row. ${columnHint(inputColumns)}`}
-            >
-              <textarea
-                style={{ ...styles.textarea, width: "100%", minHeight: 64 }}
+            <Field label="Formula" hint="Evaluated once per row.">
+              <FormulaField
                 value={step.expression ?? ""}
-                disabled={readOnly}
-                placeholder="amount - cost"
-                onChange={(e) => patch({ expression: e.target.value })}
+                columns={inputColumns}
+                readOnly={readOnly}
+                placeholder="[amount] - [cost]"
+                onChange={(expression) => patch({ expression })}
               />
-              <div style={{ marginTop: 4 }}>
-                <button style={styles.smallBtn} onClick={() => setExpressionEditor("expression")}>
-                  Edit in expression editor&hellip;
-                </button>
-              </div>
             </Field>
             <Field
               label="Declared type"
@@ -318,6 +312,65 @@ export function StepConfigForm({
                 }}
               >
                 <option value="">(infer from the expression)</option>
+                {step.dataType !== undefined &&
+                  !STEP_DATA_TYPES.includes(dataTypeLabel(step.dataType)) && (
+                    <option value={dataTypeLabel(step.dataType)}>
+                      {dataTypeLabel(step.dataType)} (edit in Script)
+                    </option>
+                  )}
+                {STEP_DATA_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </>
+        );
+
+      case "transformColumn":
+        return (
+          <>
+            <Field
+              label="Column"
+              hint="Rewritten in place: it keeps its position and its formatting."
+            >
+              <ColumnSelect
+                value={step.column ?? ""}
+                columns={inputColumns}
+                disabled={readOnly}
+                onChange={(column) => patch({ column })}
+              />
+            </Field>
+            <Field
+              label="Formula"
+              hint="Evaluated once per row. The column's own name reads its value BEFORE this step, so [x] * 2 doubles it."
+            >
+              <FormulaField
+                value={step.expression ?? ""}
+                columns={inputColumns}
+                readOnly={readOnly}
+                placeholder={step.column ? `UPPER(TRIM([${step.column}]))` : "UPPER(TRIM([status]))"}
+                onChange={(expression) => patch({ expression })}
+              />
+            </Field>
+            <Field
+              label="Declared type"
+              hint="Leave inferred unless the engine says it cannot infer one. The formula's type wins over the column's old one."
+            >
+              <select
+                style={{ ...styles.input, width: 200 }}
+                value={dataTypeLabel(step.dataType)}
+                disabled={readOnly}
+                onChange={(e) => {
+                  if (e.target.value !== "" && !STEP_DATA_TYPES.includes(e.target.value)) return;
+                  const next = { ...step };
+                  if (e.target.value === "") delete next.dataType;
+                  else next.dataType = e.target.value as TransformDataType;
+                  onChange(next);
+                }}
+              >
+                <option value="">(infer from the formula)</option>
                 {step.dataType !== undefined &&
                   !STEP_DATA_TYPES.includes(dataTypeLabel(step.dataType)) && (
                     <option value={dataTypeLabel(step.dataType)}>
@@ -382,20 +435,15 @@ export function StepConfigForm({
         return (
           <Field
             label="Condition"
-            hint={`Keeps rows where this is true; a row where it is blank is dropped. Use AND / OR, not && / ||. ${columnHint(inputColumns)}`}
+            hint="Keeps rows where this is true; a row where it is blank is dropped. Use AND / OR, not && / ||."
           >
-            <textarea
-              style={{ ...styles.textarea, width: "100%", minHeight: 64 }}
+            <FormulaField
               value={step.condition ?? ""}
-              disabled={readOnly}
-              placeholder='amount > 0 AND status <> "cancelled"'
-              onChange={(e) => patch({ condition: e.target.value })}
+              columns={inputColumns}
+              readOnly={readOnly}
+              placeholder={'[amount] > 0 AND [status] <> "cancelled"'}
+              onChange={(condition) => patch({ condition })}
             />
-            <div style={{ marginTop: 4 }}>
-              <button style={styles.smallBtn} onClick={() => setExpressionEditor("condition")}>
-                Edit in expression editor&hellip;
-              </button>
-            </div>
           </Field>
         );
 
@@ -896,29 +944,6 @@ export function StepConfigForm({
       {info && <div style={{ ...styles.hint, marginBottom: 8 }}>{info.hint}</div>}
       <div style={{ overflowY: "auto", minHeight: 0, paddingRight: 2 }}>{body()}</div>
 
-      {expressionEditor !== null && (
-        <ExpressionEditorModal
-          title={
-            expressionEditor === "condition"
-              ? `Filter rows — ${tableName}`
-              : `Add column ${step.name ?? ""} — ${tableName}`
-          }
-          initialValue={
-            (expressionEditor === "condition" ? step.condition : step.expression) ?? ""
-          }
-          overview={overview}
-          hint={
-            expressionEditor === "condition"
-              ? `Row-level boolean over this table's columns. Use AND / OR, not && / ||. ${columnHint(inputColumns)}`
-              : `Row-level expression over this table's columns. ${columnHint(inputColumns)}`
-          }
-          onClose={() => setExpressionEditor(null)}
-          onSave={(value) => {
-            patch(expressionEditor === "condition" ? { condition: value } : { expression: value });
-            setExpressionEditor(null);
-          }}
-        />
-      )}
     </div>
   );
 }

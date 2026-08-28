@@ -8,4 +8,5 @@ export { PreviewGrid } from "./PreviewGrid";
 export { StepList, SOURCE_ROW } from "./StepList";
 export { StepConfigForm } from "./StepConfigForms";
 export { ScriptPane } from "./ScriptPane";
+export { FormulaField } from "./FormulaField";
 export { dataTypeLabel, describeStep, stepDetail, stepTypeLabel, summarizeSteps } from "./stepKit";

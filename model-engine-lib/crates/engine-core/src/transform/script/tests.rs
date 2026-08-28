@@ -42,7 +42,7 @@ fn every_step_survives_render_and_reparse() {
     // the enum by a wildcard-free match that stops compiling when a variant is
     // added, so the denominator cannot silently shrink.
     let steps = one_of_every_step();
-    assert_eq!(steps.len(), 17, "the catalog has 17 steps");
+    assert_eq!(steps.len(), 18, "the catalog has 18 steps");
 
     for step in &steps {
         let text = render_statement(step);
@@ -135,7 +135,7 @@ fn every_serialized_field_has_a_spelling() {
             step.tag
         );
     }
-    assert_eq!(seen.len(), 17, "every tag must be represented");
+    assert_eq!(seen.len(), 18, "every tag must be represented");
 }
 
 #[test]
@@ -343,6 +343,11 @@ fn hostile_names_survive_in_every_string_slot() {
                 expression: "1 + 1".into(),
                 data_type: Some(DataType::Int64),
             },
+            TransformStep::TransformColumn {
+                column: h.clone(),
+                expression: "UPPER([x])".into(),
+                data_type: Some(DataType::String),
+            },
             TransformStep::SplitColumn {
                 column: h.clone(),
                 delimiter: h.clone(),
@@ -420,7 +425,7 @@ fn hostile_names_survive_in_every_string_slot() {
     }
     assert_eq!(
         checked,
-        HOSTILE.len() * 14,
+        HOSTILE.len() * 15,
         "every hostile string must reach every string-bearing step"
     );
 }
@@ -1042,7 +1047,7 @@ fn the_vocabulary_covers_the_catalog() {
     // The table the host serves to its editor must describe every step, or
     // completion silently stops offering one.
     let vocabulary = super::script_vocabulary();
-    assert_eq!(vocabulary.steps.len(), 17);
+    assert_eq!(vocabulary.steps.len(), 18);
     let tags: BTreeSet<&str> = vocabulary.steps.iter().map(|s| s.tag).collect();
     for step in one_of_every_step() {
         assert!(

@@ -483,8 +483,22 @@ use crate::model::writeback_column::WritebackColumn;
 ///   deserialize on a pre-v24 engine, so such a model refuses to open there
 ///   rather than loading a source it cannot reach.
 ///
+/// - `25` — the `transformColumn` step:
+///   [`TransformStep`](crate::transform::TransformStep) gained
+///   `TransformColumn { column, expression, data_type }`, which rewrites an
+///   existing column with a row-level expression in place rather than
+///   appending a new one.
+///
+///   An internally tagged enum cannot ignore a tag it does not know, so a
+///   pre-v25 engine fails to deserialize the pipeline and the whole model
+///   refuses to load. That is the right outcome — silently dropping the step
+///   would load a table whose values were never transformed — but the failure
+///   would surface as a serde error about an unknown variant. The version gate
+///   turns it into "update the application to open this model", which is what
+///   the reader can actually act on.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 24;
+pub const MODEL_FORMAT_VERSION: u32 = 25;
 
 /// A data model consisting of tables and relationships between them.
 ///

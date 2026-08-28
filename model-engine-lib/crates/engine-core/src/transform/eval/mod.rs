@@ -141,13 +141,22 @@ async fn apply_one(
         // the UDFs its expressions may call.
         TransformStep::FilterRows { condition } => {
             let step = sql_steps::SqlStep { table, index, udfs };
-            sql_steps::filter_rows(&step, batch, condition).await
+            sql_steps::filter_rows(&step, batch, input, condition).await
         }
         TransformStep::AddColumn {
             name, expression, ..
         } => {
             let step = sql_steps::SqlStep { table, index, udfs };
-            sql_steps::add_column(&step, batch, name, expression).await
+            sql_steps::add_column(&step, batch, input, name, expression).await
+        }
+        TransformStep::TransformColumn {
+            column,
+            expression,
+            data_type,
+        } => {
+            let step = sql_steps::SqlStep { table, index, udfs };
+            sql_steps::transform_column(&step, batch, input, column, expression, data_type.as_ref())
+                .await
         }
         TransformStep::SplitColumn {
             column,

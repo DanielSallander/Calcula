@@ -9,16 +9,52 @@
 //          vocabulary arrives, completion offers nothing rather than guessing.
 
 import * as monaco from "monaco-editor";
-import type { TransformScriptVocabulary } from "@api";
+import type { FunctionDefDto, ModelColumnInfo, TransformScriptVocabulary } from "@api";
 
 export const TRANSFORM_SCRIPT_LANGUAGE_ID = "calcula-transform-script";
 
 let vocabulary: TransformScriptVocabulary | null = null;
+let formulaColumns: ModelColumnInfo[] = [];
+let formulaFunctions: FunctionDefDto[] = [];
 let registered = false;
 
 /** Feed the editor the engine's published grammar. Safe to call repeatedly. */
 export function setTransformScriptVocabulary(next: TransformScriptVocabulary): void {
   vocabulary = next;
+}
+
+/**
+ * Feed the editor what an expression TAIL may name.
+ *
+ * The columns are approximate by construction: a tail's true input schema is the
+ * pipeline's schema at THAT statement, and the pane knows only the source
+ * columns and the pipeline's output. The union of the two covers essentially
+ * every real formula, and the cost of being wrong is an unoffered name rather
+ * than a wrong one — the engine still judges what was typed.
+ */
+export function setTransformScriptFormulaContext(
+  columns: ModelColumnInfo[],
+  functions: FunctionDefDto[],
+): void {
+  formulaColumns = columns;
+  formulaFunctions = functions;
+}
+
+/** Whether the caret sits after a free-standing `=` — inside a formula. */
+function inExpressionTail(model: monaco.editor.ITextModel, position: monaco.Position): boolean {
+  for (let line = position.lineNumber; line >= 1; line--) {
+    const text =
+      line === position.lineNumber
+        ? model.getLineContent(line).slice(0, position.column - 1)
+        : model.getLineContent(line);
+    if (/(^|\s)=(\s|$)/.test(text)) return true;
+    // A statement starts at a line whose first character is not whitespace, so
+    // reaching one without having seen a free-standing `=` means the caret is
+    // in the option part, not in a tail.
+    if (line !== position.lineNumber && !/^\s/.test(text)) return false;
+    if (line === position.lineNumber && !/^\s/.test(model.getLineContent(line))) return false;
+  }
+  return false;
 }
 
 /** Register the language once per window. */
@@ -62,10 +98,23 @@ export function registerTransformScriptLanguage(): void {
         [/[,:]/, "delimiter"],
         [/=/, "operator"],
       ],
+      // The expression tail is a FORMULA. It is never re-tokenized by the
+      // PARSER — the grammar hands it to the model expression parser
+      // byte-for-byte, which is what removes any need for an escape convention
+      // on the one field feeding the fail-closed allowlist — but the
+      // HIGHLIGHTER may still read it, and leaving it as one grey run was the
+      // single least formula-like thing about this pane.
       tail: [
+        [/\[[^\]]*\]/, "variable.name"],
+        [/[A-Za-z_][A-Za-z0-9_]*(?=\s*\()/, "keyword.function"],
+        // Word-bounded, or "BRAND" would highlight its own "AND".
+        [/\b(AND|OR|NOT|XOR|IN|TRUE|FALSE|BLANK)\b/i, "keyword"],
         [/"([^"]|"")*"/, "string"],
+        [/-?\d+(\.\d+)?/, "number"],
+        [/[<>]=?|<>|=/, "operator"],
+        [/[+\-*/&]/, "operator"],
         [/$/, { token: "", next: "@pop" }],
-        [/./, "string.escape"],
+        [/./, ""],
       ],
       string: [
         [/[^"\\]+/, "string"],
@@ -94,6 +143,49 @@ export function registerTransformScriptLanguage(): void {
       };
       const line = model.getLineContent(position.lineNumber);
       const beforeCursor = line.slice(0, position.column - 1);
+
+      // Inside a formula tail the vocabulary is COLUMNS and FUNCTIONS, not step
+      // options — offering `dataType=` where a formula belongs was the least
+      // formula-like thing about this pane.
+      if (inExpressionTail(model, position)) {
+        const openBracket = beforeCursor.lastIndexOf("[");
+        const inBracket = openBracket !== -1 && !beforeCursor.slice(openBracket).includes("]");
+        const bracketRange = {
+          startLineNumber: position.lineNumber,
+          endLineNumber: position.lineNumber,
+          startColumn: openBracket + 2,
+          endColumn: position.column,
+        };
+        return {
+          suggestions: [
+            ...formulaColumns.map((column, index) => ({
+              label: column.name,
+              kind: monaco.languages.CompletionItemKind.Field,
+              insertText: inBracket
+                ? column.name
+                : /^[A-Za-z_][A-Za-z0-9_]*$/.test(column.name)
+                  ? column.name
+                  : `[${column.name}]`,
+              detail: `column · ${column.dataType}`,
+              sortText: `0${String(index).padStart(4, "0")}`,
+              range: inBracket ? bracketRange : range,
+            })),
+            ...(inBracket
+              ? []
+              : formulaFunctions.map((fn) => ({
+                  label: fn.name,
+                  kind: monaco.languages.CompletionItemKind.Function,
+                  insertText: `${fn.name}($0)`,
+                  insertTextRules:
+                    monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                  detail: fn.signature,
+                  documentation: { value: fn.description },
+                  sortText: `1${fn.name}`,
+                  range,
+                }))),
+          ],
+        };
+      }
 
       // After `key=`, offer that option's own values where the grammar has a
       // closed set for them.

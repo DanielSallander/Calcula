@@ -63,6 +63,11 @@ pub(crate) fn one_of_every_step() -> Vec<TransformStep> {
             expression: "amount - cost".into(),
             data_type: Some(DataType::Float64),
         },
+        TransformStep::TransformColumn {
+            column: "status".into(),
+            expression: "UPPER(TRIM([status]))".into(),
+            data_type: None,
+        },
         TransformStep::SplitColumn {
             column: "region".into(),
             delimiter: "-".into(),
@@ -198,6 +203,16 @@ pub(crate) fn every_field_shape() -> Vec<TransformStep> {
             expression: "amount - cost".into(),
             data_type: None,
         },
+        TransformStep::TransformColumn {
+            column: "amount".into(),
+            expression: "ROUND([amount] * 1.25, 2)".into(),
+            data_type: Some(DataType::Decimal(18, 2)),
+        },
+        TransformStep::TransformColumn {
+            column: "status".into(),
+            expression: "LEFT([status], 3)".into(),
+            data_type: None,
+        },
         TransformStep::SplitColumn {
             column: "region".into(),
             delimiter: "\n".into(),
@@ -284,6 +299,7 @@ fn _every_variant_is_represented(step: &TransformStep) {
         | TransformStep::ChangeType { .. }
         | TransformStep::FilterRows { .. }
         | TransformStep::AddColumn { .. }
+        | TransformStep::TransformColumn { .. }
         | TransformStep::SplitColumn { .. }
         | TransformStep::ReplaceValues { .. }
         | TransformStep::TextTransform { .. }
@@ -317,8 +333,8 @@ mod tests {
         );
         assert_eq!(
             tags.len(),
-            17,
-            "the catalog has 17 steps; add the new one to one_of_every_step()"
+            18,
+            "the catalog has 18 steps; add the new one to one_of_every_step()"
         );
         // The count above compares the fixture with a literal — both sides are
         // this file. `_every_variant_is_represented` is what actually ties the

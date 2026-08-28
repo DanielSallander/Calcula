@@ -218,8 +218,17 @@ table's rows into its derived model table now.`,
   table must be bound to a data source, and a transformed table is forced to
   InMemory storage.
 
-A <statement> is a step name, its key=value options, and - for filterRows and
-addColumn only - a trailing '= <expression>'. The grammar lives in the engine
+A <statement> is a step name, its key=value options, and - for filterRows,
+addColumn and transformColumn - a trailing '= <expression>'. An expression is a
+FORMULA over this table's columns, written the way a grid formula is:
+  transform table Sales add transformColumn column=Status = UPPER(TRIM([Status]))
+  transform table Sales add addColumn name=Code = LEFT([SKU], 3)
+  transform table Sales add filterRows = [Amount] > 0 AND [Status] <> "cancelled"
+A column is [Bracketed], bare, or Table[Qualified] - all three mean the same
+thing. 83 row-level functions are available (LEFT MID UPPER TRIM SUBSTITUTE
+CONCATENATE FIND SPLIT / YEAR MONTH DATEDIFF DATEADD EOMONTH / ROUND ABS POWER
+/ IF SWITCH COALESCE ISBLANK DIVIDE IFERROR), plus your own script functions.
+Aggregates are NOT: use a groupBy step. The grammar lives in the engine
 beside the step definitions, so the command line, the Script tab and a saved
 model all read exactly the same text:
   removeColumns columns=A,B        selectColumns columns=A,B   (also reorders)
@@ -227,6 +236,7 @@ model all read exactly the same text:
   changeType cast=Qty:Int64 [onError=fail|null]  (repeat cast= per column)
   filterRows = <row condition>
   addColumn name=Margin [dataType=Float64] = <expression>
+  transformColumn column=Status [dataType=String] = <expression>   (rewrite in place)
   splitColumn column=Name delimiter="," parts=2 [keepOriginal=true]
   replaceValues column=Region find="x" [replace="y"] [matchEntireValue=true]
   textTransform columns=A,B operation=trim|clean|upper|lower

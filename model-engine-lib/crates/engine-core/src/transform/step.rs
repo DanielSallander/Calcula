@@ -93,6 +93,30 @@ pub enum TransformStep {
         data_type: Option<DataType>,
     },
 
+    /// Rewrite one existing column with a row-level expression, in place.
+    ///
+    /// The formula counterpart of [`AddColumn`](Self::AddColumn): same
+    /// expression language, same allowlist, but it REPLACES a column instead of
+    /// appending one — keeping its position and its presentation metadata,
+    /// which an add-then-drop-then-rename cannot.
+    ///
+    /// The expression reads the column's value BEFORE this step, so
+    /// `net = [net] - [discount]` means what it appears to, and two such steps
+    /// compose. The result is always nullable: a row-level expression can
+    /// produce null from null inputs.
+    TransformColumn {
+        /// The existing column to rewrite.
+        column: String,
+        /// Row-level expression source over this table's columns.
+        expression: String,
+        /// The column's new declared type. When absent the type is inferred
+        /// from the expression — and it is the INFERRED type, never the
+        /// column's old one: `LEFT(qty, 3)` over an integer column produces
+        /// text, and keeping the old type would cast the answer away.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_type: Option<DataType>,
+    },
+
     /// Split one text column into `parts` columns on a literal delimiter.
     ///
     /// Output columns are named `"{column}.1"` … `"{column}.{parts}"`. A part
@@ -224,6 +248,7 @@ impl TransformStep {
             TransformStep::ChangeType { .. } => "changeType",
             TransformStep::FilterRows { .. } => "filterRows",
             TransformStep::AddColumn { .. } => "addColumn",
+            TransformStep::TransformColumn { .. } => "transformColumn",
             TransformStep::SplitColumn { .. } => "splitColumn",
             TransformStep::ReplaceValues { .. } => "replaceValues",
             TransformStep::TextTransform { .. } => "textTransform",
@@ -246,6 +271,7 @@ impl TransformStep {
         match self {
             TransformStep::FilterRows { condition } => vec![condition.as_str()],
             TransformStep::AddColumn { expression, .. } => vec![expression.as_str()],
+            TransformStep::TransformColumn { expression, .. } => vec![expression.as_str()],
             _ => Vec::new(),
         }
     }

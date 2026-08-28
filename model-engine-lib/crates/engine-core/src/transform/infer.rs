@@ -14,35 +14,21 @@
 use crate::compute::expression::{
     ArithmeticOp, DateTimeFunction, Expression, ScalarFunction, TextFunction,
 };
-use crate::error::EngineResult;
 use crate::model::Column;
-use crate::transform::validate::parse_row_expression;
 use crate::types::DataType;
-
-/// Infer the type of an `addColumn` expression over an input schema.
-///
-/// Returns `Ok(None)` when the expression is well-formed but its type cannot
-/// be determined statically — the caller turns that into a request for an
-/// explicit type.
-///
-/// # Errors
-///
-/// [`EngineError::InvalidTransform`](crate::error::EngineError::InvalidTransform)
-/// when the expression does not parse, or is not a row-level expression.
-pub(crate) fn infer_expression_type(
-    table: &str,
-    step_index: usize,
-    input: &[Column],
-    expression: &str,
-) -> EngineResult<Option<DataType>> {
-    let parsed = parse_row_expression(table, step_index, input, expression)?;
-    Ok(infer_parsed_type(&parsed, input))
-}
 
 /// Infer the result type of an already-parsed row-level expression.
 ///
-/// The parsed-tree entry point, for callers that have already run
-/// [`parse_row_expression`] and must not pay for a second parse.
+/// The only entry point. There used to be a source-text sibling
+/// (`infer_expression_type`) that parsed and then inferred, and it was the ONLY
+/// route from an `addColumn` expression to the parser — so declaring a type on
+/// the step skipped validation entirely. Both column rules now parse
+/// unconditionally and hand the tree here, which closes that hole and pays for
+/// one parse instead of two.
+///
+/// Returns `None` when the expression is well-formed but its type cannot be
+/// determined statically — the caller turns that into a request for an
+/// explicit type.
 pub(crate) fn infer_parsed_type(expression: &Expression, input: &[Column]) -> Option<DataType> {
     infer(expression, input)
 }
@@ -264,9 +250,12 @@ fn infer_datetime(function: DateTimeFunction) -> Option<DataType> {
 mod tests {
     use super::*;
     use crate::transform::test_support::source_schema;
+    use crate::transform::validate::parse_row_expression;
 
+    /// Parse then infer, the way both column rules now do.
     fn infer_source(expression: &str) -> Option<DataType> {
-        infer_expression_type("Sales", 0, &source_schema(), expression).unwrap()
+        let parsed = parse_row_expression("Sales", 0, &source_schema(), expression).unwrap();
+        infer_parsed_type(&parsed, &source_schema())
     }
 
     #[test]

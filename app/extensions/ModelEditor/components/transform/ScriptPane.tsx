@@ -15,12 +15,22 @@ import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
 import { enforceLfLineEndings } from "../../../_shared/lib/monacoLineEndings";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import { biModelTransformFromScript, biModelTransformVocabulary } from "@api";
-import type { TransformDiagnosticDto, TransformStepDto } from "@api";
+import {
+  biModelFunctionCatalog,
+  biModelTransformFromScript,
+  biModelTransformVocabulary,
+} from "@api";
+import type {
+  FunctionDefDto,
+  ModelColumnInfo,
+  TransformDiagnosticDto,
+  TransformStepDto,
+} from "@api";
 import { styles } from "../editorShared";
 import {
   TRANSFORM_SCRIPT_LANGUAGE_ID,
   registerTransformScriptLanguage,
+  setTransformScriptFormulaContext,
   setTransformScriptVocabulary,
 } from "./transformScriptLanguage";
 
@@ -47,6 +57,7 @@ export function ScriptPane({
   /** The rendered starting text. Re-seeds the buffer when it changes identity,
    *  which happens when the pane is entered or the table is reloaded. */
   initialScript: initialText,
+  sourceColumns,
   readOnly,
   onParsed,
   onParseStateChange,
@@ -54,6 +65,8 @@ export function ScriptPane({
   connectionId: string;
   tableName: string;
   initialScript: string;
+  /** The columns reaching the pipeline, for completion inside a formula tail. */
+  sourceColumns: ModelColumnInfo[];
   readOnly: boolean;
   /** The steps a SUCCESSFUL parse produced. Not called on a failed parse: the
    *  draft must keep the last thing the buffer actually said. */
@@ -64,6 +77,7 @@ export function ScriptPane({
 }): React.ReactElement {
   const [text, setText] = useState(initialText);
   const [diagnostics, setDiagnostics] = useState<TransformDiagnosticDto[]>([]);
+  const [derivedColumns, setDerivedColumns] = useState<ModelColumnInfo[]>([]);
   const [readError, setReadError] = useState<string | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 
@@ -85,6 +99,33 @@ export function ScriptPane({
     };
   }, [connectionId]);
 
+  // What a formula TAIL may name. The function list is filtered on the
+  // engine's own `rowLevel` flag, so completion inside a tail cannot offer
+  // something a step will refuse.
+  const [functions, setFunctions] = useState<FunctionDefDto[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void biModelFunctionCatalog()
+      .then((all) => {
+        if (!cancelled) setFunctions(all.filter((f) => f.rowLevel));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Union of the pipeline's input and its current output: a tail midway
+    // through the pipeline sees columns from both ends, and an unoffered name
+    // costs less than a wrong one.
+    const byName = new Map<string, ModelColumnInfo>();
+    for (const column of [...sourceColumns, ...derivedColumns]) {
+      if (!byName.has(column.name)) byName.set(column.name, column);
+    }
+    setTransformScriptFormulaContext([...byName.values()], functions);
+  }, [sourceColumns, derivedColumns, functions]);
+
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
     registerTransformScriptLanguage();
@@ -100,6 +141,7 @@ export function ScriptPane({
           if (cancelled) return;
           setReadError(null);
           setDiagnostics(result.diagnostics);
+          setDerivedColumns(result.columns);
           onParseStateChange(result.parsed);
           // Lift ONLY a clean parse. A buffer that parses but fails validation
           // still describes a real pipeline, so the draft follows it and the

@@ -1330,6 +1330,16 @@ const EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION: u64 = 23;
 /// entirely, leaving its tables unbound.
 const TRANSFORMATIONS_MIN_FORMAT_VERSION: u64 = 24;
 
+/// Minimum schema `format_version` for the `transformColumn` step.
+///
+/// Separate from the v24 stamp because an ordinary pipeline must keep stamping
+/// 24 — only a pipeline that actually uses the new step needs a newer reader.
+/// An internally tagged enum cannot ignore a tag it does not know, so a pre-v25
+/// engine refuses the whole model rather than dropping the step; the version
+/// gate is what turns that into "update the application" instead of a serde
+/// error about an unknown variant.
+const TRANSFORM_COLUMN_MIN_FORMAT_VERSION: u64 = 25;
+
 /// Minimum schema `format_version` for dynamic row-level security: a
 /// `FilterPredicate.dynamic` (USERNAME()/CUSTOMDATA()) is additive serde, so a
 /// pre-v11 engine silently treats it as a STATIC comparison against the
@@ -1467,7 +1477,18 @@ pub fn stamp_feature_format_version(
         .iter()
         .any(|s| s.kind == bi_engine::SourceKind::Rest || s.rest.is_some());
 
-    let required = if uses_v24 {
+    // v25: the transformColumn step, stamped only when a pipeline uses it.
+    let uses_v25 = model.tables().iter().any(|t| {
+        t.source_binding().is_some_and(|b| {
+            b.transformations
+                .iter()
+                .any(|step| matches!(step, bi_engine::TransformStep::TransformColumn { .. }))
+        })
+    });
+
+    let required = if uses_v25 {
+        TRANSFORM_COLUMN_MIN_FORMAT_VERSION
+    } else if uses_v24 {
         TRANSFORMATIONS_MIN_FORMAT_VERSION
     } else if uses_v23 {
         EXPRESSION_BATCH_V23_MIN_FORMAT_VERSION

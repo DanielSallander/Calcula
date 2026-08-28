@@ -5,10 +5,11 @@
 
 use crate::error::EngineResult;
 use crate::model::Column;
-use crate::transform::infer::infer_expression_type;
+use crate::transform::infer::infer_parsed_type;
 use crate::transform::literal::validate_typed_literal;
 use crate::transform::parts::{CastErrorPolicy, ColumnRename, TextOp, TypeChange};
 use crate::transform::schema::{require_absent, require_column, require_unique, transform_error};
+use crate::transform::validate::parse_row_expression;
 use crate::types::DataType;
 
 /// Fail unless `column` is a `String` column — the precondition of every text
@@ -179,9 +180,16 @@ pub(crate) fn add_column(
     }
     require_absent(table, step_index, input, name)?;
 
+    // Parse UNCONDITIONALLY. Before this, the declared-type arm never touched
+    // `expression` — `infer_expression_type` was the only route from an
+    // addColumn expression to the parser — so
+    // `addColumn name=x dataType=Int64 = SUM(amount)` passed validation, passed
+    // schema derivation, passed model load, and died at refresh as a raw
+    // DataFusion planner error.
+    let parsed = parse_row_expression(table, step_index, input, expression)?;
     let data_type = match declared_type {
         Some(declared) => declared.clone(),
-        None => infer_expression_type(table, step_index, input, expression)?.ok_or_else(|| {
+        None => infer_parsed_type(&parsed, input).ok_or_else(|| {
             transform_error(
                 table,
                 step_index,
@@ -196,6 +204,77 @@ pub(crate) fn add_column(
     let mut output = input.to_vec();
     output.push(Column::new(name, data_type));
     Ok(output)
+}
+
+/// `transformColumn`: rewrite one existing column with a row-level expression.
+///
+/// [`add_column`] with three schema-only differences: LOCATE the column instead
+/// of refusing it, REPLACE in place instead of pushing, and keep the column's
+/// identity while changing its type — the same `with_data_type` shape
+/// [`change_type`] and [`rename_columns`] already use, which is what preserves
+/// the column's position and its eight presentation fields. `Column::new` would
+/// clear display name, description, hidden flag, sort-by, default aggregation,
+/// date role and format string, and that silent loss is most of the reason the
+/// add-then-drop-then-rename workaround was not good enough.
+pub(crate) fn transform_column(
+    table: &str,
+    step_index: usize,
+    input: &[Column],
+    column: &str,
+    expression: &str,
+    declared_type: Option<&DataType>,
+) -> EngineResult<Vec<Column>> {
+    if column.is_empty() {
+        return Err(transform_error(table, step_index, "column name is empty"));
+    }
+    let position = input
+        .iter()
+        .position(|c| c.name() == column)
+        .ok_or_else(|| unknown_column(table, step_index, input, column))?;
+
+    let parsed = parse_row_expression(table, step_index, input, expression)?;
+    let data_type = match declared_type {
+        Some(declared) => declared.clone(),
+        // NOT the column's existing type. `LEFT(qty, 3)` over an integer column
+        // produces text; keeping Int64 would make the terminal conform cast the
+        // answer away.
+        None => infer_parsed_type(&parsed, input).ok_or_else(|| {
+            transform_error(
+                table,
+                step_index,
+                format!(
+                    "cannot infer the type of column '{column}' from its expression — \
+                     set an explicit data type on the step"
+                ),
+            )
+        })?,
+    };
+
+    let mut output = input.to_vec();
+    output[position] = output[position]
+        .clone()
+        .with_data_type(data_type)
+        .with_nullable(true);
+    Ok(output)
+}
+
+/// "unknown column 'x'", naming what IS there — the message a formula author
+/// needs when a name is misspelled.
+fn unknown_column(
+    table: &str,
+    step_index: usize,
+    input: &[Column],
+    column: &str,
+) -> crate::error::EngineError {
+    let available: Vec<&str> = input.iter().map(|c| c.name()).collect();
+    transform_error(
+        table,
+        step_index,
+        format!(
+            "unknown column '{column}' — this step's input has: {}",
+            available.join(", ")
+        ),
+    )
 }
 
 /// `splitColumn`: replace a text column with `parts` text columns named
@@ -529,6 +608,134 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("already exists"), "got {err}");
+    }
+
+    #[test]
+    fn transform_column_rewrites_in_place_keeping_position_and_metadata() {
+        // The whole point of the step. The add-then-drop-then-rename
+        // workaround moves the column to the end and rebuilds it with
+        // `Column::new`, which clears every presentation field.
+        let input = vec![
+            Column::new("id", DataType::Int64),
+            Column::new("status", DataType::String)
+                .with_display_name("Order status")
+                .with_description("as the source spells it")
+                .hidden(),
+            Column::new("amount", DataType::Float64),
+        ];
+        let out = derive(
+            &input,
+            &TransformStep::TransformColumn {
+                column: "status".into(),
+                expression: "UPPER(TRIM([status]))".into(),
+                data_type: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&out), vec!["id", "status", "amount"], "position kept");
+        let column = &out[1];
+        assert_eq!(column.data_type(), &DataType::String);
+        assert_eq!(column.display_name(), Some("Order status"));
+        assert_eq!(column.description(), Some("as the source spells it"));
+        assert!(column.is_hidden(), "the hidden flag survives");
+        assert!(column.nullable(), "a row-level expression may produce null");
+    }
+
+    #[test]
+    fn transform_column_takes_the_inferred_type_not_the_old_one() {
+        // `LEN` over a TEXT column produces a NUMBER. Keeping the column's
+        // existing type would be pure and WRONG — the terminal conform would
+        // cast the answer away.
+        let out = derive(
+            &source_schema(),
+            &TransformStep::TransformColumn {
+                column: "status".into(),
+                expression: "LEN([status])".into(),
+                data_type: None,
+            },
+        )
+        .unwrap();
+        let column = out.iter().find(|c| c.name() == "status").unwrap();
+        assert_eq!(
+            column.data_type(),
+            &DataType::Int64,
+            "the expression's type wins over the column's"
+        );
+    }
+
+    #[test]
+    fn transform_column_accepts_a_declared_type() {
+        let out = derive(
+            &source_schema(),
+            &TransformStep::TransformColumn {
+                column: "amount".into(),
+                expression: "ROUND([amount] * 1.25, 2)".into(),
+                data_type: Some(DataType::Decimal(18, 2)),
+            },
+        )
+        .unwrap();
+        let column = out.iter().find(|c| c.name() == "amount").unwrap();
+        assert_eq!(column.data_type(), &DataType::Decimal(18, 2));
+    }
+
+    #[test]
+    fn transform_column_names_the_available_columns_when_the_name_is_wrong() {
+        let err = derive(
+            &source_schema(),
+            &TransformStep::TransformColumn {
+                column: "stauts".into(),
+                expression: "1".into(),
+                data_type: None,
+            },
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("stauts"), "got {message}");
+        assert!(
+            message.contains("status"),
+            "must list what IS there: {message}"
+        );
+    }
+
+    #[test]
+    fn transform_column_refuses_an_aggregate_like_every_other_expression_step() {
+        let err = derive(
+            &source_schema(),
+            &TransformStep::TransformColumn {
+                column: "amount".into(),
+                expression: "SUM(amount)".into(),
+                data_type: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("groupBy"), "got {err}");
+    }
+
+    #[test]
+    fn a_declared_type_no_longer_skips_expression_validation() {
+        // THE HOLE THIS CLOSES. `addColumn`'s declared-type arm never touched
+        // the expression, so this passed validation, passed derivation, passed
+        // model load, and died at refresh as a raw planner error.
+        for step in [
+            TransformStep::AddColumn {
+                name: "x".into(),
+                expression: "SUM(amount)".into(),
+                data_type: Some(DataType::Int64),
+            },
+            TransformStep::TransformColumn {
+                column: "amount".into(),
+                expression: "SUM(amount)".into(),
+                data_type: Some(DataType::Int64),
+            },
+        ] {
+            let err = derive(&source_schema(), &step).unwrap_err();
+            assert!(
+                err.to_string().contains("groupBy"),
+                "{} with a declared type must still be validated: {err}",
+                step.type_name()
+            );
+        }
     }
 
     #[test]
