@@ -243,6 +243,7 @@ model all read exactly the same text:
   fillDown columns=A,B             removeDuplicates [columns=A,B]
   sort by=Amount,-Date             (also Col:desc / Col:asc)
   groupBy groupBy=Region agg=Sum:Amount:Total agg=CountRows::Rows
+    aggFormula=Sum:"IF([Status] = ""open"", [Amount], BLANK())":OpenTotal
   keepRows range=first:100         removeRows range=range:0:10
   unpivot columns=Jan,Feb nameColumn=Month valueColumn=Amount
   pivot nameColumn=Month valueColumn=Amount aggregate=Sum valueNames=Jan,Feb

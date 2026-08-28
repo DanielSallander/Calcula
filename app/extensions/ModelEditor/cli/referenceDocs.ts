@@ -460,7 +460,7 @@ transform table Sales clear
 | \`fillDown\` | \`columns=A,B\` |
 | \`removeDuplicates\` | \`[columns=A,B]\` (omit = every column) |
 | \`sort\` | \`by=Amount,-Date\` (also \`Col:desc\` / \`Col:asc\`) |
-| \`groupBy\` | \`groupBy=Region agg=Sum:Amount:Total agg=CountRows::Rows\` |
+| \`groupBy\` | \`groupBy=Region agg=Sum:Amount:Total agg=CountRows::Rows aggFormula=Sum:"IF(...)":Alias\` |
 | \`keepRows\` / \`removeRows\` | \`range=first:100\` \\| \`last:50\` \\| \`range:OFFSET:COUNT\` |
 | \`unpivot\` | \`columns=Jan,Feb nameColumn=Month valueColumn=Amount\` |
 | \`pivot\` | \`nameColumn=Month valueColumn=Amount aggregate=Sum valueNames=Jan,Feb\` |
@@ -520,7 +520,20 @@ everything that needs a finished model:
 Plus calls to your own [script functions](scriptfunction.md).
 
 **Aggregates are not.** \`SUM\`, \`COUNT\` and friends are refused by name — a
-step computes one value per row, so use a \`groupBy\` step. Nor is \`RELATED\` or
+step computes one value per row, so use a \`groupBy\` step. The **SUMIF family**
+lives there too, as a \`groupBy\` aggregate over a formula:
+
+\`\`\`
+transform table Sales add groupBy groupBy=Region
+  aggFormula=Sum:"IF([Status] = ""open"", [Amount], BLANK())":OpenTotal
+  aggFormula=Average:"IF([Status] = ""open"", [Amount], BLANK())":OpenAvg
+  aggFormula=Count:"IF([Amount] > 1000, 1, BLANK())":BigOrders
+\`\`\`
+
+The formula marks the rows that count; \`BLANK()\` marks the rows that do not
+(it is ignored by every aggregate, which is what makes \`Average\` right where
+an \`ELSE 0\` would be wrong). A \`BLANK()\` branch adopts the other branch's
+type, so no declared type is needed. Nor is \`RELATED\` or
 a measure reference: the table has not joined the model yet. Two smaller
 spellings to know: an \`IN\` list takes **braces** (\`[Status] IN {"a", "b"}\`),
 and \`DATEDIFF\`'s interval is a bare keyword (\`DATEDIFF([Date], TODAY(), DAY)\`).

@@ -497,8 +497,21 @@ use crate::model::writeback_column::WritebackColumn;
 ///   turns it into "update the application to open this model", which is what
 ///   the reader can actually act on.
 ///
+/// - `26` — formula aggregates (the SUMIF shape):
+///   [`GroupAggregate`](crate::transform::GroupAggregate) gained
+///   `expression: Option<String>`, a row-level formula aggregated in place of
+///   a plain column — `Sum` over `IF([status] = "open", [amount], BLANK())`.
+///
+///   The field is additive serde, so a pre-v26 engine deserializes the
+///   pipeline without error — and then sees an aggregate whose operand column
+///   is EMPTY, which its validation refuses at model load with "unknown
+///   column ''". That is loud but points at a phantom defect; the version
+///   gate turns it into "update the application to open this model", which
+///   the reader can act on. Stamped only when a pipeline actually carries a
+///   formula aggregate.
+///
 /// [`ModelFormatTooNew`]: crate::error::EngineError::ModelFormatTooNew
-pub const MODEL_FORMAT_VERSION: u32 = 25;
+pub const MODEL_FORMAT_VERSION: u32 = 26;
 
 /// A data model consisting of tables and relationships between them.
 ///

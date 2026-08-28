@@ -67,9 +67,11 @@ fn model_format_version_is_current() {
     // source_columns) and the persisted SQL source_query.
     // v25 added the transformColumn step (TransformStep::TransformColumn),
     // which rewrites an existing column with a row-level expression in place.
+    // v26 added formula aggregates (GroupAggregate.expression) - the SUMIF
+    // shape: an aggregate over a row-level formula instead of a column.
     // If you bump the constant, extend the version history in `mod.rs`
     // and update this pin deliberately.
-    assert_eq!(MODEL_FORMAT_VERSION, 25);
+    assert_eq!(MODEL_FORMAT_VERSION, 26);
 }
 
 #[test]

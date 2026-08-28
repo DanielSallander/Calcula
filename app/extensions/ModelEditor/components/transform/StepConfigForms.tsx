@@ -752,6 +752,23 @@ export function StepConfigForm({
                       </select>
                       {countsRows ? (
                         <span style={{ ...styles.hint, flex: 1 }}>(counts rows)</span>
+                      ) : a.expression !== undefined ? (
+                        <div style={{ flex: 1, minWidth: 220 }}>
+                          <FormulaField
+                            value={a.expression ?? ""}
+                            columns={inputColumns}
+                            readOnly={readOnly}
+                            minHeight={34}
+                            placeholder={'IF([status] = "open", [amount], BLANK())'}
+                            onChange={(expression) =>
+                              patch({
+                                aggregates: aggregates.map((x, j) =>
+                                  j === i ? { ...x, expression, column: undefined } : x,
+                                ),
+                              })
+                            }
+                          />
+                        </div>
                       ) : (
                         <ColumnSelect
                           value={a.column ?? ""}
@@ -765,6 +782,42 @@ export function StepConfigForm({
                             })
                           }
                         />
+                      )}
+                      {!countsRows && (
+                        <button
+                          style={{
+                            ...styles.smallBtn,
+                            fontStyle: "italic",
+                            fontWeight: 600,
+                            background: a.expression !== undefined ? "#0b5cad" : undefined,
+                            color: a.expression !== undefined ? "#fff" : undefined,
+                          }}
+                          disabled={readOnly}
+                          title={
+                            a.expression !== undefined
+                              ? "Back to a plain column"
+                              : 'Aggregate a formula instead of a column - the SUMIF shape: Sum over IF([status] = "open", [amount], BLANK())'
+                          }
+                          onClick={() =>
+                            patch({
+                              aggregates: aggregates.map((x, j) => {
+                                if (j !== i) return x;
+                                // Switching modes clears the other operand:
+                                // the engine refuses an aggregate naming both.
+                                if (x.expression !== undefined) {
+                                  const next = { ...x, column: inputColumns[0]?.name ?? "" };
+                                  delete next.expression;
+                                  return next;
+                                }
+                                const next = { ...x, expression: "" };
+                                delete next.column;
+                                return next;
+                              }),
+                            })
+                          }
+                        >
+                          fx
+                        </button>
                       )}
                       <span style={styles.muted}>as</span>
                       <input

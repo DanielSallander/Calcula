@@ -82,9 +82,42 @@ pub(crate) fn parse_row_expression(
     // is allowed.
     let parsed = resolve_bracketed_columns(&parsed, input);
 
+    // A `MeasureRef` that SURVIVED resolution is, in a transform context, far
+    // more often a mistyped COLUMN than a genuine measure attempt — the author
+    // typed `[nope]` next to columns they spelled with the same brackets. The
+    // generic allowlist refusal would say "measure reference", which is true
+    // and useless for the typo; name the columns instead, and mention measures
+    // second.
+    if let Some(name) = find_measure_ref(&parsed) {
+        let available = input
+            .iter()
+            .map(Column::name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(transform_error(
+            table,
+            step_index,
+            format!(
+                "'[{name}]' is not a column of this step — its columns are: {available}. \
+                 (A measure cannot be used here either: measures are evaluated over the \
+                 finished model, not while a table is being built.)"
+            ),
+        ));
+    }
+
     ensure_row_level(table, step_index, &parsed)?;
     ensure_columns_exist(table, step_index, input, &parsed)?;
     Ok(parsed)
+}
+
+/// The first `MeasureRef` anywhere in the tree, if any survived resolution.
+fn find_measure_ref(expression: &Expression) -> Option<&str> {
+    if let Expression::MeasureRef(name) = expression {
+        return Some(name);
+    }
+    child_expressions(expression)
+        .into_iter()
+        .find_map(find_measure_ref)
 }
 
 /// Rewrite every `MeasureRef` naming a column of `input` into a `ColumnRef`.

@@ -253,9 +253,24 @@ pub(crate) fn every_field_shape() -> Vec<TransformStep> {
         },
         TransformStep::GroupBy {
             group_by: vec!["region".into(), "month".into()],
+            // INTERLEAVED column and formula aggregates, deliberately: the
+            // script renders them under two different keys (`agg=` /
+            // `aggFormula=`), and a parser that collected each key separately
+            // would silently reorder the output columns. This fixture is what
+            // makes the round-trip census catch that.
             aggregates: vec![
                 GroupAggregate::new("amount", AggregateOp::Sum, "total"),
+                GroupAggregate::formula(
+                    AggregateOp::Sum,
+                    "open_total",
+                    "IF([status] = \"open\", [amount], BLANK())",
+                ),
                 GroupAggregate::count_rows("orders"),
+                GroupAggregate::formula(
+                    AggregateOp::Count,
+                    "flagged",
+                    "IF([amount] > 100, 1, BLANK())",
+                ),
                 GroupAggregate::new("id", AggregateOp::DistinctCount, "customers"),
             ],
         },

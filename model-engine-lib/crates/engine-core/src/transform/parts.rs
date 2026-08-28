@@ -204,13 +204,26 @@ impl RowRange {
 #[serde(rename_all = "camelCase")]
 pub struct GroupAggregate {
     /// The input column to aggregate. Ignored (and may be empty) for
-    /// [`AggregateOp::CountRows`], which counts rows rather than values.
+    /// [`AggregateOp::CountRows`], which counts rows rather than values —
+    /// and empty when [`expression`](Self::expression) carries a formula
+    /// instead.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub column: String,
     /// The aggregation to apply.
     pub function: AggregateOp,
     /// The name of the output column.
     pub alias: String,
+    /// A row-level formula to aggregate instead of a plain column — the
+    /// SUMIF shape: `Sum` over `IF([status] = "open", [amount], BLANK())`.
+    ///
+    /// Exactly one of `column` and `expression` is given (neither for
+    /// `CountRows`). The formula goes through the same fail-closed row-level
+    /// parse as `filterRows`/`addColumn`, so it can never itself aggregate,
+    /// and its INFERRED type stands in for the column type everywhere one is
+    /// needed. Additive serde: a model written without this field reads
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
 }
 
 impl GroupAggregate {
@@ -220,6 +233,7 @@ impl GroupAggregate {
             column: column.into(),
             function,
             alias: alias.into(),
+            expression: None,
         }
     }
 
@@ -229,6 +243,22 @@ impl GroupAggregate {
             column: String::new(),
             function: AggregateOp::CountRows,
             alias: alias.into(),
+            expression: None,
+        }
+    }
+
+    /// Create an aggregate of a row-level `expression` under `alias` — the
+    /// SUMIF shape.
+    pub fn formula(
+        function: AggregateOp,
+        alias: impl Into<String>,
+        expression: impl Into<String>,
+    ) -> Self {
+        Self {
+            column: String::new(),
+            function,
+            alias: alias.into(),
+            expression: Some(expression.into()),
         }
     }
 }

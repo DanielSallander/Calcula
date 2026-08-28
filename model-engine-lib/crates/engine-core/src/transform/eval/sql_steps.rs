@@ -14,6 +14,7 @@ use crate::compute::udf::{session_context_with_udfs, UdfRegistry};
 use crate::error::EngineResult;
 use crate::model::Column;
 use crate::transform::eval::step_error;
+use crate::transform::infer::infer_parsed_type;
 use crate::transform::literal::typed_sql_literal;
 use crate::transform::parts::{GroupAggregate, TextOp};
 use crate::transform::rules_rows::aggregate_output_type;
@@ -305,16 +306,55 @@ pub(super) async fn text_transform(
     run_sql(step, batch, &sql).await
 }
 
-/// Render one aggregate over a quoted operand.
-fn aggregate_sql(aggregate: &GroupAggregate, input: &[Column]) -> String {
+/// Render one aggregate over its operand — a quoted column, or a formula.
+fn aggregate_sql(
+    step: &SqlStep<'_>,
+    aggregate: &GroupAggregate,
+    input: &[Column],
+) -> EngineResult<String> {
     if aggregate.function == AggregateOp::CountRows {
-        AggregateOp::CountRows.render_sql("*")
+        return Ok(AggregateOp::CountRows.render_sql("*"));
+    }
+    let operand = match &aggregate.expression {
+        // The SUMIF shape: the operand is a row-level formula. It goes through
+        // the SAME `parse_row_expression` the validator uses (allowlist,
+        // bracket resolution, column existence), and its INFERRED type — not a
+        // by-name lookup, which has no name here — feeds the cast decision.
+        // Getting that wrong is a silently integer-truncated median, not an
+        // error, which is why the operand-slot idea was once killed outright.
+        Some(expression) => {
+            let parsed = parse_row_expression(step.table, step.index, input, expression)?;
+            let operand_type = infer_parsed_type(&parsed, input);
+            let sql = parsed
+                .to_sql_string()
+                .map_err(|e| step.error(format!("{e}")))?;
+            fractional_cast(
+                format!("({sql})"),
+                operand_type.as_ref(),
+                aggregate.function,
+            )
+        }
+        None => aggregate_operand(&aggregate.column, aggregate.function, input),
+    };
+    Ok(aggregate.function.render_sql(&operand))
+}
+
+/// Wrap an operand in a `DOUBLE` cast when schema derivation declares a
+/// fractional result over an operand that is not already fractional.
+fn fractional_cast(
+    operand_sql: String,
+    operand_type: Option<&DataType>,
+    function: AggregateOp,
+) -> String {
+    let declared_fractional = matches!(
+        aggregate_output_type(function, operand_type),
+        Some(DataType::Float64)
+    );
+    let already_fractional = matches!(operand_type, Some(DataType::Float64));
+    if declared_fractional && !already_fractional {
+        format!("CAST({operand_sql} AS DOUBLE)")
     } else {
-        aggregate.function.render_sql(&aggregate_operand(
-            &aggregate.column,
-            aggregate.function,
-            input,
-        ))
+        operand_sql
     }
 }
 
@@ -331,21 +371,11 @@ fn aggregate_sql(aggregate: &GroupAggregate, input: &[Column]) -> String {
 /// Casting the OPERAND makes the aggregate compute in the type it was declared
 /// to produce, so preview, refresh and the declared schema all agree.
 fn aggregate_operand(column: &str, function: AggregateOp, input: &[Column]) -> String {
-    let quoted = quote_ident_double(column);
     let column_type = input
         .iter()
         .find(|c| c.name() == column)
-        .map(|c| c.data_type());
-    let declared_fractional = matches!(
-        aggregate_output_type(function, column_type),
-        Some(DataType::Float64)
-    );
-    let already_fractional = matches!(column_type, Some(DataType::Float64));
-    if declared_fractional && !already_fractional {
-        format!("CAST({quoted} AS DOUBLE)")
-    } else {
-        quoted
-    }
+        .map(|c| c.data_type().clone());
+    fractional_cast(quote_ident_double(column), column_type.as_ref(), function)
 }
 
 /// `groupBy`.
@@ -362,7 +392,7 @@ pub(super) async fn group_by(
     for aggregate in aggregates {
         select.push(format!(
             "{} AS {}",
-            aggregate_sql(aggregate, input),
+            aggregate_sql(step, aggregate, input)?,
             quote_ident_double(&aggregate.alias)
         ));
     }

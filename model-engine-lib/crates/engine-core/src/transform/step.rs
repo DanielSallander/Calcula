@@ -272,6 +272,11 @@ impl TransformStep {
             TransformStep::FilterRows { condition } => vec![condition.as_str()],
             TransformStep::AddColumn { expression, .. } => vec![expression.as_str()],
             TransformStep::TransformColumn { expression, .. } => vec![expression.as_str()],
+            // Formula aggregates — the SUMIF shape — carry expressions too.
+            TransformStep::GroupBy { aggregates, .. } => aggregates
+                .iter()
+                .filter_map(|aggregate| aggregate.expression.as_deref())
+                .collect(),
             _ => Vec::new(),
         }
     }

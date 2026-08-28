@@ -3831,7 +3831,15 @@ export interface TransformStepDto {
   operation?: "trim" | "clean" | "upper" | "lower";
   by?: Array<{ column: string; descending?: boolean }>;
   groupBy?: string[];
-  aggregates?: Array<{ column?: string; function: string; alias: string }>;
+  aggregates?: Array<{
+    column?: string;
+    function: string;
+    alias: string;
+    /** A row-level formula aggregated instead of a plain column — the SUMIF
+     *  shape: `Sum` over `IF([status] = "open", [amount], BLANK())`. Exactly
+     *  one of `column` and `expression` is given (neither for CountRows). */
+    expression?: string;
+  }>;
   range?: { kind: "firstN" | "lastN" | "range"; count?: number; offset?: number };
   nameColumn?: string;
   valueColumn?: string;

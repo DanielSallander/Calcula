@@ -935,25 +935,66 @@ fn assemble(
         },
         "groupBy" => TransformStep::GroupBy {
             group_by: names(options, &["groupBy"])?,
-            aggregates: find_all(options, &["agg", "aggregates"])
-                .iter()
-                .flat_map(|option| option.value.elements.iter())
-                .map(|element| {
-                    Ok(GroupAggregate {
-                        function: aggregate_of(
-                            element.atom_at(0, "an aggregate, as in agg=Sum:amount:total")?,
-                        )?,
-                        column: element
-                            .atom_at(1, "the column to aggregate (empty for CountRows)")?
-                            .text
-                            .clone(),
-                        alias: element
-                            .atom_at(2, "the output column name, as in agg=Sum:amount:total")?
-                            .text
-                            .clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>, ScriptError>>()?,
+            aggregates: {
+                // ONE pass over the options in the order they were WRITTEN. A
+                // pipeline mixing `agg=` and `aggFormula=` carries its
+                // aggregate order in that interleaving — collecting each key
+                // separately would silently reorder the output columns, and
+                // `parse(render(s)) == s` would be the first casualty.
+                let mut aggregates = Vec::new();
+                for option in find_all(options, &["agg", "aggregates", "aggFormula"]) {
+                    let is_formula = option.key.eq_ignore_ascii_case("aggFormula");
+                    for element in &option.value.elements {
+                        if is_formula {
+                            aggregates.push(GroupAggregate {
+                                function: aggregate_of(element.atom_at(
+                                    0,
+                                    "an aggregate, as in aggFormula=Sum:\"IF(...)\":total",
+                                )?)?,
+                                column: String::new(),
+                                expression: Some(
+                                    element
+                                        .atom_at(
+                                            1,
+                                            "the formula, quoted, as in \
+                                             aggFormula=Sum:\"IF(...)\":total",
+                                        )?
+                                        .text
+                                        .clone(),
+                                ),
+                                alias: element
+                                    .atom_at(
+                                        2,
+                                        "the output column name, as in \
+                                         aggFormula=Sum:\"IF(...)\":total",
+                                    )?
+                                    .text
+                                    .clone(),
+                            });
+                        } else {
+                            aggregates.push(GroupAggregate {
+                                function: aggregate_of(
+                                    element
+                                        .atom_at(0, "an aggregate, as in agg=Sum:amount:total")?,
+                                )?,
+                                column: element
+                                    .atom_at(1, "the column to aggregate (empty for CountRows)")?
+                                    .text
+                                    .clone(),
+                                expression: None,
+                                alias: element
+                                    .atom_at(
+                                        2,
+                                        "the output column name, as in agg=Sum:amount:total",
+                                    )?
+                                    .text
+                                    .clone(),
+                            });
+                        }
+                    }
+                }
+                aggregates
+            },
         },
         "keepRows" => TransformStep::KeepRows {
             range: row_range_of(find(options, "range").ok_or_else(|| {

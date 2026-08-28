@@ -394,7 +394,7 @@ export function stepDetail(step: TransformStepDto): string {
     case "groupBy": {
       const keys = (step.groupBy ?? []).join(", ") || "(whole table)";
       const aggs = (step.aggregates ?? [])
-        .map((a) => `${a.function}(${a.column ?? ""}) as ${a.alias}`)
+        .map((a) => `${a.function}(${a.expression ?? a.column ?? ""}) as ${a.alias}`)
         .join(", ");
       return aggs ? `${keys} · ${aggs}` : keys;
     }

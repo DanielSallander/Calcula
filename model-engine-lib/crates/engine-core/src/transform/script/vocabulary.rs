@@ -149,6 +149,10 @@ const SORT: &[OptionSpec] = &[opt!(
 const GROUP_BY: &[OptionSpec] = &[
     opt!(optional "groupBy" -> "groupBy", "the grouping columns, in output order"),
     opt!(repeatable "agg" -> "aggregates", "one aggregate, written Function:column:alias"),
+    opt!(
+        repeatable "aggFormula" -> "aggregates",
+        "one computed aggregate, written Function:\"formula\":alias - the SUMIF shape"
+    ),
 ];
 const ROW_RANGE: &[OptionSpec] =
     &[opt!("range" -> "range", "first:N, last:N or range:OFFSET:COUNT")];

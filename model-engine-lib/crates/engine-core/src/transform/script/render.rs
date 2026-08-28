@@ -214,17 +214,30 @@ fn statement_parts(step: &TransformStep) -> (Vec<String>, Option<String>) {
         } => {
             let mut options = vec_opt("groupBy", group_by);
             for aggregate in aggregates {
-                // A `CountRows` aggregate carries no input column, and the
-                // empty slot is written as nothing between the two colons —
-                // `agg=CountRows::orders` — matching what the command line
-                // already accepts. An empty atom and an empty string are the
-                // same value, so this still round-trips.
-                options.push(format!(
-                    "agg={}:{}:{}",
-                    render_aggregate(&aggregate.function),
-                    name_or_empty(&aggregate.column),
-                    name(&aggregate.alias)
-                ));
+                match &aggregate.expression {
+                    // The SUMIF shape: the operand slot carries a QUOTED
+                    // formula under its own key. Same three-atom shape as
+                    // `agg=` (function : operand : alias), so the two read as
+                    // one family; quoting is what lets the formula hold
+                    // commas, colons and its own string literals.
+                    Some(expression) => options.push(format!(
+                        "aggFormula={}:{}:{}",
+                        render_aggregate(&aggregate.function),
+                        quote(expression),
+                        name(&aggregate.alias)
+                    )),
+                    // A `CountRows` aggregate carries no input column, and the
+                    // empty slot is written as nothing between the two colons —
+                    // `agg=CountRows::orders` — matching what the command line
+                    // already accepts. An empty atom and an empty string are
+                    // the same value, so this still round-trips.
+                    None => options.push(format!(
+                        "agg={}:{}:{}",
+                        render_aggregate(&aggregate.function),
+                        name_or_empty(&aggregate.column),
+                        name(&aggregate.alias)
+                    )),
+                }
             }
             (options, None)
         }

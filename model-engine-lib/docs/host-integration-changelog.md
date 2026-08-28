@@ -63,6 +63,20 @@ All new model fields are additive (serde `default` + `skip_serializing_if`), so 
 
 ---
 
+## Formula aggregates — the SUMIF shape (format version 26)
+
+A `groupBy` step's aggregate can now take a **row-level formula** as its operand instead of a plain column: `Sum` over `IF([status] = "open", [amount], BLANK())` is SUMIF; the same shape under `Average` and `Count` is AVERAGEIF and COUNTIF. Previously this cost a scratch `addColumn` plus a cleanup step.
+
+- **Model JSON (additive):** [`GroupAggregate`] gained `expression: Option<String>` (serde `expression`, omitted when absent). Exactly one of `column` and `expression` is given — both is refused, as is a formula on `CountRows` (which counts rows; the refusal points at `Count`). A pipeline written without the field reads unchanged.
+- **The operand formula is a transform expression like any other.** It goes through the same fail-closed `parse_row_expression` as `filterRows`/`addColumn` — allowlist, bracket resolution, column existence — so it can never itself aggregate, and a nested `SUM` is refused by name. Its **inferred type** stands in for the column type in both the output-type rule and the fractional-cast decision; there is no name to look a type up by, and guessing there is a silently integer-truncated median.
+- **Inference change (also benefits `addColumn`/`transformColumn`):** a `BLANK()` branch of `IF`/`SWITCH`/`COALESCE`/`GREATEST`/`LEAST`/`IFERROR` now **adopts the other branch's type**. SQL NULL is typeless, and `IF(cond, [amount], BLANK())` is the canonical "this row does not count" idiom — before this it demanded a declared type, which an aggregate operand has no slot for. An all-blank conditional stays untypeable.
+- **Script spelling:** `aggFormula=Function:"formula":alias` — the same three-atom family as `agg=`, with the operand quoted so it can hold commas, colons and its own string literals. Column and formula aggregates interleave freely and keep their order.
+- **`TransformStep::expression_sources()`** now includes formula-aggregate expressions, so lineage and "which steps mention column X" sweeps see them.
+- **`MODEL_FORMAT_VERSION` 25 → 26**, stamped only when a pipeline actually carries a formula aggregate. The field is additive, so a pre-v26 engine loads the JSON without error — and then refuses the model with "unknown column ''", a phantom defect; the gate names the real reason instead.
+- **Calcula action.** Widen the aggregate DTO with `expression?: string`; offer a per-aggregate column⇄formula toggle in the groupBy editor; teach the SUMIF idiom with `BLANK()` (never `ELSE 0`, which corrupts `Average`). Stamp `format_version >= 26` when a pipeline uses the shape.
+
+---
+
 ## Formulas that reshape — `transformColumn`, bracketed columns, and two closed validation holes (format version 25)
 
 A transformation step's expression could only ever ADD a column. It can now rewrite one, and the spelling an author reaches for first finally works.

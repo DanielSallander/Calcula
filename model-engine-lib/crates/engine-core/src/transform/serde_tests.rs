@@ -7,6 +7,43 @@ use crate::transform::test_support::one_of_every_step;
 use crate::transform::TransformStep;
 
 #[test]
+fn a_group_aggregate_without_a_formula_field_still_reads() {
+    // ADDITIVE serde: `expression` arrived after v24 models were in the world,
+    // so a pipeline written without it must deserialize unchanged. This is the
+    // contract that lets the v26 stamp be conditional.
+    let json = r#"{"type":"groupBy","groupBy":["region"],
+        "aggregates":[{"column":"amount","function":"Sum","alias":"total"}]}"#;
+    let step: TransformStep = serde_json::from_str(json).unwrap();
+    match &step {
+        TransformStep::GroupBy { aggregates, .. } => {
+            assert_eq!(aggregates[0].expression, None);
+            assert_eq!(aggregates[0].column, "amount");
+        }
+        other => panic!("wrong step: {other:?}"),
+    }
+}
+
+#[test]
+fn a_formula_aggregate_round_trips_and_omits_the_empty_column() {
+    let step = TransformStep::GroupBy {
+        group_by: vec!["region".into()],
+        aggregates: vec![crate::transform::parts::GroupAggregate::formula(
+            crate::compute::aggregate::AggregateOp::Sum,
+            "open_total",
+            "IF([status] = \"open\", [amount], BLANK())",
+        )],
+    };
+    let json = serde_json::to_string(&step).unwrap();
+    assert!(json.contains("\"expression\""), "got {json}");
+    assert!(
+        !json.contains("\"column\""),
+        "an empty operand column must not be written: {json}"
+    );
+    let restored: TransformStep = serde_json::from_str(&json).unwrap();
+    assert_eq!(step, restored);
+}
+
+#[test]
 fn every_step_round_trips() {
     for step in one_of_every_step() {
         let json = serde_json::to_string(&step).unwrap();

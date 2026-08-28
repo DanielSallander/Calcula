@@ -3,8 +3,10 @@
 use crate::compute::aggregate::AggregateOp;
 use crate::error::EngineResult;
 use crate::model::Column;
+use crate::transform::infer::infer_parsed_type;
 use crate::transform::parts::{GroupAggregate, RowRange, SortKey};
 use crate::transform::schema::{require_column, require_unique, transform_error};
+use crate::transform::validate::parse_row_expression;
 use crate::types::DataType;
 
 /// Returns `true` for the types an arithmetic aggregate accepts.
@@ -146,26 +148,75 @@ pub(crate) fn group_by(
             ));
         }
 
-        let input_type = if aggregate.function == AggregateOp::CountRows {
-            None
-        } else {
-            Some(
+        let input_type = match (&aggregate.expression, aggregate.function) {
+            // COUNTROWS counts rows; an operand — column or formula — is a
+            // contradiction, not a detail to ignore.
+            (Some(_), AggregateOp::CountRows) => {
+                return Err(transform_error(
+                    table,
+                    step_index,
+                    format!(
+                        "aggregate '{}': COUNTROWS counts rows and takes no formula — use \
+                         COUNT over a formula that is BLANK() for the rows to skip",
+                        aggregate.alias
+                    ),
+                ));
+            }
+            (Some(expression), _) => {
+                if !aggregate.column.is_empty() {
+                    return Err(transform_error(
+                        table,
+                        step_index,
+                        format!(
+                            "aggregate '{}' names both a column and a formula — give one or \
+                             the other",
+                            aggregate.alias
+                        ),
+                    ));
+                }
+                // The SUMIF shape. The formula goes through the SAME row-level
+                // parse as filterRows/addColumn — allowlist, bracket
+                // resolution, column existence — so it can never itself
+                // aggregate. Its INFERRED type stands in for the column type:
+                // there is no name to look a type up by, and the cast decision
+                // downstream must not guess.
+                let parsed = parse_row_expression(table, step_index, input, expression)?;
+                Some(infer_parsed_type(&parsed, input).ok_or_else(|| {
+                    transform_error(
+                        table,
+                        step_index,
+                        format!(
+                            "cannot infer the type of aggregate '{}' from its formula — make \
+                             its branches the same type (a BLANK() branch adopts the other \
+                             branch's), or aggregate a typed column added by an earlier step",
+                            aggregate.alias
+                        ),
+                    )
+                })?)
+            }
+            (None, AggregateOp::CountRows) => None,
+            (None, _) => Some(
                 require_column(table, step_index, input, &aggregate.column)?
                     .data_type()
                     .clone(),
-            )
+            ),
         };
         let output_type = aggregate_output_type(aggregate.function, input_type.as_ref())
             .ok_or_else(|| {
                 transform_error(
                     table,
                     step_index,
-                    match &input_type {
-                        Some(t) => format!(
+                    match (&input_type, &aggregate.expression) {
+                        (Some(t), Some(_)) => format!(
+                            "{} is not supported over aggregate '{}''s formula, whose type \
+                             is {:?}",
+                            aggregate.function, aggregate.alias, t
+                        ),
+                        (Some(t), None) => format!(
                             "{} is not supported over column '{}' of type {:?}",
                             aggregate.function, aggregate.column, t
                         ),
-                        None => format!("{} is not supported here", aggregate.function),
+                        (None, _) => format!("{} is not supported here", aggregate.function),
                     },
                 )
             })?;
@@ -417,6 +468,118 @@ mod tests {
             out[1].nullable(),
             "an aggregate over an empty group is null"
         );
+    }
+
+    #[test]
+    fn a_formula_aggregate_types_from_its_inferred_operand() {
+        // The SUMIF shape. The operand has no column name, so the cast and
+        // output-type decisions run off the formula's INFERRED type — here
+        // `IF(..., [amount], BLANK())` infers Float64, so Sum declares Float64.
+        let out = derive(
+            &source_schema(),
+            &TransformStep::GroupBy {
+                group_by: vec!["region".into()],
+                aggregates: vec![GroupAggregate::formula(
+                    AggregateOp::Sum,
+                    "open_total",
+                    "IF([status] = \"open\", [amount], BLANK())",
+                )],
+            },
+        )
+        .unwrap();
+        assert_eq!(names(&out), vec!["region", "open_total"]);
+        assert_eq!(out[1].data_type(), &DataType::Float64);
+        assert!(out[1].nullable());
+    }
+
+    #[test]
+    fn a_formula_aggregate_with_both_column_and_formula_is_refused() {
+        let mut aggregate =
+            GroupAggregate::formula(AggregateOp::Sum, "t", "IF([amount] > 0, [amount], BLANK())");
+        aggregate.column = "amount".into();
+        let err = derive(
+            &source_schema(),
+            &TransformStep::GroupBy {
+                group_by: vec!["region".into()],
+                aggregates: vec![aggregate],
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("one or the other"), "got {err}");
+    }
+
+    #[test]
+    fn countrows_with_a_formula_is_refused_and_points_at_count() {
+        let err = derive(
+            &source_schema(),
+            &TransformStep::GroupBy {
+                group_by: vec!["region".into()],
+                aggregates: vec![GroupAggregate::formula(
+                    AggregateOp::CountRows,
+                    "n",
+                    "IF([amount] > 0, 1, BLANK())",
+                )],
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("COUNT over a formula"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn a_formula_aggregate_cannot_itself_aggregate() {
+        // The fail-closed allowlist runs on the operand formula too, so
+        // nesting an aggregate inside an aggregate is refused by name rather
+        // than reaching SQL generation.
+        let err = derive(
+            &source_schema(),
+            &TransformStep::GroupBy {
+                group_by: vec!["region".into()],
+                aggregates: vec![GroupAggregate::formula(
+                    AggregateOp::Sum,
+                    "t",
+                    "SUM(amount) * 2",
+                )],
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("aggregation"), "got {err}");
+    }
+
+    #[test]
+    fn a_formula_naming_an_unknown_column_is_refused_by_name() {
+        let err = derive(
+            &source_schema(),
+            &TransformStep::GroupBy {
+                group_by: vec!["region".into()],
+                aggregates: vec![GroupAggregate::formula(
+                    AggregateOp::Sum,
+                    "t",
+                    "IF([nope] > 0, [amount], BLANK())",
+                )],
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nope"), "got {err}");
+    }
+
+    #[test]
+    fn an_untypeable_formula_asks_for_typed_branches() {
+        let err = derive(
+            &source_schema(),
+            &TransformStep::GroupBy {
+                group_by: vec!["region".into()],
+                aggregates: vec![GroupAggregate::formula(
+                    AggregateOp::Sum,
+                    "t",
+                    "IF([amount] > 0, \"x\", 1)",
+                )],
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("branches"), "got {err}");
     }
 
     #[test]

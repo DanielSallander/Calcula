@@ -90,6 +90,7 @@ export const TRANSFORM_STEP_OPTIONS: CliOptionSpec[] = [
   { key: "by", type: "list", help: "sort: keys, Col or -Col or Col:desc" },
   { key: "groupBy", type: "list", help: "groupBy: the grouping columns, in output order" },
   { key: "agg", type: "string", help: "groupBy: Function:column:alias (CountRows::Rows); repeatable" },
+  { key: "aggFormula", type: "string", help: 'groupBy: Function:"formula":alias - the SUMIF shape; repeatable' },
   { key: "range", type: "string", help: "keepRows/removeRows: first:N | last:N | range:OFFSET:COUNT" },
   { key: "nameColumn", type: "string", help: "unpivot/pivot: the attribute-name column" },
   { key: "valueColumn", type: "string", help: "unpivot/pivot: the value column" },

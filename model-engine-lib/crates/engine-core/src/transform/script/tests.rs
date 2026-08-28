@@ -381,6 +381,9 @@ fn hostile_names_survive_in_every_string_slot() {
                 aggregates: vec![
                     GroupAggregate::new(h.clone(), AggregateOp::Sum, h.clone()),
                     GroupAggregate::count_rows(h.clone()),
+                    // The formula slot is quoted on render, so a hostile
+                    // string must survive there byte-for-byte as well.
+                    GroupAggregate::formula(AggregateOp::Max, h.clone(), h.clone()),
                 ],
             },
             TransformStep::Unpivot {
@@ -675,6 +678,39 @@ fn an_indented_comment_is_part_of_the_expression_above_it() {
             condition: "a > 0\n // still the condition".into()
         }]
     );
+}
+
+#[test]
+fn a_formula_aggregate_reads_renders_and_keeps_its_place() {
+    // The SUMIF shape in the script: `aggFormula=Function:"formula":alias`,
+    // the same three-atom family as `agg=`, with the operand quoted so it can
+    // hold commas, colons and its own string literals. The column aggregate
+    // sits BETWEEN two formula ones because the two kinds render under two
+    // different keys — a parser collecting per key would reorder them.
+    let text = "groupBy groupBy=region \
+                aggFormula=Sum:\"IF([status] = \"\"open\"\", [amount], BLANK())\":open_total \
+                agg=Sum:amount:total \
+                aggFormula=Count:\"IF([amount] > 80, 1, BLANK())\":big";
+    let steps = parse_script(text).unwrap();
+    let expected = vec![TransformStep::GroupBy {
+        group_by: vec!["region".into()],
+        aggregates: vec![
+            GroupAggregate::formula(
+                AggregateOp::Sum,
+                "open_total",
+                "IF([status] = \"open\", [amount], BLANK())",
+            ),
+            GroupAggregate::new("amount", AggregateOp::Sum, "total"),
+            GroupAggregate::formula(AggregateOp::Count, "big", "IF([amount] > 80, 1, BLANK())"),
+        ],
+    }];
+    assert_eq!(steps, expected);
+    // And the round trip holds over the mixed order.
+    assert_eq!(parse_script(&render_script(&expected)).unwrap(), expected);
+
+    // Two atoms is a missing alias, named as such.
+    let error = parse_script("groupBy aggFormula=Sum:\"1\"").unwrap_err();
+    assert!(error.message.contains("output column name"), "{error}");
 }
 
 #[test]

@@ -642,6 +642,105 @@ async fn group_by_with_no_keys_aggregates_the_whole_table() {
 }
 
 #[tokio::test]
+async fn formula_aggregates_compute_the_sumif_family() {
+    // The SUMIF / AVERAGEIF / COUNTIF idioms, in one step. The batch's
+    // statuses are ["open","cancelled","open","  open  ","closed"] with
+    // amounts [100, 50, 200, null, 75] — so status = "open" matches rows 0
+    // and 2 exactly (the padded "  open  " is a different value).
+    //
+    // The column aggregate sits BETWEEN formula aggregates on purpose: the
+    // output column order is the aggregate-vector order, whichever kind each
+    // entry is, and run_checked asserts the batch against derivation.
+    let batch = run_checked(&[TransformStep::GroupBy {
+        group_by: vec![],
+        aggregates: vec![
+            GroupAggregate::formula(
+                AggregateOp::Sum,
+                "open_total",
+                "IF([status] = \"open\", [amount], BLANK())",
+            ),
+            GroupAggregate::new("amount", AggregateOp::Sum, "total"),
+            GroupAggregate::formula(
+                AggregateOp::Average,
+                "open_avg",
+                "IF([status] = \"open\", [amount], BLANK())",
+            ),
+            GroupAggregate::count_rows("rows"),
+            GroupAggregate::formula(
+                AggregateOp::Count,
+                "big_orders",
+                "IF([amount] > 80, 1, BLANK())",
+            ),
+        ],
+    }])
+    .await;
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(floats(&batch, "open_total"), vec![Some(300.0)]);
+    assert_eq!(floats(&batch, "total"), vec![Some(425.0)]);
+    assert_eq!(floats(&batch, "open_avg"), vec![Some(150.0)]);
+    assert_eq!(ints(&batch, "rows"), vec![Some(5)]);
+    // amounts over 80: 100 and 200. The null amount makes the condition null,
+    // which lands in the blank branch — not counted, not an error.
+    assert_eq!(ints(&batch, "big_orders"), vec![Some(2)]);
+}
+
+#[tokio::test]
+async fn a_formula_aggregate_median_over_integers_computes_in_double() {
+    // ids are 1..5; id > 1 keeps {2,3,4,5}, an even count whose true median is
+    // 3.5. The DOUBLE cast on the FORMULA operand is what makes this 3.5:
+    // DataFusion's median over an integer operand returns an integer, and the
+    // terminal conform would then cast 3 to 3.0 — plausible and wrong. The
+    // cast decision runs off the formula's INFERRED type, because there is no
+    // column name to look one up by.
+    let batch = run_checked(&[TransformStep::GroupBy {
+        group_by: vec![],
+        aggregates: vec![GroupAggregate::formula(
+            AggregateOp::Median,
+            "mid",
+            "IF([id] > 1, [id], BLANK())",
+        )],
+    }])
+    .await;
+    assert_eq!(floats(&batch, "mid"), vec![Some(3.5)]);
+}
+
+#[tokio::test]
+async fn formula_aggregates_group_per_key_like_column_ones() {
+    // Per-group evaluation, not whole-table: the formula is computed on each
+    // row and aggregated within its row's group.
+    let batch = run_checked(&[
+        // Pin group order so the row assertions are deterministic.
+        TransformStep::GroupBy {
+            group_by: vec!["status".into()],
+            aggregates: vec![GroupAggregate::formula(
+                AggregateOp::Sum,
+                "big_total",
+                "IF([amount] >= 100, [amount], BLANK())",
+            )],
+        },
+        TransformStep::Sort {
+            by: vec![SortKey::ascending("status")],
+        },
+    ])
+    .await;
+    // Groups sorted: "  open  " (null amount), "cancelled" (50), "closed"
+    // (75), "open" (100 + 200). Only "open" has amounts >= 100.
+    assert_eq!(
+        strings(&batch, "status"),
+        vec![
+            Some("  open  ".into()),
+            Some("cancelled".into()),
+            Some("closed".into()),
+            Some("open".into()),
+        ]
+    );
+    assert_eq!(
+        floats(&batch, "big_total"),
+        vec![None, None, None, Some(300.0)]
+    );
+}
+
+#[tokio::test]
 async fn unpivot_produces_one_row_per_value() {
     let batch = run_checked(&[
         TransformStep::SelectColumns {

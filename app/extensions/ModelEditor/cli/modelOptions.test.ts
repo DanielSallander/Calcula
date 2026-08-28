@@ -364,6 +364,7 @@ const TRANSFORM_MATRIX: string[] = [
   "transform table Web add removeDuplicates",
   "transform table Web add sort by=Qty,-Id",
   "transform table Web add groupBy groupBy=Status agg=Sum:Qty:Total",
+  'transform table Web add groupBy groupBy=Status aggFormula=Sum:"IF([Qty] > 1, [Qty], BLANK())":Big',
   "transform table Web add keepRows range=first:10",
   "transform table Web add removeRows range=range:0:5",
   "transform table Web add unpivot columns=Jan,Feb nameColumn=Month valueColumn=Amount",

@@ -1340,6 +1340,16 @@ const TRANSFORMATIONS_MIN_FORMAT_VERSION: u64 = 24;
 /// error about an unknown variant.
 const TRANSFORM_COLUMN_MIN_FORMAT_VERSION: u64 = 25;
 
+/// Minimum schema `format_version` for formula aggregates (the SUMIF shape):
+/// a `GroupAggregate` carrying `expression` instead of a column.
+///
+/// The field is ADDITIVE serde, so a pre-v26 engine loads the pipeline without
+/// a deserialize error — and then refuses the model with "unknown column ''",
+/// because the dropped formula leaves an aggregate with an empty operand. Loud,
+/// but pointing at a phantom defect; the gate turns it into "update the
+/// application". Stamped only when a pipeline actually uses the shape.
+const FORMULA_AGGREGATE_MIN_FORMAT_VERSION: u64 = 26;
+
 /// Minimum schema `format_version` for dynamic row-level security: a
 /// `FilterPredicate.dynamic` (USERNAME()/CUSTOMDATA()) is additive serde, so a
 /// pre-v11 engine silently treats it as a STATIC comparison against the
@@ -1486,7 +1496,21 @@ pub fn stamp_feature_format_version(
         })
     });
 
-    let required = if uses_v25 {
+    // v26: a formula aggregate inside a groupBy step.
+    let uses_v26 = model.tables().iter().any(|t| {
+        t.source_binding().is_some_and(|b| {
+            b.transformations.iter().any(|step| match step {
+                bi_engine::TransformStep::GroupBy { aggregates, .. } => {
+                    aggregates.iter().any(|a| a.expression.is_some())
+                }
+                _ => false,
+            })
+        })
+    });
+
+    let required = if uses_v26 {
+        FORMULA_AGGREGATE_MIN_FORMAT_VERSION
+    } else if uses_v25 {
         TRANSFORM_COLUMN_MIN_FORMAT_VERSION
     } else if uses_v24 {
         TRANSFORMATIONS_MIN_FORMAT_VERSION
@@ -1611,6 +1635,55 @@ mod format_gate_tests {
         // The stamp must be conditional: a model using none of the v24 features
         // has to stay openable by an older build.
         assert_eq!(stamped(&model_with_binding(vec![], false)), 0);
+    }
+
+    #[test]
+    fn a_transform_column_step_stamps_format_version_25() {
+        // An internally tagged enum cannot ignore a tag it does not know, so a
+        // pre-v25 engine fails the whole load as a serde error; the gate turns
+        // that into "update the application".
+        let model = model_with_binding(
+            vec![bi_engine::TransformStep::TransformColumn {
+                column: "status".into(),
+                expression: "UPPER([status])".into(),
+                data_type: None,
+            }],
+            false,
+        );
+        assert_eq!(stamped(&model), 25);
+    }
+
+    #[test]
+    fn a_formula_aggregate_stamps_format_version_26() {
+        // ADDITIVE serde: a pre-v26 engine reads the pipeline, silently drops
+        // the formula, and then refuses the model with "unknown column ''" — a
+        // phantom defect. The gate names the real reason.
+        let model = model_with_binding(
+            vec![bi_engine::TransformStep::GroupBy {
+                group_by: vec!["status".into()],
+                aggregates: vec![bi_engine::GroupAggregate::formula(
+                    bi_engine::AggregateOp::Sum,
+                    "big_ids",
+                    "IF([id] > 100, [id], BLANK())",
+                )],
+            }],
+            false,
+        );
+        assert_eq!(stamped(&model), 26);
+    }
+
+    #[test]
+    fn a_column_only_group_by_still_stamps_only_24() {
+        // The v26 stamp is per-FEATURE, not per-step-kind: an ordinary groupBy
+        // must keep the lowest version that can express it.
+        let model = model_with_binding(
+            vec![bi_engine::TransformStep::GroupBy {
+                group_by: vec!["status".into()],
+                aggregates: vec![bi_engine::GroupAggregate::count_rows("rows")],
+            }],
+            false,
+        );
+        assert_eq!(stamped(&model), 24);
     }
 
     #[test]

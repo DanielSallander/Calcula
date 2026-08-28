@@ -99,15 +99,29 @@ fn infer(expression: &Expression, input: &[Column]) -> Option<DataType> {
         | Expression::IsBlank(_)
         | Expression::InList { .. } => Some(DataType::Boolean),
 
+        // A `BLANK()` branch ADOPTS the other branch's type. SQL NULL is
+        // typeless, and `IF(cond, [amount], BLANK())` is the canonical "this
+        // row does not count" idiom — the SUMIF/AVERAGEIF shape. Demanding a
+        // declared type for it would kill the idiom exactly where it is most
+        // needed: an aggregate operand, which has no declared-type slot.
         Expression::If {
             then_expr,
             else_expr,
             ..
-        } => widen(infer(then_expr, input), infer(else_expr, input)),
+        } => match (then_expr.as_ref(), else_expr.as_ref()) {
+            (Expression::Blank, _) => infer(else_expr, input),
+            (_, Expression::Blank) => infer(then_expr, input),
+            _ => widen(infer(then_expr, input), infer(else_expr, input)),
+        },
+        // `BLANK()` branches are skipped for the same reason as in `If` above.
+        // A switch whose EVERY branch is blank stays untypeable, correctly.
         Expression::Switch { cases, default, .. } => {
             let mut inferred: Option<DataType> = None;
             let mut first = true;
             for (_, result) in cases {
+                if matches!(result, Expression::Blank) {
+                    continue;
+                }
                 let branch = infer(result, input)?;
                 inferred = if first {
                     first = false;
@@ -116,23 +130,41 @@ fn infer(expression: &Expression, input: &[Column]) -> Option<DataType> {
                     widen(inferred, Some(branch))
                 };
             }
-            match default {
-                Some(default) => widen(inferred, infer(default, input)),
-                None => inferred,
+            match default.as_deref() {
+                Some(Expression::Blank) | None => inferred,
+                Some(default) => {
+                    let default_type = infer(default, input)?;
+                    if first {
+                        Some(default_type)
+                    } else {
+                        widen(inferred, Some(default_type))
+                    }
+                }
             }
         }
         Expression::Coalesce(args) | Expression::Greatest(args) | Expression::Least(args) => {
-            let mut iter = args.iter();
-            let mut inferred = Some(infer(iter.next()?, input)?);
-            for arg in iter {
-                inferred = widen(inferred, infer(arg, input));
+            let mut inferred: Option<DataType> = None;
+            let mut first = true;
+            for arg in args {
+                if matches!(arg, Expression::Blank) {
+                    continue;
+                }
+                let arg_type = infer(arg, input)?;
+                inferred = if first {
+                    first = false;
+                    Some(arg_type)
+                } else {
+                    widen(inferred, Some(arg_type))
+                };
             }
             inferred
         }
         Expression::NullIf { expr, .. } => infer(expr, input),
-        Expression::IfError { expr, alternate } => {
-            widen(infer(expr, input), infer(alternate, input))
-        }
+        Expression::IfError { expr, alternate } => match (expr.as_ref(), alternate.as_ref()) {
+            (Expression::Blank, _) => infer(alternate, input),
+            (_, Expression::Blank) => infer(expr, input),
+            _ => widen(infer(expr, input), infer(alternate, input)),
+        },
 
         Expression::ScalarFunc { function, args } => infer_scalar(*function, args, input),
         Expression::TextFunc { function, .. } => infer_text(*function),
@@ -312,6 +344,36 @@ mod tests {
     #[test]
     fn a_bare_blank_has_no_inferable_type() {
         assert_eq!(infer_source("BLANK()"), None);
+    }
+
+    #[test]
+    fn a_blank_branch_adopts_the_other_branchs_type() {
+        // The SUMIF idiom: `IF(cond, [amount], BLANK())` marks the rows that
+        // do not count. SQL NULL is typeless, so the blank branch adopts the
+        // typed one — without this the idiom would demand a declared type
+        // exactly where none can be given: an aggregate operand.
+        assert_eq!(
+            infer_source("IF(status = \"open\", amount, BLANK())"),
+            Some(DataType::Float64)
+        );
+        assert_eq!(
+            infer_source("IF(status = \"open\", BLANK(), amount)"),
+            Some(DataType::Float64)
+        );
+        assert_eq!(
+            infer_source("IFERROR(amount, BLANK())"),
+            Some(DataType::Float64)
+        );
+        assert_eq!(
+            infer_source("SWITCH(status, \"open\", amount, BLANK())"),
+            Some(DataType::Float64)
+        );
+        assert_eq!(
+            infer_source("COALESCE(region, BLANK())"),
+            Some(DataType::String)
+        );
+        // Every branch blank stays untypeable, correctly.
+        assert_eq!(infer_source("IF(amount > 0, BLANK(), BLANK())"), None);
     }
 
     #[test]
