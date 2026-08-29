@@ -2527,16 +2527,29 @@ pub struct FloatingRangeInfo {
     pub host_sheet_index: usize,
 }
 
-/// Partial update for `update_floating_range`: geometry and window size in one
-/// command (one `generate_handler!` slot — the dispatch frame's stack budget is
-/// finite). Absent fields are left unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Partial update for `update_floating_range`: geometry, window size and cell
+/// sizes in one command (one `generate_handler!` slot — the dispatch frame's
+/// stack budget is finite). Absent fields are left unchanged.
+///
+/// `Default` is derived for the TESTS' benefit and costs nothing in production:
+/// this struct is never CONSTRUCTED by the app, only deserialized from IPC, so
+/// an exhaustive literal would pin nothing a reviewer needs pinned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FloatingRangePatch {
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub row_count: Option<u32>,
     pub col_count: Option<u32>,
+    /// WHOLE-MAP replacement of the per-column widths / per-row heights, in
+    /// logical pixels. Present means "these are now the overrides", absent
+    /// means "leave them alone" — there is no per-index delta, because the
+    /// edge-handle drag that produces them scales every column at once and a
+    /// half-applied scale is a skewed object.
+    #[serde(default)]
+    pub col_widths: Option<std::collections::HashMap<u32, f64>>,
+    #[serde(default)]
+    pub row_heights: Option<std::collections::HashMap<u32, f64>>,
     /// Chrome visibility (see `FloatingRange`). `#[serde(default)]` so a caller
     /// that only moves or resizes may keep sending the four-field patch it
     /// always sent — an ABSENT flag means "leave it alone", which is not the

@@ -122,12 +122,9 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
         info.range.id,
         FloatingRangePatch {
             x: Some(240.0),
-            y: None,
             row_count: Some(5),
             col_count: Some(3),
-            show_title: None,
-            show_column_headers: None,
-            show_row_headers: None,
+            ..Default::default()
         },
     )
     .expect("update");
@@ -147,15 +144,7 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
         &wb.state,
         &wb.file,
         info.range.id,
-        FloatingRangePatch {
-            x: Some(240.0),
-            y: None,
-            row_count: None,
-            col_count: None,
-            show_title: None,
-            show_column_headers: None,
-            show_row_headers: None,
-        },
+        FloatingRangePatch { x: Some(240.0), ..Default::default() },
     )
     .expect("no-op update");
     assert_eq!(
@@ -169,27 +158,18 @@ fn update_patches_geometry_and_window_and_records_an_undo_entry() {
 fn update_refuses_out_of_bounds_windows() {
     let wb = Workbook::new(1);
     let info = create(&wb, None);
-    let no_chrome_change = FloatingRangePatch {
-        x: None,
-        y: None,
-        row_count: None,
-        col_count: None,
-        show_title: None,
-        show_column_headers: None,
-        show_row_headers: None,
-    };
     for patch in [
-        FloatingRangePatch { row_count: Some(0), ..no_chrome_change.clone() },
+        FloatingRangePatch { row_count: Some(0), ..Default::default() },
         FloatingRangePatch {
             row_count: Some(crate::floating_range::MAX_FLOATING_RANGE_ROWS + 1),
-            ..no_chrome_change.clone()
+            ..Default::default()
         },
         FloatingRangePatch {
             col_count: Some(crate::floating_range::MAX_FLOATING_RANGE_COLS + 1),
-            ..no_chrome_change.clone()
+            ..Default::default()
         },
-        FloatingRangePatch { x: Some(f64::NAN), ..no_chrome_change.clone() },
-        FloatingRangePatch { x: Some(-1.0), ..no_chrome_change.clone() },
+        FloatingRangePatch { x: Some(f64::NAN), ..Default::default() },
+        FloatingRangePatch { x: Some(-1.0), ..Default::default() },
     ] {
         crate::floating_range::update_floating_range_inner(&wb.state, &wb.file, info.range.id, patch)
             .expect_err("bounds must refuse");
@@ -347,11 +327,15 @@ fn floating_ranges_survive_a_collect_restore_round_trip() {
             y: Some(80.0),
             row_count: Some(4),
             col_count: Some(2),
-            // Chrome is part of the row, so the round trip must carry it: this
-            // asserts a NON-default combination survives save -> restore.
+            // Chrome and cell sizes are part of the row, so the round trip must
+            // carry them: NON-default combinations, because all-defaults would
+            // pass even with the fields dropped on the way through.
             show_title: Some(false),
             show_column_headers: Some(true),
             show_row_headers: Some(false),
+            col_widths: Some(std::collections::HashMap::from([(0u32, 96.0), (1u32, 32.0)])),
+            row_heights: Some(std::collections::HashMap::from([(2u32, 44.0)])),
+            ..Default::default()
         },
     )
     .expect("shape it");
@@ -390,6 +374,87 @@ fn floating_ranges_survive_a_collect_restore_round_trip() {
         (false, true, false),
         "chrome visibility must round-trip field by field"
     );
+    // The SIZE MAPS are the other half of "the frame is derived": lose them and
+    // the object reopens at default widths, silently reflowing every column.
+    assert_eq!(r.range.col_widths.get(&0), Some(&96.0));
+    assert_eq!(r.range.col_widths.get(&1), Some(&32.0));
+    assert_eq!(r.range.row_heights.get(&2), Some(&44.0));
+    assert_eq!(r.range.col_widths.len(), 2, "no phantom entries were invented");
+}
+
+/// The edge-handle drag's write path. It sends WHOLE maps, so the interesting
+/// properties are (a) a present map REPLACES rather than merges, (b) an absent
+/// map leaves the stored one alone, and (c) out-of-bounds sizes are refused as
+/// a whole rather than partly applied.
+#[test]
+fn update_replaces_size_maps_wholesale_and_refuses_out_of_bounds_sizes() {
+    use std::collections::HashMap;
+    let wb = Workbook::new(1);
+    let info = create(&wb, None);
+    let id = info.range.id;
+
+    let set_widths = |map: HashMap<u32, f64>| {
+        crate::floating_range::update_floating_range_inner(
+            &wb.state,
+            &wb.file,
+            id,
+            FloatingRangePatch { col_widths: Some(map), ..Default::default() },
+        )
+    };
+
+    let a = set_widths(HashMap::from([(0u32, 80.0), (1u32, 90.0)])).expect("first map");
+    assert_eq!(a.range.col_widths.len(), 2);
+
+    // REPLACE, not merge: column 1's override must be gone.
+    let b = set_widths(HashMap::from([(0u32, 50.0)])).expect("second map");
+    assert_eq!(b.range.col_widths.get(&0), Some(&50.0));
+    assert_eq!(b.range.col_widths.get(&1), None, "a whole-map write replaces");
+
+    // An ABSENT map leaves the stored one alone (it is not "clear them").
+    let c = crate::floating_range::update_floating_range_inner(
+        &wb.state,
+        &wb.file,
+        id,
+        FloatingRangePatch { x: Some(11.0), ..Default::default() },
+    )
+    .expect("geometry-only patch");
+    assert_eq!(c.range.col_widths.get(&0), Some(&50.0));
+
+    for bad in [
+        HashMap::from([(0u32, 0.0)]),
+        HashMap::from([(0u32, -20.0)]),
+        HashMap::from([(0u32, f64::NAN)]),
+        HashMap::from([(0u32, crate::floating_range::MAX_FLOATING_RANGE_COL_W + 1.0)]),
+        HashMap::from([(0u32, crate::floating_range::MIN_FLOATING_RANGE_COL_W - 1.0)]),
+        HashMap::from([(crate::floating_range::MAX_FLOATING_RANGE_COLS, 40.0)]),
+    ] {
+        set_widths(bad).expect_err("out-of-bounds sizes must be refused");
+    }
+    // …and refused means UNCHANGED, not half-written.
+    let after = crate::floating_range::list_floating_ranges_inner(&wb.state);
+    assert_eq!(after[0].range.col_widths.get(&0), Some(&50.0));
+}
+
+/// Over IPC every JSON object key is a STRING, so the map arrives as
+/// `{"0": 80}` and has to land in a `HashMap<u32, f64>`. If serde refused
+/// integer keys from strings the whole edge-drag would deserialize-fail — a
+/// silent no-op at the command boundary that no frontend test could see.
+#[test]
+fn a_patch_with_string_map_keys_deserializes_into_the_integer_keyed_map() {
+    let patch: FloatingRangePatch = serde_json::from_str(
+        r#"{"colWidths":{"0":80.5,"3":120.0},"rowHeights":{"2":31.0}}"#,
+    )
+    .expect("string keys must deserialize into u32-keyed maps");
+    let widths = patch.col_widths.expect("colWidths present");
+    assert_eq!(widths.get(&0), Some(&80.5));
+    assert_eq!(widths.get(&3), Some(&120.0));
+    assert_eq!(patch.row_heights.expect("rowHeights").get(&2), Some(&31.0));
+
+    // And an omitted map must be None ("leave it alone"), never Some(empty)
+    // ("clear every override").
+    let bare: FloatingRangePatch = serde_json::from_str(r#"{"x":5.0}"#).expect("bare patch");
+    assert!(bare.col_widths.is_none());
+    assert!(bare.row_heights.is_none());
 }
 
 /// The JSON shape, not just the in-process struct copy: a file written before

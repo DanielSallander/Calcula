@@ -71,11 +71,23 @@ export interface FloatingRangePatch {
   showTitle?: boolean;
   showColumnHeaders?: boolean;
   showRowHeaders?: boolean;
+  /** WHOLE-MAP replacement of the cell-size overrides. Present replaces,
+   *  absent leaves alone — an empty object CLEARS every override. */
+  colWidths?: Record<number, number>;
+  rowHeights?: Record<number, number>;
 }
 
 /** Backend-enforced window bounds (1..MAX each). */
 export const FLOATING_RANGE_MAX_ROWS = 1000;
 export const FLOATING_RANGE_MAX_COLS = 256;
+
+/** Backend-enforced per-cell size bounds, logical px (floating_range.rs).
+ *  Mirrored here so the drag can clamp BEFORE the round trip and never show a
+ *  size the backend is about to refuse. */
+export const FLOATING_RANGE_MIN_COL_W = 8;
+export const FLOATING_RANGE_MAX_COL_W = 1000;
+export const FLOATING_RANGE_MIN_ROW_H = 8;
+export const FLOATING_RANGE_MAX_ROW_H = 500;
 
 // ============================================================================
 // Commands

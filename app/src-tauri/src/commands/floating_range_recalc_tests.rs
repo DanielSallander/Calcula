@@ -29,13 +29,9 @@ fn grow(wb: &Workbook, id: identity::EntityId, rows: u32, cols: u32) {
         &wb.file,
         id,
         crate::api_types::FloatingRangePatch {
-            x: None,
-            y: None,
             row_count: Some(rows),
             col_count: Some(cols),
-            show_title: None,
-            show_column_headers: None,
-            show_row_headers: None,
+            ..Default::default()
         },
     )
     .expect("grow window");

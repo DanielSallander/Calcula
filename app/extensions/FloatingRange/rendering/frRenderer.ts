@@ -27,6 +27,7 @@ import {
 } from "../lib/floatingRangeStore";
 import {
   FR_TITLE_H,
+  FR_EDGE_HANDLE_R,
   frTitleH,
   frColHdrH,
   frRowHdrW,
@@ -36,6 +37,9 @@ import {
   frameWidth,
   frameHeight,
   localCellOrigin,
+  frEdgeHandles,
+  frEdgeHandleAt,
+  edgeAxis,
 } from "../lib/frDimensions";
 import {
   isFloatingRangeSelected,
@@ -197,6 +201,11 @@ const COLORS = {
   selectionBorder: "#217346",
   objectChrome: "#0e639c",
   ghost: "#0e639c",
+  /** Edge (cell-scale) handles. Deliberately NOT the object-chrome blue: the
+   *  corner handles change the COUNTS and these change the SIZES, and a user
+   *  who cannot tell them apart has to discover the difference by undoing. */
+  edgeHandleFill: "#f2c744",
+  edgeHandleBorder: "#8a6d1a",
 };
 
 const CELL_FONT = "11px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
@@ -416,16 +425,41 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
     ctx.lineWidth = 2;
     ctx.setLineDash([]);
     ctx.strokeRect(canvasX + 1, canvasY + 1, w - 2, h - 2);
-    // 4 corner handles at Core's getFloatingCornerPixels positions.
-    const handle = 6;
-    ctx.fillStyle = COLORS.objectChrome;
-    for (const [hx, hy] of [
-      [canvasX, canvasY],
-      [canvasX + w, canvasY],
-      [canvasX, canvasY + h],
-      [canvasX + w, canvasY + h],
-    ] as const) {
-      ctx.fillRect(hx - handle / 2, hy - handle / 2, handle, handle);
+
+    // The two families of handle are painted ONLY when design mode has armed
+    // them. Core skips every resize handle on a region with
+    // `resizable === false`, so painting them in run mode drew an affordance
+    // that silently did nothing — the selection outline above is what marks a
+    // selected object, and it still shows in both modes.
+    if (region.data?.resizable === true) {
+      // 4 CORNER handles (blue squares) at Core's getFloatingCornerPixels
+      // positions: these change the row/column COUNTS.
+      const handle = 6;
+      ctx.fillStyle = COLORS.objectChrome;
+      for (const [hx, hy] of [
+        [canvasX, canvasY],
+        [canvasX + w, canvasY],
+        [canvasX, canvasY + h],
+        [canvasX + w, canvasY + h],
+      ] as const) {
+        ctx.fillRect(hx - handle / 2, hy - handle / 2, handle, handle);
+      }
+
+      // 4 EDGE handles (yellow balls) at the edge midpoints: these scale the
+      // CELLS. Round and yellow precisely so they do not read as more of the
+      // same — two different resizes should not look alike. An edge too short
+      // to carry one is simply not offered (frEdgeHandles).
+      for (const eh of frEdgeHandles(entry)) {
+        const hx = canvasX + eh.x;
+        const hy = canvasY + eh.y;
+        ctx.beginPath();
+        ctx.arc(hx, hy, FR_EDGE_HANDLE_R, 0, Math.PI * 2);
+        ctx.fillStyle = COLORS.edgeHandleFill;
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = COLORS.edgeHandleBorder;
+        ctx.stroke();
+      }
     }
     ctx.lineWidth = 1;
   }
@@ -459,12 +493,23 @@ export function renderFloatingRange(overlayCtx: OverlayRenderContext): void {
 export function hitTestFloatingRange(hitCtx: OverlayHitTestContext): boolean {
   if (!hitCtx.floatingCanvasBounds) return false;
   const b = hitCtx.floatingCanvasBounds;
-  return (
+  if (
     hitCtx.canvasX >= b.x &&
     hitCtx.canvasX <= b.x + b.width &&
     hitCtx.canvasY >= b.y &&
     hitCtx.canvasY <= b.y + b.height
-  );
+  ) {
+    return true;
+  }
+  // EXTENDED AREA (the documented purpose of this hook): an edge handle is
+  // centred ON the border, so its outer half lies outside the frame. Without
+  // this, Core's inclusive bounds test would stop half of every yellow ball
+  // from being grabbable and the handle would feel like it had a dead side.
+  if (hitCtx.region.data?.resizable !== true) return false;
+  const frId = hitCtx.region.data?.frId as string | undefined;
+  const entry = frId ? getFloatingRangeById(frId) : null;
+  if (!entry) return false;
+  return frEdgeHandleAt(entry, hitCtx.canvasX - b.x, hitCtx.canvasY - b.y) !== null;
 }
 
 /**
@@ -480,6 +525,12 @@ export function getFrCursor(hitCtx: OverlayHitTestContext): string | null {
   const frId = hitCtx.region.data?.frId as string | undefined;
   const entry = frId ? getFloatingRangeById(frId) : null;
   if (!entry) return null;
+  // Edge handles first — they sit on the border, on top of whatever zone is
+  // underneath, and they are the only thing there when they are painted.
+  if (hitCtx.region.data?.resizable === true) {
+    const edge = frEdgeHandleAt(entry, hitCtx.canvasX - b.x, hitCtx.canvasY - b.y);
+    if (edge) return edgeAxis(edge) === "cols" ? "ew-resize" : "ns-resize";
+  }
   if (entry.showTitle) {
     const dy = hitCtx.canvasY - b.y;
     return dy >= 0 && dy < FR_TITLE_H ? "move" : "cell";

@@ -35,6 +35,17 @@ use crate::AppState;
 pub const MAX_FLOATING_RANGE_ROWS: u32 = 1000;
 pub const MAX_FLOATING_RANGE_COLS: u32 = 256;
 
+/// Per-cell size bounds for the override maps, in logical pixels. The grid's
+/// own `set_column_width` only refuses `<= 0`, but a floating range has no
+/// row/column headers to grab and no unhide command: a cell scaled to one
+/// pixel would be unreachable forever, which is a data-loss shape rather than
+/// a cosmetic one. The maxima keep the DERIVED frame in the same order of
+/// magnitude the count caps already allow.
+pub const MIN_FLOATING_RANGE_COL_W: f64 = 8.0;
+pub const MAX_FLOATING_RANGE_COL_W: f64 = 1000.0;
+pub const MIN_FLOATING_RANGE_ROW_H: f64 = 8.0;
+pub const MAX_FLOATING_RANGE_ROW_H: f64 = 500.0;
+
 /// The restore kind for geometry/window undo (`RESTORE_REGISTRY`).
 pub(crate) const FLOATING_RANGE_RESTORE_KIND: &str = "obj_floating_range";
 
@@ -286,6 +297,31 @@ pub fn update_floating_range(
     update_floating_range_inner(&state, &file_state, id, patch)
 }
 
+/// Validate one whole override map. `None` (absent field) always passes — that
+/// is "leave it alone", not "clear it".
+fn validate_size_map(
+    map: Option<&std::collections::HashMap<u32, f64>>,
+    field: &str,
+    max_index_exclusive: u32,
+    min_size: f64,
+    max_size: f64,
+) -> Result<(), String> {
+    let Some(map) = map else { return Ok(()) };
+    for (index, size) in map.iter() {
+        if *index >= max_index_exclusive {
+            return Err(format!(
+                "{field} index {index} is out of range (0..{max_index_exclusive})"
+            ));
+        }
+        if !size.is_finite() || *size < min_size || *size > max_size {
+            return Err(format!(
+                "{field}[{index}] must be a finite {min_size}..={max_size}, got {size}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn update_floating_range_inner(
     state: &AppState,
     file_state: &FileState,
@@ -316,6 +352,24 @@ pub(crate) fn update_floating_range_inner(
             ));
         }
     }
+    // Size maps are validated ENTRY BY ENTRY and refused as a whole: a partly
+    // applied scale leaves the object skewed, which is worse than a refusal
+    // the caller can see. Indexes are bounded by the same count caps, so a
+    // map cannot smuggle in an unbounded allocation via a huge key.
+    validate_size_map(
+        patch.col_widths.as_ref(),
+        "colWidths",
+        MAX_FLOATING_RANGE_COLS,
+        MIN_FLOATING_RANGE_COL_W,
+        MAX_FLOATING_RANGE_COL_W,
+    )?;
+    validate_size_map(
+        patch.row_heights.as_ref(),
+        "rowHeights",
+        MAX_FLOATING_RANGE_ROWS,
+        MIN_FLOATING_RANGE_ROW_H,
+        MAX_FLOATING_RANGE_ROW_H,
+    )?;
 
     let effect = crate::document_effect::DocumentEffect::mutates(file_state);
     let (previous, updated) = {
@@ -346,6 +400,12 @@ pub(crate) fn update_floating_range_inner(
         if let Some(v) = patch.show_row_headers {
             row.show_row_headers = v;
         }
+        if let Some(widths) = patch.col_widths.clone() {
+            row.col_widths = widths;
+        }
+        if let Some(heights) = patch.row_heights.clone() {
+            row.row_heights = heights;
+        }
         (previous, row.clone())
     };
 
@@ -356,16 +416,24 @@ pub(crate) fn update_floating_range_inner(
     let chrome_changed = previous.show_title != updated.show_title
         || previous.show_column_headers != updated.show_column_headers
         || previous.show_row_headers != updated.show_row_headers;
+    let sizes_changed =
+        previous.col_widths != updated.col_widths || previous.row_heights != updated.row_heights;
     if previous.x != updated.x
         || previous.y != updated.y
         || previous.row_count != updated.row_count
         || previous.col_count != updated.col_count
         || chrome_changed
+        || sizes_changed
     {
         let description = if previous.row_count != updated.row_count
             || previous.col_count != updated.col_count
         {
             "Resize floating range"
+        } else if sizes_changed {
+            // The edge-handle drag: same number of cells, different sizes.
+            // Named apart from the count resize so the undo list can tell the
+            // user WHICH of the two resizes is about to come back.
+            "Resize floating range cells"
         } else if chrome_changed {
             // Chrome is undoable in its own right: hiding a strip SHRINKS the
             // frame, so it is a visible layout change, not a view preference.

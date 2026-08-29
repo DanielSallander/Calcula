@@ -43,6 +43,10 @@ import {
   getFloatingRangeCells,
   FLOATING_RANGE_MAX_ROWS,
   FLOATING_RANGE_MAX_COLS,
+  FLOATING_RANGE_MIN_COL_W,
+  FLOATING_RANGE_MAX_COL_W,
+  FLOATING_RANGE_MIN_ROW_H,
+  FLOATING_RANGE_MAX_ROW_H,
   type FloatingRangeInfo,
 } from "@api/floatingRanges";
 import {
@@ -69,6 +73,19 @@ import {
   bestCountsForSize,
   frRowHdrW,
   frCellsTop,
+  contentWidth,
+  contentHeight,
+  frEdgeHandleAt,
+  edgeAxis,
+  edgeMovesOrigin,
+  clampScaleFactor,
+  scaledColWidths,
+  scaledRowHeights,
+  trackedColIndices,
+  trackedRowIndices,
+  frColWidth,
+  frRowHeight,
+  type FrEdge,
 } from "./lib/frDimensions";
 import {
   selectFloatingRange,
@@ -121,8 +138,22 @@ const FR_CONTEXT_MENU_ID = "floatingRange:contextMenu";
 let lastBodyDown: { frId: string; row: number; col: number; time: number } | null =
   null;
 
-/** Active drag-extend teardown (also run on deactivate). */
+/** Active drag teardown — cell drag-extend OR edge resize (also run on
+ *  deactivate). One slot, because the two can never be live at once. */
 let activeDragCleanup: (() => void) | null = null;
+
+/**
+ * True while an edge-handle resize owns the mouse.
+ *
+ * Core consults `claimsBodyDrag` and then, on a claim, dispatches
+ * `floatingObject:bodyDragStart` SYNCHRONOUSLY in the same mousedown. So the
+ * edge drag is already installed by the time `handleBodyDragStart` runs — and
+ * that function opens its own drag by calling `activeDragCleanup?.()`, which
+ * would remove the edge drag's listeners before its first mousemove and leave
+ * the yellow ball looking inert. This flag is how the second handler knows the
+ * first one already took the gesture.
+ */
+let edgeResizeActive = false;
 
 // ============================================================================
 // Geometry helpers
@@ -267,6 +298,27 @@ async function resizeFr(
   return info;
 }
 
+/**
+ * Persist a cell-size scale (the edge-handle drag's ONE write). Geometry rides
+ * along because dragging the left or top edge keeps the OPPOSITE edge fixed,
+ * which moves the frame's origin — sending it separately would be two undo
+ * steps for one gesture.
+ */
+async function resizeFrCells(
+  frId: string,
+  colWidths: Record<number, number>,
+  rowHeights: Record<number, number>,
+  x: number,
+  y: number,
+): Promise<FloatingRangeInfo> {
+  const info = await updateFloatingRange(frId, { colWidths, rowHeights, x, y });
+  upsertFromInfo(info);
+  syncFloatingRangeRegions();
+  requestOverlayRedraw();
+  emitAppEvent(AppEvents.GRID_REFRESH);
+  return info;
+}
+
 async function renameFr(frId: string, name: string): Promise<FloatingRangeInfo> {
   const info = await renameFloatingRange(frId, name);
   upsertFromInfo(info);
@@ -386,6 +438,117 @@ async function insertFloatingRangeFromMenu(): Promise<void> {
 }
 
 // ============================================================================
+// Edge-handle drag — scale the CELLS, leave the counts alone
+// ============================================================================
+
+/**
+ * Start an edge-handle drag. The object is mutated LIVE (so the user sees the
+ * real frame stretch, not a ghost of it) and written ONCE on mouseup, which is
+ * what makes the whole gesture a single undo step.
+ *
+ * `syncFloatingRangeRegions()` has to run on every frame, not just at the end:
+ * the published region's `floating.width/height` IS the hit box Core tests, so
+ * a frame that grew without re-publishing would paint over pixels that still
+ * belong to the grid — and the corner handles would sit at the old corners.
+ */
+function startEdgeResizeDrag(
+  entry: FloatingRangeEntry,
+  edge: FrEdge,
+  startCanvasX: number,
+  startCanvasY: number,
+): void {
+  const frId = entry.id;
+  const axis = edgeAxis(edge);
+  const movesOrigin = edgeMovesOrigin(edge);
+
+  // Everything the scale is measured AGAINST is captured once, so a drag that
+  // wanders back to where it started restores the original sizes exactly
+  // rather than accumulating rounding on every mousemove.
+  const baseWidths = { ...entry.colWidths };
+  const baseHeights = { ...entry.rowHeights };
+  const baseX = entry.x;
+  const baseY = entry.y;
+  const baseExtent = axis === "cols" ? contentWidth(entry) : contentHeight(entry);
+  const baseFrameW = frameWidth(entry);
+  const baseFrameH = frameHeight(entry);
+  const baseSizes =
+    axis === "cols"
+      ? trackedColIndices(entry).map((c) => frColWidth(entry, c))
+      : trackedRowIndices(entry).map((r) => frRowHeight(entry, r));
+  const min = axis === "cols" ? FLOATING_RANGE_MIN_COL_W : FLOATING_RANGE_MIN_ROW_H;
+  const max = axis === "cols" ? FLOATING_RANGE_MAX_COL_W : FLOATING_RANGE_MAX_ROW_H;
+
+  if (baseExtent <= 0) return;
+
+  const applyScale = (scale: number) => {
+    const live = getFloatingRangeById(frId);
+    if (!live) return;
+    // Restore the baseline first: the scale is always measured from the drag's
+    // START, never compounded onto the previous frame.
+    live.colWidths = { ...baseWidths };
+    live.rowHeights = { ...baseHeights };
+    if (axis === "cols") live.colWidths = scaledColWidths(live, scale);
+    else live.rowHeights = scaledRowHeights(live, scale);
+    if (movesOrigin) {
+      // The dragged edge moves; the opposite one stays where it was.
+      if (axis === "cols") live.x = Math.max(0, baseX + baseFrameW - frameWidth(live));
+      else live.y = Math.max(0, baseY + baseFrameH - frameHeight(live));
+    }
+    syncFloatingRangeRegions();
+    requestOverlayRedraw();
+  };
+
+  let lastScale = 1;
+
+  const onMove = (ev: MouseEvent) => {
+    const canvas = clientToCanvas(ev.clientX, ev.clientY);
+    if (!canvas) return;
+    const delta =
+      axis === "cols" ? canvas.x - startCanvasX : canvas.y - startCanvasY;
+    // Dragging the left/top edge outward means a NEGATIVE delta grows the
+    // object, so the sign flips for the origin-moving edges.
+    const grow = movesOrigin ? -delta : delta;
+    lastScale = clampScaleFactor(baseSizes, (baseExtent + grow) / baseExtent, min, max);
+    applyScale(lastScale);
+  };
+
+  const finish = () => {
+    activeDragCleanup?.();
+    const live = getFloatingRangeById(frId);
+    if (!live) return;
+    if (lastScale === 1) {
+      // Nothing moved: no write, no undo entry, no announcement.
+      return;
+    }
+    void resizeFrCells(
+      frId,
+      { ...live.colWidths },
+      { ...live.rowHeights },
+      live.x,
+      live.y,
+    ).catch((err) => {
+      console.error("[FloatingRange] Cell resize failed:", err);
+      // The optimistic local scale is now a lie; the backend is the authority.
+      void loadFloatingRangesFromBackend().then(() => {
+        syncFloatingRangeRegions();
+        requestOverlayRedraw();
+      });
+    });
+  };
+
+  activeDragCleanup?.();
+  edgeResizeActive = true;
+  activeDragCleanup = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", finish);
+    activeDragCleanup = null;
+    edgeResizeActive = false;
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", finish);
+}
+
+// ============================================================================
 // claimsBodyDrag — the zone router (and the M7 formula-mode branch)
 // ============================================================================
 
@@ -431,6 +594,24 @@ function claimsBodyDrag(ctx: OverlayHitTestContext): boolean {
     frId,
     hit.zone === "cells" ? { row: hit.row, col: hit.col } : null,
   );
+
+  // Edge handles: scale the CELLS. Checked before the zone router because a
+  // handle sits ON the frame border, where the zone underneath it would
+  // otherwise answer "cells" or "rowHeader". Design mode only, and gated on
+  // the same `resizable` flag Core reads for the corner handles — so the ball
+  // is never grabbable in a mode where it is not painted.
+  if (ctx.region.data?.resizable === true) {
+    const edge = frEdgeHandleAt(entry, dx, dy);
+    if (edge) {
+      startEdgeResizeDrag(entry, edge, ctx.canvasX, ctx.canvasY);
+      return true;
+    }
+  }
+
+  // The handles' hit radius reaches a few pixels PAST the frame (see
+  // hitTestFloatingRange), so a near-miss lands here with no zone. Claim it and
+  // do nothing: falling through would start a move from outside the object.
+  if (hit.zone === "outside") return true;
 
   // Title bar: Core runs the normal move path (floatingObject:selected has
   // already been dispatched, so the object still gets selected).
@@ -585,6 +766,11 @@ function setupFloatingObjectEvents(): void {
     if (!frId || !entry) return;
     const bounds = frameCanvasBounds(entry);
     if (!bounds) return;
+
+    // An edge-handle drag already claimed this very mousedown (see
+    // `edgeResizeActive`). Everything below would move the local selection and
+    // then tear that drag down again.
+    if (edgeResizeActive) return;
 
     const dx = (detail.canvasX as number) - bounds.x;
     const dy = (detail.canvasY as number) - bounds.y;

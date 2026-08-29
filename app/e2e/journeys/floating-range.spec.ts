@@ -75,6 +75,8 @@ interface FrInfo {
   showTitle: boolean;
   showColumnHeaders: boolean;
   showRowHeaders: boolean;
+  colWidths: Record<number, number>;
+  rowHeights: Record<number, number>;
 }
 
 const listFrs = (page: Page) => invoke<FrInfo[]>(page, "list_floating_ranges");
@@ -506,6 +508,82 @@ test.describe.serial("floating ranges, live", () => {
       await page.keyboard.press("Escape");
       await expect(editor).toBeHidden({ timeout: 3000 });
     } finally {
+      await deleteFr(page, fr.id);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Edge handles (2026-08-29)
+  //
+  // The corner handles change the row/column COUNTS. These change the cell
+  // SIZES. The interesting part is not the arithmetic (unit-tested) but that
+  // the gesture survives at all: Core consults claimsBodyDrag and then
+  // dispatches bodyDragStart synchronously, and that second handler used to
+  // tear the edge drag down before its first mousemove.
+  // -------------------------------------------------------------------------
+
+  test("dragging an edge handle scales the cells without changing the counts", async ({
+    appPage: page,
+  }) => {
+    const fr = await createFr(page, "FloatE2E");
+    try {
+      await frApi(page, "updateFloatingRange", [fr.id, { rowCount: 2, colCount: 2 }]);
+      await page.waitForTimeout(300);
+      await setDesignMode(page, true);
+
+      // Select it: the handles are only painted and grabbable on a selected,
+      // design-mode object. A click on a cell selects the object.
+      await clickFrCell(page, 0, 0);
+      await page.waitForTimeout(150);
+
+      const before = (await listFrs(page))[0];
+      expect(before.rowCount).toBe(2);
+      expect(before.colCount).toBe(2);
+
+      // The right edge midpoint, dragged 60px further right. Default column
+      // width is 64.29, so two columns span 128.58 and the frame is
+      // 28 (row gutter) + 128.58 wide; the midpoint sits on the border.
+      const geom = await readGridGeometry(page);
+      const frameW = 28 + 2 * 64.29;
+      const frameH = 20 + 16 + 2 * 20;
+      const start = await frFramePoint(page, frameW, frameH / 2);
+      await page.mouse.move(start.x, start.y);
+      await page.mouse.down();
+      await page.mouse.move(start.x + 30 * geom.zoom, start.y, { steps: 4 });
+      await page.mouse.move(start.x + 60 * geom.zoom, start.y, { steps: 4 });
+      await page.mouse.up();
+
+      const after = await eventually(
+        () => listFrs(page),
+        (rows) => rows.length === 1 && Object.keys(rows[0].colWidths ?? {}).length > 0,
+        "the edge drag never reached the backend (colWidths still empty)",
+      );
+
+      // COUNTS untouched — that is the whole distinction from the corner handle.
+      expect(after[0].rowCount).toBe(2);
+      expect(after[0].colCount).toBe(2);
+
+      // Columns grew, proportionally, and the rows were left alone.
+      const widths = after[0].colWidths;
+      expect(widths[0]).toBeGreaterThan(64.29);
+      expect(widths[1]).toBeCloseTo(widths[0], 2);
+      expect(Object.keys(after[0].rowHeights ?? {})).toHaveLength(0);
+
+      // The content grew by roughly the drag distance (the scale is measured
+      // against the CONTENT extent, so this is the round trip of the gesture).
+      const grew = widths[0] + widths[1] - 2 * 64.29;
+      expect(grew).toBeGreaterThan(40);
+      expect(grew).toBeLessThan(80);
+
+      // One undo step for the whole gesture, and it restores the old sizes.
+      await page.keyboard.press("Control+z");
+      await eventually(
+        () => listFrs(page),
+        (rows) => Object.keys(rows[0]?.colWidths ?? {}).length === 0,
+        "undo did not restore the cell sizes in one step",
+      );
+    } finally {
+      await setDesignMode(page, false);
       await deleteFr(page, fr.id);
     }
   });
