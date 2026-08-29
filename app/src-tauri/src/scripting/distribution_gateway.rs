@@ -179,7 +179,7 @@ fn check_session_publish_budget() -> Result<(), String> {
     if *count >= PUBLISHES_PER_SESSION {
         return Err(format!(
             "RateLimited: scripts may publish at most {} package versions per Calcula session \
-             (this one has published {}). Publish from File > Publish Package… or restart Calcula.",
+             (this one has published {}). Publish from Distribution > Publish Package… or restart Calcula.",
             PUBLISHES_PER_SESSION, *count
         ));
     }
@@ -498,7 +498,7 @@ fn require_publish_identity(
     if !holds_any {
         return Err(
             "NoPublisherKey: this machine has never published a package, so it has no Ed25519 \
-             publisher identity. Publish once yourself (File > Publish Package…) to create it — \
+             publisher identity. Publish once yourself (Distribution > Publish Package…) to create it — \
              a script must not create the identity other people will trust as yours."
                 .to_string(),
         );
@@ -553,7 +553,7 @@ fn reject_forbidden_publish_fields(p: &serde_json::Map<String, Value>) -> Result
         return Err(
             "'customObjects' is not settable from a script: package payloads are collected by \
              Calcula from registered providers, never supplied by the caller. Publish from \
-             File > Publish Package… if this package needs extension-contributed objects."
+             Distribution > Publish Package… if this package needs extension-contributed objects."
                 .to_string(),
         );
     }
@@ -561,7 +561,7 @@ fn reject_forbidden_publish_fields(p: &serde_json::Map<String, Value>) -> Result
         return Err(
             "'includeComments' cannot be turned on from a script: threaded comments are internal \
              discussion, and shipping them to a registry is a privacy decision only the person \
-             publishing can make. Publish from File > Publish Package… to include them."
+             publishing can make. Publish from Distribution > Publish Package… to include them."
                 .to_string(),
         );
     }
@@ -947,7 +947,7 @@ fn dispatch(
                     format!(
                         "{} This call came from a script, which is never allowed to establish \
                          that trust on your behalf — subscribe to '{}' once from \
-                         Data > Subscribe to Package and the script will work from then on.",
+                         Distribution > Subscribe to Package and the script will work from then on.",
                         e, package_name
                     )
                 } else {
@@ -1077,7 +1077,7 @@ fn dispatch(
 /// response is the difference between a documented limit and a silent drop.
 pub const SCRIPT_PUBLISH_PAYLOAD_NOTE: &str =
     "Published from a script: extension-contributed custom objects were not collected. \
-     Publish from File > Publish Package… if this package needs them.";
+     Publish from Distribution > Publish Package… if this package needs them.";
 
 #[cfg(test)]
 mod tests {

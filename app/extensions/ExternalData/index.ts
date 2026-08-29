@@ -1,8 +1,12 @@
 //! FILENAME: app/extensions/ExternalData/index.ts
 // PURPOSE: External Data extension entry point.
-// CONTEXT: Registers the "External Data" top-level menu.
-//          Other extensions (CsvImportExport, Distribution) append items to it.
-//          Model-specific surfaces live in the "Model" menu (ModelMenu ext).
+// CONTEXT: Registers the "External Data" top-level menu — import/export and
+//          data connections only. Other extensions append items to it:
+//          CsvImportExport ("Get Data") and Distribution ("Refresh Data").
+//          Model-specific surfaces live in the "Model" menu (ModelMenu ext);
+//          .calp packaging and writeback are their own top-level menus
+//          ("Distribution" order 46, "Writeback" order 47, both owned by the
+//          Distribution extension) rather than a submenu here.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 

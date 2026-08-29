@@ -1,7 +1,11 @@
 // FILENAME: app/extensions/Distribution/index.ts
 // PURPOSE: Distribution extension entry point — .calp publish, subscribe, refresh, overrides.
-// CONTEXT: Registers task pane, dialogs, menu items, grid overlay badges,
-// writeback guards (Phase 9), and conditional style interceptor.
+// CONTEXT: Registers task panes, dialogs, grid overlay badges, writeback guards
+// (Phase 9), and the conditional style interceptor. It also owns TWO top-level
+// menus — "Distribution" (order 46) for the .calp package lifecycle and
+// "Writeback" (order 47) for the data-collection channel. They were one
+// "Distribution" submenu under External Data until 2026-08-29; External Data
+// keeps only "Refresh Data" from this extension.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { AppEvents } from "@api/events";
@@ -15,6 +19,8 @@ import {
 } from "./components/PackageExplorerPanel";
 import {
   DistributionManifest,
+  DISTRIBUTION_MENU_ID,
+  WRITEBACK_MENU_ID,
   OVERRIDES_PANE_ID,
   WRITEBACK_PANE_ID,
   SUBSCRIPTIONS_PANE_ID,
@@ -185,86 +191,107 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister(DESIGNATE_WRITEBACK_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(CONNECTION_DIALOG_ID));
 
-  // Register menu items under External Data menu: all .calp package features are
-  // grouped under a single "Distribution" header submenu; "Refresh Data" stays
-  // top-level because it verifies/refreshes external connections generally.
-  context.ui.menus.registerItem("externalData", {
-    id: "externalData:distribution",
+  // -----------------------------------------------------------------------
+  // Menus. Distribution and Writeback are two features, so they are two
+  // top-level menus — peers of Data and Model, not a submenu buried under
+  // External Data. This extension owns every item in both, so it registers
+  // the shells itself (the same way AutoFilter owns "Data"). "Refresh Data"
+  // still belongs to External Data below: it verifies external connections
+  // generally, not .calp subscriptions specifically.
+  // -----------------------------------------------------------------------
+
+  // "Distribution" (order 46 = after Formulas at 45, before Review at 70):
+  // the .calp package lifecycle — publish, subscribe, refresh, inspect,
+  // and the override layer a subscriber lays over a received report.
+  context.ui.menus.register({
+    id: DISTRIBUTION_MENU_ID,
     label: "Distribution",
-    icon: IconPackage,
-    children: [
+    order: 46,
+    items: [
       {
-        id: "externalData:distribution:publish",
+        id: "distribution:publishPackage",
         label: "Publish Package...",
         icon: IconPublishPackage,
+        order: 10,
         action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
       },
       {
-        id: "externalData:distribution:subscribe",
+        id: "distribution:subscribePackage",
         label: "Subscribe to Package...",
         icon: IconSubscribePackage,
+        order: 11,
         action: () => context.ui.dialogs.show(SUBSCRIBE_DIALOG_ID),
       },
       {
-        id: "externalData:distribution:refreshSubscriptions",
+        id: "distribution:refreshSubscriptions",
         label: "Refresh Subscriptions...",
         icon: IconRefreshSubscriptions,
+        order: 12,
         action: () => context.ui.dialogs.show(REFRESH_PREVIEW_DIALOG_ID),
       },
-      { id: "externalData:distribution:sep1", label: "", separator: true },
+      { id: "distribution:sep.manage", label: "", separator: true, order: 19 },
       {
-        id: "externalData:distribution:manageSubscriptions",
+        id: "distribution:manageSubscriptions",
         label: "Manage Subscriptions...",
         icon: IconManageSubscriptions,
+        order: 20,
         action: () => {
           context.ui.taskPanes.open(SUBSCRIPTIONS_PANE_ID);
           context.ui.taskPanes.showContainer();
         },
       },
       {
-        id: "externalData:distribution:packageExplorer",
+        id: "distribution:openPackageExplorer",
         label: "Package Explorer",
         icon: IconPackage,
+        order: 21,
         action: () => context.ui.panels.open(PACKAGE_EXPLORER_PANEL_ID),
       },
       {
-        id: "externalData:distribution:packageInspector",
+        id: "distribution:openPackageInspector",
         label: "Package Inspector...",
         icon: IconPackage,
+        order: 22,
         action: () => void openPackageInspectorWindow(),
       },
       {
-        id: "externalData:distribution:collectedResponses",
-        label: "Collected Responses...",
-        icon: IconCollectedResponses,
-        action: () => {
-          context.ui.taskPanes.open(PUBLISHER_DASHBOARD_PANE_ID);
-          context.ui.taskPanes.showContainer();
-        },
-      },
-      {
-        id: "externalData:distribution:auditLog",
+        id: "distribution:openAuditLog",
         label: "Audit Log...",
         icon: IconAuditLog,
+        order: 23,
         action: () => {
           context.ui.taskPanes.open(AUDIT_LOG_PANE_ID);
           context.ui.taskPanes.showContainer();
         },
       },
-      { id: "externalData:distribution:sep2", label: "", separator: true },
+      { id: "distribution:sep.overrides", label: "", separator: true, order: 29 },
       {
-        id: "externalData:distribution:overrides",
+        id: "distribution:openOverridesPane",
         label: "Overrides Pane",
         icon: IconOverrides,
+        order: 30,
         action: () => {
           context.ui.taskPanes.open(OVERRIDES_PANE_ID);
           context.ui.taskPanes.showContainer();
         },
       },
+    ],
+  });
+
+  // "Writeback" (order 47): the two-way data-collection channel. Both ends of
+  // it live here — the publisher designates the input regions and reviews what
+  // came back ("Collected Responses" is the submissions inbox with
+  // approve/reject), the subscriber fills and submits them from the pane.
+  context.ui.menus.register({
+    id: WRITEBACK_MENU_ID,
+    label: "Writeback",
+    order: 47,
+    items: [
       {
-        id: "externalData:distribution:designateWriteback",
+        id: "writeback:designateRegion",
         label: "Designate Writeback Region...",
         icon: IconWriteback,
+        order: 10,
         action: async () => {
           if (!currentSelection) {
             context.ui.notifications.showToast(
@@ -291,19 +318,32 @@ function activate(context: ExtensionContext): void {
         },
       },
       {
-        id: "externalData:distribution:writebackPane",
+        id: "writeback:openPane",
         label: "Writeback Pane",
         icon: IconWritebackPane,
+        order: 11,
         action: () => {
           context.ui.taskPanes.open(WRITEBACK_PANE_ID);
+          context.ui.taskPanes.showContainer();
+        },
+      },
+      { id: "writeback:sep.publisher", label: "", separator: true, order: 19 },
+      {
+        id: "writeback:openCollectedResponses",
+        label: "Collected Responses...",
+        icon: IconCollectedResponses,
+        order: 20,
+        action: () => {
+          context.ui.taskPanes.open(PUBLISHER_DASHBOARD_PANE_ID);
           context.ui.taskPanes.showContainer();
         },
       },
     ],
   });
 
-  // Model packaging lives in the consolidated Model menu; the rest of the
-  // .calp Distribution surface stays under External Data above.
+  // Model packaging lives in the consolidated Model menu — a model is
+  // published FROM the Model surface, so the entry point stays there rather
+  // than duplicating into the Distribution menu above.
   context.ui.menus.registerItem("model", {
     id: "model:publishModel",
     label: "Publish Model as Package...",

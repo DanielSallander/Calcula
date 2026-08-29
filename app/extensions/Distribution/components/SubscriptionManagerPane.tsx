@@ -192,7 +192,7 @@ const TRUST_NOTICE: Record<
       (t.declaresWriteback
         ? "writeback regions and GATHER formulas stay inactive. "
         : "published declarations are ignored. ") +
-      `Use Data \u2192 Subscribe to Package to review the publisher and activate it.`,
+      `Use Distribution \u2192 Subscribe to Package to review the publisher and activate it.`,
   },
   notPinnedNameConflict: {
     tone: "danger",
@@ -205,7 +205,7 @@ const TRUST_NOTICE: Record<
       (t.declaresWriteback
         ? "Writeback regions and GATHER formulas stay inactive. "
         : "Published declarations are ignored. ") +
-      `Use Data \u2192 Subscribe to Package to compare both publishers before trusting either.`,
+      `Use Distribution \u2192 Subscribe to Package to compare both publishers before trusting either.`,
   },
   unavailable: {
     tone: "warn",
@@ -383,7 +383,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
       <div style={styles.list}>
         {subs.length === 0 ? (
           <div style={styles.empty}>
-            Not subscribed to any package. Use <strong>Data &rarr; Subscribe to Package</strong>.
+            Not subscribed to any package. Use <strong>Distribution &rarr; Subscribe to Package</strong>.
           </div>
         ) : (
           subs.map((s) => {

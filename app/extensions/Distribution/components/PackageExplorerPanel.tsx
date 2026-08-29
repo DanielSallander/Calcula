@@ -129,7 +129,7 @@ export function ConnectedObjectsSection(_props: PanelSectionProps): React.ReactE
     return (
       <div style={{ ...sectionStyle, ...mutedStyle }}>
         No package subscriptions in this workbook. Subscribe to a .calp package
-        via External Data &gt; Distribution to see its connected objects here.
+        via Distribution &gt; Subscribe to Package to see its connected objects here.
       </div>
     );
   }
