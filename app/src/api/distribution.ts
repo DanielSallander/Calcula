@@ -3,6 +3,7 @@
 // CONTEXT: Extensions import from here — never directly from @tauri-apps/api.
 
 import { invokeBackend } from "./backend";
+import type { CellData } from "./types";
 import { AppEvents, emitAppEvent } from "./events";
 import type {
   WritebackSubmissionNotice,
@@ -33,6 +34,25 @@ export interface PublishParams {
    * discussion, so they stay private unless this is explicitly true
    * (default false). Scenarios and outlines always publish. */
   includeComments?: boolean;
+  /**
+   * What this publish IS. `"update"` pushes the next version of a package this
+   * workbook is a working copy of and REQUIRES {@link expectedBaseVersion};
+   * `"createNew"` creates a package under a name that must not exist yet.
+   *
+   * Omitted means `"createNew"`. It is never a fallback for a failed update —
+   * an update whose base has moved is refused, not quietly turned into a
+   * different operation.
+   */
+  mode?: "createNew" | "update";
+  /**
+   * For `"update"`: the version the author worked from, read from the
+   * workbook's workspace link. The backend compares it against the registry
+   * head under the registry lock; if someone else pushed in the meantime the
+   * push is refused rather than silently burying their version.
+   */
+  expectedBaseVersion?: string;
+  /** What changed, in the author's words. Required for `"update"`. */
+  changeSummary?: string;
 }
 
 export interface PublishResponse {
@@ -75,6 +95,324 @@ export interface PublishPreviewResponse {
    * — e.g. a dropdown pane control whose CellRange item source references a
    * sheet outside the selection. Non-blocking. */
   warnings: string[];
+  /** Where a push to the previewed target stands against each gate. Present
+   * only when the preview was given a target package. */
+  gates?: PushGateStatus;
+}
+
+/** Suggested next versions, computed from the registry head. */
+export interface SuggestedVersions {
+  major: string;
+  minor: string;
+  patch: string;
+}
+
+/**
+ * Where a prospective push stands against each gate.
+ *
+ * ADVISORY. The authoritative evaluation runs inside the publish itself, under
+ * the registry lock — anything checked here and acted on later is a race on a
+ * share two people publish to. What this buys is a dialog that can be honest
+ * BEFORE the user writes a change summary, not a way around the gate.
+ */
+export interface PushGateStatus {
+  /** `"linked"` — this workbook is a working copy of the target.
+   *  `"notLinked"` — it is not a working copy of anything.
+   *  `"wrongTarget"` — it is a working copy of a DIFFERENT package.
+   *  `"subscriber"` — it SUBSCRIBES to the target, which may never push to it. */
+  linkStatus: "linked" | "notLinked" | "wrongTarget" | "subscriber";
+  /** The base version this workbook would declare. */
+  expectedBase: string;
+  /** The registry's current head. Empty when unreachable. */
+  registryLatest: string;
+  latestPublishedBy: string;
+  /** True when the head moved past the base — a push would be refused. */
+  baseStale: boolean;
+  /** True when this machine holds the key that signed the head. */
+  keyContinuityOk: boolean;
+  /** False for an HTTP registry, which can only be read from. */
+  registryWritable: boolean;
+  suggestedNext?: SuggestedVersions;
+  /** Why the registry could not be consulted, when it could not be. */
+  registryError: string;
+}
+
+/** One published version, as the version-history UI renders it. */
+export interface WorkspaceVersionInfo {
+  version: string;
+  publishedAt: string;
+  publishedBy: string;
+  /** The version this one was pushed from. Empty for a package's first. */
+  baseVersion: string;
+  /** What the author said changed. */
+  changeSummary: string;
+}
+
+export interface WorkspaceSheetInfo {
+  sheetId: string;
+  name: string;
+}
+
+/**
+ * What package this workbook is a working copy of, and where it stands.
+ *
+ * Every registry-derived field degrades rather than throwing: a developer with
+ * the share offline still gets the link's own contents, and
+ * {@link registryReachable} says which half they are looking at.
+ */
+export interface WorkspaceStatus {
+  registryUrl: string;
+  packageName: string;
+  kind: string;
+  /** The version this working copy is based on. */
+  baseVersion: string;
+  checkedOutAt: string;
+  lastPushedVersion: string;
+  lastPushedAt: string;
+  /** Sheets the base version carried — the push dialog's default selection. */
+  baseSheets: WorkspaceSheetInfo[];
+  registryReachable: boolean;
+  headVersion: string;
+  /** True when the head has moved past this working copy. */
+  isStale: boolean;
+  /** Published history, oldest first (the order the manifest stores). */
+  versions: WorkspaceVersionInfo[];
+  suggestedNext?: SuggestedVersions;
+  /** Whether this machine holds the key that signed the head. */
+  holdsPublisherKey: boolean;
+  registryError: string;
+}
+
+// ============================================================================
+// Version diffs
+// ============================================================================
+
+/** The artifact-level picture: which files differ. */
+export interface ArtifactDiffSummary {
+  added: string[];
+  removed: string[];
+  /** Paths whose hash differs AND whose parsed content differs. */
+  changed: string[];
+  /** Hash differed, content did not. Nonzero means package serialization has
+   *  become order-dependent again — see the determinism test in core/calp. */
+  spuriousHashChanges: number;
+  unchangedCount: number;
+}
+
+/** One changed thing, named the way a person would name it. */
+export interface ObjectChange {
+  domain: string;
+  id: string;
+  name: string;
+  sheetName?: string;
+  change: "added" | "removed" | "modified";
+  detail: string;
+  artifactPath?: string;
+  before?: string;
+  after?: string;
+  beforeTruncated?: boolean;
+  afterTruncated?: boolean;
+  /** Capabilities a script gained — the one script change a consumer must see. */
+  addedCapabilities?: string[];
+  removedCapabilities?: string[];
+}
+
+export interface CellSnapshot {
+  display: string;
+  formula?: string;
+  cellType: string;
+}
+
+export interface CellDiff {
+  a1: string;
+  row: number;
+  col: number;
+  change: "added" | "removed" | "modified";
+  before?: CellSnapshot;
+  after?: CellSnapshot;
+}
+
+export interface SheetDiffSummary {
+  /** The PACKAGE sheet id. */
+  sheetId: string;
+  name: string;
+  change: "added" | "removed" | "modified" | "renamed";
+  renamedFrom?: string;
+  cellsAdded: number;
+  cellsRemoved: number;
+  cellsModified: number;
+  /** The subset where the FORMULA differs, not just the value. */
+  formulaChanges: number;
+  /** False when a budget capped the parse — the counts are then floors. */
+  countsExact: boolean;
+  styleChangedCells: number;
+  stylesTableChanged: boolean;
+  layoutChanged: boolean;
+  metadataChanged: boolean;
+  sample: CellDiff[];
+  sampleTruncated: boolean;
+}
+
+export interface ManifestFieldChange {
+  field: string;
+  before: string;
+  after: string;
+}
+
+export interface DiffTotals {
+  objectsAdded: number;
+  objectsRemoved: number;
+  objectsModified: number;
+  sheetsChanged: number;
+  cellsChanged: number;
+  cellsChangedExact: boolean;
+}
+
+export interface VersionDiff {
+  packageName: string;
+  fromVersion: string;
+  /** "working copy" when the right-hand side is the open workbook. */
+  toVersion: string;
+  artifacts: ArtifactDiffSummary;
+  sheets: SheetDiffSummary[];
+  objects: ObjectChange[];
+  manifestChanges: ManifestFieldChange[];
+  totals: DiffTotals;
+}
+
+/** Every changed cell of one sheet, up to a cap. */
+export interface SheetCellDiff {
+  sheetId: string;
+  name: string;
+  changes: CellDiff[];
+  /** The truth, even when `changes` was capped. */
+  totalChanges: number;
+  truncated: boolean;
+  cellsAdded: number;
+  cellsRemoved: number;
+  cellsModified: number;
+  formulaChanges: number;
+}
+
+export interface WorkingCopyDiff {
+  packageName: string;
+  baseVersion: string;
+  diff: VersionDiff;
+}
+
+// ============================================================================
+// Merge — the three-outcome push
+// ============================================================================
+
+/**
+ * One addressable piece of a package.
+ *
+ * The grain of a collision: a cell of a sheet, a sheet's structure, an object
+ * with a stable id, or a package-level setting. Two developers who touched
+ * different pieces have not conflicted.
+ */
+export type PieceKey =
+  | { kind: "cell"; sheetId: string; a1: string }
+  | { kind: "sheetStructure"; sheetId: string }
+  | { kind: "object"; domain: string; id: string }
+  | { kind: "manifestField"; field: string };
+
+export interface Collision {
+  piece: PieceKey;
+  /** A sentence naming what collided. */
+  description: string;
+  sheetName?: string;
+}
+
+/**
+ * - `fastForward` — nothing landed since your base; publish straight away.
+ * - `canMerge` — something landed, it touched different pieces, and this build
+ *   can bring it across.
+ * - `conflict` — the same piece changed on both sides. There is no automatic
+ *   merge inside a piece, and last-writer-wins is the failure this replaces.
+ * - `cannotApply` — disjoint work, but the intervening change is of a kind this
+ *   build cannot bring into a working copy yet. Not a conflict.
+ */
+export type MergeVerdict = "fastForward" | "canMerge" | "conflict" | "cannotApply";
+
+export interface MergeAnalysis {
+  verdict: MergeVerdict;
+  /** Populated only for `conflict`. */
+  collisions: Collision[];
+  /** What landed while you were working. */
+  theirSummary: string[];
+  /** What you changed. */
+  yourSummary: string[];
+  /** What blocked a `cannotApply`. */
+  unmergeable: string[];
+}
+
+export interface MergeAnalysisResponse {
+  packageName: string;
+  baseVersion: string;
+  headVersion: string;
+  headPublishedBy: string;
+  headChangeSummary: string;
+  analysis: MergeAnalysis;
+}
+
+export interface MergeApplyResponse {
+  mergedFromVersion: string;
+  cellsApplied: number;
+  sheetsTouched: string[];
+}
+
+// ============================================================================
+// Co-publishing
+// ============================================================================
+
+export interface CoPublisherInfo {
+  /** Lowercase hex of the Ed25519 public key — what actually authorizes. */
+  key: string;
+  /** Display only. */
+  name: string;
+  addedAt: string;
+  /** Whether THIS computer holds this key. */
+  isYou: boolean;
+}
+
+export interface CoPublishersResponse {
+  packageName: string;
+  /** The key that published version 1 — the anchor, and the only key that can
+   *  change the list. Empty for a package with no signed versions. */
+  rootKey: string;
+  youAreTheRoot: boolean;
+  /** Root or an authorized delegate. */
+  youMayPublish: boolean;
+  coPublishers: CoPublisherInfo[];
+  /** Set when a list exists but could not be trusted. Reported rather than
+   *  treated as "no delegates" — those two must not look alike. */
+  problem: string;
+}
+
+export interface CheckoutParams {
+  registryPath: string;
+  packageName: string;
+  /** A concrete version, or omitted for the registry head. */
+  version?: string;
+}
+
+export interface CheckoutResponse {
+  packageName: string;
+  version: string;
+  sheetsMaterialized: number;
+  scriptsMaterialized: number;
+  publisherName: string;
+  /** The trust outcome REPORTED, never recorded: a checkout verifies the
+   *  signature but never creates a TOFU pin (a working copy has no refresh
+   *  loop for a pin to protect). */
+  trustStatus: CalpTrustStatus;
+  /** The freshly materialized workbook's active sheet, in the shape
+   *  `openFileAtPath` returns — the frontend refreshes through one path. */
+  cells: CellData[];
+  /** Custom objects of kinds handled by frontend providers (brick 4);
+   *  {@link checkoutPackage} dispatches these automatically. */
+  customObjects?: PulledDistributableObject[];
 }
 
 /**
@@ -116,6 +454,12 @@ export interface PublishPreviewResponse {
  */
 export type CalpTrustStatus =
   | "verified"
+  /** Signed by a CO-PUBLISHER the pinned publisher authorized: the signer is
+   *  not the pinned key, but appears in a `publishers.json` that the pinned key
+   *  signed. Trusted, and worth SAYING — the user agreed to trust one
+   *  publisher and is now transitively trusting somebody that publisher
+   *  vouched for. */
+  | "trustedDelegate"
   | "firstUse"
   | "firstUseKnownPublisher"
   | "firstUseAcceptedNameConflict"
@@ -129,6 +473,10 @@ export type CalpTrustStatus =
 export function calpTrustIsPinned(status: string): boolean {
   return (
     status === "verified" ||
+    // A delegate's signature traces to the key this machine DID pin, so the
+    // deliberate trust decision is present — it was simply made about the
+    // publisher who vouched for them.
+    status === "trustedDelegate" ||
     status === "firstUse" ||
     status === "firstUseKnownPublisher" ||
     status === "firstUseAcceptedNameConflict"
@@ -547,13 +895,147 @@ export function publishLibrary(params: PublishLibraryParams): Promise<PublishRes
 export function publishPreview(
   sheetIndices?: number[],
   includeComments?: boolean,
+  /** Supply both to have the response carry {@link PushGateStatus}. */
+  target?: { registryPath: string; packageName: string },
 ): Promise<PublishPreviewResponse> {
   return invokeBackend("calp_publish_preview", {
     params: {
       sheetIndices: sheetIndices ?? null,
       includeComments: includeComments ?? false,
+      registryPath: target?.registryPath ?? null,
+      packageName: target?.packageName ?? null,
     },
   });
+}
+
+/**
+ * Open a published package version as a WORKING COPY.
+ *
+ * REPLACES the open document, so the caller must have confirmed the loss of
+ * unsaved changes first — the same contract `openFileAtPath` has. The resulting
+ * workbook carries the package's own sheet ids, which is what lets a later push
+ * continue the package's identity instead of forking it.
+ */
+export async function checkoutPackage(params: CheckoutParams): Promise<CheckoutResponse> {
+  const response = await invokeBackend<CheckoutResponse>("calp_checkout", { params });
+  // Frontend-provider objects (brick 4) land the same way a pull's do.
+  if (response.customObjects?.length) {
+    await materializePulledObjects(response.customObjects);
+  }
+  // The document was replaced. Announce it exactly as an open does, so every
+  // listener (scripts host, title bar, panes) re-reads rather than trusting a
+  // cache from the previous document. `path` is empty because a working copy
+  // has no file yet — its first save is a Save As.
+  emitAppEvent(AppEvents.AFTER_OPEN, { path: "", source: "checkout" });
+  emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: true });
+  return response;
+}
+
+/**
+ * What package is this workbook a working copy of, and where does it stand
+ * relative to the registry? `null` for a standalone workbook.
+ *
+ * Never throws for an unreachable registry: the answer degrades to the link's
+ * own contents with `registryReachable: false`.
+ */
+export function workspaceStatus(): Promise<WorkspaceStatus | null> {
+  return invokeBackend("calp_workspace_status", {});
+}
+
+/**
+ * What changed between two published versions of a package.
+ *
+ * Both sides are verified first — signature, trust status and the full
+ * per-artifact checksum walk — so nothing here is backed by unverified bytes.
+ */
+export function diffVersions(params: {
+  registryPath: string;
+  packageName: string;
+  fromVersion: string;
+  toVersion: string;
+}): Promise<VersionDiff> {
+  return invokeBackend("calp_diff_versions", { params });
+}
+
+/** Every changed cell of one sheet, for the drill-down. */
+export function diffSheetCells(params: {
+  registryPath: string;
+  packageName: string;
+  fromVersion: string;
+  toVersion: string;
+  sheetId: string;
+  maxCells?: number;
+}): Promise<SheetCellDiff> {
+  return invokeBackend("calp_diff_sheet_cells", { params });
+}
+
+/**
+ * What this workbook's next push would change.
+ *
+ * With no arguments it reads the target and base from the workbook's own
+ * workspace link, which is what the push dialog wants.
+ */
+/** Who may publish this package — the root, plus any delegates it authorized. */
+export function listCoPublishers(params: {
+  registryPath: string;
+  packageName: string;
+}): Promise<CoPublishersResponse> {
+  return invokeBackend("calp_list_co_publishers", { params });
+}
+
+/**
+ * Replace the co-publisher list. Only the root publisher can.
+ *
+ * The whole list is sent, not a delta: the artifact IS the whole list, and
+ * doing the read-modify-write in the UI would put a second copy of that logic
+ * where it can drift.
+ */
+export function setCoPublishers(params: {
+  registryPath: string;
+  packageName: string;
+  coPublishers: Array<{ key: string; name?: string }>;
+}): Promise<CoPublishersResponse> {
+  return invokeBackend("calp_set_co_publishers", { params });
+}
+
+/**
+ * This computer's own publisher key, to send to whoever owns a package you want
+ * to push to. A public key identifies; it does not authorize.
+ */
+export function myPublisherKey(): Promise<CoPublisherInfo> {
+  return invokeBackend("calp_my_publisher_key", {});
+}
+
+/**
+ * Where a push stands against what landed while its author was working.
+ *
+ * Read-only. Compares the registry head against this working copy's base, and
+ * this working copy against that same base, then asks whether the two touched
+ * any piece in common.
+ */
+export function pushMergeAnalyze(): Promise<MergeAnalysisResponse> {
+  return invokeBackend("calp_push_merge_analyze", {});
+}
+
+/**
+ * Bring the intervening changes into the open working copy as one undoable
+ * step, recalculate, and move the base forward.
+ *
+ * Re-runs the analysis server-side rather than trusting a verdict from here —
+ * the registry can move between a dialog rendering and a user confirming.
+ */
+export function pushMergeApply(): Promise<MergeApplyResponse> {
+  return invokeBackend("calp_push_merge_apply", {});
+}
+
+export function diffWorkingCopy(params?: {
+  registryPath?: string;
+  packageName?: string;
+  baseVersion?: string;
+  sheetIndices?: number[];
+  includeComments?: boolean;
+}): Promise<WorkingCopyDiff> {
+  return invokeBackend("calp_diff_working_copy", { params: params ?? {} });
 }
 
 export interface PublishModelParams {
@@ -1600,6 +2082,11 @@ export interface InspectorVersionEntry {
   version: string;
   publishedAt: string;
   publishedBy: string;
+  /** The version this one was pushed from. Empty for a package's first
+   *  version, and for versions published before push lineage was recorded. */
+  baseVersion: string;
+  /** What the author said changed, from the SIGNED version manifest. */
+  changeSummary: string;
 }
 
 export interface InspectorPackageInfo {

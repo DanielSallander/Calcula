@@ -2367,6 +2367,17 @@ fn assemble_workbook_for_save(
         }
     }
 
+    // Serialize the workspace link (the package this workbook is a working copy
+    // of) so a saved-and-reopened working copy still knows what it is pushing
+    // to and which base version it is working from.
+    {
+        let link = state.workspace_link.read().map_err(|e| e.to_string())?;
+        if let Some(link) = link.as_ref() {
+            let json = serde_json::to_vec_pretty(link).map_err(|e| e.to_string())?;
+            workbook.user_files.insert("workspace_link.json".to_string(), json);
+        }
+    }
+
     // Serialize override layer into user_files so it persists in the .cala archive
     {
         let overrides = state.override_layer.read().map_err(|e| e.to_string())?;
@@ -2703,9 +2714,9 @@ fn restore_scheduled_jobs(
     }
 }
 
-/// Restore the five document state files carried in `user_files`:
-/// subscriptions, the override layer, the audit log, the writeback drafts and
-/// the AI script-authoring transcript.
+/// Restore the six document state files carried in `user_files`:
+/// subscriptions, the workspace link, the override layer, the audit log, the
+/// writeback drafts and the AI script-authoring transcript.
 ///
 /// EVERY branch assigns. The rule this enforces is that a file which is PRESENT
 /// but unparseable resets its state, exactly as an absent file does. The earlier
@@ -2756,6 +2767,27 @@ fn restore_distribution_user_files(
         None => calp::manifest::SubscriptionManifest::default(),
     };
     *state.subscriptions.write(&load).map_err(|e| e.to_string())? = subscriptions;
+
+    // The workspace link fails in the same direction as subscriptions.json and
+    // is therefore restored under the same every-branch-assigns rule: an
+    // inherited link would aim this workbook's next PUSH at a package it is not
+    // a working copy of, and the push gates — which exist to make a mis-aimed
+    // publish impossible — would be reading the previous document's answer.
+    // Present-but-corrupt therefore means "standalone", never "keep whatever
+    // was there".
+    let workspace_link = match workbook.user_files.remove("workspace_link.json") {
+        Some(bytes) => serde_json::from_slice::<calp::WorkspaceLink>(&bytes)
+            .map_err(|e| {
+                crate::log_warn!(
+                    "CALP",
+                    "workspace_link.json is unreadable ({}) - this workbook opens as STANDALONE (not a working copy)",
+                    e
+                );
+            })
+            .ok(),
+        None => None,
+    };
+    *state.workspace_link.write(&load).map_err(|e| e.to_string())? = workspace_link;
 
     let overrides = match workbook.user_files.remove("overrides.json") {
         Some(bytes) => {
@@ -4042,6 +4074,16 @@ pub fn open_file(
         workbook.format_version,
     );
 
+    collect_active_sheet_cells(&state)
+}
+
+/// The active sheet's cells in the shape the frontend renders.
+///
+/// Extracted from `open_file` so every DOCUMENT-REPLACING command returns the
+/// same projection — `calp_checkout` replaces the document exactly as an open
+/// does, and a second hand-written copy of this loop would drift on the first
+/// new `CellData` field.
+pub(crate) fn collect_active_sheet_cells(state: &AppState) -> Result<Vec<CellData>, String> {
     let grid = state.grid.read().map_err(|e| e.to_string())?;
     let styles = state.style_registry.read().map_err(|e| e.to_string())?;
     let locale = state.locale.lock().map_err(|e| e.to_string())?;
@@ -4347,6 +4389,12 @@ pub(crate) fn reset_document_scoped_stores(
     // ---- Distribution (.calp) stores ---------------------------------------
     *state.subscriptions.write(effect).map_err(|e| e.to_string())? =
         calp::manifest::SubscriptionManifest::default();
+    // The workspace link is as document-scoped as they come: it names the
+    // package this workbook is a working copy of. Carrying it into a new or
+    // reopened document would aim that document's next PUSH at a package it has
+    // nothing to do with — and the push gates would agree, because the link IS
+    // the gate's input.
+    *state.workspace_link.write(effect).map_err(|e| e.to_string())? = None;
     *state.override_layer.write(effect).map_err(|e| e.to_string())? = calp::OverrideLayer::new();
     *state.audit_log.write(effect).map_err(|e| e.to_string())? = calp::audit::AuditLog::new();
     *state.writeback_layer.write(effect).map_err(|e| e.to_string())? =
@@ -5804,7 +5852,7 @@ mod distribution_user_file_restore_tests {
         state
     }
 
-    /// Workbook B: every one of the four files present, every one corrupt.
+    /// Workbook B: every one of the five files present, every one corrupt.
     fn workbook_b_with_corrupt_files() -> Workbook {
         let mut wb = Workbook::new();
         for name in [
@@ -5812,11 +5860,23 @@ mod distribution_user_file_restore_tests {
             "overrides.json",
             "audit_log.json",
             "writeback_drafts.json",
+            "workspace_link.json",
         ] {
             wb.user_files
                 .insert(name.to_string(), b"{ this is not json".to_vec());
         }
         wb
+    }
+
+    fn a_workspace_link(package: &str) -> calp::WorkspaceLink {
+        calp::WorkspaceLink::new(
+            r"\\server\registry",
+            package,
+            "report",
+            "1.2.0",
+            "2026-08-29T00:00:00Z",
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -5843,6 +5903,75 @@ mod distribution_user_file_restore_tests {
             state.writeback_layer.read().unwrap().drafts.is_empty(),
             "workbook A's drafts must not survive - a draft is the proof a cell \
              passed the writeback gate"
+        );
+        assert!(
+            state.workspace_link.read().unwrap().is_none(),
+            "workbook A's WORKSPACE LINK must not survive: it names the package \
+             this workbook pushes to, and the push gates read it as their input \
+             — so an inherited link aims workbook B's next push at workbook A's \
+             package, and every gate agrees because it is asking the wrong \
+             document's question"
+        );
+    }
+
+    #[test]
+    fn a_workspace_link_round_trips_through_save_and_restore() {
+        let state = crate::create_app_state();
+        let effect =
+            crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default());
+        let mut link = a_workspace_link("sales-report");
+        link.record_push(
+            "1.3.0",
+            "2026-08-29T12:00:00Z",
+            vec![calp::WorkspaceSheetRef {
+                sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
+                name: "Dashboard".to_string(),
+            }],
+        );
+        *state.workspace_link.write(&effect).unwrap() = Some(link.clone());
+
+        // Save projects it into user_files; restore reads it back.
+        let mut wb = Workbook::new();
+        let json = serde_json::to_vec_pretty(&link).unwrap();
+        wb.user_files.insert("workspace_link.json".to_string(), json);
+
+        let fresh = crate::create_app_state();
+        restore_distribution_user_files(&fresh, &mut wb).expect("restore succeeds");
+        let restored = fresh.workspace_link.read().unwrap().clone();
+        assert_eq!(
+            restored,
+            Some(link),
+            "a saved working copy must reopen knowing what it is a working copy OF"
+        );
+    }
+
+    #[test]
+    fn resetting_the_document_clears_the_workspace_link() {
+        let state = crate::create_app_state();
+        let effect =
+            crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default());
+        *state.workspace_link.write(&effect).unwrap() = Some(a_workspace_link("sales-report"));
+
+        let user_files = crate::persistence::UserFilesState::default();
+        let slicer = crate::slicer::SlicerState::new();
+        let ribbon = crate::ribbon_filter::RibbonFilterState::new();
+        let pane = crate::pane_control::PaneControlState::new();
+        let scripts = crate::scripting::types::ScriptState::new();
+        let pivots = crate::pivot::types::PivotState::new();
+        let bi = crate::bi::types::BiState::new();
+        let timeline = crate::timeline_slicer::TimelineSlicerState::new();
+        let reset = crate::document_effect::DocumentEffect::deliberately_clean(
+            crate::document_effect::CleanReason::LoadingFromDisk,
+        );
+        reset_document_scoped_stores(
+            &state, &user_files, &slicer, &ribbon, &pane, &scripts, &pivots, &bi, &timeline,
+            &reset,
+        )
+        .expect("reset succeeds");
+
+        assert!(
+            state.workspace_link.read().unwrap().is_none(),
+            "File > New / Open must leave no working-copy link behind"
         );
     }
 

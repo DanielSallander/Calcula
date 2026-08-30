@@ -90,4 +90,37 @@ pub enum CalpError {
 
     #[error("This package needs a newer version of Calcula: {package}@{version} requires app v{required} but this app is v{current}. Please update Calcula.")]
     AppTooOld { package: String, version: String, required: String, current: String },
+
+    // -- Push gates (workspace collaboration) -------------------------------
+    // These messages ARE the user-facing copy: the command layer renders
+    // CalpError with Display and adds nothing. Write them for the developer
+    // who just hit the gate, not for a log file.
+
+    #[error("Cannot push {package}: you started from v{expected_base}, but the registry is now at v{actual_latest} (published by {latest_published_by}). Open the latest version, re-apply your changes, and push again.")]
+    BaseVersionStale {
+        package: String,
+        expected_base: String,
+        actual_latest: String,
+        latest_published_by: String,
+    },
+
+    #[error("'{package}' is published by {holder_name} (key {holder_key}). This computer holds a different publisher key, and pushing would break every subscriber's trust pin. Ask {holder_name} to push this change.")]
+    NotThePublisher { package: String, holder_name: String, holder_key: String },
+
+    #[error("A change summary is required to push {package}: say what changed, in a sentence or two. Subscribers and co-developers read it in the version history.")]
+    MissingChangeSummary { package: String },
+
+    #[error("Cannot push {package} as v{version}: the registry already has v{latest}, and each version must be higher than the one before it. Use v{suggested} or higher.")]
+    VersionNotGreater { package: String, version: String, latest: String, suggested: String },
+
+    #[error("Another publish to this registry is in progress — try again in a minute. (Registry: {registry})")]
+    RegistryBusy { registry: String },
+
+    // -- Co-publishing (delegation) -----------------------------------------
+
+    #[error("The list of who may publish '{package}' cannot be trusted: {reason}. Until that is resolved, only the publisher who created the package can push to it.")]
+    PublisherListInvalid { package: String, reason: String },
+
+    #[error("'{package}' does not list this computer's publisher key among those allowed to publish it. Ask {root_holder} — the publisher who created the package — to add you as a co-publisher, or to push this change for you.")]
+    NotAuthorizedPublisher { package: String, root_holder: String },
 }

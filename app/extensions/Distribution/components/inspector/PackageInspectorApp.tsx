@@ -30,6 +30,7 @@ import {
   primaryButtonStyle,
 } from "./shared";
 import { OverviewSection } from "./OverviewSection";
+import { CompareSection } from "./CompareSection";
 import { SheetsSection } from "./SheetsSection";
 import { ObjectsSection } from "./ObjectsSection";
 import { ScriptsSection } from "./ScriptsSection";
@@ -47,6 +48,8 @@ export interface InspectorContext {
 
 const SECTIONS: { id: string; label: string }[] = [
   { id: "overview", label: "Overview" },
+  // Second, right after the version list it answers a question about.
+  { id: "compare", label: "Compare Versions" },
   { id: "sheets", label: "Sheets & Data" },
   { id: "objects", label: "Objects" },
   { id: "scripts", label: "Scripts & Code" },
@@ -359,6 +362,7 @@ export function PackageInspectorApp(): React.ReactElement {
           ) : (
             <>
               {section === "overview" && <OverviewSection overview={overview} />}
+              {section === "compare" && <CompareSection ctx={ctx} overview={overview} />}
               {section === "sheets" && <SheetsSection ctx={ctx} overview={overview} />}
               {section === "objects" && <ObjectsSection overview={overview} />}
               {section === "scripts" && <ScriptsSection ctx={ctx} overview={overview} />}

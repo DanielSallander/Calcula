@@ -164,6 +164,9 @@ const TRUST_NOTICE: Record<
   { tone: "ok" | "warn" | "danger"; text: (t: SubscriptionTrustInfo) => string } | null
 > = {
   verified: null,
+  // Normal operation, like : the authority traces to the key this
+  // machine pinned. The Inspector says WHO signed when somebody asks.
+  trustedDelegate: null,
   firstUse: {
     tone: "warn",
     text: (t) => `Publisher ${t.publisherName || "(unnamed)"} was trusted just now.`,

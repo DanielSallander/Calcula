@@ -111,6 +111,39 @@ pub trait RegistryTransport {
     /// Replaces the `fs::remove_dir_all(ver_dir)` publish used to do directly.
     fn clear_version(&self, package_name: &str, version: &str) -> Result<(), CalpError>;
 
+    /// Read a file at the PACKAGE root — beside `calp-manifest.json`, outside
+    /// any version.
+    ///
+    /// Versions are immutable, which is exactly right for content and exactly
+    /// wrong for a statement about the package as a whole. The co-publisher
+    /// list (`publishers.json`) lives here because adding a delegate must not
+    /// require publishing a version, and because it applies to every version at
+    /// once. It carries its own detached signature rather than riding in the
+    /// per-version checksum map.
+    ///
+    /// Default: absent. A transport with no package-root storage answers "no
+    /// list", which is the same as a package that has never had one.
+    fn read_package_artifact(
+        &self,
+        _package_name: &str,
+        _rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, CalpError> {
+        Ok(None)
+    }
+
+    /// Write a file at the package root. Default: refuse, so a read-only
+    /// transport says so instead of appearing to succeed.
+    fn write_package_artifact(
+        &self,
+        _package_name: &str,
+        _rel_path: &str,
+        _bytes: &[u8],
+    ) -> Result<(), CalpError> {
+        Err(CalpError::Registry(
+            "this registry cannot store package-level files".to_string(),
+        ))
+    }
+
     /// Move a version's just-written artifacts into a content-addressed blob
     /// store, deduplicating bytes that repeat across versions (org-scale: a
     /// daily-published workbook only re-stores the artifacts that actually
@@ -350,6 +383,21 @@ impl RegistryTransport for Box<dyn RegistryTransport> {
         version: &str,
     ) -> Result<Vec<WritebackSubmission>, CalpError> {
         (**self).load_current_submissions(package_name, version)
+    }
+    fn read_package_artifact(
+        &self,
+        package_name: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, CalpError> {
+        (**self).read_package_artifact(package_name, rel_path)
+    }
+    fn write_package_artifact(
+        &self,
+        package_name: &str,
+        rel_path: &str,
+        bytes: &[u8],
+    ) -> Result<(), CalpError> {
+        (**self).write_package_artifact(package_name, rel_path, bytes)
     }
     fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
         (**self).lock()

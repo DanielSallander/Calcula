@@ -9,12 +9,12 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | This doc said | Actual (2026-08-16) | Recounted (2026-08-27) | How counted |
+| Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | How counted |
 |---|---:|---:|---:|---|
-| Commands in `generate_handler!` | 569 | 761 | **773** | bracket-matched parse of `lib.rs` (all unique) |
-| `#[tauri::command]` attributes | — | 798 | **815** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Commands in `generate_handler!` | 761 | 773 | **783** | bracket-matched parse of `lib.rs` (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | **822** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
 | Privileged (denylisted) commands | ~30 | 94 | **100** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
-| Feature-open commands | "safe 540" | 667 | **673** | 773 − 100 |
+| Feature-open commands | 667 | 673 | **683** | 783 − 100 |
 | Typed wrappers in `backend.ts` | ~229 | 327 | **338** | exported functions/consts in `backend.ts` |
 | Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | current suite |
 

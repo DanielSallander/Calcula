@@ -1018,6 +1018,16 @@ fn dispatch(
             let version: String = field(p, "version")?;
             let kind: Option<String> = field(p, "kind")?;
             let sheet_indices: Option<Vec<usize>> = field(p, "sheetIndices")?;
+            // A scripted publish declares the same push mode an interactive one
+            // does. It defaults to "createNew" — NOT because creating is safer,
+            // but because the alternative (inferring "update" from the registry)
+            // would let a script silently take whatever the head happens to be
+            // as its base, which is exactly the lost update the gate exists to
+            // prevent. A script that means to push a new version must say so,
+            // and say from what.
+            let mode: Option<String> = field(p, "mode")?;
+            let expected_base: Option<String> = field(p, "expectedBaseVersion")?;
+            let change_summary: Option<String> = field(p, "changeSummary")?;
             let params = serde_json::from_value(json!({
                 "registryPath": registry_path,
                 "packageName": package_name,
@@ -1028,10 +1038,14 @@ fn dispatch(
                 // rejections in reject_forbidden_publish_fields).
                 "publishedBy": publisher_display_name()?,
                 "includeComments": false,
+                "mode": mode.unwrap_or_else(|| "createNew".to_string()),
+                "expectedBaseVersion": expected_base,
+                "changeSummary": change_summary.unwrap_or_default(),
             }))
             .map_err(|e| e.to_string())?;
             let mut response = calp_cmds::calp_publish(
                 state.clone(),
+                (*file_state).clone(),
                 bi_state.clone(),
                 pivot_state.clone(),
                 script_state.clone(),

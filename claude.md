@@ -173,7 +173,7 @@ enforced by the compiler, not by review.
   `write(&effect)` requires a `DocumentEffect`. **Do not count the fields by hand, and do not
   quote a number from this file.** `the_appstate_lock_census_reconciles`
   (`app/src-tauri/src/document_effect.rs`) parses the struct body and asserts the split, so the
-  build fails the moment it moves. As pinned today: **105 fields — 63 `Persisted<T>`, 40 bare
+  build fails the moment it moves. As pinned today: **106 fields — 64 `Persisted<T>`, 40 bare
   `Mutex`/`RwLock`, 2 neither** (`undo_stack`, `calc_cancel`). Three successive hand-counts in
   this very paragraph were wrong before that test existed — 36, then 51, then 59, each from a
   different grep spelling — which is why the number now lives in a test and this paragraph no
@@ -322,7 +322,7 @@ in `tests/regression/bug-ledger.json` via its allocator, which assigns ids and r
   a pure-CRLF file as LF, and `grep -c $'\x00'` degrades to an empty pattern that "matches" every
   line, so it can never detect a NUL byte. Measure endings and NUL bytes with node, not the shell.
 
-`generate_handler!` in `app/src-tauri/src/lib.rs` registers 773 commands (recounted 2026-08-27; bracket-matched parse, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). It read 761 for eleven days while the tree held 769: nothing enforces this number, so re-run the parse rather than trusting the sentence. Its debug-build
+`generate_handler!` in `app/src-tauri/src/lib.rs` registers 783 commands (recounted 2026-08-29; bracket-matched parse, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). It read 761 for eleven days while the tree held 769: nothing enforces this number, so re-run the parse rather than trusting the sentence. Its debug-build
 dispatch frame sits on the OS MAIN thread (tao requires the event loop there, so wrapping it in a
 larger-stack `thread::spawn` panics); `app/src-tauri/build.rs` links with `/STACK:33554432` (32 MB)
 to hold it. Adding commands in bulk eats that headroom -- the symptom is

@@ -789,7 +789,7 @@ fn viewer_script() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::publish::{self, PublishRequest};
+    use crate::publish::{self, PublishRequest, PushMode};
     use crate::registry::LocalRegistry;
     use crate::version::SemVer;
     use engine::cell::Cell;
@@ -908,6 +908,8 @@ mod tests {
             package_name: "Sales Report".to_string(),
             version: SemVer::new(1, 2, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1, 2],
             now: "2026-06-16T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1035,6 +1037,8 @@ mod tests {
             package_name: "blank-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0],
             now: "2026-06-16T00:00:00Z".to_string(),
             published_by: "tester".to_string(),

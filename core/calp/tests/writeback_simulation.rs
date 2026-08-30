@@ -36,7 +36,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use calp::integrity::{PinPolicy, TrustStatus};
-use calp::publish::{self, PublishRequest};
+use calp::publish::{self, PublishRequest, PushMode};
 use calp::pull::{self, PullRequest};
 use calp::registry::LocalRegistry;
 use calp::version::{SemVer, VersionPin};
@@ -140,6 +140,14 @@ fn publish_version(
         package_name: PKG.to_string(),
         version,
         kind: "report".to_string(),
+        // Shared by the first publish and the version bump, so it asks the
+        // registry. Production callers take the base from the working copy's
+        // workspace link instead — see the note in lifecycle.rs.
+        mode: match reg.get_package_manifest(PKG).ok().and_then(|m| calp::head_version(&m)) {
+            Some(head) => PushMode::Update { expected_base: head },
+            None => PushMode::CreateNew,
+        },
+        change_summary: "writeback simulation push".to_string(),
         sheet_indices: vec![0],
         now: "2026-06-15T00:00:00Z".to_string(),
         published_by: "Finance HQ".to_string(),

@@ -810,6 +810,7 @@ fn every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason() 
         ("calp_commands.rs", "write_override_value", "all three override commands run recalculate_sheet_values after"),
         ("commands/coord_shift.rs", "shift_per_sheet_cell_map", "generic coordinate-map shift used by the structural edit"),
         ("scripting/commands.rs", "parse_script_formula_writes", "builds a detached grid; apply_script_modified_grids_core recalculates"),
+        ("calp_merge.rs", "overlay_their_cells", "builds a DETACHED copy of the grids with the intervening version's cells laid over it; it mutates nothing in AppState and hands the result to apply_script_modified_grids, which diffs, records undo and recalculates — the same arrangement parse_script_formula_writes has"),
         ("commands/structure.rs", "shift_cross_sheet_formulas", "helper of the structural edit, which recalculates"),
         ("commands/structure.rs", "shift_cross_sheet_formulas_for_off_sheet_edit", "helper of off_sheet_structural_edit, which recalculates"),
         ("tables.rs", "write_table_formula_cell", "helper: writes ONE totals cell with its resolved AST + edges; `set_totals_row_function` and `toggle_totals_row` seed the cascade over every cell they hand it"),

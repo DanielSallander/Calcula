@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::CalpError;
@@ -82,17 +84,31 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<(), CalpError> {
     }
 }
 
-/// A best-effort cross-process advisory lock over a registry, used to serialize
-/// the package-manifest read-modify-write so concurrent publishes don't lose a
-/// version-list update. Acquired by exclusively creating a lockfile; released on
-/// drop. A lockfile older than `STALE` is treated as abandoned (crashed holder)
-/// and stolen so a crash can never deadlock the registry forever.
+/// A best-effort cross-process advisory lock over a registry. Held across the
+/// whole registry-write phase of a publish — the gate checks (does this version
+/// exist, is the caller's base still the head) and the writes they authorize sit
+/// in ONE critical section, so a concurrent publish cannot slip between a check
+/// and its commit.
+///
+/// Acquired by exclusively creating a lockfile; released on drop. A lockfile
+/// whose mtime is older than `STALE` is treated as abandoned (crashed holder)
+/// and stolen, so a crash can never deadlock the registry forever.
+///
+/// Because staleness is judged by mtime, a LIVE holder must keep its lockfile
+/// fresh or a long publish over a slow share would be stolen out from under
+/// itself. A heartbeat thread touches the file every `HEARTBEAT`; it stops and
+/// is joined on drop.
 pub struct RegistryLock {
     path: PathBuf,
+    stop: Arc<AtomicBool>,
+    heartbeat: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RegistryLock {
     const STALE: Duration = Duration::from_secs(30);
+    /// Comfortably inside STALE so a missed beat (a stalled share, a suspended
+    /// thread) still leaves margin before another process reads us as crashed.
+    const HEARTBEAT: Duration = Duration::from_secs(10);
 
     pub fn acquire(root: &Path) -> Result<Self, CalpError> {
         let path = root.join(".calp-lock");
@@ -105,7 +121,7 @@ impl RegistryLock {
         let max_wait = Self::STALE + Duration::from_secs(5);
         loop {
             match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Ok(RegistryLock { path }),
+                Ok(_) => return Ok(Self::with_heartbeat(path)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Steal an abandoned lock (holder crashed) rather than wait forever.
                     if let Ok(meta) = fs::metadata(&path) {
@@ -117,9 +133,9 @@ impl RegistryLock {
                         }
                     }
                     if start.elapsed() > max_wait {
-                        return Err(CalpError::Registry(
-                            "could not acquire registry lock (timed out)".to_string(),
-                        ));
+                        return Err(CalpError::RegistryBusy {
+                            registry: root.display().to_string(),
+                        });
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
@@ -127,10 +143,46 @@ impl RegistryLock {
             }
         }
     }
+
+    /// Start the keep-alive thread for a lockfile we just created.
+    fn with_heartbeat(path: PathBuf) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let beat_path = path.clone();
+        let beat_stop = Arc::clone(&stop);
+        let handle = std::thread::Builder::new()
+            .name("calp-registry-lock-heartbeat".to_string())
+            .spawn(move || {
+                // Poll the stop flag frequently so drop() joins promptly, but
+                // only touch the file once per HEARTBEAT.
+                let tick = Duration::from_millis(200);
+                let mut since_touch = Duration::ZERO;
+                while !beat_stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(tick);
+                    since_touch += tick;
+                    if since_touch >= RegistryLock::HEARTBEAT {
+                        since_touch = Duration::ZERO;
+                        // Rewriting the file bumps its mtime on every platform
+                        // without needing a filetime dependency. Best effort:
+                        // if the share hiccups we simply try again next tick.
+                        let _ = fs::OpenOptions::new().write(true).open(&beat_path)
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                f.write_all(b"1")
+                            });
+                    }
+                }
+            })
+            .ok();
+        RegistryLock { path, stop, heartbeat: handle }
+    }
 }
 
 impl Drop for RegistryLock {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.heartbeat.take() {
+            let _ = handle.join();
+        }
         let _ = fs::remove_file(&self.path);
     }
 }
@@ -840,6 +892,33 @@ impl RegistryTransport for LocalRegistry {
         LocalRegistry::list_packages(self)
     }
 
+    fn read_package_artifact(
+        &self,
+        package_name: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, CalpError> {
+        // Validated like every other path component: the name comes from a
+        // third-party manifest, and the rel_path from this crate's own
+        // constants — but validating both keeps the boundary rule uniform.
+        validate_component(rel_path, "package artifact name")?;
+        let path = self.package_dir(package_name)?.join(rel_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(fs::read(&path)?))
+    }
+
+    fn write_package_artifact(
+        &self,
+        package_name: &str,
+        rel_path: &str,
+        bytes: &[u8],
+    ) -> Result<(), CalpError> {
+        validate_component(rel_path, "package artifact name")?;
+        let path = self.package_dir(package_name)?.join(rel_path);
+        atomic_write(&path, bytes)
+    }
+
     fn get_package_manifest(&self, package_name: &str) -> Result<PackageManifest, CalpError> {
         LocalRegistry::get_package_manifest(self, package_name)
     }
@@ -1075,6 +1154,8 @@ mod tests {
             publisher_key: String::new(),
             publisher_name: String::new(),
             min_app_version: String::new(),
+            base_version: String::new(),
+            change_summary: String::new(),
             sheets: vec![crate::manifest::PublishedSheet {
                 sheet_id,
                 name: "Dashboard".to_string(),
@@ -1118,10 +1199,10 @@ mod tests {
         let (_dir, reg) = create_test_registry();
         let mut manifest = create_test_package(&reg, "pkg");
         manifest.versions = vec![
-            VersionEntry { version: "1.0.0".to_string(), published_at: "2026-01-01T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
-            VersionEntry { version: "1.1.0".to_string(), published_at: "2026-01-02T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
-            VersionEntry { version: "1.2.0".to_string(), published_at: "2026-01-03T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
-            VersionEntry { version: "2.0.0".to_string(), published_at: "2026-01-04T00:00:00Z".to_string(), published_by: String::new(), extra: std::collections::HashMap::new() },
+            VersionEntry { version: "1.0.0".to_string(), published_at: "2026-01-01T00:00:00Z".to_string(), published_by: String::new(), base_version: String::new(), change_summary: String::new(), publisher_key: String::new(), extra: std::collections::HashMap::new() },
+            VersionEntry { version: "1.1.0".to_string(), published_at: "2026-01-02T00:00:00Z".to_string(), published_by: String::new(), base_version: String::new(), change_summary: String::new(), publisher_key: String::new(), extra: std::collections::HashMap::new() },
+            VersionEntry { version: "1.2.0".to_string(), published_at: "2026-01-03T00:00:00Z".to_string(), published_by: String::new(), base_version: String::new(), change_summary: String::new(), publisher_key: String::new(), extra: std::collections::HashMap::new() },
+            VersionEntry { version: "2.0.0".to_string(), published_at: "2026-01-04T00:00:00Z".to_string(), published_by: String::new(), base_version: String::new(), change_summary: String::new(), publisher_key: String::new(), extra: std::collections::HashMap::new() },
         ];
         reg.write_package_manifest(&manifest).unwrap();
 
@@ -1159,6 +1240,8 @@ mod tests {
             publisher_key: String::new(),
             publisher_name: String::new(),
             min_app_version: String::new(),
+            base_version: String::new(),
+            change_summary: String::new(),
             sheets: Vec::new(),
             named_ranges: Vec::new(),
             tables: Vec::new(),
@@ -1320,6 +1403,8 @@ mod tests {
             publisher_key: String::new(),
             publisher_name: String::new(),
             min_app_version: String::new(),
+            base_version: String::new(),
+            change_summary: String::new(),
             sheets: Vec::new(),
             named_ranges: Vec::new(),
             tables: Vec::new(),
@@ -1367,6 +1452,8 @@ mod tests {
             publisher_key: String::new(),
             publisher_name: String::new(),
             min_app_version: String::new(),
+            base_version: String::new(),
+            change_summary: String::new(),
             sheets: Vec::new(),
             named_ranges: Vec::new(),
             tables: Vec::new(),

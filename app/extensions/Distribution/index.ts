@@ -17,6 +17,7 @@ import {
   ConnectedObjectsSection,
   PublishPreviewSection,
 } from "./components/PackageExplorerPanel";
+import { WorkspaceSection } from "./components/WorkspaceSection";
 import {
   DistributionManifest,
   DISTRIBUTION_MENU_ID,
@@ -34,6 +35,8 @@ import {
   DESIGNATE_WRITEBACK_DIALOG_ID,
   CONNECTION_DIALOG_ID,
   PublishDialogDefinition,
+  CheckoutDialogDefinition,
+  CHECKOUT_DIALOG_ID,
   PublishModelDialogDefinition,
   SubscribeDialogDefinition,
   RefreshPreviewDialogDefinition,
@@ -162,6 +165,13 @@ function activate(context: ExtensionContext): void {
     icon: IconPackage,
     sections: [
       {
+        // First, because it answers the question a developer opens this panel
+        // with: what am I working on, and where does it stand?
+        id: `${PACKAGE_EXPLORER_PANEL_ID}.workspace`,
+        label: "Workspace",
+        component: WorkspaceSection,
+      },
+      {
         id: `${PACKAGE_EXPLORER_PANEL_ID}.connected`,
         label: "Connected objects",
         component: ConnectedObjectsSection,
@@ -179,6 +189,7 @@ function activate(context: ExtensionContext): void {
 
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
+  context.ui.dialogs.register(CheckoutDialogDefinition);
   context.ui.dialogs.register(PublishModelDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
   context.ui.dialogs.register(RefreshPreviewDialogDefinition);
@@ -216,17 +227,28 @@ function activate(context: ExtensionContext): void {
         action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
       },
       {
+        // The author-side counterpart of Subscribe, and deliberately next to
+        // it: the two look similar and mean opposite things — edit the package
+        // itself, versus take a copy of it to use — so they are read together
+        // or not at all.
+        id: "distribution:openPackageForEditing",
+        label: "Open Package for Editing...",
+        icon: IconSubscribePackage,
+        order: 11,
+        action: () => context.ui.dialogs.show(CHECKOUT_DIALOG_ID),
+      },
+      {
         id: "distribution:subscribePackage",
         label: "Subscribe to Package...",
         icon: IconSubscribePackage,
-        order: 11,
+        order: 12,
         action: () => context.ui.dialogs.show(SUBSCRIBE_DIALOG_ID),
       },
       {
         id: "distribution:refreshSubscriptions",
         label: "Refresh Subscriptions...",
         icon: IconRefreshSubscriptions,
-        order: 12,
+        order: 13,
         action: () => context.ui.dialogs.show(REFRESH_PREVIEW_DIALOG_ID),
       },
       { id: "distribution:sep.manage", label: "", separator: true, order: 19 },

@@ -705,6 +705,9 @@ mod tests {
             version: ver.to_string(),
             published_at: "2026-08-01T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
+            base_version: String::new(),
+            change_summary: String::new(),
+            publisher_key: String::new(),
             extra: Default::default(),
         });
         registry.write_package_manifest(&pkg_manifest).unwrap();

@@ -266,6 +266,10 @@ pub fn skin_publish(
         publisher_key: keypair.public_key_hex(),
         publisher_name: keypair.display_name(),
         min_app_version: String::new(),
+        // Skin packs are republished wholesale rather than developed as a
+        // working copy, so they carry no push lineage.
+        base_version: String::new(),
+        change_summary: String::new(),
         sheets: Vec::new(),
         named_ranges: Vec::new(),
         tables: Vec::new(),
@@ -313,6 +317,9 @@ pub fn skin_publish(
             version: version.to_string(),
             published_at: now.to_string(),
             published_by: keypair.display_name(),
+            base_version: String::new(),
+            change_summary: String::new(),
+            publisher_key: keypair.public_key_hex(),
             extra: std::collections::HashMap::new(),
         });
         registry.write_package_manifest(&pkg)?;
@@ -400,6 +407,10 @@ pub fn skin_pull(
         // green "verified" badge — never do that again.
         trust: match trust {
             TrustStatus::Verified => SkinTrust::Verified,
+            // A skin published by a co-publisher the pinned publisher
+            // authorized carries the same assurance as one they signed
+            // themselves: the authority traces to the key this machine pinned.
+            TrustStatus::TrustedDelegate => SkinTrust::Verified,
             TrustStatus::FirstUse => SkinTrust::FirstUse,
             TrustStatus::FirstUseKnownPublisher => SkinTrust::FirstUseKnownPublisher,
             TrustStatus::FirstUseAcceptedNameConflict => {

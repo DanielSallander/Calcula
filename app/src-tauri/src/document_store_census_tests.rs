@@ -185,7 +185,13 @@ const RESET_FUNCTIONS: &[&str] = &[
 ///   the connection the pull had just created. The connection therefore lives
 ///   exactly as long as the document that pulled it, which is the correct
 ///   lifetime and the one this census enforces at both ends.
-const DOCUMENT_REPLACING_PATHS: &[&str] = &["new_file", "open_file"];
+/// `calp_checkout` is the third: opening a published package as a WORKING COPY
+/// replaces the document exactly as File > Open does — the package's sheets,
+/// scripts, model and controls become the workbook. It differs from the other
+/// two only in where the content comes from and in ending DIRTY (the working
+/// copy has no file of its own yet), neither of which changes what has to be
+/// torn down first.
+const DOCUMENT_REPLACING_PATHS: &[&str] = &["new_file", "open_file", "calp_checkout"];
 
 /// Stores the save path reads that the reset deliberately does not touch.
 ///
@@ -1002,6 +1008,9 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("xlsx_save_loss_report", "a dry run of the xlsx writer, reporting what a save would drop"),
     ("calp_publish", "packages the open document; nothing in it changes"),
     ("calp_publish_preview", "a dry run of publish"),
+    ("calp_diff_working_copy", "runs the publish assembly against an IN-MEMORY registry to compare the open document with the version it was authored from. It holds the same states `calp_publish` does for the same reason — it is a publish, just not to a real registry — and, like the dry run, writes nothing anywhere"),
+    ("calp_push_merge_analyze", "diffs the registry head and the open document against a common base to decide whether two people's changes overlap. Read-only: it runs the publish assembly in memory, exactly as the working-copy diff does"),
+    ("calp_push_merge_apply", "brings the intervening version's CELL changes into the open document and moves the workspace link's base forward. It edits the current document — it does not replace it — and the writes go through `apply_script_modified_grids`, which is the ordinary edit pipeline (undo, recalculation, dirty flag, events)"),
     ("calp_get_package_objects", "reads a package's inventory to show it"),
     // -- Materializes package content INTO the open document ------------------
     ("calp_pull", "SUBSCRIBING adds a package's sheets and data sources to the CURRENT document. It is the one flow that legitimately CREATES a BI connection (`load_embedded_data_sources`), so running the reset here would delete the connection the pull had just made"),
@@ -1370,11 +1379,17 @@ fn new_file_delegates_every_store_reset() {
 /// a store `open_file` knows about and the reset does not is the next one.
 #[test]
 fn open_file_touches_no_store_the_reset_does_not_cover() {
-    /// Stores `open_file` reaches that the reset deliberately leaves alone.
-    const OPEN_FILE_MAY_TOUCH: &[(&str, &str)] = &[(
-        "AppState.locale",
-        "READ, not written: the command formats the opened cells for its return value and needs the user's decimal and thousands separators to do it. The locale is an application preference (see SESSION_SCOPED), so the reset must not clear it and this read must not be mistaken for one",
-    )];
+    /// Stores `open_file` reaches that the reset deliberately leaves alone AND
+    /// that `SESSION_SCOPED` does not already argue for.
+    ///
+    /// Empty, and that is the healthy state. It used to hold `AppState.locale`,
+    /// whose reason ended "(see SESSION_SCOPED)" — i.e. it was a second copy of
+    /// an argument already made elsewhere, and a second copy is a second thing
+    /// to keep true. Now this test consults `SESSION_SCOPED` directly, so a
+    /// store argued there needs no restatement here, and an entry that appears
+    /// here means something genuinely different: the open path reaches a
+    /// DOCUMENT store that the reset does not put back.
+    const OPEN_FILE_MAY_TOUCH: &[(&str, &str)] = &[];
 
     let sources = read_crate_sources();
     let fns = index_functions(&sources);
@@ -1382,8 +1397,16 @@ fn open_file_touches_no_store_the_reset_does_not_cover() {
 
     let defs: Vec<&FnDef> = fns.iter().filter(|f| f.name == "open_file").collect();
     assert_eq!(defs.len(), 1, "expected exactly one `open_file`");
-    let touched: BTreeSet<String> = scan_store_accesses(&defs[0].code())
-        .into_iter()
+    // Through the CALL CLOSURE, not the one body — lesson 1 in this file's own
+    // header, applied here after it caught something: `open_file`'s return
+    // projection was moved into `collect_active_sheet_cells` (so `calp_checkout`
+    // could return the identical shape), and a body-only scan promptly reported
+    // the locale read as a stale exemption. The store was still being read; only
+    // the line had moved. A census that a refactor can walk out of is a census
+    // that stops asking its question the first time someone tidies up.
+    let touched: BTreeSet<String> = call_closure(&fns, &["open_file"])
+        .iter()
+        .flat_map(|f| scan_store_accesses(&f.code()))
         .map(|(key, _)| key)
         .collect();
 
@@ -1397,6 +1420,11 @@ fn open_file_touches_no_store_the_reset_does_not_cover() {
     let uncovered: Vec<&String> = touched
         .iter()
         .filter(|k| !covered.contains(*k))
+        // A store already argued as the SESSION's rather than the DOCUMENT's,
+        // with a written reason, is not reset by design — asking for a second
+        // exemption in a second list would mean maintaining one argument in two
+        // places, and the two would eventually disagree.
+        .filter(|k| !SESSION_SCOPED.iter().any(|(n, _)| *n == k.as_str()))
         .filter(|k| !OPEN_FILE_MAY_TOUCH.iter().any(|(n, _)| *n == k.as_str()))
         .collect();
     assert!(

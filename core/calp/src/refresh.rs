@@ -38,6 +38,9 @@ pub struct RefreshPreview {
     pub total_sheets_removed: usize,
     pub total_overrides_conflicted: usize,
     pub total_overrides_auto_cleared: usize,
+    /// False when any subscription's cell count was capped by a budget. The
+    /// dialog must then say "at least N" rather than "N".
+    pub total_cells_changed_exact: bool,
 }
 
 /// Preview for a single subscription's refresh.
@@ -53,8 +56,14 @@ pub struct SubscriptionPreview {
     pub sheets_removed: Vec<SheetChangeInfo>,
     /// Sheets that exist in both versions (updated).
     pub sheets_updated: Vec<SheetChangeInfo>,
-    /// Cells that changed upstream.
+    /// Cells that changed upstream. Exact unless `cells_changed_exact` is
+    /// false, in which case it is a floor ("at least this many").
     pub cells_changed: usize,
+    /// Whether `cells_changed` is the whole truth or a bounded floor.
+    pub cells_changed_exact: bool,
+    /// How many sheets had a changed data artifact — meaningful even when the
+    /// cell count had to be capped.
+    pub sheets_with_data_changes: usize,
     /// Overrides that would become conflicts.
     pub overrides_conflicted: usize,
     /// Overrides that would auto-clear (match new upstream).
@@ -126,6 +135,7 @@ pub fn compute_preview(
     let mut total_removed = 0;
     let mut total_conflicts = 0;
     let total_cleared = 0;
+    let mut total_cells_exact = true;
 
     for sub in subscriptions {
         let pin = VersionPin::parse(&sub.version_pin)?;
@@ -193,11 +203,29 @@ pub fn compute_preview(
             .map(|s| s.override_count)
             .sum();
 
+        // REAL cell counts, bounded.
+        //
+        // This used to be `cells_changed: 0` with a comment saying a full diff
+        // would be expensive — so the confirm dialog showed the user a number
+        // nobody had computed, and asked them to approve it. A budgeted exact
+        // count with an honest `exact` flag beside it is strictly better than a
+        // fabricated zero: past the budget the dialog says "at least N", which
+        // is a true sentence.
+        let (cells_changed, cells_exact, sheets_with_data_changes) = count_upstream_cell_changes(
+            registry,
+            &sub.package_name,
+            &sub.resolved_version,
+            &new_version_str,
+            &new_manifest,
+        );
+
         let preview = SubscriptionPreview {
             package_name: sub.package_name.clone(),
             current_version: sub.resolved_version.clone(),
             new_version: new_version_str,
-            cells_changed: 0, // Would require full diff — expensive, skip for preview
+            cells_changed,
+            cells_changed_exact: cells_exact,
+            sheets_with_data_changes,
             overrides_conflicted: conflict_estimate,
             overrides_auto_cleared: 0,
             sheets_added: sheets_added.clone(),
@@ -205,6 +233,9 @@ pub fn compute_preview(
             sheets_updated: sheets_updated.clone(),
         };
 
+        if !cells_exact {
+            total_cells_exact = false;
+        }
         total_cells += preview.cells_changed;
         total_added += sheets_added.len();
         total_removed += sheets_removed.len();
@@ -220,7 +251,79 @@ pub fn compute_preview(
         total_sheets_removed: total_removed,
         total_overrides_conflicted: total_conflicts,
         total_overrides_auto_cleared: total_cleared,
+        total_cells_changed_exact: total_cells_exact,
     })
+}
+
+/// How many cells actually changed between the version a subscriber is on and
+/// the one they would move to.
+///
+/// Returns `(cells_changed, exact, sheets_with_data_changes)`.
+///
+/// BUDGETED, and honest about it. The old code returned a hardcoded zero with a
+/// comment explaining that a real diff would be expensive — which meant the
+/// confirmation dialog displayed a number nobody had computed. The budget below
+/// keeps the cost bounded; the `exact` flag keeps the answer true when the
+/// budget bites, so the dialog can say "at least N" instead of inventing one.
+///
+/// Degrades rather than failing: an old version whose manifest is unreadable
+/// (pruned, or a registry that has gone away mid-preview) yields
+/// `(0, false, 0)` — "unknown", never "nothing".
+fn count_upstream_cell_changes(
+    registry: &dyn RegistryTransport,
+    package: &str,
+    old_version: &str,
+    new_version: &str,
+    new_manifest: &crate::manifest::VersionManifest,
+) -> (usize, bool, usize) {
+    /// Sheet data artifacts worth parsing for one subscription's preview.
+    const MAX_SHEETS: usize = 16;
+    /// Per-side cap on a single sheet's data artifact.
+    const MAX_BYTES: usize = 4 * 1024 * 1024;
+
+    let Ok(old_manifest) = registry.get_version_manifest(package, old_version) else {
+        return (0, false, 0);
+    };
+
+    // L1: which sheet data artifacts differ at all. Signed hashes on both
+    // sides, so this costs nothing beyond the two manifests already in hand.
+    let changed: Vec<&String> = new_manifest
+        .artifact_checksums
+        .iter()
+        .filter(|(rel, hash)| {
+            rel.starts_with("sheets/")
+                && rel.ends_with("/data.json")
+                && old_manifest.artifact_checksums.get(*rel).is_some_and(|old| old != *hash)
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+
+    let sheets_with_data_changes = changed.len();
+    let mut total = 0usize;
+    let mut exact = true;
+
+    for (i, rel) in changed.iter().enumerate() {
+        if i >= MAX_SHEETS {
+            exact = false;
+            break;
+        }
+        let read = |version: &str| -> Option<calcula_format::sheet_data::SheetData> {
+            match registry.read_artifact(package, version, rel) {
+                Ok(Some(bytes)) if bytes.len() <= MAX_BYTES => serde_json::from_slice(&bytes).ok(),
+                _ => None,
+            }
+        };
+        match (read(old_version), read(new_version)) {
+            (Some(before), Some(after)) => {
+                total += crate::diff::count_sheet_data_changes(&before, &after).total();
+            }
+            // Too large to parse, or unreadable: the sheet still changed, but
+            // by how much is not something to guess at.
+            _ => exact = false,
+        }
+    }
+
+    (total, exact, sheets_with_data_changes)
 }
 
 // ============================================================================
@@ -400,7 +503,7 @@ mod tests {
     use crate::manifest::SubscribedSheet;
     use crate::registry::LocalRegistry;
     use tempfile::TempDir;
-    use crate::publish::{self, PublishRequest};
+    use crate::publish::{self, PublishRequest, PushMode};
     use crate::version::SemVer;
 
     /// The scope a real call site derives from the registry's location.
@@ -429,6 +532,8 @@ mod tests {
                 package_name: "test-pkg".to_string(),
                 version: SemVer::new(ver.0, ver.1, ver.2),
                 kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "test-pkg"),
+                change_summary: "test push".to_string(),
                 sheet_indices: vec![0],
                 now: "2026-01-01T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
@@ -477,6 +582,118 @@ mod tests {
         assert_eq!(preview.subscription_previews.len(), 1);
         assert_eq!(preview.subscription_previews[0].new_version, "1.1.0");
         assert_eq!(preview.subscription_previews[0].current_version, "1.0.0");
+    }
+
+    /// The preview reports a REAL cell count, not a placeholder.
+    ///
+    /// This number is shown in a confirmation dialog. It was hardcoded to 0
+    /// with a comment saying a diff would be expensive, which meant the user
+    /// was asked to approve a figure nobody had computed — the diff was
+    /// fabricated, not merely coarse.
+    #[test]
+    fn preview_reports_the_cells_that_actually_changed() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalRegistry::open(dir.path()).unwrap();
+
+        // v1.0.0, then v1.1.0 with two cells edited and one added.
+        let wb = make_workbook();
+        let sheet_id = wb.sheets[0].id;
+        let publish_it = |wb: &persistence::Workbook, version: SemVer| {
+            let request = PublishRequest {
+                model_writebacks: None,
+                workbook: wb,
+                package_name: "counted".to_string(),
+                version,
+                kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "counted"),
+                change_summary: "test push".to_string(),
+                sheet_indices: vec![0],
+                now: "2026-01-01T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
+            };
+            publish::publish(&reg, &request, prof.path()).unwrap();
+        };
+        publish_it(&wb, SemVer::new(1, 0, 0));
+
+        let mut v2 = wb.clone();
+        v2.sheets[0].cells.insert(
+            (0, 0),
+            persistence::SavedCell::from_cell(&engine::cell::Cell::new_number(4242.0)),
+        );
+        v2.sheets[0].cells.insert(
+            (9, 9),
+            persistence::SavedCell::from_cell(&engine::cell::Cell::new_text("new".to_string())),
+        );
+        publish_it(&v2, SemVer::new(1, 1, 0));
+
+        let sub = Subscription {
+            package_name: "counted".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: "^1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: vec![SubscribedSheet {
+                package_sheet_id: sheet_id,
+                local_sheet_id: SheetId::from_bytes(identity::generate_uuid_v7()),
+                local_name: "Sheet1".to_string(),
+                extra: std::collections::HashMap::new(),
+            }],
+            channel: String::new(),
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let preview = compute_preview(&reg, &[sub], &OverrideLayer::new()).unwrap();
+        let p = &preview.subscription_previews[0];
+        assert_eq!(p.cells_changed, 2, "one edited cell and one added cell");
+        assert!(p.cells_changed_exact, "small package: the count is the whole truth");
+        assert_eq!(p.sheets_with_data_changes, 1);
+        assert_eq!(preview.total_cells_changed, 2);
+        assert!(preview.total_cells_changed_exact);
+    }
+
+    /// The positive control for the above: an update that changes no CELLS
+    /// (only the version) must report zero, so the fixed count is not just
+    /// "always nonzero".
+    #[test]
+    fn preview_reports_zero_when_only_the_version_moved() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+
+        let sub = Subscription {
+            package_name: "test-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: "^1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            channel: String::new(),
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        };
+
+        let preview = compute_preview(&reg, &[sub], &OverrideLayer::new()).unwrap();
+        let p = &preview.subscription_previews[0];
+        assert_eq!(p.new_version, "1.1.0", "an update IS available");
+        assert_eq!(p.cells_changed, 0, "…but the same workbook was republished");
+        assert!(
+            p.cells_changed_exact,
+            "and zero here is a MEASURED zero, which is the whole difference \
+             from the placeholder this replaced"
+        );
     }
 
     #[test]
@@ -609,6 +826,8 @@ mod tests {
                 package_name: "pane-refresh".to_string(),
                 version,
                 kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "pane-refresh"),
+                change_summary: "test push".to_string(),
                 sheet_indices: vec![0],
                 now: "2026-01-01T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),

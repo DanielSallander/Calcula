@@ -132,6 +132,9 @@ pub mod sparkline_commands;
 pub mod json_view;
 pub mod r1c1;
 pub mod calp_commands;
+pub mod calp_diff;
+pub mod calp_merge;
+pub mod calp_publishers;
 pub mod calp_inspector;
 pub mod library_commands;
 pub mod extension_install;
@@ -243,6 +246,9 @@ mod document_effect_wave2_tests;
 
 #[cfg(test)]
 mod document_effect_objects_tests;
+
+#[cfg(test)]
+mod calp_push_gate_tests;
 
 #[cfg(test)]
 mod document_store_census_tests;
@@ -622,6 +628,13 @@ pub struct AppState {
     /// Subscription metadata for .calp packages linked to this workbook
     /// PERSISTED (user_files/subscriptions.json) -> `Persisted<T>`.
     pub subscriptions: crate::document_effect::Persisted<calp::manifest::SubscriptionManifest>,
+    /// The package this workbook is a WORKING COPY of, if any (the author-side
+    /// counterpart of `subscriptions`, which records the consumer side).
+    /// PERSISTED (user_files/workspace_link.json) -> `Persisted<T>`.
+    /// Written at checkout and at every push; read by the push gates to decide
+    /// what a publish IS (a new package, or the next version of this one) and
+    /// which base version it claims. `None` = a standalone workbook.
+    pub workspace_link: crate::document_effect::Persisted<Option<calp::WorkspaceLink>>,
     /// Override layer: consumer-side edits to subscribed (.calp) cells
     /// PERSISTED (user_files/overrides.json) -> `Persisted<T>`.
     pub override_layer: crate::document_effect::Persisted<calp::OverrideLayer>,
@@ -866,6 +879,7 @@ pub fn create_app_state() -> AppState {
         extension_data: document_effect::Persisted::new(std::collections::HashMap::new()),
         sheet_ids: document_effect::Persisted::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: crate::document_effect::Persisted::new(calp::manifest::SubscriptionManifest::default()),
+        workspace_link: crate::document_effect::Persisted::new(None),
         override_layer: crate::document_effect::Persisted::new(calp::OverrideLayer::new()),
         audit_log: crate::document_effect::Persisted::new(calp::audit::AuditLog::new()),
         writeback_index: Mutex::new(calp::WritebackIndex::default()),
@@ -6397,6 +6411,22 @@ pub fn run() {
             calp_commands::calp_publish_preview,
             calp_commands::calp_publish_model,
             calp_commands::calp_pull,
+            // Workspace collaboration: open a package as a working copy, and
+            // report where that working copy stands against the registry.
+            calp_commands::calp_checkout,
+            calp_commands::calp_workspace_status,
+            // Version diffs: two published versions, one sheet drilled down, and
+            // the open working copy against the version it came from.
+            calp_diff::calp_diff_versions,
+            calp_diff::calp_diff_sheet_cells,
+            calp_diff::calp_diff_working_copy,
+            // The three-outcome push: fast-forward, merge, or conflict.
+            calp_merge::calp_push_merge_analyze,
+            calp_merge::calp_push_merge_apply,
+            // Co-publishing: who besides the creator may push to a package.
+            calp_publishers::calp_list_co_publishers,
+            calp_publishers::calp_set_co_publishers,
+            calp_publishers::calp_my_publisher_key,
             calp_commands::calp_browse_registry,
             // Registry providers (distribution brick 1): saved-registry catalog
             calp_registry::calp_list_registries,

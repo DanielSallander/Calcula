@@ -322,6 +322,16 @@ pub enum TrustStatus {
     /// The package is signed by the SAME publisher key pinned by an earlier
     /// deliberate trust decision, for THIS registry.
     Verified,
+    /// Signed by a CO-PUBLISHER the pinned publisher authorized: this version's
+    /// signer is not the pinned key, but it appears in a `publishers.json` that
+    /// the pinned key signed.
+    ///
+    /// A distinct state rather than folding into `Verified`, because the user
+    /// agreed to trust ONE publisher and is now, transitively, trusting
+    /// somebody that publisher vouched for. That is a legitimate arrangement
+    /// and a fact they are entitled to see — "signed by Alice, authorized by
+    /// the publisher you trust" rather than a silent accept.
+    TrustedDelegate,
     /// Not pinned for this registry, but the SAME key is already pinned for this
     /// name somewhere else — a registry migration, a mirror, a second spelling of
     /// one path, or a location whose canonical form could not be resolved. Pinned
@@ -464,7 +474,27 @@ pub enum PinPolicy {
 /// then apply `policy` to the pin store.
 ///
 /// The ONLY place in the codebase that writes a `.calp`/skin publisher pin.
+/// Whether `signer` is a co-publisher the PINNED root authorized.
+///
+/// The pinned key is the anchor and is never re-derived from the registry: the
+/// whole point is that a delegate is accepted on the strength of a signature by
+/// the key the user already agreed to trust. A package with no list answers
+/// `false`, which lands the caller on the ordinary key-changed refusal.
+fn delegate_is_authorized(
+    registry: &dyn crate::transport::RegistryTransport,
+    package: &str,
+    pinned_root: &str,
+    signer: &str,
+) -> Result<bool, CalpError> {
+    match crate::publishers::load_verified(registry, package, pinned_root)? {
+        Some(list) => Ok(list.allows(signer)),
+        None => Ok(false),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn verify_manifest_signature_bytes(
+    registry: &dyn crate::transport::RegistryTransport,
     manifest_bytes: &[u8],
     sig_hex: &str,
     manifest: &VersionManifest,
@@ -511,6 +541,30 @@ fn verify_manifest_signature_bytes(
 
     if let Some(record) = store.get(&key) {
         if record.publisher_key != manifest.publisher_key {
+            // DELEGATION, before the accusation. A key that is not the pinned
+            // one is usually a hijack — but it is also what a co-publisher
+            // looks like, and refusing them would make delegation impossible
+            // without re-pinning on every subscriber's machine.
+            //
+            // The chain is: this version is signed by K, and K appears in a
+            // `publishers.json` signed by the key we PINNED. The pin never
+            // moves; it stays the root. So a delegate is accepted on the
+            // strength of the root's own signature, which is exactly the
+            // authority the user agreed to trust when they pinned it.
+            //
+            // A list that exists but does not verify raises
+            // `PublisherListInvalid` from inside here, which is the point:
+            // falling through to `PublisherKeyChanged` would report a hijack
+            // when the real problem is a tampered delegate list, and the two
+            // have different remedies.
+            if delegate_is_authorized(
+                registry,
+                package,
+                &record.publisher_key,
+                &manifest.publisher_key,
+            )? {
+                return Ok((TrustStatus::TrustedDelegate, other_scope_pins));
+            }
             return Err(CalpError::PublisherKeyChanged {
                 package: package.to_string(),
                 version: version.to_string(),
@@ -639,6 +693,7 @@ pub fn verify_and_load_manifest_via(
     // (2)+(3) Crypto + TOFU over the SAME bytes we parsed `manifest` from.
     let sig_hex = String::from_utf8_lossy(&sig_bytes);
     let (trust, other_scope_pins) = verify_manifest_signature_bytes(
+        t,
         &manifest_bytes,
         sig_hex.trim(),
         &manifest,

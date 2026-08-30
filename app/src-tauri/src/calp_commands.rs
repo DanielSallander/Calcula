@@ -8,6 +8,7 @@ use crate::AppState;
 use crate::bi::types::BiState;
 
 use calp::manifest::SubscriptionManifest;
+use calp::publish::PushMode;
 use calp::version::{SemVer, VersionPin};
 use identity::{CellId, SheetId};
 
@@ -24,6 +25,26 @@ pub struct PublishParams {
     pub kind: String,
     pub sheet_indices: Vec<usize>,
     pub published_by: String,
+    /// What this publish IS. `"update"` pushes the next version of a package
+    /// this workbook is a working copy of and REQUIRES `expected_base_version`;
+    /// `"createNew"` creates a package under a name that must not exist yet.
+    ///
+    /// Absent means `"createNew"` — which is the pre-workspace behaviour and
+    /// stays available for the scripted/model publish paths and for a first
+    /// publish from a standalone workbook. It is never a silent fallback for a
+    /// failed update: an update whose base is missing is refused, not downgraded.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// For `"update"`: the version the author worked from, taken from the
+    /// workbook's workspace link and echoed back by the preflight the user saw.
+    /// The base-version gate compares it against the registry head — this is
+    /// the optimistic-concurrency token, and it is the caller's claim about
+    /// their own state, never something re-read from the registry.
+    #[serde(default)]
+    pub expected_base_version: Option<String>,
+    /// What changed, in the author's words. Required for `"update"`.
+    #[serde(default)]
+    pub change_summary: String,
     /// Extra custom objects supplied by frontend distributable-object providers
     /// (distribution brick 4). Merged with the Rust-collected built-in custom
     /// objects (cell types). Absent when no provider contributed.
@@ -622,10 +643,149 @@ fn compute_publish_report(
 // silently disarmed the guard.)
 
 
+/// Serialize the OPEN WORKBOOK into `registry` by running the real publish.
+///
+/// Used by the working-copy diff to produce a comparable side without writing
+/// anything to a real registry. It deliberately goes through
+/// `assemble_publish_workbook` and `calp::publish::publish` — the same two
+/// calls `calp_publish` makes — rather than a purpose-built serializer, because
+/// a second definition of "what a package contains" drifts from the real one
+/// the first time an artifact type is added, and the whole value of a push
+/// preview is that it describes the push that would actually happen.
+///
+/// The caller supplies an in-memory registry; nothing reaches disk. One
+/// documented side effect: like any first publish, this creates the profile's
+/// signing keypair if it does not exist yet — the same file a real publish
+/// would create, and idempotent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_into_for_preview(
+    state: &State<AppState>,
+    bi_state: &State<BiState>,
+    pivot_state: &State<crate::pivot::types::PivotState>,
+    script_state: &State<crate::scripting::types::ScriptState>,
+    slicer_state: &State<crate::slicer::SlicerState>,
+    ribbon_filter_state: &State<crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: &State<crate::pane_control::PaneControlState>,
+    user_files_state: &State<crate::persistence::UserFilesState>,
+    timeline_slicer_state: &State<crate::timeline_slicer::TimelineSlicerState>,
+    registry: &dyn calp::transport::RegistryTransport,
+    package_name: &str,
+    version: SemVer,
+    sheet_indices: Vec<usize>,
+    include_comments: bool,
+) -> Result<(), String> {
+    let sheet_indices = resolve_publish_sheet_indices(state, sheet_indices)?;
+    let assembly = assemble_publish_workbook(
+        state,
+        bi_state,
+        pivot_state,
+        script_state,
+        slicer_state,
+        ribbon_filter_state,
+        pane_control_state,
+        user_files_state,
+        timeline_slicer_state,
+        &sheet_indices,
+    )?;
+
+    let PublishAssembly {
+        workbook,
+        writeback_regions,
+        object_scripts,
+        data_sources,
+        model_writebacks,
+        excluded_regions,
+    } = assembly;
+
+    let custom_objects = collect_cell_type_custom_objects(state, &sheet_indices)?;
+
+    let request = calp::publish::PublishRequest {
+        workbook: &workbook,
+        package_name: package_name.to_string(),
+        version,
+        kind: "report".to_string(),
+        // A preview package is created, not pushed: there is no prior version
+        // in a fresh in-memory registry, and no gate to satisfy.
+        mode: PushMode::CreateNew,
+        change_summary: String::new(),
+        sheet_indices,
+        now: chrono::Utc::now().to_rfc3339(),
+        published_by: publisher_display_name(),
+        writeback_regions,
+        model_writebacks: if model_writebacks.is_empty() {
+            None
+        } else {
+            Some(model_writebacks)
+        },
+        object_scripts,
+        module_scripts: None,
+        notebooks: None,
+        data_sources,
+        excluded_regions,
+        custom_objects,
+        include_comments,
+        min_app_version: String::new(),
+    };
+
+    calp::publish::publish(registry, &request, &calcula_profile_dir())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// A change summary is a headline for the version history, not the
+/// documentation. Long enough for two sentences, short enough that the history
+/// list stays readable.
+const MAX_CHANGE_SUMMARY_CHARS: usize = 2000;
+
+/// The publisher display name for this machine, derived from the signing
+/// identity rather than accepted from the caller.
+fn publisher_display_name() -> String {
+    calp::signing::PublisherKeypair::load_existing(&calcula_profile_dir())
+        .ok()
+        .flatten()
+        .map(|k| k.display_name())
+        .unwrap_or_else(|| {
+            std::env::var("USERNAME")
+                .or_else(|_| std::env::var("USER"))
+                .unwrap_or_else(|_| "unknown".to_string())
+        })
+}
+
+/// Turn the wire `mode` + `expectedBaseVersion` into a [`calp::PushMode`].
+///
+/// The wire form is two loose fields; the core form is an enum where `Update`
+/// cannot exist without a base version. Converting here means the impossible
+/// combination ("update, but I won't say from what") is rejected at the edge
+/// with a sentence, rather than being represented at all.
+pub(crate) fn parse_push_mode(params: &PublishParams) -> Result<calp::PushMode, String> {
+    match params.mode.as_deref().unwrap_or("createNew") {
+        "createNew" => Ok(calp::PushMode::CreateNew),
+        "update" => {
+            let base = params
+                .expected_base_version
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| {
+                    "CALP_PUSH_NO_BASE: An update must say which version it was based on. \
+                     Re-open the push dialog so it can read the workbook's workspace link."
+                        .to_string()
+                })?;
+            Ok(calp::PushMode::Update {
+                expected_base: SemVer::parse(base).map_err(|e| e.to_string())?,
+            })
+        }
+        other => Err(format!(
+            "Unknown publish mode '{other}' (expected \"createNew\" or \"update\")."
+        )),
+    }
+}
+
 /// Publish selected sheets to a local registry.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn calp_publish(
     state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
     bi_state: State<BiState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     script_state: State<crate::scripting::types::ScriptState>,
@@ -638,6 +798,85 @@ pub fn calp_publish(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // ---- PHASE A: the gates only this layer can run ------------------------
+    // Registry-fact gates (mode, base version, monotonic version, key
+    // continuity) live in core `publish()` under the registry lock, so every
+    // caller gets them. What is left here is what needs WORKBOOK state, which
+    // core cannot see.
+    let push_mode = parse_push_mode(&params)?;
+
+    // GATE: a working copy pushes to ITS package. Publishing into a different
+    // package from a linked workbook is either a typo or a misunderstanding,
+    // and both are cheaper to catch here than to discover in a registry.
+    // A structured code, not prose, because the remedy is a UI branch: offer
+    // "publish as a new package" rather than a message the user must decode.
+    if matches!(push_mode, calp::PushMode::Update { .. }) {
+        let link = state.workspace_link.read().map_err(|e| e.to_string())?;
+        match link.as_ref() {
+            None => {
+                return Err(format!(
+                    "CALP_PUSH_NOT_LINKED: This workbook is not a working copy of '{}'. \
+                     Open the package for editing first (Distribution > Open Package for \
+                     Editing), or publish this workbook as a NEW package.",
+                    params.package_name
+                ));
+            }
+            Some(l) if !l.targets(&params.registry_path, &params.package_name) => {
+                return Err(format!(
+                    "CALP_PUSH_WRONG_TARGET: This workbook is a working copy of '{}' \
+                     ({}), not of '{}'. Push it to the package it came from, or publish \
+                     it as a NEW package.",
+                    l.package_name, l.registry_url, params.package_name
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    // GATE: a SUBSCRIBER may never push to the package it subscribes to. Its
+    // sheets carry freshly-minted local ids (pull mints them deliberately), so
+    // the push would hand the package a different identity and every other
+    // subscriber's next refresh would see every sheet removed and re-added,
+    // orphaning their overrides. This is the identity trap, refused by name.
+    {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        if subs
+            .subscriptions
+            .iter()
+            .any(|s| s.package_name == params.package_name && s.version_pin != "dev")
+        {
+            return Err(format!(
+                "CALP_PUSH_IS_SUBSCRIBER: This workbook SUBSCRIBES to '{}' — its sheets are \
+                 a local copy with their own identity, so publishing from here would look \
+                 to every other subscriber like every sheet was deleted and replaced, and \
+                 would discard their local edits. To change the package itself, use \
+                 Distribution > Open Package for Editing.",
+                params.package_name
+            ));
+        }
+    }
+
+    // GATE: a push must say what changed. Checked here as well as in core so
+    // the user is told before a full workbook assembly runs.
+    if matches!(push_mode, calp::PushMode::Update { .. }) {
+        let summary = params.change_summary.trim();
+        if summary.is_empty() {
+            return Err(format!(
+                "CALP_PUSH_NEEDS_SUMMARY: Say what changed in '{}', in a sentence or two. \
+                 Subscribers and co-developers read it in the version history.",
+                params.package_name
+            ));
+        }
+        if summary.chars().count() > MAX_CHANGE_SUMMARY_CHARS {
+            return Err(format!(
+                "CALP_PUSH_NEEDS_SUMMARY: The change summary is too long ({} characters, \
+                 limit {}). It is a headline, not the documentation.",
+                summary.chars().count(),
+                MAX_CHANGE_SUMMARY_CHARS
+            ));
+        }
+    }
 
     // A CANCELLED RECALCULATION MUST NOT BE PUBLISHED.
     //
@@ -662,6 +901,17 @@ pub fn calp_publish(
 
     let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
+
+    // GATE: an HTTP registry is read-only. Refusing here, before the workbook is
+    // assembled and megabytes are serialized, turns a confusing deep transport
+    // error into a sentence about the registry.
+    if params.registry_path.trim_start().to_lowercase().starts_with("http") {
+        return Err(format!(
+            "CALP_PUSH_READONLY_REGISTRY: '{}' is an HTTP registry, which can only be read \
+             from. Push to a file-share registry instead.",
+            params.registry_path
+        ));
+    }
 
     let version = SemVer::parse(&params.version)
         .map_err(|e| e.to_string())?;
@@ -724,9 +974,16 @@ pub fn calp_publish(
         package_name: params.package_name,
         version,
         kind: params.kind,
+        mode: push_mode,
+        change_summary: params.change_summary.clone(),
         sheet_indices,
-        now,
-        published_by: params.published_by,
+        now: now.clone(),
+        // Stamped from the signing identity, not from the caller. `published_by`
+        // sits next to a verified `publisher_key` in the version list, and a
+        // display name the caller can type is a display name that can disagree
+        // with the key beside it. (The scripted publish path already refused to
+        // trust a caller-supplied value; this makes both paths agree.)
+        published_by: publisher_display_name(),
         writeback_regions,
         model_writebacks: if model_writebacks.is_empty() {
             None
@@ -769,15 +1026,75 @@ pub fn calp_publish(
         request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
     }
 
+    // ---- PHASE B: core runs the registry-fact gates under the registry lock --
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
 
-    // Audit (B4)
+    // The push landed. Record it in the workbook's own link, so the NEXT push
+    // knows its base — and so a standalone workbook that just created a package
+    // becomes that package's working copy without a separate step.
     {
-        let now = chrono::Utc::now().to_rfc3339();
+        let published_sheets: Vec<calp::WorkspaceSheetRef> = {
+            let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+            let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+            request
+                .sheet_indices
+                .iter()
+                .filter_map(|&i| {
+                    Some(calp::WorkspaceSheetRef {
+                        sheet_id: *ids.get(i)?,
+                        name: names.get(i)?.clone(),
+                    })
+                })
+                .collect()
+        };
+        // A push CHANGES what this workbook is (its base version moved), which
+        // is saved state — so this is the command's one `mutates` arm, taken
+        // only after the registry has actually accepted the version.
+        let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+        let mut link = state.workspace_link.write(&effect).map_err(|e| e.to_string())?;
+        match link.as_mut() {
+            Some(existing) => existing.record_push(&result.version, &now, published_sheets),
+            None => {
+                let mut fresh = calp::WorkspaceLink::new(
+                    &params.registry_path,
+                    &result.package_name,
+                    &request.kind,
+                    &result.version,
+                    &now,
+                    published_sheets.clone(),
+                );
+                fresh.record_push(&result.version, &now, published_sheets);
+                *link = Some(fresh);
+            }
+        }
+    }
+
+    // Audit — always recorded (publish is egress; see AuditEvent docs).
+    {
         let user = audit_user(&state);
         if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
-            audit.record(
+            let mut extra = std::collections::HashMap::new();
+            extra.insert(
+                "package".to_string(),
+                serde_json::Value::String(result.package_name.clone()),
+            );
+            extra.insert(
+                "version".to_string(),
+                serde_json::Value::String(result.version.clone()),
+            );
+            extra.insert(
+                "baseVersion".to_string(),
+                serde_json::Value::String(match &request.mode {
+                    calp::PushMode::CreateNew => String::new(),
+                    calp::PushMode::Update { expected_base } => expected_base.to_string(),
+                }),
+            );
+            extra.insert(
+                "registry".to_string(),
+                serde_json::Value::String(params.registry_path.clone()),
+            );
+            audit.record_with_extra(
                 calp::audit::AuditEvent::Published,
                 &format!(
                     "Published {} v{} ({} sheets)",
@@ -785,6 +1102,7 @@ pub fn calp_publish(
                 ),
                 &user,
                 &now,
+                extra,
             );
         }
     }
@@ -873,6 +1191,8 @@ pub fn calp_publish_model(
         package_name: params.package_name,
         version,
         kind: "dataset".to_string(),
+        mode: PushMode::CreateNew,
+        change_summary: String::new(),
         sheet_indices: Vec::new(),
         now: now.clone(),
         published_by: params.published_by,
@@ -957,6 +1277,13 @@ pub struct PublishPreviewParams {
     /// comments exactly where the real publish would put them (default false).
     #[serde(default)]
     pub include_comments: bool,
+    /// The push target, when the caller is previewing an actual push rather
+    /// than running a content-only dry run. Supplying both turns the response's
+    /// `gates` field on.
+    #[serde(default)]
+    pub registry_path: Option<String>,
+    #[serde(default)]
+    pub package_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -970,6 +1297,46 @@ pub struct PublishPreviewResponse {
     /// a dropdown pane control whose CellRange item source references a sheet
     /// outside the selection. Non-blocking; the artifact is never rewritten.
     pub warnings: Vec<String>,
+    /// The state of every push gate that can be evaluated WITHOUT publishing,
+    /// so the dialog can show the user where they stand before they write a
+    /// change summary — rather than making them discover a refusal afterwards.
+    ///
+    /// Absent when the preview was asked for without a target package (the
+    /// plain dry-run the Package Explorer's "Preview publish" button runs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gates: Option<PushGateStatus>,
+}
+
+/// Where a prospective push stands against each gate.
+///
+/// Advisory ONLY. The authoritative evaluation happens inside core `publish()`
+/// under the registry lock, because anything checked out here and acted on
+/// later is a TOCTOU window on a share two people publish to. What this buys is
+/// a dialog that can be honest BEFORE the user does the work, not a shortcut
+/// past the gate.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushGateStatus {
+    /// "linked" | "notLinked" | "wrongTarget" | "subscriber"
+    pub link_status: String,
+    /// The base version this workbook would declare (from its workspace link).
+    pub expected_base: String,
+    /// The registry's current head. Empty when unreachable.
+    pub registry_latest: String,
+    pub latest_published_by: String,
+    /// True when the head has moved past `expected_base` — a push would be
+    /// refused by the base-version gate.
+    pub base_stale: bool,
+    /// True when this machine holds the key that signed the head (or the
+    /// package has no signed head yet).
+    pub key_continuity_ok: bool,
+    /// True when the registry can be written to at all (a file share, not HTTP).
+    pub registry_writable: bool,
+    /// Suggested next versions from the head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_next: Option<SuggestedVersions>,
+    /// Why the registry could not be consulted, when it could not be.
+    pub registry_error: String,
 }
 
 /// Dry-run of calp_publish: assemble the EXACT carrier a publish would use
@@ -1032,7 +1399,106 @@ pub fn calp_publish_preview(
         .filter_map(|&i| assembly.workbook.sheets.get(i).map(|s| s.name.clone()))
         .collect();
 
-    Ok(PublishPreviewResponse { sheet_names, report, warnings })
+    let gates = match (params.registry_path.as_deref(), params.package_name.as_deref()) {
+        (Some(registry_path), Some(package_name)) => {
+            Some(evaluate_push_gates(&state, registry_path, package_name)?)
+        }
+        _ => None,
+    };
+
+    Ok(PublishPreviewResponse { sheet_names, report, warnings, gates })
+}
+
+/// Evaluate every push gate that can be answered without publishing.
+///
+/// Failure-tolerant by design: an unreachable registry reports itself in
+/// `registry_error` and leaves the registry-derived fields empty, rather than
+/// failing the whole preview. The dialog then shows what it does know (which
+/// package, which base) instead of nothing at all.
+fn evaluate_push_gates(
+    state: &AppState,
+    registry_path: &str,
+    package_name: &str,
+) -> Result<PushGateStatus, String> {
+    let link = state.workspace_link.read().map_err(|e| e.to_string())?.clone();
+    let subscribes_to_target = {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        subs.subscriptions
+            .iter()
+            .any(|s| s.package_name == package_name && s.version_pin != "dev")
+    };
+
+    let (link_status, expected_base) = if subscribes_to_target {
+        ("subscriber".to_string(), String::new())
+    } else {
+        match link.as_ref() {
+            None => ("notLinked".to_string(), String::new()),
+            Some(l) if l.targets(registry_path, package_name) => {
+                ("linked".to_string(), l.base_version.clone())
+            }
+            Some(_) => ("wrongTarget".to_string(), String::new()),
+        }
+    };
+
+    let registry_writable = !registry_path.trim_start().to_lowercase().starts_with("http");
+
+    let mut status = PushGateStatus {
+        link_status,
+        expected_base: expected_base.clone(),
+        registry_latest: String::new(),
+        latest_published_by: String::new(),
+        base_stale: false,
+        // No head yet (a package about to be created) is not a continuity
+        // failure — there is nothing to be continuous WITH.
+        key_continuity_ok: true,
+        registry_writable,
+        suggested_next: None,
+        registry_error: String::new(),
+    };
+
+    match crate::calp_registry::open_registry_scoped(registry_path) {
+        Ok((registry, _scope)) => match registry.get_package_manifest(package_name) {
+            Ok(manifest) => {
+                if let Some(head) = calp::head_version(&manifest) {
+                    status.registry_latest = head.to_string();
+                    status.latest_published_by = manifest
+                        .versions
+                        .iter()
+                        .find(|e| e.version == head.to_string())
+                        .map(|e| e.published_by.clone())
+                        .unwrap_or_default();
+                    status.base_stale =
+                        !expected_base.is_empty() && expected_base != head.to_string();
+                    status.suggested_next = Some(SuggestedVersions {
+                        major: SemVer::new(head.major + 1, 0, 0).to_string(),
+                        minor: SemVer::new(head.major, head.minor + 1, 0).to_string(),
+                        patch: SemVer::new(head.major, head.minor, head.patch + 1).to_string(),
+                    });
+                    status.key_continuity_ok = calp::publish::resolve_authorized_keys(
+                        &registry,
+                        package_name,
+                        &head,
+                    )
+                    .map(|keys| {
+                        keys.is_empty()
+                            || keys.iter().any(|k| {
+                                calp::signing::profile_holds_publisher_key(
+                                    &calcula_profile_dir(),
+                                    k,
+                                )
+                                .unwrap_or(false)
+                            })
+                    })
+                    .unwrap_or(false);
+                }
+            }
+            // No such package: a create, not an update. Not an error.
+            Err(_) => {}
+        },
+        Err(e) => status.registry_error = e.to_string(),
+    }
+
+    Ok(status)
 }
 
 /// Materialize ONE package's distributed standalone module scripts + notebooks
@@ -2337,6 +2803,69 @@ pub fn calp_pull(
     )
     .map_err(|e| e.to_string())?;
 
+    // Materialize into the workbook through the shared materializer — the
+    // same code the CHECKOUT path runs, so package fidelity cannot drift
+    // between consuming a package and developing one.
+    materialize_pull_result(
+        &state,
+        &effect,
+        &pivot_state,
+        &bi_state,
+        &script_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &slicer_state,
+        result,
+        MaterializeMode::Subscribe,
+        &window,
+    )
+}
+
+/// What a materialization IS — consuming a package, or opening it to develop.
+///
+/// The two paths share every line of the materializer below, which is the
+/// point: the fidelity matrix's root cause was a hand-written per-type
+/// materializer, and a second one written for checkout would drift from this
+/// one on the first artifact type somebody added. What differs is recorded
+/// here, in three places, rather than in a parallel copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaterializeMode {
+    /// A subscriber pulling a package to USE it. Records a Subscription with
+    /// the provenance ledger, so refresh/override/reset have something to act
+    /// on.
+    Subscribe,
+    /// A developer checking a package out to EDIT it. Records NO subscription:
+    /// a working copy is not a subscriber of its own package (the two roles are
+    /// exclusive — see docs/design/calp-workspace-collaboration.md §2.3), and a
+    /// subscription here would make the workbook refuse its own push.
+    Checkout,
+}
+
+/// Materialize a pulled package version into the open workbook.
+///
+/// Extracted verbatim from `calp_pull` so `calp_checkout` runs the identical
+/// path. Every artifact type the package can carry lands here — sheets and
+/// their presentation state, tables, charts, sparklines, named ranges, CF/DV,
+/// comments/scenarios/outlines, cell behaviors, controls and their media, pane
+/// controls, custom objects, module scripts, notebooks, slicers, ribbon
+/// filters, pivot layouts, theme, extension data, BI data sources and pivots.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_pull_result(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    pivot_state: &crate::pivot::types::PivotState,
+    bi_state: &BiState,
+    script_state: &crate::scripting::types::ScriptState,
+    ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
+    pane_control_state: &crate::pane_control::PaneControlState,
+    slicer_state: &crate::slicer::SlicerState,
+    mut result: calp::pull::PullResult,
+    mode: MaterializeMode,
+    // Needed for the one live-refresh emit below: a package that brings custom
+    // functions must re-install the UDF registry now, or its formulas read
+    // #NAME? until the workbook is reopened.
+    window: &tauri::Window,
+) -> Result<PullResponse, String> {
     // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
     let publisher_name = result.publisher_name.clone();
     // EXHAUSTIVE on purpose: a new TrustStatus must not reach the frontend
@@ -2419,7 +2948,7 @@ pub fn calp_pull(
             // rather than recomputing it. Called under the grid locks, which is
             // the canonical order for the spill maps.
             crate::spill_restore::restore_spill_extents_for_sheet(
-                state.inner(),
+                state,
                 base_index + i,
                 &pulled.sheet,
             );
@@ -2834,7 +3363,7 @@ pub fn calp_pull(
     if custom_functions_changed {
         // Re-install the live UDF registry NOW — without this, the pulled
         // report's custom-function formulas stay #NAME? until a reopen.
-        let _ = tauri::Emitter::emit(&window, "custom-functions:refresh", ());
+        let _ = tauri::Emitter::emit(window, "custom-functions:refresh", ());
     }
     for (id, name) in &applied_modules {
         sub_objects.push(sub_object("moduleScript", id.clone(), name.clone()));
@@ -2931,15 +3460,26 @@ pub fn calp_pull(
     // Store subscription — WITH the provenance ledger of what this pull
     // actually materialized. Must precede rebuild_writeback_index (it reads
     // the subscription list).
-    {
-        let mut subscription = result.subscription;
-        subscription.objects = sub_objects;
-        let mut subs = state.subscriptions.write(&effect).map_err(|e| e.to_string())?;
-        subs.subscriptions.push(subscription);
+    //
+    // A CHECKOUT records none. `pull()` builds a Subscription unconditionally
+    // (it cannot know which caller it has), and taking it here would make the
+    // working copy a subscriber of the very package it is about to push to —
+    // which the push gates then refuse, correctly, for the identity reason in
+    // §2.3. Dropping it is the mode's whole job.
+    match mode {
+        MaterializeMode::Subscribe => {
+            let mut subscription = result.subscription.clone();
+            subscription.objects = sub_objects;
+            let mut subs = state.subscriptions.write(effect).map_err(|e| e.to_string())?;
+            subs.subscriptions.push(subscription);
+        }
+        MaterializeMode::Checkout => {
+            let _ = sub_objects;
+        }
     }
 
     // Rebuild writeback index from updated subscriptions
-    rebuild_writeback_index(&state);
+    rebuild_writeback_index(state);
 
     // Auto-load embedded BI models from the pulled package.
     // This creates BI connections so that BI pivots have a live engine to query.
@@ -2981,15 +3521,23 @@ pub fn calp_pull(
         let now = chrono::Utc::now().to_rfc3339();
         let user = audit_user(&state);
         if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
-            audit.record(
-                calp::audit::AuditEvent::Subscribe,
-                &format!(
-                    "Subscribed to {} v{} ({} sheets, {} scripts)",
-                    result.package_name, result.resolved_version, sheets_pulled, scripts_pulled
+            let (event, description) = match mode {
+                MaterializeMode::Subscribe => (
+                    calp::audit::AuditEvent::Subscribe,
+                    format!(
+                        "Subscribed to {} v{} ({} sheets, {} scripts)",
+                        result.package_name, result.resolved_version, sheets_pulled, scripts_pulled
+                    ),
                 ),
-                &user,
-                &now,
-            );
+                MaterializeMode::Checkout => (
+                    calp::audit::AuditEvent::CheckedOut,
+                    format!(
+                        "Opened {} v{} for editing ({} sheets, {} scripts)",
+                        result.package_name, result.resolved_version, sheets_pulled, scripts_pulled
+                    ),
+                ),
+            };
+            audit.record(event, &description, &user, &now);
         }
     }
 
@@ -3007,6 +3555,364 @@ pub fn calp_pull(
         other_scope_pins,
         custom_objects: frontend_custom_objects,
     })
+}
+
+// ===========================================================================
+// Checkout — open a published package as a WORKING COPY
+// ===========================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutParams {
+    pub registry_path: String,
+    pub package_name: String,
+    /// A concrete version, or absent for the registry head (what `latest`
+    /// resolves to, and what a developer means by "open the current one").
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutResponse {
+    pub package_name: String,
+    pub version: String,
+    pub sheets_materialized: usize,
+    pub scripts_materialized: usize,
+    pub publisher_name: String,
+    /// The TOFU outcome REPORTED, never recorded: a checkout is `VerifyOnly`.
+    pub trust_status: String,
+    /// Cells of the freshly materialized workbook, in the same shape
+    /// `open_file` returns, so the frontend refreshes through one code path.
+    pub cells: Vec<crate::api_types::CellData>,
+    pub custom_objects: Vec<PulledCustomObjectDto>,
+}
+
+/// Open a published package version for editing.
+///
+/// This REPLACES the open document: the workbook becomes a working copy of the
+/// package, carrying the package's own sheet ids so the next push continues its
+/// identity rather than forking it. The caller is responsible for having
+/// confirmed the loss of unsaved changes — the same contract `open_file` has.
+///
+/// The materialization is `calp_pull`'s, verbatim (see `materialize_pull_result`),
+/// minus the subscription: a working copy is not a subscriber of its own
+/// package.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn calp_checkout(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    pivot_state: State<'_, crate::pivot::types::PivotState>,
+    bi_state: State<'_, BiState>,
+    script_state: State<'_, crate::scripting::types::ScriptState>,
+    ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
+    pane_control_state: State<'_, crate::pane_control::PaneControlState>,
+    slicer_state: State<'_, crate::slicer::SlicerState>,
+    user_files_state: State<'_, crate::persistence::UserFilesState>,
+    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    params: CheckoutParams,
+    window: tauri::Window,
+) -> Result<CheckoutResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    let (registry, scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
+        .map_err(|e| e.to_string())?;
+
+    let version = match params.version.as_deref().filter(|v| !v.trim().is_empty()) {
+        Some(v) => Some(SemVer::parse(v).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Read + verify BEFORE touching the open document. Every gate — signature,
+    // TOFU (VerifyOnly), min_app_version, the full per-artifact checksum walk —
+    // runs in here, so a package that fails any of them leaves the user's
+    // current workbook exactly as it was.
+    let result = calp::checkout::checkout(
+        &registry,
+        &params.package_name,
+        version,
+        &now,
+        &scope,
+        &calcula_profile_dir(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let resolved_version = result.resolved_version.to_string();
+    let kind_for_link = registry
+        .get_version_manifest(&params.package_name, &resolved_version)
+        .map(|m| m.kind)
+        .unwrap_or_else(|_| "report".to_string());
+    let base_sheets: Vec<calp::WorkspaceSheetRef> = result
+        .sheets
+        .iter()
+        .map(|s| calp::WorkspaceSheetRef {
+            sheet_id: s.package_sheet_id,
+            name: s.name.clone(),
+        })
+        .collect();
+    let package_brings_sheets = !result.sheets.is_empty();
+
+    // ONE effect for the whole command. Unlike `new_file`/`open_file` — which
+    // tear down under `deliberately_clean` because they END clean — a checkout
+    // ends DIRTY: the working copy exists only in memory until the user saves
+    // it somewhere, and closing without saving must prompt.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+
+    // Replace the document. Same shared reset both document-replacing paths
+    // use, so a store nobody thought of cannot survive into the working copy.
+    crate::persistence::reset_document_scoped_stores(
+        &state,
+        &user_files_state,
+        &slicer_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &script_state,
+        &pivot_state,
+        &bi_state,
+        &timeline_slicer_state,
+        &effect,
+    )?;
+
+    // The reset leaves one blank "Sheet1". The materializer APPENDS at
+    // grids.len(), so leaving it there would put a stray empty sheet in front
+    // of every checked-out package. Drop it — but only when the package
+    // actually brings sheets, so a zero-sheet dataset package does not leave a
+    // workbook with no sheets at all.
+    if package_brings_sheets {
+        state.grids.write(&effect).map_err(|e| e.to_string())?.clear();
+        state.sheet_names.write(&effect).map_err(|e| e.to_string())?.clear();
+        state.sheet_ids.write(&effect).map_err(|e| e.to_string())?.clear();
+        state.all_column_widths.write(&effect).map_err(|e| e.to_string())?.clear();
+        state.all_row_heights.write(&effect).map_err(|e| e.to_string())?.clear();
+    }
+
+    let materialized = materialize_pull_result(
+        &state,
+        &effect,
+        &pivot_state,
+        &bi_state,
+        &script_state,
+        &ribbon_filter_state,
+        &pane_control_state,
+        &slicer_state,
+        result,
+        MaterializeMode::Checkout,
+        &window,
+    )?;
+
+    // The workbook now IS this package version. Record it, so the push gates
+    // have an answer to "which package, from which base".
+    {
+        let mut link = state.workspace_link.write(&effect).map_err(|e| e.to_string())?;
+        *link = Some(calp::WorkspaceLink::new(
+            &params.registry_path,
+            &params.package_name,
+            &kind_for_link,
+            &resolved_version,
+            &now,
+            base_sheets,
+        ));
+    }
+
+    // A working copy has no file of its own yet: the first Ctrl+S must be a
+    // Save As, not an overwrite of whatever document was open before.
+    *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
+    *file_state.session_password.lock().map_err(|e| e.to_string())? = None;
+    *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = false;
+
+    let cells = crate::persistence::collect_active_sheet_cells(&state)?;
+
+    Ok(CheckoutResponse {
+        package_name: materialized.package_name,
+        version: materialized.resolved_version,
+        sheets_materialized: materialized.sheets_pulled,
+        scripts_materialized: materialized.scripts_pulled,
+        publisher_name: materialized.publisher_name,
+        trust_status: materialized.trust_status,
+        cells,
+        custom_objects: materialized.custom_objects,
+    })
+}
+
+// ===========================================================================
+// Workspace status — what is this workbook a working copy of?
+// ===========================================================================
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceVersionInfo {
+    pub version: String,
+    pub published_at: String,
+    pub published_by: String,
+    pub base_version: String,
+    pub change_summary: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedVersions {
+    pub major: String,
+    pub minor: String,
+    pub patch: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceStatus {
+    pub registry_url: String,
+    pub package_name: String,
+    pub kind: String,
+    /// The version this working copy is based on.
+    pub base_version: String,
+    pub checked_out_at: String,
+    pub last_pushed_version: String,
+    pub last_pushed_at: String,
+    /// Sheets the base version carried — the push dialog's default selection,
+    /// available even with the registry unreachable.
+    pub base_sheets: Vec<WorkspaceSheetInfo>,
+    /// Whether the registry answered at all. Everything below is meaningful
+    /// only when this is true.
+    pub registry_reachable: bool,
+    /// The registry's current head version (empty when unreachable).
+    pub head_version: String,
+    /// True when the head has moved past this working copy's base — i.e. a push
+    /// would be refused by the base-version gate.
+    pub is_stale: bool,
+    /// Full published history, newest last (as the package manifest stores it).
+    pub versions: Vec<WorkspaceVersionInfo>,
+    /// Next version suggestions from the head.
+    pub suggested_next: Option<SuggestedVersions>,
+    /// Whether THIS machine's publisher key is the one that signed the head —
+    /// i.e. whether the key-continuity gate will pass.
+    pub holds_publisher_key: bool,
+    /// Why the registry could not be read, when it could not be. Empty on
+    /// success. Reported rather than thrown: a working copy must still open and
+    /// describe itself with the share offline.
+    pub registry_error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSheetInfo {
+    pub sheet_id: String,
+    pub name: String,
+}
+
+/// What package is this workbook a working copy of, and where does it stand
+/// relative to the registry?
+///
+/// Read-only, and deliberately failure-tolerant: an unreachable registry
+/// downgrades the answer to the link's own contents rather than erroring. A
+/// developer on a train must still be able to see which package they are
+/// editing.
+#[tauri::command]
+pub fn calp_workspace_status(
+    state: State<AppState>,
+    window: tauri::Window,
+) -> Result<Option<WorkspaceStatus>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    let link = {
+        let guard = state.workspace_link.read().map_err(|e| e.to_string())?;
+        match guard.as_ref() {
+            Some(l) => l.clone(),
+            None => return Ok(None),
+        }
+    };
+
+    let mut status = WorkspaceStatus {
+        registry_url: link.registry_url.clone(),
+        package_name: link.package_name.clone(),
+        kind: link.kind.clone(),
+        base_version: link.base_version.clone(),
+        checked_out_at: link.checked_out_at.clone(),
+        last_pushed_version: link.last_pushed_version.clone(),
+        last_pushed_at: link.last_pushed_at.clone(),
+        base_sheets: link
+            .base_sheets
+            .iter()
+            .map(|s| WorkspaceSheetInfo {
+                sheet_id: s.sheet_id.to_string(),
+                name: s.name.clone(),
+            })
+            .collect(),
+        registry_reachable: false,
+        head_version: String::new(),
+        is_stale: false,
+        versions: Vec::new(),
+        suggested_next: None,
+        holds_publisher_key: false,
+        registry_error: String::new(),
+    };
+
+    let manifest = match crate::calp_registry::open_registry_scoped(&link.registry_url)
+        .map_err(|e| e.to_string())
+        .and_then(|(registry, _)| {
+            registry
+                .get_package_manifest(&link.package_name)
+                .map_err(|e| e.to_string())
+                .map(|m| (registry, m))
+        }) {
+        Ok((registry, manifest)) => {
+            status.registry_reachable = true;
+            // Key continuity, answered before the user reaches the push button
+            // rather than as a refusal after they have written a summary.
+            if let Some(head) = calp::head_version(&manifest) {
+                status.holds_publisher_key = calp::publish::resolve_authorized_keys(
+                    &registry,
+                    &link.package_name,
+                    &head,
+                )
+                .map(|keys| {
+                    keys.is_empty()
+                        || keys.iter().any(|k| {
+                            calp::signing::profile_holds_publisher_key(&calcula_profile_dir(), k)
+                                .unwrap_or(false)
+                        })
+                })
+                .unwrap_or(false);
+            }
+            Some(manifest)
+        }
+        Err(e) => {
+            status.registry_error = e;
+            None
+        }
+    };
+
+    if let Some(manifest) = manifest {
+        status.versions = manifest
+            .versions
+            .iter()
+            .map(|v| WorkspaceVersionInfo {
+                version: v.version.clone(),
+                published_at: v.published_at.clone(),
+                published_by: v.published_by.clone(),
+                base_version: v.base_version.clone(),
+                change_summary: v.change_summary.clone(),
+            })
+            .collect();
+        if let Some(head) = calp::head_version(&manifest) {
+            status.head_version = head.to_string();
+            // Stale means "the head is not where this copy started". A copy
+            // that has already pushed is measured from what it pushed.
+            let anchor = if link.last_pushed_version.is_empty() {
+                &link.base_version
+            } else {
+                &link.last_pushed_version
+            };
+            status.is_stale = head.to_string() != *anchor;
+            status.suggested_next = Some(SuggestedVersions {
+                major: SemVer::new(head.major + 1, 0, 0).to_string(),
+                minor: SemVer::new(head.major, head.minor + 1, 0).to_string(),
+                patch: SemVer::new(head.major, head.minor, head.patch + 1).to_string(),
+            });
+        }
+    }
+
+    Ok(Some(status))
 }
 
 /// Browse packages in a local registry.
@@ -4378,6 +5284,9 @@ pub fn calp_refresh_preview(
         total_sheets_removed: 0,
         total_overrides_conflicted: 0,
         total_overrides_auto_cleared: 0,
+        // Starts true and is ANDed down: one registry group whose count was
+        // capped makes the whole figure a floor, and the dialog must say so.
+        total_cells_changed_exact: true,
     };
 
     for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
@@ -4395,6 +5304,7 @@ pub fn calp_refresh_preview(
         merged.total_sheets_removed += preview.total_sheets_removed;
         merged.total_overrides_conflicted += preview.total_overrides_conflicted;
         merged.total_overrides_auto_cleared += preview.total_overrides_auto_cleared;
+        merged.total_cells_changed_exact &= preview.total_cells_changed_exact;
     }
 
     Ok(merged)
@@ -8568,19 +9478,43 @@ pub(crate) fn require_publisher(
     let manifest = registry
         .get_version_manifest(package_name, version)
         .map_err(|e| e.to_string())?;
-    let owns = calp::signing::profile_holds_publisher_key(
-        &calcula_profile_dir(),
-        &manifest.publisher_key,
-    )
-    .map_err(|e| e.to_string())?;
-    if owns {
-        Ok(())
-    } else {
-        Err(format!(
-            "Only the publisher of '{}' can view or manage its writeback submissions.",
-            package_name
-        ))
+    let profile = calcula_profile_dir();
+
+    // The publisher of record for THIS version — the ordinary case, and the
+    // only one before co-publishing existed.
+    if calp::signing::profile_holds_publisher_key(&profile, &manifest.publisher_key)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
     }
+
+    // A CO-PUBLISHER may review too. A package a team develops together is a
+    // package the team collects data for together: routing every approval
+    // through whoever happened to create the package would reinstate the
+    // release-manager bottleneck one step to the left. Authorization is the
+    // same root-signed list the push gate consults, so there is one answer to
+    // "who is behind this package", not two.
+    if let Some(root_key) =
+        calp::publishers::root_key_of(registry, package_name).map_err(|e| e.to_string())?
+    {
+        if let Some(list) = calp::publishers::load_verified(registry, package_name, &root_key)
+            .map_err(|e| e.to_string())?
+        {
+            for key in list.allowed_keys() {
+                if calp::signing::profile_holds_publisher_key(&profile, &key)
+                    .map_err(|e| e.to_string())?
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Only the publisher of '{}' — or a co-publisher they authorized — can view \
+         or manage its writeback submissions.",
+        package_name
+    ))
 }
 
 /// Resolve a grid writeback region's owning subscription and assert the caller

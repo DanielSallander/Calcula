@@ -38,6 +38,21 @@ pub struct VersionEntry {
     pub published_at: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub published_by: String,
+    /// The version this push was based on (empty for the first version of a
+    /// package). A listing convenience so the version-history UI renders
+    /// lineage from ONE package-manifest read; the authority is the same field
+    /// inside the SIGNED version manifest, which this copies.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_version: String,
+    /// The push message — what changed and why. Copied from the signed version
+    /// manifest for the same reason as `base_version`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub change_summary: String,
+    /// Ed25519 public key of whoever signed this version, lowercase hex.
+    /// `published_by` beside it is a display name and is not verified; this is.
+    /// Listing convenience only — the signed version manifest is the authority.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub publisher_key: String,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -101,6 +116,18 @@ pub struct VersionManifest {
     /// Ed25519 signature.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub min_app_version: String,
+    /// The version this push was based on — the registry head the author's
+    /// working copy was checked out from (or last merged with). Empty for the
+    /// first version of a package, and for publishes made outside the workspace
+    /// flow. Inside the Ed25519 signature, so lineage cannot be rewritten by
+    /// editing a file on the share.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_version: String,
+    /// What changed in this version, in the author's own words. Required for a
+    /// push to an existing package (see `PushMode::Update`); optional when a
+    /// package is first created. Signed, like `base_version`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub change_summary: String,
     pub sheets: Vec<PublishedSheet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_ranges: Vec<PublishedNamedRange>,
@@ -291,17 +318,17 @@ pub struct PublishedSheetMetadata {
     pub freeze_col: Option<u32>,
     /// EFFECTIVE hidden rows (filter + outline + user), what the HTML report
     /// exporter skips.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
-    pub hidden_rows: std::collections::HashSet<u32>,
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
-    pub hidden_cols: std::collections::HashSet<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hidden_rows: std::collections::BTreeSet<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hidden_cols: std::collections::BTreeSet<u32>,
     /// Rows/columns the user hid BY HAND, carried separately so a subscriber
     /// can unhide them by hand too (the effective set above is rebuilt from
     /// filter+outline and would lose them on the first save).
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
-    pub user_hidden_rows: std::collections::HashSet<u32>,
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
-    pub user_hidden_cols: std::collections::HashSet<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub user_hidden_rows: std::collections::BTreeSet<u32>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub user_hidden_cols: std::collections::BTreeSet<u32>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tab_color: String,
     #[serde(default = "default_visibility")]
@@ -370,10 +397,10 @@ impl Default for PublishedSheetMetadata {
             merged_regions: Vec::new(),
             freeze_row: None,
             freeze_col: None,
-            hidden_rows: std::collections::HashSet::new(),
-            hidden_cols: std::collections::HashSet::new(),
-            user_hidden_rows: std::collections::HashSet::new(),
-            user_hidden_cols: std::collections::HashSet::new(),
+            hidden_rows: std::collections::BTreeSet::new(),
+            hidden_cols: std::collections::BTreeSet::new(),
+            user_hidden_rows: std::collections::BTreeSet::new(),
+            user_hidden_cols: std::collections::BTreeSet::new(),
             tab_color: String::new(),
             visibility: "visible".to_string(),
             notes: Vec::new(),
@@ -398,10 +425,10 @@ impl PublishedSheetMetadata {
             merged_regions: sheet.merged_regions.clone(),
             freeze_row: sheet.freeze_row,
             freeze_col: sheet.freeze_col,
-            hidden_rows: sheet.hidden_rows.clone(),
-            hidden_cols: sheet.hidden_cols.clone(),
-            user_hidden_rows: sheet.user_hidden_rows.clone(),
-            user_hidden_cols: sheet.user_hidden_cols.clone(),
+            hidden_rows: sheet.hidden_rows.iter().copied().collect(),
+            hidden_cols: sheet.hidden_cols.iter().copied().collect(),
+            user_hidden_rows: sheet.user_hidden_rows.iter().copied().collect(),
+            user_hidden_cols: sheet.user_hidden_cols.iter().copied().collect(),
             tab_color: sheet.tab_color.clone(),
             visibility: sheet.visibility.clone(),
             notes: sheet.notes.clone(),

@@ -4,6 +4,7 @@
 import type { AddInManifest, DialogDefinition, DialogProps } from "@api";
 import React from "react";
 import { PublishDialog } from "./components/PublishDialog";
+import { CheckoutDialog } from "./components/CheckoutDialog";
 import { PublishModelDialog } from "./components/PublishModelDialog";
 import { SubscribeDialog } from "./components/SubscribeDialog";
 import { RefreshPreviewDialog } from "./components/RefreshPreviewDialog";
@@ -42,6 +43,7 @@ export const DistributionManifest: AddInManifest = {
 // ============================================================================
 
 export const PUBLISH_DIALOG_ID = "distribution:publishDialog";
+export const CHECKOUT_DIALOG_ID = "distribution:checkoutDialog";
 export const PUBLISH_MODEL_DIALOG_ID = "distribution:publishModelDialog";
 export const SUBSCRIBE_DIALOG_ID = "distribution:subscribeDialog";
 export const REFRESH_PREVIEW_DIALOG_ID = "distribution:refreshPreviewDialog";
@@ -51,6 +53,15 @@ export const CONNECTION_DIALOG_ID = "distribution:connectionDialog";
 export const PublishDialogDefinition: DialogDefinition = {
   id: PUBLISH_DIALOG_ID,
   component: PublishDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+  // Non-modal floating window: the workbook stays interactive while it is
+  // open, so a grid-level Escape must not dismiss it.
+  dismissOnEscape: false,
+};
+
+export const CheckoutDialogDefinition: DialogDefinition = {
+  id: CHECKOUT_DIALOG_ID,
+  component: CheckoutDialog as React.ComponentType<DialogProps>,
   priority: 100,
   // Non-modal floating window: the workbook stays interactive while it is
   // open, so a grid-level Escape must not dismiss it.

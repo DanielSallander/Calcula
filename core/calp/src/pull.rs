@@ -379,6 +379,39 @@ pub fn pull(
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<PullResult, CalpError> {
+    pull_with_options(registry, request, scope, profile_dir, policy, SheetIdMode::FreshLocal)
+}
+
+/// What sheet identity a materialized package version carries locally.
+///
+/// This is the difference between consuming a package and developing one, and
+/// it is exactly one field wide because the artifact walk, the trust gates and
+/// every remap below it must stay a single audited path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetIdMode {
+    /// SUBSCRIBE / REFRESH. Mint a fresh local `SheetId` per sheet and record
+    /// the package -> local mapping in the subscription. The subscriber's copy
+    /// is their own document; two subscriptions to the same package in one
+    /// workbook must not collide, and a subscriber must not be able to
+    /// republish under the package's identity by accident.
+    FreshLocal,
+    /// CHECKOUT. Keep the package's sheet ids verbatim, so the working copy IS
+    /// the package as far as identity is concerned and the next push preserves
+    /// continuity: subscribers see modified sheets rather than every sheet
+    /// removed and re-added, and their overrides — anchored to cell ids inside
+    /// those sheets — survive.
+    PreservePackage,
+}
+
+/// `pull()` with control over sheet identity. See [`SheetIdMode`].
+pub fn pull_with_options(
+    registry: &dyn RegistryTransport,
+    request: &PullRequest,
+    scope: &RegistryScope,
+    profile_dir: &Path,
+    policy: PinPolicy,
+    sheet_id_mode: SheetIdMode,
+) -> Result<PullResult, CalpError> {
     let resolved = registry.resolve_version(&request.package_name, &request.version_pin)?;
     let version_str = resolved.to_string();
     let pkg = request.package_name.as_str();
@@ -493,10 +526,20 @@ pub fn pull(
             }
         };
 
-        // Build Sheet with fresh local SheetId, restoring the carried metadata
-        // (merged regions, freeze panes, hidden rows/cols, tab color, visibility,
-        // notes, hyperlinks, page setup, gridlines) instead of dropping it.
-        let local_id = SheetId::from_bytes(identity::generate_uuid_v7());
+        // Build the Sheet, restoring the carried metadata (merged regions,
+        // freeze panes, hidden rows/cols, tab color, visibility, notes,
+        // hyperlinks, page setup, gridlines) instead of dropping it.
+        //
+        // The local id is the ONE thing checkout does differently from a
+        // subscribe: keeping the package's id is what gives a working copy
+        // identity continuity with the package it came from. Everything below
+        // this line — the chart/sparkline/CF/DV/control remaps — is written
+        // against package_sheet_id -> local_id, so in PreservePackage mode it
+        // simply maps each id to itself.
+        let local_id = match sheet_id_mode {
+            SheetIdMode::FreshLocal => SheetId::from_bytes(identity::generate_uuid_v7()),
+            SheetIdMode::PreservePackage => pub_sheet.sheet_id,
+        };
         let sheet = Sheet {
             id: local_id,
             name: pub_sheet.name.clone(),
@@ -507,10 +550,10 @@ pub fn pull(
             merged_regions: metadata.merged_regions,
             freeze_row: metadata.freeze_row,
             freeze_col: metadata.freeze_col,
-            hidden_rows: metadata.hidden_rows,
-            hidden_cols: metadata.hidden_cols,
-            user_hidden_rows: metadata.user_hidden_rows,
-            user_hidden_cols: metadata.user_hidden_cols,
+            hidden_rows: metadata.hidden_rows.into_iter().collect(),
+            hidden_cols: metadata.hidden_cols.into_iter().collect(),
+            user_hidden_rows: metadata.user_hidden_rows.into_iter().collect(),
+            user_hidden_cols: metadata.user_hidden_cols.into_iter().collect(),
             tab_color: metadata.tab_color,
             visibility: metadata.visibility,
             notes: metadata.notes,
@@ -1062,7 +1105,7 @@ mod tests {
             scope.id
         );
     }
-    use crate::publish::{self, PublishRequest};
+    use crate::publish::{self, PublishRequest, PushMode};
     use crate::registry::LocalRegistry;
 
     fn make_test_workbook() -> persistence::Workbook {
@@ -1087,6 +1130,8 @@ mod tests {
             package_name: "test-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1149,6 +1194,8 @@ mod tests {
             package_name: "co-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1216,6 +1263,8 @@ mod tests {
             package_name: "styled-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1278,6 +1327,8 @@ mod tests {
             package_name: "controls-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0], // only the first sheet
             now: "2026-07-02T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1370,6 +1421,8 @@ mod tests {
             package_name: "media-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0],
             now: "2026-08-07T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1458,6 +1511,8 @@ mod tests {
                 package_name: "media-dedup".to_string(),
                 version,
                 kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "media-dedup"),
+                change_summary: "test push".to_string(),
                 sheet_indices: vec![0],
                 now: "2026-08-07T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
@@ -1565,6 +1620,8 @@ mod tests {
             package_name: "pane-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0], // partial sheet selection — controls still all travel
             now: "2026-07-03T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1645,6 +1702,8 @@ mod tests {
                 package_name: "pane-det".to_string(),
                 version,
                 kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "pane-det"),
+                change_summary: "test push".to_string(),
                 sheet_indices: vec![0, 1],
                 now: "2026-07-03T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
@@ -1747,6 +1806,8 @@ mod tests {
             package_name: "slicer-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0], // only the first sheet ships
             now: "2026-07-12T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1811,6 +1872,8 @@ mod tests {
             package_name: "min-app-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: crate::publish::test_mode_for(&reg, "min-app-pkg"),
+            change_summary: "test push".to_string(),
             sheet_indices: vec![0, 1],
             now: "2026-07-12T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1838,6 +1901,8 @@ mod tests {
         wave_wb.slicers = vec![make_test_slicer("ByRegion", wave_wb.sheets[0].id)];
         plain_req.workbook = &wave_wb;
         plain_req.version = SemVer::new(1, 0, 1);
+        plain_req.mode = PushMode::Update { expected_base: SemVer::new(1, 0, 0) };
+        plain_req.change_summary = "adds a slicer".to_string();
         assert!(
             publish::carries_wave_content(&plain_req),
             "a slicer on a published sheet is Wave A content"
@@ -1864,6 +1929,8 @@ mod tests {
             package_name: "spill-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-08-10T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1952,6 +2019,8 @@ mod tests {
             package_name: "filter-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0], // partial selection — filters still all travel
             now: "2026-07-12T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2019,6 +2088,8 @@ mod tests {
             package_name: "layout-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-07-12T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2071,6 +2142,8 @@ mod tests {
             package_name: "theme-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-07-12T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2122,6 +2195,8 @@ mod tests {
             package_name: "ext-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-07-12T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2215,6 +2290,8 @@ mod tests {
             package_name: "sales-model".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "dataset".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: Vec::new(), // model-only: no sheets
             now: "2026-07-02T00:00:00Z".to_string(),
             published_by: "author".to_string(),
@@ -2299,6 +2376,8 @@ mod tests {
             package_name: "fidelity-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2389,6 +2468,8 @@ mod tests {
             package_name: "wave-b-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0], // only "Report" — "Private" stays behind
             now: "2026-07-12T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2599,6 +2680,8 @@ mod tests {
             package_name: "charted-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2659,6 +2742,8 @@ mod tests {
             package_name: "sparked-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0],
             now: "2026-06-28T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -2729,6 +2814,8 @@ mod tests {
                 package_name: "versioned".to_string(),
                 version: SemVer::new(maj, min, 0),
                 kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "versioned"),
+                change_summary: "test push".to_string(),
                 sheet_indices: vec![0],
                 now: "2026-05-18T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
@@ -3031,6 +3118,8 @@ mod tests {
             package_name: "d9-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -3120,6 +3209,8 @@ mod tests {
             package_name: "c8-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -3239,6 +3330,8 @@ mod tests {
             package_name: "evil-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "attacker".to_string(),

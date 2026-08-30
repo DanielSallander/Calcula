@@ -5,7 +5,9 @@
 //! and the publish/pull workflows.
 
 pub mod audit;
+pub mod checkout;
 pub mod compat;
+pub mod diff;
 pub mod dev_mode;
 pub mod error;
 pub mod fold;
@@ -13,6 +15,8 @@ pub mod html_export;
 pub mod identity_provider;
 pub mod integrity;
 pub mod manifest;
+pub mod memory_registry;
+pub mod merge;
 pub mod overrides;
 pub mod package_kind;
 pub mod refresh;
@@ -23,7 +27,9 @@ pub mod skin_pack;
 pub mod transport;
 pub mod version;
 pub mod publish;
+pub mod publishers;
 pub mod pull;
+pub mod workspace;
 pub mod writeback;
 
 pub use compat::{check_min_app_version, host_app_version, set_host_app_version};
@@ -36,6 +42,14 @@ pub use manifest::{
     PackageManifest, VersionEntry, VersionManifest, PublishedSheet,
     PackageDataSource, PackageBinding, SubscriberDataSourceConfig,
 };
+pub use publish::{head_version, resolve_authorized_keys, PushMode};
+pub use checkout::checkout;
+pub use diff::{diff_sheet_cells, diff_sides, DiffOptions, DiffSide, VersionDiff};
+pub use memory_registry::MemoryRegistry;
+pub use merge::{analyze as analyze_merge, Collision, MergeAnalysis, MergeVerdict, PieceKey};
+pub use publishers::{AuthorizedKey, PublisherList};
+pub use pull::SheetIdMode;
+pub use workspace::{WorkspaceLink, WorkspaceSheetRef};
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use registry::LocalRegistry;
 pub use registry_id::{registry_scope, RegistryScope};

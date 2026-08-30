@@ -63,6 +63,10 @@ pub enum AuditEvent {
     OverrideImported,
     /// Published a package version.
     Published,
+    /// Opened a published package version as a WORKING COPY (checkout). The
+    /// author-side counterpart of `Subscribe`: same materialization, different
+    /// intent — this workbook is now something that can push.
+    CheckedOut,
     /// Changed active channel.
     ChannelChanged,
     /// Submitted writeback values to the registry.
@@ -103,8 +107,16 @@ impl AuditEvent {
     ///   meant the trail was absent exactly when someone needed to reconstruct
     ///   what they had sent.
     ///
-    /// The remaining distribution events (subscribe/refresh/override/publish/…)
-    /// stay opt-in via the `enabled` flag.
+    /// * PUBLISH — the same egress argument as writeback, pointed the other
+    ///   way: a push is the moment this workbook's content LEAVES THE MACHINE
+    ///   for a shared registry, where other people will pull it. In the
+    ///   workspace model it is also the workbook's only local record of its own
+    ///   release history, and "which version did I push, from which base" is
+    ///   precisely the question asked after something went wrong — i.e. when
+    ///   nobody thought to turn logging on first.
+    ///
+    /// The remaining distribution events (subscribe/refresh/override/…) stay
+    /// opt-in via the `enabled` flag.
     pub fn is_always_recorded(&self) -> bool {
         matches!(
             self,
@@ -113,6 +125,7 @@ impl AuditEvent {
                 | AuditEvent::WritebackSubmitted
                 | AuditEvent::WritebackReviewed
                 | AuditEvent::WritebackInvalidated
+                | AuditEvent::Published
                 // Protection changes are a security boundary moving; recording
                 // them only when distribution auditing happens to be on would
                 // make the trail useless exactly when it matters.

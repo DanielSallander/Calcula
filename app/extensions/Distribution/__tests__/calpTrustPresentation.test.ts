@@ -61,13 +61,19 @@ describe("the Rust trust vocabulary is complete and honest", () => {
   it("every TrustStatus variant has a wire string", () => {
     const variants = [
       ...INTEGRITY_RS.matchAll(
-        /^\s{4}(FirstUse|FirstUseKnownPublisher|FirstUseAcceptedNameConflict|Verified|NotPinned|NotPinnedNameConflict),$/gm,
+        /^\s{4}(FirstUse|FirstUseKnownPublisher|FirstUseAcceptedNameConflict|Verified|TrustedDelegate|NotPinned|NotPinnedNameConflict),$/gm,
       ),
     ].map((m) => m[1]);
-    expect(new Set(variants).size, "TrustStatus variants changed").toBe(6);
-    expect(RUST_STATUSES.length).toBe(6);
+    expect(new Set(variants).size, "TrustStatus variants changed").toBe(7);
+    expect(RUST_STATUSES.length).toBe(7);
     expect(RUST_STATUSES).toContain("notPinned");
     expect(RUST_STATUSES).toContain("notPinnedNameConflict");
+    // Co-publishing: a version signed by a delegate the PINNED publisher
+    // authorized. Trusted — the authority traces to the key this machine
+    // pinned — but a distinct state, because the user agreed to trust one
+    // publisher and is now transitively trusting somebody that publisher
+    // vouched for, and that is a fact they are entitled to see.
+    expect(RUST_STATUSES).toContain("trustedDelegate");
   });
 
   it("there is exactly ONE Rust map, and nothing hand-rolls a second", () => {

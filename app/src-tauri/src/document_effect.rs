@@ -1210,8 +1210,8 @@ mod tests {
             .map(|(n, _)| n)
             .collect();
 
-        assert_eq!(decls.len(), 105, "AppState field count changed");
-        assert_eq!(persisted.len(), 63, "Persisted<T> count changed");
+        assert_eq!(decls.len(), 106, "AppState field count changed");
+        assert_eq!(persisted.len(), 64, "Persisted<T> count changed");
         assert_eq!(bare.len(), 40, "bare Mutex/RwLock count changed");
         assert_eq!(
             neither,

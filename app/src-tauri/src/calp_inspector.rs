@@ -130,7 +130,7 @@ fn open_verified(
 /// decision to fail open on. What these commands DO enforce is unchanged and
 /// non-negotiable — a valid signature, and (for the content commands) the full
 /// per-artifact SHA-256 walk.
-fn open_verified_content(
+pub(crate) fn open_verified_content(
     registry_path: &str,
     package_name: &str,
     version_pin: &str,
@@ -146,6 +146,11 @@ fn open_verified_content(
 /// presented.
 pub(crate) fn trust_status_str(trust: TrustStatus) -> String {
     match trust {
+        // Deliberately its own wire value rather than folded into "verified".
+        // The user agreed to trust ONE publisher and is now transitively
+        // trusting somebody that publisher vouched for — a legitimate
+        // arrangement, and one they are entitled to see stated.
+        TrustStatus::TrustedDelegate => "trustedDelegate",
         TrustStatus::FirstUse => "firstUse",
         TrustStatus::FirstUseKnownPublisher => "firstUseKnownPublisher",
         TrustStatus::FirstUseAcceptedNameConflict => "firstUseAcceptedNameConflict",
@@ -338,6 +343,13 @@ pub struct InspectorVersionEntry {
     pub version: String,
     pub published_at: String,
     pub published_by: String,
+    /// The version this one was pushed from — the package's own lineage.
+    /// Empty for a first version, and for versions published before push
+    /// lineage was recorded.
+    pub base_version: String,
+    /// What the author said changed. Mirrored here from the version list;
+    /// the authority is the same field inside the SIGNED version manifest.
+    pub change_summary: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -928,6 +940,8 @@ pub fn calp_inspector_overview(
                     version: v.version.clone(),
                     published_at: v.published_at.clone(),
                     published_by: v.published_by.clone(),
+                    base_version: v.base_version.clone(),
+                    change_summary: v.change_summary.clone(),
                 })
                 .collect(),
         },

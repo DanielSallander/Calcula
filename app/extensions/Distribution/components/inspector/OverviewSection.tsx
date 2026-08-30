@@ -40,6 +40,12 @@ const TRUST_BADGE: Record<CalpTrustStatus, { label: string; color: string; title
     title:
       "Signed by the same publisher key you pinned when you subscribed to this package.",
   },
+  trustedDelegate: {
+    label: "signature verified — co-publisher",
+    color: OK_GREEN,
+    title:
+      "Signed by a co-publisher the publisher you pinned authorized. The authority still traces to the key you trusted; somebody they vouched for did the publishing.",
+  },
   firstUse: {
     label: "trusted just now — key pinned",
     color: WARN_AMBER,
@@ -206,6 +212,8 @@ export function OverviewSection({
           <thead>
             <tr>
               <th style={thStyle}>Version</th>
+              <th style={thStyle}>Based on</th>
+              <th style={thStyle}>Changes</th>
               <th style={thStyle}>Published</th>
               <th style={thStyle}>By</th>
             </tr>
@@ -216,6 +224,11 @@ export function OverviewSection({
                 <td style={tdStyle}>
                   {v.version === overview.resolvedVersion ? <b>v{v.version} (inspected)</b> : `v${v.version}`}
                 </td>
+                {/* Lineage and the author's own account of the change. Blank
+                    for a package's first version, and for anything published
+                    before a push was required to say what it did. */}
+                <td style={tdStyle}>{v.baseVersion ? `v${v.baseVersion}` : "—"}</td>
+                <td style={tdStyle}>{v.changeSummary || "—"}</td>
                 <td style={tdStyle}>{v.publishedAt}</td>
                 <td style={tdStyle}>{v.publishedBy}</td>
               </tr>

@@ -140,6 +140,13 @@ const TRUST_REVIEW: Record<
     blurb:
       "Signed by the same key you already trusted for this package. Nothing about the publisher's identity has changed.",
   },
+  trustedDelegate: {
+    label: "trusted publisher — co-published",
+    color: "#137333",
+    box: { background: "#e8f5e9", border: "1px solid #b7dfbb" },
+    blurb:
+      "Signed by a co-publisher that the publisher you trust for this package authorized. You are still trusting the same publisher; they have vouched for a colleague.",
+  },
   firstUse: {
     label: "trusted just now",
     color: "#a05a00",

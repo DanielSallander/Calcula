@@ -25,7 +25,7 @@ use pivot_engine::{
     AggregationType, PivotDefinition, PivotField, PivotId, ValueField,
 };
 
-use calp::publish::{publish, ExcludedRegion, PublishDataSource, PublishRequest};
+use calp::publish::{publish, ExcludedRegion, PublishDataSource, PublishRequest, PushMode};
 use calp::PackageBinding;
 use calp::registry::LocalRegistry;
 use calp::version::SemVer;
@@ -582,6 +582,8 @@ fn main() {
         package_name: "sales-report".to_string(),
         version,
         kind: "report".to_string(),
+        mode: PushMode::CreateNew,
+        change_summary: String::new(),
         sheet_indices: vec![0, 1],
         now,
         published_by: "Calcula CLI".to_string(),

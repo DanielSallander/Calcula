@@ -28,7 +28,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use calp::integrity::{PinPolicy, TrustStatus};
-use calp::publish::{self, PublishRequest};
+use calp::publish::{self, PublishRequest, PushMode};
 use calp::pull::{self, PullRequest};
 use calp::registry::LocalRegistry;
 use calp::version::{SemVer, VersionPin};
@@ -117,6 +117,15 @@ fn publish_version(
         package_name: package.to_string(),
         version,
         kind: "report".to_string(),
+        // A helper used for both the first publish and later version bumps, so
+        // it asks the registry what it is holding. Production callers must NOT:
+        // the base version comes from the working copy's workspace link, which
+        // is what makes the base-version gate mean anything.
+        mode: match reg.get_package_manifest(package).ok().and_then(|m| calp::head_version(&m)) {
+            Some(head) => PushMode::Update { expected_base: head },
+            None => PushMode::CreateNew,
+        },
+        change_summary: "lifecycle test push".to_string(),
         sheet_indices: vec![0],
         now: "2026-06-15T00:00:00Z".to_string(),
         published_by: "publisher".to_string(),
@@ -721,6 +730,8 @@ fn publish_with_data_source(
         package_name: package.to_string(),
         version,
         kind: "report".to_string(),
+        mode: PushMode::CreateNew,
+        change_summary: String::new(),
         sheet_indices: vec![0],
         now: "2026-06-15T00:00:00Z".to_string(),
         published_by: "publisher".to_string(),

@@ -55,12 +55,108 @@ pub struct ExcludedRegion {
     pub end_col: u32,
 }
 
+/// What a publish is: the creation of a NEW package, or a push of the next
+/// version of one that already exists.
+///
+/// There is deliberately no `Default` and no `Option` wrapper (the same reason
+/// [`crate::integrity::PinPolicy`] has none): a caller that has not thought
+/// about which of the two this is does not compile. That single property is
+/// what makes it impossible to create a package by mis-typing the name of an
+/// existing one, and it doubles as the optimistic-concurrency token — an
+/// `Update` names the version the author actually worked from, and the gate
+/// refuses if the registry has moved on since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushMode {
+    /// First publish under this name. Refused if the package already exists.
+    CreateNew,
+    /// Next version of an existing package. Refused unless the registry's head
+    /// version is still `expected_base`.
+    Update { expected_base: SemVer },
+}
+
+/// The registry's head version for a package: the HIGHEST published version,
+/// which is what a `latest` pin resolves to and therefore what a checkout hands
+/// the author.
+///
+/// Deliberately not `PackageManifest::latest_version()`, which returns the LAST
+/// list entry. The two agree for every package published through the push gates
+/// (the monotonic-version gate keeps them agreeing), but they can disagree in a
+/// package written before those gates existed — and when they disagree, the one
+/// the author is actually looking at is the one `latest` resolves to.
+pub fn head_version(manifest: &PackageManifest) -> Option<SemVer> {
+    manifest.parsed_versions().into_iter().max()
+}
+
+/// The keys allowed to publish the next version of `package`.
+///
+/// Two sources, in order:
+///
+/// 1. **The package's co-publisher list**, if it has one — a `publishers.json`
+///    at the package root, signed by the ROOT key (whoever published version 1,
+///    an anchor nothing can move because version 1 is immutable). Its entries
+///    are delegates the owner deliberately added.
+/// 2. **Otherwise the head version's signer**, so a package with no list stays
+///    with the identity that has been publishing it.
+///
+/// A list that exists but cannot be verified is an ERROR, never a fallback to
+/// (2): "no delegates" and "delegates I could not read" must not behave the
+/// same, or deleting the list becomes a way to remove people from it.
+///
+/// An empty result means "no continuity to enforce" — a package whose head
+/// version predates signing, or one with no versions at all.
+pub fn resolve_authorized_keys(
+    registry: &dyn RegistryTransport,
+    package: &str,
+    head: &SemVer,
+) -> Result<Vec<String>, CalpError> {
+    if let Some(root_key) = crate::publishers::root_key_of(registry, package)? {
+        if let Some(list) = crate::publishers::load_verified(registry, package, &root_key)? {
+            return Ok(list.allowed_keys());
+        }
+    }
+    let head_manifest = registry.get_version_manifest(package, &head.to_string())?;
+    if head_manifest.publisher_key.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![head_manifest.publisher_key])
+}
+
+/// TEST ONLY: derive the push mode from what the registry already holds —
+/// `CreateNew` for a package's first version, `Update` against its current head
+/// otherwise.
+///
+/// Deliberately `#[cfg(test)]` and crate-private. A production caller must take
+/// the base version from the WORKING COPY's workspace link, which is the whole
+/// point of the base-version gate: asking the registry what the head is and
+/// then declaring that as your base makes the gate a tautology and reinstates
+/// the lost-update it exists to prevent.
+#[cfg(test)]
+pub(crate) fn test_mode_for(registry: &dyn RegistryTransport, package: &str) -> PushMode {
+    match registry
+        .get_package_manifest(package)
+        .ok()
+        .and_then(|m| head_version(&m))
+    {
+        Some(head) => PushMode::Update { expected_base: head },
+        None => PushMode::CreateNew,
+    }
+}
+
 /// Request to publish selected sheets from a workbook.
 pub struct PublishRequest<'a> {
     pub workbook: &'a Workbook,
     pub package_name: String,
     pub version: SemVer,
     pub kind: String,
+    /// Whether this creates the package or pushes the next version of it.
+    /// See [`PushMode`] — this is the gate that makes accidental package
+    /// creation and lost-update overwrites structurally impossible.
+    pub mode: PushMode,
+    /// What changed in this version, in the author's own words. Required (non
+    /// -blank) for [`PushMode::Update`]; optional when creating a package.
+    /// Lands in the SIGNED version manifest, so history cannot be rewritten by
+    /// editing a file on the share.
+    pub change_summary: String,
     /// Which sheets to publish (by index into workbook.sheets).
     pub sheet_indices: Vec<usize>,
     pub now: String,
@@ -122,6 +218,7 @@ pub struct PublishCustomObject {
 }
 
 /// Result of a publish operation.
+#[derive(Debug)]
 pub struct PublishResult {
     pub package_name: String,
     pub version: String,
@@ -425,13 +522,6 @@ pub fn publish(
     // Generated with the OS CSPRNG inside PublisherKeypair::load_or_create.
     let keypair = PublisherKeypair::load_or_create(profile_dir)?;
 
-    if registry.version_exists(&request.package_name, &version_str) {
-        return Err(CalpError::VersionAlreadyPublished {
-            package: request.package_name.clone(),
-            version: version_str,
-        });
-    }
-
     for &idx in &request.sheet_indices {
         if idx >= request.workbook.sheets.len() {
             return Err(CalpError::SheetNotFound(format!("index {}", idx)));
@@ -561,6 +651,13 @@ pub fn publish(
         // an older app would silently drop (carries_wave_content); cell-only
         // packages stay pullable by older apps.
         min_app_version: request.min_app_version.clone(),
+        // Push lineage, inside the signature. `base_version` is the head this
+        // push was authored against; empty when the package is being created.
+        base_version: match &request.mode {
+            PushMode::CreateNew => String::new(),
+            PushMode::Update { expected_base } => expected_base.to_string(),
+        },
+        change_summary: request.change_summary.trim().to_string(),
         sheets,
         named_ranges: named_ranges.clone(),
         tables: table_ids,
@@ -596,13 +693,121 @@ pub fn publish(
         extra: std::collections::HashMap::new(),
     };
 
+    let pkg = request.package_name.as_str();
+    let ver = version_str.as_str();
+
+    // ----------------------------------------------------------------------
+    // The registry-write phase, start to finish, under ONE lock.
+    //
+    // Every gate below reads a registry fact and then acts on it, so the read
+    // and the write it authorizes have to be in one critical section: a check
+    // outside the lock is a TOCTOU window on a share two developers publish to.
+    // The lock previously covered only the final version-list append, which
+    // left both the "does this version already exist" check and the artifact
+    // writes racing. Holding it across the whole phase also means two publishes
+    // of the same version can never interleave artifact bytes under one signed
+    // checksum map.
+    //
+    // Cost: publishes to DIFFERENT packages in one registry serialize too. For
+    // the share-with-a-few-developers case this design targets that is the
+    // right trade, and a waiter that gives up gets `RegistryBusy` — an honest,
+    // retryable answer rather than a corrupted half-publish.
+    // ----------------------------------------------------------------------
+    let _lock = registry.lock()?;
+
+    // Gate 1 — mode. Which of the two things is this?
+    let existing_manifest = registry.get_package_manifest(pkg).ok();
+    match (&request.mode, &existing_manifest) {
+        (PushMode::CreateNew, Some(_)) => {
+            return Err(CalpError::PackageAlreadyExists(pkg.to_string()));
+        }
+        (PushMode::Update { .. }, None) => {
+            return Err(CalpError::PackageNotFound(pkg.to_string()));
+        }
+        _ => {}
+    }
+
+    if let (PushMode::Update { expected_base }, Some(pkg_manifest)) =
+        (&request.mode, &existing_manifest)
+    {
+        if let Some(head) = head_version(pkg_manifest) {
+            // Gate 2 — base version. Somebody else pushed since this working
+            // copy was checked out, so publishing now would produce a version
+            // that silently does not contain their work.
+            if head != *expected_base {
+                let published_by = pkg_manifest
+                    .versions
+                    .iter()
+                    .find(|e| e.version == head.to_string())
+                    .map(|e| e.published_by.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "another publisher".to_string());
+                return Err(CalpError::BaseVersionStale {
+                    package: pkg.to_string(),
+                    expected_base: expected_base.to_string(),
+                    actual_latest: head.to_string(),
+                    latest_published_by: published_by,
+                });
+            }
+
+            // Gate 3 — monotonic version. Keeps "the last entry" and "the
+            // highest version" the same fact, which gate 2 relies on.
+            if request.version <= head {
+                let mut suggested = head.clone();
+                suggested.patch += 1;
+                return Err(CalpError::VersionNotGreater {
+                    package: pkg.to_string(),
+                    version: version_str.clone(),
+                    latest: head.to_string(),
+                    suggested: suggested.to_string(),
+                });
+            }
+
+            // Gate 4 — change summary. A version history nobody can read is
+            // not a version history.
+            if request.change_summary.trim().is_empty() {
+                return Err(CalpError::MissingChangeSummary { package: pkg.to_string() });
+            }
+
+            // Gate 5 — publisher key continuity. Pushing with a different key
+            // does not fail here today; it fails at every SUBSCRIBER's next
+            // refresh, as a trust-pin change that looks exactly like a package
+            // hijack. Refusing at the source is the only place the person who
+            // can still do something about it is present.
+            let authorized = resolve_authorized_keys(registry, pkg, &head)?;
+            let mine = keypair.public_key_hex();
+            if !authorized.is_empty() && !authorized.iter().any(|k| k == &mine) {
+                let head_manifest = registry.get_version_manifest(pkg, &head.to_string())?;
+                let holder_name = if head_manifest.publisher_name.is_empty() {
+                    "another publisher".to_string()
+                } else {
+                    head_manifest.publisher_name.clone()
+                };
+                let holder_key: String =
+                    head_manifest.publisher_key.chars().take(12).collect();
+                return Err(CalpError::NotThePublisher {
+                    package: pkg.to_string(),
+                    holder_name,
+                    holder_key,
+                });
+            }
+        }
+    }
+
+    // Gate 6 — immutability. Still a distinct check from the monotonic gate: a
+    // CreateNew into a half-written package directory reaches here too.
+    if registry.version_exists(pkg, ver) {
+        return Err(CalpError::VersionAlreadyPublished {
+            package: request.package_name.clone(),
+            version: version_str,
+        });
+    }
+
     // The version manifest is written LAST (it is the integrity root and the
     // publish commit point — version_exists() keys off it). If the version
     // already has artifacts without a manifest, that is debris from a crashed
     // earlier publish: clear it so stale files can't end up unlisted in the
     // checksum map. Through the transport, never the filesystem directly.
-    let pkg = request.package_name.as_str();
-    let ver = version_str.as_str();
     registry.clear_version(pkg, ver)?;
 
     // Write generic custom-object payloads (brick 4). Opaque JSON; the .calp
@@ -1180,12 +1385,11 @@ pub fn publish(
         signature_hex.as_bytes(),
     )?;
 
-    // Update the package manifest under the registry lock (D7): the version-list
-    // read-modify-write must be serialized so a concurrent publish to the same
-    // registry can't drop the other's version. The lock releases when `_lock`
-    // drops at the end of this scope.
+    // Append to the version list. Still under the `_lock` acquired before the
+    // gates — do NOT re-acquire it here: RegistryLock is a lockfile, not a
+    // reentrant mutex, so a second acquire would block against this publish's
+    // own live lock until it timed out with RegistryBusy.
     {
-        let _lock = registry.lock()?;
         let mut pkg_manifest = registry.get_package_manifest(&request.package_name)
             .unwrap_or_else(|_| PackageManifest::new(
                 &request.package_name, &request.kind, &request.published_by, &request.now,
@@ -1195,10 +1399,14 @@ pub fn publish(
             version: version_str.clone(),
             published_at: request.now.clone(),
             published_by: request.published_by.clone(),
+            base_version: version_manifest.base_version.clone(),
+            change_summary: version_manifest.change_summary.clone(),
+            publisher_key: keypair.public_key_hex(),
             extra: std::collections::HashMap::new(),
         });
         registry.write_package_manifest(&pkg_manifest)?;
     }
+    drop(_lock);
 
     Ok(PublishResult {
         package_name: request.package_name.clone(),
@@ -1345,6 +1553,8 @@ mod tests {
             package_name: "privacy".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-08-26T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1438,6 +1648,8 @@ mod tests {
             package_name: "dangle".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0], // only "Dashboard" ships
             now: "2026-07-03T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1494,6 +1706,8 @@ mod tests {
             package_name: "covered".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1], // both sheets ship — "Data" is covered
             now: "2026-07-03T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1617,6 +1831,8 @@ mod tests {
             package_name: "test-pkg".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1688,6 +1904,8 @@ mod tests {
             package_name: "partial".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0], // Only Dashboard
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1723,6 +1941,8 @@ mod tests {
             package_name: "checked".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0, 1],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1791,12 +2011,19 @@ mod tests {
         // Publish two versions of the SAME workbook — the artifact bytes are
         // identical across versions (only the manifest differs).
         for v in [SemVer::new(1, 0, 0), SemVer::new(1, 0, 1)] {
+            let first = v == SemVer::new(1, 0, 0);
             let request = PublishRequest {
             model_writebacks: None,
                 workbook: &wb,
                 package_name: "dedup".to_string(),
                 version: v,
                 kind: "report".to_string(),
+                mode: if first {
+                    PushMode::CreateNew
+                } else {
+                    PushMode::Update { expected_base: SemVer::new(1, 0, 0) }
+                },
+                change_summary: "republish, same content".to_string(),
                 sheet_indices: vec![0, 1],
                 now: "2026-05-18T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
@@ -1860,6 +2087,8 @@ mod tests {
             package_name: "dup".to_string(),
             version: SemVer::new(1, 0, 0),
             kind: "report".to_string(),
+            mode: PushMode::CreateNew,
+            change_summary: String::new(),
             sheet_indices: vec![0],
             now: "2026-05-18T00:00:00Z".to_string(),
             published_by: "tester".to_string(),
@@ -1875,8 +2104,26 @@ mod tests {
         };
 
         publish(&reg, &request, prof.path()).unwrap();
+
+        // Publishing the same request again is a CreateNew into a name that now
+        // exists — refused before it can touch a byte of the published version.
         let result = publish(&reg, &request, prof.path());
-        assert!(matches!(result, Err(CalpError::VersionAlreadyPublished { .. })));
+        assert!(
+            matches!(result, Err(CalpError::PackageAlreadyExists(ref p)) if p == "dup"),
+            "expected PackageAlreadyExists, got {result:?}"
+        );
+
+        // And the honest way to try the same thing — pushing v1.0.0 as an
+        // update whose base is v1.0.0 — is refused by the monotonic gate, which
+        // is what keeps a published version immutable.
+        let mut update = request;
+        update.mode = PushMode::Update { expected_base: SemVer::new(1, 0, 0) };
+        update.change_summary = "second try".to_string();
+        let result = publish(&reg, &update, prof.path());
+        assert!(
+            matches!(result, Err(CalpError::VersionNotGreater { ref suggested, .. }) if suggested == "1.0.1"),
+            "expected VersionNotGreater suggesting 1.0.1, got {result:?}"
+        );
     }
 
     #[test]
@@ -1886,6 +2133,7 @@ mod tests {
         let reg = LocalRegistry::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
+        let mut previous: Option<SemVer> = None;
         for (major, minor) in [(1, 0), (1, 1), (2, 0)] {
             let request = PublishRequest {
             model_writebacks: None,
@@ -1893,6 +2141,11 @@ mod tests {
                 package_name: "multi".to_string(),
                 version: SemVer::new(major, minor, 0),
                 kind: "report".to_string(),
+                mode: match &previous {
+                    None => PushMode::CreateNew,
+                    Some(base) => PushMode::Update { expected_base: base.clone() },
+                },
+                change_summary: "next version".to_string(),
                 sheet_indices: vec![0],
                 now: "2026-05-18T00:00:00Z".to_string(),
                 published_by: "tester".to_string(),
@@ -1907,6 +2160,7 @@ mod tests {
                 min_app_version: String::new(),
             };
             publish(&reg, &request, prof.path()).unwrap();
+            previous = Some(SemVer::new(major, minor, 0));
         }
 
         let pkg = reg.get_package_manifest("multi").unwrap();
