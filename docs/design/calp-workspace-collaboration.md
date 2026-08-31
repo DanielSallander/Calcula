@@ -165,6 +165,24 @@ application's sheet identity and orphan every other subscriber's overrides.
 Rather than let that happen silently, the push refuses and points at the right
 door: *Open Application for Editing*.
 
+**The role has to be VISIBLE, not merely enforced.** A working copy and a
+subscribed copy look identical on screen and behave oppositely on Push, and for
+a while the only surface that said which you held was the Working copy section
+of the Application Explorer — a sidebar you had to go and open. A developer
+working both sides at once loses track of which window is which, and finds out
+from a refusal. So the status bar carries a permanent badge
+(`DistributionRoleStatusItem`): *"✎ Working copy: sales-report v1.0.0"*, *"↓
+Subscribed: vendor-kpis v2.1.0"*, both when both apply, and nothing at all for a
+standalone workbook — a chip on every new file would be noise, and the status bar
+is shared space. A stale working copy says so ("behind"), because that is the
+push the base-version gate is about to refuse. Clicking opens the Explorer.
+
+The window title would reach further — it is what the taskbar shows when two
+instances are open — but the shell owns it (`dirtyStateBridge.ts`) and there is
+no `@api` seam for it, so an extension cannot set it without one. That is a
+seam worth adding if the badge proves not to be enough, not a rule worth
+breaking.
+
 ## 3. Invariants
 
 1. **Versions are immutable.** Publishing over an existing version is refused.

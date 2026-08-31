@@ -35,6 +35,7 @@ import { VersionDiffView } from "./VersionDiffView";
 import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
 import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
+import { pushBlockingReason } from "../lib/pushReadiness";
 import { PublishReportView } from "./ApplicationExplorerPanel";
 
 /** Which of the two things this dialog is doing right now. */
@@ -73,6 +74,16 @@ export function PublishDialog({ onClose }: DialogProps) {
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<PublishReport | null>(null);
   const [reportLabel, setReportLabel] = useState<string>("");
+  /**
+   * The input signature the visible report was computed FROM.
+   *
+   * The report names the sheets it would ship, and it goes stale the moment a
+   * checkbox moves — so the panel could claim "would publish Sheet1, Sheet1 (2),
+   * Sheet1 (3)" while only Sheet1 was ticked. On the surface whose entire job is
+   * disclosing what leaves the machine, an overstatement is the worst direction
+   * to be wrong in.
+   */
+  const [reportFor, setReportFor] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [pushed, setPushed] = useState(false);
   const [diff, setDiff] = useState<VersionDiff | null>(null);
@@ -124,6 +135,7 @@ export function PublishDialog({ onClose }: DialogProps) {
         setWarnings(result.warnings);
         setGates(result.gates ?? null);
         setAvailableSheets(result.sheetNames);
+        setReportFor(previewSignature());
         setStatus(null);
       } catch (err: unknown) {
         setError(String(err));
@@ -231,6 +243,10 @@ export function PublishDialog({ onClose }: DialogProps) {
   };
 
   /** Selected sheet NAMES resolved to workbook indices; [] = every sheet. */
+  /** Everything a preview's answer depends on, as one comparable string. */
+  const previewSignature = (): string =>
+    JSON.stringify({ i: selectedIndices(), c: includeComments });
+
   const selectedIndices = (): number[] => {
     if (sheetSelection.size === 0 || availableSheets.length === 0) return [];
     if (sheetSelection.size === availableSheets.length) return [];
@@ -256,6 +272,19 @@ export function PublishDialog({ onClose }: DialogProps) {
   };
 
   const handlePublish = async () => {
+    // VALIDATE ON CLICK, don't just sit there disabled. The button used to be
+    // `disabled={!canPush}`, and the single condition a filled-in-looking dialog
+    // could still fail was the change summary — whose PLACEHOLDER is a complete
+    // sentence, so an empty required field reads as a filled one. Pressing Push
+    // then did nothing at all: no error, no status, no movement. A primary
+    // action that silently ignores the click is indistinguishable from a broken
+    // build, so the click now always produces an answer.
+    const missing = blockingReason();
+    if (missing) {
+      setError(missing);
+      setStatus(null);
+      return;
+    }
     setError(null);
     setStatus(mode === "push" ? "Pushing…" : "Publishing…");
     try {
@@ -296,13 +325,14 @@ export function PublishDialog({ onClose }: DialogProps) {
     }
   };
 
-  const canPush =
-    mode !== "loading" &&
-    registryPath.trim() !== "" &&
-    packageName.trim() !== "" &&
-    version.trim() !== "" &&
-    (mode === "create" || changeSummary.trim() !== "") &&
-    !pushed;
+  // Why this dialog cannot push yet, in the user's words — shown live beside the
+  // button AND returned on click, so the reason is visible before the gesture and
+  // unmissable after it. Pure and unit-tested; see lib/pushReadiness.ts for why
+  // it is a sentence rather than the boolean it used to be.
+  const blockingReason = (): string | null =>
+    pushBlockingReason({ mode, registryPath, packageName, version, changeSummary, pushed });
+  const blocked = blockingReason();
+  const canPush = !blocked && !pushed;
 
   // ---- styles -------------------------------------------------------------
   const windowStyle: React.CSSProperties = {
@@ -549,13 +579,34 @@ export function PublishDialog({ onClose }: DialogProps) {
             <label>
               What changed{mode === "push" ? " (required)" : " (optional)"}
             </label>
+            {/*
+              An EMPTY required field must not look like a filled one. The
+              placeholder here is a complete sentence — good guidance, and
+              indistinguishable at a glance from a value somebody typed — so the
+              empty state is marked on the control itself rather than left to be
+              inferred from grey text.
+            */}
             <textarea
-              style={{ ...inputStyle, minHeight: "56px", resize: "vertical", fontFamily: "inherit" }}
+              style={{
+                ...inputStyle,
+                minHeight: "56px",
+                resize: "vertical",
+                fontFamily: "inherit",
+                ...(mode === "push" && changeSummary.trim() === ""
+                  ? { borderColor: "#c5221f", background: "#fdeceb" }
+                  : {}),
+              }}
               value={changeSummary}
               onChange={(e) => setChangeSummary(e.target.value)}
-              placeholder="Adds the regional split to the summary sheet and a Refresh button."
+              placeholder="e.g. Adds the regional split to the summary sheet and a Refresh button."
             />
             <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+              {mode === "push" && changeSummary.trim() === "" ? (
+                <span style={{ color: "#c5221f" }}>
+                  Required — this box is still empty; the sentence in it is an
+                  example.{" "}
+                </span>
+              ) : null}
               Stored inside the signed version manifest — subscribers and
               co-developers read it in the version history.
             </div>
@@ -630,21 +681,13 @@ export function PublishDialog({ onClose }: DialogProps) {
           </div>
         )}
 
-        {error && (
-          <div
-            style={{
-              color: "var(--text-error, #d33)",
-              marginBottom: "8px",
-              fontSize: "12px",
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {error}
-          </div>
-        )}
-        {status && (
-          <div style={{ color: "green", marginBottom: "8px", fontSize: "12px" }}>{status}</div>
-        )}
+        {/*
+          The error and the status used to be rendered HERE, inside the
+          scrolling body of a dialog tall enough to need scrolling. Press Push
+          with the sheet list scrolled into view and the answer appears above
+          the fold — visually identical to the button doing nothing. They now
+          render in the pinned strip just above the footer; see below.
+        */}
 
         {warnings.length > 0 && (
           <div
@@ -675,18 +718,68 @@ export function PublishDialog({ onClose }: DialogProps) {
               border: "1px solid var(--border-default)",
               borderRadius: "3px",
               fontSize: "12px",
+              ...(reportFor !== null && reportFor !== previewSignature()
+                ? { opacity: 0.55 }
+                : {}),
             }}
           >
+            {reportFor !== null && reportFor !== previewSignature() && (
+              // The report names the sheets it would ship. Once the selection
+              // moves it is describing a publish nobody is about to make, and
+              // saying so is the only honest option: silently leaving it up
+              // overstates what would leave the machine.
+              <div style={{ color: "#a05a00", fontWeight: 600, marginBottom: "4px" }}>
+                Out of date — the sheet selection changed. Press Preview again.
+              </div>
+            )}
             <div style={{ fontWeight: 600, marginBottom: "4px" }}>{reportLabel}</div>
             <PublishReportView report={report} />
           </div>
         )}
       </div>
 
+      {/*
+        THE ANSWER STRIP — pinned, outside the scroll, directly above the button
+        it is about, so the reply to a click is read in the same glance as the
+        gesture. One strip and one priority order rather than three scattered
+        messages: what just FAILED beats what just happened, which beats what is
+        stopping you from trying.
+      */}
+      {(error || status || (blocked && !pushed)) && (
+        <div
+          style={{
+            flexShrink: 0,
+            padding: "6px 16px",
+            fontSize: "12px",
+            lineHeight: 1.35,
+            whiteSpace: "pre-wrap",
+            borderTop: "1px solid var(--border-default)",
+            ...(error
+              ? { background: "#fdeceb", color: "#c5221f" }
+              : status
+                ? { background: "#e8f5e9", color: "#137333" }
+                : { color: "var(--text-secondary)" }),
+          }}
+        >
+          {error ?? status ?? blocked}
+        </div>
+      )}
+
       <div style={footerStyle}>
         <button onClick={onClose}>{pushed ? "Close" : "Cancel"}</button>
         <button onClick={() => void runPreview("Preview — would publish")}>Preview</button>
-        <button onClick={handlePublish} disabled={!canPush} style={{ fontWeight: 600 }}>
+        {/*
+          NOT `disabled`. A disabled primary button explains nothing, and the one
+          condition a complete-looking dialog still fails is the change summary,
+          whose placeholder is a full sentence and reads as a value. Clicking now
+          always answers — see `handlePublish`.
+        */}
+        <button
+          onClick={handlePublish}
+          disabled={pushed}
+          title={blocked ?? undefined}
+          style={{ fontWeight: 600, opacity: canPush ? 1 : 0.65 }}
+        >
           {mode === "push" ? "Push" : "Publish"}
         </button>
       </div>

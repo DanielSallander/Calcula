@@ -84,7 +84,13 @@ import {
   IconWriteback,
   IconWritebackPane,
   IconRefreshData,
+  registerStatusBarItem,
+  unregisterStatusBarItem,
 } from "@api";
+import { DistributionRoleStatusItem } from "./components/DistributionRoleStatusItem";
+
+/** Status-bar item id for the working-copy / subscriber role badge. */
+const ROLE_STATUS_ITEM_ID = "distribution:roleBadge";
 
 let isActivated = false;
 const cleanupFns: (() => void)[] = [];
@@ -191,6 +197,18 @@ function activate(context: ExtensionContext): void {
     priority: 37,
   });
   cleanupFns.push(() => context.ui.panels.unregister(APPLICATION_EXPLORER_PANEL_ID));
+
+  // WHICH WORKBOOK AM I LOOKING AT? A working copy and a subscribed copy are
+  // visually identical and behave oppositely on Push, and the only place that
+  // said which was a sidebar section you had to go and open. This badge says it
+  // without being asked, and renders nothing for a workbook that is neither.
+  registerStatusBarItem({
+    id: ROLE_STATUS_ITEM_ID,
+    component: DistributionRoleStatusItem,
+    alignment: "right",
+    priority: 60,
+  });
+  cleanupFns.push(() => unregisterStatusBarItem(ROLE_STATUS_ITEM_ID));
 
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
