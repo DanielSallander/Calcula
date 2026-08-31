@@ -382,19 +382,27 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       // Notify the app that sheets have changed so UI refreshes
       emitAppEvent(AppEvents.SHEET_CHANGED, {});
 
-      // Land the user on the report: activate the FIRST pulled sheet (pulled
-      // sheets are appended at the end of the workbook).
-      if (result.sheetsPulled > 0) {
+      // Land the user on the report, using the index the BACKEND reported.
+      //
+      // This used to be `sheets.length - sheetsPulled` — list arithmetic. The
+      // sheet list omits object-backed sheets (a floating range's backing
+      // sheet), and its builder says so: "`index` stays the TRUE position in
+      // the state vectors — consumers must match by `s.index`, never by list
+      // position." With any such sheet present, that subtraction names the
+      // wrong sheet, so the pulled report never becomes active — and because
+      // the active-sheet mirror is only repaired BY an activation, the next
+      // recalculation then copies the stale mirror back over the pulled sheet
+      // and its literal cells are gone.
+      const firstPulled = result.firstPulledSheetIndex;
+      if (firstPulled !== undefined && firstPulled !== null) {
         try {
+          await setActiveSheetApi(firstPulled);
           const sheetsResult = await getSheets();
-          const firstPulled = sheetsResult.sheets.length - result.sheetsPulled;
-          if (firstPulled >= 0 && firstPulled < sheetsResult.sheets.length) {
-            await setActiveSheetApi(firstPulled);
-            emitAppEvent(AppEvents.SHEET_CHANGED, {
-              sheetIndex: firstPulled,
-              sheetName: sheetsResult.sheets[firstPulled]?.name ?? "",
-            });
-          }
+          emitAppEvent(AppEvents.SHEET_CHANGED, {
+            sheetIndex: firstPulled,
+            sheetName:
+              sheetsResult.sheets.find((s) => s.index === firstPulled)?.name ?? "",
+          });
         } catch (err) {
           console.warn("[Subscribe] Could not activate pulled sheet:", err);
         }

@@ -580,6 +580,18 @@ export interface PullResponse {
   /** Custom objects of kinds NOT handled Rust-side (brick 4), for frontend
    *  provider materialization. pullPackage dispatches these automatically. */
   customObjects?: PulledDistributableObject[];
+  /**
+   * The TRUE state-vector index of the first user-visible sheet this pull
+   * created, for the caller to activate. Null when the package brought no user
+   * sheet (a dataset or library package).
+   *
+   * Use THIS rather than deriving a position from `getSheets()`. That list
+   * omits object-backed sheets — a floating range's backing sheet — so list
+   * arithmetic names the wrong sheet as soon as one exists, and activating the
+   * wrong sheet leaves the pulled report's content out of the active-sheet
+   * mirror, where the next recalculation overwrites it.
+   */
+  firstPulledSheetIndex?: number | null;
 }
 
 /** Contents of a package version, for pre-pull review. */

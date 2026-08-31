@@ -191,6 +191,15 @@ pub struct PullResponse {
     /// NOT included here. Payloads are already integrity-verified.
     #[serde(default)]
     pub custom_objects: Vec<PulledCustomObjectDto>,
+    /// The TRUE state-vector index of the first user-visible sheet this pull
+    /// created, for the caller to activate.  when the package brought no
+    /// user sheet (a dataset or library package).
+    ///
+    /// Answered here because only this layer knows the real indices: the sheet
+    /// LIST omits object-backed sheets, so a caller deriving a position from it
+    /// names the wrong sheet as soon as a floating range exists.
+    #[serde(default)]
+    pub first_pulled_sheet_index: Option<usize>,
 }
 
 /// A pulled custom object handed to the frontend for provider materialization
@@ -2817,7 +2826,7 @@ pub fn calp_pull(
         &slicer_state,
         result,
         MaterializeMode::Subscribe,
-        &window,
+        Some(&window),
     )
 }
 
@@ -2864,7 +2873,14 @@ pub(crate) fn materialize_pull_result(
     // Needed for the one live-refresh emit below: a package that brings custom
     // functions must re-install the UDF registry now, or its formulas read
     // #NAME? until the workbook is reopened.
-    window: &tauri::Window,
+    //
+    // OPTIONAL so this function is testable. A `tauri::Window` cannot be built
+    // outside a running app, and requiring one made 700 lines of
+    // materialization — every artifact type a package can carry — reachable
+    // only from a live app. That is how the active-sheet mirror desync below
+    // shipped. `None` means "no frontend to notify", which is exactly true in
+    // a test.
+    window: Option<&tauri::Window>,
 ) -> Result<PullResponse, String> {
     // S5 phase 2: capture the origin/trust outcome before `result` is consumed.
     let publisher_name = result.publisher_name.clone();
@@ -2908,6 +2924,11 @@ pub(crate) fn materialize_pull_result(
     // Materialize pulled sheets into the workbook.
     // Each pulled sheet has its own local StyleRegistry; we merge styles into
     // the shared registry and remap cell style_index values accordingly.
+    //
+    // Set inside the grid-lock scope below, consumed after it drops — the
+    // mirror write takes its own lock. See the note at the assignment.
+    let mut active_grid_after_materialize: Option<engine::grid::Grid> = None;
+    let mut first_pulled_user_sheet: Option<usize> = None;
     let (chart_sheet_index, pkg_to_index) = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
@@ -2955,8 +2976,65 @@ pub(crate) fn materialize_pull_result(
             chart_index_map.insert(pulled.sheet.id, base_index + i);
             pkg_to_index.insert(pulled.package_sheet_id, base_index + i);
         }
+
+        // SYNC THE ACTIVE-SHEET MIRROR when a sheet we just created IS the
+        // active one.
+        //
+        // `state.grid` is the authoritative copy of the active sheet, and
+        // `run_calculation_pass` opens by doing `grids[active] = grid.clone()`
+        // — a whole-Grid REPLACEMENT, not a value write (calculation.rs:1107).
+        // Meanwhile `recalculate_sheet_values` only ever mirrors FORMULA cells
+        // into it (it iterates `filter_map(|c| c.formula_string())`). So a
+        // materialized sheet that lands on `active` with a stale mirror loses
+        // every LITERAL cell on the next recalculation: the mirror fills with
+        // formula results, and the copy-back deletes everything else, key and
+        // all. That is exactly the reported symptom — publish a sheet of values
+        // and formulas, open it, and only the formulas are there.
+        //
+        // CHECKOUT is where it bites hardest: the document reset blanks the
+        // mirror and sets active_sheet = 0, and the package's first sheet lands
+        // at index 0 — so the mirror is EMPTY while grids[0] holds the package.
+        // `collect_active_sheet_cells` reads the mirror, so the command was
+        // also returning an empty cell list to the frontend.
+        //
+        // CONDITIONAL, never unconditional: `grids[active]` may legitimately
+        // lag behind the mirror (BUG-0016), so copying grids -> mirror for a
+        // sheet we did NOT just create would discard the user's live edits on
+        // it. Same guard, same reason, as the refresh path's
+        // `active_was_refreshed`.
+        let active = *state.active_sheet.read().map_err(|e| e.to_string())?;
+        if active >= base_index && active < grids.len() {
+            active_grid_after_materialize = grids.get(active).cloned();
+        }
+
+        // WHICH SHEET THE USER SHOULD LAND ON — answered here, where the true
+        // state-vector indices are known, rather than reconstructed by the
+        // caller from a filtered list.
+        //
+        // `build_sheet_list` OMITS object-backed sheets (a floating range's
+        // backing sheet) and says so in its own doc: "`index` stays the TRUE
+        // position in the state vectors — consumers must match by `s.index`,
+        // never by list position." The subscribe dialog was computing
+        // `sheets.length - sheetsPulled`, which is list arithmetic: with any
+        // object-backed sheet below the pulled ones it names the wrong sheet,
+        // the pulled sheet never becomes active, its content never reaches the
+        // active-sheet mirror, and the next recalculation copies the mirror
+        // back over it. Same lost-literals symptom, different route.
+        //
+        // A package can itself contain backing sheets (publish auto-joins a
+        // floating range's), so this skips them: landing the user on one would
+        // show them a sheet the tab bar deliberately hides.
+        first_pulled_user_sheet = {
+            let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+            (base_index..grids.len())
+                .find(|&i| crate::sheets::is_user_sheet(&visibility, i))
+        };
+
         (chart_index_map, pkg_to_index)
     };
+    if let Some(grid) = active_grid_after_materialize {
+        *state.grid.write(effect).map_err(|e| e.to_string())? = grid;
+    }
 
     // Provenance ledger: everything this pull actually materializes. Stored on
     // the Subscription (subscriptions.json) so the Package Explorer can show
@@ -3363,7 +3441,9 @@ pub(crate) fn materialize_pull_result(
     if custom_functions_changed {
         // Re-install the live UDF registry NOW — without this, the pulled
         // report's custom-function formulas stay #NAME? until a reopen.
-        let _ = tauri::Emitter::emit(window, "custom-functions:refresh", ());
+        if let Some(window) = window {
+            let _ = tauri::Emitter::emit(window, "custom-functions:refresh", ());
+        }
     }
     for (id, name) in &applied_modules {
         sub_objects.push(sub_object("moduleScript", id.clone(), name.clone()));
@@ -3554,6 +3634,7 @@ pub(crate) fn materialize_pull_result(
         trust_status,
         other_scope_pins,
         custom_objects: frontend_custom_objects,
+        first_pulled_sheet_index: first_pulled_user_sheet,
     })
 }
 
@@ -3699,7 +3780,7 @@ pub fn calp_checkout(
         &slicer_state,
         result,
         MaterializeMode::Checkout,
-        &window,
+        Some(&window),
     )?;
 
     // The workbook now IS this package version. Record it, so the push gates
@@ -6829,6 +6910,9 @@ pub fn calp_dev_subscribe(
 
     Ok(PullResponse {
         package_name,
+        // Dev preview materializes into the CURRENT workbook and leaves the
+        // user where they were; it has no activation step to inform.
+        first_pulled_sheet_index: None,
         resolved_version: "dev".to_string(),
         sheets_pulled,
         tables_pulled,
@@ -7049,6 +7133,9 @@ pub fn calp_dev_refresh(
 
     Ok(PullResponse {
         package_name,
+        // Dev preview materializes into the CURRENT workbook and leaves the
+        // user where they were; it has no activation step to inform.
+        first_pulled_sheet_index: None,
         resolved_version: "dev".to_string(),
         sheets_pulled,
         tables_pulled,

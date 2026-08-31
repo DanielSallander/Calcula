@@ -38,4 +38,29 @@ Remove-Item Env:\CC -ErrorAction SilentlyContinue
 Remove-Item Env:\AR -ErrorAction SilentlyContinue
 Remove-Item Env:\CFLAGS -ErrorAction SilentlyContinue
 
+# 5. Build OUTSIDE the repository.
+#
+# Two separate reasons, either one sufficient:
+#   * Dropbox syncs the repo, and it locks files under `target/` mid-build
+#     (os error 32).
+#   * The in-repo tree is corrupt and fails to link `app_lib.dll` with
+#     `LNK2019 anon.*.llvm.*` unresolved externals — compiler-generated
+#     anonymous constants, i.e. object files from different compilations mixed
+#     together. No source change causes or fixes that.
+#
+# This script used to configure LIB/INCLUDE/PATH and then announce "environment
+# configured", which was not true: the one variable CLAUDE.md calls mandatory
+# was still unset, so `yarn tauri dev` from a freshly-prepared shell built into
+# the corrupt tree and failed at the linker. Setting it here means preparing the
+# environment actually prepares the environment.
+#
+# An explicit CARGO_TARGET_DIR already in the environment wins — someone who
+# chose their own location meant it.
+if (-not $env:CARGO_TARGET_DIR) {
+    $env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'calcula-target'
+}
+
 Write-Host "Rust $Target build environment configured (LIB + INCLUDE + MSVC)!" -ForegroundColor Green
+# Printed, not silent: which binary a build or an E2E run exercises is a
+# function of this value, so it should never have to be guessed at.
+Write-Host "CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR" -ForegroundColor DarkGray
