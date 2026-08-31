@@ -1,8 +1,8 @@
 //! FILENAME: core/calp/src/audit.rs
 //! PURPOSE: Opt-in audit log for subscription events in .cala workbooks.
 //! CONTEXT: Records subscription events, refreshes, override creation/deletion.
-//! Policy is set per registry: a registry may require audit logging for
-//! packages it serves. Off by default.
+//! Policy is set per workspace: a workspace may require audit logging for
+//! applications it serves. Off by default.
 
 use std::collections::HashMap;
 
@@ -45,7 +45,7 @@ pub struct AuditEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditEvent {
-    /// Subscribed to a new package.
+    /// Subscribed to a new application.
     Subscribe,
     /// Refreshed one or more subscriptions.
     Refresh,
@@ -61,15 +61,15 @@ pub enum AuditEvent {
     OverrideExported,
     /// Imported overrides from a patch.
     OverrideImported,
-    /// Published a package version.
+    /// Published an application version.
     Published,
-    /// Opened a published package version as a WORKING COPY (checkout). The
+    /// Opened a published application version as a WORKING COPY (checkout). The
     /// author-side counterpart of `Subscribe`: same materialization, different
     /// intent — this workbook is now something that can push.
     CheckedOut,
     /// Changed active channel.
     ChannelChanged,
-    /// Submitted writeback values to the registry.
+    /// Submitted writeback values to the workspace.
     WritebackSubmitted,
     /// Writeback drafts invalidated by refresh (removed/incompatible regions).
     WritebackInvalidated,
@@ -98,7 +98,7 @@ impl AuditEvent {
     ///
     /// * SCRIPT ACTIVITY — grid mutations and capability use.
     /// * WRITEBACK — submitting is the moment a contributor's typed values
-    ///   LEAVE THE MACHINE for a shared registry, which makes it an egress
+    ///   LEAVE THE MACHINE for a shared workspace, which makes it an egress
     ///   event much closer to a `CapabilityCall` (net.fetch and friends) than
     ///   to bookkeeping like subscribe/refresh. `WritebackReviewed` and
     ///   `WritebackInvalidated` are its counterparts: an approve/reject changes
@@ -109,7 +109,7 @@ impl AuditEvent {
     ///
     /// * PUBLISH — the same egress argument as writeback, pointed the other
     ///   way: a push is the moment this workbook's content LEAVES THE MACHINE
-    ///   for a shared registry, where other people will pull it. In the
+    ///   for a shared workspace, where other people will pull it. In the
     ///   workspace model it is also the workbook's only local record of its own
     ///   release history, and "which version did I push, from which base" is
     ///   precisely the question asked after something went wrong — i.e. when

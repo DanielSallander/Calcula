@@ -1,10 +1,10 @@
 //! FILENAME: core/calp/examples/publish_report.rs
 //! PURPOSE: Build a report workbook with sales data + pivot table and publish
-//!          it as a .calp package with an embedded BI model data source.
+//!          it as a .calp application with an embedded BI model data source.
 //!          The subscriber gets the data sheet, an interactive pivot, and
 //!          the BI model for live data refresh.
 //!
-//! USAGE:   cargo run --example publish_report -- <registry_dir> [model_path]
+//! USAGE:   cargo run --example publish_report -- <workspace_dir> [model_path]
 //!
 //! Example:
 //!   cargo run --example publish_report -- \
@@ -26,8 +26,8 @@ use pivot_engine::{
 };
 
 use calp::publish::{publish, ExcludedRegion, PublishDataSource, PublishRequest, PushMode};
-use calp::PackageBinding;
-use calp::registry::LocalRegistry;
+use calp::TableBinding;
+use calp::workspace::LocalWorkspace;
 use calp::version::SemVer;
 
 // ---------------------------------------------------------------------------
@@ -443,8 +443,8 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
         .map(|arr| arr.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let bindings: Vec<PackageBinding> = tables.iter().map(|table_name| {
-        PackageBinding {
+    let bindings: Vec<TableBinding> = tables.iter().map(|table_name| {
+        TableBinding {
             model_table: table_name.clone(),
             schema: "BI".to_string(),
             source_table: table_name.clone(),
@@ -474,7 +474,7 @@ fn load_bi_data_source(model_path: &Path) -> Option<PublishDataSource> {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: publish_report <registry_dir> [model_path]");
+        eprintln!("Usage: publish_report <workspace_dir> [model_path]");
         eprintln!();
         eprintln!("Example:");
         eprintln!("  cargo run --example publish_report -- \\");
@@ -538,14 +538,14 @@ fn main() {
 
     println!("Built workbook: {} sheets, {} pivot(s)", workbook.sheets.len(), workbook.pivot_definitions.len());
 
-    // Open (or create) the local registry
-    let registry = LocalRegistry::open(registry_path).expect("Failed to open/create registry");
-    println!("Registry at: {}", registry_path.display());
+    // Open (or create) the local workspace
+    let registry = LocalWorkspace::open(registry_path).expect("Failed to open/create workspace");
+    println!("Workspace at: {}", registry_path.display());
 
-    // Delete existing package directory if present (overwrite)
+    // Delete existing application directory if present (overwrite)
     let pkg_dir = registry_path.join("sales-report");
     if pkg_dir.exists() {
-        std::fs::remove_dir_all(&pkg_dir).expect("Failed to remove old package");
+        std::fs::remove_dir_all(&pkg_dir).expect("Failed to remove old application");
         println!("Removed existing sales-report package");
     }
 

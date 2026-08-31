@@ -10,18 +10,18 @@
 > sequencing rationale below still reads against the plan it was written for.
 
 Deferred items:
-- ~~HTTP registry adapter (Phase 2 scope, local-filesystem only for now)~~
-  **BUILT (read-only).** `HttpRegistry` (`app/src-tauri/src/calp_registry.rs:93`)
-  implements `RegistryTransport` over `reqwest::blocking`, so any static file
-  host (S3, nginx, GitHub Pages) is a registry with no server code. It lives in
+- ~~HTTP workspace adapter (Phase 2 scope, local-filesystem only for now)~~
+  **BUILT (read-only).** `HttpWorkspace` (`app/src-tauri/src/calp_registry.rs:93`)
+  implements `WorkspaceTransport` over `reqwest::blocking`, so any static file
+  host (S3, nginx, GitHub Pages) is a workspace with no server code. It lives in
   the app crate deliberately, so `core/calp` stays free of an HTTP client —
   which is why `core/calp/src/transport.rs` still describes itself as
   local-only. Routing is by URL scheme through the single choke point
-  `open_registry_scoped` (`calp_registry.rs:49`). **Still genuinely absent:**
+  `open_workspace_scoped` (`calp_registry.rs:49`). **Still genuinely absent:**
   writes. Publish, submission save and the publish lock all error on an HTTP
-  registry ("HTTP registries are read-only", `calp_registry.rs:207`), so
-  writeback collection remains local-registry-only, and redirects are disabled
-  to keep a hostile registry from turning a GET into an SSRF primitive.
+  workspace ("HTTP registries are read-only", `calp_registry.rs:207`), so
+  writeback collection remains local-workspace-only, and redirects are disabled
+  to keep a hostile workspace from turning a GET into an SSRF primitive.
 - ~~Author-facing rename/merge UI (stubs in place, pending full IdRegistry
   integration into AppState)~~ **The blocker is gone; only the UI is still
   missing.** `IdRegistry` is in `AppState` (`app/src-tauri/src/lib.rs:616`), and
@@ -42,10 +42,10 @@ Deferred items:
   publisher keypair and writes a detached `version-manifest.sig` over the raw
   manifest bytes (`core/calp/src/publish.rs:1176`), stamping the asserted
   `publisher_key` into the manifest (`publish.rs:557`). Trust is TOFU and
-  enforced CLIENT-side, not by the registry: `PinPolicy` is
+  enforced CLIENT-side, not by the workspace: `PinPolicy` is
   `PinOnFirstUse` / `PinAcceptingNameConflict` / `VerifyOnly` / `RequirePinned`
   (`core/calp/src/integrity.rs:439-458`) against a pin store in the user
-  profile, and cross-registry name conflicts are surfaced rather than
+  profile, and cross-workspace name conflicts are surfaced rather than
   silently accepted. See "Security and Trust" in `calp-distribution.md`.
 
 See `docs/guide/distribution.md` for user-facing documentation and
@@ -73,11 +73,11 @@ All phases are v1.0 scope.
 - TestRunner coverage for: ID minting, edit-time alignment, structural shifts,
   cross-sheet refs, rename/merge
 
-## Phase 2: .calp Format and Registry Plumbing
+## Phase 2: .calp Format and Workspace Plumbing
 
 - `.calp` file format (manifest + content layout, on-disk)
-- Local-filesystem registry adapter
-- HTTP registry adapter
+- Local-filesystem workspace adapter
+- HTTP workspace adapter
 - Publish command
 - Pull command (no override layer yet; raw subscribe-and-materialize)
 - Version pinning grammar and resolution
@@ -111,17 +111,17 @@ All phases are v1.0 scope.
 ## Phase 6: Author Workflow
 
 - `--dev` subscription mode (local path / dev channel, follows HEAD)
-- Test registry / dev channel publishing
+- Test workspace / dev channel publishing
 - Production publish flow (version bump, sign, upload)
 - Author-facing UI for `IdRegistry::rename` and `IdRegistry::merge`
-- Signing infrastructure (if registry policy requires)
+- Signing infrastructure (if workspace policy requires)
 
-## Phase 7: Cross-Package and Telemetry
+## Phase 7: Cross-Application and Telemetry
 
-- Cross-package references
-- Registry-side dependency tracking
+- Cross-application references
+- Workspace-side dependency tracking
 - Opt-in audit log in `.cala`
-- Package kind declarations (`template`, `dataset`, `report`) and kind-specific
+- Application kind declarations (`template`, `dataset`, `report`) and kind-specific
   refresh defaults
 
 ## Phase 8: Integration and Polish

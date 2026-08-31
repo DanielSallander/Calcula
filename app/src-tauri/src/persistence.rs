@@ -1584,7 +1584,7 @@ pub(crate) fn slicer_computed_props_from_saved(
 /// ONE function because the open path re-binds TWICE, from two disjoint id
 /// spaces that share this field: `restore_local_bi_connections` keys its map by
 /// the SAVED CONNECTION UUID of a locally-authored connection, and
-/// `restore_package_bi_connections` keys its map by the PACKAGE DATA SOURCE ID.
+/// `restore_application_bi_connections` keys its map by the PACKAGE DATA SOURCE ID.
 /// Both are additive — a pivot is re-bound only when the map names its data
 /// source — so running it twice cannot unbind what the other pass bound.
 fn rebind_bi_pivots_to_connections(
@@ -2371,10 +2371,10 @@ fn assemble_workbook_for_save(
     // of) so a saved-and-reopened working copy still knows what it is pushing
     // to and which base version it is working from.
     {
-        let link = state.workspace_link.read().map_err(|e| e.to_string())?;
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
         if let Some(link) = link.as_ref() {
             let json = serde_json::to_vec_pretty(link).map_err(|e| e.to_string())?;
-            workbook.user_files.insert("workspace_link.json".to_string(), json);
+            workbook.user_files.insert("working_copy_link.json".to_string(), json);
         }
     }
 
@@ -2775,8 +2775,8 @@ fn restore_distribution_user_files(
     // publish impossible — would be reading the previous document's answer.
     // Present-but-corrupt therefore means "standalone", never "keep whatever
     // was there".
-    let workspace_link = match workbook.user_files.remove("workspace_link.json") {
-        Some(bytes) => serde_json::from_slice::<calp::WorkspaceLink>(&bytes)
+    let workspace_link = match workbook.user_files.remove("working_copy_link.json") {
+        Some(bytes) => serde_json::from_slice::<calp::WorkingCopyLink>(&bytes)
             .map_err(|e| {
                 crate::log_warn!(
                     "CALP",
@@ -2787,7 +2787,7 @@ fn restore_distribution_user_files(
             .ok(),
         None => None,
     };
-    *state.workspace_link.write(&load).map_err(|e| e.to_string())? = workspace_link;
+    *state.working_copy_link.write(&load).map_err(|e| e.to_string())? = workspace_link;
 
     let overrides = match workbook.user_files.remove("overrides.json") {
         Some(bytes) => {
@@ -3751,7 +3751,7 @@ pub fn open_file(
     // and until this call nothing ever put one back: a saved subscriber workbook
     // reopened with zero connections, `calp_refresh_data` could only UPDATE a
     // connection that already existed, and the report had no path back to a live
-    // model at all. `restore_package_bi_connections` rebuilds each one from the
+    // model at all. `restore_application_bi_connections` rebuilds each one from the
     // subscription ledger plus the local package cache, through the same
     // signature + pin + artifact-checksum gates a pull runs, under
     // `PinPolicy::RequirePinned` — see its doc comment for what happens when the
@@ -3761,7 +3761,7 @@ pub fn open_file(
     // ledger that call restores) and `load_pending_roles` (so a restored package
     // connection picks up its saved "view as" role, as the pull path does).
     {
-        let ds_to_conn = crate::calp_commands::restore_package_bi_connections(
+        let ds_to_conn = crate::calp_commands::restore_application_bi_connections(
             &state,
             &bi_state,
             &ribbon_filter_state,
@@ -4394,7 +4394,7 @@ pub(crate) fn reset_document_scoped_stores(
     // reopened document would aim that document's next PUSH at a package it has
     // nothing to do with — and the push gates would agree, because the link IS
     // the gate's input.
-    *state.workspace_link.write(effect).map_err(|e| e.to_string())? = None;
+    *state.working_copy_link.write(effect).map_err(|e| e.to_string())? = None;
     *state.override_layer.write(effect).map_err(|e| e.to_string())? = calp::OverrideLayer::new();
     *state.audit_log.write(effect).map_err(|e| e.to_string())? = calp::audit::AuditLog::new();
     *state.writeback_layer.write(effect).map_err(|e| e.to_string())? =
@@ -4570,10 +4570,10 @@ pub(crate) fn reset_document_scoped_stores(
     // leftover entry blames the open document for another one's bad manifest.
     state.writeback_rebuild_skips.lock().map_err(|e| e.to_string())?.clear();
     // ...and the same for why a subscribed package's BI connections could not be
-    // re-materialized (`calp_get_package_connection_skips`). Same reasoning: the
+    // re-materialized (`calp_get_application_connection_skips`). Same reasoning: the
     // previous document's unverifiable package must not be reported against this
     // one. `open_file` refills it from the workbook being opened.
-    state.package_connection_restore_skips.lock().map_err(|e| e.to_string())?.clear();
+    state.application_connection_restore_skips.lock().map_err(|e| e.to_string())?.clear();
 
     // ---- The GATHER pre-fetch map ------------------------------------------
     // Keyed by writeback region id, and `build_gather_data` serves whatever is
@@ -5860,7 +5860,7 @@ mod distribution_user_file_restore_tests {
             "overrides.json",
             "audit_log.json",
             "writeback_drafts.json",
-            "workspace_link.json",
+            "working_copy_link.json",
         ] {
             wb.user_files
                 .insert(name.to_string(), b"{ this is not json".to_vec());
@@ -5868,8 +5868,8 @@ mod distribution_user_file_restore_tests {
         wb
     }
 
-    fn a_workspace_link(package: &str) -> calp::WorkspaceLink {
-        calp::WorkspaceLink::new(
+    fn a_workspace_link(package: &str) -> calp::WorkingCopyLink {
+        calp::WorkingCopyLink::new(
             r"\\server\registry",
             package,
             "report",
@@ -5905,7 +5905,7 @@ mod distribution_user_file_restore_tests {
              passed the writeback gate"
         );
         assert!(
-            state.workspace_link.read().unwrap().is_none(),
+            state.working_copy_link.read().unwrap().is_none(),
             "workbook A's WORKSPACE LINK must not survive: it names the package \
              this workbook pushes to, and the push gates read it as their input \
              — so an inherited link aims workbook B's next push at workbook A's \
@@ -5923,21 +5923,21 @@ mod distribution_user_file_restore_tests {
         link.record_push(
             "1.3.0",
             "2026-08-29T12:00:00Z",
-            vec![calp::WorkspaceSheetRef {
+            vec![calp::WorkingCopySheetRef {
                 sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
                 name: "Dashboard".to_string(),
             }],
         );
-        *state.workspace_link.write(&effect).unwrap() = Some(link.clone());
+        *state.working_copy_link.write(&effect).unwrap() = Some(link.clone());
 
         // Save projects it into user_files; restore reads it back.
         let mut wb = Workbook::new();
         let json = serde_json::to_vec_pretty(&link).unwrap();
-        wb.user_files.insert("workspace_link.json".to_string(), json);
+        wb.user_files.insert("working_copy_link.json".to_string(), json);
 
         let fresh = crate::create_app_state();
         restore_distribution_user_files(&fresh, &mut wb).expect("restore succeeds");
-        let restored = fresh.workspace_link.read().unwrap().clone();
+        let restored = fresh.working_copy_link.read().unwrap().clone();
         assert_eq!(
             restored,
             Some(link),
@@ -5950,7 +5950,7 @@ mod distribution_user_file_restore_tests {
         let state = crate::create_app_state();
         let effect =
             crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default());
-        *state.workspace_link.write(&effect).unwrap() = Some(a_workspace_link("sales-report"));
+        *state.working_copy_link.write(&effect).unwrap() = Some(a_workspace_link("sales-report"));
 
         let user_files = crate::persistence::UserFilesState::default();
         let slicer = crate::slicer::SlicerState::new();
@@ -5970,7 +5970,7 @@ mod distribution_user_file_restore_tests {
         .expect("reset succeeds");
 
         assert!(
-            state.workspace_link.read().unwrap().is_none(),
+            state.working_copy_link.read().unwrap().is_none(),
             "File > New / Open must leave no working-copy link behind"
         );
     }

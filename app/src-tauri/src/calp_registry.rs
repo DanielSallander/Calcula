@@ -1,23 +1,23 @@
 //! FILENAME: app/src-tauri/src/calp_registry.rs
-// PURPOSE: Registry transport selection + the HTTP registry (granular bricks —
+// PURPOSE: Workspace transport selection + the HTTP workspace (granular bricks —
 //          distribution brick 1). The core `calp` crate defines the
-//          `RegistryTransport` seam and ships only `LocalRegistry`; the HTTP
+//          `WorkspaceTransport` seam and ships only `LocalWorkspace`; the HTTP
 //          implementation lives HERE (app crate) so `core/calp` stays
 //          dependency-free (no HTTP client). `open_registry()` routes a
 //          location string to the right transport by URL scheme, so every calp
-//          command constructs its registry through one choke point.
-// SECURITY: HTTP registries are READ-ONLY in v1 (publish/write methods error).
-//          Signing/TOFU/integrity are unchanged — a package pulled over HTTP is
+//          command constructs its workspace through one choke point.
+// SECURITY: HTTP workspaces are READ-ONLY in v1 (publish/write methods error).
+//          Signing/TOFU/integrity are unchanged — an application pulled over HTTP is
 //          verified exactly like a local one (the manifest signature + per-
 //          artifact SHA-256 are checked through the same transport-agnostic
-//          path). A malicious server can therefore serve a package but cannot
+//          path). A malicious server can therefore serve an application but cannot
 //          forge a publisher's signature or tamper an artifact undetected.
 
 use calp::error::CalpError;
-use calp::manifest::{PackageManifest, VersionManifest};
-use calp::registry::LocalRegistry;
-use calp::registry_id::{registry_scope, strip_file_scheme, RegistryScope};
-use calp::transport::RegistryTransport;
+use calp::manifest::{ApplicationManifest, VersionManifest};
+use calp::workspace::LocalWorkspace;
+use calp::workspace_id::{workspace_scope, strip_file_scheme, WorkspaceScope};
+use calp::transport::WorkspaceTransport;
 use calp::version::{SemVer, VersionPin};
 use calp::writeback::WritebackSubmission;
 
@@ -25,31 +25,31 @@ use calp::writeback::WritebackSubmission;
 // Transport factory (the single construction choke point)
 // ============================================================================
 
-/// Whether a location string denotes an HTTP(S) registry.
+/// Whether a location string denotes an HTTP(S) workspace.
 pub fn is_http_location(location: &str) -> bool {
-    calp::registry_id::is_http_location(location)
+    calp::workspace_id::is_http_location(location)
 }
 
-/// Open a registry transport AND derive the pin scope for it, from ONE location
+/// Open a workspace transport AND derive the pin scope for it, from ONE location
 /// string.
 ///
-/// This is the only public way to open a registry, deliberately. A publisher pin
-/// is filed under the registry it came from, so the string used to OPEN a
-/// registry must be the string used to SCOPE it — otherwise a pin is written
+/// This is the only public way to open a workspace, deliberately. A publisher pin
+/// is filed under the workspace it came from, so the string used to OPEN a
+/// workspace must be the string used to SCOPE it — otherwise a pin is written
 /// under one identity and looked up under another, and the fail-closed paths
 /// (`RequirePinned`) silently stop working. Making the transport and the scope
 /// arrive together means a call site cannot hold one without the other.
 ///
 /// Routing is by scheme:
-/// - `http://` / `https://` -> read-only `HttpRegistry`
-/// - `file://<path>` or a bare path -> `LocalRegistry`
+/// - `http://` / `https://` -> read-only `HttpWorkspace`
+/// - `file://<path>` or a bare path -> `LocalWorkspace`
 ///
 /// The transport is a boxed trait object; publish/pull/refresh all accept
-/// `&dyn RegistryTransport`, so callers pass `registry.as_ref()`.
-pub fn open_registry_scoped(
+/// `&dyn WorkspaceTransport`, so callers pass `registry.as_ref()`.
+pub fn open_workspace_scoped(
     location: &str,
-) -> Result<(Box<dyn RegistryTransport>, RegistryScope), CalpError> {
-    let scope = registry_scope(location)?;
+) -> Result<(Box<dyn WorkspaceTransport>, WorkspaceScope), CalpError> {
+    let scope = workspace_scope(location)?;
     let transport = open_registry(&scope.label)?;
     Ok((transport, scope))
 }
@@ -57,64 +57,69 @@ pub fn open_registry_scoped(
 /// Derive the pin scope for a location WITHOUT opening it. For the few callers
 /// that need the scope in isolation (the admin pre-pin in `managed_policy`,
 /// which has no transport at all).
-pub fn scope_for_location(location: &str) -> Result<RegistryScope, CalpError> {
-    registry_scope(location)
+pub fn scope_for_location(location: &str) -> Result<WorkspaceScope, CalpError> {
+    workspace_scope(location)
 }
 
-/// The transport half. PRIVATE: opening a registry without deriving its scope
+/// The transport half. PRIVATE: opening a workspace without deriving its scope
 /// is exactly the seam this module exists to close.
-fn open_registry(location: &str) -> Result<Box<dyn RegistryTransport>, CalpError> {
+fn open_registry(location: &str) -> Result<Box<dyn WorkspaceTransport>, CalpError> {
     if is_http_location(location) {
-        Ok(Box::new(HttpRegistry::new(location)))
+        Ok(Box::new(HttpWorkspace::new(location)))
     } else {
-        // ONE `file://` stripper for the whole codebase (`calp::registry_id`).
+        // ONE `file://` stripper for the whole codebase (`calp::workspace_id`).
         // Two divergent copies used to exist and the org skin could be pinned
         // under one spelling and read under another.
         let path = strip_file_scheme(location);
-        let reg = LocalRegistry::open(std::path::Path::new(&path))?;
+        let reg = LocalWorkspace::open(std::path::Path::new(&path))?;
         Ok(Box::new(reg))
     }
 }
 
 // ============================================================================
-// HTTP registry (read-only)
+// HTTP workspace (read-only)
 // ============================================================================
 
-/// A read-only `.calp` registry served over HTTP(S). Any static file host that
-/// lays packages out as `<base>/<package>/calp-manifest.json`,
-/// `<base>/<package>/<version>/version-manifest.json`, and
-/// `<base>/<package>/<version>/<artifact-rel-path>` is a valid registry — so an
+/// A read-only `.calp` workspace served over HTTP(S). Any static file host that
+/// lays applications out as `<base>/<application>/calp-manifest.json`,
+/// `<base>/<application>/<version>/version-manifest.json`, and
+/// `<base>/<application>/<version>/<artifact-rel-path>` is a valid workspace — so an
 /// S3 bucket, nginx dir, or GitHub Pages site works with no server code.
 ///
 /// Uses `reqwest::blocking` (the app already links reqwest with native TLS, so
 /// no new C toolchain is needed). Safe to call from a sync Tauri command
 /// thread: those run OFF the async runtime, so the blocking client's internal
 /// runtime does not nest.
-pub struct HttpRegistry {
+pub struct HttpWorkspace {
     base_url: String,
     client: reqwest::blocking::Client,
 }
 
-impl HttpRegistry {
+impl HttpWorkspace {
     pub fn new(base_url: &str) -> Self {
-        // A static-file .calp registry has a flat, predictable layout
+        // A static-file .calp workspace has a flat, predictable layout
         // (base/pkg/calp-manifest.json, base/pkg/ver/version-manifest.json,
         // base/pkg/ver/artifact) and legitimately needs NO redirects. Following
-        // them turns every registry GET into a blind SSRF/port-probe primitive:
-        // a hostile registry could redirect a fetch to http://169.254.169.254/…
+        // them turns every workspace GET into a blind SSRF/port-probe primitive:
+        // a hostile workspace could redirect a fetch to http://169.254.169.254/…
         // or an intranet host. Disable redirect-following entirely.
         //
         // NOTE: `.unwrap_or_default()` would fall back to a default client that
         // DOES follow redirects, silently reintroducing the hole — so fail loudly
         // instead. The builder only fails on TLS-backend init, which is fatal
-        // for an HTTP registry anyway.
+        // for an HTTP workspace anyway.
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("HttpRegistry: failed to build reqwest client");
-        HttpRegistry {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            .expect("HttpWorkspace: failed to build reqwest client");
+        // A URL may name the `workspace.calcula` marker exactly as a local path
+        // may — someone copies the link to the pointer file rather than to the
+        // directory. Reduce it here so the transport and `workspace_scope`
+        // agree on which workspace this is.
+        let base = calp::workspace_id::strip_workspace_marker(base_url);
+        HttpWorkspace {
+            base_url: base.trim_end_matches('/').to_string(),
             client,
         }
     }
@@ -125,23 +130,23 @@ impl HttpRegistry {
 
     /// Validate the caller-supplied path components a request is built from.
     ///
-    /// SECURITY (parity with LocalRegistry). `LocalRegistry` runs every
-    /// package/version/artifact component through `calp::registry::validate_component`
+    /// SECURITY (parity with LocalWorkspace). `LocalWorkspace` runs every
+    /// application/version/artifact component through `calp::workspace::validate_component`
     /// before joining it into a path, so a name like `..` cannot escape the
-    /// registry root. This transport builds a URL by string concatenation, and
-    /// URL parsing RESOLVES `..` — so without the same check, a package name of
+    /// workspace root. This transport builds a URL by string concatenation, and
+    /// URL parsing RESOLVES `..` — so without the same check, an application name of
     /// `../..` would silently turn `https://host/reg/<pkg>/calp-manifest.json`
     /// into `https://host/calp-manifest.json` and treat a location the user
-    /// never configured as a registry. It cannot change the HOST (the authority
+    /// never configured as a workspace. It cannot change the HOST (the authority
     /// is fixed by base_url and redirects are disabled), so this is a bounded
-    /// escape rather than an SSRF — but "only registries you configured" is the
+    /// escape rather than an SSRF — but "only workspaces you configured" is the
     /// rule the whole script-distribution gateway rests on, and a rule enforced
     /// on one transport and not the other is not enforced.
     ///
-    /// Applied to package name, version, and every segment of an artifact's
-    /// relative path — the same three inputs LocalRegistry validates.
+    /// Applied to application name, version, and every segment of an artifact's
+    /// relative path — the same three inputs LocalWorkspace validates.
     fn check_component(component: &str, kind: &str) -> Result<(), CalpError> {
-        calp::registry::validate_component(component, kind)
+        calp::workspace::validate_component(component, kind)
     }
 
     fn check_package(package_name: &str) -> Result<(), CalpError> {
@@ -163,7 +168,7 @@ impl HttpRegistry {
             any = true;
         }
         if !any {
-            return Err(CalpError::Registry(format!(
+            return Err(CalpError::Workspace(format!(
                 "Invalid artifact path '{rel_path}': must name a file"
             )));
         }
@@ -176,19 +181,19 @@ impl HttpRegistry {
             .client
             .get(self.url(rel))
             .send()
-            .map_err(|e| CalpError::Registry(format!("GET {rel}: {e}")))?;
+            .map_err(|e| CalpError::Workspace(format!("GET {rel}: {e}")))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(CalpError::Registry(format!(
+            return Err(CalpError::Workspace(format!(
                 "GET {rel}: HTTP {}",
                 resp.status().as_u16()
             )));
         }
         let bytes = resp
             .bytes()
-            .map_err(|e| CalpError::Registry(format!("read body of {rel}: {e}")))?;
+            .map_err(|e| CalpError::Workspace(format!("read body of {rel}: {e}")))?;
         Ok(Some(bytes.to_vec()))
     }
 
@@ -196,7 +201,7 @@ impl HttpRegistry {
         match self.get_bytes(rel)? {
             Some(bytes) => {
                 let value = serde_json::from_slice(&bytes)
-                    .map_err(|e| CalpError::Registry(format!("parse {rel}: {e}")))?;
+                    .map_err(|e| CalpError::Workspace(format!("parse {rel}: {e}")))?;
                 Ok(Some(value))
             }
             None => Ok(None),
@@ -204,27 +209,27 @@ impl HttpRegistry {
     }
 
     fn read_only_err(op: &str) -> CalpError {
-        CalpError::Registry(format!(
-            "HTTP registries are read-only ({op} is not supported); publish to a local registry"
+        CalpError::Workspace(format!(
+            "HTTP workspaces are read-only ({op} is not supported); publish to a local workspace"
         ))
     }
 }
 
-impl RegistryTransport for HttpRegistry {
-    // -- package ops --
+impl WorkspaceTransport for HttpWorkspace {
+    // -- application ops --
 
-    fn list_packages(&self) -> Result<Vec<String>, CalpError> {
+    fn list_applications(&self) -> Result<Vec<String>, CalpError> {
         // Optional catalog file; absent -> empty (browsing by name still works).
         Ok(self.get_json::<Vec<String>>("packages.json")?.unwrap_or_default())
     }
 
-    fn get_package_manifest(&self, package_name: &str) -> Result<PackageManifest, CalpError> {
+    fn get_application_manifest(&self, package_name: &str) -> Result<ApplicationManifest, CalpError> {
         Self::check_package(package_name)?;
         self.get_json(&format!("{package_name}/calp-manifest.json"))?
-            .ok_or_else(|| CalpError::PackageNotFound(package_name.to_string()))
+            .ok_or_else(|| CalpError::ApplicationNotFound(package_name.to_string()))
     }
 
-    fn write_package_manifest(&self, _manifest: &PackageManifest) -> Result<(), CalpError> {
+    fn write_application_manifest(&self, _manifest: &ApplicationManifest) -> Result<(), CalpError> {
         Err(Self::read_only_err("write package manifest"))
     }
 
@@ -266,7 +271,7 @@ impl RegistryTransport for HttpRegistry {
         package_name: &str,
         pin: &VersionPin,
     ) -> Result<SemVer, CalpError> {
-        let pkg_manifest = self.get_package_manifest(package_name)?;
+        let pkg_manifest = self.get_application_manifest(package_name)?;
         let available = pkg_manifest.parsed_versions();
         pin.resolve(&available)
             .cloned()
@@ -277,7 +282,7 @@ impl RegistryTransport for HttpRegistry {
     }
 
     fn list_versions(&self, package_name: &str) -> Result<Vec<SemVer>, CalpError> {
-        let manifest = self.get_package_manifest(package_name)?;
+        let manifest = self.get_application_manifest(package_name)?;
         let mut versions = manifest.parsed_versions();
         versions.sort();
         Ok(versions)
@@ -325,9 +330,9 @@ impl RegistryTransport for HttpRegistry {
         Err(Self::read_only_err("clear version"))
     }
 
-    // -- submissions (writeback). A read-only HTTP registry has no event
+    // -- submissions (writeback). A read-only HTTP workspace has no event
     //    store; appending errors, and loading yields nothing. (A future
-    //    writable HTTP registry maps the append-only event log to plain
+    //    writable HTTP workspace maps the append-only event log to plain
     //    POSTs — the friendliest possible shape for a server.) --
 
     fn save_submission(
@@ -390,17 +395,17 @@ impl RegistryTransport for HttpRegistry {
 }
 
 // ============================================================================
-// Saved registries (a per-machine catalog, like trusted-publishers.json)
+// Saved workspaces (a per-machine catalog, like trusted-publishers.json)
 // ============================================================================
-// A small list of known registries so users pick from a dropdown instead of
+// A small list of known workspaces so users pick from a dropdown instead of
 // typing a path/URL blind. Stored in the profile dir (NOT the workbook — a
-// document must not carry your machine's registry list). No credentials are
-// stored here; v1 HTTP registries are anonymous read-only.
+// document must not carry your machine's workspace list). No credentials are
+// stored here; v1 HTTP workspaces are anonymous read-only.
 
-/// One saved registry the user has added.
+/// One saved workspace the user has added.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SavedRegistry {
+pub struct SavedWorkspace {
     pub id: String,
     pub name: String,
     /// A location string understood by `open_registry` (a path, `file://…`, or
@@ -412,14 +417,14 @@ fn registries_file() -> std::path::PathBuf {
     crate::calp_commands::calcula_profile_dir().join("registries.json")
 }
 
-fn load_saved_registries_from_disk() -> Vec<SavedRegistry> {
+fn load_saved_registries_from_disk() -> Vec<SavedWorkspace> {
     match std::fs::read(registries_file()) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => Vec::new(),
     }
 }
 
-fn persist_saved_registries(list: &[SavedRegistry]) -> Result<(), String> {
+fn persist_saved_registries(list: &[SavedWorkspace]) -> Result<(), String> {
     let path = registries_file();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -428,20 +433,37 @@ fn persist_saved_registries(list: &[SavedRegistry]) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
-/// List the machine's saved registries.
+/// Write the `workspace.calcula` marker into a LOCAL workspace.
+///
+/// A no-op for an HTTP workspace, which is read-only by construction, and
+/// best-effort for a local one: a read-only share is still a perfectly usable
+/// workspace to subscribe from, so failing to place a pointer file must never
+/// fail the operation that asked for it.
+pub fn ensure_workspace_marker(location: &str) {
+    if is_http_location(location) {
+        return;
+    }
+    let path = strip_file_scheme(location);
+    if let Ok(reg) = LocalWorkspace::open(std::path::Path::new(&path)) {
+        let _ = reg.ensure_marker();
+    }
+}
+
+/// List the machine's saved workspaces.
 #[tauri::command]
-pub fn calp_list_registries() -> Result<Vec<SavedRegistry>, String> {
+pub fn calp_list_workspaces() -> Result<Vec<SavedWorkspace>, String> {
     Ok(load_saved_registries_from_disk())
 }
 
-/// Add (or replace by id) a saved registry. Returns the full list.
+/// Add (or replace by id) a saved workspace. Returns the full list.
 ///
 /// A location that cannot be SCOPED is refused here rather than saved and failed
-/// later: the scope is what a publisher pin is filed under, so a registry with no
-/// derivable identity is a registry whose trust decisions could not be recorded.
+/// later: the scope is what a publisher pin is filed under, so a workspace with no
+/// derivable identity is a workspace whose trust decisions could not be recorded.
 #[tauri::command]
-pub fn calp_add_registry(registry: SavedRegistry) -> Result<Vec<SavedRegistry>, String> {
+pub fn calp_add_workspace(registry: SavedWorkspace) -> Result<Vec<SavedWorkspace>, String> {
     scope_for_location(&registry.location).map_err(|e| e.to_string())?;
+    ensure_workspace_marker(&registry.location);
     let mut list = load_saved_registries_from_disk();
     if let Some(existing) = list.iter_mut().find(|r| r.id == registry.id) {
         *existing = registry;
@@ -452,9 +474,9 @@ pub fn calp_add_registry(registry: SavedRegistry) -> Result<Vec<SavedRegistry>, 
     Ok(list)
 }
 
-/// Remove a saved registry by id. Returns the full list.
+/// Remove a saved workspace by id. Returns the full list.
 #[tauri::command]
-pub fn calp_remove_registry(id: String) -> Result<Vec<SavedRegistry>, String> {
+pub fn calp_remove_workspace(id: String) -> Result<Vec<SavedWorkspace>, String> {
     let mut list = load_saved_registries_from_disk();
     list.retain(|r| r.id != id);
     persist_saved_registries(&list)?;
@@ -474,7 +496,7 @@ mod tests {
         assert!(!is_http_location("/home/user/registry"));
     }
 
-    /// A registry is ALWAYS opened together with the scope its pins are filed
+    /// A workspace is ALWAYS opened together with the scope its pins are filed
     /// under, from ONE string. Two spellings of one directory therefore share a
     /// scope, and a location with no derivable identity cannot be opened at all.
     #[test]
@@ -482,8 +504,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let base = dir.path().to_string_lossy().to_string();
 
-        let (_t1, a) = open_registry_scoped(&base).unwrap();
-        let (_t2, b) = open_registry_scoped(&format!(
+        let (_t1, a) = open_workspace_scoped(&base).unwrap();
+        let (_t2, b) = open_workspace_scoped(&format!(
             "file://{}/",
             base.replace('\\', "/").to_uppercase()
         ))
@@ -497,24 +519,24 @@ mod tests {
 
     #[test]
     fn an_http_registry_scopes_by_scheme_host_and_path() {
-        let (_t, scope) = open_registry_scoped("https://REG.Acme.com:443/pub/").unwrap();
+        let (_t, scope) = open_workspace_scoped("https://REG.Acme.com:443/pub/").unwrap();
         assert_eq!(scope.id, "https://reg.acme.com/pub");
         assert_eq!(scope.label, "https://REG.Acme.com:443/pub/");
     }
 
     /// A location whose identity cannot be derived is refused at the door.
-    /// Saving it would mean a registry whose trust decisions could not be
+    /// Saving it would mean a workspace whose trust decisions could not be
     /// recorded — a pin has to be filed under SOMETHING, and "some fallback" is
     /// how name-only keying happened in the first place.
     #[test]
     fn an_unscopeable_location_can_be_neither_opened_nor_saved() {
         for bad in ["", "   ", "ftp://host/reg", "https://host/reg?token=1"] {
             assert!(
-                open_registry_scoped(bad).is_err(),
+                open_workspace_scoped(bad).is_err(),
                 "location {bad:?} must not open"
             );
             assert!(
-                calp_add_registry(SavedRegistry {
+                calp_add_workspace(SavedWorkspace {
                     id: "x".to_string(),
                     name: "x".to_string(),
                     location: bad.to_string(),
@@ -527,7 +549,7 @@ mod tests {
 
     #[test]
     fn http_registry_is_read_only() {
-        let reg = HttpRegistry::new("https://example.com/reg/");
+        let reg = HttpWorkspace::new("https://example.com/reg/");
         // base_url trailing slash trimmed
         assert_eq!(reg.base_url, "https://example.com/reg");
         assert!(reg
@@ -552,7 +574,7 @@ mod tests {
                 },
             )
             .is_err());
-        // Loading submissions from a read-only registry yields nothing.
+        // Loading submissions from a read-only workspace yields nothing.
         assert!(reg
             .load_current_submissions("pkg", "1.0.0")
             .unwrap()
@@ -562,32 +584,32 @@ mod tests {
 
     #[test]
     fn url_join_normalizes_slashes() {
-        let reg = HttpRegistry::new("https://host/base/");
+        let reg = HttpWorkspace::new("https://host/base/");
         assert_eq!(reg.url("pkg/1.0.0/data.json"), "https://host/base/pkg/1.0.0/data.json");
         assert_eq!(reg.url("/pkg/x.json"), "https://host/base/pkg/x.json");
     }
 
     // -----------------------------------------------------------------------
-    // Path-component validation (parity with LocalRegistry)
+    // Path-component validation (parity with LocalWorkspace)
     // -----------------------------------------------------------------------
 
     #[test]
     fn a_traversing_package_name_never_becomes_a_url() {
         // `url()` concatenates, and a URL parser RESOLVES `..` — so without the
         // component check these would silently address a location OUTSIDE the
-        // registry the user configured. Refused before any request is built.
+        // workspace the user configured. Refused before any request is built.
         for bad in ["..", "../..", "a/b", r"a\b", "C:evil", ".", ""] {
             assert!(
-                HttpRegistry::check_package(bad).is_err(),
+                HttpWorkspace::check_package(bad).is_err(),
                 "package name {:?} must be refused",
                 bad
             );
         }
-        // Real package names survive: dots are ordinary (only "." and ".." are
+        // Real application names survive: dots are ordinary (only "." and ".." are
         // reserved), and so are dashes and underscores.
         for good in ["acme.http", "sales-report", "vendor_kpis", "a.b.c"] {
             assert!(
-                HttpRegistry::check_package(good).is_ok(),
+                HttpWorkspace::check_package(good).is_ok(),
                 "package name {:?} must be allowed",
                 good
             );
@@ -596,15 +618,15 @@ mod tests {
 
     #[test]
     fn a_traversing_version_or_artifact_path_is_refused() {
-        assert!(HttpRegistry::check_package_version("pkg", "..").is_err());
-        assert!(HttpRegistry::check_package_version("pkg", "1.0.0/../2.0.0").is_err());
-        assert!(HttpRegistry::check_package_version("pkg", "1.0.0").is_ok());
-        assert!(HttpRegistry::check_package_version("pkg", "1.0.0-beta.1").is_ok());
+        assert!(HttpWorkspace::check_package_version("pkg", "..").is_err());
+        assert!(HttpWorkspace::check_package_version("pkg", "1.0.0/../2.0.0").is_err());
+        assert!(HttpWorkspace::check_package_version("pkg", "1.0.0").is_ok());
+        assert!(HttpWorkspace::check_package_version("pkg", "1.0.0-beta.1").is_ok());
 
         // rel_path is PUBLISHER-controlled (it comes out of the signed manifest's
         // checksum map), so it gets the same treatment segment by segment.
-        assert!(HttpRegistry::check_rel_path("sheets/abc/data.json").is_ok());
-        assert!(HttpRegistry::check_rel_path("object_scripts/s1.json").is_ok());
+        assert!(HttpWorkspace::check_rel_path("sheets/abc/data.json").is_ok());
+        assert!(HttpWorkspace::check_rel_path("object_scripts/s1.json").is_ok());
         for bad in [
             "../../etc/passwd",
             "sheets/../../../x.json",
@@ -613,7 +635,7 @@ mod tests {
             "sheets/./x.json",
         ] {
             assert!(
-                HttpRegistry::check_rel_path(bad).is_err(),
+                HttpWorkspace::check_rel_path(bad).is_err(),
                 "artifact path {:?} must be refused",
                 bad
             );
@@ -625,8 +647,8 @@ mod tests {
         // Each of these would otherwise perform a GET. They must fail on the
         // component check, which needs no server — so the test is hermetic AND
         // proves the refusal happens before egress.
-        let reg = HttpRegistry::new("https://host/reg");
-        assert!(reg.get_package_manifest("../..").is_err());
+        let reg = HttpWorkspace::new("https://host/reg");
+        assert!(reg.get_application_manifest("../..").is_err());
         assert!(reg.get_version_manifest("../..", "1.0.0").is_err());
         assert!(reg.get_version_manifest("pkg", "..").is_err());
         assert!(reg.read_artifact("pkg", "1.0.0", "../../secret.json").is_err());

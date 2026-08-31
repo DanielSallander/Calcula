@@ -2,7 +2,7 @@
 // ARCHITECTURE: Uses the System API facade (The Facade Rule).
 // Extensions must ONLY import from app/src/api.
 import type { MenuDefinition } from '@api/ui';
-import { workspace } from '@api/system';
+import { workbook } from '@api/system';
 import { IconNew, IconOpen, IconSave, IconSaveAs } from '@api';
 import { confirmAsync, alertAsync } from "@api/dialogs";
 
@@ -20,7 +20,7 @@ export interface FileMenuHandlers {
 
 export async function fileNew(): Promise<void> {
   try {
-    const modified = await workspace.isModified();
+    const modified = await workbook.isModified();
     if (modified) {
       // AWAITED. `!confirmed` on a Promise was always false, so Cancel discarded
       // the unsaved workbook and reloaded the window regardless.
@@ -30,7 +30,7 @@ export async function fileNew(): Promise<void> {
       );
       if (!confirmed) return;
     }
-    await workspace.new();
+    await workbook.new();
     window.location.reload();
   } catch (error) {
     console.error('[FileMenu] handleNew error:', error);
@@ -46,7 +46,7 @@ export async function fileOpen(): Promise<void> {
     // one document-replacing gesture in the app that did not ask. It runs
     // BEFORE the picker: asking afterwards makes the user choose a file and
     // only then tells them the choice costs them their edits.
-    const modified = await workspace.isModified();
+    const modified = await workbook.isModified();
     if (modified) {
       const confirmed = await confirmAsync(
         'You have unsaved changes. Open another file anyway?',
@@ -54,7 +54,7 @@ export async function fileOpen(): Promise<void> {
       );
       if (!confirmed) return;
     }
-    const cells = await workspace.open();
+    const cells = await workbook.open();
     if (cells) {
       window.location.reload();
     }
@@ -66,7 +66,7 @@ export async function fileOpen(): Promise<void> {
 
 export async function fileSave(): Promise<void> {
   try {
-    const path = await workspace.save();
+    const path = await workbook.save();
     if (path) {
       console.log('[FileMenu] Saved to:', path);
     }
@@ -78,7 +78,7 @@ export async function fileSave(): Promise<void> {
 
 export async function fileSaveAs(): Promise<void> {
   try {
-    const path = await workspace.saveAs();
+    const path = await workbook.saveAs();
     if (path) {
       console.log('[FileMenu] Saved as:', path);
     }

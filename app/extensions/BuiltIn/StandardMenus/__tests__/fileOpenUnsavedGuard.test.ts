@@ -20,7 +20,7 @@ const confirmAsync = vi.fn();
 const alertAsync = vi.fn();
 
 vi.mock("@api/system", () => ({
-  workspace: {
+  workbook: {
     isModified: (...a: unknown[]) => isModified(...a),
     open: (...a: unknown[]) => open(...a),
     new: vi.fn(),

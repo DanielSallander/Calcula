@@ -1,7 +1,7 @@
 //! FILENAME: core/calp/src/merge.rs
-//! PURPOSE: Decide whether two concurrent sets of changes to a package can both
+//! PURPOSE: Decide whether two concurrent sets of changes to an application can both
 //! land, and say precisely where they collide when they cannot.
-//! CONTEXT: A package is not a monolith. It is a tree of addressable pieces —
+//! CONTEXT: An application is not a monolith. It is a tree of addressable pieces —
 //! sheets down to individual cells, and objects (charts, controls, scripts,
 //! measures) with stable ids. Two developers who touch different pieces have
 //! not conflicted, and telling them they have is the thing that makes people
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::VersionDiff;
 
-/// One addressable piece of a package.
+/// One addressable piece of an application.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PieceKey {
@@ -54,7 +54,7 @@ pub enum PieceKey {
     /// Anything with a stable id: a chart, a script, a measure, a control.
     #[serde(rename_all = "camelCase")]
     Object { domain: String, id: String },
-    /// A manifest-level field (the compat floor, the package kind).
+    /// A manifest-level field (the compat floor, the application kind).
     #[serde(rename_all = "camelCase")]
     ManifestField { field: String },
 }
@@ -66,7 +66,7 @@ impl PieceKey {
             PieceKey::Cell { a1, .. } => format!("cell {a1}"),
             PieceKey::SheetStructure { .. } => "the sheet itself".to_string(),
             PieceKey::Object { domain, id } => format!("{domain} {id}"),
-            PieceKey::ManifestField { field } => format!("package setting '{field}'"),
+            PieceKey::ManifestField { field } => format!("application setting '{field}'"),
         }
     }
 }
@@ -186,7 +186,7 @@ fn unmergeable_kinds(theirs: &BTreeSet<PieceKey>) -> Vec<String> {
                 kinds.insert(format!("changes to {domain}"));
             }
             PieceKey::ManifestField { field } => {
-                kinds.insert(format!("a change to the package setting '{field}'"));
+                kinds.insert(format!("a change to the application setting '{field}'"));
             }
         }
     }
@@ -314,7 +314,7 @@ fn describe_collision(piece: &PieceKey, theirs: &VersionDiff, yours: &VersionDif
             format!("the {domain} '{name}' was changed on both sides")
         }
         PieceKey::ManifestField { field } => {
-            format!("the package setting '{field}' was changed on both sides")
+            format!("the application setting '{field}' was changed on both sides")
         }
     }
 }

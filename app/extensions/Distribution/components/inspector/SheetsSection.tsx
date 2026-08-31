@@ -10,7 +10,7 @@ import {
   type InspectorSheetDetail,
   type InspectorSheetSummary,
 } from "@api/distribution";
-import type { InspectorContext } from "./PackageInspectorApp";
+import type { InspectorContext } from "./ApplicationInspectorApp";
 import {
   ACCENT,
   BORDER,
@@ -298,7 +298,7 @@ export function SheetsSection({
     return (
       <div>
         <h2 style={sectionTitleStyle}>Sheets &amp; Data</h2>
-        <StatusLine empty emptyText="This package carries no sheets (model-only dataset)." />
+        <StatusLine empty emptyText="This application carries no sheets (model-only dataset)." />
       </div>
     );
   }

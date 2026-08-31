@@ -76,13 +76,13 @@ const CAP_LABEL: Record<CapabilityId, string> = {
   "bi.model": "BI model edit",
   "bi.connector": "BI connector",
   "ui.dialog": "Ask you",
-  "distribution.writeback": "Package writeback",
+  "distribution.writeback": "Application writeback",
   schedule: "Scheduled jobs",
   "file.picker": "Files you pick",
   "ui.shortcut": "Keyboard shortcut",
   "grid.read": "Shown your cells",
-  "distribution.publish": "Publish packages",
-  "distribution.subscribe": "Subscribe to packages",
+  "distribution.publish": "Publish applications",
+  "distribution.subscribe": "Subscribe to applications",
 };
 
 /** Label for a capability id that arrives as an untrusted string (a persisted

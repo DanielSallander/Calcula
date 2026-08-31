@@ -14,10 +14,10 @@ import { ConnectionDialog } from "./components/ConnectionDialog";
 export const DISTRIBUTION_EXTENSION_ID = "calcula.distribution";
 
 // Two top-level menus, because these are two features and not one. .calp
-// packaging (publish / subscribe / refresh / overrides) and writeback (the
-// two-way data-collection channel back to the publisher) used to share a
-// single "Distribution" submenu under External Data; they are peers of Data
-// and Model, not accessories of an import menu.
+// application distribution (publish / subscribe / refresh / overrides) and
+// writeback (the two-way data-collection channel back to the publisher) used
+// to share a single "Distribution" submenu under External Data; they are peers
+// of Data and Model, not accessories of an import menu.
 export const DISTRIBUTION_MENU_ID = "distribution";
 export const WRITEBACK_MENU_ID = "writeback";
 
@@ -26,13 +26,13 @@ export const WRITEBACK_PANE_ID = "distribution:writeback";
 export const SUBSCRIPTIONS_PANE_ID = "distribution:subscriptions";
 export const PUBLISHER_DASHBOARD_PANE_ID = "distribution:publisherDashboard";
 export const AUDIT_LOG_PANE_ID = "distribution:auditLog";
-export const PACKAGE_EXPLORER_PANEL_ID = "distribution:packageExplorer";
+export const APPLICATION_EXPLORER_PANEL_ID = "distribution:applicationExplorer";
 
 export const DistributionManifest: AddInManifest = {
   id: DISTRIBUTION_EXTENSION_ID,
   name: "Distribution",
   version: "1.0.0",
-  description: "Publish and subscribe to .calp packages",
+  description: "Publish and subscribe to .calp applications",
   ribbonTabs: [],
   ribbonGroups: [],
   commands: [],

@@ -1,14 +1,14 @@
-//! FILENAME: core/calp/src/registry_id.rs
-//! PURPOSE: Registry IDENTITY — turn the location string a user configured into
+//! FILENAME: core/calp/src/workspace_id.rs
+//! PURPOSE: Workspace IDENTITY — turn the location string a user configured into
 //! a stable scope that a publisher pin can be keyed by.
-//! CONTEXT: A TOFU pin used to be keyed by PACKAGE NAME ALONE, so whoever made
-//! first contact with a name owned it on the whole machine: a package
+//! CONTEXT: A TOFU pin used to be keyed by APPLICATION NAME ALONE, so whoever made
+//! first contact with a name owned it on the whole machine: an application
 //! `acme.finance` served once from `\\evil\share` wrote the pin that the GENUINE
 //! `acme.finance` was later measured against, and the real publisher's first
 //! legitimate release reported `publisherChanged` — an accusation pointed at the
-//! victim. Pins are now keyed by `(namespace, registry scope, package)`.
+//! victim. Pins are now keyed by `(namespace, workspace scope, application)`.
 //!
-//! WHAT A SCOPE IS. `RegistryScope::id` is key material: normalized, lossy,
+//! WHAT A SCOPE IS. `WorkspaceScope::id` is key material: normalized, lossy,
 //! lowercase for filesystem locations, never shown to a human. `label` is the
 //! location EXACTLY as the user configured it, and is the only string a UI, an
 //! audit entry or an error message may display. A lowercased canonical path is
@@ -16,7 +16,7 @@
 //!
 //! WHY IMPERFECT CANONICALIZATION IS SAFE HERE. Canonicalization can fail — a
 //! UNC path and a mapped drive for one share, a server that is offline, a folder
-//! the user renamed. Under plain registry scoping each of those would be a NEW
+//! the user renamed. Under plain workspace scoping each of those would be a NEW
 //! scope and therefore a silent first use. It is not, because `integrity.rs`
 //! cross-checks every first contact against pins for the same name in OTHER
 //! scopes: a failed canonicalization lands in the same-key branch and reports
@@ -29,7 +29,7 @@
 //! THE SCOPE IS DERIVED FROM THE LOCATION STRING THE USER CONFIGURED — never from
 //! the transport. `managed_policy`'s admin pre-pin has no transport at all; an
 //! HTTP transport's self-reported identity is server-influenced; and the string
-//! used to OPEN a registry must be the string used to SCOPE it, or the pin is
+//! used to OPEN a workspace must be the string used to SCOPE it, or the pin is
 //! written under one identity and read under another (the same split-view lesson
 //! `verify_and_load_manifest_via` already learned about manifest bytes).
 
@@ -38,10 +38,10 @@ use crate::error::CalpError;
 /// The identity a publisher pin is scoped to.
 ///
 /// Deliberately has NO `Default` and is never wrapped in an `Option` on a
-/// verification path: a caller that does not know which registry it is talking to
+/// verification path: a caller that does not know which workspace it is talking to
 /// must not compile, for exactly the reason `PinPolicy` has no default.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegistryScope {
+pub struct WorkspaceScope {
     /// Normalized key material. Lowercased for filesystem locations (Windows
     /// paths are case-insensitive); case-preserving for HTTP paths (URL paths
     /// are case-sensitive). NEVER display this.
@@ -86,26 +86,70 @@ fn looks_like_drive_path(s: &str) -> bool {
     b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
-/// Whether a location string denotes an HTTP(S) registry.
+/// Whether a location string denotes an HTTP(S) workspace.
 pub fn is_http_location(location: &str) -> bool {
     let lower = location.trim().to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
-/// Derive the pin scope for a registry location.
+/// The pointer file that names a workspace, after `.pbip`.
 ///
-/// Returns `Err` for a location no registry could be opened from (empty, a
+/// A workspace IS a directory — this file only makes it selectable in a file
+/// dialog, which is far easier to aim at than a folder picker, and makes a
+/// workspace self-describing when someone browses the share.
+pub const WORKSPACE_MARKER_FILE: &str = "workspace.calcula";
+
+/// Reduce a location that NAMES THE MARKER FILE to the directory holding it.
+///
+/// `C:\share\ws\workspace.calcula` -> `C:\share\ws`, and likewise for a URL.
+/// Any other location is returned unchanged (trimmed).
+///
+/// THIS MUST RUN BEFORE SCOPING, AND BEFORE OPENING. A publisher pin is filed
+/// under the scope derived from the location string, so if the file form scoped
+/// differently from the folder form, one user who browsed to the marker and
+/// another who typed the folder would hold pins under two identities for one
+/// workspace — and the second one would be told a DIFFERENT publisher owns the
+/// name, which is the hijack alarm, fired at nobody. Both forms converge here so
+/// that cannot happen.
+pub fn strip_workspace_marker(location: &str) -> String {
+    let trimmed = location.trim();
+    // Compare the final segment case-insensitively: Windows paths are
+    // case-insensitive, and a file dialog can hand back any casing.
+    let cut = trimmed
+        .rfind(|c| c == '/' || c == '\\')
+        .filter(|&i| trimmed[i + 1..].eq_ignore_ascii_case(WORKSPACE_MARKER_FILE));
+    match cut {
+        // Keep the separator when everything before it is a root (`C:\`, `/`,
+        // `\\server\share`) — cutting it would turn an absolute path relative.
+        Some(i) => {
+            let head = &trimmed[..i];
+            if head.is_empty() || head.ends_with(':') || head.ends_with("//") {
+                trimmed[..=i].to_string()
+            } else {
+                head.to_string()
+            }
+        }
+        None => trimmed.to_string(),
+    }
+}
+
+/// Derive the pin scope for a workspace location.
+///
+/// Returns `Err` for a location no workspace could be opened from (empty, a
 /// non-`http(s)` URL scheme, an HTTP URL carrying a query/fragment/userinfo or a
 /// traversing path segment). A location that cannot be scoped must not be usable
-/// as a registry at all — otherwise a pin would be written under a scope derived
+/// as a workspace at all — otherwise a pin would be written under a scope derived
 /// from one reading of the string and looked up under another.
-pub fn registry_scope(location: &str) -> Result<RegistryScope, CalpError> {
+pub fn workspace_scope(location: &str) -> Result<WorkspaceScope, CalpError> {
     let label = location.trim().to_string();
     if label.is_empty() {
-        return Err(CalpError::Registry(
-            "a registry location must not be empty".to_string(),
+        return Err(CalpError::Workspace(
+            "a workspace location must not be empty".to_string(),
         ));
     }
+    // The marker file and the directory holding it are ONE workspace, so they
+    // must be ONE scope. The label keeps the user's spelling either way.
+    let located = strip_workspace_marker(&label);
     // A location carrying a URL scheme Calcula cannot open must be refused here,
     // not quietly treated as a relative filesystem path — `ftp://host/reg` would
     // otherwise scope (and pin) as a folder literally named `ftp:` under the
@@ -113,19 +157,19 @@ pub fn registry_scope(location: &str) -> Result<RegistryScope, CalpError> {
     if let Some(i) = label.find("://") {
         let scheme = label[..i].to_ascii_lowercase();
         if !matches!(scheme.as_str(), "http" | "https" | "file") {
-            return Err(CalpError::Registry(format!(
+            return Err(CalpError::Workspace(format!(
                 "'{label}' is not a usable registry location: only http, https, \
                  file:// and plain filesystem paths are supported"
             )));
         }
     }
 
-    let id = if is_http_location(&label) {
-        http_scope_id(&label)?
+    let id = if is_http_location(&located) {
+        http_scope_id(&located)?
     } else {
-        local_scope_id(&label)?
+        local_scope_id(&located)?
     };
-    Ok(RegistryScope { id, label })
+    Ok(WorkspaceScope { id, label })
 }
 
 // ---------------------------------------------------------------------------
@@ -135,15 +179,15 @@ pub fn registry_scope(location: &str) -> Result<RegistryScope, CalpError> {
 /// `scheme://host[:port]/path`, with the default port folded away, the host
 /// lowercased and the PATH CASE PRESERVED.
 ///
-/// Origin-only is deliberately NOT used. A static-file registry is routinely one
+/// Origin-only is deliberately NOT used. A static-file workspace is routinely one
 /// directory on a shared host (`https://user.github.io/registry-a` vs
 /// `/registry-b`; two teams on one S3 bucket). Reducing to the origin would merge
-/// administratively separate registries into one scope, re-creating the
-/// cross-registry key substitution that name-only keying got right.
+/// administratively separate workspaces into one scope, re-creating the
+/// cross-workspace key substitution that name-only keying got right.
 fn http_scope_id(location: &str) -> Result<String, CalpError> {
     let bad = |why: &str| {
-        CalpError::Registry(format!(
-            "'{location}' is not a usable registry URL: {why}"
+        CalpError::Workspace(format!(
+            "'{location}' is not a usable workspace URL: {why}"
         ))
     };
 
@@ -154,17 +198,17 @@ fn http_scope_id(location: &str) -> Result<String, CalpError> {
     let default_port = match scheme.as_str() {
         "http" => 80u16,
         "https" => 443u16,
-        _ => return Err(bad("only http and https registries are supported")),
+        _ => return Err(bad("only http and https workspaces are supported")),
     };
 
     if rest.contains('?') {
         return Err(bad(
-            "a query string is not part of a registry location (artifact paths \
+            "a query string is not part of a workspace location (artifact paths \
              are appended to it, so a query could never survive)",
         ));
     }
     if rest.contains('#') {
-        return Err(bad("a fragment is not part of a registry location"));
+        return Err(bad("a fragment is not part of a workspace location"));
     }
 
     let (authority, path) = match rest.find('/') {
@@ -174,7 +218,7 @@ fn http_scope_id(location: &str) -> Result<String, CalpError> {
     if authority.contains('@') {
         return Err(bad(
             "credentials in the URL are not supported — they would give one \
-             registry two identities depending on whether they were typed",
+             workspace two identities depending on whether they were typed",
         ));
     }
     if authority.is_empty() {
@@ -224,7 +268,7 @@ fn http_scope_id(location: &str) -> Result<String, CalpError> {
             "." | ".." => {
                 return Err(bad(
                     "a '.' or '..' path segment is not allowed — the scope must \
-                     name one registry unambiguously",
+                     name one workspace unambiguously",
                 ))
             }
             s => segments.push(s),
@@ -243,7 +287,7 @@ fn http_scope_id(location: &str) -> Result<String, CalpError> {
 // Filesystem / UNC
 // ---------------------------------------------------------------------------
 
-/// A filesystem registry's scope id: `file://` stripped, separators normalized,
+/// A filesystem workspace's scope id: `file://` stripped, separators normalized,
 /// `canonicalize`d when the OS can (which is what merges a junction, a `subst`
 /// drive and the real path), lexically normalized when it cannot, and lowercased
 /// because Windows paths are case-insensitive.
@@ -258,8 +302,8 @@ fn local_scope_id(location: &str) -> Result<String, CalpError> {
         .trim_matches(|c| c == '\\' || c == '/')
         .is_empty()
     {
-        return Err(CalpError::Registry(format!(
-            "'{location}' does not name a registry directory"
+        return Err(CalpError::Workspace(format!(
+            "'{location}' does not name a workspace directory"
         )));
     }
 
@@ -270,8 +314,8 @@ fn local_scope_id(location: &str) -> Result<String, CalpError> {
 
     let id = canonical.trim().to_lowercase();
     if id.is_empty() {
-        return Err(CalpError::Registry(format!(
-            "'{location}' does not name a registry directory"
+        return Err(CalpError::Workspace(format!(
+            "'{location}' does not name a workspace directory"
         )));
     }
     Ok(id)
@@ -291,7 +335,7 @@ fn strip_verbatim_prefix(path: &str) -> String {
 }
 
 /// Textual normalization for a location `canonicalize` could not resolve: a
-/// registry directory that does not exist yet, a UNC server that is offline, a
+/// workspace directory that does not exist yet, a UNC server that is offline, a
 /// path the process cannot stat.
 ///
 /// Absolutizes against the process cwd, resolves `.`/`..` textually, collapses
@@ -356,14 +400,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn id(location: &str) -> String {
-        registry_scope(location).unwrap().id
+        workspace_scope(location).unwrap().id
     }
 
     #[test]
     fn every_spelling_of_one_directory_is_one_scope() {
         // A REAL directory, so `canonicalize` participates — this is the case
         // that must converge, because it is the one users actually hit when a
-        // registry is typed two different ways in two different dialogs.
+        // workspace is typed two different ways in two different dialogs.
         let dir = TempDir::new().unwrap();
         let base = dir.path().to_string_lossy().to_string();
         let forward = base.replace('\\', "/");
@@ -384,7 +428,7 @@ mod tests {
             assert_eq!(
                 id(&spelling),
                 expected,
-                "'{spelling}' must scope to the same registry as '{base}'"
+                "'{spelling}' must scope to the same workspace as '{base}'"
             );
         }
     }
@@ -393,7 +437,7 @@ mod tests {
     fn the_label_is_what_the_user_typed_and_the_id_never_is() {
         let dir = TempDir::new().unwrap();
         let typed = format!("{}\\", dir.path().to_string_lossy().to_uppercase());
-        let scope = registry_scope(&typed).unwrap();
+        let scope = workspace_scope(&typed).unwrap();
         assert_eq!(scope.label, typed.trim(), "the label is the user's spelling");
         assert_ne!(scope.id, scope.label);
         assert_eq!(scope.id, scope.id.to_lowercase());
@@ -409,7 +453,7 @@ mod tests {
         assert_ne!(
             id(&a.to_string_lossy()),
             id(&b.to_string_lossy()),
-            "two sibling registries must not share a scope"
+            "two sibling workspaces must not share a scope"
         );
     }
 
@@ -454,7 +498,7 @@ mod tests {
 
     #[test]
     fn http_paths_are_case_sensitive_and_slash_normalized() {
-        // URL paths ARE case-sensitive: /Pub and /pub may be two registries.
+        // URL paths ARE case-sensitive: /Pub and /pub may be two workspaces.
         assert_ne!(id("https://h/Pub"), id("https://h/pub"));
         assert_eq!(id("https://h/pub/"), id("https://h/pub"));
         assert_eq!(id("https://h//pub//"), "https://h/pub");
@@ -464,7 +508,7 @@ mod tests {
     #[test]
     fn two_registries_on_one_host_are_two_scopes() {
         // The reason origin-only keying is refused: GitHub Pages / S3 routinely
-        // serve administratively separate registries from one origin.
+        // serve administratively separate workspaces from one origin.
         assert_ne!(
             id("https://user.github.io/registry-a"),
             id("https://user.github.io/registry-b")
@@ -487,8 +531,76 @@ mod tests {
             "file://",
         ] {
             assert!(
-                registry_scope(bad).is_err(),
+                workspace_scope(bad).is_err(),
                 "location {bad:?} must be refused, not silently scoped"
+            );
+        }
+    }
+
+    /// THE POINT OF THE MARKER: pointing at the file and pointing at the folder
+    /// are ONE workspace, and therefore ONE pin scope.
+    ///
+    /// If these diverged, a user who browsed to `workspace.calcula` would pin
+    /// under a scope nobody else uses, and the next application they subscribed
+    /// to from the SAME share under the SAME publisher would come back as
+    /// `notPinnedNameConflict` — the hijack warning, fired at a colleague.
+    #[test]
+    fn the_marker_file_and_its_folder_are_one_scope() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().to_string_lossy().to_string();
+        let expected = id(&base);
+        for spelling in [
+            format!("{base}\\workspace.calcula"),
+            format!("{base}/workspace.calcula"),
+            format!("{base}\\WORKSPACE.CALCULA"),
+            format!("{base}\\Workspace.Calcula"),
+            format!("file://{base}\\workspace.calcula"),
+        ] {
+            assert_eq!(
+                id(&spelling),
+                expected,
+                "'{spelling}' must scope to the same workspace as '{base}'"
+            );
+        }
+    }
+
+    #[test]
+    fn the_marker_stripper_never_cuts_below_a_root() {
+        assert_eq!(strip_workspace_marker(r"C:\ws\workspace.calcula"), r"C:\ws");
+        assert_eq!(strip_workspace_marker(r"C:\workspace.calcula"), r"C:\");
+        assert_eq!(strip_workspace_marker("/workspace.calcula"), "/");
+        assert_eq!(
+            strip_workspace_marker(r"\\server\share\workspace.calcula"),
+            r"\\server\share"
+        );
+        assert_eq!(
+            strip_workspace_marker("https://h/ws/workspace.calcula"),
+            "https://h/ws"
+        );
+        // An origin with no path is a usable workspace location in its own right
+        // (`id("https://h") == "https://h"`), so the separator goes.
+        assert_eq!(
+            strip_workspace_marker("https://h/workspace.calcula"),
+            "https://h"
+        );
+    }
+
+    /// Only the EXACT marker name is a marker. A folder that merely ends in
+    /// `.calcula`, or an application whose name resembles it, must be left alone
+    /// — stripping those would silently retarget the workspace one level up.
+    #[test]
+    fn only_the_marker_name_is_stripped() {
+        for untouched in [
+            r"C:\ws\notworkspace.calcula",
+            r"C:\ws\workspace.calcula.bak",
+            r"C:\ws\workspace",
+            r"C:\my.calcula",
+            r"C:\ws",
+        ] {
+            assert_eq!(
+                strip_workspace_marker(untouched),
+                untouched,
+                "'{untouched}' does not name the marker file and must not be reduced"
             );
         }
     }
@@ -505,8 +617,8 @@ mod tests {
     /// WHY A CALLER MUST NEVER PRE-STRIP `file://` ITSELF.
     ///
     /// A publisher pin is filed under the scope derived from the string handed
-    /// to `registry_scope`. Ten app-crate call sites used to run their own
-    /// `strip_prefix("file://")` before opening a subscription's registry, which
+    /// to `workspace_scope`. Ten app-crate call sites used to run their own
+    /// `strip_prefix("file://")` before opening a subscription's workspace, which
     /// handed this function a DIFFERENT string than `pull` had scoped the pin
     /// with. The pin was then written under one identity and read under another,
     /// so `RequirePinned` reported `PublisherNotPinned` and writeback / GATHER /
@@ -516,7 +628,7 @@ mod tests {
     /// harmless to the next reader: the naive strip does NOT round-trip.
     #[test]
     fn a_locally_pre_stripped_file_url_scopes_to_a_different_registry() {
-        // The whole point: the scheme form and the bare form are ONE registry...
+        // The whole point: the scheme form and the bare form are ONE workspace...
         assert_eq!(id("file:///C:/no-such-reg/pub"), id("C:/no-such-reg/pub"));
         assert_eq!(id(r"file://C:\no-such-reg\pub"), id(r"C:\no-such-reg\pub"));
 
@@ -528,7 +640,7 @@ mod tests {
         assert_ne!(
             id(naive),
             id("file:///C:/no-such-reg/pub"),
-            "a hand-stripped file:// URL must not silently scope as the same registry"
+            "a hand-stripped file:// URL must not silently scope as the same workspace"
         );
 
         // The UNC form is worse: hand-stripping turns an absolute share into a

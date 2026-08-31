@@ -28,16 +28,16 @@ export interface PublishParams {
   sheetIndices: number[];
   publishedBy: string;
   /** Custom objects contributed by distributable-object providers (brick 4).
-   *  publishPackage fills this automatically from registered providers. */
+   *  publishApplication fills this automatically from registered providers. */
   customObjects?: DistributableObjectPayload[];
   /** Opt-in for carrying threaded comments (Wave B). Comments are internal
    * discussion, so they stay private unless this is explicitly true
    * (default false). Scenarios and outlines always publish. */
   includeComments?: boolean;
   /**
-   * What this publish IS. `"update"` pushes the next version of a package this
+   * What this publish IS. `"update"` pushes the next version of an application this
    * workbook is a working copy of and REQUIRES {@link expectedBaseVersion};
-   * `"createNew"` creates a package under a name that must not exist yet.
+   * `"createNew"` creates an application under a name that must not exist yet.
    *
    * Omitted means `"createNew"`. It is never a fallback for a failed update —
    * an update whose base has moved is refused, not quietly turned into a
@@ -46,8 +46,8 @@ export interface PublishParams {
   mode?: "createNew" | "update";
   /**
    * For `"update"`: the version the author worked from, read from the
-   * workbook's workspace link. The backend compares it against the registry
-   * head under the registry lock; if someone else pushed in the meantime the
+   * workbook's working-copy link. The backend compares it against the workspace
+   * head under the workspace lock; if someone else pushed in the meantime the
    * push is refused rather than silently burying their version.
    */
   expectedBaseVersion?: string;
@@ -65,7 +65,7 @@ export interface PublishResponse {
   modulesPublished: number;
   notebooksPublished: number;
   /** Transparency report: everything that shipped and everything present in
-   * the workbook that packages cannot carry yet (no silent drops). */
+   * the workbook that applications cannot carry yet (no silent drops). */
   report: PublishReport;
   /** Publish-time disclosure warnings — e.g. a dropdown pane control whose
    * CellRange item source references a sheet outside the published selection
@@ -88,7 +88,7 @@ export interface PublishReport {
 }
 
 export interface PublishPreviewResponse {
-  /** Names of the sheets the preview covered, in package order. */
+  /** Names of the sheets the preview covered, in application order. */
   sheetNames: string[];
   report: PublishReport;
   /** The SAME disclosure warnings a real publish of this selection would emit
@@ -96,11 +96,11 @@ export interface PublishPreviewResponse {
    * sheet outside the selection. Non-blocking. */
   warnings: string[];
   /** Where a push to the previewed target stands against each gate. Present
-   * only when the preview was given a target package. */
+   * only when the preview was given a target application. */
   gates?: PushGateStatus;
 }
 
-/** Suggested next versions, computed from the registry head. */
+/** Suggested next versions, computed from the workspace head. */
 export interface SuggestedVersions {
   major: string;
   minor: string;
@@ -111,56 +111,56 @@ export interface SuggestedVersions {
  * Where a prospective push stands against each gate.
  *
  * ADVISORY. The authoritative evaluation runs inside the publish itself, under
- * the registry lock — anything checked here and acted on later is a race on a
+ * the workspace lock — anything checked here and acted on later is a race on a
  * share two people publish to. What this buys is a dialog that can be honest
  * BEFORE the user writes a change summary, not a way around the gate.
  */
 export interface PushGateStatus {
   /** `"linked"` — this workbook is a working copy of the target.
    *  `"notLinked"` — it is not a working copy of anything.
-   *  `"wrongTarget"` — it is a working copy of a DIFFERENT package.
+   *  `"wrongTarget"` — it is a working copy of a DIFFERENT application.
    *  `"subscriber"` — it SUBSCRIBES to the target, which may never push to it. */
   linkStatus: "linked" | "notLinked" | "wrongTarget" | "subscriber";
   /** The base version this workbook would declare. */
   expectedBase: string;
-  /** The registry's current head. Empty when unreachable. */
+  /** The workspace's current head. Empty when unreachable. */
   registryLatest: string;
   latestPublishedBy: string;
   /** True when the head moved past the base — a push would be refused. */
   baseStale: boolean;
   /** True when this machine holds the key that signed the head. */
   keyContinuityOk: boolean;
-  /** False for an HTTP registry, which can only be read from. */
+  /** False for an HTTP workspace, which can only be read from. */
   registryWritable: boolean;
   suggestedNext?: SuggestedVersions;
-  /** Why the registry could not be consulted, when it could not be. */
+  /** Why the workspace could not be consulted, when it could not be. */
   registryError: string;
 }
 
 /** One published version, as the version-history UI renders it. */
-export interface WorkspaceVersionInfo {
+export interface WorkingCopyVersionInfo {
   version: string;
   publishedAt: string;
   publishedBy: string;
-  /** The version this one was pushed from. Empty for a package's first. */
+  /** The version this one was pushed from. Empty for an application's first. */
   baseVersion: string;
   /** What the author said changed. */
   changeSummary: string;
 }
 
-export interface WorkspaceSheetInfo {
+export interface WorkingCopySheetInfo {
   sheetId: string;
   name: string;
 }
 
 /**
- * What package this workbook is a working copy of, and where it stands.
+ * What application this workbook is a working copy of, and where it stands.
  *
- * Every registry-derived field degrades rather than throwing: a developer with
+ * Every workspace-derived field degrades rather than throwing: a developer with
  * the share offline still gets the link's own contents, and
  * {@link registryReachable} says which half they are looking at.
  */
-export interface WorkspaceStatus {
+export interface WorkingCopyStatus {
   registryUrl: string;
   packageName: string;
   kind: string;
@@ -170,13 +170,13 @@ export interface WorkspaceStatus {
   lastPushedVersion: string;
   lastPushedAt: string;
   /** Sheets the base version carried — the push dialog's default selection. */
-  baseSheets: WorkspaceSheetInfo[];
+  baseSheets: WorkingCopySheetInfo[];
   registryReachable: boolean;
   headVersion: string;
   /** True when the head has moved past this working copy. */
   isStale: boolean;
   /** Published history, oldest first (the order the manifest stores). */
-  versions: WorkspaceVersionInfo[];
+  versions: WorkingCopyVersionInfo[];
   suggestedNext?: SuggestedVersions;
   /** Whether this machine holds the key that signed the head. */
   holdsPublisherKey: boolean;
@@ -193,7 +193,7 @@ export interface ArtifactDiffSummary {
   removed: string[];
   /** Paths whose hash differs AND whose parsed content differs. */
   changed: string[];
-  /** Hash differed, content did not. Nonzero means package serialization has
+  /** Hash differed, content did not. Nonzero means application serialization has
    *  become order-dependent again — see the determinism test in core/calp. */
   spuriousHashChanges: number;
   unchangedCount: number;
@@ -233,7 +233,7 @@ export interface CellDiff {
 }
 
 export interface SheetDiffSummary {
-  /** The PACKAGE sheet id. */
+  /** The APPLICATION sheet id. */
   sheetId: string;
   name: string;
   change: "added" | "removed" | "modified" | "renamed";
@@ -305,10 +305,10 @@ export interface WorkingCopyDiff {
 // ============================================================================
 
 /**
- * One addressable piece of a package.
+ * One addressable piece of an application.
  *
  * The grain of a collision: a cell of a sheet, a sheet's structure, an object
- * with a stable id, or a package-level setting. Two developers who touched
+ * with a stable id, or an application-level setting. Two developers who touched
  * different pieces have not conflicted.
  */
 export type PieceKey =
@@ -379,7 +379,7 @@ export interface CoPublisherInfo {
 export interface CoPublishersResponse {
   packageName: string;
   /** The key that published version 1 — the anchor, and the only key that can
-   *  change the list. Empty for a package with no signed versions. */
+   *  change the list. Empty for an application with no signed versions. */
   rootKey: string;
   youAreTheRoot: boolean;
   /** Root or an authorized delegate. */
@@ -393,7 +393,7 @@ export interface CoPublishersResponse {
 export interface CheckoutParams {
   registryPath: string;
   packageName: string;
-  /** A concrete version, or omitted for the registry head. */
+  /** A concrete version, or omitted for the workspace head. */
   version?: string;
 }
 
@@ -411,46 +411,55 @@ export interface CheckoutResponse {
    *  `openFileAtPath` returns — the frontend refreshes through one path. */
   cells: CellData[];
   /** Custom objects of kinds handled by frontend providers (brick 4);
-   *  {@link checkoutPackage} dispatches these automatically. */
+   *  {@link checkoutApplication} dispatches these automatically. */
   customObjects?: PulledDistributableObject[];
 }
 
 /**
- * TOFU trust outcome for a `.calp` package, mirrored EXACTLY from the Rust
+ * TOFU trust outcome for a `.calp` application, mirrored EXACTLY from the Rust
  * `calp::integrity::TrustStatus`.
  *
- * A pin is scoped to `(registry, package name)`, not to the name alone. Keying
- * on the name alone meant whoever made first contact with a name owned it on the
- * whole machine: a package `acme.finance` served once from `\\evil\share` wrote
+ * A pin is scoped to `(workspace, application name)`, not to the name alone.
+ * Keying on the name alone meant whoever made first contact with a name owned it
+ * on the whole machine: an application `acme.finance` served once from
+ * `\\evil\share` wrote
  * the pin the GENUINE `acme.finance` was later measured against, so the real
  * publisher's first release read as "publisher changed" — an accusation pointed
- * at the victim. Three of the six states below exist because scoping alone would
- * have traded that loud false alarm for a quiet true miss.
+ * at the victim. Three of the seven states below exist because scoping alone
+ * would have traded that loud false alarm for a quiet true miss.
  *
- * - `"verified"` — signed by the key this machine pinned for THIS registry when
+ * - `"verified"` — signed by the key this machine pinned for THIS workspace when
  *   the user deliberately trusted this publisher (Subscribe).
+ * - `"trustedDelegate"` — signed by a CO-PUBLISHER the pinned publisher
+ *   authorized: not the pinned key, but a key listed in a `publishers.json` the
+ *   pinned key signed. Trusted, and worth SAYING — the user agreed to trust one
+ *   publisher and is now transitively trusting someone that publisher vouched
+ *   for.
  * - `"firstUse"` — the key was pinned by THIS operation, and this name was not
  *   pinned anywhere else. Only a commit point (Subscribe) can produce it.
- * - `"firstUseKnownPublisher"` — pinned by this operation for a new registry,
+ * - `"firstUseKnownPublisher"` — pinned by this operation for a new workspace,
  *   and the SAME key is already trusted for this name elsewhere: a migration, a
  *   mirror, or a second spelling of one location. Reassurance, not alarm.
  * - `"firstUseAcceptedNameConflict"` — pinned by this operation even though a
- *   DIFFERENT key holds this name from another registry, because the user was
+ *   DIFFERENT key holds this name from another workspace, because the user was
  *   shown both and accepted. Never present this as an ordinary first use.
  * - `"notPinned"` — the signature is cryptographically valid, but nobody on
- *   this computer has ever agreed to trust that signer for this package name
- *   from this registry. AUTHENTIC IS NOT TRUSTED: anyone can generate an Ed25519
- *   key and sign a package, so a valid signature proves only that the bytes are
- *   unaltered. Passive surfaces (inspect, review, the Package Inspector) return
+ *   this computer has ever agreed to trust that signer for this application name
+ *   from this workspace. AUTHENTIC IS NOT TRUSTED: anyone can generate an Ed25519
+ *   key and sign an application, so a valid signature proves only that the bytes are
+ *   unaltered. Passive surfaces (inspect, review, the Application Inspector) return
  *   this instead of quietly creating a pin.
  * - `"notPinnedNameConflict"` — passive first contact AND a different key is
- *   pinned for this same name from another registry. Two registries claiming one
- *   name is what a hijack looks like: show BOTH registries and BOTH key
+ *   pinned for this same name from another workspace. Two workspaces claiming one
+ *   name is what a hijack looks like: show BOTH workspaces and BOTH key
  *   fingerprints, in a danger tone.
  *
- * EVERY UI that switches on one of these MUST have a row for all six. A trust
+ * EVERY UI that switches on one of these MUST have a row for all seven. A trust
  * state that renders as no badge (reads as benign) or falls through to a green
- * "verified" pill is a security-UX defect, not a cosmetic one.
+ * "verified" pill is a security-UX defect, not a cosmetic one. This list said
+ * "all six" and omitted `trustedDelegate` while the union already carried it —
+ * so the paragraph demanding completeness was itself incomplete, which is
+ * exactly how a state ends up rendering as nothing.
  */
 export type CalpTrustStatus =
   | "verified"
@@ -467,7 +476,7 @@ export type CalpTrustStatus =
   | "notPinnedNameConflict";
 
 /** The statuses that mean "this machine has deliberately agreed to trust this
- *  publisher for this package name, from this registry". Both `notPinned` states
+ *  publisher for this application name, from this workspace". Both `notPinned` states
  *  are deliberately absent, exactly as `notInstalled` is absent from the
  *  library/extension equivalents. */
 export function calpTrustIsPinned(status: string): boolean {
@@ -484,15 +493,15 @@ export function calpTrustIsPinned(status: string): boolean {
 }
 
 /** The two conflict states, which must always render in a danger tone: another
- *  registry holds this package name under a DIFFERENT publisher key. */
+ *  workspace holds this application name under a DIFFERENT publisher key. */
 export function calpTrustIsNameConflict(status: string): boolean {
   return status === "notPinnedNameConflict" || status === "firstUseAcceptedNameConflict";
 }
 
 /**
- * A pin held for the SAME package name in a DIFFERENT registry.
+ * A pin held for the SAME application name in a DIFFERENT workspace.
  *
- * `scopeLabel` is the other registry EXACTLY as the user configured it — the
+ * `scopeLabel` is the other workspace EXACTLY as the user configured it — the
  * backend never exposes the normalized scope id, which is key material and not a
  * string anyone typed.
  */
@@ -509,9 +518,9 @@ export interface OtherScopePin {
 /**
  * One publisher pin held by THIS COMPUTER.
  *
- * `scopeLabel` is the registry exactly as the user configured it, and is empty
+ * `scopeLabel` is the workspace exactly as the user configured it, and is empty
  * for the `ext` namespace: an extension pin is machine-global by decision (there
- * is no registry, and the only candidate scope — the source folder — is the
+ * is no workspace, and the only candidate scope — the source folder — is the
  * attacker's own choice, so scoping by it would hand a dropped bundle a free
  * first use on an id it does not own).
  */
@@ -545,7 +554,7 @@ export interface TrustedPublisherReport {
 /**
  * What does this computer trust, and from where?
  *
- * Read-only and passive: it opens no registry, verifies nothing, and can neither
+ * Read-only and passive: it opens no workspace, verifies nothing, and can neither
  * create nor remove a pin.
  */
 export async function listTrustedPublishers(): Promise<TrustedPublisherReport> {
@@ -556,7 +565,7 @@ export interface PullParams {
   registryPath: string;
   packageName: string;
   versionPin: string;
-  /** The user was shown a cross-registry NAME CONFLICT and accepted it in a
+  /** The user was shown a cross-workspace NAME CONFLICT and accepted it in a
    *  second, differently-worded confirmation. Omitting it makes a conflicting
    *  subscribe FAIL with an explanation rather than pin — fail closed. */
   acceptNameConflict?: boolean;
@@ -575,15 +584,15 @@ export interface PullResponse {
    *  pinning states ("verified", "firstUse", "firstUseKnownPublisher" or
    *  "firstUseAcceptedNameConflict"); neither "notPinned" state occurs here. */
   trustStatus: CalpTrustStatus;
-  /** Pins for this same package name in OTHER registries. */
+  /** Pins for this same application name in OTHER workspaces. */
   otherScopePins: OtherScopePin[];
   /** Custom objects of kinds NOT handled Rust-side (brick 4), for frontend
-   *  provider materialization. pullPackage dispatches these automatically. */
+   *  provider materialization. subscribeToApplication dispatches these automatically. */
   customObjects?: PulledDistributableObject[];
   /**
    * The TRUE state-vector index of the first user-visible sheet this pull
-   * created, for the caller to activate. Null when the package brought no user
-   * sheet (a dataset or library package).
+   * created, for the caller to activate. Null when the application brought no user
+   * sheet (a dataset or library application).
    *
    * Use THIS rather than deriving a position from `getSheets()`. That list
    * omits object-backed sheets — a floating range's backing sheet — so list
@@ -594,18 +603,18 @@ export interface PullResponse {
   firstPulledSheetIndex?: number | null;
 }
 
-/** Contents of a package version, for pre-pull review. */
-export interface PackageInspection {
+/** Contents of an application version, for pre-pull review. */
+export interface ApplicationInspection {
   packageName: string;
   resolvedVersion: string;
   sheets: SheetInfo[];
   scripts: InspectedScript[];
   /**
-   * Standalone module scripts bundled with the package (C8).
+   * Standalone module scripts bundled with the application (C8).
    *
    * `calp_commands.rs` has returned these since C8; this interface did not
    * declare them, so the Subscribe review rendered `inspection.scripts` alone
-   * and a package's module scripts — including the reserved
+   * and an application's module scripts — including the reserved
    * `__calcula_custom_functions__` module, whose functions run whenever a cell
    * calls them — arrived undisclosed. They land INERT (a separate consent gates
    * execution: `require_distributed_module_consent`), so this was a disclosure
@@ -613,7 +622,7 @@ export interface PackageInspection {
    * the whole job of this type.
    */
   moduleScripts: InspectedModuleScript[];
-  /** Standalone notebooks bundled with the package (C8). Inert until the user
+  /** Standalone notebooks bundled with the application (C8). Inert until the user
    *  opens and runs them — but, like moduleScripts, they were arriving with no
    *  mention in the pre-pull review. */
   notebooks: InspectedNotebook[];
@@ -621,29 +630,29 @@ export interface PackageInspection {
   writebackRegionCount: number;
   tableCount: number;
   namedRangeCount: number;
-  /** Names of the tables the package carries (per-object transparency). */
+  /** Names of the tables the application carries (per-object transparency). */
   tableNames: string[];
-  /** Names of the named ranges the package carries. */
+  /** Names of the named ranges the application carries. */
   namedRangeNames: string[];
   chartCount: number;
   sparklineCount: number;
   pivotCount: number;
   /** Sheets carrying cell-anchored controls (buttons/checkboxes). */
   controlSheetCount: number;
-  /** Pane controls (Controls pane widgets) the package carries. */
+  /** Pane controls (Controls pane widgets) the application carries. */
   paneControlCount: number;
-  /** Names of the pane controls the package carries. */
+  /** Names of the pane controls the application carries. */
   paneControlNames: string[];
   /** Slicers on the published sheets (Wave A). */
   slicerCount: number;
-  /** Ribbon filters the package carries (workbook-scoped, BI-only; Wave A). */
+  /** Ribbon filters the application carries (workbook-scoped, BI-only; Wave A). */
   ribbonFilterCount: number;
-  /** Saved pivot layouts the package carries (Wave A). */
+  /** Saved pivot layouts the application carries (Wave A). */
   pivotLayoutCount: number;
-  /** Whether the package carries a document theme (applied only if the
+  /** Whether the application carries a document theme (applied only if the
    * subscriber's theme is still the default). */
   hasDocumentTheme: boolean;
-  /** Extension-data keys the package carries (merged additively; keys the
+  /** Extension-data keys the application carries (merged additively; keys the
    * subscriber already has are never overwritten). */
   extensionDataCount: number;
   /** Their key names (per-object transparency, like namedRangeNames). */
@@ -653,16 +662,16 @@ export interface PackageInspection {
   commentSheetCount: number;
   /** Verified publisher display name (S5 phase 2). */
   publisherName: string;
-  /** The verified publisher's Ed25519 public key (hex). Reviewing a package
+  /** The verified publisher's Ed25519 public key (hex). Reviewing an application
    *  deliberately does NOT pin it, so this key is the thing the user compares
    *  against what the publisher told them out of band before subscribing. */
   publisherKey: string;
-  /** Pins for this same package name in OTHER registries. Shown in the Review
+  /** Pins for this same application name in OTHER workspaces. Shown in the Review
    *  step, because Review must never say nothing and then have Subscribe fail on
    *  a conflict it never mentioned. */
   otherScopePins: OtherScopePin[];
   /** A `CalpTrustStatus`. Review/inspect is PASSIVE, so first contact reports
-   *  "notPinned" and writes nothing to the pin store — inspecting a package is
+   *  "notPinned" and writes nothing to the pin store — inspecting an application is
    *  not a decision to trust its publisher. A failed signature check returns an
    *  error instead of a status. */
   trustStatus: CalpTrustStatus;
@@ -672,7 +681,7 @@ export interface InspectedScript {
   name: string;
   objectType: string;
   description: string | null;
-  /** Capability ids the package's manifest declares this script needs (R19). */
+  /** Capability ids the application's manifest declares this script needs (R19). */
   requestedCapabilities: string[];
 }
 
@@ -707,7 +716,7 @@ export interface InspectedDataSource {
   database: string;
 }
 
-export interface PackageInfo {
+export interface ApplicationInfo {
   name: string;
   description: string;
   kind: string;
@@ -843,7 +852,7 @@ export interface StructuralConflict {
 // Backend Wrappers
 // ============================================================================
 
-export async function publishPackage(params: PublishParams): Promise<PublishResponse> {
+export async function publishApplication(params: PublishParams): Promise<PublishResponse> {
   // Fill custom objects from registered distributable-object providers (brick 4)
   // unless the caller already supplied them. Built-in cell types are collected
   // Rust-side and merged there — these are the third-party providers' objects.
@@ -872,22 +881,22 @@ export interface PublishLibraryParams {
 
 /**
  * Publish this workbook's standalone module scripts as a `kind: "library"`
- * package — the authoring half of the script package manager.
+ * application — the authoring half of the script package manager.
  *
  * A library's payload is `modules/{id}.json`, not sheets, so this deliberately
  * defaults `sheetIndices` to `[]`. The backend honours that literally for the
  * library kind (`calp_publish`): every other kind reads an empty selection as
  * "all sheets", which for a library would ship the author's entire workbook —
- * data and all — to a shared registry as a side effect of publishing a function
+ * data and all — to a shared workspace as a side effect of publishing a function
  * library.
  *
  * Everything else is the ordinary publish path: same Ed25519 signature, same
  * TOFU identity, same version manifest, same artifact checksums. A library is
- * an ordinary package with a different `kind`, which is exactly why consuming
+ * an ordinary application with a different `kind`, which is exactly why consuming
  * one needs no second trust root.
  */
 export function publishLibrary(params: PublishLibraryParams): Promise<PublishResponse> {
-  return publishPackage({
+  return publishApplication({
     registryPath: params.registryPath,
     packageName: params.packageName,
     version: params.version,
@@ -898,7 +907,7 @@ export function publishLibrary(params: PublishLibraryParams): Promise<PublishRes
 }
 
 /**
- * Dry-run of publishPackage: assemble the exact carrier a publish would use
+ * Dry-run of publishApplication: assemble the exact carrier a publish would use
  * and report what would ship vs stay behind — without writing anything.
  * Omit sheetIndices (or pass []) to preview publishing every sheet.
  * Pass includeComments to mirror the real publish's comment opt-in, so the
@@ -921,14 +930,14 @@ export function publishPreview(
 }
 
 /**
- * Open a published package version as a WORKING COPY.
+ * Open a published application version as a WORKING COPY.
  *
  * REPLACES the open document, so the caller must have confirmed the loss of
  * unsaved changes first — the same contract `openFileAtPath` has. The resulting
- * workbook carries the package's own sheet ids, which is what lets a later push
- * continue the package's identity instead of forking it.
+ * workbook carries the application's own sheet ids, which is what lets a later push
+ * continue the application's identity instead of forking it.
  */
-export async function checkoutPackage(params: CheckoutParams): Promise<CheckoutResponse> {
+export async function checkoutApplication(params: CheckoutParams): Promise<CheckoutResponse> {
   const response = await invokeBackend<CheckoutResponse>("calp_checkout", { params });
   // Frontend-provider objects (brick 4) land the same way a pull's do.
   if (response.customObjects?.length) {
@@ -944,18 +953,18 @@ export async function checkoutPackage(params: CheckoutParams): Promise<CheckoutR
 }
 
 /**
- * What package is this workbook a working copy of, and where does it stand
- * relative to the registry? `null` for a standalone workbook.
+ * What application is this workbook a working copy of, and where does it stand
+ * relative to the workspace? `null` for a standalone workbook.
  *
- * Never throws for an unreachable registry: the answer degrades to the link's
+ * Never throws for an unreachable workspace: the answer degrades to the link's
  * own contents with `registryReachable: false`.
  */
-export function workspaceStatus(): Promise<WorkspaceStatus | null> {
-  return invokeBackend("calp_workspace_status", {});
+export function workingCopyStatus(): Promise<WorkingCopyStatus | null> {
+  return invokeBackend("calp_working_copy_status", {});
 }
 
 /**
- * What changed between two published versions of a package.
+ * What changed between two published versions of an application.
  *
  * Both sides are verified first — signature, trust status and the full
  * per-artifact checksum walk — so nothing here is backed by unverified bytes.
@@ -981,13 +990,7 @@ export function diffSheetCells(params: {
   return invokeBackend("calp_diff_sheet_cells", { params });
 }
 
-/**
- * What this workbook's next push would change.
- *
- * With no arguments it reads the target and base from the workbook's own
- * workspace link, which is what the push dialog wants.
- */
-/** Who may publish this package — the root, plus any delegates it authorized. */
+/** Who may publish this application — the root, plus any delegates it authorized. */
 export function listCoPublishers(params: {
   registryPath: string;
   packageName: string;
@@ -1011,7 +1014,7 @@ export function setCoPublishers(params: {
 }
 
 /**
- * This computer's own publisher key, to send to whoever owns a package you want
+ * This computer's own publisher key, to send to whoever owns an application you want
  * to push to. A public key identifies; it does not authorize.
  */
 export function myPublisherKey(): Promise<CoPublisherInfo> {
@@ -1021,7 +1024,7 @@ export function myPublisherKey(): Promise<CoPublisherInfo> {
 /**
  * Where a push stands against what landed while its author was working.
  *
- * Read-only. Compares the registry head against this working copy's base, and
+ * Read-only. Compares the workspace head against this working copy's base, and
  * this working copy against that same base, then asks whether the two touched
  * any piece in common.
  */
@@ -1034,12 +1037,18 @@ export function pushMergeAnalyze(): Promise<MergeAnalysisResponse> {
  * step, recalculate, and move the base forward.
  *
  * Re-runs the analysis server-side rather than trusting a verdict from here —
- * the registry can move between a dialog rendering and a user confirming.
+ * the workspace can move between a dialog rendering and a user confirming.
  */
 export function pushMergeApply(): Promise<MergeApplyResponse> {
   return invokeBackend("calp_push_merge_apply", {});
 }
 
+/**
+ * What this workbook's next push would change.
+ *
+ * With no arguments it reads the target and base from the workbook's own
+ * working-copy link, which is what the push dialog wants.
+ */
 export function diffWorkingCopy(params?: {
   registryPath?: string;
   packageName?: string;
@@ -1060,7 +1069,7 @@ export interface PublishModelParams {
 }
 
 /**
- * Publish a single BI model as a MODEL-ONLY package (kind "dataset", zero
+ * Publish a single BI model as a MODEL-ONLY application (kind "dataset", zero
  * sheets): the .calp becomes the distribution unit for models — signed,
  * versioned, min-app-gated — instead of hand-carried .json files. Subscribing
  * materializes a live connection (schema only; the subscriber supplies their
@@ -1070,8 +1079,8 @@ export function publishModel(params: PublishModelParams): Promise<PublishRespons
   return invokeBackend("calp_publish_model", { params });
 }
 
-/** One object connected to a package, resolved against the live workbook. */
-export interface PackageObjectInfo {
+/** One object connected to an application, resolved against the live workbook. */
+export interface ApplicationObjectInfo {
   kind: string;
   id: string;
   name: string;
@@ -1081,23 +1090,23 @@ export interface PackageObjectInfo {
   sheetName: string;
 }
 
-export interface PackageSheetObjectInfo {
+export interface ApplicationSheetObjectInfo {
   localName: string;
   localSheetIndex: number | null;
 }
 
-export interface PackageObjectsResponse {
+export interface ApplicationObjectsResponse {
   packageName: string;
   resolvedVersion: string;
   registryUrl: string;
-  sheets: PackageSheetObjectInfo[];
-  objects: PackageObjectInfo[];
+  sheets: ApplicationSheetObjectInfo[];
+  objects: ApplicationObjectInfo[];
 }
 
-/** Which sheets and objects are connected to a subscribed package, and
- * whether each still exists in the live workbook (Package Explorer data). */
-export function getPackageObjects(packageName: string): Promise<PackageObjectsResponse> {
-  return invokeBackend("calp_get_package_objects", { packageName });
+/** Which sheets and objects are connected to a subscribed application, and
+ * whether each still exists in the live workbook (Application Explorer data). */
+export function getApplicationObjects(packageName: string): Promise<ApplicationObjectsResponse> {
+  return invokeBackend("calp_get_application_objects", { packageName });
 }
 
 /**
@@ -1105,7 +1114,7 @@ export function getPackageObjects(packageName: string): Promise<PackageObjectsRe
  * providers (brick 4). Built-in kinds (cell types) were already materialized
  * Rust-side.
  *
- * Exported because there are now TWO callers: `pullPackage` (the Subscribe
+ * Exported because there are now TWO callers: `subscribeToApplication` (the Subscribe
  * dialog's path) and the script broker's `cap.pkgPull` handler, which receives
  * the very same `PullResponse` from the Rust distribution gateway. One
  * implementation on purpose — a second copy is how a scripted pull would start
@@ -1117,32 +1126,32 @@ export async function applyPulledCustomObjects(response: PullResponse): Promise<
   }
 }
 
-export async function pullPackage(params: PullParams): Promise<PullResponse> {
+export async function subscribeToApplication(params: PullParams): Promise<PullResponse> {
   const response = await invokeBackend<PullResponse>("calp_pull", { params });
   await applyPulledCustomObjects(response);
   return response;
 }
 
-export function browseRegistry(registryPath: string): Promise<PackageInfo[]> {
-  return invokeBackend("calp_browse_registry", { registryPath });
+export function listApplicationsInWorkspace(registryPath: string): Promise<ApplicationInfo[]> {
+  return invokeBackend("calp_browse_workspace", { registryPath });
 }
 
-/** Inspect a package version's contents without materializing anything. */
-export function inspectPackage(
+/** Inspect an application version's contents without materializing anything. */
+export function inspectApplication(
   registryPath: string,
   packageName: string,
   versionPin: string,
-): Promise<PackageInspection> {
-  return invokeBackend("calp_inspect_package", { registryPath, packageName, versionPin });
+): Promise<ApplicationInspection> {
+  return invokeBackend("calp_inspect_application", { registryPath, packageName, versionPin });
 }
 
 /**
  * Whether this machine trusts each subscription's publisher.
  *
  * A `.cala` restores its subscription list on open WITHOUT pulling, so a
- * workbook received from a colleague can name packages this computer has never
+ * workbook received from a colleague can name applications this computer has never
  * subscribed to. Writeback regions, GATHER and model-writeback columns from such
- * a package are deliberately INERT — the paths that read their declarations
+ * an application are deliberately INERT — the paths that read their declarations
  * require an existing TOFU pin rather than creating one, because a workbook that
  * arrives by email must not be able to squat a publisher identity.
  *
@@ -1154,14 +1163,14 @@ export interface SubscriptionTrustInfo {
   packageName: string;
   registryUrl: string;
   resolvedVersion: string;
-  /** A `CalpTrustStatus`, or "unavailable" when the registry/manifest could not
+  /** A `CalpTrustStatus`, or "unavailable" when the workspace/manifest could not
    *  be read or verified at all (see `error`). */
   trustStatus: CalpTrustStatus | "unavailable";
-  /** Pins for this same package name in OTHER registries. */
+  /** Pins for this same application name in OTHER workspaces. */
   otherScopePins: OtherScopePin[];
   publisherName: string;
   publisherKey: string;
-  /** Whether this package declares writeback regions or model-writeback columns
+  /** Whether this application declares writeback regions or model-writeback columns
    *  — i.e. whether "not pinned" actually costs the user working features. */
   declaresWriteback: boolean;
   /** Failure text when `trustStatus` is "unavailable". */
@@ -1222,7 +1231,7 @@ export interface ResetSubscriptionResponse {
 /**
  * Reset a subscription's sheets to the pristine published content of the
  * currently resolved version, discarding local edits (cells, formatting,
- * sizes, merges, overrides) on those sheets AND restoring the package's
+ * sizes, merges, overrides) on those sheets AND restoring the application's
  * published pivot definitions (layout changes revert). One undo step.
  */
 export function resetSubscription(
@@ -1248,7 +1257,7 @@ export interface DevSubscribeParams {
 /**
  * Subscribe to a local .cala file in dev mode.
  * Sheets are materialized into the workbook like a normal pull but resolve
- * against the file directly instead of a registry version.
+ * against the file directly instead of a version published in a workspace.
  */
 export function devSubscribe(params: DevSubscribeParams): Promise<PullResponse> {
   return invokeBackend("calp_dev_subscribe", { params });
@@ -1289,9 +1298,9 @@ export function mergeCellIds(
 }
 
 /**
- * Suggest the next version string for a package given a bump level.
- * @param registryPath - Absolute path to the local registry directory.
- * @param packageName  - Package name inside the registry.
+ * Suggest the next version string for an application given a bump level.
+ * @param registryPath - Absolute path to the local workspace directory.
+ * @param packageName  - Application name inside the workspace.
  * @param bump         - One of "major", "minor", or "patch".
  * @returns The suggested next version string, e.g. "1.3.0".
  */
@@ -1385,7 +1394,7 @@ export function getWritebackRegions(): Promise<WritebackRegionEntry[]> {
  *
  * Mirrors `WritebackRebuildSkip` in app/src-tauri/src/calp_commands.rs.
  *
- * Before this existed, "this package declares no writeback" and "this package's
+ * Before this existed, "this application declares no writeback" and "this application's
  * writeback regions are UNKNOWN" were the same observable state — an empty
  * index — so a subscriber whose form protections were silently inactive saw
  * exactly what a subscriber with no form sees. An empty list here means every
@@ -1399,7 +1408,7 @@ export interface WritebackRebuildSkip {
    * | `"appTooOld"` | `"deferred"` | `"unknown"`.
    *
    * `"deferred"` is not a failure: the workbook-open rebuild walks local
-   * registries inline and hands HTTP ones to a worker, so a subscription reads
+   * workspaces inline and hands HTTP ones to a worker, so a subscription reads
    * `deferred` until that worker lands and fires
    * {@link WRITEBACK_INDEX_CHANGED_EVENT}.
    */
@@ -1415,31 +1424,31 @@ export function getWritebackRebuildSkips(): Promise<WritebackRebuildSkip[]> {
 }
 
 /**
- * Why opening this workbook could NOT re-materialize a subscribed package's BI
+ * Why opening this workbook could NOT re-materialize a subscribed application's BI
  * connections.
  *
- * Mirrors `PackageConnectionRestoreSkip` in app/src-tauri/src/calp_commands.rs.
+ * Mirrors `ApplicationConnectionRestoreSkip` in app/src-tauri/src/calp_commands.rs.
  *
- * A package's BI connection is not stored in the subscriber's `.cala` — the
+ * An application's BI connection is not stored in the subscriber's `.cala` — the
  * model belongs to the publisher and travels in the `.calp` — so it is rebuilt
- * on open from the subscription ledger plus the local package cache, under the
+ * on open from the subscription ledger plus the local application cache, under the
  * same signature + pin + checksum gates a pull runs. When that cannot be done
  * the report keeps its cells but has no live model, and without this list
- * "this package has no data source" and "this package's model could not be
+ * "this application has no data source" and "this application's model could not be
  * verified here" look identical: a pivot that says it has no connection.
  *
- * An empty list means every subscribed package's model is live (or it declares
+ * An empty list means every subscribed application's model is live (or it declares
  * no data source).
  */
-export interface PackageConnectionRestoreSkip {
+export interface ApplicationConnectionRestoreSkip {
   packageName: string;
   registryUrl: string;
   /**
    * `"unreachable"` | `"notPinned"` | `"publisherChanged"` | `"badManifest"`
    * | `"appTooOld"` | `"unsupportedTransport"` | `"unknown"`.
    *
-   * `"unsupportedTransport"` is an HTTP registry: it exposes no local model
-   * artifact, so a package connection cannot be built from it — true of the
+   * `"unsupportedTransport"` is an HTTP workspace: it exposes no local model
+   * artifact, so an application connection cannot be built from it — true of the
    * pull path too, not a regression of the restore.
    */
   reason: string;
@@ -1447,10 +1456,10 @@ export interface PackageConnectionRestoreSkip {
   detail: string;
 }
 
-/** Reasons opening this workbook could not restore a subscribed package's BI
+/** Reasons opening this workbook could not restore a subscribed application's BI
  *  connections. Re-read whenever the subscription list is re-read. */
-export function getPackageConnectionSkips(): Promise<PackageConnectionRestoreSkip[]> {
-  return invokeBackend("calp_get_package_connection_skips");
+export function getApplicationConnectionSkips(): Promise<ApplicationConnectionRestoreSkip[]> {
+  return invokeBackend("calp_get_application_connection_skips");
 }
 
 /** Subscriber identity attached to writeback submissions. */
@@ -1597,15 +1606,15 @@ export function getWritebackLayer(): Promise<WritebackLayer> {
   return invokeBackend("calp_get_writeback_layer");
 }
 
-/** Reconcile local submission states from the registry (the approved/rejected
+/** Reconcile local submission states from the workspace (the approved/rejected
  * read-back — the return leg of the writeback loop) and return the updated
- * layer. Submitted entries adopt their current registry state; unsent drafts
+ * layer. Submitted entries adopt their current workspace state; unsent drafts
  * are untouched. This is how a subscriber learns the fate of what they sent. */
 export function reconcileWriteback(): Promise<WritebackLayer> {
   return invokeBackend("calp_reconcile_writeback");
 }
 
-/** Submit all drafts for a region to the registry of the subscription that
+/** Submit all drafts for a region to the workspace of the subscription that
  * declares the region. Returns count submitted. */
 export function submitRegion(regionId: string): Promise<number> {
   return invokeBackend("calp_submit_region", { regionId });
@@ -1626,7 +1635,7 @@ export interface OutboundValue {
 }
 
 /** A read-only preview of exactly what submitRegion would send — destination
- * package + registry, the submitter identity, and each draft value — so the
+ * application + workspace, the submitter identity, and each draft value — so the
  * user can review what leaves the machine before it leaves. */
 export interface OutboundSubmissionPreview {
   regionId: string;
@@ -1646,7 +1655,7 @@ export interface OutboundSubmissionPreview {
     sourceHash: string;
     consented: boolean;
   };
-  /** Set when the region declares a validator NAME but the package ships no
+  /** Set when the region declares a validator NAME but the application ships no
    *  BODY for it — the submission WILL be refused (fail-closed) until the
    *  publisher republishes with the validator body included. */
   validatorError?: string;
@@ -1659,12 +1668,12 @@ export function previewRegionSubmission(
   return invokeBackend("calp_preview_region_submission", { regionId });
 }
 
-/** How to render a package version to self-contained HTML (recipient reach):
+/** How to render an application version to self-contained HTML (recipient reach):
  *  `static` = a stacked, print-ready report; `viewer` = a multi-sheet tabbed
  *  viewer with embedded navigation. Both are single offline-openable .html. */
 export type HtmlExportMode = "static" | "viewer";
 
-/** Render a published package version to a self-contained HTML string that any
+/** Render a published application version to a self-contained HTML string that any
  *  browser/phone/Mac can open WITHOUT Calcula. */
 export function exportPackageHtml(
   registryPath: string,
@@ -1672,7 +1681,7 @@ export function exportPackageHtml(
   version: string,
   mode: HtmlExportMode,
 ): Promise<string> {
-  return invokeBackend("calp_export_package_html", {
+  return invokeBackend("calp_export_application_html", {
     registryPath,
     packageName,
     version,
@@ -1743,14 +1752,14 @@ export function exportRegionSubmissionsParquet(regionId: string): Promise<number
   return invokeBackend("calp_export_region_submissions_parquet", { regionId });
 }
 
-/** Whether the auto-materialized Parquet rollup is enabled for the package
+/** Whether the auto-materialized Parquet rollup is enabled for the application
  * owning this region (publisher opt-in, default off). */
 export function getWritebackRollup(regionId: string): Promise<boolean> {
   return invokeBackend("calp_get_writeback_rollup", { regionId });
 }
 
 /** Publisher-only: enable/disable the auto-materialized Parquet rollup for the
- * package owning this region. Enabling writes the rollup immediately. */
+ * application owning this region. Enabling writes the rollup immediately. */
 export function setWritebackRollup(regionId: string, enabled: boolean): Promise<void> {
   return invokeBackend("calp_set_writeback_rollup", { regionId, enabled });
 }
@@ -1772,14 +1781,14 @@ export function regionResponseStatus(regionId: string): Promise<RegionResponseSt
 // Submission watch (§5.5): the honest push behind WRITEBACK_SUBMISSION_RECEIVED
 // ============================================================================
 //
-// THE PROBLEM. A subscriber submits by APPENDING to a registry on disk (or a
+// THE PROBLEM. A subscriber submits by APPENDING to a workspace on disk (or a
 // share) from THEIR machine. The publisher's Calcula is not in that path and
 // receives nothing — so until now a publisher learned about answers by opening
 // the Responses pane and looking, and a script could not react at all.
 //
 // WHAT A REAL PUSH WOULD NEED, and why it does not exist: an OS file watcher on
-// the registry, plus a way to know which of its thousands of files matter. The
-// registry is an append-only event log that Rust folds on read; there is no
+// the workspace, plus a way to know which of its thousands of files matter. The
+// workspace is an append-only event log that Rust folds on read; there is no
 // change feed, no sequence cursor, and no per-region "latest" marker to watch.
 // So a true push is not available, and inventing an event that never fires
 // would be worse than none.
@@ -1834,7 +1843,7 @@ export interface SubmissionWatchStatus {
 let watchRefCount = 0;
 let watchTimer: ReturnType<typeof setInterval> | null = null;
 /** The pass currently running, so two never overlap (a slow pass makes the next
- *  tick a no-op rather than stacking a second walk of the registry). */
+ *  tick a no-op rather than stacking a second walk of the workspace). */
 let inFlightPass: Promise<void> | null = null;
 /** regionId -> submission ids already reported (replaced each pass, so this is
  *  bounded by the region's live slot count rather than by history). */
@@ -1871,7 +1880,7 @@ async function doSubmissionPass(announce: boolean): Promise<void> {
     const regions = await getWritebackRegions();
     calls += 1;
     const liveRegionIds = new Set(regions.map((r) => r.regionId));
-    // Forget state for regions that no longer exist (unsubscribed package).
+    // Forget state for regions that no longer exist (unsubscribed application).
     for (const id of [...seenSubmissionIds.keys()]) {
       if (!liveRegionIds.has(id)) seenSubmissionIds.delete(id);
     }
@@ -2069,7 +2078,7 @@ export function refreshData(): Promise<DataRefreshResponse> {
 
 /**
  * Save connection credentials for a data source.
- * Stored in the subscriber's local .cala file, never in the registry.
+ * Stored in the subscriber's local .cala file, never in the workspace.
  */
 export function saveDataSourceConfig(
   dataSourceId: string,
@@ -2084,8 +2093,8 @@ export function getDataSources(): Promise<DataSourceInfo[]> {
 }
 
 // ============================================================================
-// Package Inspector (standalone window) — read-only deep inspection of a
-// published package version. Nothing is subscribed or materialized; every
+// Application Inspector (standalone window) — read-only deep inspection of a
+// published application version. Nothing is subscribed or materialized; every
 // call re-verifies the manifest signature + TOFU pin, and artifacts are only
 // readable via the signed manifest's checksum keys.
 // ============================================================================
@@ -2094,14 +2103,14 @@ export interface InspectorVersionEntry {
   version: string;
   publishedAt: string;
   publishedBy: string;
-  /** The version this one was pushed from. Empty for a package's first
+  /** The version this one was pushed from. Empty for an application's first
    *  version, and for versions published before push lineage was recorded. */
   baseVersion: string;
   /** What the author said changed, from the SIGNED version manifest. */
   changeSummary: string;
 }
 
-export interface InspectorPackageInfo {
+export interface InspectorApplicationInfo {
   name: string;
   description: string;
   kind: string;
@@ -2119,12 +2128,12 @@ export interface InspectorManifestInfo {
   /** Lowercase hex Ed25519 public key of the verified signer. */
   publisherKey: string;
   minAppVersion: string;
-  /** A `CalpTrustStatus`. The Package Inspector is PASSIVE (VerifyOnly): merely
-   *  pointing it at a registry folder must never pin a publisher, so an
+  /** A `CalpTrustStatus`. The Application Inspector is PASSIVE (VerifyOnly): merely
+   *  pointing it at a workspace folder must never pin a publisher, so an
    *  unrecognised signer reports "notPinned" — or "notPinnedNameConflict" when
-   *  another registry holds this name under a different key. */
+   *  another workspace holds this name under a different key. */
   trustStatus: CalpTrustStatus;
-  /** Pins for this same package name in OTHER registries. */
+  /** Pins for this same application name in OTHER workspaces. */
   otherScopePins: OtherScopePin[];
   /** Whether THIS machine holds the publisher signing key. */
   isPublisher: boolean;
@@ -2180,7 +2189,7 @@ export interface InspectorSlicerInfo {
   sheetName: string;
   fieldName: string;
   /** Filter level: 1 = ordinary, 2-9 = PINNED. A pin changes what the
-   * package's measures return (a CLEAR/RESET measure keeps respecting it),
+   * application's measures return (a CLEAR/RESET measure keeps respecting it),
    * so it is surfaced before subscribing. */
   filterLevel: number;
 }
@@ -2263,7 +2272,7 @@ export interface InspectorArtifactEntry {
 }
 
 export interface InspectorOverview {
-  package: InspectorPackageInfo;
+  package: InspectorApplicationInfo;
   resolvedVersion: string;
   manifest: InspectorManifestInfo;
   sheets: InspectorSheetSummary[];
@@ -2543,22 +2552,22 @@ export interface InspectorVerifyReport {
   allOk: boolean;
 }
 
-export interface ResolvedRegistryLocation {
-  /** The registry ROOT to browse (walked up from whatever was picked). */
+export interface ResolvedWorkspaceLocation {
+  /** The workspace ROOT to browse (walked up from whatever was picked). */
   registryPath: string;
-  /** Set when the picked folder was a package (or version) directory. */
+  /** Set when the picked folder was an application (or version) directory. */
   packageName: string | null;
   /** Set when the picked folder was a specific version directory. */
   version: string | null;
 }
 
-/** Walk a picked folder up to its registry root (package/version dirs are
+/** Walk a picked folder up to its workspace root (application/version dirs are
  * recognized and pre-selected). Unrecognized paths pass through unchanged. */
-export function inspectorResolveLocation(path: string): Promise<ResolvedRegistryLocation> {
+export function inspectorResolveLocation(path: string): Promise<ResolvedWorkspaceLocation> {
   return invokeBackend("calp_inspector_resolve_location", { path });
 }
 
-/** Deep overview of a package version (Package Inspector landing payload). */
+/** Deep overview of an application version (Application Inspector landing payload). */
 export function inspectorOverview(
   registryPath: string,
   packageName: string,
@@ -2584,7 +2593,7 @@ export function inspectorSheet(
   });
 }
 
-/** Every line of code the package carries, with full source. */
+/** Every line of code the application carries, with full source. */
 export function inspectorScripts(
   registryPath: string,
   packageName: string,

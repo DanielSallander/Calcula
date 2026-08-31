@@ -211,7 +211,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   // did not configure, and that refusal is the reason its signature/TOFU/
   // integrity checks mean anything — so the commands that EDIT the configured
   // set have to be at least as protected as the gateway they guard. A
-  // non-trusted extension that could call calp_add_registry would simply add a
+  // non-trusted extension that could call calp_add_workspace would simply add a
   // registry it controls and then pull from it legitimately, through a gate
   // that had already been satisfied.
   //
@@ -223,8 +223,8 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   // hand-carried patch that never passed a signed pull, and calp_detach
   // destroys the provenance record the whole .calp transparency story rests on.
   distributionTrust: [
-    "calp_add_registry",
-    "calp_remove_registry",
+    "calp_add_workspace",
+    "calp_remove_workspace",
     "calp_dev_subscribe",
     "calp_dev_refresh",
     "calp_import_overrides",

@@ -27,10 +27,10 @@ to ensure the necessary doors were left open.
 ## Motivation
 
 The v1.0 distribution system is read-only from the consumer perspective:
-subscribers consume published packages and may override locally, but
+subscribers consume published applications and may override locally, but
 contributions do not flow back to the publisher or to other subscribers.
 Writeback extends the model to support collaborative input: regions of a
-published package designated by the publisher as "subscriber-fillable,"
+published application designated by the publisher as "subscriber-fillable,"
 where subscriber input is collected and aggregated.
 
 The motivating scenarios are corporate: budget templates filled in by region,
@@ -70,7 +70,7 @@ Both flavors avoid scalar conflicts by construction.
 ### Push, not pull
 
 Writeback transport is push: subscribers save, contributions flow to the
-registry, the registry indexes them, other subscribers and the publisher see
+workspace, the workspace indexes them, other subscribers and the publisher see
 current aggregates. Pull is not a configurable alternative.
 
 A separate, deliberate "writeback patch export/import" mechanism exists for
@@ -97,20 +97,20 @@ tracking. v1.0 does not need this trigger because v1.0 has no submissions.
 
 ### Writeback requires authenticated subscribers
 
-The registry must be able to attribute submissions to identified subscribers.
+The workspace must be able to attribute submissions to identified subscribers.
 This typically falls out of corporate SSO/AD authentication. Writeback
-packages cannot be published to anonymous public registries.
+applications cannot be published to anonymous public workspaces.
 
 ## Three-Layer Model
 
 The full data model after writeback lands has three layers:
 
-1. **Upstream package content** - immutable, versioned, signed. Lives in
+1. **Upstream application content** - immutable, versioned, signed. Lives in
    `.calp`.
 2. **Consumer overrides** - private to one subscriber's `.cala`. Rebased on
    refresh.
-3. **Writeback contributions** - shared via the registry. Indexed by
-   `{package_id, version, region, submitter}`. Bound to a specific package
+3. **Writeback contributions** - shared via the workspace. Indexed by
+   `{package_id, version, region, submitter}`. Bound to a specific application
    version.
 
 Overrides and writeback are deliberately separate systems despite surface
@@ -119,7 +119,7 @@ similarity. Key differences:
 - Overrides are private; writeback is shared.
 - Overrides rebase across versions; writeback is version-bound.
 - Overrides apply to any cell; writeback only to designated regions.
-- Overrides live in the workbook; writeback lives in the registry.
+- Overrides live in the workbook; writeback lives in the workspace.
 - A consumer can override any unlocked cell; a consumer cannot override a
   writeback cell (the cell is theirs to fill, not the publisher's to be
   shadowed).
@@ -193,7 +193,7 @@ Default: `on_submit`. Draft state is private to the subscriber.
 
 ### Version binding
 
-When publisher releases a new package version:
+When publisher releases a new application version:
 
 - `strict` - submissions invalidated, must be redone
 - `lenient` - submissions carry forward if region schema is compatible
@@ -238,17 +238,17 @@ contribution per cell per version.
 For list-object mode, the same key identifies the entry within the list-object
 cell that belongs to that subscriber. Re-submission supersedes the entry.
 
-Submissions live in the registry, not in subscribers' `.cala` files. The
+Submissions live in the workspace, not in subscribers' `.cala` files. The
 local `.cala` may cache the subscriber's own draft state for offline editing,
-but the canonical store is registry-side.
+but the canonical store is workspace-side.
 
-### Registry storage: append-only event log (2026-07-17)
+### Workspace storage: append-only event log (2026-07-17)
 
-The registry never rewrites a submission. Physical layout per package
+The workspace never rewrites a submission. Physical layout per application
 version:
 
 ```
-{registry}/{package}/{version}/
+{workspace}/{application}/{version}/
   submissions/{submitter_id}/                # ONLY that submitter writes here
     {region}_{row}_{col}_{submission_id}.json    # grid submission event
     {region}_{keyhash16}_{submission_id}.json    # model-keyed (writeback column) event
@@ -259,7 +259,7 @@ version:
 
 Every submit, re-submit, and publisher decision is a NEW immutable file;
 each path has exactly one writer and no path is ever written twice. This is
-what makes shared registries safe on SMB shares AND cloud-sync folders
+what makes shared workspaces safe on SMB shares AND cloud-sync folders
 (Dropbox/OneDrive) with **no locking anywhere on submission paths**: a sync
 client only ever sees new files appear, so lost updates and "conflicted
 copy" forks are structurally impossible.
@@ -282,7 +282,7 @@ Current state is DERIVED (database-style MVCC) by the deterministic fold in
 ## Aggregation: the GATHER Function Family
 
 Writeback introduces formula functions that reach across subscriber boundaries.
-These execute against registry-side data, not local workbook state.
+These execute against workspace-side data, not local workbook state.
 
 - `GATHER(region_ref)` - returns a list-object of all visible submissions
   for the region (every cell × every submitter)
@@ -298,14 +298,14 @@ These execute against registry-side data, not local workbook state.
 - `GATHER.SUBMITTERS(region_ref [, row, col])` - submitter display names for
   the region, or for one cell
 
-The publisher uses these in their package formulas to roll up writeback into
+The publisher uses these in their application formulas to roll up writeback into
 visible aggregates: a sum across regional forecasts, a per-line-item total via
 `GATHER.AT`, an average of submitted estimates, a count of who has submitted.
 
 > **Coordinate convention:** `row`/`col` are 1-based ABSOLUTE sheet coordinates
 > (matching `ROW()`/`COLUMN()` and cell addresses), so
 > `GATHER.AT("region", ROW(B2), COLUMN(B2))` targets B2. They are converted to
-> the 0-based region/registry coordinates internally.
+> the 0-based region/workspace coordinates internally.
 
 > **CORRECTED 2026-08-16 — all five functions exist, but `GATHER.AT` is
 > UNDISCOVERABLE.** Verified present in the parser
@@ -329,7 +329,7 @@ submission.
 ### Evaluation model
 
 Calling `GATHER` is the first formula primitive that reaches outside the
-local workbook. The engine needs an async/registry-aware evaluation path for
+local workbook. The engine needs an async/workspace-aware evaluation path for
 these functions specifically.
 
 - Results are cached per evaluation session; the engine does not refetch on
@@ -353,16 +353,16 @@ these functions specifically.
 > `build_gather_data` finds no cache, returns an EMPTY map and queues a
 > background rebuild (`app/src-tauri/src/calp_commands.rs:10709-10718`); when
 > the worker finishes and the fingerprint changed, every sheet is recalculated
-> and repainted. For a **local** registry — a directory on disk, which is the
-> only registry that can receive submissions at all — that round-trip is fast
+> and repainted. For a **local** workspace — a directory on disk, which is the
+> only workspace that can receive submissions at all — that round-trip is fast
 > and offline is a non-issue, which is why the missing persistence has stayed
-> invisible. The gap is real for an **HTTP** registry: it is read-only so it
+> invisible. The gap is real for an **HTTP** workspace: it is read-only so it
 > never holds submissions today, and an unreachable one is put on a 5-minute
 > backoff (`GATHER_REGISTRY_BACKOFF`, `calp_commands.rs:10563`) rather than
 > paying a 30s connect timeout per artifact per TTL window.
 >
-> The consequence to keep in view if HTTP registries ever accept writeback: for
-> the window before the first rebuild lands, and indefinitely while a registry
+> The consequence to keep in view if HTTP workspaces ever accept writeback: for
+> the window before the first rebuild lands, and indefinitely while a workspace
 > is unreachable, `SUM(GATHER(...))` evaluates over zero submissions and shows
 > **0 with no error and no indicator** — a wrong number that looks like a right
 > one. Persisting the cache, or surfacing staleness, is what would close that;
@@ -373,9 +373,9 @@ these functions specifically.
 > mutations invalidate eagerly via `invalidate_gather_cache`.
 
 This is the first crack in the "formula evaluation is local and synchronous"
-model. Other registry-aware functions may follow (live data feeds, cross-package
-lookups). The async evaluation path must be designed as a general capability,
-not a special case for `GATHER`.
+model. Other workspace-aware functions may follow (live data feeds,
+cross-application lookups). The async evaluation path must be designed as a
+general capability, not a special case for `GATHER`.
 
 ## UI
 
@@ -418,7 +418,7 @@ A new side pane parallel to the overrides pane:
   rejected)
 - Shows deadlines if set
 - Shows visibility settings so subscriber knows who sees their input
-- For publishers viewing their own packages: shows aggregate status across
+- For publishers viewing their own applications: shows aggregate status across
   all submitters (who has submitted, who has not)
 
 ### Author UI (publisher)
@@ -464,17 +464,17 @@ On refresh:
 ## Audit and Telemetry
 
 Writeback contributions naturally generate audit data: who submitted what
-when. This is registry-side and is required, not opt-in, for writeback
-packages. Compliance and operational visibility are the whole point.
+when. This is workspace-side and is required, not opt-in, for writeback
+applications. Compliance and operational visibility are the whole point.
 
-Specifically, the registry retains:
+Specifically, the workspace retains:
 
 - All submission events (create, update, submit, approve, reject)
 - All submitter identities
 - Timestamps
-- Optionally: the values themselves vs. only metadata, configured per package
+- Optionally: the values themselves vs. only metadata, configured per application
 
-Retention policy is set per registry (corporate IT concern).
+Retention policy is set per workspace (corporate IT concern).
 
 ## v1.0 Prerequisites
 
@@ -526,9 +526,9 @@ Captured in detail in `calp-v1.0-writeback-readiness.md`.
 - Pattern 2 (genuine shared scalar editing)
 - Role-based visibility beyond the four built-in modes
 - Approval workflows beyond simple approve/reject
-- Cross-package writeback aggregation (e.g., a package that aggregates
-  submissions from another package's writeback)
-- Programmatic submission via API (registry HTTP endpoints for non-Calcula
+- Cross-application writeback aggregation (e.g., an application that aggregates
+  submissions from another application's writeback)
+- Programmatic submission via API (workspace HTTP endpoints for non-Calcula
   clients)
 
 These may come in later versions.

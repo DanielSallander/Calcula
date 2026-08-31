@@ -22,9 +22,9 @@ about *scripts and libraries*).
 
 Three decisions, in dependency order:
 
-1. **A library is a `.calp` package of a new `PackageKind::Library`.** It carries module scripts
+1. **A library is a `.calp` package whose manifest `kind` is `"library"`.** It carries module scripts
    and no sheets. It is published, signed, pinned, versioned, resolved, diffed and consented by the
-   machinery that already exists in `core/calp/` — `LocalRegistry`, `SemVer`/`VersionPin`,
+   machinery that already exists in `core/calp/` — `LocalWorkspace`, `SemVer`/`VersionPin`,
    Ed25519 + TOFU, content-addressed blobs, and the per-source-hash consent store. No new trust
    primitive is invented.
 2. **Imports are declared, not fetched.** A consuming script declares
@@ -104,12 +104,12 @@ path because there is nothing to update *from*.
 
 | Need | Already shipped | Evidence |
 |---|---|---|
-| Versioned registry on disk | `LocalRegistry` | `core/calp/src/registry.rs:151-320` (`list_packages`, `get_package_manifest`, `resolve_version`, `list_versions`, `version_exists`) |
+| Versioned registry on disk | `LocalWorkspace` | `core/calp/src/workspace.rs` (`list_packages`, `get_package_manifest`, `resolve_version`, `list_versions`, `version_exists`) |
 | Semver + range pins | `SemVer`, `VersionPin` | `core/calp/src/version.rs:12-160` (`parse`, `matches`, `resolve`) |
 | Publisher signing + TOFU pinning | `PublisherKeypair`, `verify_signature`, `pin_publisher` | `core/calp/src/signing.rs:85-287` |
-| Content-addressed dedup | blob store | `registry.rs:681-725` (`write_blob`, `read_blob`, `commit_artifacts_as_blobs`) |
-| Pre-install review of incoming code | `calp_inspect_package` → `PackageInspection { scripts, module_scripts, … }` | `app/src-tauri/src/calp_commands.rs:2659`, `2559+` |
-| Browse a registry from the UI | `calp_browse_registry` | `calp_commands.rs:2511-2556` |
+| Content-addressed dedup | blob store | `workspace.rs` (`write_blob`, `read_blob`, `commit_artifacts_as_blobs`) |
+| Pre-install review of incoming code | `calp_inspect_application` → `ApplicationInspection { scripts, module_scripts, … }` | `app/src-tauri/src/calp_commands.rs` |
+| Browse a registry from the UI | `calp_browse_workspace` | `app/src-tauri/src/calp_commands.rs` |
 | Per-source-hash consent with diffs | `distributedConsent.ts` | `sha256Hex:50`, `isConsentCurrent:162-186`, `getChangedScripts:202-219`, capability-expansion re-prompt at `86-99`/`181-183` |
 | Capability pragma parsing | `parseDeclaredCapabilities` | `app/src/api/scriptHost/capabilities.ts:384-404` |
 | Module scripts as a package payload | `PublishedModuleScript` | `core/calp/src/manifest.rs:129-137` |
@@ -122,7 +122,8 @@ Everything hard is done. What is missing is a *package kind*, a *resolver*, and 
 
 ### 3.1 Kind
 
-Add `Library` to `PackageKind` (`core/calp/src/package_kind.rs:9-38`) with
+**(Proposed; NOT built — see §10.2 item 1.)** Add `Library` to `ApplicationKind`
+(`core/calp/src/application_kind.rs`, whose variants today are `Template`, `Dataset`, `Report`) with
 `RefreshDefaults { refresh_formulas: false, refresh_data: false, refresh_structure: false,
 preserve_consumer_data: true }` — a library subscription refreshes *nothing* in the workbook; it is
 resolved at mount, not merged into the grid. This keeps it out of the override/refresh machinery
@@ -131,7 +132,7 @@ entirely, which is the point: a library has no cells.
 ### 3.2 Payload
 
 A library `.calp` has empty `sheets` and populates `module_scripts`
-(`manifest.rs:137`, artifacts at `modules/{id}.json`, `registry.rs:277`). Each module carries:
+(`manifest.rs:137`, artifacts at `modules/{id}.json`, `workspace.rs`). Each module carries:
 
 ```jsonc
 {
@@ -153,12 +154,12 @@ transparency lie, and a source pragma the manifest does not list must not be sil
 
 Module scripts are documented today as *inert*: "Standalone module scripts bundled with the package
 (C8). Unlike object scripts these are inert, transparent data" (`manifest.rs:129-137`), and
-`calp_inspect_package` surfaces them "for transparency — they are inert (never auto-executed)"
+`calp_inspect_application` surfaces them "for transparency — they are inert (never auto-executed)"
 (`calp_commands.rs` `InspectedModuleScript` doc). **A library package changes that**: its modules
 *do* execute, on import. This is a deliberate status change and must be reflected in three places or
 the transparency pillar regresses:
 
-1. `PackageInspection` must distinguish `moduleScripts` (inert) from `libraryModules` (executed on
+1. `ApplicationInspection` must distinguish `moduleScripts` (inert) from `libraryModules` (executed on
    import), with distinct copy in the pre-pull review UI.
 2. The consent prompt must say so in words.
 3. `scriptSurfaces.ts` must carry a `library` surface with its real reach. (The review already flags
@@ -170,10 +171,10 @@ the transparency pillar regresses:
 
 ### 4.1 Search
 
-`calp_browse_registry` (`calp_commands.rs:2511`) already returns `Vec<PackageInfo>` with every
+`calp_browse_workspace` (`calp_commands.rs`) already returns `Vec<ApplicationInfo>` with every
 version. Add:
 
-- `PackageManifest`: `keywords: Vec<String>`, `homepage: Option<String>` (already has `description`,
+- `ApplicationManifest`: `keywords: Vec<String>`, `homepage: Option<String>` (already has `description`,
   `author`, `kind` — `manifest.rs:14-35`).
 - `calp_search_registry(registryPath, query, kind: Option<String>) -> Vec<PackageInfo>` — a filter
   over name/description/keywords, `kind`-scoped so the library browser does not list report
@@ -184,7 +185,7 @@ version. Add:
 
 `library_install(registryPath, package, pin) -> InstalledLibrary`:
 
-1. `LocalRegistry::open` → `resolve_version(package, VersionPin::parse(pin))` (`registry.rs:289`,
+1. `LocalWorkspace::open` → `resolve_version(package, VersionPin::parse(pin))` (`workspace.rs`,
    `version.rs:76-160`).
 2. Verify the version signature and TOFU-pin the publisher under `lib:<package>` — namespaced
    exactly as extensions use `ext:<id>` (`app/src-tauri/src/lib.rs:3609`) so a library key change
@@ -419,9 +420,10 @@ Rules that make this honest rather than decorative:
 **Scope: the import mechanism only, against a local registry, for object scripts and the
 Custom Functions library. No marketplace UI.** Rationale: the import shim is the part with no
 existing equivalent and the part everything else depends on; the browse UI is a straightforward
-consumer of `calp_browse_registry` once the mechanism is real.
+consumer of `calp_browse_workspace` once the mechanism is real.
 
-1. **`PackageKind::Library`** + `RefreshDefaults` (`core/calp/src/package_kind.rs`), and library
+1. **A `Library` variant on `ApplicationKind`** + `RefreshDefaults`
+   (`core/calp/src/application_kind.rs`) — not built; see §10.2 item 1 — and library
    publish from an existing `.calp` publish path with `sheets` empty.
 2. **`library_install` / `library_resolve` Tauri commands** (§4.2) — resolve, verify+TOFU-pin under
    `lib:<package>`, flatten the closure, cycle-detect, return the closure. No mount, no write.
@@ -470,7 +472,7 @@ a worse defect than the one it fixes — but the copy now knows where it came fr
   closure capture in `generateLibrarySource` and the `sameTrust` branch in `callExposed`, but did
   not confirm that a UDF body can in fact reach a sibling through `context.callMethod`. Resolve this
   before publishing any statement about UDF isolation.
-- I did not verify that `LocalRegistry` tolerates a package with zero sheets end-to-end
+- I did not verify that `LocalWorkspace` tolerates a package with zero sheets end-to-end
   (publish → browse → inspect → pull); a library package is the first such artifact and the publish
   path may assume at least one sheet.
 - I did not audit `calp_pull` (`calp_commands.rs:1875`) for whether module-script materialization
@@ -492,7 +494,7 @@ a worse defect than the one it fixes — but the copy now knows where it came fr
 | `// @uses` / `// @uses-isolated` / `// @export` pragma dialect | `app/src/api/scriptLibraries/usesPragma.ts` |
 | The ceiling rule (intersection, tier `min`, transitive chaining, origin intersection) | `app/src/api/scriptLibraries/ceiling.ts` |
 | Workbook lockfile `.calcula/script-deps.json` + content-addressed source cache `.calcula/script-libs/<sha256>.js` | `app/src/api/scriptLibraries/lockfile.ts` |
-| Search (a filter over the existing `calp_browse_registry`) + transitive closure with cycle and pin-conflict detection | `app/src/api/scriptLibraries/registry.ts` |
+| Search (a filter over the existing `calp_browse_workspace`) + transitive closure with cycle and pin-conflict detection | `app/src/api/scriptLibraries/registry.ts` |
 | Realm mount, token issue/revoke, generated realm source, generated `imports` prelude | `app/src/api/scriptLibraries/linker.ts` |
 | Consent plan / apply / update check / uninstall | `app/src/api/scriptLibraries/install.ts` |
 | Per-script `.d.ts` for the `imports` binding | `app/src/api/scriptLibraries/typings.ts` |
@@ -506,8 +508,10 @@ Tests: `app/src/api/__tests__/scriptLibraries.test.ts` (40), `.../scriptLibraryR
 
 ### 10.2 Deviations from §1-§8, and why
 
-**1. `PackageKind::Library` was NOT added to the enum (§3.1).** `PackageManifest.kind` is already a
-free-form `String` with a `"report"` default (`core/calp/src/manifest.rs:20`), so `kind: "library"`
+**1. A `Library` variant was NOT added to the `ApplicationKind` enum (§3.1), and still is not —
+its variants are `Template`, `Dataset`, `Report` and nothing else
+(`core/calp/src/application_kind.rs`).** `ApplicationManifest.kind` is already a
+free-form `String` with a `"report"` default (`core/calp/src/manifest.rs`), so `kind: "library"`
 travels and round-trips with no core change at all. `library_resolve` refuses any package whose kind
 is not `"library"` before reading a single module. Adding an enum variant would have bought a
 `RefreshDefaults` row for a package kind that is never pulled or refreshed.

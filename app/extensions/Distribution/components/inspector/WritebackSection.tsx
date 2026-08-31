@@ -10,7 +10,7 @@ import {
   type InspectorOverview,
   type InspectorWriteback,
 } from "@api/distribution";
-import type { InspectorContext } from "./PackageInspectorApp";
+import type { InspectorContext } from "./ApplicationInspectorApp";
 import {
   Badge,
   OK_GREEN,
@@ -48,7 +48,7 @@ export function WritebackSection({
         <h2 style={sectionTitleStyle}>Writeback</h2>
         <StatusLine
           empty
-          emptyText="This package declares no writeback regions or model writeback columns."
+          emptyText="This application declares no writeback regions or model writeback columns."
         />
       </div>
     );

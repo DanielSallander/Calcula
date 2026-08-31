@@ -1,20 +1,20 @@
-// FILENAME: app/extensions/Distribution/components/inspector/PackageInspectorApp.tsx
-// PURPOSE: Root component of the standalone Package Inspector window — browse
-//          to a registry, pick a package + version, and inspect EVERYTHING it
-//          contains (manifest, signature, sheet data, objects, scripts, model,
-//          writeback, raw artifacts). Strictly read-only: nothing is
-//          subscribed or materialized.
+// FILENAME: app/extensions/Distribution/components/inspector/ApplicationInspectorApp.tsx
+// PURPOSE: Root component of the standalone Application Inspector window —
+//          browse to a workspace, pick an application + version, and inspect
+//          EVERYTHING it contains (manifest, signature, sheet data, objects,
+//          scripts, model, writeback, raw artifacts). Strictly read-only:
+//          nothing is subscribed or materialized.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import {
-  browseRegistry,
+  listApplicationsInWorkspace,
   inspectorOverview,
   inspectorResolveLocation,
   type InspectorOverview,
-  type PackageInfo,
+  type ApplicationInfo,
 } from "@api/distribution";
-import { listRegistries, type SavedRegistry } from "@api/distributionRegistries";
+import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces";
 import {
   emitInspectorReady,
   onOpenPackage,
@@ -107,10 +107,10 @@ const contentStyle: React.CSSProperties = {
   padding: 16,
 };
 
-export function PackageInspectorApp(): React.ReactElement {
-  const [saved, setSaved] = useState<SavedRegistry[]>([]);
+export function ApplicationInspectorApp(): React.ReactElement {
+  const [saved, setSaved] = useState<SavedWorkspace[]>([]);
   const [registryPath, setRegistryPath] = useState("");
-  const [packages, setPackages] = useState<PackageInfo[] | null>(null);
+  const [packages, setPackages] = useState<ApplicationInfo[] | null>(null);
   const [packageName, setPackageName] = useState("");
   const [versionPin, setVersionPin] = useState("latest");
   const [overview, setOverview] = useState<InspectorOverview | null>(null);
@@ -123,11 +123,11 @@ export function PackageInspectorApp(): React.ReactElement {
   const [ctx, setCtx] = useState<InspectorContext | null>(null);
 
   useEffect(() => {
-    listRegistries().then(setSaved).catch(() => setSaved([]));
+    listWorkspaces().then(setSaved).catch(() => setSaved([]));
   }, []);
 
-  const listPackagesAt = useCallback(async (path: string): Promise<PackageInfo[]> => {
-    const found = await browseRegistry(path);
+  const listPackagesAt = useCallback(async (path: string): Promise<ApplicationInfo[]> => {
+    const found = await listApplicationsInWorkspace(path);
     setPackages(found);
     return found;
   }, []);
@@ -159,10 +159,10 @@ export function PackageInspectorApp(): React.ReactElement {
   );
 
   // One entry point for every user-typed/browsed location: users naturally
-  // pick the package or version FOLDER itself, not the registry root — the
+  // pick the application or version FOLDER itself, not the workspace root — the
   // backend walks up and tells us what was actually picked, so we can list
-  // the registry AND jump straight to the picked package/version. An empty
-  // registry must say so — silently rendering nothing reads as a dead button.
+  // the workspace AND jump straight to the picked application/version. An empty
+  // workspace must say so — silently rendering nothing reads as a dead button.
   const resolveAndLoad = useCallback(
     async (rawPath: string) => {
       setError(null);
@@ -174,8 +174,8 @@ export function PackageInspectorApp(): React.ReactElement {
         const found = await listPackagesAt(resolved.registryPath);
         if (found.length === 0) {
           setError(
-            "No packages found here. Pick the registry folder — the one that contains " +
-              "the package folders — or any package/version folder inside it.",
+            "No applications found here. Pick the workspace folder — the one that contains " +
+              "the application folders — or any application/version folder inside it.",
           );
           return;
         }
@@ -201,7 +201,7 @@ export function PackageInspectorApp(): React.ReactElement {
   loadRef.current = { listPackagesAt, loadOverview };
 
   // Cross-window bridge: register the listener FIRST, then announce
-  // readiness so the main window can hand over the initial package.
+  // readiness so the main window can hand over the initial application.
   useEffect(() => {
     const openPromise = onOpenPackage((payload: InspectorOpenPayload) => {
       if (!payload.registryPath) return; // empty payload = just focus
@@ -225,7 +225,7 @@ export function PackageInspectorApp(): React.ReactElement {
       const selected = await openNativeDialog({
         directory: true,
         multiple: false,
-        title: "Select Registry, Package, or Version Folder",
+        title: "Select Workspace, Application, or Version Folder",
       });
       if (selected && typeof selected === "string") {
         await resolveAndLoad(selected);
@@ -237,7 +237,7 @@ export function PackageInspectorApp(): React.ReactElement {
 
   const handleListPackages = async () => {
     if (!registryPath.trim()) {
-      setError("Choose a registry folder or URL first.");
+      setError("Choose a workspace folder or URL first.");
       return;
     }
     await resolveAndLoad(registryPath.trim());
@@ -248,7 +248,7 @@ export function PackageInspectorApp(): React.ReactElement {
   return (
     <div style={appStyle}>
       <div style={topBarStyle}>
-        <span style={{ fontWeight: 600 }}>Registry</span>
+        <span style={{ fontWeight: 600 }}>Workspace</span>
         {saved.length > 0 && (
           <select
             style={inputStyle}
@@ -268,7 +268,7 @@ export function PackageInspectorApp(): React.ReactElement {
         )}
         <input
           style={{ ...inputStyle, flex: 1, minWidth: 180 }}
-          placeholder="Registry, package, or version folder — or https:// URL"
+          placeholder="Workspace, application, or version folder — or https:// URL"
           value={registryPath}
           onChange={(e) => setRegistryPath(e.target.value)}
           onKeyDown={(e) => {
@@ -279,7 +279,7 @@ export function PackageInspectorApp(): React.ReactElement {
           Browse…
         </button>
         <button style={buttonStyle} onClick={() => void handleListPackages()}>
-          List Packages
+          List Applications
         </button>
 
         {packages && packages.length > 0 && (
@@ -292,7 +292,7 @@ export function PackageInspectorApp(): React.ReactElement {
                 setVersionPin("latest");
               }}
             >
-              <option value="">Select package…</option>
+              <option value="">Select application…</option>
               {packages.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name} ({p.kind})
@@ -354,9 +354,9 @@ export function PackageInspectorApp(): React.ReactElement {
           {!overview || !ctx ? (
             <div style={{ ...mutedStyle, padding: 24, fontSize: 13 }}>
               {busy
-                ? "Verifying signature and reading the package…"
-                : "Browse to a registry — or directly to a package or version folder inside " +
-                  "one — then Inspect. Everything is read directly from the registry; " +
+                ? "Verifying signature and reading the application…"
+                : "Browse to a workspace — or directly to an application or version folder " +
+                  "inside one — then Inspect. Everything is read directly from the workspace; " +
                   "nothing is subscribed or changed."}
             </div>
           ) : (

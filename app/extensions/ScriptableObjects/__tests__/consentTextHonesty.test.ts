@@ -97,7 +97,7 @@ describe("package consent does not overstate distribution capabilities", () => {
   // never exercised. The prompt must say what was asked AND that it is refused.
   it("says publish/subscribe are refused for a packaged script", () => {
     const flat = EXT_INDEX.replace(/\s+/g, " ");
-    const refusal = "a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked";
+    const refusal = "a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked";
     const publish = flat.match(/"distribution\.publish":\s*"([^"]*)"/);
     const subscribe = flat.match(/"distribution\.subscribe":\s*"([^"]*)"/);
     expect(publish, "distribution.publish phrase missing").toBeTruthy();
@@ -108,7 +108,7 @@ describe("package consent does not overstate distribution capabilities", () => {
 
   it("uses the same refusal clause as the Subscribe review", () => {
     const subscribeDialog = read("extensions/Distribution/components/SubscribeDialog.tsx");
-    const refusal = "a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked";
+    const refusal = "a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked";
     expect(subscribeDialog).toContain(refusal);
   });
 });

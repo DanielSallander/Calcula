@@ -86,7 +86,7 @@ fn a_malformed_base_version_is_refused() {
 
 #[test]
 fn a_link_targets_the_same_share_however_the_user_spelled_it() {
-    let link = calp::WorkspaceLink::new(
+    let link = calp::WorkingCopyLink::new(
         r"\\server\reports",
         "sales",
         "report",
@@ -107,7 +107,7 @@ fn a_link_targets_the_same_share_however_the_user_spelled_it() {
 
 #[test]
 fn recording_a_push_moves_the_base_so_the_next_push_is_measured_from_it() {
-    let mut link = calp::WorkspaceLink::new(
+    let mut link = calp::WorkingCopyLink::new(
         r"\\server\reports",
         "sales",
         "report",

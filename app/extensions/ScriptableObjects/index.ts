@@ -161,7 +161,7 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "bi.connector": "Feed external data into this workbook's BI model as a data connector",
   "ui.dialog": "Interrupt you with a dialog box and read what you answer",
   "distribution.writeback":
-    "Fill in and send the input cells of a subscribed package — and, for a package this workbook can sign, read and approve everyone else's answers",
+    "Fill in and send the input cells of a subscribed application — and, for an application this workbook can sign, read and approve everyone else's answers",
   schedule:
     "Run itself on a schedule while Calcula is open, saved in this workbook so it resumes after a reload",
   "file.picker":
@@ -184,9 +184,9 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   // Distribution/components/SubscribeDialog.tsx, which reached this conclusion
   // first.
   "distribution.publish":
-    "Publish this workbook to one of your package registries, signed with YOUR publisher key, where everyone subscribed will receive it (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
+    "Publish this workbook to one of your workspaces, signed with YOUR publisher key, where everyone subscribed will receive it (a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked)",
   "distribution.subscribe":
-    "Bring somebody else's published packages into this workbook, and update the ones you subscribe to (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
+    "Bring somebody else's published applications into this workbook, and update the ones you subscribe to (a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked)",
 };
 
 /** Shape of one requested capability in the consent-needed event payload. */

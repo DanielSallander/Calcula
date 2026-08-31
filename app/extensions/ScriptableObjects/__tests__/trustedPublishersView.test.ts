@@ -57,7 +57,7 @@ describe("the backend trusted-publisher report", () => {
   });
 
   it("exposes the user's spelling of a registry and never the normalized id", () => {
-    // `RegistryScope.id` is key material: lowercased, canonicalized, lossy. It is
+    // `WorkspaceScope.id` is key material: lowercased, canonicalized, lossy. It is
     // not a string anyone typed, and showing it to a human would be a lie about
     // what they configured.
     const fn = CMDS_RS.match(/pub fn calp_list_trusted_publishers\([\s\S]*?\n\}\n/)![0];
@@ -133,7 +133,7 @@ describe("the store the view reads", () => {
   it("keys pins by namespace + scope + name, built in exactly one place", () => {
     const production = SIGNING_RS.split("#[cfg(test)]")[0];
     expect(production).toMatch(/pub struct PinKey \{\n {4}namespace: PinNamespace,/);
-    expect(production).toMatch(/pub fn calp\(scope: &RegistryScope, package: &str\) -> PinKey/);
+    expect(production).toMatch(/pub fn calp\(scope: &WorkspaceScope, package: &str\) -> PinKey/);
     expect(production).toMatch(/pub fn extension\(id: &str\) -> PinKey/);
     expect(
       production.match(/PinKey \{\n {12}namespace,/g)?.length ?? 0,

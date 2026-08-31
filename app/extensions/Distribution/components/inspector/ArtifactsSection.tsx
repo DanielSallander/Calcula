@@ -11,7 +11,7 @@ import {
   type InspectorOverview,
   type InspectorVerifyReport,
 } from "@api/distribution";
-import type { InspectorContext } from "./PackageInspectorApp";
+import type { InspectorContext } from "./ApplicationInspectorApp";
 import {
   Badge,
   ERR_RED,

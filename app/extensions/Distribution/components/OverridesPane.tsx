@@ -171,8 +171,8 @@ export function OverridesPane() {
   };
 
   // C2c: export this subscriber's override layer as a shareable .json patch so
-  // another subscriber of the same package can import it. Single-package-first;
-  // a multi-package workbook prompts for which one.
+  // another subscriber of the same application can import it.
+  // Single-application-first; a multi-application workbook prompts for which one.
   const handleExportOverrides = async () => {
     try {
       await runOverrideExport({

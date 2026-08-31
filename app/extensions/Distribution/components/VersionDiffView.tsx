@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/Distribution/components/VersionDiffView.tsx
-// PURPOSE: Render a VersionDiff — shared by the Package Inspector's Compare
+// PURPOSE: Render a VersionDiff — shared by the Application Inspector's Compare
 // view and the push dialog's "changes since your base" panel.
 // CONTEXT: One component because the two answer the same question from
 // different vantage points ("what changed between these versions" and "what
@@ -79,7 +79,7 @@ export function VersionDiffView({ diff, onDrillDown, drilledCells }: VersionDiff
       )}
 
       {diff.manifestChanges.length > 0 && (
-        <Section title="Package metadata">
+        <Section title="Application metadata">
           {diff.manifestChanges.map((m) => (
             <div key={m.field} style={{ marginBottom: 4 }}>
               <span style={{ fontWeight: 600 }}>{m.field}</span>{" "}
@@ -102,7 +102,7 @@ export function VersionDiffView({ diff, onDrillDown, drilledCells }: VersionDiff
         <div style={warnBoxStyle}>
           {diff.artifacts.spuriousHashChanges} artifact(s) hashed differently but
           contain the same thing. That is a packaging bug, not a change you made
-          — package serialization has become order-dependent.
+          — application serialization has become order-dependent.
         </div>
       )}
     </div>
@@ -406,7 +406,7 @@ const DOMAIN_LABELS: Record<string, string> = {
   extensionData: "Extension data",
   writebackRegion: "Writeback regions",
   modelWriteback: "Writeback columns",
-  artifact: "Other package files",
+  artifact: "Other application files",
 };
 
 function domainLabel(domain: string): string {

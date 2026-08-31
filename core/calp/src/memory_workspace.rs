@@ -1,53 +1,53 @@
-//! FILENAME: core/calp/src/memory_registry.rs
-//! PURPOSE: A `RegistryTransport` that lives in memory.
+//! FILENAME: core/calp/src/memory_workspace.rs
+//! PURPOSE: A `WorkspaceTransport` that lives in memory.
 //! CONTEXT: Two jobs, and the first is the reason it exists.
 //!
 //! **Diffing a working copy against its base.** The push dialog wants to show
 //! "what your push changes" before anything is written. The naive way is a
 //! second serializer that walks the workbook and produces something
-//! diff-shaped — which is a second definition of what a package contains, and
+//! diff-shaped — which is a second definition of what an application contains, and
 //! it drifts from the real one on the first artifact type somebody adds. The
-//! honest way is to run the REAL `publish()` against a registry that keeps its
+//! honest way is to run the REAL `publish()` against a workspace that keeps its
 //! bytes in a `HashMap`, and diff that. There is then exactly one answer to
 //! "what would this publish write", because the preview and the publish are the
 //! same code.
 //!
-//! **Fixtures.** A test that needs two versions of a package no longer needs a
+//! **Fixtures.** A test that needs two versions of an application no longer needs a
 //! temp directory and a filesystem.
 //!
-//! It is NOT a general-purpose registry: it holds no lock (there is nobody to
+//! It is NOT a general-purpose workspace: it holds no lock (there is nobody to
 //! contend with) and no blob store (there is nothing to dedup against on disk).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::error::CalpError;
-use crate::manifest::{PackageManifest, VersionManifest};
-use crate::transport::RegistryTransport;
+use crate::manifest::{ApplicationManifest, VersionManifest};
+use crate::transport::WorkspaceTransport;
 use crate::version::{SemVer, VersionPin};
 use crate::writeback::{ReviewEvent, WritebackSubmission};
 
 #[derive(Default)]
 struct Inner {
-    packages: BTreeMap<String, PackageManifest>,
-    /// (package, version) -> manifest
+    packages: BTreeMap<String, ApplicationManifest>,
+    /// (application, version) -> manifest
     versions: BTreeMap<(String, String), VersionManifest>,
-    /// (package, version, rel_path) -> bytes
+    /// (application, version, rel_path) -> bytes
     artifacts: BTreeMap<(String, String, String), Vec<u8>>,
 }
 
-/// An in-memory registry. Cheap to create, holds everything written to it.
-pub struct MemoryRegistry {
+/// An in-memory workspace. Cheap to create, holds everything written to it.
+pub struct MemoryWorkspace {
     inner: Mutex<Inner>,
 }
 
-impl Default for MemoryRegistry {
+impl Default for MemoryWorkspace {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MemoryRegistry {
+impl MemoryWorkspace {
     pub fn new() -> Self {
         Self { inner: Mutex::new(Inner::default()) }
     }
@@ -55,7 +55,7 @@ impl MemoryRegistry {
     /// The ARTIFACTS of one version, as `rel_path -> bytes`.
     ///
     /// This is what a caller hands to [`crate::diff::DiffSide::InMemory`] after
-    /// running a publish into this registry, and it must therefore describe the
+    /// running a publish into this workspace, and it must therefore describe the
     /// same set a published version's signed `artifact_checksums` map does —
     /// which excludes the version manifest (the integrity root cannot list
     /// itself), its detached signature, and the post-publish writeback
@@ -78,22 +78,22 @@ impl MemoryRegistry {
     }
 }
 
-impl RegistryTransport for MemoryRegistry {
-    fn list_packages(&self) -> Result<Vec<String>, CalpError> {
+impl WorkspaceTransport for MemoryWorkspace {
+    fn list_applications(&self) -> Result<Vec<String>, CalpError> {
         let inner = self.inner.lock().expect("poisoned");
         Ok(inner.packages.keys().cloned().collect())
     }
 
-    fn get_package_manifest(&self, package_name: &str) -> Result<PackageManifest, CalpError> {
+    fn get_application_manifest(&self, package_name: &str) -> Result<ApplicationManifest, CalpError> {
         let inner = self.inner.lock().expect("poisoned");
         inner
             .packages
             .get(package_name)
             .cloned()
-            .ok_or_else(|| CalpError::PackageNotFound(package_name.to_string()))
+            .ok_or_else(|| CalpError::ApplicationNotFound(package_name.to_string()))
     }
 
-    fn write_package_manifest(&self, manifest: &PackageManifest) -> Result<(), CalpError> {
+    fn write_application_manifest(&self, manifest: &ApplicationManifest) -> Result<(), CalpError> {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.packages.insert(manifest.name.clone(), manifest.clone());
         Ok(())
@@ -128,7 +128,7 @@ impl RegistryTransport for MemoryRegistry {
         );
         // A version manifest is ALSO an artifact — publish reads its raw bytes
         // back to sign them, and the signature must cover exactly what a reader
-        // would see. Serializing it the same way the local registry does keeps
+        // would see. Serializing it the same way the local workspace does keeps
         // that true here too.
         let bytes = serde_json::to_string_pretty(manifest)?.into_bytes();
         inner.artifacts.insert(
@@ -154,7 +154,7 @@ impl RegistryTransport for MemoryRegistry {
         package_name: &str,
         pin: &VersionPin,
     ) -> Result<SemVer, CalpError> {
-        let manifest = self.get_package_manifest(package_name)?;
+        let manifest = self.get_application_manifest(package_name)?;
         pin.resolve(&manifest.parsed_versions())
             .cloned()
             .ok_or_else(|| CalpError::NoMatchingVersion {
@@ -164,7 +164,7 @@ impl RegistryTransport for MemoryRegistry {
     }
 
     fn list_versions(&self, package_name: &str) -> Result<Vec<SemVer>, CalpError> {
-        let manifest = self.get_package_manifest(package_name)?;
+        let manifest = self.get_application_manifest(package_name)?;
         let mut versions = manifest.parsed_versions();
         versions.sort();
         Ok(versions)
@@ -209,7 +209,7 @@ impl RegistryTransport for MemoryRegistry {
             .keys()
             .filter(|(p, v, _)| p == package_name && v == version)
             .map(|(_, _, rel)| rel.clone())
-            // The same exclusions the on-disk registry applies: the manifest is
+            // The same exclusions the on-disk workspace applies: the manifest is
             // the integrity root and cannot list itself, its signature is not
             // covered either, and post-publish subtrees are a separate trust
             // domain.
@@ -234,8 +234,8 @@ impl RegistryTransport for MemoryRegistry {
         Ok(())
     }
 
-    // ---- Writeback: an in-memory registry collects nothing ----------------
-    // These are not "unimplemented": a preview/fixture registry genuinely has
+    // ---- Writeback: an in-memory workspace collects nothing ----------------
+    // These are not "unimplemented": a preview/fixture workspace genuinely has
     // no submitters, and answering with an empty set is the truthful answer.
 
     fn save_submission(
@@ -244,7 +244,7 @@ impl RegistryTransport for MemoryRegistry {
         _version: &str,
         _submission: &WritebackSubmission,
     ) -> Result<(), CalpError> {
-        Err(CalpError::Registry(
+        Err(CalpError::Workspace(
             "an in-memory registry collects no writeback submissions".to_string(),
         ))
     }
@@ -255,7 +255,7 @@ impl RegistryTransport for MemoryRegistry {
         _version: &str,
         _review: &ReviewEvent,
     ) -> Result<(), CalpError> {
-        Err(CalpError::Registry(
+        Err(CalpError::Workspace(
             "an in-memory registry records no writeback reviews".to_string(),
         ))
     }
@@ -295,7 +295,7 @@ impl RegistryTransport for MemoryRegistry {
     }
 
     fn lock(&self) -> Result<Box<dyn std::any::Any>, CalpError> {
-        // Nothing to serialize against: this registry is not shared.
+        // Nothing to serialize against: this workspace is not shared.
         Ok(Box::new(()))
     }
 }
@@ -319,7 +319,7 @@ mod tests {
     }
 
     fn publish_into(
-        reg: &dyn RegistryTransport,
+        reg: &dyn WorkspaceTransport,
         prof: &std::path::Path,
         wb: &Workbook,
     ) -> Result<(), CalpError> {
@@ -351,11 +351,11 @@ mod tests {
     fn the_real_publish_runs_against_memory_and_produces_the_same_artifacts_as_disk() {
         // The property the working-copy diff depends on: publishing into memory
         // is publishing. If these two ever disagree, the push preview is
-        // describing a package the push would not write.
+        // describing an application the push would not write.
         let prof = TempDir::new().unwrap();
         let disk_dir = TempDir::new().unwrap();
-        let disk = crate::registry::LocalRegistry::open(disk_dir.path()).unwrap();
-        let mem = MemoryRegistry::new();
+        let disk = crate::workspace::LocalWorkspace::open(disk_dir.path()).unwrap();
+        let mem = MemoryWorkspace::new();
 
         let wb = workbook("hello");
         publish_into(&disk, prof.path(), &wb).unwrap();
@@ -375,7 +375,7 @@ mod tests {
         // transport that stored the manifest but could not return it would
         // fail there, so this is the property that keeps publish working.
         let prof = TempDir::new().unwrap();
-        let mem = MemoryRegistry::new();
+        let mem = MemoryWorkspace::new();
         publish_into(&mem, prof.path(), &workbook("x")).unwrap();
         let bytes = mem
             .read_artifact("mem", "1.0.0", crate::integrity::VERSION_MANIFEST_FILE)
@@ -393,7 +393,7 @@ mod tests {
         // or the diff reports the manifest and its signature as two artifacts
         // that "appeared" — and a merge then treats them as pieces.
         let prof = TempDir::new().unwrap();
-        let mem = MemoryRegistry::new();
+        let mem = MemoryWorkspace::new();
         publish_into(&mem, prof.path(), &workbook("x")).unwrap();
 
         let manifest = mem.get_version_manifest("mem", "1.0.0").unwrap();
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn list_artifacts_excludes_the_manifest_and_its_signature() {
         let prof = TempDir::new().unwrap();
-        let mem = MemoryRegistry::new();
+        let mem = MemoryWorkspace::new();
         publish_into(&mem, prof.path(), &workbook("x")).unwrap();
         let listed = mem.list_artifacts("mem", "1.0.0").unwrap();
         assert!(!listed.iter().any(|r| r == crate::integrity::VERSION_MANIFEST_FILE));

@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/Distribution/components/inspector/OverviewSection.tsx
-// PURPOSE: Landing view — package identity, verified publisher + trust state,
+// PURPOSE: Landing view — application identity, verified publisher + trust state,
 //          version history, a content census, and the policy-exclusion
 //          disclosure (what a .calp can NEVER carry).
 
@@ -25,7 +25,7 @@ const DANGER_RED = "#c5221f";
  * Trust badge per `CalpTrustStatus`. A TABLE, not a ternary.
  *
  * This used to be `trustStatus === "verified" ? green : amber "first use — key
- * newly pinned"`. Inspecting a package no longer pins anything, so that else
+ * newly pinned"`. Inspecting an application no longer pins anything, so that else
  * branch would now assert a pin that does not exist — telling the user they had
  * trusted a publisher they had not. Worse, the same shape is what let an
  * unrecognised signer render as reassuring elsewhere.
@@ -38,7 +38,7 @@ const TRUST_BADGE: Record<CalpTrustStatus, { label: string; color: string; title
     label: "signature verified — publisher trusted",
     color: OK_GREEN,
     title:
-      "Signed by the same publisher key you pinned when you subscribed to this package.",
+      "Signed by the same publisher key you pinned when you subscribed to this application.",
   },
   trustedDelegate: {
     label: "signature verified — co-publisher",
@@ -53,39 +53,40 @@ const TRUST_BADGE: Record<CalpTrustStatus, { label: string; color: string; title
       "This publisher key was recorded as trusted by this operation (trust-on-first-use).",
   },
   firstUseKnownPublisher: {
-    label: "trusted just now — same publisher as another registry",
+    label: "trusted just now — same publisher as another workspace",
     color: WARN_AMBER,
     title:
-      "This registry was not trusted for this package before, but the SAME publisher key is " +
-      "already trusted for this package name from another registry — a move, a mirror, or the " +
-      "same folder reached by a different path. The key was recorded for this registry too.",
+      "This workspace was not trusted for this application before, but the SAME publisher key is " +
+      "already trusted for this application name from another workspace — a move, a mirror, or " +
+      "the same folder reached by a different path. The key was recorded for this workspace too.",
   },
   firstUseAcceptedNameConflict: {
     label: "trusted DESPITE a name conflict — you accepted a second publisher",
     color: DANGER_RED,
     title:
-      "Another registry already holds this package name under a DIFFERENT publisher key, and " +
-      "this key was recorded anyway because you accepted the conflict. Two registries claiming " +
-      "one name is what a package hijack looks like. Check the other registry below.",
+      "Another workspace already holds this application name under a DIFFERENT publisher key, " +
+      "and this key was recorded anyway because you accepted the conflict. Two workspaces " +
+      "claiming one name is what an application hijack looks like. Check the other workspace below.",
   },
   notPinned: {
     label: "signature valid — publisher NOT trusted yet",
     color: DANGER_RED,
     title:
-      "The package is intact and correctly signed, but nobody on this computer has ever agreed " +
-      "to trust this publisher for this package name from this registry. Anyone can generate a " +
-      "signing key, so a valid signature only proves the files were not altered after signing — " +
-      "it does not tell you who signed them. Compare the key below against the one the publisher " +
-      "gave you, then subscribe to record it as trusted. Inspecting a package deliberately does not.",
+      "The application is intact and correctly signed, but nobody on this computer has ever " +
+      "agreed to trust this publisher for this application name from this workspace. Anyone can " +
+      "generate a signing key, so a valid signature only proves the files were not altered after " +
+      "signing — it does not tell you who signed them. Compare the key below against the one the " +
+      "publisher gave you, then subscribe to record it as trusted. Inspecting an application " +
+      "deliberately does not.",
   },
   notPinnedNameConflict: {
-    label: "NAME CONFLICT — another registry holds this name under a different key",
+    label: "NAME CONFLICT — another workspace holds this name under a different key",
     color: DANGER_RED,
     title:
-      "This package name is already trusted on this computer from a DIFFERENT registry, under a " +
-      "DIFFERENT publisher key. The signature here is valid, but a valid signature says nothing " +
-      "about who signed it. Two registries claiming one name is exactly what a package hijack " +
-      "looks like — compare both registries and both keys before trusting this one.",
+      "This application name is already trusted on this computer from a DIFFERENT workspace, " +
+      "under a DIFFERENT publisher key. The signature here is valid, but a valid signature says " +
+      "nothing about who signed it. Two workspaces claiming one name is exactly what an " +
+      "application hijack looks like — compare both workspaces and both keys before trusting this one.",
   },
 };
 
@@ -127,7 +128,7 @@ export function OverviewSection({
 
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>Identity &amp; trust</div>
-        <KV label="Package kind">{m.kind}</KV>
+        <KV label="Application kind">{m.kind}</KV>
         {p.description && <KV label="Description">{p.description}</KV>}
         <KV label="Author">{p.author || "(not set)"}</KV>
         <KV label="Created">{p.created}</KV>
@@ -201,7 +202,7 @@ export function OverviewSection({
         )}
         {overview.sheets.length === 0 && overview.dataSources.length > 0 && (
           <div style={{ ...mutedStyle, fontSize: 12, marginTop: 4 }}>
-            A model-only dataset package: no sheets, just the embedded data model.
+            A model-only dataset application: no sheets, just the embedded data model.
           </div>
         )}
       </div>
@@ -238,7 +239,7 @@ export function OverviewSection({
       </div>
 
       <div style={cardStyle}>
-        <div style={cardHeaderStyle}>Never in a package (by policy)</div>
+        <div style={cardHeaderStyle}>Never in an application (by policy)</div>
         <div style={{ ...mutedStyle, fontSize: 12, lineHeight: 1.6 }}>
           Credentials and connection secrets (data sources carry schema only) · the
           subscriber audit log · workbook document properties · pivot output cells

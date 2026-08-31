@@ -12,10 +12,10 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 use calp::diff::{diff_sheet_cells, diff_sides, DiffOptions, DiffSide};
-use calp::memory_registry::MemoryRegistry;
+use calp::memory_workspace::MemoryWorkspace;
 use calp::publish::{self, PublishRequest, PushMode};
-use calp::registry::LocalRegistry;
-use calp::transport::RegistryTransport;
+use calp::workspace::LocalWorkspace;
+use calp::transport::WorkspaceTransport;
 use calp::version::SemVer;
 
 use engine::cell::Cell;
@@ -59,7 +59,7 @@ fn base_workbook() -> Workbook {
 }
 
 fn publish_version(
-    reg: &dyn RegistryTransport,
+    reg: &dyn WorkspaceTransport,
     prof: &std::path::Path,
     wb: &Workbook,
     version: SemVer,
@@ -92,14 +92,14 @@ fn publish_version(
 struct Fixture {
     _dir: TempDir,
     _prof: TempDir,
-    reg: LocalRegistry,
+    reg: LocalWorkspace,
 }
 
 impl Fixture {
     fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         Self { _dir: dir, _prof: prof, reg }
     }
 
@@ -407,7 +407,7 @@ fn the_drill_down_returns_every_changed_cell_up_to_its_cap() {
 fn a_working_copy_diffs_against_the_version_it_came_from() {
     // The push-time preview, end to end: publish v1, edit, run the REAL publish
     // into memory, and diff. No second serializer, so the preview cannot
-    // describe a package the push would not write.
+    // describe an application the push would not write.
     let f = Fixture::new();
     let wb = base_workbook();
     f.publish(&wb, SemVer::new(1, 0, 0), PushMode::CreateNew);
@@ -419,7 +419,7 @@ fn a_working_copy_diffs_against_the_version_it_came_from() {
         .cells
         .insert((5, 0), SavedCell::from_cell(&Cell::new_text("added by me".to_string())));
 
-    let mem = MemoryRegistry::new();
+    let mem = MemoryWorkspace::new();
     publish_version(
         &mem,
         f._prof.path(),
@@ -459,7 +459,7 @@ fn an_unedited_working_copy_diffs_to_nothing() {
     let wb = base_workbook();
     f.publish(&wb, SemVer::new(1, 0, 0), PushMode::CreateNew);
 
-    let mem = MemoryRegistry::new();
+    let mem = MemoryWorkspace::new();
     publish_version(&mem, f._prof.path(), &wb, SemVer::new(1, 0, 0), PushMode::CreateNew);
 
     let base_manifest = f.reg.get_version_manifest(PKG, "1.0.0").unwrap();
@@ -484,7 +484,7 @@ fn an_unedited_working_copy_diffs_to_nothing() {
 
 #[test]
 fn a_working_copy_with_remapped_sheet_ids_still_diffs_in_place() {
-    // A workbook that SUBSCRIBED to the package carries its own local sheet
+    // A workbook that SUBSCRIBED to the application carries its own local sheet
     // ids. Without the remap every sheet would read as removed-and-added; with
     // it, the diff is about content again.
     let f = Fixture::new();
@@ -496,7 +496,7 @@ fn a_working_copy_with_remapped_sheet_ids_still_diffs_in_place() {
         .cells
         .insert((0, 1), SavedCell::from_cell(&Cell::new_number(999.0)));
 
-    let mem = MemoryRegistry::new();
+    let mem = MemoryWorkspace::new();
     publish_version(&mem, f._prof.path(), &local, SemVer::new(1, 1, 0), PushMode::CreateNew);
 
     let mut sheet_id_map = HashMap::new();
@@ -529,17 +529,17 @@ fn a_working_copy_with_remapped_sheet_ids_still_diffs_in_place() {
 #[test]
 fn a_publisher_key_change_is_reported_loudly() {
     // Under one TOFU pin this should be impossible, which is exactly why a diff
-    // must surface it rather than treat it as metadata noise: it is what a
-    // package hijack looks like from the subscriber's side.
+    // must surface it rather than treat it as metadata noise: it is what an
+    // application hijack looks like from the subscriber's side.
     let f = Fixture::new();
     let other_profile = TempDir::new().unwrap();
     let wb = base_workbook();
     f.publish(&wb, SemVer::new(1, 0, 0), PushMode::CreateNew);
 
     // Publish v1.1.0 with a DIFFERENT profile, bypassing the push gate by
-    // writing straight through core with CreateNew into a second registry.
+    // writing straight through core with CreateNew into a second workspace.
     let dir2 = TempDir::new().unwrap();
-    let reg2 = LocalRegistry::open(dir2.path()).unwrap();
+    let reg2 = LocalWorkspace::open(dir2.path()).unwrap();
     publish_version(
         &reg2,
         other_profile.path(),
@@ -578,10 +578,10 @@ fn a_publisher_key_change_is_reported_loudly() {
 // Merge analysis over REAL diffs
 // ---------------------------------------------------------------------------
 
-/// Two developers, one package, disjoint cells on the SAME sheet.
+/// Two developers, one application, disjoint cells on the SAME sheet.
 ///
 /// The unit tests in `merge.rs` prove the analysis over hand-built diffs; this
-/// proves it over diffs the engine actually produced from published packages,
+/// proves it over diffs the engine actually produced from published applications,
 /// which is where a mismatch between what the diff reports and what the merge
 /// reads would show up.
 #[test]
@@ -612,7 +612,7 @@ fn two_developers_editing_different_cells_of_one_sheet_can_both_land() {
         .cells
         .insert((1, 1), SavedCell::from_cell(&Cell::new_number(222.0)));
 
-    let mem = MemoryRegistry::new();
+    let mem = MemoryWorkspace::new();
     publish_version(&mem, f._prof.path(), &bob, SemVer::new(9, 9, 9), PushMode::CreateNew);
 
     let theirs = f.diff("1.0.0", "1.1.0");
@@ -670,7 +670,7 @@ fn two_developers_editing_one_cell_is_a_conflict_that_names_the_cell() {
         .cells
         .insert((0, 1), SavedCell::from_cell(&Cell::new_number(222.0)));
 
-    let mem = MemoryRegistry::new();
+    let mem = MemoryWorkspace::new();
     publish_version(&mem, f._prof.path(), &bob, SemVer::new(9, 9, 9), PushMode::CreateNew);
 
     let theirs = f.diff("1.0.0", "1.1.0");
@@ -725,7 +725,7 @@ fn a_script_change_and_a_cell_edit_do_not_collide() {
         .cells
         .insert((0, 1), SavedCell::from_cell(&Cell::new_number(999.0)));
 
-    let mem = MemoryRegistry::new();
+    let mem = MemoryWorkspace::new();
     publish_version(&mem, f._prof.path(), &bob, SemVer::new(9, 9, 9), PushMode::CreateNew);
 
     let theirs = f.diff("1.0.0", "1.1.0");

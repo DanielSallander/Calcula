@@ -16,7 +16,7 @@
 //! superseded slots into a single rolled-up value — lives in the APP crate
 //! (`app/src-tauri/src/calp_commands.rs::build_gather_data`), NOT in calp.
 //! That logic is out of scope for this calp-crate test. What we cover here are
-//! the registry / publish / pull / writeback PRIMITIVES that the app's gather
+//! the workspace / publish / pull / writeback PRIMITIVES that the app's gather
 //! step is built on top of: that submissions round-trip, that the slot-keyed
 //! storage gives supersedence (newest-wins, no double count) for free, that
 //! versions are retained independently for carry-forward, and that the
@@ -30,12 +30,12 @@ use tempfile::TempDir;
 use calp::integrity::{PinPolicy, TrustStatus};
 use calp::publish::{self, PublishRequest, PushMode};
 use calp::pull::{self, PullRequest};
-use calp::registry::LocalRegistry;
+use calp::workspace::LocalWorkspace;
 use calp::version::{SemVer, VersionPin};
-// `local_artifact_path` is a RegistryTransport method — the restore path
+// `local_artifact_path` is a WorkspaceTransport method — the restore path
 // resolves model artifacts through it, so a test that tampers with one must
 // find it the same way.
-use calp::transport::RegistryTransport;
+use calp::transport::WorkspaceTransport;
 use calp::writeback::{
     RegionSelector, SubmissionState, SubmissionValue, ValueSchema, ValueType, VersionBinding,
     VisibilityPolicy, SubmissionPolicy, WritebackRegionDeclaration,
@@ -104,7 +104,7 @@ fn make_region_declaration(sheet_id: identity::SheetId) -> WritebackRegionDeclar
 /// Signs with the keypair persisted in `prof` (created on first publish), so a
 /// pull against the SAME `prof` verifies trust as FirstUse-then-Verified.
 fn publish_version(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     prof: &Path,
     wb: &Workbook,
     package: &str,
@@ -118,10 +118,10 @@ fn publish_version(
         version,
         kind: "report".to_string(),
         // A helper used for both the first publish and later version bumps, so
-        // it asks the registry what it is holding. Production callers must NOT:
+        // it asks the workspace what it is holding. Production callers must NOT:
         // the base version comes from the working copy's workspace link, which
         // is what makes the base-version gate mean anything.
-        mode: match reg.get_package_manifest(package).ok().and_then(|m| calp::head_version(&m)) {
+        mode: match reg.get_application_manifest(package).ok().and_then(|m| calp::head_version(&m)) {
             Some(head) => PushMode::Update { expected_base: head },
             None => PushMode::CreateNew,
         },
@@ -150,11 +150,11 @@ fn pull_version(package: &str, version: SemVer) -> PullRequest {
     }
 }
 
-/// The registry scope a real call site derives from the location the user
+/// The workspace scope a real call site derives from the location the user
 /// configured. Pins are filed under it, so every pull in a test must use the
-/// scope of the registry it is actually reading.
-fn scope_of(dir: &TempDir) -> calp::RegistryScope {
-    calp::registry_scope(&dir.path().to_string_lossy()).unwrap()
+/// scope of the workspace it is actually reading.
+fn scope_of(dir: &TempDir) -> calp::WorkspaceScope {
+    calp::workspace_scope(&dir.path().to_string_lossy()).unwrap()
 }
 
 /// A per-subscriber numeric submission for one (region, cell) slot. Re-used
@@ -195,9 +195,9 @@ fn make_submission(
 /// pull() returns a PullResult with no Debug derive (deep persistence types),
 /// so unwrap_err() is unavailable; match to extract the error instead.
 fn expect_pull_err(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     req: &PullRequest,
-    scope: &calp::RegistryScope,
+    scope: &calp::WorkspaceScope,
     prof: &Path,
 ) -> CalpError {
     match pull::pull(reg, req, scope, prof, PinPolicy::PinOnFirstUse) {
@@ -214,7 +214,7 @@ fn expect_pull_err(
 fn lifecycle_publish_pull_roundtrip_carries_cells_region_and_trust() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region = make_region_declaration(wb.sheets[0].id);
@@ -251,8 +251,8 @@ fn lifecycle_publish_pull_roundtrip_carries_cells_region_and_trust() {
     assert_eq!(regions[0].schema.as_ref().unwrap().value_type, ValueType::Number);
     assert_eq!(regions[0].version_binding, Some(VersionBinding::Lenient));
 
-    // The region's selector points at the PACKAGE sheet id; the pulled sheet
-    // gets a fresh local id, but the package sheet id is exposed so the
+    // The region's selector points at the APPLICATION sheet id; the pulled sheet
+    // gets a fresh local id, but the application sheet id is exposed so the
     // subscriber can remap the region onto the local sheet.
     assert_eq!(regions[0].selector.sheet_id, result.sheets[0].package_sheet_id);
 
@@ -269,7 +269,7 @@ fn lifecycle_publish_pull_roundtrip_carries_cells_region_and_trust() {
 fn lifecycle_writeback_submit_and_load_across_submitters() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region = make_region_declaration(wb.sheets[0].id);
@@ -333,7 +333,7 @@ fn lifecycle_writeback_submit_and_load_across_submitters() {
 fn lifecycle_supersedence_same_slot_newest_wins_no_double_count() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region = make_region_declaration(wb.sheets[0].id);
@@ -362,7 +362,7 @@ fn lifecycle_supersedence_same_slot_newest_wins_no_double_count() {
     // STORAGE BEHAVIOR OBSERVED: save_submission APPENDS — the filename embeds
     // the per-save submission id ("{region}_{row}_{col}_{id}.json"), so the
     // re-submit is a second immutable file and nothing is ever overwritten
-    // (that is what keeps shared/synced registries conflict-free). The
+    // (that is what keeps shared/synced workspaces conflict-free). The
     // current-state loaders fold the slot to the newest (updated_at, id)
     // event, so callers still see exactly one current value — supersedence is
     // structural, enforced by the fold rather than by file replacement.
@@ -384,9 +384,9 @@ fn lifecycle_supersedence_same_slot_newest_wins_no_double_count() {
 
 /// App-layer supersedence rule, reproduced here over the public submission
 /// type: collapse to one current value per (submitter, region, cell) slot by
-/// keeping the entry with the latest `updated_at`. The registry's slot-keyed
+/// keeping the entry with the latest `updated_at`. The workspace's slot-keyed
 /// storage means this is normally a no-op, but it guards callers that merge
-/// submissions from several sources (e.g. local drafts + registry).
+/// submissions from several sources (e.g. local drafts + workspace).
 fn newest_per_slot(
     subs: &[calp::writeback::WritebackSubmission],
 ) -> Vec<calp::writeback::WritebackSubmission> {
@@ -418,7 +418,7 @@ fn newest_per_slot(
 fn lifecycle_version_bump_retains_prior_version_submissions() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region_v1 = make_region_declaration(wb.sheets[0].id);
@@ -440,7 +440,7 @@ fn lifecycle_version_bump_retains_prior_version_submissions() {
 
     // Publish v2 with the SAME region id and a schema-COMPATIBLE (wider bounds)
     // declaration — the lenient-binding carry-forward case. Republishing the
-    // same workbook keeps the same package sheet id, so the region still lines
+    // same workbook keeps the same application sheet id, so the region still lines
     // up positionally.
     let mut region_v2 = make_region_declaration(wb.sheets[0].id);
     region_v2.schema = Some(ValueSchema {
@@ -478,7 +478,7 @@ fn lifecycle_version_bump_retains_prior_version_submissions() {
     assert_eq!(versions, vec![SemVer::new(1, 0, 0), SemVer::new(2, 0, 0)]);
 
     // Carry-forward is an app-layer concern (it copies v1 submissions into v2
-    // when compatible). At the registry primitive level what must hold is that
+    // when compatible). At the workspace primitive level what must hold is that
     // the v1 submissions remain READABLE after v2 exists, and that v2 starts
     // with its own (here empty) submission set — the app reads both and merges.
     let v1_subs = reg.load_current_region_submissions("budget", "1.0.0", "budget-input").unwrap();
@@ -489,7 +489,7 @@ fn lifecycle_version_bump_retains_prior_version_submissions() {
     assert!(v2_subs.is_empty(), "v2 starts with its own (empty) submission set");
 
     // Simulate the app's carry-forward: copy the compatible v1 submission into
-    // v2 (the app would re-stamp version provenance; the registry just stores).
+    // v2 (the app would re-stamp version provenance; the workspace just stores).
     reg.save_submission("budget", "2.0.0", &v1_sub).unwrap();
     let v2_after = reg.load_current_region_submissions("budget", "2.0.0", "budget-input").unwrap();
     assert_eq!(v2_after.len(), 1);
@@ -508,7 +508,7 @@ fn lifecycle_version_bump_retains_prior_version_submissions() {
 fn lifecycle_integrity_gate_rejects_tampered_artifact() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region = make_region_declaration(wb.sheets[0].id);
@@ -539,12 +539,12 @@ fn lifecycle_integrity_gate_rejects_tampered_artifact() {
         "expected ChecksumMismatch, got {err:?}"
     );
     let msg = err.to_string();
-    assert!(msg.contains("Package integrity check failed"), "msg: {msg}");
+    assert!(msg.contains("Integrity check failed"), "msg: {msg}");
     assert!(msg.contains("data.json"), "msg: {msg}");
 }
 
 // ---------------------------------------------------------------------------
-// 6. signature / trust (TOFU): same package + same profile -> FirstUse, then
+// 6. signature / trust (TOFU): same application + same profile -> FirstUse, then
 //    Verified on the second pull.
 // ---------------------------------------------------------------------------
 
@@ -552,7 +552,7 @@ fn lifecycle_integrity_gate_rejects_tampered_artifact() {
 fn lifecycle_tofu_first_use_then_verified() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region = make_region_declaration(wb.sheets[0].id);
@@ -569,7 +569,7 @@ fn lifecycle_tofu_first_use_then_verified() {
     let first = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), &scope_of(&reg_dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
     assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
-    // ...a second pull of the same package, against the same TOFU pin store,
+    // ...a second pull of the same application, against the same TOFU pin store,
     // matches the pinned key and reports Verified.
     let second = pull::pull(&reg, &pull_version("budget", SemVer::new(1, 0, 0)), &scope_of(&reg_dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
     assert_eq!(second.trust_status, TrustStatus::Verified);
@@ -579,8 +579,8 @@ fn lifecycle_tofu_first_use_then_verified() {
 // 7. pin policy across the SUBSCRIBE / REFRESH / RESET trio (Wave J).
 //
 //    pull() is shared by three user actions that are NOT the same trust
-//    decision. Only Subscribe may create a pin; Refresh and Reset act on a
-//    package the user already trusts and must refuse first contact instead of
+//    decision. Only Subscribe may create a pin; Refresh and Reset act on an
+//    application the user already trusts and must refuse first contact instead of
 //    minting the pin under the label "get the latest version".
 // ---------------------------------------------------------------------------
 
@@ -590,9 +590,9 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
     // The PUBLISHER's profile (holds the signing key).
     let pubp = TempDir::new().unwrap();
     // The SUBSCRIBER's own profile (holds the TOFU pin store) — a fresh
-    // machine that has never heard of this package.
+    // machine that has never heard of this application.
     let subp = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region = make_region_declaration(wb.sheets[0].id);
@@ -680,22 +680,22 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. REOPENING a subscribed workbook re-materializes its package data sources.
+// 8. REOPENING a subscribed workbook re-materializes its application data sources.
 //
-//    A package BI connection is not stored in the subscriber's `.cala` (the
+//    An application BI connection is not stored in the subscriber's `.cala` (the
 //    model belongs to the publisher and travels in the `.calp`), so reopening a
 //    subscribed report used to leave it with NO connection and no command able
 //    to make one: `calp_refresh_data` only updates connections that already
 //    exist, and only `pull` ever created one. `load_verified_data_sources` is
 //    the restore path, and these tests pin the four outcomes that matter:
-//    it works for a package this machine pulled; it refuses one it never
+//    it works for an application this machine pulled; it refuses one it never
 //    pinned; it refuses one whose artifacts were tampered with; and it refuses
-//    a version that is no longer in the registry. Anything other than the first
+//    a version that is no longer in the workspace. Anything other than the first
 //    must yield NO data source — a subscriber that cannot prove which model it
 //    has must get no model rather than a stale or unverified one.
 // ---------------------------------------------------------------------------
 
-/// A package data source carrying a minimal (host-opaque) model document.
+/// An application data source carrying a minimal (host-opaque) model document.
 fn a_data_source(id: &str) -> publish::PublishDataSource {
     publish::PublishDataSource {
         id: id.to_string(),
@@ -704,7 +704,7 @@ fn a_data_source(id: &str) -> publish::PublishDataSource {
         server: "db.example.com".to_string(),
         database: "sales".to_string(),
         model_json: serde_json::json!({ "name": "SalesModel", "tables": [] }),
-        bindings: vec![calp::manifest::PackageBinding {
+        bindings: vec![calp::manifest::TableBinding {
             model_table: "Orders".to_string(),
             schema: "public".to_string(),
             source_table: "orders".to_string(),
@@ -717,7 +717,7 @@ fn a_data_source(id: &str) -> publish::PublishDataSource {
 
 /// `publish_version` with one embedded data source.
 fn publish_with_data_source(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     prof: &Path,
     wb: &Workbook,
     package: &str,
@@ -752,7 +752,7 @@ fn publish_with_data_source(
 fn reopening_a_subscribed_workbook_resolves_its_model() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     publish_with_data_source(&reg, prof.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
@@ -799,7 +799,7 @@ fn reopening_refuses_a_package_this_machine_never_pinned() {
     // never pinned anything — the shape a `.cala` received by email produces.
     let pubp = TempDir::new().unwrap();
     let subp = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     publish_with_data_source(&reg, pubp.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
@@ -826,7 +826,7 @@ fn reopening_refuses_a_package_this_machine_never_pinned() {
 fn reopening_refuses_a_package_whose_model_was_tampered_with() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     publish_with_data_source(&reg, prof.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
@@ -867,7 +867,7 @@ fn reopening_refuses_a_package_whose_model_was_tampered_with() {
 fn reopening_when_the_package_is_gone_yields_no_model() {
     let reg_dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     publish_with_data_source(&reg, prof.path(), &wb, "budget", SemVer::new(1, 0, 0), "ds-sales");
@@ -880,7 +880,7 @@ fn reopening_when_the_package_is_gone_yields_no_model() {
     )
     .unwrap();
 
-    // The subscriber is offline, or the registry no longer holds the version
+    // The subscriber is offline, or the workspace no longer holds the version
     // the ledger names: the restore must fail cleanly, not serve something else.
     let err = pull::load_verified_data_sources(
         &reg,

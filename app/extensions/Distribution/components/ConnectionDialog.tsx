@@ -1,6 +1,6 @@
 // FILENAME: app/extensions/Distribution/components/ConnectionDialog.tsx
 // PURPOSE: Dialog for configuring database connection credentials for a
-//          .calp package data source. Shown when SSPI auto-connect fails.
+//          .calp application data source. Shown when SSPI auto-connect fails.
 
 import React, { useState } from "react";
 import type { DialogProps } from "@api";

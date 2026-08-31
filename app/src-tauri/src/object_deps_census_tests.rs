@@ -168,7 +168,7 @@ const OUT_OF_SCOPE: &[(&str, &str)] = &[
          in a published package, not in this document.",
     ),
     (
-        "calp_remove_registry",
+        "calp_remove_workspace",
         "An app-level list of package sources (machine scope), not a workbook \
          object.",
     ),

@@ -1,18 +1,18 @@
 // FILENAME: app/extensions/Distribution/components/PublishDialog.tsx
-// PURPOSE: Push a new version of the package this workbook is a working copy of
-// — or, for a standalone workbook, create a package from it.
+// PURPOSE: Push a new version of the application this workbook is a working copy
+// of — or, for a standalone workbook, create an application from it.
 // CONTEXT: Deliberately NOT a modal: there is no backdrop, so the workbook stays
 // fully interactive while the window is open. Movable + resizable via the shared
 // @api/dialogWindow hook; closes only via its own buttons.
 //
 // TWO MODES, and the difference is not cosmetic. A LINKED workbook already knows
-// its registry, package and base version, so the dialog stops asking and starts
-// TELLING: here is where the package stands, here is what you are based on, here
-// is the next version. It was seven blank fields on every open — including a
-// comma-separated list of sheet INDICES — which meant shipping v1.1 of your own
-// report involved retyping its identity from memory and being wrong about it in
-// silence. An UNLINKED workbook still gets the fields, because there is genuinely
-// nothing to remember yet, and publishing links it for next time.
+// its workspace, application and base version, so the dialog stops asking and
+// starts TELLING: here is where the application stands, here is what you are
+// based on, here is the next version. It was seven blank fields on every open —
+// including a comma-separated list of sheet INDICES — which meant shipping v1.1
+// of your own report involved retyping its identity from memory and being wrong
+// about it in silence. An UNLINKED workbook still gets the fields, because there
+// is genuinely nothing to remember yet, and publishing links it for next time.
 
 import React, { useCallback, useEffect, useState } from "react";
 import type {
@@ -21,22 +21,21 @@ import type {
   PublishReport,
   PushGateStatus,
   VersionDiff,
-  WorkspaceStatus,
+  WorkingCopyStatus,
 } from "@api";
 import {
   diffWorkingCopy,
-  publishPackage,
+  publishApplication,
   publishPreview,
   pushMergeAnalyze,
   pushMergeApply,
-  workspaceStatus,
+  workingCopyStatus,
 } from "@api";
 import { VersionDiffView } from "./VersionDiffView";
-import { listPackageKinds } from "@api/packageKinds";
-import { listRegistries, type SavedRegistry } from "@api/distributionRegistries";
+import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
-import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
-import { PublishReportView } from "./PackageExplorerPanel";
+import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
+import { PublishReportView } from "./ApplicationExplorerPanel";
 
 /** Which of the two things this dialog is doing right now. */
 type Mode = "loading" | "push" | "create";
@@ -45,14 +44,24 @@ export function PublishDialog({ onClose }: DialogProps) {
   const win = useDialogWindow({ minWidth: 460, minHeight: 400 });
 
   const [mode, setMode] = useState<Mode>("loading");
-  const [workspace, setWorkspace] = useState<WorkspaceStatus | null>(null);
+  const [workspace, setWorkspace] = useState<WorkingCopyStatus | null>(null);
   const [gates, setGates] = useState<PushGateStatus | null>(null);
-  const [saved, setSaved] = useState<SavedRegistry[]>([]);
+  const [saved, setSaved] = useState<SavedWorkspace[]>([]);
 
   // Fields. In push mode the target three are read-only, taken from the link.
   const [registryPath, setRegistryPath] = useState("");
   const [packageName, setPackageName] = useState("");
   const [version, setVersion] = useState("1.0.0");
+  // NOT a user choice. Kind is advisory for the ordinary case — nothing in the
+  // codebase consumes RefreshDefaults::for_kind, so report/template/dataset
+  // behave identically — while "library" DOES change what ships (an empty sheet
+  // selection publishes zero sheets, so a function library does not carry the
+  // author's data). Offering that as a dropdown next to "report" put a
+  // content-changing option one careless click away from a question that has
+  // one right answer. Libraries publish through publishLibrary(), datasets
+  // through calp_publish_model, skins through their own path; each sets its own
+  // kind. A push does not set it at all — it is fixed when the application is
+  // created, and read from the link.
   const [kind, setKind] = useState("report");
   const [changeSummary, setChangeSummary] = useState("");
   const [includeComments, setIncludeComments] = useState(false);
@@ -77,8 +86,8 @@ export function PublishDialog({ onClose }: DialogProps) {
     let cancelled = false;
     void (async () => {
       const [link, registries] = await Promise.all([
-        workspaceStatus().catch(() => null),
-        listRegistries().catch(() => [] as SavedRegistry[]),
+        workingCopyStatus().catch(() => null),
+        listWorkspaces().catch(() => [] as SavedWorkspace[]),
       ]);
       if (cancelled) return;
       setSaved(registries);
@@ -161,7 +170,7 @@ export function PublishDialog({ onClose }: DialogProps) {
         if (!cancelled) setDiff(result.diff);
       })
       .catch((e: unknown) => {
-        // A missing base version or an unreachable registry costs the diff
+        // A missing base version or an unreachable workspace costs the diff
         // panel, not the dialog — the push gates still run server-side.
         if (!cancelled) setDiffError(String(e));
       })
@@ -175,7 +184,7 @@ export function PublishDialog({ onClose }: DialogProps) {
 
   // When the base is stale, WHY it is stale matters more than the fact. Ask
   // whether the intervening work actually overlaps yours before telling the
-  // user their push is refused — most of the time on a decomposed package it
+  // user their push is refused — most of the time on a decomposed application it
   // does not, and "you two collided" would be false.
   const analyzeMerge = useCallback(async () => {
     setMergeBusy(true);
@@ -209,7 +218,7 @@ export function PublishDialog({ onClose }: DialogProps) {
       );
       setMerge(null);
       // Everything downstream moved: the base, the gate statuses, the diff.
-      const fresh = await workspaceStatus();
+      const fresh = await workingCopyStatus();
       if (fresh) {
         setWorkspace(fresh);
         setVersion(fresh.suggestedNext?.patch ?? fresh.baseVersion);
@@ -230,24 +239,27 @@ export function PublishDialog({ onClose }: DialogProps) {
       .filter((i) => i >= 0);
   };
 
+  // Publishing is the ONE flow with two legitimate gestures, and the second is
+  // not a fallback for old workspaces — Subscribe and Open-for-editing have no
+  // folder button precisely because those always target a workspace that
+  // already exists. Creating a NEW one is different: you cannot aim a file
+  // picker at a `workspace.calcula` that has not been written yet, and it is
+  // this publish that writes it.
   const handleBrowse = async () => {
-    try {
-      const selected = await openNativeDialog({
-        directory: true,
-        multiple: false,
-        title: "Select Registry Folder",
-      });
-      if (selected && typeof selected === "string") setRegistryPath(selected);
-    } catch {
-      // user cancelled
-    }
+    const selected = await pickWorkspaceFile();
+    if (selected) setRegistryPath(selected);
+  };
+
+  const handleBrowseNewFolder = async () => {
+    const selected = await pickWorkspaceFolder("Choose a Folder for the New Workspace");
+    if (selected) setRegistryPath(selected);
   };
 
   const handlePublish = async () => {
     setError(null);
     setStatus(mode === "push" ? "Pushing…" : "Publishing…");
     try {
-      const result = await publishPackage({
+      const result = await publishApplication({
         registryPath,
         packageName,
         version,
@@ -270,7 +282,7 @@ export function PublishDialog({ onClose }: DialogProps) {
       setWarnings(result.warnings);
       setPushed(true);
       // The link moved; re-read so the panel shows the new base.
-      workspaceStatus()
+      workingCopyStatus()
         .then((s) => {
           if (s) {
             setWorkspace(s);
@@ -371,7 +383,7 @@ export function PublishDialog({ onClose }: DialogProps) {
     <div ref={win.ref} style={{ ...windowStyle, ...win.style }}>
       <div style={headerStyle} onMouseDown={win.onHeaderMouseDown}>
         <span style={{ fontWeight: 600 }}>
-          {mode === "push" ? `Push to ${packageName}` : "Publish Package"}
+          {mode === "push" ? `Push to ${packageName}` : "Publish Application"}
         </span>
         <button style={closeButtonStyle} onClick={onClose} aria-label="Close" title="Close">
           ✕
@@ -411,7 +423,7 @@ export function PublishDialog({ onClose }: DialogProps) {
         {mode === "create" && (
           <>
             <div style={fieldStyle}>
-              <label>Registry Path</label>
+              <label>Workspace</label>
               {saved.length > 0 && (
                 <select
                   style={inputStyle}
@@ -421,7 +433,7 @@ export function PublishDialog({ onClose }: DialogProps) {
                     if (reg) setRegistryPath(reg.location);
                   }}
                 >
-                  <option value="">Choose a saved registry…</option>
+                  <option value="">Choose a saved workspace…</option>
                   {saved.map((r) => (
                     <option key={r.id} value={r.id}>
                       {r.name} — {r.location}
@@ -434,31 +446,28 @@ export function PublishDialog({ onClose }: DialogProps) {
                   style={{ ...inputStyle, flex: 1 }}
                   value={registryPath}
                   onChange={(e) => setRegistryPath(e.target.value)}
-                  placeholder="C:\shared\registry"
+                  placeholder="C:\shared\workspace"
                 />
                 <button onClick={handleBrowse} style={{ whiteSpace: "nowrap" }}>
                   Browse…
                 </button>
+                <button
+                  onClick={handleBrowseNewFolder}
+                  style={{ whiteSpace: "nowrap" }}
+                  title="Create a workspace in a folder that is not one yet — publishing writes its workspace.calcula pointer file"
+                >
+                  New workspace…
+                </button>
               </div>
             </div>
             <div style={fieldStyle}>
-              <label>Package Name</label>
+              <label>Application Name</label>
               <input
                 style={inputStyle}
                 value={packageName}
                 onChange={(e) => setPackageName(e.target.value)}
                 placeholder="sales-report"
               />
-            </div>
-            <div style={fieldStyle}>
-              <label>Kind</label>
-              <select style={inputStyle} value={kind} onChange={(e) => setKind(e.target.value)}>
-                {listPackageKinds().map((k) => (
-                  <option key={k.id} value={k.id} title={k.description}>
-                    {k.label}
-                  </option>
-                ))}
-              </select>
             </div>
           </>
         )}
@@ -648,8 +657,8 @@ export function PublishDialog({ onClose }: DialogProps) {
               color: "#664d03",
             }}
           >
-            <strong>Warnings ({warnings.length})</strong> — the package publishes
-            as-is; these only degrade for subscribers.
+            <strong>Warnings ({warnings.length})</strong> — the application
+            publishes as-is; these only degrade for subscribers.
             {warnings.map((w, i) => (
               <div key={i} style={{ marginLeft: 8, marginTop: 4 }}>
                 {w}
@@ -688,8 +697,8 @@ export function PublishDialog({ onClose }: DialogProps) {
 }
 
 /**
- * Where this working copy stands: which package, which base, and whether the
- * registry has moved on since.
+ * Where this working copy stands: which application, which base, and whether the
+ * workspace has moved on since.
  */
 function WorkspaceBanner({
   workspace,
@@ -698,7 +707,7 @@ function WorkspaceBanner({
   mergeBusy,
   onMerge,
 }: {
-  workspace: WorkspaceStatus;
+  workspace: WorkingCopyStatus;
   gates: PushGateStatus | null;
   merge: MergeAnalysisResponse | null;
   mergeBusy: boolean;
@@ -754,7 +763,7 @@ function WorkspaceBanner({
       );
     }
 
-    // Disjoint work is the common case on a package made of addressable
+    // Disjoint work is the common case on an application made of addressable
     // pieces, and calling it a conflict would be false.
     if (merge.analysis.verdict === "canMerge") {
       return (

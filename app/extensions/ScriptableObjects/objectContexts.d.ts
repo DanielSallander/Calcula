@@ -64,25 +64,25 @@
 //   bi.sql
 //     - cap.biSql: Run read-only RAW SQL against a BI connection's database (any reachable table)
 //   distribution.publish
-//     - cap.pkgNextVersion: Ask a registry what the next version number of one of your packages would be
-//     - cap.pkgPublish: Publish this workbook to one of your registries as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before)
-//     - cap.pkgPublishModel: Publish one of your BI models to one of your registries as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel)
+//     - cap.pkgNextVersion: Ask a workspace what the next version number of one of your applications would be
+//     - cap.pkgPublish: Publish this workbook to one of your workspaces as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before)
+//     - cap.pkgPublishModel: Publish one of your BI models to one of your workspaces as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel)
 //     - cap.pkgPublishPreview: Work out what publishing this workbook would ship, and what it would leave behind, without sending anything
 //   distribution.subscribe
-//     - cap.pkgBrowse: List the packages available in one of the registries you have set up
-//     - cap.pkgInspect: Look inside a published package before taking it — its sheets, its data sources and every script it carries — without bringing anything in
-//     - cap.pkgListRegistries: See which package registries you have set up on this machine
-//     - cap.pkgListSubscriptions: See which packages this workbook is subscribed to, and which version of each
-//     - cap.pkgPull: Bring somebody else's published package into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only registries you already added can be used)
-//     - cap.pkgRefreshApply: Update every package this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it)
-//     - cap.pkgRefreshPreview: Check whether newer versions of the packages you subscribe to are available, and what would change
+//     - cap.pkgBrowse: List the applications available in one of the workspaces you have set up
+//     - cap.pkgInspect: Look inside a published application before taking it — its sheets, its data sources and every script it carries — without bringing anything in
+//     - cap.pkgListRegistries: See which workspaces you have set up on this machine
+//     - cap.pkgListSubscriptions: See which applications this workbook is subscribed to, and which version of each
+//     - cap.pkgPull: Bring somebody else's published application into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only workspaces you already added can be used)
+//     - cap.pkgRefreshApply: Update every application this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it)
+//     - cap.pkgRefreshPreview: Check whether newer versions of the applications you subscribe to are available, and what would change
 //   distribution.writeback
 //     - cap.writebackGetLayer: Read the answers you have entered so far and whether each one is unsent, sent, approved or rejected
-//     - cap.writebackListRegions: List the input areas a subscribed package asks you to fill in (where they are and what kind of value they expect)
-//     - cap.writebackListSubmissions: Read what EVERY respondent submitted — their answers and their names — for an area you publish (only possible if this workbook can sign that package)
+//     - cap.writebackListRegions: List the input areas a subscribed application asks you to fill in (where they are and what kind of value they expect)
+//     - cap.writebackListSubmissions: Read what EVERY respondent submitted — their answers and their names — for an area you publish (only possible if this workbook can sign that application)
 //     - cap.writebackPreview: See exactly which values would leave this machine, and to whom, before anything is sent
-//     - cap.writebackReview: Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that package)
-//     - cap.writebackSaveDraft: Fill in one input cell of a subscribed package (checked against the publisher's rules, and sent straight away if the package asks for that)
+//     - cap.writebackReview: Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that application)
+//     - cap.writebackSaveDraft: Fill in one input cell of a subscribed application (checked against the publisher's rules, and sent straight away if the application asks for that)
 //     - cap.writebackSubmit: Send your filled-in answers for one input area to the publisher — they leave this machine and you cannot take them back
 //   file.picker
 //     - cap.fileExportText: Ask you where to save a text file it has produced (you choose the folder and the name; it is never told where anything on your computer is)
@@ -855,7 +855,7 @@ declare type WritebackReview =
 declare interface ScriptWritebackApi {
   /** The input areas this workbook is asked to fill in.
    *
-   * Calcula policy (generated): List the input areas a subscribed package asks you to fill in (where they are and what kind of value they expect).
+   * Calcula policy (generated): List the input areas a subscribed application asks you to fill in (where they are and what kind of value they expect).
    * Reach: broker `cap.writebackListRegions`, restricted tier, class read, requires the `distribution.writeback` capability. Limits: perMinute 60.
    */
   listRegions(): Promise<WritebackRegion[]>;
@@ -870,7 +870,7 @@ declare interface ScriptWritebackApi {
    * rules; rejected values throw with the real reason. A region whose policy is
    * `immediate` sends the value as soon as it is drafted.
    *
-   * Calcula policy (generated): Fill in one input cell of a subscribed package (checked against the publisher's rules, and sent straight away if the package asks for that).
+   * Calcula policy (generated): Fill in one input cell of a subscribed application (checked against the publisher's rules, and sent straight away if the application asks for that).
    * Reach: broker `cap.writebackSaveDraft`, restricted tier, class mutate, requires the `distribution.writeback` capability. Limits: perMinute 240.
    */
   saveDraft(
@@ -894,13 +894,13 @@ declare interface ScriptWritebackApi {
   previewSubmission(regionId: string): Promise<WritebackSubmissionPreview>;
   /** PUBLISHER ONLY: every respondent's answers for an area you publish.
    *
-   * Calcula policy (generated): Read what EVERY respondent submitted — their answers and their names — for an area you publish (only possible if this workbook can sign that package).
+   * Calcula policy (generated): Read what EVERY respondent submitted — their answers and their names — for an area you publish (only possible if this workbook can sign that application).
    * Reach: broker `cap.writebackListSubmissions`, restricted tier, class read, requires the `distribution.writeback` capability. Limits: perMinute 60.
    */
   listSubmissions(target: WritebackTarget): Promise<WritebackSubmissionRow[]>;
   /** PUBLISHER ONLY: approve, reject, or reopen somebody's answer.
    *
-   * Calcula policy (generated): Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that package).
+   * Calcula policy (generated): Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that application).
    * Reach: broker `cap.writebackReview`, restricted tier, class net, requires the `distribution.writeback` capability. Limits: perMinute 12.
    */
   setSubmissionState(decision: WritebackReview): Promise<void>;
@@ -1589,26 +1589,26 @@ declare interface ScriptPackagesApi {
   /** The registries set up on this machine — the only locations the rest of
    *  this API will accept.
    *
-   * Calcula policy (generated): See which package registries you have set up on this machine.
+   * Calcula policy (generated): See which workspaces you have set up on this machine.
    * Reach: broker `cap.pkgListRegistries`, unlocked tier, class read, requires the `distribution.subscribe` capability. Limits: perMinute 60.
    */
   listRegistries(): Promise<ScriptRegistry[]>;
   /** What this workbook currently subscribes to.
    *
-   * Calcula policy (generated): See which packages this workbook is subscribed to, and which version of each.
+   * Calcula policy (generated): See which applications this workbook is subscribed to, and which version of each.
    * Reach: broker `cap.pkgListSubscriptions`, unlocked tier, class read, requires the `distribution.subscribe` capability. Limits: perMinute 60.
    */
   listSubscriptions(): Promise<ScriptSubscriptionList>;
   /** The packages available in one of your registries.
    *
-   * Calcula policy (generated): List the packages available in one of the registries you have set up.
+   * Calcula policy (generated): List the applications available in one of the workspaces you have set up.
    * Reach: broker `cap.pkgBrowse`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 20.
    */
   browse(registry: string): Promise<ScriptRegistryPackage[]>;
   /** Look inside a package version — including every script it carries and the
    *  capabilities each declares — WITHOUT bringing anything in.
    *
-   * Calcula policy (generated): Look inside a published package before taking it — its sheets, its data sources and every script it carries — without bringing anything in.
+   * Calcula policy (generated): Look inside a published application before taking it — its sheets, its data sources and every script it carries — without bringing anything in.
    * Reach: broker `cap.pkgInspect`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 20.
    */
   inspect(
@@ -1622,7 +1622,7 @@ declare interface ScriptPackagesApi {
    * `versionPin` is a semver pin: an exact version ("1.2.0"), a range
    * ("^1.0.0", "~1.2.0") or "latest".
    *
-   * Calcula policy (generated): Bring somebody else's published package into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only registries you already added can be used).
+   * Calcula policy (generated): Bring somebody else's published application into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only workspaces you already added can be used).
    * Reach: broker `cap.pkgPull`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 6.
    */
   pull(
@@ -1632,13 +1632,13 @@ declare interface ScriptPackagesApi {
   ): Promise<ScriptPullResult>;
   /** What updating every subscription would change — without changing it.
    *
-   * Calcula policy (generated): Check whether newer versions of the packages you subscribe to are available, and what would change.
+   * Calcula policy (generated): Check whether newer versions of the applications you subscribe to are available, and what would change.
    * Reach: broker `cap.pkgRefreshPreview`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 20.
    */
   refreshPreview(): Promise<ScriptRefreshPreview>;
   /** Update every subscription to its publisher's newest matching version.
    *
-   * Calcula policy (generated): Update every package this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it).
+   * Calcula policy (generated): Update every application this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it).
    * Reach: broker `cap.pkgRefreshApply`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 6.
    */
   refreshApply(): Promise<ScriptRefreshResult>;
@@ -1729,7 +1729,7 @@ declare interface ScriptPublishApi {
   preview(sheetIndices?: number[]): Promise<ScriptPublishPreview>;
   /** The next version number for one of your packages.
    *
-   * Calcula policy (generated): Ask a registry what the next version number of one of your packages would be.
+   * Calcula policy (generated): Ask a workspace what the next version number of one of your applications would be.
    * Reach: broker `cap.pkgNextVersion`, unlocked tier, class net, requires the `distribution.publish` capability. Limits: perMinute 20.
    */
   nextVersion(
@@ -1739,13 +1739,13 @@ declare interface ScriptPublishApi {
   ): Promise<string>;
   /** Publish this workbook as a new version. Irreversible.
    *
-   * Calcula policy (generated): Publish this workbook to one of your registries as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before).
+   * Calcula policy (generated): Publish this workbook to one of your workspaces as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before).
    * Reach: broker `cap.pkgPublish`, unlocked tier, class net, requires the `distribution.publish` capability. Limits: perMinute 3.
    */
   package(spec: ScriptPublishSpec): Promise<ScriptPublishResult>;
   /** Publish ONE BI model as a model-only package.
    *
-   * Calcula policy (generated): Publish one of your BI models to one of your registries as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel).
+   * Calcula policy (generated): Publish one of your BI models to one of your workspaces as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel).
    * Reach: broker `cap.pkgPublishModel`, unlocked tier, class net, requires the `distribution.publish` capability. Limits: perMinute 3.
    */
   model(spec: ScriptPublishModelSpec): Promise<ScriptPublishResult>;

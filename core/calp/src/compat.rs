@@ -1,9 +1,9 @@
 //! FILENAME: core/calp/src/compat.rs
-//! PURPOSE: Compatibility contract — refuse a .calp package that needs a newer
+//! PURPOSE: Compatibility contract — refuse a .calp application that needs a newer
 //!          Calcula than this one, with an honest "update the app" error rather
 //!          than a silent or partial failure. The host records its version once
 //!          at startup; the pull-time gate (pull.rs) consults it. This is the
-//!          whole-package analogue of the BI-model `ModelFormatTooNew` gate.
+//!          whole-application analogue of the BI-model `ModelFormatTooNew` gate.
 //! CONTEXT: First slice of the compatibility contract. Deferred to later slices:
 //!          required-capabilities check and script/extension-API semver.
 
@@ -19,7 +19,7 @@ use crate::version::SemVer;
 static HOST_APP_VERSION: OnceLock<String> = OnceLock::new();
 
 /// Record the host application's version (e.g. `env!("CARGO_PKG_VERSION")`) so
-/// the pull-time compatibility gate can reject packages requiring a newer app.
+/// the pull-time compatibility gate can reject applications requiring a newer app.
 /// Idempotent — only the first call takes effect (the version is fixed for the
 /// life of the process).
 pub fn set_host_app_version(version: impl Into<String>) {
@@ -31,10 +31,10 @@ pub fn host_app_version() -> Option<&'static str> {
     HOST_APP_VERSION.get().map(String::as_str)
 }
 
-/// Compatibility gate: refuse a package version whose declared `min_app_version`
+/// Compatibility gate: refuse an application version whose declared `min_app_version`
 /// is newer than the host app.
 ///
-/// Passes when: the package declares no minimum (`min_app_version` empty), or
+/// Passes when: the application declares no minimum (`min_app_version` empty), or
 /// the host version is unknown (`None` — tests / headless). A malformed version
 /// string is a typed [`CalpError`]. Otherwise compares as semver and returns
 /// [`CalpError::AppTooOld`] when the host is older than required.

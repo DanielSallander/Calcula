@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/Distribution/components/SubscribeDialog.tsx
-// PURPOSE: Floating window for subscribing to (pulling) a .calp package.
+// PURPOSE: Floating window for subscribing to (pulling) a .calp application.
 // CONTEXT: Non-modal like PublishDialog — no backdrop, the workbook stays
 // interactive; movable + resizable via @api/dialogWindow. After a pull with a
 // disconnected model source, tries saved sign-in silently and only then opens
@@ -8,29 +8,29 @@
 import React, { useState, useEffect } from "react";
 import type { DialogProps, ConnectionInfo, CapabilityId } from "@api";
 import {
-  pullPackage,
+  subscribeToApplication,
   emitAppEvent,
   AppEvents,
   getSheets,
   setActiveSheetApi,
-  type PackageUpdatedPayload,
+  type ApplicationUpdatedPayload,
 } from "@api";
 import {
-  inspectPackage,
-  browseRegistry,
+  inspectApplication,
+  listApplicationsInWorkspace,
   type CalpTrustStatus,
-  type PackageInspection,
-  type PackageInfo,
+  type ApplicationInspection,
+  type ApplicationInfo,
 } from "@api/distribution";
 import {
-  listRegistries,
-  addRegistry,
-  isHttpRegistry,
-  type SavedRegistry,
-} from "@api/distributionRegistries";
-import { open } from "@tauri-apps/plugin-dialog";
+  listWorkspaces,
+  addWorkspace,
+  isHttpWorkspace,
+  type SavedWorkspace,
+} from "@api/distributionWorkspaces";
+import { pickWorkspaceFile } from "../lib/pickWorkspace";
 import { useDialogWindow } from "@api/dialogWindow";
-import { openPackageInspectorWindow } from "../lib/openPackageInspectorWindow";
+import { openApplicationInspectorWindow } from "../lib/openApplicationInspectorWindow";
 import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-api";
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
 import { pivot } from "@api/pivot";
@@ -52,17 +52,17 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // NOT "store data on this device": the store is the workbook's own virtual
   // filesystem (.calcula/script-data/<scriptId>.json — scriptHost/host.ts), so
   // it travels inside the .cala to everyone the file is sent to. Word for word
-  // the same phrase as @api/capabilities.ts and the package inspector's
+  // the same phrase as @api/scriptHost/capabilities.ts and the Application Inspector's
   // ScriptsSection; three surfaces describing one capability must not diverge.
   storage:
-    "store its own private data inside this workbook file (256 KB; it travels with the file if you share it)",
+    "store its own private data inside this workbook file (up to 256 KB; it travels with the file if you share it)",
   "ui.html": "render custom HTML UI",
   "formula.udf": "define formula functions you can use in cells",
   "bi.model": "change your BI model definitions (measures, relationships, ...)",
   "bi.connector": "feed external data into your BI model",
   "ui.dialog": "interrupt you with a dialog and read your answer",
   "distribution.writeback":
-    "fill in and send the input cells of a subscribed package — and, for a package it can sign, read and approve everyone else's answers",
+    "fill in and send the input cells of a subscribed application — and, for an application it can sign, read and approve everyone else's answers",
   // Subscribing is the moment somebody else's code enters this workbook, so
   // this phrase carries the part that survives the session: the schedule is
   // saved in YOUR workbook and starts itself again every time you open it.
@@ -85,14 +85,15 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   "grid.read":
     "be shown what is in your cells — the value of every cell on screen while it decides how to colour them, and the old value, new value and formula of every cell that changes while it is running",
   // These two can only be REQUESTED here, never exercised: a script that
-  // arrives in a package is forced to the restricted tier, and every cap.pkg*
-  // row is unlocked-tier. A package declaring them is asking for something this
-  // surface will refuse — so say what it asked for, plainly, and let the reader
-  // draw their own conclusion about a report that wants to publish.
+  // arrives in an application is forced to the restricted tier, and every
+  // cap.pkg* row is unlocked-tier. An application declaring them is asking for
+  // something this surface will refuse — so say what it asked for, plainly, and
+  // let the reader draw their own conclusion about a report that wants to
+  // publish.
   "distribution.publish":
-    "publish workbooks to your package registries under your own publisher key (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
+    "publish workbooks to your workspaces under your own publisher key (a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked)",
   "distribution.subscribe":
-    "pull further packages into this workbook and refresh them (a script that arrived in a package cannot actually do this — Calcula refuses it — but it asked)",
+    "pull further applications into this workbook and refresh them (a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked)",
 };
 
 function capabilityPhrase(id: string): string {
@@ -126,7 +127,7 @@ function isCustomFunctionLibrary(id: string): boolean {
  * all — which reads as "nothing to worry about".)
  *
  * `notPinned` is the normal answer here, and the copy has to carry the whole
- * point: the package is intact and signed, but *signed by whom* is a question
+ * point: the application is intact and signed, but *signed by whom* is a question
  * only the user can answer, and clicking Subscribe is the answer.
  */
 const TRUST_REVIEW: Record<
@@ -138,47 +139,47 @@ const TRUST_REVIEW: Record<
     color: "#137333",
     box: { background: "#e8f5e9", border: "1px solid #b7dfbb" },
     blurb:
-      "Signed by the same key you already trusted for this package. Nothing about the publisher's identity has changed.",
+      "Signed by the same key you already trusted for this application. Nothing about the publisher's identity has changed.",
   },
   trustedDelegate: {
     label: "trusted publisher — co-published",
     color: "#137333",
     box: { background: "#e8f5e9", border: "1px solid #b7dfbb" },
     blurb:
-      "Signed by a co-publisher that the publisher you trust for this package authorized. You are still trusting the same publisher; they have vouched for a colleague.",
+      "Signed by a co-publisher that the publisher you trust for this application authorized. You are still trusting the same publisher; they have vouched for a colleague.",
   },
   firstUse: {
     label: "trusted just now",
     color: "#a05a00",
     box: { background: "#fef7e0", border: "1px solid #f2dcae" },
-    blurb: "This publisher key has just been recorded as trusted for this package name.",
+    blurb: "This publisher key has just been recorded as trusted for this application name.",
   },
   firstUseKnownPublisher: {
     label: "trusted just now — publisher already known",
     color: "#a05a00",
     box: { background: "#fef7e0", border: "1px solid #f2dcae" },
     blurb:
-      "This registry was not trusted for this package before, but the same publisher key is " +
-      "already trusted for this package name from another registry — a move, a mirror, or the " +
-      "same location spelled differently. It has now been recorded for this registry too.",
+      "This workspace was not trusted for this application before, but the same publisher key is " +
+      "already trusted for this application name from another workspace — a move, a mirror, or " +
+      "the same location spelled differently. It has now been recorded for this workspace too.",
   },
   firstUseAcceptedNameConflict: {
     label: "trusted despite a name conflict",
     color: "#c5221f",
     box: { background: "#fdeceb", border: "1px solid #f3c4c2" },
     blurb:
-      "Another registry already holds this package name under a DIFFERENT publisher key, and " +
-      "you accepted that. Both are now trusted, each for its own registry.",
+      "Another workspace already holds this application name under a DIFFERENT publisher key, " +
+      "and you accepted that. Both are now trusted, each for its own workspace.",
   },
   notPinned: {
     label: "not yet trusted on this computer",
     color: "#a05a00",
     box: { background: "#fef7e0", border: "1px solid #f2dcae" },
     blurb:
-      "The package is intact and correctly signed, but nobody on this computer has agreed to " +
-      "trust this publisher yet — reviewing a package deliberately does not do that. Anyone can " +
-      "create a signing key, so check the key above against the one the publisher gave you. " +
-      "Subscribing records it, and every later version of this package must be signed by the " +
+      "The application is intact and correctly signed, but nobody on this computer has agreed to " +
+      "trust this publisher yet — reviewing an application deliberately does not do that. Anyone " +
+      "can create a signing key, so check the key above against the one the publisher gave you. " +
+      "Subscribing records it, and every later version of this application must be signed by the " +
       "same key or Calcula will refuse it.",
   },
   notPinnedNameConflict: {
@@ -186,11 +187,11 @@ const TRUST_REVIEW: Record<
     color: "#c5221f",
     box: { background: "#fdeceb", border: "1px solid #f3c4c2" },
     blurb:
-      "This package name is already trusted on this computer from a DIFFERENT registry, under a " +
-      "DIFFERENT publisher key. The signature here is valid, but a valid signature only proves " +
-      "the bytes were not altered — it does not say who signed them. Two registries claiming one " +
-      "name is exactly what a package hijack looks like. Compare both registries and both keys " +
-      "below; subscribing anyway needs a second, explicit confirmation.",
+      "This application name is already trusted on this computer from a DIFFERENT workspace, " +
+      "under a DIFFERENT publisher key. The signature here is valid, but a valid signature only " +
+      "proves the bytes were not altered — it does not say who signed them. Two workspaces " +
+      "claiming one name is exactly what an application hijack looks like. Compare both " +
+      "workspaces and both keys below; subscribing anyway needs a second, explicit confirmation.",
   },
 };
 
@@ -199,7 +200,7 @@ const TRUST_REVIEW_FALLBACK = {
   color: "#c5221f",
   box: { background: "#fdeceb", border: "1px solid #f3c4c2" } as React.CSSProperties,
   blurb:
-    "Calcula does not recognise the trust state reported for this package. Do not subscribe " +
+    "Calcula does not recognise the trust state reported for this application. Do not subscribe " +
     "until you know why.",
 };
 
@@ -211,53 +212,53 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const [versionPin, setVersionPin] = useState("latest");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [inspection, setInspection] = useState<PackageInspection | null>(null);
+  const [inspection, setInspection] = useState<ApplicationInspection | null>(null);
 
-  // The packages found in the chosen registry (D6 — no more blind text entry).
-  const [packages, setPackages] = useState<PackageInfo[] | null>(null);
+  // The applications found in the chosen workspace (D6 — no more blind text entry).
+  const [packages, setPackages] = useState<ApplicationInfo[] | null>(null);
   const [browsing, setBrowsing] = useState(false);
 
   // A pulled model source that saved sign-in could not connect — the
   // ConnectSourceDialog credentials window is open for it.
   const [pendingConn, setPendingConn] = useState<ConnectionInfo | null>(null);
 
-  // Saved-registry catalog (distribution brick 1): pick a known local OR http
-  // registry instead of typing a path/URL blind.
-  const [saved, setSaved] = useState<SavedRegistry[]>([]);
+  // Saved-workspace catalog (distribution brick 1): pick a known local OR http
+  // workspace instead of typing a path/URL blind.
+  const [saved, setSaved] = useState<SavedWorkspace[]>([]);
   useEffect(() => {
-    listRegistries().then(setSaved).catch(() => setSaved([]));
+    listWorkspaces().then(setSaved).catch(() => setSaved([]));
   }, []);
 
   const handleSaveRegistry = async () => {
     const location = registryPath.trim();
     if (!location) return;
     const name =
-      (await promptAsync("Name this registry", {
-        title: "Save registry",
+      (await promptAsync("Name this workspace", {
+        title: "Save workspace",
         defaultValue: location,
       })) ?? location;
     try {
       const id = crypto.randomUUID();
-      setSaved(await addRegistry({ id, name, location }));
+      setSaved(await addWorkspace({ id, name, location }));
     } catch {
       // ignore persistence failures — the path still works ad-hoc
     }
   };
 
-  // List the packages in a registry so the user can pick one instead of
+  // List the applications in a workspace so the user can pick one instead of
   // typing its name + version blind.
   const listPackagesAt = async (path: string) => {
     if (!path.trim()) {
-      setError("Choose a registry folder first.");
+      setError("Choose a workspace folder first.");
       return;
     }
     setError(null);
     setStatus(null);
     setBrowsing(true);
     try {
-      const found = await browseRegistry(path);
+      const found = await listApplicationsInWorkspace(path);
       setPackages(found);
-      if (found.length === 0) setStatus("No packages found in this registry.");
+      if (found.length === 0) setStatus("No applications found in this workspace.");
     } catch (err: unknown) {
       setError(String(err));
     } finally {
@@ -265,33 +266,30 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     }
   };
 
+  // Subscribing targets a workspace somebody already published into, and the
+  // pointer file is written by `LocalWorkspace::write_application_manifest` —
+  // the one write every publish route makes — so there is exactly one gesture
+  // here and no folder fallback. A location with no `workspace.calcula` has no
+  // applications in it either. The text field still takes a typed or pasted
+  // path, which is how an `https://` workspace is reached.
   const handleBrowse = async () => {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "Select Registry Folder",
-      });
-      if (selected && typeof selected === "string") {
-        setRegistryPath(selected);
-        setPackages(null);
-        // Discovery: immediately show what the chosen registry offers.
-        await listPackagesAt(selected);
-      }
-    } catch {
-      // user cancelled
-    }
+    const selected = await pickWorkspaceFile();
+    if (!selected) return;
+    setRegistryPath(selected);
+    setPackages(null);
+    // Discovery: immediately show what the chosen workspace offers.
+    await listPackagesAt(selected);
   };
 
   const handleListPackages = () => listPackagesAt(registryPath);
 
-  // Step 1: inspect the package and show its contents for review.
+  // Step 1: inspect the application and show its contents for review.
   // Nothing is materialized until the user explicitly accepts.
   const handleReview = async () => {
     setError(null);
-    setStatus("Inspecting package...");
+    setStatus("Inspecting application...");
     try {
-      const result = await inspectPackage(registryPath, packageName, versionPin);
+      const result = await inspectApplication(registryPath, packageName, versionPin);
       setInspection(result);
       setStatus(null);
     } catch (err: unknown) {
@@ -368,11 +366,11 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     setStatus("Pulling...");
 
     try {
-      const result = await pullPackage({
+      const result = await subscribeToApplication({
         registryPath,
         packageName,
         versionPin,
-        // Only set when the Review step SHOWED the cross-registry name conflict
+        // Only set when the Review step SHOWED the cross-workspace name conflict
         // and the user answered the second, differently-worded question. The
         // backend refuses a conflicting subscribe without it, so a UI that
         // forgets to ask cannot pin past a conflict.
@@ -416,16 +414,16 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       // Announce the distribution lifecycle. This is what makes the
       // ScriptableObjects extension register the pulled scripts and run the
       // consent flow in this session (not only after save/reopen), reloads
-      // chart libraries, and refreshes the Package Explorer. Fired even when the
-      // package carried no scripts — sheets/objects changed either way — and
-      // reachable by user scripts as a THINNED { packageName, version }.
+      // chart libraries, and refreshes the Application Explorer. Fired even when
+      // the application carried no scripts — sheets/objects changed either way
+      // — and reachable by user scripts as a THINNED { packageName, version }.
       emitAppEvent(AppEvents.PACKAGE_UPDATED, {
         packageName: result.packageName,
         version: result.resolvedVersion,
         kind: "subscribe",
         sheetsPulled: result.sheetsPulled,
         scriptsPulled: result.scriptsPulled,
-      } satisfies PackageUpdatedPayload);
+      } satisfies ApplicationUpdatedPayload);
 
       setStatus(
         `Pulled ${result.packageName} v${result.resolvedVersion}: ` +
@@ -435,7 +433,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
           : "")
       );
 
-      // Bring the package's model source(s) live: silent saved-sign-in first
+      // Bring the application's model source(s) live: silent saved-sign-in first
       // (Windows Credential Manager, keyed by server+database); only when
       // that fails ask for credentials in the ConnectSourceDialog window.
       try {
@@ -540,15 +538,15 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     </>
   );
 
-  // Review step: show what the package contains before anything lands.
+  // Review step: show what the application contains before anything lands.
   const reviewBody = inspection && (
     <>
       {(() => {
         // WHO signed this, shown FIRST — before the contents.
         //
-        // Reviewing a package is passive: the backend verifies the signature and
+        // Reviewing an application is passive: the backend verifies the signature and
         // reports the trust state but never writes a TOFU pin, because merely
-        // looking at a package is not a decision to trust its publisher. That
+        // looking at an application is not a decision to trust its publisher. That
         // makes this panel the moment the identity has to be legible. A valid
         // signature only proves the bytes were not altered after signing —
         // anyone can generate a key and sign — so the reviewer needs the KEY,
@@ -619,7 +617,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
 
       {/* Module scripts and notebooks are CODE, and the pre-pull review used to
           render neither: `inspect_package` returns both
-          (calp_commands.rs::PackageInspection) and this screen showed only
+          (calp_commands.rs::ApplicationInspection) and this screen showed only
           `scripts`. A reviewer reading "Scripts (2)" had no way to know the
           package also carried four notebooks and a formula-function library.
           They land inert — nothing here mounts or runs on subscribe — but the
@@ -743,7 +741,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const formBody = (
     <>
       <div style={fieldStyle}>
-        <label>Registry</label>
+        <label>Workspace</label>
         {saved.length > 0 && (
           <select
             style={{ ...inputStyle, marginBottom: 4 }}
@@ -752,30 +750,34 @@ export function SubscribeDialog({ onClose }: DialogProps) {
               if (e.target.value) {
                 setRegistryPath(e.target.value);
                 setPackages(null);
-                // Discovery: picking a saved registry lists its packages too.
+                // Discovery: picking a saved workspace lists its applications too.
                 void listPackagesAt(e.target.value);
               }
             }}
           >
-            <option value="">Saved registries…</option>
+            <option value="">Saved workspaces…</option>
             {saved.map((r) => (
               <option key={r.id} value={r.location}>
-                {r.name}{isHttpRegistry(r.location) ? "  (web)" : ""}
+                {r.name}{isHttpWorkspace(r.location) ? "  (web)" : ""}
               </option>
             ))}
           </select>
         )}
         <div style={{ display: "flex", gap: "4px" }}>
           <input style={{ ...inputStyle, flex: 1 }} value={registryPath} onChange={(e) => { setRegistryPath(e.target.value); setPackages(null); }}
-            placeholder="C:\shared\registry  or  https://host/registry" />
-          <button onClick={handleBrowse} style={{ whiteSpace: "nowrap" }}>Browse...</button>
+            placeholder="C:\shared\workspace  or  https://host/workspace" />
+          <button
+            onClick={handleBrowse}
+            style={{ whiteSpace: "nowrap" }}
+            title="Pick a workspace by its workspace.calcula file"
+          >Browse...</button>
           <button onClick={handleListPackages} disabled={browsing} style={{ whiteSpace: "nowrap" }}>
-            {browsing ? "..." : "List Packages"}
+            {browsing ? "..." : "List Applications"}
           </button>
         </div>
         {registryPath.trim() && (
           <button onClick={handleSaveRegistry} style={{ marginTop: 4, fontSize: 12, alignSelf: "flex-start" }}>
-            ★ Save this registry
+            ★ Save this workspace
           </button>
         )}
       </div>
@@ -826,7 +828,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       )}
 
       <div style={fieldStyle}>
-        <label>Package Name</label>
+        <label>Application Name</label>
         <input style={inputStyle} value={packageName} onChange={(e) => setPackageName(e.target.value)}
           placeholder="sales-report" />
       </div>
@@ -848,7 +850,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         <span style={{ fontWeight: 600 }}>
           {inspection
             ? `Review: ${inspection.packageName} v${inspection.resolvedVersion}`
-            : "Subscribe to Package"}
+            : "Subscribe to Application"}
         </span>
         <button style={closeButtonStyle} onClick={onClose} aria-label="Close" title="Close">
           ✕
@@ -868,8 +870,9 @@ export function SubscribeDialog({ onClose }: DialogProps) {
             <button onClick={onClose}>Cancel</button>
             {/*
               A NAME CONFLICT gets a second, differently-worded question. The
-              first question is "do you want this package"; this one is "do you
-              accept that two registries claim this name under different keys".
+              first question is "do you want this application"; this one is "do
+              you accept that two workspaces claim this name under different
+              keys".
               Same two-step shape as `acceptPublisherChange` on add-in installs —
               and the reason the Review step needs its own conflict status:
               Review must never say nothing and then have Subscribe fail.
@@ -884,8 +887,8 @@ export function SubscribeDialog({ onClose }: DialogProps) {
               }}
               title={
                 inspection.trustStatus === "notPinnedNameConflict"
-                  ? "Another registry already holds this package name under a different " +
-                    "publisher key. Subscribing records THIS key for THIS registry as well."
+                  ? "Another workspace already holds this application name under a different " +
+                    "publisher key. Subscribing records THIS key for THIS workspace as well."
                   : undefined
               }
             >
@@ -898,10 +901,10 @@ export function SubscribeDialog({ onClose }: DialogProps) {
           <>
             <button onClick={onClose}>Cancel</button>
             <button
-              title="Deep-inspect this package in the standalone Package Inspector window"
+              title="Deep-inspect this application in the standalone Application Inspector window"
               disabled={!registryPath.trim() || !packageName.trim()}
               onClick={() =>
-                void openPackageInspectorWindow({
+                void openApplicationInspectorWindow({
                   registryPath: registryPath.trim(),
                   packageName: packageName.trim(),
                   versionPin: versionPin.trim() || "latest",

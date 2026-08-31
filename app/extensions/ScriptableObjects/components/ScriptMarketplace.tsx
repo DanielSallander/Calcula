@@ -1,5 +1,5 @@
 //! FILENAME: app/extensions/ScriptableObjects/components/ScriptMarketplace.tsx
-// PURPOSE: The Script Libraries browser — search a .calp registry for library
+// PURPOSE: The Script Libraries browser — search a .calp workspace for library
 //          packages, review the WHOLE dependency closure, install against the
 //          workbook lockfile, check for updates, and uninstall.
 // CONTEXT: This replaces the former "Script Marketplace", which was a local
@@ -28,7 +28,7 @@
 import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { showToast } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
-import { listRegistries, type SavedRegistry } from "@api/distributionRegistries";
+import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces";
 import {
   searchLibraries,
   planInstall,
@@ -164,11 +164,11 @@ const tag = (bg: string, fg: string): React.CSSProperties => ({
  * it had never seen. Neutral tone, and the word "verified" is reserved for the
  * one status that earns it.
  *
- * `notInstalledNameConflict` is the scoped-pin twin: another registry is already
+ * `notInstalledNameConflict` is the scoped-pin twin: another workspace is already
  * trusted for this library NAME under a DIFFERENT publisher key. Pins are keyed by
- * (registry, package), so a second registry serving a familiar name is first
- * contact rather than a refusal — and this badge is what stops that from being a
- * QUIET first contact. It is red, deliberately.
+ * (workspace, library name), so a second workspace serving a familiar name is
+ * first contact rather than a refusal — and this badge is what stops that from
+ * being a QUIET first contact. It is red, deliberately.
  *
  * `unknown` exists so a status added in Rust and not added here degrades to a
  * caution badge naming the raw value, rather than silently reading as safe.
@@ -196,7 +196,7 @@ function trustBadge(status: string): { label: string; style: React.CSSProperties
       };
     case "notInstalledNameConflict":
       return {
-        label: "NAME CONFLICT — another registry owns this name",
+        label: "NAME CONFLICT — another workspace owns this name",
         style: tag("#FDE7E9", "#A80000"),
       };
     default:
@@ -229,7 +229,7 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
   useEffect(() => winReset(), [winReset]); // open centered at its natural size
 
   const [tab, setTab] = useState<Tab>("browse");
-  const [registries, setRegistries] = useState<SavedRegistry[]>([]);
+  const [registries, setRegistries] = useState<SavedWorkspace[]>([]);
   const [location, setLocation] = useState("");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<RegistryPackageInfo[] | null>(null);
@@ -246,7 +246,7 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
   useEffect(() => {
     void (async () => {
       try {
-        const saved = await listRegistries();
+        const saved = await listWorkspaces();
         setRegistries(saved);
         if (saved.length > 0) setLocation(saved[0].location);
       } catch {
@@ -266,7 +266,7 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
 
   const runSearch = useCallback(async () => {
     if (!location.trim()) {
-      setError("Choose or type a registry location first.");
+      setError("Choose or type a workspace location first.");
       return;
     }
     setBusy(true);
@@ -474,7 +474,7 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
           value={registries.some((r) => r.location === location) ? location : ""}
           onChange={(e) => setLocation(e.target.value)}
         >
-          <option value="">(saved registries)</option>
+          <option value="">(saved workspaces)</option>
           {registries.map((r) => (
             <option key={r.id} value={r.location}>
               {r.name}
@@ -483,7 +483,7 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
         </select>
         <input
           style={{ ...input, flex: 1, minWidth: 180 }}
-          placeholder="Registry path or https:// URL"
+          placeholder="Workspace path or https:// URL"
           value={location}
           onChange={(e) => setLocation(e.target.value)}
         />
@@ -708,8 +708,8 @@ export default function ScriptMarketplace({ onClose }: DialogProps): React.React
                 }
                 title={
                   conflictingPackages(plan).length > 0
-                    ? "Another registry already holds this package name under a different " +
-                      "publisher key. Installing records THIS key for THIS registry as well."
+                    ? "Another workspace already holds this library name under a different " +
+                      "publisher key. Installing records THIS key for THIS workspace as well."
                     : undefined
                 }
                 onClick={() => void confirmInstall()}

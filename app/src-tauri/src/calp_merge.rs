@@ -31,7 +31,7 @@ use tauri::State;
 
 use calp::diff::{DiffOptions, DiffSide, VersionDiff};
 use calp::merge::{MergeAnalysis, MergeVerdict};
-use calp::transport::RegistryTransport;
+use calp::transport::WorkspaceTransport;
 
 use crate::bi::types::BiState;
 use crate::AppState;
@@ -69,10 +69,10 @@ pub fn calp_push_merge_analyze(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     let ctx = MergeContext::resolve(&state)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&ctx.registry_url)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&ctx.registry_url)
         .map_err(|e| e.to_string())?;
     let package_manifest = registry
-        .get_package_manifest(&ctx.package_name)
+        .get_application_manifest(&ctx.package_name)
         .map_err(|e| e.to_string())?;
     let head = calp::head_version(&package_manifest)
         .ok_or_else(|| format!("'{}' has no published versions.", ctx.package_name))?;
@@ -150,10 +150,10 @@ pub fn calp_push_merge_apply(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     let ctx = MergeContext::resolve(&state)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&ctx.registry_url)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&ctx.registry_url)
         .map_err(|e| e.to_string())?;
     let package_manifest = registry
-        .get_package_manifest(&ctx.package_name)
+        .get_application_manifest(&ctx.package_name)
         .map_err(|e| e.to_string())?;
     let head = calp::head_version(&package_manifest)
         .ok_or_else(|| format!("'{}' has no published versions.", ctx.package_name))?;
@@ -237,7 +237,7 @@ pub fn calp_push_merge_apply(
     // fast-forward, and its recorded lineage will say it came from there.
     {
         let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut link = state.workspace_link.write(&effect).map_err(|e| e.to_string())?;
+        let mut link = state.working_copy_link.write(&effect).map_err(|e| e.to_string())?;
         if let Some(l) = link.as_mut() {
             l.base_version = head_str.clone();
         }
@@ -262,7 +262,7 @@ struct MergeContext {
 
 impl MergeContext {
     fn resolve(state: &AppState) -> Result<Self, String> {
-        let link = state.workspace_link.read().map_err(|e| e.to_string())?;
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
         let link = link.as_ref().ok_or_else(|| {
             "This workbook is not a working copy of any package, so there is nothing to \
              merge with."
@@ -361,7 +361,7 @@ fn diff_working_copy_against_base(
         true,
     )?;
 
-    let memory = calp::MemoryRegistry::new();
+    let memory = calp::MemoryWorkspace::new();
     let working_version = calp::SemVer::new(0, 0, 0);
     crate::calp_commands::publish_into_for_preview(
         state,

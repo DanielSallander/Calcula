@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/Distribution/components/inspector/shared.tsx
-// PURPOSE: Shared visual language for the Package Inspector window — light
+// PURPOSE: Shared visual language for the Application Inspector window — light
 //          standalone-window chrome like the Model Editor (secondary windows
 //          do not load the app skin), plus small presentation helpers.
 
@@ -150,7 +150,7 @@ export function StatusLine({
   if (empty)
     return (
       <div style={{ ...mutedStyle, fontSize: 12, padding: 8 }}>
-        {emptyText ?? "Nothing of this kind in the package."}
+        {emptyText ?? "Nothing of this kind in the application."}
       </div>
     );
   return null;

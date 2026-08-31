@@ -1,7 +1,7 @@
 //! FILENAME: core/calp/src/diff.rs
-//! PURPOSE: What changed between two versions of a package — or between a
+//! PURPOSE: What changed between two versions of an application — or between a
 //! working copy and the version it was authored against.
-//! CONTEXT: The registry has always kept every version, but nothing could say
+//! CONTEXT: The workspace has always kept every version, but nothing could say
 //! what distinguished them. The refresh preview was the closest thing, and it
 //! reported `cells_changed: 0` unconditionally with a comment saying a real
 //! diff would be expensive — so the confirmation dialog asked the user to
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CalpError;
 use crate::manifest::VersionManifest;
-use crate::transport::RegistryTransport;
+use crate::transport::WorkspaceTransport;
 
 // ---------------------------------------------------------------------------
 // Sides
@@ -55,10 +55,10 @@ use crate::transport::RegistryTransport;
 /// The in-memory arm is what lets the push dialog show "what your push changes"
 /// without publishing anything: the app runs the REAL publish pipeline against
 /// an in-memory transport and hands the result here, so the preview can never
-/// describe a package different from the one a push would write.
+/// describe an application different from the one a push would write.
 pub enum DiffSide<'a> {
     Published {
-        transport: &'a dyn RegistryTransport,
+        transport: &'a dyn WorkspaceTransport,
         package: &'a str,
         version: &'a str,
         manifest: &'a VersionManifest,
@@ -110,7 +110,7 @@ impl<'a> DiffSide<'a> {
 // Options
 // ---------------------------------------------------------------------------
 
-/// Budgets, so a diff of a large package stays a bounded operation.
+/// Budgets, so a diff of a large application stays a bounded operation.
 ///
 /// Every limit has a matching `*_truncated` / `counts_exact` flag in the
 /// output. Silently reporting a truncated result as a complete one is how a
@@ -125,7 +125,7 @@ pub struct DiffOptions {
     pub max_sheet_data_bytes: usize,
     /// Cap on how many changed sheet data artifacts are parsed at all.
     pub max_parsed_sheet_artifacts: usize,
-    /// Map a working copy's LOCAL sheet ids onto the package's ids.
+    /// Map a working copy's LOCAL sheet ids onto the application's ids.
     ///
     /// Needed when the working copy came from a `pull` (which mints fresh local
     /// ids) rather than a `checkout` (which preserves them): without it every
@@ -218,7 +218,7 @@ pub struct ObjectChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetDiffSummary {
-    /// The PACKAGE sheet id (after any working-copy remap).
+    /// The APPLICATION sheet id (after any working-copy remap).
     pub sheet_id: String,
     pub name: String,
     /// "added" | "removed" | "modified" | "renamed"
@@ -318,7 +318,7 @@ impl CellChangeCounts {
 // The entry points
 // ---------------------------------------------------------------------------
 
-/// Compare two sides of a package.
+/// Compare two sides of an application.
 pub fn diff_sides(
     from: &DiffSide,
     to: &DiffSide,
@@ -518,10 +518,10 @@ struct DiffContext<'a, 'b> {
     from: &'a DiffSide<'b>,
     to: &'a DiffSide<'b>,
     opts: &'a DiffOptions,
-    /// local sheet id -> package sheet id.
+    /// local sheet id -> application sheet id.
     sheet_id_map: &'a HashMap<String, String>,
-    /// package sheet id -> local sheet id. The inverse, because paths are
-    /// COMPARED in package space but must be READ from the `to` side in its own
+    /// application sheet id -> local sheet id. The inverse, because paths are
+    /// COMPARED in application space but must be READ from the `to` side in its own
     /// space — a working copy that came from a pull stores its sheets under the
     /// local ids the pull minted.
     reverse_sheet_ids: HashMap<String, String>,
@@ -532,7 +532,7 @@ struct DiffContext<'a, 'b> {
 }
 
 impl DiffContext<'_, '_> {
-    /// A path in package space, translated to how the `to` side stores it.
+    /// A path in application space, translated to how the `to` side stores it.
     fn to_path(&self, rel: &str) -> String {
         if self.reverse_sheet_ids.is_empty() {
             return rel.to_string();
@@ -559,7 +559,7 @@ impl DiffContext<'_, '_> {
             }
         }
 
-        // Media never enters the payload as bytes — a package can carry
+        // Media never enters the payload as bytes — an application can carry
         // megabytes of images, and a diff that inlined them would be unusable
         // and would leak content into a summary meant to be skimmed.
         if let Some(hash) = rel.strip_prefix("media/") {
@@ -647,7 +647,7 @@ impl DiffContext<'_, '_> {
         }
 
         // Anything this build does not recognise. Reported rather than dropped:
-        // a diff that silently omits a package's newest artifact type is a diff
+        // a diff that silently omits an application's newest artifact type is a diff
         // that says "nothing changed" about the thing that did.
         self.push_json_object(rel, "artifact", rel, presence)
     }
@@ -935,7 +935,7 @@ impl DiffContext<'_, '_> {
 // ---------------------------------------------------------------------------
 
 /// Rewrite `sheets/{local}/…` paths to `sheets/{package}/…` so a working copy
-/// whose sheets were minted by a pull lines up with the package it came from.
+/// whose sheets were minted by a pull lines up with the application it came from.
 fn remap_sheet_paths(
     sums: &BTreeMap<String, String>,
     map: &HashMap<String, String>,
@@ -1049,7 +1049,7 @@ fn diff_manifest_fields(before: &VersionManifest, after: &VersionManifest) -> Ve
     push("minAppVersion", &before.min_app_version, &after.min_app_version);
     push("publishedBy", &before.published_by, &after.published_by);
     // Loud: under one TOFU pin this should be impossible, and a subscriber
-    // whose pin no longer matches is exactly the "package hijack" signal.
+    // whose pin no longer matches is exactly the "application hijack" signal.
     push("publisherKey", &before.publisher_key, &after.publisher_key);
     out
 }
@@ -1250,7 +1250,7 @@ fn field_str(v: Option<&serde_json::Value>, field: &str) -> String {
 ///
 /// The engine serializes snake_case with no `rename_all`, and a measure's
 /// display text lives under `source` (`expression` is the parsed AST) — the
-/// same two facts the Package Inspector had to learn. Both spellings are tried
+/// same two facts the Application Inspector had to learn. Both spellings are tried
 /// so this keeps working either way.
 fn diff_model(
     ds: &str,

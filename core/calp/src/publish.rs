@@ -1,7 +1,7 @@
 //! FILENAME: core/calp/src/publish.rs
-//! PURPOSE: Publish a workbook's selected sheets as a .calp package version.
+//! PURPOSE: Publish a workbook's selected sheets as a .calp application version.
 //! CONTEXT: The author selects sheets to publish, specifies a version, and
-//! the content is written to the registry as an immutable version directory.
+//! the content is written to the workspace as an immutable version directory.
 
 use std::path::Path;
 
@@ -11,10 +11,10 @@ use persistence::{SavedCell, SavedTable, SavedObjectScript, SavedScript, SavedNo
 use crate::error::CalpError;
 use crate::manifest::*;
 use crate::signing::PublisherKeypair;
-use crate::transport::RegistryTransport;
+use crate::transport::WorkspaceTransport;
 use crate::version::SemVer;
 
-/// A data source to embed in the published package.
+/// A data source to embed in the published application.
 pub struct PublishDataSource {
     pub id: String,
     pub name: String,
@@ -23,7 +23,7 @@ pub struct PublishDataSource {
     pub database: String,
     /// The BI DataModel as JSON (will be written to models/{id}/model.json).
     pub model_json: serde_json::Value,
-    pub bindings: Vec<PackageBinding>,
+    pub bindings: Vec<TableBinding>,
     /// Materialized calculated-table snapshots (Arrow IPC stream bytes),
     /// written to models/{id}/calculated_tables/{index}.arrow so subscribers
     /// without source access still see the derived tables' data.
@@ -55,35 +55,35 @@ pub struct ExcludedRegion {
     pub end_col: u32,
 }
 
-/// What a publish is: the creation of a NEW package, or a push of the next
+/// What a publish is: the creation of a NEW application, or a push of the next
 /// version of one that already exists.
 ///
 /// There is deliberately no `Default` and no `Option` wrapper (the same reason
 /// [`crate::integrity::PinPolicy`] has none): a caller that has not thought
 /// about which of the two this is does not compile. That single property is
-/// what makes it impossible to create a package by mis-typing the name of an
+/// what makes it impossible to create an application by mis-typing the name of an
 /// existing one, and it doubles as the optimistic-concurrency token — an
 /// `Update` names the version the author actually worked from, and the gate
-/// refuses if the registry has moved on since.
+/// refuses if the workspace has moved on since.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushMode {
-    /// First publish under this name. Refused if the package already exists.
+    /// First publish under this name. Refused if the application already exists.
     CreateNew,
-    /// Next version of an existing package. Refused unless the registry's head
+    /// Next version of an existing application. Refused unless the workspace's head
     /// version is still `expected_base`.
     Update { expected_base: SemVer },
 }
 
-/// The registry's head version for a package: the HIGHEST published version,
+/// The workspace's head version for an application: the HIGHEST published version,
 /// which is what a `latest` pin resolves to and therefore what a checkout hands
 /// the author.
 ///
-/// Deliberately not `PackageManifest::latest_version()`, which returns the LAST
-/// list entry. The two agree for every package published through the push gates
-/// (the monotonic-version gate keeps them agreeing), but they can disagree in a
-/// package written before those gates existed — and when they disagree, the one
+/// Deliberately not `ApplicationManifest::latest_version()`, which returns the LAST
+/// list entry. The two agree for every application published through the push gates
+/// (the monotonic-version gate keeps them agreeing), but they can disagree in an
+/// application written before those gates existed — and when they disagree, the one
 /// the author is actually looking at is the one `latest` resolves to.
-pub fn head_version(manifest: &PackageManifest) -> Option<SemVer> {
+pub fn head_version(manifest: &ApplicationManifest) -> Option<SemVer> {
     manifest.parsed_versions().into_iter().max()
 }
 
@@ -91,21 +91,21 @@ pub fn head_version(manifest: &PackageManifest) -> Option<SemVer> {
 ///
 /// Two sources, in order:
 ///
-/// 1. **The package's co-publisher list**, if it has one — a `publishers.json`
-///    at the package root, signed by the ROOT key (whoever published version 1,
+/// 1. **The application's co-publisher list**, if it has one — a `publishers.json`
+///    at the application root, signed by the ROOT key (whoever published version 1,
 ///    an anchor nothing can move because version 1 is immutable). Its entries
 ///    are delegates the owner deliberately added.
-/// 2. **Otherwise the head version's signer**, so a package with no list stays
+/// 2. **Otherwise the head version's signer**, so an application with no list stays
 ///    with the identity that has been publishing it.
 ///
 /// A list that exists but cannot be verified is an ERROR, never a fallback to
 /// (2): "no delegates" and "delegates I could not read" must not behave the
 /// same, or deleting the list becomes a way to remove people from it.
 ///
-/// An empty result means "no continuity to enforce" — a package whose head
+/// An empty result means "no continuity to enforce" — an application whose head
 /// version predates signing, or one with no versions at all.
 pub fn resolve_authorized_keys(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package: &str,
     head: &SemVer,
 ) -> Result<Vec<String>, CalpError> {
@@ -121,19 +121,19 @@ pub fn resolve_authorized_keys(
     Ok(vec![head_manifest.publisher_key])
 }
 
-/// TEST ONLY: derive the push mode from what the registry already holds —
-/// `CreateNew` for a package's first version, `Update` against its current head
+/// TEST ONLY: derive the push mode from what the workspace already holds —
+/// `CreateNew` for an application's first version, `Update` against its current head
 /// otherwise.
 ///
 /// Deliberately `#[cfg(test)]` and crate-private. A production caller must take
 /// the base version from the WORKING COPY's workspace link, which is the whole
-/// point of the base-version gate: asking the registry what the head is and
+/// point of the base-version gate: asking the workspace what the head is and
 /// then declaring that as your base makes the gate a tautology and reinstates
 /// the lost-update it exists to prevent.
 #[cfg(test)]
-pub(crate) fn test_mode_for(registry: &dyn RegistryTransport, package: &str) -> PushMode {
+pub(crate) fn test_mode_for(registry: &dyn WorkspaceTransport, package: &str) -> PushMode {
     match registry
-        .get_package_manifest(package)
+        .get_application_manifest(package)
         .ok()
         .and_then(|m| head_version(&m))
     {
@@ -148,12 +148,12 @@ pub struct PublishRequest<'a> {
     pub package_name: String,
     pub version: SemVer,
     pub kind: String,
-    /// Whether this creates the package or pushes the next version of it.
-    /// See [`PushMode`] — this is the gate that makes accidental package
+    /// Whether this creates the application or pushes the next version of it.
+    /// See [`PushMode`] — this is the gate that makes accidental application
     /// creation and lost-update overwrites structurally impossible.
     pub mode: PushMode,
     /// What changed in this version, in the author's own words. Required (non
-    /// -blank) for [`PushMode::Update`]; optional when creating a package.
+    /// -blank) for [`PushMode::Update`]; optional when creating an application.
     /// Lands in the SIGNED version manifest, so history cannot be rewritten by
     /// editing a file on the share.
     pub change_summary: String,
@@ -167,23 +167,23 @@ pub struct PublishRequest<'a> {
     /// v21 writeback columns, distributed). Governance for model-keyed
     /// submissions — see [`crate::writeback::ModelWritebackDeclaration`].
     pub model_writebacks: Option<Vec<crate::writeback::ModelWritebackDeclaration>>,
-    /// Object scripts to include in the package.
+    /// Object scripts to include in the application.
     /// If None, all workbook object scripts are published.
     pub object_scripts: Option<Vec<SavedObjectScript>>,
-    /// Standalone module scripts to include in the package (C8).
+    /// Standalone module scripts to include in the application (C8).
     /// If None, all workbook module scripts (`workbook.scripts`) are published;
     /// Some means exactly these. Distributed inert — never auto-executed.
     pub module_scripts: Option<Vec<SavedScript>>,
-    /// Standalone notebooks to include in the package (C8).
+    /// Standalone notebooks to include in the application (C8).
     /// If None, all workbook notebooks (`workbook.notebooks`) are published;
     /// Some means exactly these. Execution metadata is stripped at write time.
     pub notebooks: Option<Vec<SavedNotebook>>,
-    /// Data source definitions to embed in the package for live data.
+    /// Data source definitions to embed in the application for live data.
     pub data_sources: Vec<PublishDataSource>,
     /// Cell regions to exclude from published sheet data (e.g., pivot output).
     /// These regions are recalculated by subscribers from the source definition.
     pub excluded_regions: Vec<ExcludedRegion>,
-    /// Generic custom objects to carry in the package (distribution brick 4) —
+    /// Generic custom objects to carry in the application (distribution brick 4) —
     /// the open channel for object families beyond the built-in set. Each is
     /// written as an opaque-JSON artifact under `custom_objects/{kind}/{id}.json`
     /// and listed in the manifest. Built-in producers (cell types) and
@@ -197,9 +197,9 @@ pub struct PublishRequest<'a> {
     pub include_comments: bool,
     /// Minimum app version written into the version manifest VERBATIM (empty =
     /// no gate). The pull-time compatibility gate
-    /// (`compat::check_min_app_version`) refuses the package on older apps
+    /// (`compat::check_min_app_version`) refuses the application on older apps
     /// with an honest "update the app" error. Hosts stamp their own version
-    /// here when the package carries artifacts an older app would silently
+    /// here when the application carries artifacts an older app would silently
     /// drop — see [`carries_wave_content`].
     pub min_app_version: String,
 }
@@ -211,7 +211,7 @@ pub struct PublishCustomObject {
     pub kind: String,
     pub id: String,
     pub name: String,
-    /// For per-sheet objects: the package sheet id (remapped on pull). None =
+    /// For per-sheet objects: the application sheet id (remapped on pull). None =
     /// workbook-scoped.
     pub sheet_id: Option<SheetId>,
     pub payload: serde_json::Value,
@@ -234,7 +234,7 @@ pub struct PublishResult {
     pub charts_published: usize,
     /// Sparkline sheet-entries on the published sheets.
     pub sparklines_published: usize,
-    /// Pivot definitions carried by the package.
+    /// Pivot definitions carried by the application.
     pub pivots_published: usize,
     /// Sheets that carried conditional-formatting rules.
     pub conditional_format_sheets: usize,
@@ -251,15 +251,15 @@ pub struct PublishResult {
     pub outline_sheets_published: usize,
     /// Cell-behavior bindings on the published sheets (granular bricks phase 2).
     pub cell_behaviors_published: usize,
-    /// Pane controls (Controls pane) carried by the package (workbook-scoped).
+    /// Pane controls (Controls pane) carried by the application (workbook-scoped).
     pub pane_controls_published: usize,
     /// Slicers on the published sheets (Wave A).
     pub slicers_published: usize,
-    /// Ribbon filters carried by the package (workbook-scoped, Wave A).
+    /// Ribbon filters carried by the application (workbook-scoped, Wave A).
     pub ribbon_filters_published: usize,
-    /// Saved pivot layouts carried by the package (workbook-scoped, Wave A).
+    /// Saved pivot layouts carried by the application (workbook-scoped, Wave A).
     pub pivot_layouts_published: usize,
-    /// Extension-data keys carried by the package (workbook-scoped, Wave A).
+    /// Extension-data keys carried by the application (workbook-scoped, Wave A).
     pub extension_data_published: usize,
     /// Embedded BI data-source models.
     pub data_sources_published: usize,
@@ -448,10 +448,10 @@ pub fn macro_reference_warnings(
 /// actually write: slicers / opted-in comments / scenarios / outlines on the
 /// published sheets, ribbon filters / saved pivot layouts / extension data
 /// (workbook-scoped), or a non-default document theme. Apps that predate
-/// these artifacts pull such a package "successfully" while silently dropping
+/// these artifacts pull such an application "successfully" while silently dropping
 /// them — so the publishing host stamps `PublishRequest::min_app_version`
 /// with its OWN version exactly when this returns true, letting the pull-time
-/// compatibility gate refuse honestly instead. Cell-only packages return
+/// compatibility gate refuse honestly instead. Cell-only applications return
 /// false and stay pullable by older apps.
 pub fn carries_wave_content(request: &PublishRequest) -> bool {
     let wb = request.workbook;
@@ -489,14 +489,14 @@ pub fn carries_wave_content(request: &PublishRequest) -> bool {
             .any(|b| published_sheet_ids.contains(&b.sheet_id))
         || wb.theme != engine::theme::ThemeDefinition::default()
         // A DYNAMIC-ARRAY SPILL EXTENT on a published sheet. It fails this
-        // function's test in its sharpest form: an older app pulls the package
+        // function's test in its sharpest form: an older app pulls the application
         // "successfully", writes the spilled cells as ordinary literals, and
         // silently drops the record of which origin owns them -- so the
         // subscriber gets an array that LOOKS right, is protected by nothing,
         // and collapses to an error the first time anything re-evaluates its
         // origin (register 2ab). Refusing the pull is the honest failure.
         //
-        // Cell-only packages with no array still return false here and stay
+        // Cell-only applications with no array still return false here and stay
         // pullable by older apps, which is the point of the whole function.
         || request.sheet_indices.iter().any(|&idx| {
             wb.sheets
@@ -505,14 +505,14 @@ pub fn carries_wave_content(request: &PublishRequest) -> bool {
         })
 }
 
-/// Publish selected sheets from a workbook to a local registry.
+/// Publish selected sheets from a workbook to a local workspace.
 ///
 /// `profile_dir` is the per-user profile directory holding the publisher's
 /// Ed25519 keypair (`publisher-key.json`, created on first publish). The
 /// version manifest carries the publisher's public key, and its raw on-disk
 /// bytes are signed into a detached `version-manifest.sig` (S5 phase 2).
 pub fn publish(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     request: &PublishRequest,
     profile_dir: &Path,
 ) -> Result<PublishResult, CalpError> {
@@ -575,7 +575,7 @@ pub fn publish(
             instance_id: s.instance_id.clone(),
             description: s.description.clone(),
             // R19: the publisher's declared ceiling for this script, lifted
-            // from its source pragmas. This is what the package's scripts may
+            // from its source pragmas. This is what the application's scripts may
             // use; the subscriber's pull sets each script's ceiling from this.
             capabilities: persistence::parse_declared_capabilities(&s.source),
         }
@@ -647,12 +647,12 @@ pub fn publish(
         publisher_key: keypair.public_key_hex(),
         publisher_name: keypair.display_name(),
         // The host-supplied minimum, verbatim (empty = no minimum). The app
-        // stamps its own version when the package carries Wave A/B artifacts
+        // stamps its own version when the application carries Wave A/B artifacts
         // an older app would silently drop (carries_wave_content); cell-only
-        // packages stay pullable by older apps.
+        // applications stay pullable by older apps.
         min_app_version: request.min_app_version.clone(),
         // Push lineage, inside the signature. `base_version` is the head this
-        // push was authored against; empty when the package is being created.
+        // push was authored against; empty when the application is being created.
         base_version: match &request.mode {
             PushMode::CreateNew => String::new(),
             PushMode::Update { expected_base } => expected_base.to_string(),
@@ -668,7 +668,7 @@ pub fn publish(
         object_scripts: published_scripts,
         module_scripts: published_modules,
         notebooks: published_notebooks,
-        data_sources: request.data_sources.iter().map(|ds| PackageDataSource {
+        data_sources: request.data_sources.iter().map(|ds| ApplicationDataSource {
             id: ds.id.clone(),
             name: ds.name.clone(),
             connection_type: ds.connection_type.clone(),
@@ -697,9 +697,9 @@ pub fn publish(
     let ver = version_str.as_str();
 
     // ----------------------------------------------------------------------
-    // The registry-write phase, start to finish, under ONE lock.
+    // The workspace-write phase, start to finish, under ONE lock.
     //
-    // Every gate below reads a registry fact and then acts on it, so the read
+    // Every gate below reads a workspace fact and then acts on it, so the read
     // and the write it authorizes have to be in one critical section: a check
     // outside the lock is a TOCTOU window on a share two developers publish to.
     // The lock previously covered only the final version-list append, which
@@ -708,21 +708,21 @@ pub fn publish(
     // of the same version can never interleave artifact bytes under one signed
     // checksum map.
     //
-    // Cost: publishes to DIFFERENT packages in one registry serialize too. For
+    // Cost: publishes to DIFFERENT applications in one workspace serialize too. For
     // the share-with-a-few-developers case this design targets that is the
-    // right trade, and a waiter that gives up gets `RegistryBusy` — an honest,
+    // right trade, and a waiter that gives up gets `WorkspaceBusy` — an honest,
     // retryable answer rather than a corrupted half-publish.
     // ----------------------------------------------------------------------
     let _lock = registry.lock()?;
 
     // Gate 1 — mode. Which of the two things is this?
-    let existing_manifest = registry.get_package_manifest(pkg).ok();
+    let existing_manifest = registry.get_application_manifest(pkg).ok();
     match (&request.mode, &existing_manifest) {
         (PushMode::CreateNew, Some(_)) => {
-            return Err(CalpError::PackageAlreadyExists(pkg.to_string()));
+            return Err(CalpError::ApplicationAlreadyExists(pkg.to_string()));
         }
         (PushMode::Update { .. }, None) => {
-            return Err(CalpError::PackageNotFound(pkg.to_string()));
+            return Err(CalpError::ApplicationNotFound(pkg.to_string()));
         }
         _ => {}
     }
@@ -771,7 +771,7 @@ pub fn publish(
 
             // Gate 5 — publisher key continuity. Pushing with a different key
             // does not fail here today; it fails at every SUBSCRIBER's next
-            // refresh, as a trust-pin change that looks exactly like a package
+            // refresh, as a trust-pin change that looks exactly like an application
             // hijack. Refusing at the source is the only place the person who
             // can still do something about it is present.
             let authorized = resolve_authorized_keys(registry, pkg, &head)?;
@@ -795,7 +795,7 @@ pub fn publish(
     }
 
     // Gate 6 — immutability. Still a distinct check from the monotonic gate: a
-    // CreateNew into a half-written package directory reaches here too.
+    // CreateNew into a half-written application directory reaches here too.
     if registry.version_exists(pkg, ver) {
         return Err(CalpError::VersionAlreadyPublished {
             package: request.package_name.clone(),
@@ -866,7 +866,7 @@ pub fn publish(
 
         // Per-cell style assignments (A1 -> style index). data.json does NOT
         // carry style_index (it is always 0 there), so without this companion
-        // map the registry above could never be re-associated with cells and
+        // map the workspace above could never be re-associated with cells and
         // all per-cell formatting would be lost on the consuming side (subscriber
         // refresh, HTML export). Only written when there are non-default styles,
         // mirroring named_ranges.json. Uses the (possibly region-filtered) cells.
@@ -880,7 +880,7 @@ pub fn publish(
         }
 
         // Layout: column widths + row heights, plus the row/column default-style
-        // tiers. The tiers must travel with the package — a whole-column format
+        // tiers. The tiers must travel with the application — a whole-column format
         // is stored ONCE there rather than as a style on every cell, so omitting
         // them would silently drop that formatting for the subscriber while
         // per-cell styles came through fine.
@@ -1128,7 +1128,7 @@ pub fn publish(
 
     // Write pane controls (Controls pane) — WORKBOOK-scoped like pivot
     // definitions, not filtered per sheet: the pane strip belongs to the
-    // workbook, so a report package carries all of it. Sorted by (order, id)
+    // workbook, so a report application carries all of it. Sorted by (order, id)
     // for deterministic artifact bytes across publishes (stable checksums +
     // blob dedup), matching collect_pane_controls_for_save's .cala ordering.
     //
@@ -1153,7 +1153,7 @@ pub fn publish(
     }
 
     // Write slicers on the published sheets (Wave A) — sheet-anchored like
-    // charts: filtered to the published selection and keyed by the PACKAGE
+    // charts: filtered to the published selection and keyed by the APPLICATION
     // sheet id (the pull side remaps to the local sheet and drops slicers
     // whose sheet wasn't pulled). Sorted by id for deterministic artifact
     // bytes across publishes (the live store is a HashMap).
@@ -1178,9 +1178,9 @@ pub fn publish(
 
     // Write ribbon filters (Wave A) — WORKBOOK-scoped like pane controls, so
     // all of them travel. They are BI-only by design: each carries its stable
-    // package data-source id, and pull re-binds connection ids to the freshly
-    // materialized package connections (filters whose data source is not
-    // embedded in the package are skipped at pull, never clobbered). Sorted by
+    // application data-source id, and pull re-binds connection ids to the freshly
+    // materialized application connections (filters whose data source is not
+    // embedded in the application are skipped at pull, never clobbered). Sorted by
     // (order, id) for deterministic bytes, matching pane_controls.
     let published_ribbon_filters = {
         let mut filters = request.workbook.ribbon_filters.clone();
@@ -1250,7 +1250,7 @@ pub fn publish(
     if !scripts_to_publish.is_empty() {
         for script in &scripts_to_publish {
             let mut def = calcula_format::features::object_scripts::ObjectScriptDef::from(*script);
-            // Packages ship provenance-clean: the subscriber stamps
+            // Applications ship provenance-clean: the subscriber stamps
             // provenance at pull time. This also covers re-publishing a
             // workbook that itself contains pulled (distributed) scripts.
             def.provenance = Default::default();
@@ -1272,8 +1272,8 @@ pub fn publish(
         for script in &modules_to_publish {
             let mut def = calcula_format::features::scripts::ScriptDef::from(*script);
             // Clear any distribution provenance: the SUBSCRIBER stamps this with
-            // the new package name on pull. A publisher who in turn subscribed to
-            // some upstream package must not leak that upstream attribution.
+            // the new application name on pull. A publisher who in turn subscribed to
+            // some upstream application must not leak that upstream attribution.
             def.source_package = None;
             registry.write_artifact(
                 pkg, ver,
@@ -1286,7 +1286,7 @@ pub fn publish(
     // Write standalone notebooks (C8) as notebooks/{id}.json using the
     // calcula-format NotebookDef (camelCase). Execution metadata is STRIPPED:
     // last_output/last_error/cells_modified/duration_ms/execution_index are
-    // zeroed so cached output can never leak in a published package — only
+    // zeroed so cached output can never leak in a published application — only
     // cell id + source ship. Written BEFORE the manifest so they are covered
     // by the integrity checksums and the Ed25519 signature.
     if !notebooks_to_publish.is_empty() {
@@ -1375,7 +1375,7 @@ pub fn publish(
     // sibling version-manifest.sig, completing the publish.
     let manifest_bytes = registry
         .read_artifact(pkg, ver, crate::integrity::VERSION_MANIFEST_FILE)?
-        .ok_or_else(|| CalpError::Registry(format!(
+        .ok_or_else(|| CalpError::Workspace(format!(
             "version manifest missing immediately after write for {pkg}@{ver}"
         )))?;
     let signature_hex = keypair.sign(&manifest_bytes);
@@ -1386,12 +1386,12 @@ pub fn publish(
     )?;
 
     // Append to the version list. Still under the `_lock` acquired before the
-    // gates — do NOT re-acquire it here: RegistryLock is a lockfile, not a
+    // gates — do NOT re-acquire it here: WorkspaceLock is a lockfile, not a
     // reentrant mutex, so a second acquire would block against this publish's
-    // own live lock until it timed out with RegistryBusy.
+    // own live lock until it timed out with WorkspaceBusy.
     {
-        let mut pkg_manifest = registry.get_package_manifest(&request.package_name)
-            .unwrap_or_else(|_| PackageManifest::new(
+        let mut pkg_manifest = registry.get_application_manifest(&request.package_name)
+            .unwrap_or_else(|_| ApplicationManifest::new(
                 &request.package_name, &request.kind, &request.published_by, &request.now,
             ));
 
@@ -1404,7 +1404,7 @@ pub fn publish(
             publisher_key: keypair.public_key_hex(),
             extra: std::collections::HashMap::new(),
         });
-        registry.write_package_manifest(&pkg_manifest)?;
+        registry.write_application_manifest(&pkg_manifest)?;
     }
     drop(_lock);
 
@@ -1452,7 +1452,7 @@ mod tests {
     use tempfile::TempDir;
     use persistence::Sheet;
     use engine::cell::Cell;
-    use crate::registry::LocalRegistry;
+    use crate::workspace::LocalWorkspace;
 
     fn make_test_workbook() -> Workbook {
         let mut sheet1 = Sheet::new("Dashboard".to_string());
@@ -1520,14 +1520,14 @@ mod tests {
         // publishes a sales report should not thereby email their subscribers
         // the sentence "flag the customers who are behind on payments".
         //
-        // Byte-level over the whole package, not a field check, and it
+        // Byte-level over the whole application, not a field check, and it
         // retroactively pins the same firewall for scheduled_jobs.json and
         // audit_log.json.
         const SECRET: &str = "customers who are behind on payments";
 
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         wb.user_files.insert(
@@ -1611,7 +1611,7 @@ mod tests {
         // warning while leaving the artifact byte-identical semantics-wise.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook(); // sheets: "Dashboard", "Data"
         wb.pane_controls = vec![
@@ -1692,7 +1692,7 @@ mod tests {
     fn publish_with_covered_dropdown_references_emits_no_warnings() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         wb.pane_controls = vec![dropdown_pane_control(
@@ -1728,7 +1728,7 @@ mod tests {
     #[test]
     fn dropdown_reference_warnings_computes_without_publishing() {
         // The preview contract: the SAME warnings a publish would emit,
-        // computed from the carrier alone — no registry, no artifact writes.
+        // computed from the carrier alone — no workspace, no artifact writes.
         let mut wb = make_test_workbook(); // sheets: "Dashboard", "Data"
         wb.pane_controls = vec![
             dropdown_pane_control(
@@ -1822,7 +1822,7 @@ mod tests {
     fn publish_creates_package() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
         let request = PublishRequest {
@@ -1851,8 +1851,8 @@ mod tests {
         assert_eq!(result.sheets_published, 2);
         assert_eq!(result.version, "1.0.0");
 
-        // Verify package manifest was created
-        let pkg = reg.get_package_manifest("test-pkg").unwrap();
+        // Verify application manifest was created
+        let pkg = reg.get_application_manifest("test-pkg").unwrap();
         assert_eq!(pkg.versions.len(), 1);
         assert_eq!(pkg.versions[0].version, "1.0.0");
 
@@ -1895,7 +1895,7 @@ mod tests {
     fn publish_selected_sheets_only() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
         let request = PublishRequest {
@@ -1932,7 +1932,7 @@ mod tests {
     fn publish_records_artifact_checksums() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
         let request = PublishRequest {
@@ -1984,7 +1984,7 @@ mod tests {
         assert_eq!(digest, &crate::integrity::sha256_hex(&bytes));
     }
 
-    /// Count blob files in the registry's content-addressed store.
+    /// Count blob files in the workspace's content-addressed store.
     fn count_blobs(root: &std::path::Path) -> usize {
         let blobs = root.join(".blobs");
         let mut n = 0;
@@ -2005,7 +2005,7 @@ mod tests {
     fn publish_dedups_identical_artifacts_across_versions() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
         // Publish two versions of the SAME workbook — the artifact bytes are
@@ -2068,7 +2068,7 @@ mod tests {
                 now: "2026-05-18T01:00:00Z".to_string(),
             };
             let scope =
-                crate::registry_id::registry_scope(&dir.path().to_string_lossy()).unwrap();
+                crate::workspace_id::workspace_scope(&dir.path().to_string_lossy()).unwrap();
             let result = crate::pull::pull(&reg, &req, &scope, prof.path(), crate::integrity::PinPolicy::PinOnFirstUse).unwrap();
             assert_eq!(result.sheets.len(), 2);
         }
@@ -2078,7 +2078,7 @@ mod tests {
     fn publish_duplicate_version_fails() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
         let request = PublishRequest {
@@ -2109,8 +2109,8 @@ mod tests {
         // exists — refused before it can touch a byte of the published version.
         let result = publish(&reg, &request, prof.path());
         assert!(
-            matches!(result, Err(CalpError::PackageAlreadyExists(ref p)) if p == "dup"),
-            "expected PackageAlreadyExists, got {result:?}"
+            matches!(result, Err(CalpError::ApplicationAlreadyExists(ref p)) if p == "dup"),
+            "expected ApplicationAlreadyExists, got {result:?}"
         );
 
         // And the honest way to try the same thing — pushing v1.0.0 as an
@@ -2130,7 +2130,7 @@ mod tests {
     fn publish_multiple_versions() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
         let mut previous: Option<SemVer> = None;
@@ -2163,7 +2163,7 @@ mod tests {
             previous = Some(SemVer::new(major, minor, 0));
         }
 
-        let pkg = reg.get_package_manifest("multi").unwrap();
+        let pkg = reg.get_application_manifest("multi").unwrap();
         assert_eq!(pkg.versions.len(), 3);
 
         let versions = reg.list_versions("multi").unwrap();

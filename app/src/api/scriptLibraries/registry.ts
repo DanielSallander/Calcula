@@ -2,7 +2,7 @@
 // PURPOSE: Registry-facing half of the script package manager: search a .calp
 //          registry for library packages, and resolve a request into a
 //          FLATTENED, cycle-checked dependency closure.
-// CONTEXT: Search is a filter over the EXISTING `calp_browse_registry` listing
+// CONTEXT: Search is a filter over the EXISTING `calp_browse_workspace` listing
 //          (registries are directories and the package count is small) — no new
 //          backend command and no index. Resolution calls the single new command
 //          `library_resolve`, which verifies signature + TOFU + per-artifact
@@ -43,7 +43,7 @@ import { LibraryLinkError } from "./types";
 const MAX_CLOSURE_NODES = 64;
 const MAX_DEPTH = 8;
 
-/** A registry listing entry (mirrors the Rust `PackageInfo` of calp_commands). */
+/** A registry listing entry (mirrors the Rust `ApplicationInfo` of calp_commands). */
 export interface RegistryPackageInfo {
   name: string;
   description: string;
@@ -66,7 +66,7 @@ export async function searchLibraries(
   registryLocation: string,
   query = "",
 ): Promise<RegistryPackageInfo[]> {
-  const all = await invokeBackend<RegistryPackageInfo[]>("calp_browse_registry", {
+  const all = await invokeBackend<RegistryPackageInfo[]>("calp_browse_workspace", {
     registryPath: registryLocation,
   });
   const q = query.trim().toLowerCase();

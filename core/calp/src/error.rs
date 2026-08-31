@@ -11,13 +11,13 @@ pub enum CalpError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Package not found: {0}")]
-    PackageNotFound(String),
+    #[error("Application not found: {0}")]
+    ApplicationNotFound(String),
 
     #[error("Version not found: {package} {version}")]
     VersionNotFound { package: String, version: String },
 
-    #[error("No version satisfies constraint '{pin}' for package '{package}'")]
+    #[error("No version satisfies constraint '{pin}' for application '{package}'")]
     NoMatchingVersion { package: String, pin: String },
 
     #[error("Invalid version string: {0}")]
@@ -26,8 +26,8 @@ pub enum CalpError {
     #[error("Invalid version pin: {0}")]
     InvalidPin(String),
 
-    #[error("Package already exists: {0}")]
-    PackageAlreadyExists(String),
+    #[error("Application already exists: {0}")]
+    ApplicationAlreadyExists(String),
 
     #[error("Version already published: {package} {version}")]
     VersionAlreadyPublished { package: String, version: String },
@@ -35,60 +35,60 @@ pub enum CalpError {
     #[error("Sheet not found in workbook: {0}")]
     SheetNotFound(String),
 
-    #[error("Registry error: {0}")]
-    Registry(String),
+    #[error("Workspace error: {0}")]
+    Workspace(String),
 
     #[error("Format error: {0}")]
     Format(String),
 
-    // -- Package integrity (S5 phase 1: SHA-256 artifact checksums) --------
+    // -- Application integrity (S5 phase 1: SHA-256 artifact checksums) --------
     // Phase 2 adds manifest signature variants (Ed25519 + TOFU pinning),
     // e.g. ManifestSignatureInvalid / PublisherKeyChanged. See integrity.rs.
 
-    #[error("Package integrity check failed: {file} in {package}@{version} does not match its published checksum")]
+    #[error("Integrity check failed: {file} in {package}@{version} does not match its published checksum")]
     ChecksumMismatch { package: String, version: String, file: String },
 
-    #[error("Package integrity check failed: {file} in {package}@{version} is listed in the manifest but missing from the registry")]
+    #[error("Integrity check failed: {file} in {package}@{version} is listed in the manifest but missing from the workspace")]
     MissingArtifact { package: String, version: String, file: String },
 
-    #[error("Package integrity check failed: {file} in {package}@{version} is not listed in the published checksums (file added after publish?)")]
+    #[error("Integrity check failed: {file} in {package}@{version} is not listed in the published checksums (file added after publish?)")]
     UnlistedArtifact { package: String, version: String, file: String },
 
-    #[error("Package {package}@{version} was published without integrity checksums — republish it")]
+    #[error("Application {package}@{version} was published without integrity checksums — republish it")]
     MissingChecksums { package: String, version: String },
 
     // -- Publisher signing (S5 phase 2: Ed25519 manifest signature + TOFU) --
 
-    #[error("Package {package}@{version} is not signed (missing manifest signature or publisher key) — republish it with a signing-capable publisher")]
+    #[error("Application {package}@{version} is not signed (missing manifest signature or publisher key) — republish it with a signing-capable publisher")]
     MissingSignature { package: String, version: String },
 
-    #[error("Package integrity check failed: the manifest signature for {package}@{version} is invalid (manifest tampered or signed by a different key)")]
+    #[error("Integrity check failed: the manifest signature for {package}@{version} is invalid (manifest tampered or signed by a different key)")]
     ManifestSignatureInvalid { package: String, version: String },
 
-    #[error("Publisher key for package {package}@{version} changed since first use: pinned {pinned} but this version is signed by {got} — refusing to trust (possible package hijack)")]
+    #[error("Publisher key for application {package}@{version} changed since first use: pinned {pinned} but this version is signed by {got} — refusing to trust (possible application hijack)")]
     PublisherKeyChanged { package: String, version: String, pinned: String, got: String },
 
-    #[error("Package {package}@{version} is signed by {got}, but nobody on this computer has ever agreed to trust that publisher for '{package}' from {scope}. Subscribe to the package (Distribution > Subscribe to Package) to review the publisher and trust it — a signature alone is not trust.")]
+    #[error("Application {package}@{version} is signed by {got}, but nobody on this computer has ever agreed to trust that publisher for '{package}' from {scope}. Subscribe to it (Distribution > Subscribe to Application) to review the publisher and trust it — a signature alone is not trust.")]
     PublisherNotPinned { package: String, version: String, scope: String, got: String },
 
-    #[error("The package name '{package}' is already trusted on this computer from a DIFFERENT registry: {other_scope} is pinned to publisher {pinned}, but {scope} is offering {package}@{version} signed by {got}. Two registries claiming one name is exactly what a package hijack looks like. Review both publishers before accepting this one.")]
+    #[error("The application name '{package}' is already trusted on this computer from a DIFFERENT workspace: {other_scope} is pinned to publisher {pinned}, but {scope} is offering {package}@{version} signed by {got}. Two workspaces claiming one name is exactly what an application hijack looks like. Review both publishers before accepting this one.")]
     PublisherNameConflict {
         package: String,
         version: String,
-        /// The registry being contacted now, in the USER'S spelling.
+        /// The workspace being contacted now, in the USER'S spelling.
         scope: String,
-        /// The registry that already holds a pin for this name, in the user's
+        /// The workspace that already holds a pin for this name, in the user's
         /// spelling.
         other_scope: String,
-        /// The key pinned for the other registry.
+        /// The key pinned for the other workspace.
         pinned: String,
-        /// The key this registry is offering.
+        /// The key this workspace is offering.
         got: String,
     },
 
     // -- Compatibility contract --------------------------------------------
 
-    #[error("This package needs a newer version of Calcula: {package}@{version} requires app v{required} but this app is v{current}. Please update Calcula.")]
+    #[error("This application needs a newer version of Calcula: {package}@{version} requires app v{required} but this app is v{current}. Please update Calcula.")]
     AppTooOld { package: String, version: String, required: String, current: String },
 
     // -- Push gates (workspace collaboration) -------------------------------
@@ -96,7 +96,7 @@ pub enum CalpError {
     // CalpError with Display and adds nothing. Write them for the developer
     // who just hit the gate, not for a log file.
 
-    #[error("Cannot push {package}: you started from v{expected_base}, but the registry is now at v{actual_latest} (published by {latest_published_by}). Open the latest version, re-apply your changes, and push again.")]
+    #[error("Cannot push {package}: you started from v{expected_base}, but the workspace is now at v{actual_latest} (published by {latest_published_by}). Open the latest version, re-apply your changes, and push again.")]
     BaseVersionStale {
         package: String,
         expected_base: String,
@@ -110,11 +110,11 @@ pub enum CalpError {
     #[error("A change summary is required to push {package}: say what changed, in a sentence or two. Subscribers and co-developers read it in the version history.")]
     MissingChangeSummary { package: String },
 
-    #[error("Cannot push {package} as v{version}: the registry already has v{latest}, and each version must be higher than the one before it. Use v{suggested} or higher.")]
+    #[error("Cannot push {package} as v{version}: the workspace already has v{latest}, and each version must be higher than the one before it. Use v{suggested} or higher.")]
     VersionNotGreater { package: String, version: String, latest: String, suggested: String },
 
-    #[error("Another publish to this registry is in progress — try again in a minute. (Registry: {registry})")]
-    RegistryBusy { registry: String },
+    #[error("Another publish to this workspace is in progress — try again in a minute. (Workspace: {workspace})")]
+    WorkspaceBusy { workspace: String },
 
     // -- Co-publishing (delegation) -----------------------------------------
 

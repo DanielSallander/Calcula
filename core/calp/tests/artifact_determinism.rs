@@ -20,8 +20,8 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use calp::publish::{self, PublishRequest, PushMode};
-use calp::registry::LocalRegistry;
-use calp::transport::RegistryTransport;
+use calp::workspace::LocalWorkspace;
+use calp::transport::WorkspaceTransport;
 use calp::version::SemVer;
 
 use engine::cell::Cell;
@@ -76,7 +76,7 @@ fn workbook_with_unordered_collections(ids: &[identity::SheetId]) -> Workbook {
 }
 
 fn publish_at(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     prof: &Path,
     wb: &Workbook,
     package: &str,
@@ -108,7 +108,7 @@ fn publish_at(
 }
 
 /// Every artifact of a version, as `rel_path -> bytes`.
-fn artifacts_of(reg: &LocalRegistry, package: &str, version: &str) -> BTreeMap<String, Vec<u8>> {
+fn artifacts_of(reg: &LocalWorkspace, package: &str, version: &str) -> BTreeMap<String, Vec<u8>> {
     let manifest = reg.get_version_manifest(package, version).unwrap();
     manifest
         .artifact_checksums
@@ -127,7 +127,7 @@ fn artifacts_of(reg: &LocalRegistry, package: &str, version: &str) -> BTreeMap<S
 fn publishing_identical_content_twice_produces_identical_bytes() {
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
 
     // Two separately-BUILT workbooks with identical content and identical sheet
     // identity. Building them separately is the point (see the builder's note on
@@ -169,10 +169,10 @@ fn publishing_identical_content_twice_produces_identical_bytes() {
 #[test]
 fn identical_content_dedups_to_one_blob_per_artifact() {
     // The consequence of the property above, measured where it pays off: two
-    // versions of unchanged content should not double the registry's size.
+    // versions of unchanged content should not double the workspace's size.
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
 
     let ids = fixed_sheet_ids();
     let a = workbook_with_unordered_collections(&ids);
@@ -212,7 +212,7 @@ fn a_real_change_still_changes_the_bytes() {
     // test at all.
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
 
     let ids = fixed_sheet_ids();
     let a = workbook_with_unordered_collections(&ids);

@@ -1,6 +1,6 @@
 //! FILENAME: core/calp/tests/writeback_simulation.rs
 //! PURPOSE: A narrative, multi-user END-TO-END simulation of a writeback
-//! "data collection" scenario, exercised against the REAL calp registry /
+//! "data collection" scenario, exercised against the REAL calp workspace /
 //! publish / pull / submission primitives plus the real `ValueSchema::validate`.
 //!
 //! SCENARIO ("Regional Budget Collection"):
@@ -9,7 +9,7 @@
 //!      forecast input cells — with an `on_approval` submission policy and
 //!      `own_plus_aggregate` visibility.
 //!   2. Three SUBSCRIBERS (North/Alice, South/Bob, West/Carol) each pull the
-//!      package and COMMIT their four quarterly forecasts.
+//!      application and COMMIT their four quarterly forecasts.
 //!   3. Alice CORRECTS one cell (supersedence — newest wins, no double count).
 //!   4. Carol CLEARS one cell (an empty submission == "no value", not a zero).
 //!   5. The PUBLISHER approves Alice's and Bob's values and REJECTS one of
@@ -27,7 +27,7 @@
 //! produced here by a FAITHFUL PORT of `apply_gather_governance` (kept in
 //! lock-step with the app source; see `governed_submissions` below). Everything
 //! the port consumes — the submissions, their states, supersedence, carry-
-//! forward — comes from the real registry primitives, so the data plane under
+//! forward — comes from the real workspace primitives, so the data plane under
 //! test is the production one.
 
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ use tempfile::TempDir;
 use calp::integrity::{PinPolicy, TrustStatus};
 use calp::publish::{self, PublishRequest, PushMode};
 use calp::pull::{self, PullRequest};
-use calp::registry::LocalRegistry;
+use calp::workspace::LocalWorkspace;
 use calp::version::{SemVer, VersionPin};
 use calp::writeback::{
     check_region_compatibility, LifecyclePolicy, RegionSelector, SubmissionPolicy, SubmissionState,
@@ -128,7 +128,7 @@ fn make_region(sheet_id: identity::SheetId) -> WritebackRegionDeclaration {
 }
 
 fn publish_version(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     prof: &Path,
     wb: &Workbook,
     version: SemVer,
@@ -141,9 +141,9 @@ fn publish_version(
         version,
         kind: "report".to_string(),
         // Shared by the first publish and the version bump, so it asks the
-        // registry. Production callers take the base from the working copy's
+        // workspace. Production callers take the base from the working copy's
         // workspace link instead — see the note in lifecycle.rs.
-        mode: match reg.get_package_manifest(PKG).ok().and_then(|m| calp::head_version(&m)) {
+        mode: match reg.get_application_manifest(PKG).ok().and_then(|m| calp::head_version(&m)) {
             Some(head) => PushMode::Update { expected_base: head },
             None => PushMode::CreateNew,
         },
@@ -164,10 +164,10 @@ fn publish_version(
     publish::publish(reg, &request, prof).expect("publish failed");
 }
 
-/// A subscriber (their own TOFU profile) pulls a version of the package.
+/// A subscriber (their own TOFU profile) pulls a version of the application.
 fn subscriber_pull(
-    reg: &LocalRegistry,
-    scope: &calp::RegistryScope,
+    reg: &LocalWorkspace,
+    scope: &calp::WorkspaceScope,
     prof: &Path,
     version: SemVer,
 ) -> pull::PullResult {
@@ -179,9 +179,9 @@ fn subscriber_pull(
     pull::pull(reg, &req, scope, prof, PinPolicy::PinOnFirstUse).expect("pull failed")
 }
 
-/// The registry scope a real call site derives from the configured location.
-fn scope_of(dir: &TempDir) -> calp::RegistryScope {
-    calp::registry_scope(&dir.path().to_string_lossy()).unwrap()
+/// The workspace scope a real call site derives from the configured location.
+fn scope_of(dir: &TempDir) -> calp::WorkspaceScope {
+    calp::workspace_scope(&dir.path().to_string_lossy()).unwrap()
 }
 
 fn identity(name: &str, id: &str) -> SubmitterIdentity {
@@ -194,10 +194,10 @@ fn identity(name: &str, id: &str) -> SubmitterIdentity {
 
 /// Validate a value against the region schema (mirroring the app's draft-save
 /// path: `calp_save_writeback_draft` calls `schema.validate` before storing),
-/// then COMMIT it to the registry as a Submitted submission — exactly what
-/// `submit_region_internal` does on the registry side.
+/// then COMMIT it to the workspace as a Submitted submission — exactly what
+/// `submit_region_internal` does on the workspace side.
 fn commit(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     version: &str,
     region: &WritebackRegionDeclaration,
     who: &SubmitterIdentity,
@@ -236,7 +236,7 @@ fn commit(
 /// `calp_set_submission_state` (approve/reject) — the submission file itself
 /// is never touched; the decision is its own immutable file under `reviews/`.
 fn decide(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     version: &str,
     submitter_id: &str,
     row: u32,
@@ -348,7 +348,7 @@ fn sum_numbers(subs: &[WritebackSubmission]) -> f64 {
 fn writeback_multi_user_simulation() {
     let reg_dir = TempDir::new().unwrap();
     let hq_prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     // --- 1. Author publishes the data-collection report -------------------
     let wb = make_budget_workbook();
@@ -586,7 +586,7 @@ fn writeback_schema_gate_rejects_bad_input() {
 }
 
 // ---------------------------------------------------------------------------
-// Publisher authorization: only the package's publisher may approve/reject.
+// Publisher authorization: only the application's publisher may approve/reject.
 // This is the calp-level primitive the app's `require_publisher` gate
 // (calp_commands.rs::calp_set_submission_state) is built on — proof of
 // publisher ownership is possession of the Ed25519 key the signed manifest
@@ -597,7 +597,7 @@ fn writeback_schema_gate_rejects_bad_input() {
 fn writeback_only_publisher_is_authorized_to_approve() {
     let reg_dir = TempDir::new().unwrap();
     let hq_prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+    let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
 
     let wb = make_budget_workbook();
     let region = make_region(wb.sheets[0].id);
@@ -636,7 +636,8 @@ fn writeback_only_publisher_is_authorized_to_approve() {
         "a subscriber must not be authorized to approve/reject"
     );
 
-    // Even a DIFFERENT publisher (their own keypair) is not THIS package's publisher.
+    // Even a DIFFERENT publisher (their own keypair) is not THIS application's
+    // publisher.
     let other_pub = TempDir::new().unwrap();
     calp::signing::PublisherKeypair::load_or_create(other_pub.path()).unwrap();
     assert!(
@@ -648,7 +649,7 @@ fn writeback_only_publisher_is_authorized_to_approve() {
 
 // ---------------------------------------------------------------------------
 // Concurrency: the append-only event log under interleaved multi-machine
-// writes. Two LocalRegistry handles over the SAME directory stand in for two
+// writes. Two LocalWorkspace handles over the SAME directory stand in for two
 // machines sharing a network/synced folder. There is no locking anywhere on
 // the submission paths — every write is a NEW immutable file — so any
 // interleaving preserves every event and converges to one folded state.
@@ -658,8 +659,8 @@ fn writeback_only_publisher_is_authorized_to_approve() {
 fn writeback_concurrent_interleavings_converge() {
     let reg_dir = TempDir::new().unwrap();
     let hq_prof = TempDir::new().unwrap();
-    let reg_a = LocalRegistry::open(reg_dir.path()).unwrap(); // "machine A" (publisher)
-    let reg_b = LocalRegistry::open(reg_dir.path()).unwrap(); // "machine B" (subscriber)
+    let reg_a = LocalWorkspace::open(reg_dir.path()).unwrap(); // "machine A" (publisher)
+    let reg_b = LocalWorkspace::open(reg_dir.path()).unwrap(); // "machine B" (subscriber)
 
     let wb = make_budget_workbook();
     let region = make_region(wb.sheets[0].id);
@@ -713,7 +714,7 @@ fn writeback_concurrent_interleavings_converge() {
             let region = region.clone();
             let alice = alice.clone();
             std::thread::spawn(move || {
-                let reg = LocalRegistry::open(&root).unwrap();
+                let reg = LocalWorkspace::open(&root).unwrap();
                 commit(
                     &reg,
                     "1.0.0",

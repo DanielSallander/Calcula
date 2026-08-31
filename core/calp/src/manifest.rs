@@ -1,5 +1,5 @@
 //! FILENAME: core/calp/src/manifest.rs
-//! PURPOSE: .calp manifest types — package-level and version-level.
+//! PURPOSE: .calp manifest types — application-level and version-level.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -7,16 +7,16 @@ use identity::{EntityId, SheetId};
 use serde::{Deserialize, Serialize};
 use crate::version::SemVer;
 
-/// Package-level manifest (calp-manifest.json).
-/// Lives at the root of a package directory. Lists all published versions.
+/// Application-level manifest (calp-manifest.json).
+/// Lives at the root of an application directory. Lists all published versions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageManifest {
+pub struct ApplicationManifest {
     pub format_version: u32,
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    /// Package kind: "report", "template", or "dataset".
+    /// Application kind: "report", "template", or "dataset".
     #[serde(default = "default_kind")]
     pub kind: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -30,7 +30,7 @@ pub struct PackageManifest {
 
 fn default_kind() -> String { "report".to_string() }
 
-/// An entry in the package manifest's version list.
+/// An entry in the application manifest's version list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionEntry {
@@ -38,9 +38,9 @@ pub struct VersionEntry {
     pub published_at: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub published_by: String,
-    /// The version this push was based on (empty for the first version of a
-    /// package). A listing convenience so the version-history UI renders
-    /// lineage from ONE package-manifest read; the authority is the same field
+    /// The version this push was based on (empty for the first version of an
+    /// application). A listing convenience so the version-history UI renders
+    /// lineage from ONE application-manifest read; the authority is the same field
     /// inside the SIGNED version manifest, which this copies.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_version: String,
@@ -57,7 +57,7 @@ pub struct VersionEntry {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-impl PackageManifest {
+impl ApplicationManifest {
     pub fn new(name: &str, kind: &str, author: &str, now: &str) -> Self {
         Self {
             format_version: 1,
@@ -110,22 +110,22 @@ pub struct VersionManifest {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub publisher_name: String,
     /// Minimum host app version (semver) required to open this version. Empty =
-    /// no minimum (older packages / publishers who don't opt in). Checked at
+    /// no minimum (older applications / publishers who don't opt in). Checked at
     /// pull (compat.rs): an older Calcula is refused with an "update the app"
     /// error instead of a silent/partial failure. Covered by the manifest's
     /// Ed25519 signature.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub min_app_version: String,
-    /// The version this push was based on — the registry head the author's
+    /// The version this push was based on — the workspace head the author's
     /// working copy was checked out from (or last merged with). Empty for the
-    /// first version of a package, and for publishes made outside the workspace
+    /// first version of an application, and for publishes made outside the workspace
     /// flow. Inside the Ed25519 signature, so lineage cannot be rewritten by
     /// editing a file on the share.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_version: String,
     /// What changed in this version, in the author's own words. Required for a
-    /// push to an existing package (see `PushMode::Update`); optional when a
-    /// package is first created. Signed, like `base_version`.
+    /// push to an existing application (see `PushMode::Update`); optional when
+    /// an application is first created. Signed, like `base_version`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub change_summary: String,
     pub sheets: Vec<PublishedSheet>,
@@ -144,16 +144,16 @@ pub struct VersionManifest {
     pub writeback_regions: Option<Vec<crate::writeback::WritebackRegionDeclaration>>,
     /// Model writeback COLUMN declarations (engine v21 writeback columns,
     /// distributed): submissions keyed by host-row key values instead of grid
-    /// coordinates. Absent for packages without writeback columns; pre-feature
+    /// coordinates. Absent for applications without writeback columns; pre-feature
     /// apps ignore it (they only consult `writeback_regions`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_writebacks: Option<Vec<crate::writeback::ModelWritebackDeclaration>>,
-    /// Object scripts bundled with the package. Scripts travel with the package
+    /// Object scripts bundled with the application. Scripts travel with the application
     /// and are loaded on the subscriber side. Subscribers cannot edit these
     /// scripts but can add their own script layers on top.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub object_scripts: Vec<PublishedObjectScript>,
-    /// Standalone module scripts bundled with the package (C8). Unlike object
+    /// Standalone module scripts bundled with the application (C8). Unlike object
     /// scripts these are inert, transparent data: materialized into the
     /// subscriber's workbook on pull but NEVER auto-executed — they run only on
     /// explicit user action in the sandboxed Rust QuickJS interpreter. No
@@ -162,17 +162,17 @@ pub struct VersionManifest {
     /// artifact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub module_scripts: Vec<PublishedModuleScript>,
-    /// Standalone notebooks bundled with the package (C8). Inert, transparent
+    /// Standalone notebooks bundled with the application (C8). Inert, transparent
     /// data like module_scripts. Notebook execution metadata (outputs, errors,
     /// timings, execution indices) is STRIPPED at publish time — only cell
-    /// id + source ship — so cached output can never leak in a package.
+    /// id + source ship — so cached output can never leak in an application.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notebooks: Vec<PublishedNotebook>,
     /// Data source definitions for live data. Each data source embeds a BI
     /// model and table bindings; subscribers refresh against the original
     /// database through pivots (and CUBE formulas, planned).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub data_sources: Vec<PackageDataSource>,
+    pub data_sources: Vec<ApplicationDataSource>,
     /// Generic custom objects (distribution brick 4): the OPEN channel for
     /// object families beyond the built-in set. Each entry names a `kind`
     /// (registered by an extension, or a built-in like "cellType"), a stable
@@ -180,7 +180,7 @@ pub struct VersionManifest {
     /// app-owned JSON. Optional + forward-compatible: an older reader that does
     /// not know a kind ignores it; the payload is still integrity-checked like
     /// every other artifact. This is how a third party's own object definitions
-    /// (e.g. a custom pivot's config) travel in a package.
+    /// (e.g. a custom pivot's config) travel in an application.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_objects: Vec<PublishedCustomObject>,
     /// SHA-256 checksums (lowercase hex) of every artifact in the version
@@ -191,7 +191,7 @@ pub struct VersionManifest {
     /// separate trust domain and arrives after publish.
     /// BTreeMap keeps serialization deterministic.
     /// Verified on every pull (and therefore on refresh, which shares the
-    /// pull machinery). An empty map means the package predates integrity
+    /// pull machinery). An empty map means the application predates integrity
     /// checksums and is rejected on pull — republish to fix.
     /// Phase 2 (S5) adds an Ed25519 signature over the raw manifest bytes
     /// to make this root tamper-proof — see integrity.rs.
@@ -201,7 +201,7 @@ pub struct VersionManifest {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// A generic custom object bundled with a .calp package (distribution brick 4).
+/// A generic custom object bundled with a .calp application (distribution brick 4).
 /// The manifest entry; the payload lives at `payload_path` as opaque JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,10 +210,10 @@ pub struct PublishedCustomObject {
     pub kind: String,
     /// Stable object id (idempotent across versions).
     pub id: String,
-    /// Human-readable name (shown in the package explorer / subscriber ledger).
+    /// Human-readable name (shown in the application explorer / subscriber ledger).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
-    /// For per-sheet objects: the PACKAGE sheet id (remapped to a local sheet on
+    /// For per-sheet objects: the APPLICATION sheet id (remapped to a local sheet on
     /// pull, like controls/CF/DV). None for workbook-scoped objects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet_id: Option<SheetId>,
@@ -224,7 +224,7 @@ pub struct PublishedCustomObject {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// An object script bundled with a .calp package.
+/// An object script bundled with a .calp application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedObjectScript {
@@ -242,7 +242,7 @@ pub struct PublishedObjectScript {
     pub description: Option<String>,
     /// The capability ids this script declares it needs (R19 ceiling). Lifted
     /// from the script source `// @capability <id>` pragmas at publish time.
-    /// This is the publisher's authoritative declaration of what the package's
+    /// This is the publisher's authoritative declaration of what the application's
     /// scripts may use; the subscriber sets each pulled script's ceiling from
     /// THIS list, never from the (tamperable) source. Recognized ids:
     /// persistence::KNOWN_CAPABILITY_IDS.
@@ -250,7 +250,7 @@ pub struct PublishedObjectScript {
     pub capabilities: Vec<String>,
 }
 
-/// A standalone module script bundled with a .calp package (C8).
+/// A standalone module script bundled with a .calp application (C8).
 /// Module scripts are inert, transparent data — the manifest entry exists so
 /// the subscriber can list/review them BEFORE pulling and locate the on-disk
 /// artifact (`modules/{id}.json`). No provenance/access-level/capability
@@ -270,7 +270,7 @@ pub struct PublishedModuleScript {
     pub description: Option<String>,
 }
 
-/// A standalone notebook bundled with a .calp package (C8).
+/// A standalone notebook bundled with a .calp application (C8).
 /// Inert, transparent data. The manifest entry locates the on-disk artifact
 /// (`notebooks/{id}.json`) and lets the subscriber review the notebook BEFORE
 /// pulling. Execution metadata is stripped from the artifact at publish time.
@@ -301,11 +301,11 @@ pub struct PublishedSheet {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// Per-sheet presentation metadata carried in a package (D9 — content fidelity).
+/// Per-sheet presentation metadata carried in an application (D9 — content fidelity).
 /// Written as `sheets/{sheet_id}/metadata.json` at publish and restored at pull.
 /// Without this a subscriber's sheets lost their merged headers, freeze panes,
 /// notes, hyperlinks, hidden rows/cols, tab color and print setup. Mirrors the
-/// `persistence::Sheet` metadata fields; an older package without this file
+/// `persistence::Sheet` metadata fields; an older application without this file
 /// falls back to the (correct) per-field defaults at pull.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,7 +458,7 @@ impl PublishedSheetMetadata {
     }
 }
 
-/// A named range included in the published package.
+/// A named range included in the published application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedNamedRange {
@@ -471,16 +471,16 @@ pub struct PublishedNamedRange {
 }
 
 // ===========================================================================
-// Data Source types (live .calp packages)
+// Data Source types (live .calp applications)
 // ===========================================================================
 
-/// A data source definition embedded in a .calp package version.
+/// A data source definition embedded in a .calp application version.
 /// Embeds a BI model and table bindings; data reaches subscribers through
 /// pivots (and CUBE formulas, planned).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageDataSource {
-    /// Stable UUID for this data source within the package.
+pub struct ApplicationDataSource {
+    /// Stable UUID for this data source within the application.
     pub id: String,
     /// Human-readable name (e.g., "Sales Database").
     pub name: String,
@@ -493,19 +493,19 @@ pub struct PackageDataSource {
     /// Relative path to embedded DataModel JSON: "models/{id}/model.json".
     pub model_path: String,
     /// Table bindings: logical model tables -> physical database tables.
-    pub bindings: Vec<PackageBinding>,
-    /// Materialized calculated-table snapshots carried in the package (Arrow
+    pub bindings: Vec<TableBinding>,
+    /// Materialized calculated-table snapshots carried in the application (Arrow
     /// IPC stream artifacts under "models/{id}/calculated_tables/"), so a
     /// subscriber without source access still sees the derived tables' data.
     /// Empty for models without materialized calculated tables (and for
-    /// packages published before the feature existed).
+    /// applications published before the feature existed).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calculated_table_snapshots: Vec<CalculatedTableSnapshotRef>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// One materialized calculated table's snapshot artifact in a package.
+/// One materialized calculated table's snapshot artifact in an application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalculatedTableSnapshotRef {
@@ -518,7 +518,7 @@ pub struct CalculatedTableSnapshotRef {
 /// Maps a logical model table to a physical database table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageBinding {
+pub struct TableBinding {
     /// Logical table name in the BI model.
     pub model_table: String,
     /// Database schema (e.g., "public", "dbo").
@@ -526,13 +526,13 @@ pub struct PackageBinding {
     /// Physical table name in the database.
     pub source_table: String,
     /// When set, the table's rows come from this SQL SELECT (a wrapped subquery)
-    /// rather than `schema.source_table`. Defaulted so older packages load.
+    /// rather than `schema.source_table`. Defaulted so older applications load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_query: Option<String>,
 }
 
 /// Subscriber-local connection configuration for a data source.
-/// Stored in the .cala file (never in the shared registry).
+/// Stored in the .cala file (never in the shared workspace).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriberDataSourceConfig {
@@ -593,15 +593,15 @@ pub struct Subscription {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub channel: String,
     /// Subscriber-local connection configurations for data sources.
-    /// Stored in the .cala file, never in the shared registry.
+    /// Stored in the .cala file, never in the shared workspace.
     /// Contains the subscriber's connection strings (may include credentials).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data_source_configs: Vec<SubscriberDataSourceConfig>,
     /// Provenance ledger: every object this subscription materialized into the
     /// local workbook (tables, charts, pivots, named ranges, scripts, data
     /// sources, control sheets). Written at pull, updated at refresh. This is
-    /// what lets the UI show "which objects are connected to this package" and
-    /// lets refresh replace exactly the package-owned objects without touching
+    /// what lets the UI show "which objects are connected to this application" and
+    /// lets refresh replace exactly the application-owned objects without touching
     /// subscriber-authored ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<SubscribedObject>,
@@ -627,15 +627,16 @@ pub struct SubscribedObject {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// Mapping from a package sheet to its local representation in the consumer's workbook.
+/// Mapping from an application sheet to its local representation in the
+/// consumer's workbook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscribedSheet {
-    /// The sheet's ID in the package.
+    /// The sheet's ID in the application.
     pub package_sheet_id: SheetId,
     /// The sheet's ID in the local workbook.
     pub local_sheet_id: SheetId,
-    /// The sheet's name in the local workbook (may differ from package name).
+    /// The sheet's name in the local workbook (may differ from application name).
     pub local_name: String,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,

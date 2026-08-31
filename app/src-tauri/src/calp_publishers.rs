@@ -60,7 +60,7 @@ pub fn calp_list_co_publishers(
     window: tauri::Window,
 ) -> Result<CoPublishersResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let profile = crate::calp_commands::calcula_profile_dir();
 
@@ -163,7 +163,7 @@ pub fn calp_set_co_publishers(
     window: tauri::Window,
 ) -> Result<CoPublishersResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let profile = crate::calp_commands::calcula_profile_dir();
 

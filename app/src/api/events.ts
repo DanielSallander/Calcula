@@ -276,7 +276,7 @@ export const AppEvents = {
 
   // Report-distribution lifecycle (.calp). Emitted after a subscribe-pull or a
   // refresh-apply lands, so anything holding package-derived state (scripts,
-  // chart libraries, the Package Explorer) can re-read. This replaced the
+  // chart libraries, the Application Explorer) can re-read. This replaced the
   // untyped, script-invisible "calp:scripts-pulled" window event: it carries a
   // proper app: id, so a script CAN subscribe to it — with a THINNED payload
   // (package name + version only; see scriptHost/allowlist.ts
@@ -492,7 +492,7 @@ export interface RecalcIncompletePayload {
  * Payload of AppEvents.PACKAGE_UPDATED (trusted subscribers). Sandboxed script
  * subscribers receive only { packageName, version } — see thinAppEventForScripts.
  */
-export interface PackageUpdatedPayload {
+export interface ApplicationUpdatedPayload {
   packageName: string;
   /** Resolved semver of the version now installed; null when a refresh touched
    *  several subscriptions at once and no single version applies. */

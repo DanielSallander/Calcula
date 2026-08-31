@@ -1,33 +1,33 @@
-// FILENAME: app/extensions/Distribution/components/WorkspaceSection.tsx
-// PURPOSE: What package this workbook is a working copy of, and its published
-// history.
-// CONTEXT: The registry has always retained every version — signed manifests
+// FILENAME: app/extensions/Distribution/components/WorkingCopySection.tsx
+// PURPOSE: What application this workbook is a working copy of, and its
+// published history.
+// CONTEXT: The workspace has always retained every version — signed manifests
 // and a content-addressed blob store, kept forever — but an author had no way
-// to SEE that history without pointing the Package Inspector at their own
-// package by name, the same as a stranger would. This section is the author
-// looking at their own work: which package, which base version, what has been
-// pushed, and by whom.
+// to SEE that history without pointing the Application Inspector at their own
+// application by name, the same as a stranger would. This section is the author
+// looking at their own work: which application, which base version, what has
+// been pushed, and by whom.
 
 import React, { useCallback, useEffect, useState } from "react";
-import type { CoPublishersResponse, WorkspaceStatus } from "@api";
+import type { CoPublishersResponse, WorkingCopyStatus } from "@api";
 import {
   listCoPublishers,
   myPublisherKey,
   setCoPublishers,
-  workspaceStatus,
+  workingCopyStatus,
 } from "@api";
 import { AppEvents, onAppEvent } from "@api";
 import { promptAsync, confirmAsync } from "@api/dialogs";
 
-export function WorkspaceSection() {
-  const [status, setStatus] = useState<WorkspaceStatus | null>(null);
+export function WorkingCopySection() {
+  const [status, setStatus] = useState<WorkingCopyStatus | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const reload = useCallback(async () => {
     setBusy(true);
     try {
-      setStatus(await workspaceStatus());
+      setStatus(await workingCopyStatus());
     } catch {
       setStatus(null);
     } finally {
@@ -40,7 +40,7 @@ export function WorkspaceSection() {
     void reload();
     // The link changes when a document is replaced (open / new / checkout) and
     // when a push lands. Re-read rather than showing the previous document's
-    // package, which is the specific failure the persistence restore guards
+    // application, which is the specific failure the persistence restore guards
     // against on its side.
     const off = onAppEvent(AppEvents.AFTER_OPEN, () => void reload());
     return () => off();
@@ -53,17 +53,17 @@ export function WorkspaceSection() {
   if (!status) {
     return (
       <div style={mutedStyle}>
-        This workbook is not a working copy of any package.
+        This workbook is not a working copy of any application.
         <div style={{ marginTop: 6 }}>
-          Use <strong>Distribution &gt; Open Package for Editing</strong> to work
-          on a published package, or <strong>Publish Package</strong> to create
-          one from this workbook.
+          Use <strong>Distribution &gt; Open Application for Editing</strong> to
+          work on a published application, or <strong>Publish Application</strong>{" "}
+          to create one from this workbook.
         </div>
       </div>
     );
   }
 
-  // Newest first: the current state of the package is what a developer looks
+  // Newest first: the current state of the application is what a developer looks
   // for, and history reads backwards from it.
   const versionsNewestFirst = [...status.versions].reverse();
 
@@ -78,7 +78,7 @@ export function WorkspaceSection() {
         <dt style={dtStyle}>Based on</dt>
         <dd style={ddStyle}>v{status.baseVersion}</dd>
 
-        <dt style={dtStyle}>Package is at</dt>
+        <dt style={dtStyle}>Application is at</dt>
         <dd style={ddStyle}>
           {status.registryReachable ? (
             <>
@@ -90,7 +90,7 @@ export function WorkspaceSection() {
               )}
             </>
           ) : (
-            <span style={mutedStyle}>registry unreachable</span>
+            <span style={mutedStyle}>workspace unreachable</span>
           )}
         </dd>
 
@@ -117,7 +117,7 @@ export function WorkspaceSection() {
       )}
 
       {!status.registryReachable && status.registryError && (
-        <div style={warnBoxStyle}>Registry could not be read: {status.registryError}</div>
+        <div style={warnBoxStyle}>Workspace could not be read: {status.registryError}</div>
       )}
 
       <div style={{ marginTop: 12 }}>
@@ -175,10 +175,10 @@ export function WorkspaceSection() {
 }
 
 /**
- * Who else may push to this package.
+ * Who else may push to this application.
  *
  * Delegation rather than key sharing, and the reason is worth stating in the
- * UI: a profile holds ONE keypair, used for every package that user publishes
+ * UI: a profile holds ONE keypair, used for every application that user publishes
  * and for reviewing writeback, so handing a colleague "the team key" overwrites
  * their own identity machine-wide.
  */
@@ -215,9 +215,9 @@ function CoPublishers({
 
   const handleAdd = async () => {
     const key = await promptAsync(
-      "Paste the colleague's publisher key (they can copy it from their own " +
-        "Workspace panel). It is a public key — it identifies them, it does not " +
-        "give anyone access to their machine.",
+      "Paste the colleague's publisher key (they can copy it from the Working copy " +
+        "section of their own Application Explorer panel). It is a public key — it " +
+        "identifies them, it does not give anyone access to their machine.",
       { title: "Add a co-publisher", okLabel: "Add" },
     );
     if (!key || !key.trim()) return;
@@ -290,7 +290,7 @@ function CoPublishers({
             borderRadius: 3,
           }}
         >
-          {!enabled && <div style={mutedStyle}>Unavailable while the registry is offline.</div>}
+          {!enabled && <div style={mutedStyle}>Unavailable while the workspace is offline.</div>}
           {busy && <div style={mutedStyle}>Loading…</div>}
           {error && (
             <div style={{ color: "var(--text-error, #d33)", fontSize: "11px" }}>{error}</div>
@@ -306,7 +306,7 @@ function CoPublishers({
 
               {info.coPublishers.length === 0 && (
                 <div style={{ marginTop: 4 }}>
-                  Only the original publisher can push to this package.
+                  Only the original publisher can push to this application.
                 </div>
               )}
               {info.coPublishers.map((c) => (
@@ -338,16 +338,16 @@ function CoPublishers({
               </div>
               {copied && (
                 <div style={{ ...mutedStyle, marginTop: 4 }}>
-                  Copied {copied.slice(0, 12)}… — send it to whoever owns the package.
+                  Copied {copied.slice(0, 12)}… — send it to whoever owns the application.
                 </div>
               )}
 
               {!info.youAreTheRoot && (
                 <div style={{ ...mutedStyle, marginTop: 6, lineHeight: 1.4 }}>
-                  Only the publisher who created this package can change this list.
-                  Send them your key and ask to be added — never swap key files:
-                  this computer holds one publisher identity, used for every
-                  package you publish.
+                  Only the publisher who created this application can change this
+                  list. Send them your key and ask to be added — never swap key
+                  files: this computer holds one publisher identity, used for every
+                  application you publish.
                 </div>
               )}
             </>

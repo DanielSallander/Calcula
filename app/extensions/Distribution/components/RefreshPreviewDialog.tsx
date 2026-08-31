@@ -13,7 +13,7 @@ import {
   calculateNow,
   emitAppEvent,
   AppEvents,
-  type PackageUpdatedPayload,
+  type ApplicationUpdatedPayload,
   type RefreshPreview,
 } from "@api";
 import { useDialogWindow } from "@api/dialogWindow";
@@ -53,11 +53,11 @@ export function RefreshPreviewDialog({ onClose }: DialogProps) {
       }
       window.dispatchEvent(new CustomEvent("grid:refresh"));
       // Announce the distribution lifecycle: the refresh may have replaced
-      // distributed scripts with new package versions (reload them so changed
+      // distributed scripts with new application versions (reload them so changed
       // sources re-prompt for consent — ScriptableObjects de-dupes unchanged
       // ones by source hash), swapped chart libraries, or moved sheets. One
       // event PER refreshed subscription, so a subscriber that only cares about
-      // its own package can filter; scripts see a thinned {packageName, version}.
+      // its own application can filter; scripts see a thinned {packageName, version}.
       for (const sub of preview?.subscriptionPreviews ?? []) {
         emitAppEvent(AppEvents.PACKAGE_UPDATED, {
           packageName: sub.packageName,
@@ -67,7 +67,7 @@ export function RefreshPreviewDialog({ onClose }: DialogProps) {
           // A refresh replaces script SOURCES in place and the backend reports
           // only totals, so there is no honest per-subscription count here.
           scriptsPulled: null,
-        } satisfies PackageUpdatedPayload);
+        } satisfies ApplicationUpdatedPayload);
       }
       // Pane controls may also have changed — tell the Controls pane to
       // reload (cross-extension window event; same name the shell fans the

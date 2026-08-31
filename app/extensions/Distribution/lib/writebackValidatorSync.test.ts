@@ -95,7 +95,7 @@ describe("syncWritebackValidators", () => {
     ]);
   });
 
-  // The old failure mode, made visible: a region names a validator the package
+  // The old failure mode, made visible: a region names a validator the application
   // never shipped. Submission of that region WILL be refused backend-side, so
   // the pane has to be able to say which region and why.
   it("reports a region whose validator has no body as blocked", async () => {
@@ -112,7 +112,7 @@ describe("syncWritebackValidators", () => {
     expect(unmountWritebackValidator).toHaveBeenCalledWith("r1");
   });
 
-  it("consents per (package, validator) and mounts per region", async () => {
+  it("consents per (application, validator) and mounts per region", async () => {
     fetchWritebackValidator.mockImplementation((regionId: string) =>
       Promise.resolve({ regionId, validator: validator(regionId), error: null }),
     );
@@ -127,7 +127,7 @@ describe("syncWritebackValidators", () => {
     expect(mountWritebackValidator).toHaveBeenCalledTimes(2);
   });
 
-  it("separates packages so one package's approval never covers another's code", async () => {
+  it("separates applications so one application's approval never covers another's code", async () => {
     fetchWritebackValidator.mockImplementation((regionId: string) =>
       Promise.resolve({
         regionId,

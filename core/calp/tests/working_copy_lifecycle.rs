@@ -1,14 +1,14 @@
-//! FILENAME: core/calp/tests/workspace_lifecycle.rs
-//! PURPOSE: The author-side lifecycle — check out a published package, edit it,
+//! FILENAME: core/calp/tests/working_copy_lifecycle.rs
+//! PURPOSE: The author-side lifecycle — check out a published application, edit it,
 //! push the next version — and the properties that make it safe.
 //! CONTEXT: `.calp` had no author update flow at all. Republishing meant
-//! re-deriving the package from whatever workbook happened to be open, and
-//! doing it from a SUBSCRIBED copy silently destroyed the package's sheet
+//! re-deriving the application from whatever workbook happened to be open, and
+//! doing it from a SUBSCRIBED copy silently destroyed the application's sheet
 //! identity: `pull()` mints fresh sheet ids, so every subscriber's next refresh
 //! saw every sheet as removed-and-re-added and their overrides were orphaned.
 //! `identity_survives_checkout_and_push` is the test that closes that hole; the
 //! rest hold the push gates that keep two developers from overwriting each
-//! other on a shared registry.
+//! other on a shared workspace.
 
 use std::path::Path;
 use std::sync::{Arc, Barrier};
@@ -22,8 +22,8 @@ use calp::overrides::OverrideLayer;
 use calp::publish::{self, PublishRequest, PushMode};
 use calp::pull::{self, PullRequest};
 use calp::refresh;
-use calp::registry::LocalRegistry;
-use calp::transport::RegistryTransport;
+use calp::workspace::LocalWorkspace;
+use calp::transport::WorkspaceTransport;
 use calp::version::{SemVer, VersionPin};
 use calp::CalpError;
 
@@ -45,13 +45,13 @@ fn workbook(text: &str) -> Workbook {
     wb
 }
 
-fn scope_of(dir: &TempDir) -> calp::RegistryScope {
-    calp::registry_scope(dir.path().to_str().unwrap()).unwrap()
+fn scope_of(dir: &TempDir) -> calp::WorkspaceScope {
+    calp::workspace_scope(dir.path().to_str().unwrap()).unwrap()
 }
 
 /// Publish `wb` as `package`@`version` in the given mode.
 fn push(
-    reg: &LocalRegistry,
+    reg: &LocalWorkspace,
     prof: &Path,
     wb: &Workbook,
     package: &str,
@@ -83,7 +83,7 @@ fn push(
     publish::publish(reg, &request, prof)
 }
 
-fn create(reg: &LocalRegistry, prof: &Path, wb: &Workbook, package: &str) {
+fn create(reg: &LocalWorkspace, prof: &Path, wb: &Workbook, package: &str) {
     push(reg, prof, wb, package, SemVer::new(1, 0, 0), PushMode::CreateNew, "first cut")
         .expect("create failed");
 }
@@ -94,12 +94,12 @@ fn create(reg: &LocalRegistry, prof: &Path, wb: &Workbook, package: &str) {
 
 /// THE point of checkout.
 ///
-/// A developer opens a published package, edits it, and pushes it back. A
+/// A developer opens a published application, edits it, and pushes it back. A
 /// subscriber who is still on the old version then refreshes. They must see
 /// their sheets MODIFIED — not removed and re-added — because that is the
 /// difference between an override surviving and an override being orphaned.
 ///
-/// Before checkout existed, the only way to "open" a package was to subscribe
+/// Before checkout existed, the only way to "open" an application was to subscribe
 /// to it, and a push from that copy renamed every sheet's identity. This test
 /// asserts both halves: what checkout does, and what pull deliberately does
 /// not.
@@ -108,7 +108,7 @@ fn identity_survives_checkout_and_push() {
     let dir = TempDir::new().unwrap();
     let author = TempDir::new().unwrap();
     let subscriber = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let scope = scope_of(&dir);
 
     // v1.0.0, published from the author's own workbook.
@@ -136,7 +136,7 @@ fn identity_survives_checkout_and_push() {
         "precondition: a subscriber's copy has its OWN sheet identity"
     );
 
-    // A (possibly different) developer checks the package out and edits it.
+    // A (possibly different) developer checks the application out and edits it.
     let mut working_copy_result =
         checkout(&reg, "sales", None, "2026-08-29T02:00:00Z", &scope, author.path()).unwrap();
     let mut working_copy = Workbook::default();
@@ -218,14 +218,14 @@ fn identity_survives_checkout_and_push() {
 
 /// The counter-example, stated as a test so the reason checkout exists cannot
 /// quietly stop being true: pushing from a SUBSCRIBED copy would hand the
-/// package a different sheet identity, which is why the app-side gate refuses
+/// application a different sheet identity, which is why the app-side gate refuses
 /// it outright.
 #[test]
 fn a_subscribed_copy_carries_different_identity_than_the_package() {
     let dir = TempDir::new().unwrap();
     let author = TempDir::new().unwrap();
     let subscriber = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let scope = scope_of(&dir);
 
     let original = workbook("v1");
@@ -261,7 +261,7 @@ fn a_subscribed_copy_carries_different_identity_than_the_package() {
 fn a_stale_base_is_refused_and_names_who_moved_it() {
     let dir = TempDir::new().unwrap();
     let alice = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let wb = workbook("v1");
     create(&reg, alice.path(), &wb, "sales");
 
@@ -300,7 +300,7 @@ fn a_stale_base_is_refused_and_names_who_moved_it() {
 fn a_push_with_no_change_summary_is_refused() {
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let wb = workbook("v1");
     create(&reg, prof.path(), &wb, "sales");
 
@@ -325,7 +325,7 @@ fn pushing_with_a_different_publisher_key_is_refused_at_the_source() {
     let dir = TempDir::new().unwrap();
     let alice = TempDir::new().unwrap();
     let bob = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let wb = workbook("v1");
 
     create(&reg, alice.path(), &wb, "sales");
@@ -353,7 +353,7 @@ fn pushing_with_a_different_publisher_key_is_refused_at_the_source() {
         !reg.version_exists("sales", "1.1.0"),
         "a refused push must leave no version behind"
     );
-    let manifest = reg.get_package_manifest("sales").unwrap();
+    let manifest = reg.get_application_manifest("sales").unwrap();
     assert_eq!(manifest.versions.len(), 1, "…and no version-list entry");
 }
 
@@ -361,7 +361,7 @@ fn pushing_with_a_different_publisher_key_is_refused_at_the_source() {
 fn create_new_into_an_existing_name_is_refused() {
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let wb = workbook("v1");
     create(&reg, prof.path(), &wb, "sales");
 
@@ -375,8 +375,8 @@ fn create_new_into_an_existing_name_is_refused() {
         "oops, meant to push",
     );
     assert!(
-        matches!(result, Err(CalpError::PackageAlreadyExists(ref p)) if p == "sales"),
-        "expected PackageAlreadyExists, got {result:?}"
+        matches!(result, Err(CalpError::ApplicationAlreadyExists(ref p)) if p == "sales"),
+        "expected ApplicationAlreadyExists, got {result:?}"
     );
 }
 
@@ -384,7 +384,7 @@ fn create_new_into_an_existing_name_is_refused() {
 fn updating_a_package_that_does_not_exist_is_refused() {
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let wb = workbook("v1");
 
     let result = push(
@@ -397,8 +397,8 @@ fn updating_a_package_that_does_not_exist_is_refused() {
         "a change",
     );
     assert!(
-        matches!(result, Err(CalpError::PackageNotFound(ref p)) if p == "typo-in-the-name"),
-        "expected PackageNotFound, got {result:?}"
+        matches!(result, Err(CalpError::ApplicationNotFound(ref p)) if p == "typo-in-the-name"),
+        "expected ApplicationNotFound, got {result:?}"
     );
 }
 
@@ -410,7 +410,7 @@ fn updating_a_package_that_does_not_exist_is_refused() {
 fn lineage_is_recorded_in_the_signed_manifest_and_the_version_list() {
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let wb = workbook("v1");
     create(&reg, prof.path(), &wb, "sales");
     push(
@@ -435,7 +435,7 @@ fn lineage_is_recorded_in_the_signed_manifest_and_the_version_list() {
     assert_eq!(v1.base_version, "", "a created package has no base");
 
     // The version list carries the same facts so history renders from one read.
-    let pkg = reg.get_package_manifest("sales").unwrap();
+    let pkg = reg.get_application_manifest("sales").unwrap();
     let entry = pkg.versions.iter().find(|e| e.version == "1.1.0").unwrap();
     assert_eq!(entry.base_version, "1.0.0");
     assert_eq!(entry.change_summary, "adds the regional split");
@@ -449,7 +449,7 @@ fn lineage_is_recorded_in_the_signed_manifest_and_the_version_list() {
 fn tampering_with_the_change_summary_breaks_the_signature() {
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let scope = scope_of(&dir);
     let wb = workbook("v1");
     create(&reg, prof.path(), &wb, "sales");
@@ -504,7 +504,7 @@ fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
     let prof_path = prof.path().to_path_buf();
 
     {
-        let reg = LocalRegistry::open(&reg_path).unwrap();
+        let reg = LocalWorkspace::open(&reg_path).unwrap();
         create(&reg, &prof_path, &workbook("v1"), "sales");
     }
 
@@ -515,7 +515,7 @@ fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
         let prof_path = prof_path.clone();
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
-            let reg = LocalRegistry::open(&reg_path).unwrap();
+            let reg = LocalWorkspace::open(&reg_path).unwrap();
             let wb = workbook(&format!("edit from developer {i}"));
             barrier.wait();
             push(
@@ -537,13 +537,13 @@ fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
     assert_eq!(winners.len(), 1, "exactly one push may win: {results:?}");
     assert_eq!(losers.len(), 1);
     assert!(
-        matches!(losers[0], CalpError::BaseVersionStale { .. } | CalpError::RegistryBusy { .. }),
+        matches!(losers[0], CalpError::BaseVersionStale { .. } | CalpError::WorkspaceBusy { .. }),
         "the loser must be told the base moved (or that the registry was busy), got {:?}",
         losers[0]
     );
 
-    let reg = LocalRegistry::open(&reg_path).unwrap();
-    let pkg = reg.get_package_manifest("sales").unwrap();
+    let reg = LocalWorkspace::open(&reg_path).unwrap();
+    let pkg = reg.get_application_manifest("sales").unwrap();
     assert_eq!(
         pkg.versions.len(),
         2,
@@ -566,7 +566,7 @@ fn concurrent_pushes_from_one_base_produce_exactly_one_winner() {
 
 /// The whole point of delegation, end to end.
 ///
-/// Alice creates a package and adds Bob as a co-publisher. Bob pushes. A
+/// Alice creates an application and adds Bob as a co-publisher. Bob pushes. A
 /// subscriber who pinned ALICE's key accepts Bob's version — because it traces
 /// to a list Alice signed — without being asked to re-decide anything.
 #[test]
@@ -575,7 +575,7 @@ fn a_delegate_can_push_and_subscribers_accept_it_without_re_pinning() {
     let alice = TempDir::new().unwrap();
     let bob = TempDir::new().unwrap();
     let subscriber = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let scope = scope_of(&dir);
 
     let wb = workbook("v1");
@@ -673,7 +673,7 @@ fn an_unlisted_key_is_still_refused_after_a_list_exists() {
     let alice = TempDir::new().unwrap();
     let bob = TempDir::new().unwrap();
     let stranger = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
 
     let wb = workbook("v1");
     create(&reg, alice.path(), &wb, "sales");
@@ -722,7 +722,7 @@ fn a_tampered_publisher_list_is_reported_rather_than_ignored() {
     let dir = TempDir::new().unwrap();
     let alice = TempDir::new().unwrap();
     let bob = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
 
     let wb = workbook("v1");
     create(&reg, alice.path(), &wb, "sales");
@@ -746,7 +746,7 @@ fn a_tampered_publisher_list_is_reported_rather_than_ignored() {
     // Someone edits the list on the share, leaving the old signature in place.
     let mut tampered = serde_json::to_value(&list).unwrap();
     tampered["authorizedKeys"] = serde_json::json!([]);
-    reg.write_package_artifact(
+    reg.write_application_artifact(
         "sales",
         calp::publishers::PUBLISHERS_FILE,
         serde_json::to_vec_pretty(&tampered).unwrap().as_slice(),

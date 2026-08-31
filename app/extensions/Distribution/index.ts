@@ -2,7 +2,7 @@
 // PURPOSE: Distribution extension entry point — .calp publish, subscribe, refresh, overrides.
 // CONTEXT: Registers task panes, dialogs, grid overlay badges, writeback guards
 // (Phase 9), and the conditional style interceptor. It also owns TWO top-level
-// menus — "Distribution" (order 46) for the .calp package lifecycle and
+// menus — "Distribution" (order 46) for the .calp application lifecycle and
 // "Writeback" (order 47) for the data-collection channel. They were one
 // "Distribution" submenu under External Data until 2026-08-29; External Data
 // keeps only "Refresh Data" from this extension.
@@ -16,8 +16,8 @@ import { AuditLogPane } from "./components/AuditLogPane";
 import {
   ConnectedObjectsSection,
   PublishPreviewSection,
-} from "./components/PackageExplorerPanel";
-import { WorkspaceSection } from "./components/WorkspaceSection";
+} from "./components/ApplicationExplorerPanel";
+import { WorkingCopySection } from "./components/WorkingCopySection";
 import {
   DistributionManifest,
   DISTRIBUTION_MENU_ID,
@@ -27,7 +27,7 @@ import {
   SUBSCRIPTIONS_PANE_ID,
   PUBLISHER_DASHBOARD_PANE_ID,
   AUDIT_LOG_PANE_ID,
-  PACKAGE_EXPLORER_PANEL_ID,
+  APPLICATION_EXPLORER_PANEL_ID,
   PUBLISH_DIALOG_ID,
   PUBLISH_MODEL_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
@@ -55,7 +55,7 @@ import {
   getWritebackCellState,
   getRegionForCell,
 } from "./lib/writebackStore";
-import { openPackageInspectorWindow } from "./lib/openPackageInspectorWindow";
+import { openApplicationInspectorWindow } from "./lib/openApplicationInspectorWindow";
 import {
   syncWritebackValidators,
   resetWritebackValidators,
@@ -155,29 +155,34 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(() => context.ui.taskPanes.unregister(AUDIT_LOG_PANE_ID));
 
-  // Register the Package Explorer transparency panel (sections API): which
-  // objects are connected to each subscribed package (with presence checks +
-  // click-to-navigate), and a dry-run publish preview for authors showing
+  // Register the Application Explorer transparency panel (sections API): which
+  // objects are connected to each subscribed application (with presence checks
+  // + click-to-navigate), and a dry-run publish preview for authors showing
   // exactly what would ship vs stay behind.
   context.ui.panels.register({
-    id: PACKAGE_EXPLORER_PANEL_ID,
-    title: "Package Explorer",
+    id: APPLICATION_EXPLORER_PANEL_ID,
+    title: "Application Explorer",
     icon: IconPackage,
     sections: [
       {
         // First, because it answers the question a developer opens this panel
         // with: what am I working on, and where does it stand?
-        id: `${PACKAGE_EXPLORER_PANEL_ID}.workspace`,
-        label: "Workspace",
-        component: WorkspaceSection,
+        //
+        // Labelled "Working copy", not "Workspace": once a WORKSPACE is the
+        // shared folder that holds published applications, this section — which
+        // is about THIS workbook and which application it came from — would be
+        // named after the wrong noun.
+        id: `${APPLICATION_EXPLORER_PANEL_ID}.workingCopy`,
+        label: "Working copy",
+        component: WorkingCopySection,
       },
       {
-        id: `${PACKAGE_EXPLORER_PANEL_ID}.connected`,
+        id: `${APPLICATION_EXPLORER_PANEL_ID}.connected`,
         label: "Connected objects",
         component: ConnectedObjectsSection,
       },
       {
-        id: `${PACKAGE_EXPLORER_PANEL_ID}.publishPreview`,
+        id: `${APPLICATION_EXPLORER_PANEL_ID}.publishPreview`,
         label: "Publish preview",
         component: PublishPreviewSection,
       },
@@ -185,7 +190,7 @@ function activate(context: ExtensionContext): void {
     defaultPlacement: "sidebar",
     priority: 37,
   });
-  cleanupFns.push(() => context.ui.panels.unregister(PACKAGE_EXPLORER_PANEL_ID));
+  cleanupFns.push(() => context.ui.panels.unregister(APPLICATION_EXPLORER_PANEL_ID));
 
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
@@ -212,7 +217,7 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   // "Distribution" (order 46 = after Formulas at 45, before Review at 70):
-  // the .calp package lifecycle — publish, subscribe, refresh, inspect,
+  // the .calp application lifecycle — publish, subscribe, refresh, inspect,
   // and the override layer a subscriber lays over a received report.
   context.ui.menus.register({
     id: DISTRIBUTION_MENU_ID,
@@ -220,26 +225,26 @@ function activate(context: ExtensionContext): void {
     order: 46,
     items: [
       {
-        id: "distribution:publishPackage",
-        label: "Publish Package...",
+        id: "distribution:publishApplication",
+        label: "Publish Application...",
         icon: IconPublishPackage,
         order: 10,
         action: () => context.ui.dialogs.show(PUBLISH_DIALOG_ID),
       },
       {
         // The author-side counterpart of Subscribe, and deliberately next to
-        // it: the two look similar and mean opposite things — edit the package
-        // itself, versus take a copy of it to use — so they are read together
-        // or not at all.
-        id: "distribution:openPackageForEditing",
-        label: "Open Package for Editing...",
+        // it: the two look similar and mean opposite things — edit the
+        // application itself, versus take a copy of it to use — so they are
+        // read together or not at all.
+        id: "distribution:openApplicationForEditing",
+        label: "Open Application for Editing...",
         icon: IconSubscribePackage,
         order: 11,
         action: () => context.ui.dialogs.show(CHECKOUT_DIALOG_ID),
       },
       {
-        id: "distribution:subscribePackage",
-        label: "Subscribe to Package...",
+        id: "distribution:subscribeApplication",
+        label: "Subscribe to Application...",
         icon: IconSubscribePackage,
         order: 12,
         action: () => context.ui.dialogs.show(SUBSCRIBE_DIALOG_ID),
@@ -263,18 +268,18 @@ function activate(context: ExtensionContext): void {
         },
       },
       {
-        id: "distribution:openPackageExplorer",
-        label: "Package Explorer",
+        id: "distribution:openApplicationExplorer",
+        label: "Application Explorer",
         icon: IconPackage,
         order: 21,
-        action: () => context.ui.panels.open(PACKAGE_EXPLORER_PANEL_ID),
+        action: () => context.ui.panels.open(APPLICATION_EXPLORER_PANEL_ID),
       },
       {
-        id: "distribution:openPackageInspector",
-        label: "Package Inspector...",
+        id: "distribution:openApplicationInspector",
+        label: "Application Inspector...",
         icon: IconPackage,
         order: 22,
-        action: () => void openPackageInspectorWindow(),
+        action: () => void openApplicationInspectorWindow(),
       },
       {
         id: "distribution:openAuditLog",
@@ -368,7 +373,7 @@ function activate(context: ExtensionContext): void {
   // than duplicating into the Distribution menu above.
   context.ui.menus.registerItem("model", {
     id: "model:publishModel",
-    label: "Publish Model as Package...",
+    label: "Publish Model as Application...",
     icon: IconPublishPackage,
     order: 50,
     action: () => context.ui.dialogs.show(PUBLISH_MODEL_DIALOG_ID),
@@ -557,7 +562,7 @@ function activate(context: ExtensionContext): void {
 
   // Writeback style interceptor management.
   // Only registered when writeback regions exist, so per-cell render cost
-  // is zero in the common case (no writeback packages).
+  // is zero in the common case (no writeback applications).
   let unregStyleInterceptor: (() => void) | null = null;
 
   function updateStyleInterceptor(): void {

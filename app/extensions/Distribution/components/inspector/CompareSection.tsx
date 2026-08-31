@@ -1,15 +1,15 @@
 // FILENAME: app/extensions/Distribution/components/inspector/CompareSection.tsx
-// PURPOSE: Compare any two published versions of the inspected package.
+// PURPOSE: Compare any two published versions of the inspected application.
 // CONTEXT: The Inspector could already show what a version CONTAINS. What it
 // could not answer was the question people actually ask about a version list —
 // "what changed?" — because nothing in the codebase compared two versions at
-// all. The registry has kept every version since the beginning; this is the
+// all. The workspace has kept every version since the beginning; this is the
 // first view that reads more than one of them at a time.
 
 import React, { useEffect, useMemo, useState } from "react";
 import type { CellDiff, VersionDiff } from "@api";
 import { diffSheetCells, diffVersions } from "@api";
-import type { InspectorContext } from "./PackageInspectorApp";
+import type { InspectorContext } from "./ApplicationInspectorApp";
 import type { InspectorOverview } from "@api/distribution";
 import { VersionDiffView } from "../VersionDiffView";
 
@@ -98,7 +98,7 @@ export function CompareSection({
   if (versions.length < 2) {
     return (
       <div style={{ color: "var(--text-secondary)" }}>
-        This package has only one published version, so there is nothing to
+        This application has only one published version, so there is nothing to
         compare it against yet.
       </div>
     );

@@ -67,7 +67,7 @@ fn publish_and_pull(
     prof: &Path,
     wb: &Workbook,
 ) -> calp::pull::PullResult {
-    let reg = calp::registry::LocalRegistry::open(dir.path()).unwrap();
+    let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
     let request = PublishRequest {
         workbook: wb,
         package_name: "literals".to_string(),
@@ -91,7 +91,7 @@ fn publish_and_pull(
     };
     publish::publish(&reg, &request, prof).expect("publish failed");
 
-    let scope = calp::registry_scope(dir.path().to_str().unwrap()).unwrap();
+    let scope = calp::workspace_scope(dir.path().to_str().unwrap()).unwrap();
     calp::pull::pull(
         &reg,
         &calp::pull::PullRequest {

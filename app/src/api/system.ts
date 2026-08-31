@@ -25,11 +25,18 @@ export type {
 export { ENCRYPTION_STATE_CHANGED } from '../core/lib/file-api';
 
 /**
- * Workspace API Facade.
- * Exposes file system and workspace operations to extensions.
+ * Workbook API Facade.
+ * Exposes file-system and document-lifecycle operations to extensions.
+ *
+ * Named for what it operates on. It was `workspace`, which collided with the
+ * .calp vocabulary once a WORKSPACE became the shared folder that holds
+ * published applications — and `workspace.save()` meaning "save the open
+ * workbook" is confusing the moment both meanings are live. `document` was the
+ * other candidate and is worse: it shadows the DOM global in any module that
+ * imports it.
  */
-export const workspace = {
-  /** Creates a new spreadsheet workspace. */
+export const workbook = {
+  /** Creates a new, empty workbook. */
   new: newFile,
 
   /** Opens a file dialog to load a spreadsheet (handles encrypted files). */
@@ -41,10 +48,10 @@ export const workspace = {
   /** Opens a "Save As" dialog. Pass a password to encrypt. */
   saveAs: saveFileAs,
 
-  /** Checks if the current workspace has unsaved changes. */
+  /** Whether the open workbook has unsaved changes. */
   isModified: isFileModified,
 
-  /** Marks the current workspace as modified. */
+  /** Marks the open workbook as modified. */
   markModified: markFileModified,
 
   /** Gets the current file path, or null if unsaved. */

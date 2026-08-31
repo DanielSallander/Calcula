@@ -1,12 +1,12 @@
 // FILENAME: app/extensions/Distribution/components/PublishModelDialog.tsx
-// PURPOSE: Publish a single BI model as a model-only .calp package (kind
+// PURPOSE: Publish a single BI model as a model-only .calp application (kind
 // "dataset", zero sheets) — the signed, versioned distribution unit for
 // models, replacing hand-carried .json files.
 
 import React, { useEffect, useState } from "react";
 import type { DialogProps, ConnectionInfo } from "@api";
 import { biGetConnections, publishModel } from "@api";
-import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
+import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
 
 export function PublishModelDialog({ onClose }: DialogProps) {
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
@@ -30,20 +30,23 @@ export function PublishModelDialog({ onClose }: DialogProps) {
     })();
   }, []);
 
-  // Native folder picker for the registry destination.
+  // Through the `pickWorkspace` seam, like every other workspace selector. This
+  // hand-rolled its own `openNativeDialog({ directory: true })` and was the last
+  // copy — which is precisely the drift the seam exists to stop: it offered a
+  // folder picker only, so a model published this way went into a location the
+  // Subscribe and Open-for-editing pickers (file-only) could not then browse to.
+  //
+  // Two gestures, same as the workbook publish dialog: an existing workspace is
+  // picked by its pointer file, and a NEW one by the folder this publish will
+  // turn into a workspace.
   const handleBrowse = async () => {
-    try {
-      const selected = await openNativeDialog({
-        directory: true,
-        multiple: false,
-        title: "Select Registry Folder",
-      });
-      if (selected && typeof selected === "string") {
-        setRegistryPath(selected);
-      }
-    } catch {
-      // user cancelled
-    }
+    const selected = await pickWorkspaceFile();
+    if (selected) setRegistryPath(selected);
+  };
+
+  const handleBrowseNewFolder = async () => {
+    const selected = await pickWorkspaceFolder("Choose a Folder for the New Workspace");
+    if (selected) setRegistryPath(selected);
   };
 
   const handlePublish = async () => {
@@ -58,7 +61,7 @@ export function PublishModelDialog({ onClose }: DialogProps) {
         connectionId,
       });
       setStatus(
-        `Published ${result.packageName} v${result.version} (dataset package — model schema only)`
+        `Published ${result.packageName} v${result.version} (dataset application — model schema only)`
       );
     } catch (err: unknown) {
       setError(String(err));
@@ -75,7 +78,7 @@ export function PublishModelDialog({ onClose }: DialogProps) {
 
   return (
     <div style={{ padding: "16px", width: "420px" }}>
-      <h3 style={{ margin: "0 0 4px 0" }}>Publish Model as Package</h3>
+      <h3 style={{ margin: "0 0 4px 0" }}>Publish Model as Application</h3>
       <div style={{ fontSize: "12px", opacity: 0.7, marginBottom: "12px" }}>
         Publishes the model schema only — no data and no credentials leave this
         machine. Subscribers connect with their own credentials, so row-level
@@ -98,16 +101,25 @@ export function PublishModelDialog({ onClose }: DialogProps) {
         </select>
       </div>
       <div style={fieldStyle}>
-        <label>Registry Path</label>
+        <label>Workspace Path</label>
         <div style={{ display: "flex", gap: "4px" }}>
           <input style={{ ...inputStyle, flex: 1 }} value={registryPath}
             onChange={(e) => setRegistryPath(e.target.value)}
-            placeholder="C:\shared\registry" />
-          <button onClick={handleBrowse} style={{ whiteSpace: "nowrap" }}>Browse...</button>
+            placeholder="C:\shared\workspace" />
+          <button
+            onClick={handleBrowse}
+            style={{ whiteSpace: "nowrap" }}
+            title="Pick an existing workspace by its workspace.calcula file"
+          >Browse...</button>
+          <button
+            onClick={handleBrowseNewFolder}
+            style={{ whiteSpace: "nowrap" }}
+            title="Create a workspace in a folder that is not one yet — publishing writes its workspace.calcula pointer file"
+          >New workspace...</button>
         </div>
       </div>
       <div style={fieldStyle}>
-        <label>Package Name</label>
+        <label>Application Name</label>
         <input style={inputStyle} value={packageName} onChange={(e) => setPackageName(e.target.value)}
           placeholder="sales-model" />
       </div>

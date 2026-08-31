@@ -1,7 +1,7 @@
 // FILENAME: app/extensions/Distribution/components/PublisherDashboardPane.tsx
 // PURPOSE: Publisher data-collection dashboard (D5) — a submissions inbox +
 //          respondent roster + approve/reject for each writeback region.
-// CONTEXT: Wires the previously-unexposed registry primitive load_region_submissions
+// CONTEXT: Wires the previously-unexposed workspace primitive load_region_submissions
 //          (via the new calp_load_region_submissions command) and the unwired
 //          calp_set_submission_state, so a publisher can SEE who responded and
 //          approve/reject — instead of GATHER formulas being the only surface.

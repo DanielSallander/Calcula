@@ -62,7 +62,7 @@ use std::time::Instant;
 use serde_json::{json, Value};
 use tauri::{State, Window};
 
-use calp::transport::RegistryTransport;
+use calp::transport::WorkspaceTransport;
 
 use crate::calp_commands as calp_cmds;
 use crate::scripting::CapabilityStore;
@@ -376,20 +376,27 @@ fn registry_location(payload: &serde_json::Map<String, Value>) -> Result<String,
 // RULE: a script may act only on registries the USER has already configured
 // ---------------------------------------------------------------------------
 
-/// Comparison form of a registry location. Locations are written by hand in
-/// several equivalent spellings (`file://C:\reg`, `C:/reg`, `C:\reg\`), and a
+/// Comparison form of a workspace location. Locations are written by hand in
+/// several equivalent spellings (`file://C:\ws`, `C:/ws`, `C:\ws\`), and a
 /// subscription stores `file://` + whatever was passed at pull, so the
-/// comparison has to normalize or it would refuse the user's OWN registry.
+/// comparison has to normalize or it would refuse the user's OWN workspace.
 ///
 /// Used ONLY for comparison — the caller always passes the ORIGINAL string on
 /// to `open_registry`, so normalization can never widen what is opened.
 fn normalize_location(raw: &str) -> String {
     let s = raw.trim();
+    // The `workspace.calcula` pointer file names the same workspace as the
+    // directory holding it, and it is the spelling the UI now PRODUCES: the
+    // picker returns the full marker path and Subscribe saves it verbatim. A
+    // script that names the folder must therefore match a workspace the user
+    // configured by its marker, or it is refused as unconfigured while the
+    // error lists a location that resolves to the very same directory.
+    let s = calp::workspace_id::strip_workspace_marker(s);
     // The crate's ONE `file://` stripper. A local `strip_prefix` left
-    // `file:///C:/reg` as `/C:/reg`, which then failed to match the same
-    // registry configured as `C:\reg` — a refusal of the user's own registry,
+    // `file:///C:/ws` as `/C:/ws`, which then failed to match the same
+    // workspace configured as `C:\ws` — a refusal of the user's own workspace,
     // which is the failure this function exists to avoid.
-    let s = calp::registry_id::strip_file_scheme(s);
+    let s = calp::workspace_id::strip_file_scheme(&s);
     let s = s.replace('\\', "/");
     let s = s.trim_end_matches('/').to_string();
     // Windows paths are case-insensitive, and so are scheme + host of a URL.
@@ -411,7 +418,7 @@ fn normalize_location(raw: &str) -> String {
 /// refresh path already skips them (`group_subscriptions_by_registry` drops
 /// `version_pin == "dev"`), so this keeps the two halves consistent.
 fn configured_registries(state: &AppState) -> Result<Vec<String>, String> {
-    let mut out: Vec<String> = crate::calp_registry::calp_list_registries()?
+    let mut out: Vec<String> = crate::calp_registry::calp_list_workspaces()?
         .into_iter()
         .map(|r| r.location)
         .collect();
@@ -488,7 +495,7 @@ fn require_configured_registry(state: &AppState, requested: &str) -> Result<(), 
 ///
 /// Note what this does NOT do: it never creates a key and never pins anything.
 fn require_publish_identity(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package_name: &str,
 ) -> Result<(), String> {
     let profile = calp_cmds::calcula_profile_dir();
@@ -674,7 +681,7 @@ pub fn script_distribution(
         let location = registry_location(&p)?;
         let package_name: String = field(&p, "packageName")?;
         let (registry, _scope) =
-            crate::calp_registry::open_registry_scoped(&location).map_err(|e| e.to_string())?;
+            crate::calp_registry::open_workspace_scoped(&location).map_err(|e| e.to_string())?;
         if let Err(e) = require_publish_identity(registry.as_ref(), &package_name) {
             crate::log_warn!(
                 "SECURITY",
@@ -880,7 +887,7 @@ fn dispatch(
 ) -> Result<Value, String> {
     match act {
         Action::ListRegistries => {
-            let list = crate::calp_registry::calp_list_registries()?;
+            let list = crate::calp_registry::calp_list_workspaces()?;
             serde_json::to_value(list).map_err(|e| e.to_string())
         }
         Action::ListSubscriptions => {
@@ -889,7 +896,7 @@ fn dispatch(
         }
         Action::BrowseRegistry => {
             let registry_path = registry_location(p)?;
-            let packages = calp_cmds::calp_browse_registry(registry_path, window.clone())?;
+            let packages = calp_cmds::calp_browse_workspace(registry_path, window.clone())?;
             serde_json::to_value(packages).map_err(|e| e.to_string())
         }
         Action::InspectPackage => {
@@ -898,7 +905,7 @@ fn dispatch(
             let registry_path = registry_location(p)?;
             let package_name: String = field(p, "packageName")?;
             let version_pin: String = field(p, "versionPin")?;
-            let inspection = calp_cmds::calp_inspect_package(
+            let inspection = calp_cmds::calp_inspect_application(
                 registry_path,
                 package_name,
                 version_pin,
@@ -1358,9 +1365,27 @@ mod tests {
         assert_eq!(normalize_location("C:/Registries/Team/"), canonical);
         assert_eq!(normalize_location("  C:/registries/team  "), canonical);
 
+        // The `workspace.calcula` pointer file is the spelling the UI PRODUCES —
+        // the picker returns the full marker path and Subscribe saves it
+        // verbatim — so a script naming the folder must match a workspace
+        // configured by its marker, and vice versa. Without this the gate
+        // refuses a workspace the user demonstrably configured, and says so
+        // while listing a location that resolves to the same directory.
+        assert_eq!(normalize_location(r"C:\registries\team\workspace.calcula"), canonical);
+        assert_eq!(normalize_location("C:/registries/team/workspace.calcula"), canonical);
+        assert_eq!(normalize_location(r"C:\Registries\Team\Workspace.Calcula"), canonical);
+        assert_eq!(
+            normalize_location(r"file://C:\registries\team\workspace.calcula"),
+            canonical
+        );
+
         let url = normalize_location("https://packages.example.com/reg");
         assert_eq!(normalize_location("https://packages.example.com/reg/"), url);
         assert_eq!(normalize_location("HTTPS://Packages.Example.com/reg"), url);
+        assert_eq!(
+            normalize_location("https://packages.example.com/reg/workspace.calcula"),
+            url
+        );
     }
 
     #[test]
@@ -1378,6 +1403,18 @@ mod tests {
         assert_ne!(
             normalize_location("C:/registries/team"),
             normalize_location("C:/registries")
+        );
+        // Only the EXACT marker name is reduced. A neighbouring file that
+        // merely ends in `.calcula`, or a DIRECTORY named after the marker,
+        // must stay distinct — reducing those would silently retarget the gate
+        // one level up, which is the over-match this test exists to prevent.
+        assert_ne!(
+            normalize_location(r"C:\registries\team\notes.calcula"),
+            normalize_location(r"C:\registries\team")
+        );
+        assert_ne!(
+            normalize_location(r"C:\registries\team\workspace.calcula.bak"),
+            normalize_location(r"C:\registries\team")
         );
         // An empty request must never match an empty configured entry (the
         // configured list drops blanks, and the matcher rejects empties too).
@@ -1722,7 +1759,7 @@ mod tests {
             "calp_cmds::calp_pull(",
             "calp_cmds::calp_refresh_apply(",
             "calp_cmds::calp_publish(",
-            "calp_cmds::calp_inspect_package(",
+            "calp_cmds::calp_inspect_application(",
         ] {
             assert!(me.contains(expected), "missing dispatch into {}", expected);
         }

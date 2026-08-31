@@ -481,10 +481,10 @@ The cache is:
   (`lib.rs:808`). An `Instant` cannot be serialised and nothing writes the map
   into the archive, so it starts EMPTY on every launch. A cold open returns an
   empty map and queues a background rebuild
-  (`app/src-tauri/src/calp_commands.rs:10709`); against a local workspace (the
+  (`app/src-tauri/src/calp_commands.rs:10709`); against a local registry (the
   only kind that holds submissions today) that is fast enough that the gap has
   never shown. See `calp-writeback.md` "Evaluation model" for the consequence
-  if HTTP workspaces ever accept writeback.
+  if HTTP registries ever accept writeback.
 - Invalidated by a "Refresh Writeback Aggregates" command, and eagerly on local
   mutation via `invalidate_gather_cache`; otherwise served for a 2-second TTL
   (`GATHER_CACHE_TTL`, `calp_commands.rs:10558`)
@@ -520,17 +520,17 @@ The subscriber identity from Phase 13 determines filtering.
 - GATHER.COUNT returns correct count
 - Visibility filtering: OwnOnly, OwnPlusAggregate, Transparent
 - Cache invalidation on refresh
-- Offline: cached values used when the workspace is unavailable
+- Offline: cached values used when registry unavailable
 
 ---
 
 ### Phase 17: Refresh Integration and Version Binding
 
-**Goal:** Handle writeback regions across application version changes.
+**Goal:** Handle writeback regions across package version changes.
 
 **Scope:**
 
-When publisher releases a new application version:
+When publisher releases a new package version:
 - New writeback regions appearing → surface in writeback pane
 - Removed writeback regions → existing submissions marked obsolete,
   subscriber notified
@@ -629,15 +629,15 @@ because the region reference isn't known until evaluation time.
 be static (literal strings or named ranges). Dynamic references are a
 v1.2 enhancement that may require the async evaluator refactor.
 
-### R2: Workspace concurrency — RESOLVED (2026-07-17, append-only event log)
+### R2: Registry concurrency — RESOLVED (2026-07-17, append-only event log)
 
-Multiple subscribers may submit concurrently to the same workspace — including
-workspaces on SMB shares and cloud-sync folders (Dropbox/OneDrive), where file
+Multiple subscribers may submit concurrently to the same registry — including
+registries on SMB shares and cloud-sync folders (Dropbox/OneDrive), where file
 locks break sync clients and concurrent rewrites of one path fork "conflicted
 copy" files.
 
 **Resolution shipped (NOT the flock proposal — locking is explicitly
-rejected on submission paths):** the workspace stores writeback as an
+rejected on submission paths):** the registry stores writeback as an
 append-only event log with MVCC-style derived state:
 
 - Every submission (submit, re-submit) is a NEW immutable file
@@ -658,10 +658,10 @@ append-only event log with MVCC-style derived state:
   conflicted-copy renames, tmp debris, and files whose attribution doesn't
   match their directory.
 
-The only mutable-file writes left are publisher-only: the application-manifest
+The only mutable-file writes left are publisher-only: the package-manifest
 read-modify-write (guarded by the existing `.calp-lock` publish lock, now also
 around the rollup toggle) and the derived `_rollup.parquet` (regenerated
-publisher-side only; self-healing). For future networked workspaces, the
+publisher-side only; self-healing). For future networked registries, the
 append-only event log maps directly to POSTs — the server needs no locking
 either.
 
@@ -679,10 +679,10 @@ cached.
 ### R4: Offline editing
 
 Subscribers may edit writeback cells offline. Drafts are stored locally.
-Submission requires workspace access.
+Submission requires registry access.
 
 **Proposed resolution:** Drafts are first-class local state, persisted
-in `.cala`. The submit gesture checks workspace reachability and queues
+in `.cala`. The submit gesture checks registry reachability and queues
 if offline. Conflict resolution on reconnect follows the same pattern
 as override rebasing.
 
@@ -712,9 +712,9 @@ Each phase has its own test section above. Cross-cutting integration
 tests that span multiple phases:
 
 - **End-to-end publish-pull-write-submit-aggregate:** Publisher creates
-  writeback application → subscriber pulls → subscriber fills cells →
+  writeback package → subscriber pulls → subscriber fills cells →
   subscriber submits → publisher sees aggregated data via GATHER()
-- **Multi-subscriber:** Two subscribers pull the same application, each fills
+- **Multi-subscriber:** Two subscribers pull same package, each fills
   their slice, both submit, publisher sees both contributions
 - **Version upgrade with writeback carry-forward:** Publisher releases
   v1.1 with lenient binding, subscriber's v1.0 submissions carry forward
@@ -727,17 +727,17 @@ tests that span multiple phases:
 
 - It is not a timeline. Phase sizes vary enormously — Phase 14 and
   Phase 16 are each larger than all of Phase 9.
-- ~~It does not cover networked/remote workspaces. All workspace operations
-  are local filesystem. Remote workspace support is a separate project.~~
+- ~~It does not cover networked/remote registries. All registry operations
+  are local filesystem. Remote registry support is a separate project.~~
   **Partly overtaken (corrected 2026-08-16):** that separate project delivered
-  READ support — `HttpWorkspace` (`app/src-tauri/src/calp_registry.rs:93`) pulls
-  applications from any static file host, verified through the same signature and
-  per-artifact SHA-256 path as a local one. Workspace WRITES remain local-only,
+  READ support — `HttpRegistry` (`app/src-tauri/src/calp_registry.rs:93`) pulls
+  packages from any static file host, verified through the same signature and
+  per-artifact SHA-256 path as a local one. Registry WRITES remain local-only,
   and since submissions are writes, everything this plan says about writeback
   storage is still local-filesystem and still accurate.
 - It does not cover approval workflows beyond simple state transitions.
   The `OnApproval` submission policy stores the state; the approval UI
   and workflow engine are future work.
-- It does not cover Pattern 2 (shared scalar editing) or cross-application
+- It does not cover Pattern 2 (shared scalar editing) or cross-package
   writeback aggregation. These are explicitly out of scope per the
   design doc.

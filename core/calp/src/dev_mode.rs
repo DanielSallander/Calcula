@@ -6,7 +6,7 @@
 //!
 //! Dev subscriptions are stored alongside normal subscriptions but flagged with
 //! `dev: true`. They resolve by reading the source .cala directly instead of
-//! going through the registry.
+//! going through the workspace.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,7 +18,7 @@ use crate::error::CalpError;
 use crate::manifest::{Subscription, SubscribedSheet};
 
 /// A dev subscription entry. Stored in SubscriptionManifest with `dev: true`.
-/// Points at a local .cala file instead of a registry package.
+/// Points at a local .cala file instead of a workspace application.
 
 /// Read a source .cala workbook and extract sheets for dev subscription.
 pub fn pull_dev(
@@ -26,7 +26,7 @@ pub fn pull_dev(
     sheet_names: &[String],
 ) -> Result<DevPullResult, CalpError> {
     if !source_path.exists() {
-        return Err(CalpError::Registry(format!(
+        return Err(CalpError::Workspace(format!(
             "Dev source not found: {}", source_path.display()
         )));
     }

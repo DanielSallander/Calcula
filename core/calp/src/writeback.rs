@@ -90,7 +90,7 @@ pub enum SubmissionPolicy {
     OnApproval,
 }
 
-/// How submissions are handled across package version changes.
+/// How submissions are handled across application version changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VersionBinding {
@@ -172,9 +172,9 @@ pub struct WritebackRegionDeclaration {
 #[serde(rename_all = "camelCase")]
 pub struct ModelWritebackDeclaration {
     /// The writeback column's stable id (lowercase `[a-z0-9-]`; also the
-    /// submission `region_id` and the registry slot prefix).
+    /// submission `region_id` and the workspace slot prefix).
     pub id: String,
-    /// The package data source (embedded model) this column belongs to.
+    /// The application data source (embedded model) this column belongs to.
     pub data_source_id: String,
     /// Host table and user-facing column name (review/display).
     pub table: String,
@@ -882,7 +882,7 @@ pub fn check_region_compatibility(
 ///
 /// The model-side mirror of [`RegionCompatibility`]. Model writeback columns
 /// have no local drafts to invalidate — `bi_writeback_set_value` submits
-/// straight to the registry — so this exists for a different reason: when a
+/// straight to the workspace — so this exists for a different reason: when a
 /// declaration disappears or changes incompatibly, previously-counted
 /// submissions stop reaching the model. Removal drops out of the read-side
 /// declaration walk in `bi::writeback::collect_distributed_writeback_entries`,
@@ -1031,9 +1031,9 @@ pub fn check_model_writeback_compatibility(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmissionState {
-    /// Saved locally, not yet submitted to the registry.
+    /// Saved locally, not yet submitted to the workspace.
     Draft,
-    /// Submitted to the registry and visible per the region's policies.
+    /// Submitted to the workspace and visible per the region's policies.
     Submitted,
     /// Submitted and approved by the publisher (for on_approval policy).
     Approved,
@@ -1106,7 +1106,7 @@ pub struct WritebackSubmission {
 
 /// A publisher review decision over one submission EVENT, stored as its own
 /// immutable file under the version's `reviews/` subtree — never inside a
-/// submitter's directory. Every registry path has exactly one writer
+/// submitter's directory. Every workspace path has exactly one writer
 /// (submission events: the owning submitter; review events: the publisher)
 /// and no file is ever rewritten, which is what makes shared/synced storage
 /// (SMB, Dropbox) structurally conflict-free: a sync client can only ever see
@@ -1150,7 +1150,7 @@ pub struct ReviewEvent {
 #[serde(rename_all = "camelCase")]
 pub struct WritebackLayer {
     pub format_version: u32,
-    /// Local drafts not yet submitted to the registry.
+    /// Local drafts not yet submitted to the workspace.
     pub drafts: Vec<WritebackSubmission>,
     /// Forward-compatibility.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
@@ -1212,7 +1212,7 @@ impl WritebackLayer {
     }
 
     /// Mark all drafts for a region as Submitted and set the submitted_at timestamp.
-    /// Returns the submissions that were advanced (for writing to the registry).
+    /// Returns the submissions that were advanced (for writing to the workspace).
     pub fn submit_region(&mut self, region_id: &str, now: &str) -> Vec<WritebackSubmission> {
         let mut submitted = Vec::new();
         for draft in &mut self.drafts {

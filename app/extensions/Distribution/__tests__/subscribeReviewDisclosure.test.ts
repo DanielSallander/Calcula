@@ -1,13 +1,13 @@
 //! FILENAME: app/extensions/Distribution/__tests__/subscribeReviewDisclosure.test.ts
-// PURPOSE: The pre-pull Subscribe review must disclose every KIND of code a
-//          package carries, and describe each capability truthfully.
+// PURPOSE: The pre-pull Subscribe review must disclose every KIND of code an
+//          application carries, and describe each capability truthfully.
 // CONTEXT: Three defects, one screen:
 //
-//          1. `inspect_package` returns `module_scripts` and `notebooks`
-//             (calp_commands.rs::PackageInspection) and the review rendered
-//             NEITHER — only `scripts`. A reviewer reading "Scripts (2)" had no
-//             way to learn the package also shipped a formula-function library
-//             that runs whenever a cell calls it.
+//          1. `calp_inspect_application` returns `module_scripts` and
+//             `notebooks` (calp_commands.rs::ApplicationInspection) and the
+//             review rendered NEITHER — only `scripts`. A reviewer reading
+//             "Scripts (2)" had no way to learn the application also shipped a
+//             formula-function library that runs whenever a cell calls it.
 //          2. `storage` was phrased "store data on this device". The store is
 //             the workbook's own virtual filesystem, so it travels inside the
 //             .cala to whoever the file is sent to — the opposite of the
@@ -17,7 +17,7 @@
 //             every answer it checks, which IS the user's data.
 //
 //          The set of code kinds is DERIVED from the Rust struct, so the day
-//          `PackageInspection` grows another one this test names it instead of
+//          `ApplicationInspection` grows another one this test names it instead of
 //          the review silently omitting it.
 
 import fs from "fs";
@@ -40,20 +40,20 @@ const SUBSCRIBE = code(read("extensions/Distribution/components/SubscribeDialog.
 const SCRIPTS_SECTION = code(read("extensions/Distribution/components/inspector/ScriptsSection.tsx"));
 const WRITEBACK_PANE = code(read("extensions/Distribution/components/WritebackPane.tsx"));
 
-/** The `pub struct PackageInspection { ... }` body, read out of the Rust source. */
+/** The `pub struct ApplicationInspection { ... }` body, read out of the Rust source. */
 const INSPECTION_STRUCT: string = (() => {
-  const m = CALP_RS.match(/pub struct PackageInspection \{([\s\S]*?)\n\}/);
-  expect(m, "PackageInspection moved or was renamed").toBeTruthy();
+  const m = CALP_RS.match(/pub struct ApplicationInspection \{([\s\S]*?)\n\}/);
+  expect(m, "ApplicationInspection moved or was renamed").toBeTruthy();
   return m![1];
 })();
 
-describe("Subscribe review discloses every kind of code in the package", () => {
+describe("Subscribe review discloses every kind of code in the application", () => {
   it("the backend really does report module scripts and notebooks", () => {
     expect(INSPECTION_STRUCT).toMatch(/pub module_scripts:\s*Vec<InspectedModuleScript>/);
     expect(INSPECTION_STRUCT).toMatch(/pub notebooks:\s*Vec<InspectedNotebook>/);
   });
 
-  it("renders the module scripts the package carries", () => {
+  it("renders the module scripts the application carries", () => {
     expect(SUBSCRIBE).toContain("inspection.moduleScripts");
     const flat = SUBSCRIBE.replace(/\s+/g, " ");
     expect(flat).toContain("Module scripts (");
@@ -63,7 +63,7 @@ describe("Subscribe review discloses every kind of code in the package", () => {
     expect(flat).toMatch(/arrive switched off: subscribing stores them, it does not run them/);
   });
 
-  it("renders the notebooks the package carries", () => {
+  it("renders the notebooks the application carries", () => {
     expect(SUBSCRIBE).toContain("inspection.notebooks");
     const flat = SUBSCRIBE.replace(/\s+/g, " ");
     expect(flat).toContain("Notebooks (");
@@ -105,15 +105,28 @@ describe("Subscribe review discloses every kind of code in the package", () => {
 });
 
 describe("capability phrases tell the truth about where storage lives", () => {
-  const PHRASE =
-    "store its own private data inside this workbook file (256 KB; it travels with the file if you share it)";
+  // READ FROM THE SOURCE OF TRUTH, not retyped here. Both Distribution surfaces
+  // carry a comment promising this phrase is "word for word the same" as the
+  // scriptHost one — and it was NOT: scriptHost said "up to 256 KB" while both
+  // copies said "256 KB". The guard could not catch it, because it pinned the
+  // two copies to a constant declared in this file and never opened the third
+  // surface at all. A three-way invariant checked two ways is a two-way
+  // invariant with a comment on it.
+  const CAPABILITIES = read("src/api/scriptHost/capabilities.ts");
+  const PHRASE = CAPABILITIES.match(
+    /store its own private data inside this workbook file \([^)]*\)/,
+  )?.[0];
+
+  it("the authoritative phrase is where the comments say it is", () => {
+    expect(PHRASE, "the storage phrase moved out of scriptHost/capabilities.ts").toBeTruthy();
+  });
 
   it("no surface still says storage is on this device", () => {
     expect(SUBSCRIBE).not.toContain("store data on this device");
     expect(SCRIPTS_SECTION).not.toContain("store data on this device");
   });
 
-  it("the Subscribe review and the package inspector use the identical phrase", () => {
+  it("the Subscribe review and the Application Inspector use the identical phrase", () => {
     expect(SUBSCRIBE).toContain(PHRASE);
     expect(SCRIPTS_SECTION).toContain(PHRASE);
   });

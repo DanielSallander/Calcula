@@ -1,14 +1,14 @@
-//! FILENAME: core/calp/src/package_kind.rs
-//! PURPOSE: Package kind declarations and kind-specific refresh defaults.
+//! FILENAME: core/calp/src/application_kind.rs
+//! PURPOSE: Application kind declarations and kind-specific refresh defaults.
 //! CONTEXT: A .calp declares its kind: template, dataset, or report.
 //! Kind affects refresh defaults and override semantics.
 
 use serde::{Deserialize, Serialize};
 
-/// Package kind determines refresh behavior and override semantics.
+/// Application kind determines refresh behavior and override semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PackageKind {
+pub enum ApplicationKind {
     /// Structure and formulas, no/minimal data. Refresh changes structure
     /// and formulas; data is consumer-supplied.
     Template,
@@ -19,25 +19,25 @@ pub enum PackageKind {
     Report,
 }
 
-impl PackageKind {
+impl ApplicationKind {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "template" => PackageKind::Template,
-            "dataset" => PackageKind::Dataset,
-            _ => PackageKind::Report,
+            "template" => ApplicationKind::Template,
+            "dataset" => ApplicationKind::Dataset,
+            _ => ApplicationKind::Report,
         }
     }
 
     pub fn as_str(&self) -> &str {
         match self {
-            PackageKind::Template => "template",
-            PackageKind::Dataset => "dataset",
-            PackageKind::Report => "report",
+            ApplicationKind::Template => "template",
+            ApplicationKind::Dataset => "dataset",
+            ApplicationKind::Report => "report",
         }
     }
 }
 
-/// Refresh defaults for a package kind.
+/// Refresh defaults for an application kind.
 #[derive(Debug, Clone)]
 pub struct RefreshDefaults {
     /// Whether formulas from upstream should be refreshed.
@@ -51,22 +51,22 @@ pub struct RefreshDefaults {
 }
 
 impl RefreshDefaults {
-    /// Get the defaults for a package kind.
-    pub fn for_kind(kind: &PackageKind) -> Self {
+    /// Get the defaults for an application kind.
+    pub fn for_kind(kind: &ApplicationKind) -> Self {
         match kind {
-            PackageKind::Template => RefreshDefaults {
+            ApplicationKind::Template => RefreshDefaults {
                 refresh_formulas: true,
                 refresh_data: false, // data is consumer-supplied
                 refresh_structure: true,
                 preserve_consumer_data: true,
             },
-            PackageKind::Dataset => RefreshDefaults {
+            ApplicationKind::Dataset => RefreshDefaults {
                 refresh_formulas: false, // no formulas in a dataset
                 refresh_data: true,
                 refresh_structure: false, // structure is stable
                 preserve_consumer_data: false,
             },
-            PackageKind::Report => RefreshDefaults {
+            ApplicationKind::Report => RefreshDefaults {
                 refresh_formulas: true,
                 refresh_data: true,
                 refresh_structure: true,
@@ -86,22 +86,22 @@ mod tests {
 
     #[test]
     fn parse_kind_from_string() {
-        assert_eq!(PackageKind::from_str("template"), PackageKind::Template);
-        assert_eq!(PackageKind::from_str("DATASET"), PackageKind::Dataset);
-        assert_eq!(PackageKind::from_str("report"), PackageKind::Report);
-        assert_eq!(PackageKind::from_str("unknown"), PackageKind::Report); // default
+        assert_eq!(ApplicationKind::from_str("template"), ApplicationKind::Template);
+        assert_eq!(ApplicationKind::from_str("DATASET"), ApplicationKind::Dataset);
+        assert_eq!(ApplicationKind::from_str("report"), ApplicationKind::Report);
+        assert_eq!(ApplicationKind::from_str("unknown"), ApplicationKind::Report); // default
     }
 
     #[test]
     fn kind_roundtrip() {
-        for kind in [PackageKind::Template, PackageKind::Dataset, PackageKind::Report] {
-            assert_eq!(PackageKind::from_str(kind.as_str()), kind);
+        for kind in [ApplicationKind::Template, ApplicationKind::Dataset, ApplicationKind::Report] {
+            assert_eq!(ApplicationKind::from_str(kind.as_str()), kind);
         }
     }
 
     #[test]
     fn template_preserves_consumer_data() {
-        let defaults = RefreshDefaults::for_kind(&PackageKind::Template);
+        let defaults = RefreshDefaults::for_kind(&ApplicationKind::Template);
         assert!(defaults.refresh_formulas);
         assert!(!defaults.refresh_data);
         assert!(defaults.preserve_consumer_data);
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn dataset_refreshes_data_only() {
-        let defaults = RefreshDefaults::for_kind(&PackageKind::Dataset);
+        let defaults = RefreshDefaults::for_kind(&ApplicationKind::Dataset);
         assert!(!defaults.refresh_formulas);
         assert!(defaults.refresh_data);
         assert!(!defaults.refresh_structure);
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn report_refreshes_everything() {
-        let defaults = RefreshDefaults::for_kind(&PackageKind::Report);
+        let defaults = RefreshDefaults::for_kind(&ApplicationKind::Report);
         assert!(defaults.refresh_formulas);
         assert!(defaults.refresh_data);
         assert!(defaults.refresh_structure);
@@ -125,10 +125,10 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        let kind = PackageKind::Template;
+        let kind = ApplicationKind::Template;
         let json = serde_json::to_string(&kind).unwrap();
         assert_eq!(json, "\"template\"");
-        let deserialized: PackageKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, PackageKind::Template);
+        let deserialized: ApplicationKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, ApplicationKind::Template);
     }
 }

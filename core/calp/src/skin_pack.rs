@@ -3,7 +3,7 @@
 //! data (CSS-variable token overrides + canvas grid overrides + density/font +
 //! branding assets), code-free, layered over a light/dark base on the client.
 //! CONTEXT: A skin pack is plain signed JSON. It reuses the SAME Ed25519 +
-//! SHA-256 trust spine as .calp packages (signing.rs / integrity.rs) but needs
+//! SHA-256 trust spine as .calp applications (signing.rs / integrity.rs) but needs
 //! none of the sheet/script/pivot machinery — it is colors and fonts. The shape
 //! mirrors the frontend `Skin` (camelCase) so the host can apply it directly.
 
@@ -14,15 +14,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CalpError;
 use crate::integrity::{self, TrustStatus};
-use crate::manifest::{PackageManifest, VersionEntry, VersionManifest};
-use crate::registry_id::RegistryScope;
+use crate::manifest::{ApplicationManifest, VersionEntry, VersionManifest};
+use crate::workspace_id::WorkspaceScope;
 use crate::signing::{verify_signature, PublisherKeypair};
-use crate::transport::RegistryTransport;
+use crate::transport::WorkspaceTransport;
 use crate::version::VersionPin;
 
-/// The single artifact a skin package carries.
+/// The single artifact a skin application carries.
 pub const SKIN_PACK_ARTIFACT: &str = "skin-pack.json";
-/// The `.calp` package kind for a skin (no sheets/scripts/pivots).
+/// The `.calp` application kind for a skin (no sheets/scripts/pivots).
 pub const SKIN_KIND: &str = "skin";
 
 /// Branding assets a corporate skin may carry. data-URLs or local paths.
@@ -79,22 +79,22 @@ pub enum SkinTrust {
     /// Signed, valid, and the publisher key was pinned by THIS operation because
     /// the caller was a deliberate trust decision (`PinPolicy::PinOnFirstUse`).
     FirstUse,
-    /// Pinned just now for THIS registry, and the same key is already trusted for
-    /// this package from another registry — a migration, a mirror, or a second
+    /// Pinned just now for THIS workspace, and the same key is already trusted for
+    /// this application from another workspace — a migration, a mirror, or a second
     /// spelling of one location.
     FirstUseKnownPublisher,
-    /// Pinned just now for this registry even though a DIFFERENT key is pinned
-    /// for the same package name elsewhere, because the user was shown both and
+    /// Pinned just now for this workspace even though a DIFFERENT key is pinned
+    /// for the same application name elsewhere, because the user was shown both and
     /// accepted. Never presented as an ordinary first use.
     FirstUseAcceptedNameConflict,
     /// Signed and the signature is valid, but this machine holds no pin for the
-    /// package — nobody here ever agreed to trust that signer. Authentic, NOT
+    /// application — nobody here ever agreed to trust that signer. Authentic, NOT
     /// trusted. Kept distinct from `Verified` on purpose: the previous code
     /// collapsed a trust-on-first-use result into `Verified`, so a first-contact
     /// squat rendered in the Appearance panel as a green "verified" badge.
     NotPinned,
-    /// Not pinned for this registry, and a DIFFERENT key is pinned for the same
-    /// package name from another registry. Two registries claiming one name is
+    /// Not pinned for this workspace, and a DIFFERENT key is pinned for the same
+    /// application name from another workspace. Two workspaces claiming one name is
     /// what a hijack looks like — never quietly "not pinned yet".
     NotPinnedNameConflict,
     /// No publisher key expected — applied as unsigned (advisory) data.
@@ -133,7 +133,7 @@ pub fn load_and_verify_skin(
             return Ok(LoadedSkin { skin: None, trust: SkinTrust::Unknown });
         }
         let sig_hex = std::fs::read_to_string(&sig_path)?;
-        // The package label here is purely for the error context.
+        // The application label here is purely for the error context.
         match verify_signature(expected_publisher_key, &bytes, sig_hex.trim(), "skin", "1.0.0") {
             Ok(()) => {
                 let skin: SkinPack = serde_json::from_slice(&bytes)?;
@@ -148,10 +148,10 @@ pub fn load_and_verify_skin(
 }
 
 // ---------------------------------------------------------------------------
-// Remote distribution over the .calp registry rail (transport + signing + integrity)
+// Remote distribution over the .calp workspace rail (transport + signing + integrity)
 // ---------------------------------------------------------------------------
 
-/// A skin pulled + verified from a registry.
+/// A skin pulled + verified from a workspace.
 ///
 /// The three `*_bytes` fields carry the RAW proof material, not a re-serialized
 /// copy: they are what [`verify_cached_skin`] needs to re-establish the same
@@ -180,8 +180,8 @@ pub struct PulledSkin {
 /// read back, applied, and labelled `"verified"` with no check of any kind, so
 /// dropping a JSON file into `%LOCALAPPDATA%\Calcula\skins-cache\` was enough to
 /// take over the machine's branding under a green badge — and, because a
-/// `refresh: "manual"` policy skips the registry pull whenever a cache file
-/// exists, without the genuine registry ever being consulted. That made the
+/// `refresh: "manual"` policy skips the workspace pull whenever a cache file
+/// exists, without the genuine workspace ever being consulted. That made the
 /// cache a way around the `PinPolicy::RequirePinned` gate on the pull itself.
 ///
 /// The chain here is rooted in `%PROGRAMDATA%\Calcula\policy.json`, which is
@@ -235,14 +235,14 @@ pub fn verify_cached_skin(
     Ok(serde_json::from_slice(skin_bytes)?)
 }
 
-/// Publish a skin pack to a registry as a `skin`-kind package version. Mirrors
+/// Publish a skin pack to a workspace as a `skin`-kind application version. Mirrors
 /// the canonical publish flow (write artifact -> checksum -> write+sign manifest
-/// -> update package manifest under lock) but carries only `skin-pack.json` — no
+/// -> update application manifest under lock) but carries only `skin-pack.json` — no
 /// sheets/scripts/pivots. The publisher's Ed25519 key (created on first publish)
 /// signs the version manifest, so subscribers verify origin + integrity exactly
-/// like any .calp package.
+/// like any .calp application.
 pub fn skin_publish(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     profile_dir: &Path,
     package_name: &str,
     version: &str,
@@ -296,7 +296,7 @@ pub fn skin_publish(
     let manifest_bytes = registry
         .read_artifact(package_name, version, integrity::VERSION_MANIFEST_FILE)?
         .ok_or_else(|| {
-            CalpError::Registry(format!("version manifest missing after write for {package_name}@{version}"))
+            CalpError::Workspace(format!("version manifest missing after write for {package_name}@{version}"))
         })?;
     let signature_hex = keypair.sign(&manifest_bytes);
     registry.write_artifact(
@@ -306,12 +306,12 @@ pub fn skin_publish(
         signature_hex.as_bytes(),
     )?;
 
-    // Append the version to the package manifest under the registry lock.
+    // Append the version to the application manifest under the workspace lock.
     {
         let _lock = registry.lock()?;
         let mut pkg = registry
-            .get_package_manifest(package_name)
-            .unwrap_or_else(|_| PackageManifest::new(package_name, SKIN_KIND, &keypair.display_name(), now));
+            .get_application_manifest(package_name)
+            .unwrap_or_else(|_| ApplicationManifest::new(package_name, SKIN_KIND, &keypair.display_name(), now));
         pkg.versions.retain(|e| e.version != version); // idempotent republish
         pkg.versions.push(VersionEntry {
             version: version.to_string(),
@@ -322,13 +322,13 @@ pub fn skin_publish(
             publisher_key: keypair.public_key_hex(),
             extra: std::collections::HashMap::new(),
         });
-        registry.write_package_manifest(&pkg)?;
+        registry.write_application_manifest(&pkg)?;
     }
 
     Ok(())
 }
 
-/// Pull + verify a skin pack from a registry. Resolves the version pin, verifies
+/// Pull + verify a skin pack from a workspace. Resolves the version pin, verifies
 /// the Ed25519 manifest signature (with TOFU publisher pinning) and the SHA-256
 /// artifact integrity BEFORE parsing the payload. Any verification failure
 /// (tampered pack, wrong signer, changed key) propagates as a `CalpError`.
@@ -338,12 +338,12 @@ pub fn skin_publish(
 /// before any user interaction) passes `RequirePinned`: the administrator's
 /// `policy.json` supplies the pin via `publisherKey`, and if it does not, the
 /// answer is "no org skin plus a surfaced misconfiguration", never "trust
-/// whatever key this registry happens to serve at startup".
+/// whatever key this workspace happens to serve at startup".
 pub fn skin_pull(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     profile_dir: &Path,
     package_name: &str,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     pin: &VersionPin,
     policy: integrity::PinPolicy,
 ) -> Result<PulledSkin, CalpError> {
@@ -425,14 +425,14 @@ pub fn skin_pull(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::LocalRegistry;
-    use crate::registry_id::registry_scope;
+    use crate::workspace::LocalWorkspace;
+    use crate::workspace_id::workspace_scope;
     use crate::signing::{load_pins, PinKey, PublisherKeypair};
     use tempfile::TempDir;
 
-    /// The scope a real call site would derive from the registry's location.
-    fn scope_of(dir: &TempDir) -> RegistryScope {
-        registry_scope(&dir.path().to_string_lossy()).unwrap()
+    /// The scope a real call site would derive from the workspace's location.
+    fn scope_of(dir: &TempDir) -> WorkspaceScope {
+        workspace_scope(&dir.path().to_string_lossy()).unwrap()
     }
 
     fn sample_json(id: &str) -> String {
@@ -500,7 +500,7 @@ mod tests {
         assert!(loaded.skin.is_none());
     }
 
-    // --- Remote registry publish/pull ---------------------------------------
+    // --- Remote workspace publish/pull ---------------------------------------
 
     fn make_skin(id: &str) -> SkinPack {
         let mut tokens = BTreeMap::new();
@@ -523,7 +523,7 @@ mod tests {
         let reg_dir = TempDir::new().unwrap();
         let pub_profile = TempDir::new().unwrap();
         let sub_profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
 
         skin_publish(
             &registry,
@@ -562,7 +562,7 @@ mod tests {
         let reg_dir = TempDir::new().unwrap();
         let pub_profile = TempDir::new().unwrap();
         let sub_profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
 
         for v in ["1.0.0", "1.1.0", "2.0.0"] {
             skin_publish(&registry, pub_profile.path(), "acme-brand", v, "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
@@ -586,7 +586,7 @@ mod tests {
         let reg_dir = TempDir::new().unwrap();
         let pub_profile = TempDir::new().unwrap();
         let sub_profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
 
         skin_publish(&registry, pub_profile.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
 
@@ -605,13 +605,13 @@ mod tests {
         let pub_a = TempDir::new().unwrap();
         let pub_b = TempDir::new().unwrap();
         let sub_profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
 
         // First publish + pull pins publisher A (TOFU).
         skin_publish(&registry, pub_a.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
         skin_pull(&registry, sub_profile.path(), "acme-brand", &scope_of(&reg_dir), &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap();
 
-        // A DIFFERENT publisher (B) republishes a new version to the same package.
+        // A DIFFERENT publisher (B) republishes a new version to the same application.
         skin_publish(&registry, pub_b.path(), "acme-brand", "2.0.0", "2026-06-23T01:00:00Z", &make_skin("acme.brand")).unwrap();
 
         let err = skin_pull(&registry, sub_profile.path(), "acme-brand", &scope_of(&reg_dir), &VersionPin::Latest, integrity::PinPolicy::PinOnFirstUse).unwrap_err();
@@ -626,7 +626,7 @@ mod tests {
         let reg_dir = TempDir::new().unwrap();
         let pub_profile = TempDir::new().unwrap();
         let sub_profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
 
         skin_publish(&registry, pub_profile.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
 
@@ -654,7 +654,7 @@ mod tests {
         let reg_dir = TempDir::new().unwrap();
         let pub_profile = TempDir::new().unwrap();
         let sub_profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
 
         skin_publish(&registry, pub_profile.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
         let org_key = PublisherKeypair::load_or_create(pub_profile.path())
@@ -691,7 +691,7 @@ mod tests {
         let reg_dir = TempDir::new().unwrap();
         let pub_profile = TempDir::new().unwrap();
         let sub_profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
 
         skin_publish(&registry, pub_profile.path(), "acme-brand", "1.0.0", "2026-06-23T00:00:00Z", &make_skin("acme.brand")).unwrap();
         let org_key = PublisherKeypair::load_or_create(pub_profile.path())
@@ -704,7 +704,7 @@ mod tests {
             "{}/",
             reg_dir.path().to_string_lossy().replace('\\', "/").to_uppercase()
         );
-        let admin_scope = registry_scope(&admin_spelling).unwrap();
+        let admin_scope = workspace_scope(&admin_spelling).unwrap();
         crate::signing::pin_publisher(
             sub_profile.path(),
             &PinKey::calp(&admin_scope, "acme-brand"),

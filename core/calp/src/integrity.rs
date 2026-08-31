@@ -1,5 +1,5 @@
 //! FILENAME: core/calp/src/integrity.rs
-//! PURPOSE: Package integrity — SHA-256 artifact checksums (S5, phase 1).
+//! PURPOSE: Application integrity — SHA-256 artifact checksums (S5, phase 1).
 //! CONTEXT: On publish, every artifact in a version directory is hashed and
 //! the digests are recorded in the version manifest (written last, so the
 //! manifest is the integrity root and the publish commit point). On pull —
@@ -11,14 +11,14 @@
 //!   - on-disk file not listed           -> UnlistedArtifact (no post-publish
 //!     file injection)
 //!   - empty checksum map                -> MissingChecksums (pre-checksum
-//!     packages are rejected, not allowed through; republish to fix)
+//!     applications are rejected, not allowed through; republish to fix)
 //!
 //! ---------------------------------------------------------------------------
 //! Phase 2 seam: publisher signing (Ed25519 + TOFU key pinning)
 //! ---------------------------------------------------------------------------
 //! The checksum map makes every artifact verifiable from the version manifest,
 //! but the manifest itself is still unsigned — anyone who can write to the
-//! registry can rewrite manifest + checksums together. Phase 2 plugs in here:
+//! workspace can rewrite manifest + checksums together. Phase 2 plugs in here:
 //!   1. publish(): sign the raw bytes of version-manifest.json with the
 //!      publisher's Ed25519 key -> detached `version-manifest.sig` sibling.
 //!   2. pull/refresh/inspect: a `verify_and_load_manifest_via()` step runs
@@ -44,9 +44,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CalpError;
 use crate::manifest::VersionManifest;
-use crate::registry_id::RegistryScope;
+use crate::workspace_id::WorkspaceScope;
 use crate::signing::{PinKey, PinNamespace};
-use crate::transport::RegistryTransport;
+use crate::transport::WorkspaceTransport;
 
 /// The version manifest filename — the integrity root. Never listed in its
 /// own checksum map.
@@ -125,7 +125,7 @@ fn walk_dir(
             walk_dir(&path, base, out)?;
         } else if file_type.is_file() {
             let rel = path.strip_prefix(base).map_err(|e| {
-                CalpError::Registry(format!(
+                CalpError::Workspace(format!(
                     "Artifact path {} escapes version directory: {}",
                     path.display(),
                     e
@@ -156,7 +156,7 @@ pub fn verify_version_artifacts(
     version: &str,
 ) -> Result<(), CalpError> {
     if manifest.artifact_checksums.is_empty() {
-        // Pre-checksum package. No backward compatibility: hard error.
+        // Pre-checksum application. No backward compatibility: hard error.
         return Err(CalpError::MissingChecksums {
             package: package.to_string(),
             version: version.to_string(),
@@ -170,7 +170,7 @@ pub fn verify_version_artifacts(
 /// Compare a freshly-computed checksum map against the manifest's published
 /// checksums. The trust gate shared by the fs-path and transport-agnostic
 /// verify paths: a listed file missing/changed, or an unlisted file present,
-/// each fails. The empty-map (pre-checksum package) case is handled by the
+/// each fails. The empty-map (pre-checksum application) case is handled by the
 /// callers BEFORE they compute `actual`.
 fn compare_checksums(
     actual: &BTreeMap<String, String>,
@@ -214,7 +214,7 @@ fn compare_checksums(
 }
 
 // ---------------------------------------------------------------------------
-// D8: transport-agnostic integrity — same trust gate over `&dyn RegistryTransport`
+// D8: transport-agnostic integrity — same trust gate over `&dyn WorkspaceTransport`
 // ---------------------------------------------------------------------------
 
 /// Compute SHA-256 digests of every checksummable artifact via the transport
@@ -223,7 +223,7 @@ fn compare_checksums(
 /// integrity root, its signature, and the submissions subtree — exactly the set
 /// the fs walk excludes — so the resulting map matches the manifest convention.
 pub fn compute_artifact_checksums_via(
-    t: &dyn RegistryTransport,
+    t: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
 ) -> Result<BTreeMap<String, String>, CalpError> {
@@ -247,13 +247,13 @@ pub fn compute_artifact_checksums_via(
 /// artifact the transport exposes for a version against the manifest's
 /// published checksums BEFORE any artifact is materialized.
 pub fn verify_version_artifacts_via(
-    t: &dyn RegistryTransport,
+    t: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
     manifest: &VersionManifest,
 ) -> Result<(), CalpError> {
     if manifest.artifact_checksums.is_empty() {
-        // Pre-checksum package. No backward compatibility: hard error.
+        // Pre-checksum application. No backward compatibility: hard error.
         return Err(CalpError::MissingChecksums {
             package: package.to_string(),
             version: version.to_string(),
@@ -305,7 +305,7 @@ pub fn verify_version_artifacts_via(
 /// The outcome of a successful manifest-signature + TOFU check.
 ///
 /// NOTE FOR FUTURE EDITORS: the app-side maps that turn this into a wire string
-/// (`calp_commands::calp_pull`, `calp_commands::calp_inspect_package`,
+/// (`calp_commands::calp_pull`, `calp_commands::calp_inspect_application`,
 /// `calp_inspector::trust_status_str`) are deliberately EXHAUSTIVE matches with
 /// no `_` arm. Adding a variant here must not compile until every one of them —
 /// and the frontend presentation map behind it — has been given a row. A trust
@@ -313,14 +313,14 @@ pub fn verify_version_artifacts_via(
 /// bug, not a cosmetic one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustStatus {
-    /// This package's publisher key was not pinned before — for this registry or
+    /// This application's publisher key was not pinned before — for this workspace or
     /// any other — and it has now been pinned (trust-on-first-use) because the
     /// caller passed a pinning policy, i.e. the USER decided to trust this
     /// publisher. The caller should surface this so the user knows they are
     /// trusting a publisher for the first time.
     FirstUse,
-    /// The package is signed by the SAME publisher key pinned by an earlier
-    /// deliberate trust decision, for THIS registry.
+    /// The application is signed by the SAME publisher key pinned by an earlier
+    /// deliberate trust decision, for THIS workspace.
     Verified,
     /// Signed by a CO-PUBLISHER the pinned publisher authorized: this version's
     /// signer is not the pinned key, but it appears in a `publishers.json` that
@@ -332,49 +332,49 @@ pub enum TrustStatus {
     /// and a fact they are entitled to see — "signed by Alice, authorized by
     /// the publisher you trust" rather than a silent accept.
     TrustedDelegate,
-    /// Not pinned for this registry, but the SAME key is already pinned for this
-    /// name somewhere else — a registry migration, a mirror, a second spelling of
+    /// Not pinned for this workspace, but the SAME key is already pinned for this
+    /// name somewhere else — a workspace migration, a mirror, a second spelling of
     /// one path, or a location whose canonical form could not be resolved. Pinned
     /// now, and reported as reassurance rather than alarm: this is the publisher
     /// you already trust, reached from a new location.
     ///
-    /// This variant is what makes an imperfect registry canonicalizer SAFE. The
+    /// This variant is what makes an imperfect workspace canonicalizer SAFE. The
     /// worst outcome of a missed match is one redundant pin row and this notice —
     /// never a false hijack accusation, and never a silent accept of a different
     /// key.
     FirstUseKnownPublisher,
-    /// Not pinned for this registry, a DIFFERENT key is pinned for this name
+    /// Not pinned for this workspace, a DIFFERENT key is pinned for this name
     /// elsewhere, and the user was shown both and accepted anyway
     /// (`PinPolicy::PinAcceptingNameConflict`). Pinned. Kept distinct from
     /// `FirstUse` so the audit trail and the subscriptions pane never describe it
     /// as an ordinary first use.
     FirstUseAcceptedNameConflict,
     /// The signature is cryptographically valid, but this machine has never
-    /// agreed to trust this publisher for this package name from this registry,
+    /// agreed to trust this publisher for this application name from this workspace,
     /// and this operation was not a trust decision (`PinPolicy::VerifyOnly`), so
     /// NOTHING was written to the pin store.
     ///
     /// AUTHENTIC IS NOT TRUSTED. Anyone can generate an Ed25519 keypair and sign
-    /// a package; a valid signature proves only that the bytes were not altered
+    /// an application; a valid signature proves only that the bytes were not altered
     /// after signing, never that the signer is who the user expects. Presenting
     /// this as "verified" is exactly the failure this status exists to prevent.
     NotPinned,
-    /// Passive first contact AND a different key is pinned for this same package
-    /// name from another registry. Nothing was written. Two registries claiming
+    /// Passive first contact AND a different key is pinned for this same application
+    /// name from another workspace. Nothing was written. Two workspaces claiming
     /// one name is what a hijack looks like, so this must be surfaced
-    /// prominently — with BOTH registries and BOTH key fingerprints — rather than
+    /// prominently — with BOTH workspaces and BOTH key fingerprints — rather than
     /// shown as a plain "not pinned yet".
     NotPinnedNameConflict,
 }
 
-/// A pin held for the SAME package name in a DIFFERENT registry scope.
+/// A pin held for the SAME application name in a DIFFERENT workspace scope.
 ///
 /// Travels on every `VerifiedManifest`, including `Verified` ones, so a
 /// transparency surface can show the whole picture rather than only the moment
 /// of conflict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OtherScopePin {
-    /// The other registry in the USER'S spelling. Never the normalized id.
+    /// The other workspace in the USER'S spelling. Never the normalized id.
     pub scope_label: String,
     /// The key pinned there.
     pub publisher_key: String,
@@ -404,14 +404,14 @@ pub struct VerifiedManifest {
 ///
 /// WHY THIS PARAMETER EXISTS (read before adding a call site).
 ///
-/// A TOFU pin records "this publisher key is the one I expect for this package
+/// A TOFU pin records "this publisher key is the one I expect for this application
 /// name". It is a statement about a decision the USER made. If a pin can be
 /// created by an operation the user experiences as passive — a scan, a preview,
 /// an inspection, a background refresh, a recalculation — then a file that
 /// merely APPEARS somewhere can SQUAT the identity that a genuine publisher will
 /// later be measured against. The real publisher's next release then reads as
 /// `PublisherKeyChanged`: the attacker's key becomes the trusted one and the
-/// legitimate one becomes "possible package hijack".
+/// legitimate one becomes "possible application hijack".
 ///
 /// That defect has now been found and fixed THREE separate times in this
 /// codebase:
@@ -421,7 +421,7 @@ pub struct VerifiedManifest {
 ///   2. Wave I — library resolution pinned on preview
 ///      (`library_commands.rs`: `verify_library_manifest`, which now takes this
 ///      same enum).
-///   3. Wave J — `.calp` package inspection, workbook open, writeback submit and
+///   3. Wave J — `.calp` application inspection, workbook open, writeback submit and
 ///      every GATHER recalculation all pinned, via
 ///      `verify_and_load_manifest_via`.
 ///
@@ -430,25 +430,25 @@ pub struct VerifiedManifest {
 /// not think about pinning does not compile. Pick the variant that names what
 /// the USER just did, not what is convenient for the caller.
 ///
-/// A PIN IS SCOPED TO THE REGISTRY THE USER CONFIGURED. `verify_and_load_manifest_via`
-/// takes a required `&RegistryScope` for the same reason it takes this enum: a
+/// A PIN IS SCOPED TO THE WORKSPACE THE USER CONFIGURED. `verify_and_load_manifest_via`
+/// takes a required `&WorkspaceScope` for the same reason it takes this enum: a
 /// pin that is not tied to an origin lets whoever reaches a name first own it for
-/// the whole machine. See `registry_id.rs`.
+/// the whole machine. See `workspace_id.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinPolicy {
-    /// The user has just decided to trust this publisher for this package name
-    /// from this registry — Subscribe, Install, or an administrator's machine
+    /// The user has just decided to trust this publisher for this application name
+    /// from this workspace — Subscribe, Install, or an administrator's machine
     /// policy. First contact pins here, and ONLY here (plus its
     /// conflict-accepting sibling below). Reports `FirstUse`, or
     /// `FirstUseKnownPublisher` when the same key is already trusted from another
-    /// registry.
+    /// workspace.
     ///
     /// If a DIFFERENT key is pinned for this name elsewhere, this policy REFUSES
     /// with `CalpError::PublisherNameConflict` rather than pinning. An error, not
     /// a status: an error cannot be bound as `_` and carried on.
     PinOnFirstUse,
-    /// `PinOnFirstUse`, except that the user has been shown the cross-registry
-    /// name conflict — both registries, both key fingerprints — and answered a
+    /// `PinOnFirstUse`, except that the user has been shown the cross-workspace
+    /// name conflict — both workspaces, both key fingerprints — and answered a
     /// second, differently-worded question. Reachable ONLY from a UI that
     /// displayed the conflict. Reports `FirstUseAcceptedNameConflict`, which is
     /// never presented as an ordinary first use.
@@ -456,14 +456,14 @@ pub enum PinPolicy {
     /// Look, authenticate, report. Writes nothing to the pin store, ever. Used
     /// by inspection/preview surfaces that exist precisely so the user can
     /// decide. First contact reports `NotPinned`, or `NotPinnedNameConflict` when
-    /// another registry holds a different key for this name.
+    /// another workspace holds a different key for this name.
     VerifyOnly,
-    /// This operation is only meaningful for a package the user ALREADY trusts
+    /// This operation is only meaningful for an application the user ALREADY trusts
     /// (writeback, GATHER, refresh, reset, an org-managed skin). It must run
-    /// against an EXISTING pin FOR THIS REGISTRY: first contact is an error
+    /// against an EXISTING pin FOR THIS WORKSPACE: first contact is an error
     /// (`CalpError::PublisherNotPinned`), never a pin and never a status the
-    /// caller might mistake for success. A pin held for another registry is not
-    /// a pin here — deliberately, because "some registry somewhere vouched for
+    /// caller might mistake for success. A pin held for another workspace is not
+    /// a pin here — deliberately, because "some workspace somewhere vouched for
     /// this name" is not the question this policy asks.
     RequirePinned,
 }
@@ -476,12 +476,12 @@ pub enum PinPolicy {
 /// The ONLY place in the codebase that writes a `.calp`/skin publisher pin.
 /// Whether `signer` is a co-publisher the PINNED root authorized.
 ///
-/// The pinned key is the anchor and is never re-derived from the registry: the
+/// The pinned key is the anchor and is never re-derived from the workspace: the
 /// whole point is that a delegate is accepted on the strength of a signature by
-/// the key the user already agreed to trust. A package with no list answers
+/// the key the user already agreed to trust. An application with no list answers
 /// `false`, which lands the caller on the ordinary key-changed refusal.
 fn delegate_is_authorized(
-    registry: &dyn crate::transport::RegistryTransport,
+    registry: &dyn crate::transport::WorkspaceTransport,
     package: &str,
     pinned_root: &str,
     signer: &str,
@@ -494,12 +494,12 @@ fn delegate_is_authorized(
 
 #[allow(clippy::too_many_arguments)]
 fn verify_manifest_signature_bytes(
-    registry: &dyn crate::transport::RegistryTransport,
+    registry: &dyn crate::transport::WorkspaceTransport,
     manifest_bytes: &[u8],
     sig_hex: &str,
     manifest: &VersionManifest,
     package: &str,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<(TrustStatus, Vec<OtherScopePin>), CalpError> {
@@ -515,7 +515,7 @@ fn verify_manifest_signature_bytes(
     )?;
 
     // (3) TOFU. The store is READ on every path — a key that contradicts an
-    // existing pin is refused even on a passive inspection, because a package
+    // existing pin is refused even on a passive inspection, because an application
     // whose signer changed is exactly what the user must be told about. Only the
     // WRITE is gated by the policy.
     //
@@ -575,7 +575,7 @@ fn verify_manifest_signature_bytes(
         return Ok((TrustStatus::Verified, other_scope_pins));
     }
 
-    // FIRST CONTACT with this (registry, package) pair.
+    // FIRST CONTACT with this (workspace, application) pair.
     let conflicting = other_scope_pins.iter().find(|p| !p.same_key);
     let same_key_elsewhere = other_scope_pins.iter().any(|p| p.same_key);
 
@@ -583,7 +583,7 @@ fn verify_manifest_signature_bytes(
     // this match, so the single `pin_publisher` call below is reachable ONLY
     // through a policy that the user's action authorized.
     let status = match policy {
-        // A different key for this name in another registry is not a thing to
+        // A different key for this name in another workspace is not a thing to
         // decide silently. It is an Err rather than a status precisely so it
         // cannot be bound and carried on.
         PinPolicy::PinOnFirstUse if conflicting.is_some() => {
@@ -643,14 +643,14 @@ fn verify_manifest_signature_bytes(
 /// Here the bytes that are cryptographically checked ARE the bytes every
 /// downstream gate trusts, so no such divergence is possible.
 ///
-/// An absent signature (or an empty asserted `publisher_key`) means the package
+/// An absent signature (or an empty asserted `publisher_key`) means the application
 /// is unsigned -> hard error (no backward compat).
 ///
-/// `scope` is the REGISTRY the package is being read from, derived from the
-/// location string the user configured (`calp::registry_id::registry_scope`).
-/// The pin is filed under it, so a squat in one registry cannot own a package
+/// `scope` is the WORKSPACE the application is being read from, derived from the
+/// location string the user configured (`calp::workspace_id::workspace_scope`).
+/// The pin is filed under it, so a squat in one workspace cannot own an application
 /// name in another. It is required and never optional, for the same reason
-/// `policy` is: a caller that does not know which registry it is talking to
+/// `policy` is: a caller that does not know which workspace it is talking to
 /// cannot make a trust statement about it.
 ///
 /// `policy` decides what happens on FIRST CONTACT with a publisher key this
@@ -659,10 +659,10 @@ fn verify_manifest_signature_bytes(
 /// "what does my code need", it is "did the user just decide to trust this
 /// publisher?". If the answer is no, it is `VerifyOnly` or `RequirePinned`.
 pub fn verify_and_load_manifest_via(
-    t: &dyn RegistryTransport,
+    t: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<VerifiedManifest, CalpError> {
@@ -672,13 +672,13 @@ pub fn verify_and_load_manifest_via(
     let manifest_bytes = t
         .read_artifact(package, version, VERSION_MANIFEST_FILE)?
         .ok_or_else(|| {
-            CalpError::Registry(format!(
+            CalpError::Workspace(format!(
                 "version-manifest.json not found for {package}@{version}"
             ))
         })?;
     let manifest: VersionManifest = serde_json::from_slice(&manifest_bytes)?;
 
-    // (1) Unsigned packages are rejected outright (no backward compat).
+    // (1) Unsigned applications are rejected outright (no backward compat).
     let sig_bytes = t.read_artifact(package, version, VERSION_MANIFEST_SIG_FILE)?;
     let sig_bytes = match (manifest.publisher_key.is_empty(), sig_bytes) {
         (false, Some(sig)) => sig,
@@ -710,7 +710,7 @@ pub fn verify_and_load_manifest_via(
 }
 
 /// `verify_and_load_manifest_via` for the ALREADY-TRUSTED callers: the manifest
-/// of a package this machine has previously, deliberately, agreed to trust.
+/// of an application this machine has previously, deliberately, agreed to trust.
 ///
 /// Returns the manifest ALONE, on purpose. Under `PinPolicy::RequirePinned` the
 /// only status that can come back is `TrustStatus::Verified` — first contact is
@@ -723,10 +723,10 @@ pub fn verify_and_load_manifest_via(
 /// Callers that DO need to react to first contact (inspection, subscribe) must
 /// call `verify_and_load_manifest_via` and handle every `TrustStatus`.
 pub fn load_pinned_manifest_via(
-    t: &dyn RegistryTransport,
+    t: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
 ) -> Result<VersionManifest, CalpError> {
     let verified = verify_and_load_manifest_via(
@@ -796,14 +796,14 @@ mod tests {
     // -----------------------------------------------------------------------
     // PinPolicy: pinning is a DECISION, not a side effect of verification.
     //
-    // The fixture publishes a real signed package (skin_publish is the smallest
-    // signed-package producer in the crate — one artifact, one manifest, one
+    // The fixture publishes a real signed application (skin_publish is the smallest
+    // signed-application producer in the crate — one artifact, one manifest, one
     // detached signature) so these exercise the ACTUAL crypto + TOFU path rather
     // than a mock of it.
     // -----------------------------------------------------------------------
 
-    use crate::registry::LocalRegistry;
-    use crate::registry_id::registry_scope;
+    use crate::workspace::LocalWorkspace;
+    use crate::workspace_id::workspace_scope;
     use crate::signing::{load_pins, PublisherKeypair};
     use crate::skin_pack::{skin_publish, SkinPack};
 
@@ -821,25 +821,25 @@ mod tests {
         }
     }
 
-    /// A published registry, everything a test needs to talk about it.
+    /// A published workspace, everything a test needs to talk about it.
     struct Published {
         _dir: TempDir,
         _publisher: TempDir,
-        registry: LocalRegistry,
-        /// The scope derived from the registry's own location, exactly as an app
+        registry: LocalWorkspace,
+        /// The scope derived from the workspace's own location, exactly as an app
         /// call site would derive it.
-        scope: RegistryScope,
+        scope: WorkspaceScope,
         /// The location string a user would have typed.
         location: String,
         key: String,
     }
 
-    /// Publish `package` v1.0.0 into a fresh registry, signed by a fresh
+    /// Publish `package` v1.0.0 into a fresh workspace, signed by a fresh
     /// publisher profile.
     fn publish_signed(package: &str) -> Published {
         let reg_dir = TempDir::new().unwrap();
         let pub_dir = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
         skin_publish(
             &registry,
             pub_dir.path(),
@@ -853,7 +853,7 @@ mod tests {
             .unwrap()
             .public_key_hex();
         let location = reg_dir.path().to_string_lossy().to_string();
-        let scope = registry_scope(&location).unwrap();
+        let scope = workspace_scope(&location).unwrap();
         Published {
             _dir: reg_dir,
             _publisher: pub_dir,
@@ -864,8 +864,8 @@ mod tests {
         }
     }
 
-    /// The pinned key for one (registry, package) pair, or None.
-    fn pinned_key(profile: &Path, scope: &RegistryScope, package: &str) -> Option<String> {
+    /// The pinned key for one (workspace, application) pair, or None.
+    fn pinned_key(profile: &Path, scope: &WorkspaceScope, package: &str) -> Option<String> {
         load_pins(profile)
             .unwrap()
             .get(&crate::signing::PinKey::calp(scope, package))
@@ -981,8 +981,8 @@ mod tests {
         assert_eq!(m.package_name, "acme.finance");
     }
 
-    /// A pin in ANOTHER registry is not a pin here. `RequirePinned` asks "did
-    /// the user trust this publisher for THIS registry", and "some registry
+    /// A pin in ANOTHER workspace is not a pin here. `RequirePinned` asks "did
+    /// the user trust this publisher for THIS workspace", and "some workspace
     /// somewhere vouched for this name" is not an answer to it.
     #[test]
     fn require_pinned_ignores_a_pin_in_another_scope() {
@@ -1012,7 +1012,7 @@ mod tests {
         assert!(pinned_key(me.path(), &mirror.scope, "acme.finance").is_none());
     }
 
-    /// THE HEADLINE. A squat at registry A does not own the name at registry B.
+    /// THE HEADLINE. A squat at workspace A does not own the name at workspace B.
     ///
     /// The attacker publishes `acme.finance` under their own key to `\\evil\share`
     /// and the victim actually SUBSCRIBES to it. Under name-only keying that pin
@@ -1026,7 +1026,7 @@ mod tests {
         assert_ne!(evil.key, good.key);
         let me = TempDir::new().unwrap();
 
-        // The victim subscribes to the squat. It pins — but only for ITS registry.
+        // The victim subscribes to the squat. It pins — but only for ITS workspace.
         let squat = verify_and_load_manifest_via(
             &evil.registry,
             "acme.finance",
@@ -1038,8 +1038,8 @@ mod tests {
         .unwrap();
         assert_eq!(squat.trust, TrustStatus::FirstUse);
 
-        // A PASSIVE look at the genuine registry now reports the conflict — with
-        // both registries and both keys — instead of accusing the real publisher.
+        // A PASSIVE look at the genuine workspace now reports the conflict — with
+        // both workspaces and both keys — instead of accusing the real publisher.
         let review = verify_and_load_manifest_via(
             &good.registry,
             "acme.finance",
@@ -1056,7 +1056,7 @@ mod tests {
         assert!(!review.other_scope_pins[0].same_key);
         assert!(!review.other_scope_pins[0].pinned_at.is_empty());
 
-        // A plain subscribe REFUSES: a name claimed by two registries is not a
+        // A plain subscribe REFUSES: a name claimed by two workspaces is not a
         // thing to decide silently. It is an Err, so it cannot be bound as `_`.
         let err = verify_and_load_manifest_via(
             &good.registry,
@@ -1075,7 +1075,7 @@ mod tests {
                 got,
                 ..
             } => {
-                // Both registries are named in the USER'S spelling.
+                // Both workspaces are named in the USER'S spelling.
                 assert_eq!(scope, &good.location);
                 assert_eq!(other_scope, &evil.location);
                 assert_eq!(pinned, &evil.key);
@@ -1088,7 +1088,7 @@ mod tests {
         assert!(!matches!(err, CalpError::PublisherKeyChanged { .. }));
 
         // Only after the user is shown the conflict and answers the second
-        // question does the genuine package pin — and it says so.
+        // question does the genuine application pin — and it says so.
         let accepted = verify_and_load_manifest_via(
             &good.registry,
             "acme.finance",
@@ -1100,7 +1100,7 @@ mod tests {
         .unwrap();
         assert_eq!(accepted.trust, TrustStatus::FirstUseAcceptedNameConflict);
 
-        // Both pins now exist, each resolving to its OWN registry's key.
+        // Both pins now exist, each resolving to its OWN workspace's key.
         assert_eq!(pinned_key(me.path(), &good.scope, "acme.finance"), Some(good.key.clone()));
         assert_eq!(pinned_key(me.path(), &evil.scope, "acme.finance"), Some(evil.key.clone()));
     }
@@ -1108,11 +1108,11 @@ mod tests {
     /// The cross-scope check must not be dodgeable by RE-CASING the name.
     ///
     /// `PinKey` lookups are exact, but the conflict SCAN is case-insensitive. A
-    /// hostile registry serving `ACME.Finance` at a user who already trusts
+    /// hostile workspace serving `ACME.Finance` at a user who already trusts
     /// `acme.finance` would otherwise miss the scan entirely and report a plain
     /// `NotPinned` — an ordinary amber "not trusted yet" instead of the red
-    /// two-registries-one-name warning. On a local (case-insensitive)
-    /// filesystem registry the two names are frequently the very same package.
+    /// two-workspaces-one-name warning. On a local (case-insensitive)
+    /// filesystem workspace the two names are frequently the very same application.
     ///
     /// The loosening only ever ADDS a warning: `get` stays exact, so a re-cased
     /// name can never satisfy a pin it did not create (asserted below).
@@ -1210,7 +1210,7 @@ mod tests {
         assert_eq!(pinned_key(me.path(), &good.scope, "acme.finance"), Some(good.key));
     }
 
-    /// The same registry reached by a second spelling is the SAME scope — one
+    /// The same workspace reached by a second spelling is the SAME scope — one
     /// pin, no second row, no alarm.
     #[test]
     fn the_same_registry_by_a_second_spelling_is_the_same_scope() {
@@ -1228,7 +1228,7 @@ mod tests {
         .unwrap();
 
         // The user types the same folder differently in a different dialog.
-        let restyled = registry_scope(&format!(
+        let restyled = workspace_scope(&format!(
             "{}\\",
             p.location.replace('\\', "/").to_uppercase()
         ))
@@ -1247,7 +1247,7 @@ mod tests {
         assert_eq!(load_pins(me.path()).unwrap().len(), 1, "one registry, one pin");
     }
 
-    /// A legitimate registry MIGRATION (the org moves `\\corp\reg` to
+    /// A legitimate workspace MIGRATION (the org moves `\\corp\reg` to
     /// `https://reg.acme.com`, same publisher key) reads as "the publisher you
     /// already trust, reached from a new location" — not as an attack.
     ///
@@ -1256,10 +1256,10 @@ mod tests {
     #[test]
     fn a_registry_migration_reads_as_the_publisher_you_already_trust() {
         let old_home = publish_signed("acme.finance");
-        // The SAME publisher republishes into a new registry: reuse the same
+        // The SAME publisher republishes into a new workspace: reuse the same
         // publisher profile so the key is identical.
         let new_dir = TempDir::new().unwrap();
-        let new_registry = LocalRegistry::open(new_dir.path()).unwrap();
+        let new_registry = LocalWorkspace::open(new_dir.path()).unwrap();
         skin_publish(
             &new_registry,
             old_home._publisher.path(),
@@ -1269,7 +1269,7 @@ mod tests {
             &tiny_pack("p"),
         )
         .unwrap();
-        let new_scope = registry_scope(&new_dir.path().to_string_lossy()).unwrap();
+        let new_scope = workspace_scope(&new_dir.path().to_string_lossy()).unwrap();
 
         let me = TempDir::new().unwrap();
         verify_and_load_manifest_via(
@@ -1309,14 +1309,14 @@ mod tests {
         );
     }
 
-    /// A key change at the SAME registry is still refused, on every policy —
-    /// including the one that exists to accept a cross-registry conflict.
-    /// "Two registries disagree" and "this registry's own key changed" are
+    /// A key change at the SAME workspace is still refused, on every policy —
+    /// including the one that exists to accept a cross-workspace conflict.
+    /// "Two workspaces disagree" and "this workspace's own key changed" are
     /// different facts and only the first is a question for the user.
     #[test]
     fn a_key_contradicting_an_existing_pin_is_refused_even_passively() {
         let good = publish_signed("acme.finance");
-        // A DIFFERENT publisher republishes into the SAME registry directory.
+        // A DIFFERENT publisher republishes into the SAME workspace directory.
         let evil_profile = TempDir::new().unwrap();
         skin_publish(
             &good.registry,
@@ -1366,7 +1366,7 @@ mod tests {
         );
     }
 
-    /// Two registries can each pin the same NAME without touching each other's
+    /// Two workspaces can each pin the same NAME without touching each other's
     /// row — the property the flat name->key map could not express.
     #[test]
     fn two_registries_pinning_the_same_name_do_not_overwrite_each_other() {
@@ -1435,7 +1435,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Structural guard: a caller that forgets to think about pinning — or about
-    // WHICH REGISTRY it is talking to — must FAIL TO COMPILE, and this module
+    // WHICH WORKSPACE it is talking to — must FAIL TO COMPILE, and this module
     // must remain the only place that can pin.
     // -----------------------------------------------------------------------
 
@@ -1509,23 +1509,23 @@ mod tests {
             "PinPolicy must never derive Default"
         );
 
-        // The registry scope is subject to exactly the same rule, and for the
+        // The workspace scope is subject to exactly the same rule, and for the
         // same reason: a pin that is not tied to an origin lets whoever reaches
         // a name first own it machine-wide. A `None` scope, or a defaulted one,
         // would silently become "the empty scope" — i.e. name-only keying,
         // reintroduced.
         assert!(
-            production.contains("    scope: &RegistryScope,"),
-            "verify_and_load_manifest_via must take a required `scope: &RegistryScope`"
+            production.contains("    scope: &WorkspaceScope,"),
+            "verify_and_load_manifest_via must take a required `scope: &WorkspaceScope`"
         );
         assert!(
-            !production.contains("Option<RegistryScope>")
-                && !production.contains("Option<&RegistryScope>"),
+            !production.contains("Option<WorkspaceScope>")
+                && !production.contains("Option<&WorkspaceScope>"),
             "the registry scope must never be optional"
         );
         assert!(
-            !production.contains("impl Default for RegistryScope"),
-            "RegistryScope must never have a Default"
+            !production.contains("impl Default for WorkspaceScope"),
+            "WorkspaceScope must never have a Default"
         );
 
         // And this file must remain the ONLY writer of a .calp publisher pin,

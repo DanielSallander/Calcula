@@ -17,15 +17,15 @@ Transparency (2026-07)" below.
 **August 2026 media round:** embedded pictures became content-addressed
 artifacts instead of base64 inside `controls.json`, and the pull path — the
 last unvalidated binary route into a subscriber's document — was closed. See
-"Binary Media in Packages (2026-08)" below.
+"Binary Media in Applications (2026-08)" below.
 
 **Documentation audit 2026-08-16.** Every substantive claim below was
 re-verified against code. Four were stale and are corrected in place, each
 marked `CORRECTED 2026-08-16`: the list of categories publish still excludes
 (five of the six named items now travel), what happens to an inline image this
 build refuses (the cap-violating class is now DROPPED, not left inline — that
-was the defect, BUG-0086), "packages MAY be signed" (every package is signed,
-and trust is enforced client-side, not by the registry), and the audit log's
+was the defect, BUG-0086), "applications MAY be signed" (every application is
+signed, and trust is enforced client-side, not by the workspace), and the audit log's
 "opt-in, off by default" (writeback egress is now always recorded). The
 identity model, formula-storage and refresh/override sections were spot-checked
 and hold.
@@ -49,20 +49,20 @@ relying on email round-trips.
 ## Overview
 
 Calcula's report distribution model. Replaces the "copy of a workbook" paradigm
-with a subscription-based system where `.calp` packages are manifests that
+with a subscription-based system where `.calp` applications are manifests that
 `.cala` workbooks subscribe to.
 
 ## Core Model
 
-- **`.calp` package**: A manifest + content bundle published to a registry.
+- **`.calp` application**: A manifest + content bundle published to a workspace.
   Declares sheets, formulas, data, named ranges, version, and metadata. Immutable
   once published at a given version.
 - **`.cala` workbook**: The user's working file. Contains materialized state
   (current values, formulas, formatting) plus subscription metadata and an
   override layer. Self-contained: opens and works offline.
-- **Registry**: A location (SMB share, HTTP endpoint, Azure Blob, etc.) hosting
-  `.calp` packages. Corporate-internal is the primary scenario; public registries
-  are a thinner variant of the same machinery.
+- **Workspace**: A location (SMB share, HTTP endpoint, Azure Blob, etc.) hosting
+  `.calp` applications. Corporate-internal is the primary scenario; public
+  workspaces are a thinner variant of the same machinery.
 
 ## Identity Model
 
@@ -87,7 +87,7 @@ or controls this decision; it is automatic and transparent.
 
 Every reference site inside every formula receives an ID, unconditionally and
 eagerly. This holds even in a standalone `.cala` with no subscriptions, because
-any workbook may become a package later. Lazy minting at publish time would
+any workbook may become an application later. Lazy minting at publish time would
 mean rewriting every formula on publish and would prevent overrides from
 anchoring to references that existed pre-publish.
 
@@ -110,7 +110,7 @@ varint or prefix compression because sheet-ID prefixes repeat heavily.
 Never exposed in user-facing UI.
 
 A 64-bit counter is insufficient because two unrelated publishers must be able
-to publish packages whose IDs do not collide for any consumer subscribed to both.
+to publish applications whose IDs do not collide for any consumer subscribed to both.
 
 ### ID survival across structural shifts
 
@@ -135,7 +135,7 @@ existing spreadsheet versioning tools unusable.
 
 ### ID persistence across publishes
 
-IDs persist across publishes: v2 of a package preserves the IDs from v1, so
+IDs persist across publishes: v2 of an application preserves the IDs from v1, so
 consumer overrides rebase cleanly. A deleted-and-recreated cell is a new cell
 with a new ID; overrides on the old ID do not follow.
 
@@ -194,10 +194,10 @@ positioned right now. The internal graph never operates on coordinates.
 
 ## Subscription Behavior
 
-A `.cala` may subscribe to multiple `.calp` packages. Each subscription
+A `.cala` may subscribe to multiple `.calp` applications. Each subscription
 contributes sheets and/or named ranges that the workbook composes together.
-Cross-package references are allowed; the registry tracks the resulting
-dependency graph (declared, not strictly enforced in v1).
+Cross-application references are allowed; the resulting dependency graph is
+declared, not strictly enforced in v1.
 
 ### Version pinning grammar
 
@@ -212,7 +212,7 @@ Major-version bumps signal "overrides may not survive."
 
 ### Refresh behavior
 
-On workbook open: never block. If the registry is unreachable, open with last
+On workbook open: never block. If the workspace is unreachable, open with last
 known state. If reachable and updates are available, show a non-modal banner
 with a one-click refresh.
 
@@ -229,7 +229,7 @@ become conflicts. The user confirms before the pull is applied.
 An explicit "detach from upstream" command strips the subscription manifest
 from the `.cala`. The workbook becomes a standalone file with no upstream
 link. Used for archival ("FY24 close, frozen") and for sending one-off
-snapshots to recipients who cannot reach the registry.
+snapshots to recipients who cannot reach the workspace.
 
 ## Override Layer
 
@@ -299,36 +299,36 @@ A side pane with three views (filterable or tabbed - implementation choice):
 
 ## Security and Trust
 
-- ~~`.calp` packages may be signed; the registry enforces signing policy.~~
+- ~~`.calp` applications may be signed; the workspace enforces signing policy.~~
   **CORRECTED 2026-08-16:** both halves are wrong now. Signing is **not
   optional** — `publish()` loads or creates the publisher's Ed25519 keypair and
   always writes a detached `version-manifest.sig` over the raw manifest bytes
   (`core/calp/src/publish.rs:1176`), recording the asserted signer as
   `publisher_key` (`publish.rs:557`). And the policy is enforced by the
-  **client**, not the registry: a registry is often a dumb static file host with
-  no server code at all, so it could not enforce anything. Trust is TOFU against
-  a pin store in the user profile, under `PinPolicy`
+  **client**, not the workspace: a workspace is often a dumb static file host
+  with no server code at all, so it could not enforce anything. Trust is TOFU
+  against a pin store in the user profile, under `PinPolicy`
   (`core/calp/src/integrity.rs:439-458`): `PinOnFirstUse` (reporting `FirstUse`,
   or `FirstUseKnownPublisher` when that key is already trusted from another
-  registry), `PinAcceptingNameConflict` for the case where the user has been
-  shown a cross-registry name conflict and accepted it, `VerifyOnly`, and
+  workspace), `PinAcceptingNameConflict` for the case where the user has been
+  shown a cross-workspace name conflict and accepted it, `VerifyOnly`, and
   `RequirePinned`, which can only succeed against an existing pin. The same
   machinery covers distributed extensions via signed sidecar manifests verified
   at scan.
-- Packages with executable content (formulas reaching external data,
+- Applications with executable content (formulas reaching external data,
   extensions/macros when those land) prompt the user on first refresh per
-  package, similar to first-run extension trust.
+  application, similar to first-run extension trust.
 - Materialized `.cala` files carry data from upstream. If a user emails a
   `.cala` containing confidential data, the recipient sees it. Documented
   behavior; treat `.cala` confidentiality the same as `.xlsx` today. No DRM.
 
 ## Telemetry and Audit
 
-- Registry-side: server logs (who pulled what version when). Standard.
+- Workspace-side: server logs (who pulled what version when). Standard.
 - Workbook-side: an audit log in the `.cala` recording subscription events,
-  refreshes, and override creation. Policy is set per registry: a registry may
-  require audit logging for packages it serves. Off by default for packages
-  from registries that do not require it.
+  refreshes, and override creation. Policy is set per workspace: a workspace may
+  require audit logging for applications it serves. Off by default for
+  applications from workspaces that do not require it.
 
   > **CORRECTED 2026-08-16 — "opt-in / off by default" is no longer true of the
   > whole log.** `AuditEvent::is_always_recorded` (`core/calp/src/audit.rs:108`)
@@ -336,7 +336,7 @@ A side pane with three views (filterable or tabbed - implementation choice):
   > activity (`ScriptExecuted`, `CapabilityCall`), and **writeback**
   > (`WritebackSubmitted`, `WritebackReviewed`, `WritebackInvalidated`). The
   > reasoning is worth keeping: submitting is the moment a contributor's typed
-  > values LEAVE THE MACHINE for a shared registry, which makes it an egress
+  > values LEAVE THE MACHINE for a shared workspace, which makes it an egress
   > event much closer to `net.fetch` than to bookkeeping like subscribe/refresh;
   > an approve/reject changes whether someone's answer counts; an invalidation
   > silently discards entered work. Recording those only when a workbook
@@ -354,7 +354,7 @@ per save:
 
 - `--dev` subscription flag: subscription points at a working `.cala` via
   local path or a dev-channel URL, follows HEAD, and refreshes on file change.
-- "Publish to test registry" command separate from production publish.
+- "Publish to test workspace" command separate from production publish.
 - Production publish bumps a version, signs (if configured), and uploads.
 
 ## Identity Migration of Existing Numeric IDs
@@ -374,7 +374,7 @@ Imported `.xlsx` files get fresh IDs minted on import. Round-tripping
 round-trip. Documented; not a supported workflow for identity-dependent
 features.
 
-## Package Kinds
+## Application Kinds
 
 A `.calp` declares its kind in its manifest:
 
@@ -399,7 +399,7 @@ instances:
 - **One collector.** `build_workbook_snapshot` (a drifted parallel of the
   save path) was deleted; `calp_publish` builds its carrier through the SAME
   `build_workbook_for_save_with_slicers` collector as `.cala` save, so
-  package fidelity automatically tracks file fidelity. Core `publish()`
+  application fidelity automatically tracks file fidelity. Core `publish()`
   writes the subset the format supports.
 - **No silent drops.** Every publish returns a `PublishReport`
   (included/excluded, each with a count and a reason —
@@ -410,7 +410,7 @@ instances:
   > **CORRECTED 2026-08-16 — the exclusion list below was five-sixths wrong,
   > in the "says it is missing when it has shipped" direction.** A later round
   > (the `Wave A` counters on `PublishResult`) brought most of it into the
-  > package: `slicers_published`, `ribbon_filters_published`,
+  > application: `slicers_published`, `ribbon_filters_published`,
   > `pivot_layouts_published` and `extension_data_published` all exist on the
   > publish result (`core/calp/src/publish.rs:159-166`), extension data is
   > written as its own `extension_data.json` artifact and read back on pull
@@ -438,17 +438,17 @@ instances:
   the same fidelity, so the author preview matches subscriber reality.
 - **Controls and the consent model.** Cell-anchored controls
   (buttons/checkboxes) persist in `.cala` (`controls.json`, opaque per-sheet
-  payloads like CF/DV) and travel in packages — but their `onSelect` wiring
+  payloads like CF/DV) and travel in applications — but their `onSelect` wiring
   is INLINE SCRIPT SOURCE, so it is stripped at pull/refresh/dev
-  materialization (`sanitize_distributed_controls`). Packaged buttons arrive
+  materialization (`sanitize_distributed_controls`). Distributed buttons arrive
   visually intact but disarmed; publisher interactivity flows through
   consent-gated object scripts only.
-- **Provenance ledger + Package Explorer.** `Subscription.objects` records
+- **Provenance ledger + Application Explorer.** `Subscription.objects` records
   every object a pull actually materialized (conflict-skipped items are
-  never claimed). The Package Explorer panel resolves the ledger against
+  never claimed). The Application Explorer panel resolves the ledger against
   live state for subscribers, and shows authors the publish preview.
 - **Model distribution (`dataset` kind).** `calp_publish_model` publishes a
-  single BI connection's model as a zero-sheet `dataset` package —
+  single BI connection's model as a zero-sheet `dataset` application —
   credential-free schema, signed, versioned, min-app-gated — replacing loose
   `.json` file hand-off. Subscribing materializes a live connection;
   refreshing a dataset subscription swaps the engine onto the new model
@@ -461,14 +461,14 @@ instances:
   `read_artifact`), and pivot-definition discovery enumerates the SIGNED
   manifest's checksum keys instead of a directory walk (which returns
   nothing after blob dedup — pivots were silently never pulled from real
-  registries before this).
+  workspaces before this).
 
-## Binary Media in Packages (2026-08)
+## Binary Media in Applications (2026-08)
 
 Pictures used to travel as base64 data URLs inside the `controls.json`
 artifact. They now travel as their own content-addressed artifacts. The change
 is small in the format and large in what it fixes, and the interesting half is
-what happens to packages that were already published and already signed.
+what happens to applications that were already published and already signed.
 
 ### Media artifacts
 
@@ -477,13 +477,13 @@ distinct image — and the control property holds a `media:<sha256>` handle
 instead of the image. Only media that the PUBLISHED sheets actually reference
 travels; `publish.rs` walks each published sheet's controls with
 `calcula_format::media::visit_media_refs` and writes exactly the blobs it
-finds, so a picture on an unpublished sheet does not leak into the package.
+finds, so a picture on an unpublished sheet does not leak into the application.
 
 **This is what makes the content-addressed blob store work.**
 `commit_artifacts_as_blobs` keys on each ARTIFACT's SHA-256, and a media
 artifact's content IS the image, so the blob key is literally the media hash:
-the same corporate logo is one blob across every version of every package that
-carries it. Inline, the blob key was the SHA of the whole `controls.json`, so
+the same corporate logo is one blob across every version of every application
+that carries it. Inline, the blob key was the SHA of the whole `controls.json`, so
 editing one caption minted a fresh multi-megabyte blob on every release. The
 dedup was already there; inlining defeated it.
 
@@ -501,11 +501,11 @@ Dev-mode pulls carry media too (`DevPullResult.media`). A dev pull exists to
 show an author what a subscriber will get, and without the bytes every picture
 in the preview painted "Image Unavailable".
 
-### The legacy-package contract: read tolerance, write strictness
+### The legacy-application contract: read tolerance, write strictness
 
-Packages published before media artifacts existed carry whole images base64'd
+Applications published before media artifacts existed carry whole images base64'd
 inside `controls.json`, and that artifact is covered by the detached manifest
-signature. **A subscriber cannot re-sign someone else's package.** Two
+signature. **A subscriber cannot re-sign someone else's application.** Two
 consequences follow and they pull in opposite directions:
 
 - Refusing the legacy shape would break every existing subscription to fix
@@ -514,14 +514,14 @@ consequences follow and they pull in opposite directions:
   verbatim into their own `controls.json`. Reading it unchecked propagates the
   original defect one hop further.
 
-The resolution is to migrate at the package boundary:
+The resolution is to migrate at the application boundary:
 `media::admit_distributed_controls` sanitizes AND migrates — decode,
 re-validate through `calcula_format::media::inspect_media` (magic bytes, 8 MiB
 byte cap, both pixel caps, PNG/JPEG/GIF/WebP allowlist), file under the content
 hash, rewrite the property to a handle. All three distributed materialization
 sites — first pull, refresh, dev pull — call it instead of the old
 `sanitize_distributed_controls`. It runs AFTER signature verification, on the
-way into the subscriber's document, so the package as published is untouched
+way into the subscriber's document, so the application as published is untouched
 and its signature unaffected.
 
 > **CORRECTED 2026-08-16 — the paragraph below stated the exact posture that
@@ -568,8 +568,8 @@ picture the subscriber can see, which is a worse outcome than carrying a
 payload that can no longer spread.~~
 
 **What a subscriber sees: the same picture.** No consent prompt, no re-pull, no
-"package invalid". What changed is invisible and in their favour — the image is
-content-addressed, so the same logo across five packages is one blob, and their
+"application invalid". What changed is invisible and in their favour — the image
+is content-addressed, so the same logo across five applications is one blob, and their
 saved workbook holds a 70-character handle where it held a multi-megabyte
 string.
 
@@ -586,7 +586,7 @@ The general form is worth recording, because it will recur: a
 *materialize*-shaped code path — one that reconstructs persisted state directly
 into a store rather than replaying the commands that would have created it —
 bypasses every gate that lives at the command layer. Publish/pull, `.cala`
-load, undo restore and package refresh are all this shape. When a validation
+load, undo restore and application refresh are all this shape. When a validation
 rule is added to a command, ask which materializers reach the same store, and
 put the rule where they converge (here: one Rust function,
 `calcula_format::media::inspect_media`, called by all four doors) rather than
@@ -595,15 +595,15 @@ at each command.
 ## Open Items Deferred Beyond v1
 
 - Promote-override-to-upstream mechanism (UI reserved; flow undefined)
-- Public registry discovery and trust model
+- Public workspace discovery and trust model
 - Multi-user concurrent editing of a `.cala` (single-user assumed in v1)
 - **No artifact size cap exists at all.** Still true, and still open:
   `core/calp/src/pull.rs` bounds no artifact by size, so a hostile or merely
-  careless package can carry an arbitrarily large `data.json`. Media is the one
+  careless application can carry an arbitrarily large `data.json`. Media is the one
   exception, capped at 8 MiB per image by `inspect_media`.
   *(CORRECTED 2026-08-16: the sentence that used to follow — "a legacy inline
   payload that this build refuses is left inline and is therefore unbounded" —
   no longer holds. A payload refused for exceeding a cap is now cleared, not
-  left inline; see "The legacy-package contract" above. Only POLICY-refused
+  left inline; see "The legacy-application contract" above. Only POLICY-refused
   payloads stay inline, and those already passed the byte cap. The general
   artifact gap is unaffected by that fix, which is why this item stays open.)*

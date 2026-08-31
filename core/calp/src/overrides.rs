@@ -1,7 +1,7 @@
 //! FILENAME: core/calp/src/overrides.rs
 //! PURPOSE: Override layer for consumer-side modifications to subscribed content.
 //! CONTEXT: When a consumer edits a cell that originates from an upstream .calp
-//! package, the edit is recorded as an override rather than a raw value change.
+//! application, the edit is recorded as an override rather than a raw value change.
 //! Overrides are anchored to cell IDs and survive structural shifts.
 //!
 //! The override layer stores:
@@ -257,12 +257,12 @@ impl OverrideIndex {
 }
 
 /// Export format for overrides — a standalone patch that can be applied to
-/// any .cala subscribed to the same upstream package.
+/// any .cala subscribed to the same upstream application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverridePatch {
     pub format_version: u32,
-    /// Which package these overrides apply to.
+    /// Which application these overrides apply to.
     pub package_name: String,
     /// The version the overrides were created against.
     pub baseline_version: String,

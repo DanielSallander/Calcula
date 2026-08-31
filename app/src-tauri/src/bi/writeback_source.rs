@@ -161,7 +161,7 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
         // `file://` strip here would scope the pin differently from the one
         // written at subscribe, and these datasets would silently disappear.
         let (registry, scope) =
-            match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+            match crate::calp_registry::open_workspace_scoped(&sub.registry_url) {
                 Ok(r) => r,
                 Err(_) => continue,
             };

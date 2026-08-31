@@ -1,5 +1,5 @@
 //! FILENAME: core/calp/src/pull.rs
-//! PURPOSE: Pull (subscribe and materialize) a .calp package into a workbook.
+//! PURPOSE: Pull (subscribe and materialize) a .calp application into a workbook.
 //! CONTEXT: Phase 2 — raw subscribe-and-materialize, no override layer.
 
 use std::path::{Path, PathBuf};
@@ -11,11 +11,11 @@ use persistence::{Sheet, SavedCell, SavedTable, SavedObjectScript, SavedScript, 
 use crate::error::CalpError;
 use crate::integrity::{PinPolicy, TrustStatus, VerifiedManifest};
 use crate::manifest::*;
-use crate::registry_id::RegistryScope;
-use crate::transport::RegistryTransport;
+use crate::workspace_id::WorkspaceScope;
+use crate::transport::WorkspaceTransport;
 use crate::version::{SemVer, VersionPin};
 
-/// Request to pull (subscribe to) a package.
+/// Request to pull (subscribe to) an application.
 pub struct PullRequest {
     pub package_name: String,
     pub version_pin: VersionPin,
@@ -29,43 +29,44 @@ pub struct PullResult {
     pub sheets: Vec<PulledSheet>,
     pub tables: Vec<SavedTable>,
     pub subscription: Subscription,
-    /// Object scripts bundled with the package.
+    /// Object scripts bundled with the application.
     /// These should be loaded in restricted mode and marked as read-only.
     pub object_scripts: Vec<SavedObjectScript>,
-    /// Standalone module scripts bundled with the package (C8). Inert,
+    /// Standalone module scripts bundled with the application (C8). Inert,
     /// transparent data: materialized into the workbook on pull but NEVER
     /// auto-executed — they run only on explicit user action, sandboxed.
     pub module_scripts: Vec<SavedScript>,
-    /// Standalone notebooks bundled with the package (C8). Inert, transparent
+    /// Standalone notebooks bundled with the application (C8). Inert, transparent
     /// data like module_scripts; execution metadata was stripped at publish.
     pub notebooks: Vec<SavedNotebook>,
-    /// Data source definitions from the package, with resolved model paths.
+    /// Data source definitions from the application, with resolved model paths.
     pub data_sources: Vec<PulledDataSource>,
-    /// Pivot table definitions from the package.
+    /// Pivot table definitions from the application.
     pub pivot_definitions: Vec<persistence::SavedPivotDefinition>,
     /// BI pivot metadata for reconnecting to BI models.
     pub bi_pivot_metadata: Vec<serde_json::Value>,
-    /// Charts carried by the package, each with its `sheet_id` already remapped
-    /// from the package's sheet id to the new LOCAL sheet id so it materializes
-    /// on the right sheet. Empty for packages published before charts were carried.
+    /// Charts carried by the application, each with its `sheet_id` already remapped
+    /// from the application's sheet id to the new LOCAL sheet id so it materializes
+    /// on the right sheet. Empty for applications published before charts were carried.
     pub charts: Vec<SavedChart>,
-    /// Sparklines carried by the package (C2a), each with its `sheet_id` already
-    /// remapped to the new LOCAL sheet id. Empty for packages published before
+    /// Sparklines carried by the application (C2a), each with its `sheet_id` already
+    /// remapped to the new LOCAL sheet id. Empty for applications published before
     /// sparklines were carried.
     pub sparklines: Vec<SavedSparkline>,
-    /// Named ranges carried by the package (from the version manifest). Their
-    /// `sheet_id` is the PACKAGE sheet id (un-remapped); the Tauri pull maps it to
-    /// the local sheet index. Empty for packages published before names were carried.
+    /// Named ranges carried by the application (from the version manifest).
+    /// Their `sheet_id` is the APPLICATION sheet id (un-remapped); the Tauri
+    /// pull maps it to the local sheet index. Empty for applications published
+    /// before names were carried.
     pub named_ranges: Vec<PublishedNamedRange>,
-    /// Conditional-formatting rules carried by the package, per sheet. `sheet_id`
-    /// is the PACKAGE sheet id (un-remapped); `rules` is the opaque app payload.
+    /// Conditional-formatting rules carried by the application, per sheet. `sheet_id`
+    /// is the APPLICATION sheet id (un-remapped); `rules` is the opaque app payload.
     pub conditional_formats: Vec<SavedSheetConditionalFormats>,
-    /// Data-validation ranges carried by the package, per sheet. `sheet_id` is the
-    /// PACKAGE sheet id (un-remapped); `ranges` is the opaque app payload.
+    /// Data-validation ranges carried by the application, per sheet. `sheet_id` is the
+    /// APPLICATION sheet id (un-remapped); `ranges` is the opaque app payload.
     pub data_validations: Vec<SavedSheetDataValidations>,
-    /// Cell-anchored controls carried by the package, per sheet. `sheet_id` is
-    /// the PACKAGE sheet id (un-remapped); `controls` is the opaque app payload.
-    /// Empty for packages published before controls were carried.
+    /// Cell-anchored controls carried by the application, per sheet. `sheet_id` is
+    /// the APPLICATION sheet id (un-remapped); `controls` is the opaque app payload.
+    /// Empty for applications published before controls were carried.
     pub controls: Vec<SavedSheetControls>,
     /// Content-addressed binary media the published controls reference:
     /// sha256 hex -> raw bytes, read from the `media/{sha256}` artifacts.
@@ -76,89 +77,89 @@ pub struct PullResult {
     /// them through `calcula_format::media` on the way into the document, so a
     /// correctly-signed decompression bomb is still refused.
     pub media: HashMap<String, Vec<u8>>,
-    /// Threaded comments carried by the package, per sheet (Wave B). `sheet_id`
-    /// is the PACKAGE sheet id (un-remapped); `comments` is the opaque app
+    /// Threaded comments carried by the application, per sheet (Wave B). `sheet_id`
+    /// is the APPLICATION sheet id (un-remapped); `comments` is the opaque app
     /// payload. Empty unless the publisher opted in via `include_comments`
-    /// (and for packages published before comments were carried).
+    /// (and for applications published before comments were carried).
     pub comments: Vec<SavedSheetComments>,
-    /// What-if scenarios carried by the package, per sheet (Wave B). `sheet_id`
-    /// is the PACKAGE sheet id (un-remapped); `scenarios` is the opaque app
-    /// payload. Empty for older packages.
+    /// What-if scenarios carried by the application, per sheet (Wave B). `sheet_id`
+    /// is the APPLICATION sheet id (un-remapped); `scenarios` is the opaque app
+    /// payload. Empty for older applications.
     pub scenarios: Vec<SavedSheetScenarios>,
-    /// Row/column outline groups carried by the package, per sheet (Wave B).
-    /// `sheet_id` is the PACKAGE sheet id (un-remapped); `outline` is the
-    /// opaque app payload. Empty for older packages.
+    /// Row/column outline groups carried by the application, per sheet (Wave B).
+    /// `sheet_id` is the APPLICATION sheet id (un-remapped); `outline` is the
+    /// opaque app payload. Empty for older applications.
     pub outlines: Vec<SavedSheetOutline>,
-    /// Cell-behavior bindings carried by the package (granular bricks phase 2).
-    /// `sheet_id` is the PACKAGE sheet id (un-remapped), like CF/DV/outlines;
+    /// Cell-behavior bindings carried by the application (granular bricks phase 2).
+    /// `sheet_id` is the APPLICATION sheet id (un-remapped), like CF/DV/outlines;
     /// `binding` is the opaque app payload naming the script that runs for the
-    /// bound range. Empty for packages published before behaviours travelled —
-    /// which, until this field existed, was EVERY package: a published report
+    /// bound range. Empty for applications published before behaviours travelled —
+    /// which, until this field existed, was EVERY application: a published report
     /// arrived with typed cells whose behaviour had been silently dropped, and
     /// nothing in the publish transparency report said so.
     pub cell_behaviors: Vec<persistence::SavedCellBehavior>,
-    /// Pane controls (Controls pane) carried by the package. WORKBOOK-scoped
-    /// (no sheet remap needed) and complete: the package list is the
+    /// Pane controls (Controls pane) carried by the application. WORKBOOK-scoped
+    /// (no sheet remap needed) and complete: the application list is the
     /// publisher's whole pane-control set, in the deterministic (order, id)
     /// order publish wrote. `config`/`value` are opaque app-owned JSON;
     /// configs contain no inline code by design (D6) — custom-control /
     /// button scripts travel separately as consent-gated object_scripts.
-    /// Empty for packages published before pane controls were carried.
+    /// Empty for applications published before pane controls were carried.
     pub pane_controls: Vec<SavedPaneControl>,
-    /// Generic custom objects carried by the package (distribution brick 4).
-    /// Each carries its `kind`, id, name, the PACKAGE `sheet_id` (un-remapped;
+    /// Generic custom objects carried by the application (distribution brick 4).
+    /// Each carries its `kind`, id, name, the APPLICATION `sheet_id` (un-remapped;
     /// the Tauri layer maps it to a local sheet), and the opaque JSON payload.
     /// Built-in kinds (cellType) are materialized Rust-side on pull; unknown
     /// kinds are surfaced to frontend distributable-object providers.
     pub custom_objects: Vec<PulledCustomObject>,
-    /// Slicers carried by the package (Wave A). `sheet_id` is the PACKAGE
+    /// Slicers carried by the application (Wave A). `sheet_id` is the APPLICATION
     /// sheet id (un-remapped, like CF/DV); the Tauri layer maps it to the
     /// local sheet and drops slicers whose sheet wasn't pulled. Empty for
-    /// packages published before slicers were carried.
+    /// applications published before slicers were carried.
     pub slicers: Vec<SavedSlicer>,
-    /// Ribbon filters carried by the package (Wave A). WORKBOOK-scoped; each
-    /// carries the publisher's connection uuid plus its stable package
+    /// Ribbon filters carried by the application (Wave A). WORKBOOK-scoped; each
+    /// carries the publisher's connection uuid plus its stable application
     /// data-source id — the Tauri layer re-binds connection ids onto the
-    /// freshly materialized package connections and skips filters whose data
-    /// source is not embedded in the package. Empty for older packages.
+    /// freshly materialized application connections and skips filters whose data
+    /// source is not embedded in the application. Empty for older applications.
     pub ribbon_filters: Vec<SavedRibbonFilter>,
-    /// Saved pivot layouts carried by the package (Wave A). Workbook-scoped.
-    /// Empty for older packages.
+    /// Saved pivot layouts carried by the application (Wave A). Workbook-scoped.
+    /// Empty for older applications.
     pub pivot_layouts: Vec<SavedPivotLayout>,
-    /// The publisher's document theme (Wave A). None for packages published
+    /// The publisher's document theme (Wave A). None for applications published
     /// before themes were carried. A workbook SINGLETON: the Tauri layer
     /// applies it only while the subscriber's theme is still the default.
     pub theme: Option<engine::theme::ThemeDefinition>,
-    /// Per-extension persisted state carried by the package (Wave A). The
+    /// Per-extension persisted state carried by the application (Wave A). The
     /// Tauri layer merges ADDITIVELY (subscriber keys are never overwritten).
-    /// Empty for older packages.
+    /// Empty for older applications.
     pub extension_data: HashMap<String, serde_json::Value>,
     /// Trust outcome of the manifest-signature + TOFU check (S5 phase 2).
     /// FirstUse means this publisher key was just pinned; Verified means it
     /// matched a prior pin. The Tauri layer can surface this to the user.
     pub trust_status: TrustStatus,
-    /// Pins held for this SAME package name in OTHER registries, so the
+    /// Pins held for this SAME application name in OTHER workspaces, so the
     /// subscribe notice can distinguish "the publisher you already trust,
-    /// reached from a new location" from "a second registry is claiming this
+    /// reached from a new location" from "a second workspace is claiming this
     /// name under a different key".
     pub other_scope_pins: Vec<crate::integrity::OtherScopePin>,
     /// The publisher's display name asserted in the (now verified) manifest.
     pub publisher_name: String,
 }
 
-/// A generic custom object pulled from a package (distribution brick 4).
+/// A generic custom object pulled from an application (distribution brick 4).
 pub struct PulledCustomObject {
     pub kind: String,
     pub id: String,
     pub name: String,
-    /// The PACKAGE sheet id (un-remapped) for per-sheet objects; None =
+    /// The APPLICATION sheet id (un-remapped) for per-sheet objects; None =
     /// workbook-scoped.
     pub package_sheet_id: Option<SheetId>,
     /// Opaque app-owned JSON payload (already integrity-verified).
     pub payload: serde_json::Value,
 }
 
-/// A data source pulled from a package, ready for connection resolution.
+/// A data source pulled from an application, ready for connection resolution.
 ///
 /// `Debug` (unlike its `PullResult` parent, which carries deep `persistence`
 /// types that have none) so callers can `unwrap_err()` on a restore that was
@@ -166,21 +167,21 @@ pub struct PulledCustomObject {
 #[derive(Debug)]
 pub struct PulledDataSource {
     /// The data source definition from the version manifest.
-    pub definition: PackageDataSource,
-    /// Absolute path to the embedded model.json in the registry.
+    pub definition: ApplicationDataSource,
+    /// Absolute path to the embedded model.json in the workspace.
     pub model_path: PathBuf,
     /// Materialized calculated-table snapshots: (table name, absolute path
-    /// to the Arrow IPC stream artifact). Empty when the package carries
+    /// to the Arrow IPC stream artifact). Empty when the application carries
     /// none. Integrity-verified with the rest of the artifacts.
     pub calculated_table_snapshots: Vec<(String, PathBuf)>,
     /// Absolute path to the publisher's writeback-column history baseline
-    /// (models/{id}/writeback_history.json), when the package carries one.
+    /// (models/{id}/writeback_history.json), when the application carries one.
     /// Opaque JSON (host-defined entry shape); integrity-verified like every
     /// artifact.
     pub writeback_history_path: Option<PathBuf>,
 }
 
-/// A sheet pulled from a package, ready to be inserted into a workbook.
+/// A sheet pulled from an application, ready to be inserted into a workbook.
 pub struct PulledSheet {
     pub package_sheet_id: SheetId,
     pub name: String,
@@ -194,9 +195,9 @@ pub struct PulledSheet {
 ///
 /// - `taken` is the subscriber's current sheet-name list; every FINAL name of a
 ///   non-skipped pulled sheet is appended to it, so callers can thread one list
-///   through multiple pulls (multi-subscription refresh) and within-package
+///   through multiple pulls (multi-subscription refresh) and within-application
 ///   duplicates also resolve.
-/// - `skip` holds package sheet ids to leave untouched — refresh passes the
+/// - `skip` holds application sheet ids to leave untouched — refresh passes the
 ///   already-tracked sheets, which replace in place under their existing local
 ///   name and must not be renamed against their own workbook entry.
 pub fn resolve_sheet_name_collisions(
@@ -241,7 +242,7 @@ pub fn resolve_sheet_name_collisions(
 /// Resolve a verified version manifest's data sources to on-disk artifact
 /// paths. Split out of [`pull`] so the RESTORE path
 /// ([`load_verified_data_sources`]) resolves them through exactly the same
-/// code — a package connection re-materialized when a subscribed workbook is
+/// code — an application connection re-materialized when a subscribed workbook is
 /// reopened must see the same model artifact, snapshot list and writeback
 /// baseline a fresh pull would have seen.
 ///
@@ -251,10 +252,10 @@ pub fn resolve_sheet_name_collisions(
 ///
 /// A non-local transport (HTTP) has no local artifact path, so its data
 /// sources resolve to an empty `model_path` — the same value `pull` produced,
-/// and the reason a package connection has never materialized from an HTTP
-/// registry.
+/// and the reason an application connection has never materialized from an HTTP
+/// workspace.
 fn resolve_pulled_data_sources(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     pkg: &str,
     ver: &str,
     manifest: &VersionManifest,
@@ -302,7 +303,7 @@ fn resolve_pulled_data_sources(
 ///
 /// WHY THIS EXISTS. A `.cala` persists locally-authored BI connections inside
 /// itself (`capture_local_bi_connections`), but deliberately does NOT persist
-/// PACKAGE connections: their model belongs to the publisher and travels in the
+/// APPLICATION connections: their model belongs to the publisher and travels in the
 /// `.calp`, not in the subscriber's file. Only `pull` ever created one, so a
 /// subscribed report that was saved and reopened came back with the
 /// subscription ledger intact and ZERO connections — every BI pivot in it
@@ -315,12 +316,12 @@ fn resolve_pulled_data_sources(
 /// is the same one `pull` runs, in the same order —
 ///
 ///   1. `verify_and_load_manifest_via` under [`PinPolicy::RequirePinned`], so
-///      an unsigned package, a tampered manifest, a publisher key that changed,
-///      and a package this machine never deliberately subscribed to are all
+///      an unsigned application, a tampered manifest, a publisher key that changed,
+///      and an application this machine never deliberately subscribed to are all
 ///      hard errors. Restore is NOT a trust decision, so it can never mint a
 ///      pin — a `.cala` arriving by email cannot make this machine trust a
 ///      publisher it has never seen.
-///   2. `check_min_app_version`, so a package needing a newer Calcula says so
+///   2. `check_min_app_version`, so an application needing a newer Calcula says so
 ///      instead of half-materializing.
 ///   3. `verify_version_artifacts_via`, so every artifact — including the
 ///      `models/{id}/model.json` the caller then reads by path — hashes to the
@@ -332,10 +333,10 @@ fn resolve_pulled_data_sources(
 /// prove which model it has gets no model at all, which is visible (pivots
 /// report no connection) rather than silently wrong.
 pub fn load_verified_data_sources(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package_name: &str,
     version: &str,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
 ) -> Result<Vec<PulledDataSource>, CalpError> {
     let manifest = crate::integrity::load_pinned_manifest_via(
@@ -355,7 +356,7 @@ pub fn load_verified_data_sources(
     resolve_pulled_data_sources(registry, package_name, version, &manifest)
 }
 
-/// Pull a package from the registry. Returns sheets and metadata for the
+/// Pull an application from the workspace. Returns sheets and metadata for the
 /// caller to integrate into the workbook.
 ///
 /// `profile_dir` is the per-user profile directory holding the TOFU pin store
@@ -364,7 +365,7 @@ pub fn load_verified_data_sources(
 ///
 /// `policy` is REQUIRED and has no default because `pull()` is shared by three
 /// user actions that are NOT the same trust decision:
-///   * Subscribe  -> `PinPolicy::PinOnFirstUse`. The user reviewed the package
+///   * Subscribe  -> `PinPolicy::PinOnFirstUse`. The user reviewed the application
 ///     and its publisher key and said yes; first contact legitimately pins.
 ///   * Refresh    -> `PinPolicy::RequirePinned`. "Get the latest version" of
 ///     something already trusted. A refresh of a subscription that was never
@@ -373,41 +374,41 @@ pub fn load_verified_data_sources(
 ///   * Reset      -> `PinPolicy::RequirePinned`. Same reasoning.
 /// The decision therefore belongs to the caller, not to `pull()`.
 pub fn pull(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     request: &PullRequest,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<PullResult, CalpError> {
     pull_with_options(registry, request, scope, profile_dir, policy, SheetIdMode::FreshLocal)
 }
 
-/// What sheet identity a materialized package version carries locally.
+/// What sheet identity a materialized application version carries locally.
 ///
-/// This is the difference between consuming a package and developing one, and
+/// This is the difference between consuming an application and developing one, and
 /// it is exactly one field wide because the artifact walk, the trust gates and
 /// every remap below it must stay a single audited path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SheetIdMode {
     /// SUBSCRIBE / REFRESH. Mint a fresh local `SheetId` per sheet and record
-    /// the package -> local mapping in the subscription. The subscriber's copy
-    /// is their own document; two subscriptions to the same package in one
+    /// the application -> local mapping in the subscription. The subscriber's copy
+    /// is their own document; two subscriptions to the same application in one
     /// workbook must not collide, and a subscriber must not be able to
-    /// republish under the package's identity by accident.
+    /// republish under the application's identity by accident.
     FreshLocal,
-    /// CHECKOUT. Keep the package's sheet ids verbatim, so the working copy IS
-    /// the package as far as identity is concerned and the next push preserves
+    /// CHECKOUT. Keep the application's sheet ids verbatim, so the working copy IS
+    /// the application as far as identity is concerned and the next push preserves
     /// continuity: subscribers see modified sheets rather than every sheet
     /// removed and re-added, and their overrides — anchored to cell ids inside
     /// those sheets — survive.
-    PreservePackage,
+    PreserveApplication,
 }
 
 /// `pull()` with control over sheet identity. See [`SheetIdMode`].
 pub fn pull_with_options(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     request: &PullRequest,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
     policy: PinPolicy,
     sheet_id_mode: SheetIdMode,
@@ -425,7 +426,7 @@ pub fn pull_with_options(
     // cryptographically-verified copy, so a hostile transport cannot present a
     // signed manifest for the crypto check and a different one for the payload.
     // A tampered manifest, a wrong/changed publisher key, or an unsigned
-    // package all fail here.
+    // application all fail here.
     let VerifiedManifest {
         trust: trust_status,
         manifest: ver_manifest,
@@ -439,11 +440,11 @@ pub fn pull_with_options(
         policy,
     )?;
 
-    // COMPATIBILITY GATE: refuse a package that needs a newer Calcula than this
+    // COMPATIBILITY GATE: refuse an application that needs a newer Calcula than this
     // one (an honest "update the app" rather than a silent/partial failure).
     // min_app_version lives in the now-signature-verified manifest; the host app
     // version was recorded at startup via calp::set_host_app_version. Skipped
-    // when the package declares no minimum or the host version is unknown.
+    // when the application declares no minimum or the host version is unknown.
     crate::compat::check_min_app_version(
         pkg,
         ver,
@@ -484,7 +485,7 @@ pub fn pull_with_options(
         // style_index as 0, so the cell->style association rides in a companion
         // cell_styles.json (A1 -> style index). Without this a subscriber's
         // sheet would lose ALL per-cell styling (colors/fonts/borders). Absent
-        // in pre-cell_styles packages -> cells keep their default style.
+        // in pre-cell_styles applications -> cells keep their default style.
         if let Some(bytes) =
             registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/cell_styles.json"))?
         {
@@ -511,13 +512,13 @@ pub fn pull_with_options(
                     let (rs, cs) = layout.to_style_tiers();
                     (cw, rh, rs, cs)
                 }
-                // Pre-tier packages simply have none; every cell then resolves
+                // Pre-tier applications simply have none; every cell then resolves
                 // through its own style, which is the old behaviour.
                 None => (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new()),
             }
         };
 
-        // Read presentation metadata (D9). Absent in pre-D9 packages -> the
+        // Read presentation metadata (D9). Absent in pre-D9 applications -> the
         // (correct) per-field defaults via PublishedSheetMetadata::default().
         let metadata: crate::manifest::PublishedSheetMetadata = {
             match registry.read_artifact(pkg, ver, &format!("{sheet_prefix}/metadata.json"))? {
@@ -531,14 +532,14 @@ pub fn pull_with_options(
         // hyperlinks, page setup, gridlines) instead of dropping it.
         //
         // The local id is the ONE thing checkout does differently from a
-        // subscribe: keeping the package's id is what gives a working copy
-        // identity continuity with the package it came from. Everything below
+        // subscribe: keeping the application's id is what gives a working copy
+        // identity continuity with the application it came from. Everything below
         // this line — the chart/sparkline/CF/DV/control remaps — is written
-        // against package_sheet_id -> local_id, so in PreservePackage mode it
+        // against package_sheet_id -> local_id, so in PreserveApplication mode it
         // simply maps each id to itself.
         let local_id = match sheet_id_mode {
             SheetIdMode::FreshLocal => SheetId::from_bytes(identity::generate_uuid_v7()),
-            SheetIdMode::PreservePackage => pub_sheet.sheet_id,
+            SheetIdMode::PreserveApplication => pub_sheet.sheet_id,
         };
         let sheet = Sheet {
             id: local_id,
@@ -565,7 +566,8 @@ pub fn pull_with_options(
             zoom: metadata.zoom,
             split_row: metadata.split_row,
             split_col: metadata.split_col,
-            // Package sheets carry their author's display flags, same as zoom/split.
+            // Application sheets carry their author's display flags, same as
+            // zoom/split.
             display_zeros: metadata.display_zeros,
             show_formulas: metadata.show_formulas,
             view_mode: metadata.view_mode.clone(),
@@ -580,9 +582,9 @@ pub fn pull_with_options(
     }
 
     // Read charts (carried for subscriber in-app fidelity). Each chart names the
-    // sheet it lives on by the PACKAGE sheet id; remap to the new LOCAL sheet id
+    // sheet it lives on by the APPLICATION sheet id; remap to the new LOCAL sheet id
     // (pull assigns fresh ids) so it lands on the right sheet. A chart whose
-    // sheet wasn't pulled is dropped. Absent in packages published before charts.
+    // sheet wasn't pulled is dropped. Absent in applications published before charts.
     let pulled_charts: Vec<SavedChart> = {
         match registry.read_artifact(pkg, ver, "charts.json")? {
             Some(bytes) => {
@@ -605,8 +607,8 @@ pub fn pull_with_options(
         }
     };
 
-    // Read sparklines (C2a) — same package->local sheet-id remap as charts; an
-    // entry whose sheet wasn't pulled is dropped. Absent in older packages.
+    // Read sparklines (C2a) — same application->local sheet-id remap as charts; an
+    // entry whose sheet wasn't pulled is dropped. Absent in older applications.
     let pulled_sparklines: Vec<SavedSparkline> = {
         match registry.read_artifact(pkg, ver, "sparklines.json")? {
             Some(bytes) => {
@@ -630,8 +632,8 @@ pub fn pull_with_options(
     };
 
     // Read conditional formats + data validations (per-sheet, opaque payloads).
-    // Sheet ids are left as PACKAGE ids here; the Tauri pull remaps them to local
-    // sheet indices (alongside named ranges). Absent in older packages.
+    // Sheet ids are left as APPLICATION ids here; the Tauri pull remaps them to local
+    // sheet indices (alongside named ranges). Absent in older applications.
     let pulled_conditional_formats: Vec<SavedSheetConditionalFormats> =
         match registry.read_artifact(pkg, ver, "conditional_formats.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -654,7 +656,7 @@ pub fn pull_with_options(
     // version directory. That is not a style choice: `commit_artifacts_as_blobs`
     // moves every artifact into the content-addressed blob store and deletes the
     // per-version copy, so a directory walk returns nothing on a real published
-    // package — the exact bug that silently dropped every pivot definition from
+    // application — the exact bug that silently dropped every pivot definition from
     // real pulls until the checksum map became the authoritative artifact set.
     //
     // The bytes are integrity-verified against the signed manifest before this
@@ -677,9 +679,9 @@ pub fn pull_with_options(
     }
 
     // Read Wave B artifacts (comments, scenarios, outlines) — per-sheet opaque
-    // payloads with PACKAGE sheet ids, exactly like CF/DV. All optional:
+    // payloads with APPLICATION sheet ids, exactly like CF/DV. All optional:
     // comments.json exists only when the publisher opted in, and older
-    // packages lack all three.
+    // applications lack all three.
     let pulled_comments: Vec<SavedSheetComments> =
         match registry.read_artifact(pkg, ver, "comments.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -696,7 +698,7 @@ pub fn pull_with_options(
             None => Vec::new(),
         };
     // Cell-behavior bindings (granular bricks phase 2), same per-sheet opaque
-    // shape. Absent in packages published before behaviours travelled.
+    // shape. Absent in applications published before behaviours travelled.
     let pulled_cell_behaviors: Vec<persistence::SavedCellBehavior> =
         match registry.read_artifact(pkg, ver, "cell_behaviors.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -707,7 +709,7 @@ pub fn pull_with_options(
     // per-sheet filtering or sheet-id remap). The artifact carries the
     // publisher's COMPLETE pane-control set; the caller materializes it as a
     // whole (the app layer decides collision handling against the
-    // subscriber's own controls). Absent in older packages -> empty.
+    // subscriber's own controls). Absent in older applications -> empty.
     let pulled_pane_controls: Vec<SavedPaneControl> =
         match registry.read_artifact(pkg, ver, "pane_controls.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -715,9 +717,9 @@ pub fn pull_with_options(
         };
 
     // Read Wave A artifacts (slicers, ribbon filters, pivot layouts, theme,
-    // extension data). All optional — packages published before Wave A simply
+    // extension data). All optional — applications published before Wave A simply
     // lack the artifacts, mirroring how conditional_formats.json absence is
-    // handled. Sheet ids on slicers stay PACKAGE ids (the Tauri layer remaps).
+    // handled. Sheet ids on slicers stay APPLICATION ids (the Tauri layer remaps).
     let pulled_slicers: Vec<SavedSlicer> =
         match registry.read_artifact(pkg, ver, "slicers.json")? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -776,7 +778,7 @@ pub fn pull_with_options(
             // source came from.
             script.package_version = Some(version_str.clone());
             // R19 SECURITY: the declared-capability ceiling is server-
-            // authoritative — it comes from the package MANIFEST, never from
+            // authoritative — it comes from the application MANIFEST, never from
             // the (tamperable) script source. A tampered source can therefore
             // never widen a distributed script's ceiling.
             script.declared_capabilities = pub_script.capabilities.clone();
@@ -797,7 +799,7 @@ pub fn pull_with_options(
                 serde_json::from_slice(&bytes)?;
             let mut s = SavedScript::from(&def);
             // Stamp distribution provenance so refresh + dedupe can tell this
-            // module belongs to THIS package (vs a subscriber-authored local one).
+            // module belongs to THIS application (vs a subscriber-authored local one).
             s.source_package = Some(request.package_name.clone());
             pulled_modules.push(s);
         }
@@ -846,9 +848,9 @@ pub fn pull_with_options(
 
     let subscription = Subscription {
         package_name: request.package_name.clone(),
-        // The registry as the USER configured it, taken from the scope the pin
+        // The workspace as the USER configured it, taken from the scope the pin
         // was filed under — so subscribe, the stored subscription and every later
-        // refresh all name the registry with ONE string.
+        // refresh all name the workspace with ONE string.
         registry_url: scope.label.clone(),
         version_pin: request.version_pin.to_string(),
         resolved_version: version_str.clone(),
@@ -903,7 +905,7 @@ pub fn pull_with_options(
     // via read_artifact (a later HTTP effort, out of scope).
     //
     // SHARED with the reopen restore path (`load_verified_data_sources`), so a
-    // re-materialized package connection resolves its artifacts identically.
+    // re-materialized application connection resolves its artifacts identically.
     let pulled_data_sources = resolve_pulled_data_sources(registry, pkg, ver, &ver_manifest)?;
 
     // Generic custom objects (brick 4): read each declared payload via the
@@ -1057,7 +1059,7 @@ mod sheet_name_collision_tests {
         let skip: std::collections::HashSet<SheetId> =
             [sheets[0].package_sheet_id].into_iter().collect();
         resolve_sheet_name_collisions(&mut sheets, &mut subs, &mut taken, &skip);
-        // Tracked sheet keeps its package name (it replaces in place);
+        // Tracked sheet keeps its application name (it replaces in place);
         // the genuinely new sheet renames around the existing workbook name.
         assert_eq!(sheets[0].name, "Sheet1");
         assert_eq!(sheets[1].name, "Sheet1 (2)");
@@ -1070,12 +1072,12 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// The scope a real call site derives from the registry's location.
-    fn scope_of(dir: &TempDir) -> RegistryScope {
-        crate::registry_id::registry_scope(&dir.path().to_string_lossy()).unwrap()
+    /// The scope a real call site derives from the workspace's location.
+    fn scope_of(dir: &TempDir) -> WorkspaceScope {
+        crate::workspace_id::workspace_scope(&dir.path().to_string_lossy()).unwrap()
     }
 
-    /// The stored subscription names the registry in the USER'S spelling, taken
+    /// The stored subscription names the workspace in the USER'S spelling, taken
     /// from the scope the pin was filed under — so subscribe, the persisted
     /// subscription and every later refresh all use ONE string. Two of them
     /// (a `registry_url` on the request and a separately-derived scope) is how a
@@ -1084,11 +1086,11 @@ mod tests {
     fn the_subscription_records_the_registry_the_scope_was_derived_from() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         let typed = format!("file://{}", dir.path().display());
-        let scope = crate::registry_id::registry_scope(&typed).unwrap();
+        let scope = crate::workspace_id::workspace_scope(&typed).unwrap();
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
             version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
@@ -1099,14 +1101,14 @@ mod tests {
         // ...and that stored string re-derives the SAME scope, so the refresh
         // that reads it lands on the pin the subscribe wrote.
         assert_eq!(
-            crate::registry_id::registry_scope(&result.subscription.registry_url)
+            crate::workspace_id::workspace_scope(&result.subscription.registry_url)
                 .unwrap()
                 .id,
             scope.id
         );
     }
     use crate::publish::{self, PublishRequest, PushMode};
-    use crate::registry::LocalRegistry;
+    use crate::workspace::LocalWorkspace;
 
     fn make_test_workbook() -> persistence::Workbook {
         let mut sheet1 = Sheet::new("Dashboard".to_string());
@@ -1122,7 +1124,7 @@ mod tests {
         wb
     }
 
-    fn publish_test_package(reg: &LocalRegistry, prof: &std::path::Path) -> persistence::Workbook {
+    fn publish_test_package(reg: &LocalWorkspace, prof: &std::path::Path) -> persistence::Workbook {
         let wb = make_test_workbook();
         let request = PublishRequest {
             model_writebacks: None,
@@ -1153,7 +1155,7 @@ mod tests {
     fn pull_materializes_sheets() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         let request = PullRequest {
@@ -1181,10 +1183,10 @@ mod tests {
     fn custom_objects_round_trip_through_publish_and_pull() {
         // Distribution brick 4: a generic custom object (opaque JSON payload,
         // per-sheet) survives publish -> pull with its kind/id/name/payload and
-        // its package sheet id intact (so the app layer can remap it).
+        // its application sheet id intact (so the app layer can remap it).
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let wb = make_test_workbook();
         let sheet0_id = wb.sheets[0].id;
@@ -1248,7 +1250,7 @@ mod tests {
         // publish->pull via the companion cell_styles.json.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut sheet = Sheet::new("Styled".to_string());
         let mut sc = SavedCell::from_cell(&engine::cell::Cell::new_text("x".to_string()));
@@ -1296,11 +1298,11 @@ mod tests {
     #[test]
     fn pull_carries_controls() {
         // Controls (buttons/checkboxes with onSelect wiring) travel as a
-        // per-sheet opaque payload keyed by the PACKAGE sheet id, like CF/DV.
-        // A control on an unpublished sheet must not leak into the package.
+        // per-sheet opaque payload keyed by the APPLICATION sheet id, like CF/DV.
+        // A control on an unpublished sheet must not leak into the application.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         let published_sheet_id = wb.sheets[0].id;
@@ -1362,7 +1364,7 @@ mod tests {
     }
 
     /// A byte-exact PNG header of the requested size. Real bytes, so the
-    /// package carries a real binary rather than a placeholder string.
+    /// application carries a real binary rather than a placeholder string.
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         let mut v: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         v.extend_from_slice(&13u32.to_be_bytes());
@@ -1381,10 +1383,10 @@ mod tests {
     fn media_travels_as_its_own_artifact_and_only_for_published_sheets() {
         // A picture referenced by a published control must arrive; a picture
         // referenced only from a sheet the publisher withheld must NOT — the
-        // package would otherwise disclose content from an unpublished sheet.
+        // application would otherwise disclose content from an unpublished sheet.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let logo = png_bytes(64, 64);
         let secret = png_bytes(128, 128);
@@ -1483,7 +1485,7 @@ mod tests {
         // multi-megabyte blob every release.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let logo = png_bytes(64, 64);
         let logo_hash = sha_of(&logo);
@@ -1559,7 +1561,7 @@ mod tests {
     fn a_package_with_no_media_pulls_an_empty_map() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
         let pull_req = PullRequest {
             package_name: "test-pkg".to_string(),
@@ -1607,7 +1609,7 @@ mod tests {
         // the deterministic (order, id) order publish wrote.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         wb.pane_controls = make_test_pane_controls();
@@ -1684,7 +1686,7 @@ mod tests {
         // sorts by order, then id) — stable checksums, blob dedup intact.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let controls = make_test_pane_controls();
 
@@ -1783,11 +1785,11 @@ mod tests {
     #[test]
     fn pull_carries_slicers_filtered_to_published_sheets() {
         // Wave A: slicers are sheet-anchored — only slicers on published
-        // sheets travel, keyed by the un-remapped PACKAGE sheet id (CF/DV
+        // sheets travel, keyed by the un-remapped APPLICATION sheet id (CF/DV
         // semantics; the Tauri layer remaps to the local sheet).
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         let published_sheet_id = wb.sheets[0].id;
@@ -1855,14 +1857,14 @@ mod tests {
 
     #[test]
     fn min_app_version_stamped_for_wave_content_and_empty_otherwise() {
-        // Compatibility contract: a package carrying Wave A/B artifacts must
+        // Compatibility contract: an application carrying Wave A/B artifacts must
         // declare the publisher app's version (publish writes the request's
         // min_app_version VERBATIM into the signed manifest) so pre-Wave apps
         // refuse it honestly instead of silently dropping the new artifacts.
-        // A cell-only package carries no minimum and stays pullable anywhere.
+        // A cell-only application carries no minimum and stays pullable anywhere.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         // Cell-only workbook: no Wave A/B content -> hosts stamp nothing.
         let plain_wb = make_test_workbook();
@@ -1895,7 +1897,7 @@ mod tests {
         let v1 = reg.get_version_manifest("min-app-pkg", "1.0.0").unwrap();
         assert_eq!(v1.min_app_version, "", "cell-only package declares no minimum");
 
-        // Same package, next version, now with a slicer (Wave A): the host
+        // Same application, next version, now with a slicer (Wave A): the host
         // detects wave content and the stamp lands verbatim in the manifest.
         let mut wave_wb = make_test_workbook();
         wave_wb.slicers = vec![make_test_slicer("ByRegion", wave_wb.sheets[0].id)];
@@ -1916,7 +1918,7 @@ mod tests {
     #[test]
     fn a_published_dynamic_array_declares_a_minimum_app_version() {
         // A DYNAMIC-ARRAY SPILL EXTENT fails `carries_wave_content`'s test in
-        // its sharpest form. An older app pulls the package "successfully",
+        // its sharpest form. An older app pulls the application "successfully",
         // writes the spilled cells as ordinary literals, and drops the record
         // of which origin owns them -- so the subscriber gets an array that
         // looks right, is protected by nothing, and collapses to an error the
@@ -1967,7 +1969,7 @@ mod tests {
         );
 
         // ...and only when the sheet carrying it is actually PUBLISHED, which
-        // is what keeps a cell-only package pullable by older apps.
+        // is what keeps a cell-only application pullable by older apps.
         req.sheet_indices = vec![1];
         assert!(
             !publish::carries_wave_content(&req),
@@ -1978,11 +1980,11 @@ mod tests {
     #[test]
     fn pull_carries_ribbon_filters_with_data_source_id() {
         // Wave A: ribbon filters are workbook-scoped and BI-only; the stable
-        // package data-source id must survive so the subscriber's pull can
+        // application data-source id must survive so the subscriber's pull can
         // re-bind connection_id onto the freshly materialized connection.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         let filter_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
@@ -2065,7 +2067,7 @@ mod tests {
     fn pull_carries_pivot_layouts() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         let layout_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
@@ -2131,7 +2133,7 @@ mod tests {
         // publisher's (customized) theme reads back exactly.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         wb.theme = engine::theme::ThemeDefinition::facet();
@@ -2177,7 +2179,7 @@ mod tests {
     fn pull_carries_extension_data() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = make_test_workbook();
         wb.extension_data.insert(
@@ -2235,12 +2237,12 @@ mod tests {
 
     #[test]
     fn pull_without_wave_a_artifacts_returns_empty_defaults() {
-        // A package whose workbook carries none of the optional Wave A kinds:
+        // An application whose workbook carries none of the optional Wave A kinds:
         // the vec artifacts are absent (reader tolerates), extension data is
         // empty, and only the always-written theme singleton is present.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         assert!(reg.read_artifact("test-pkg", "1.0.0", "slicers.json").unwrap().is_none());
@@ -2258,11 +2260,11 @@ mod tests {
 
     #[test]
     fn pull_with_no_pane_controls_returns_empty() {
-        // Packages published without pane controls (or before they were
+        // Applications published without pane controls (or before they were
         // carried) pull an empty set — no artifact, no error.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         assert!(reg
@@ -2275,13 +2277,13 @@ mod tests {
 
     #[test]
     fn model_only_dataset_package_round_trip() {
-        // Slice E (model-in-calp): a package of kind "dataset" with ZERO
+        // Slice E (model-in-calp): an application of kind "dataset" with ZERO
         // sheets is the distribution unit for a BI model — publish embeds the
         // credential-free model JSON as models/{id}/model.json; pull hands
         // back the data source (the app layer materializes a connection).
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let wb = persistence::Workbook::new();
         let publish_req = PublishRequest {
@@ -2345,7 +2347,7 @@ mod tests {
     fn pull_carries_named_ranges_and_cf_dv() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut sheet = Sheet::new("Sales".to_string());
         sheet
@@ -2401,7 +2403,7 @@ mod tests {
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         // Named ranges ride in the manifest; CF/DV are read from their artifacts.
-        // sheet_ids stay as PACKAGE ids here (the Tauri pull remaps to local index).
+        // sheet_ids stay as APPLICATION ids here (the Tauri pull remaps to local index).
         assert_eq!(result.named_ranges.len(), 1, "named range must be carried by .calp");
         assert_eq!(result.named_ranges[0].name, "TaxRate");
         assert_eq!(result.conditional_formats.len(), 1, "CF must be carried by .calp");
@@ -2489,7 +2491,7 @@ mod tests {
     fn pull_carries_scenarios_and_outlines_filtered_to_published_sheets() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let (wb, pkg_sheet_id) = make_wave_b_workbook();
 
         let pub_result =
@@ -2504,7 +2506,7 @@ mod tests {
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
-        // Scenarios + outlines travel per published sheet, PACKAGE sheet ids
+        // Scenarios + outlines travel per published sheet, APPLICATION sheet ids
         // un-remapped (CF/DV semantics); the unpublished sheet's entries do not.
         assert_eq!(result.scenarios.len(), 1, "scenarios must be carried by .calp");
         assert_eq!(result.scenarios[0].sheet_id, pkg_sheet_id);
@@ -2531,7 +2533,7 @@ mod tests {
     fn pull_carries_cell_behaviors_filtered_to_published_sheets() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let (wb, pkg_sheet_id) = make_wave_b_workbook();
 
         let pub_result =
@@ -2561,10 +2563,10 @@ mod tests {
         );
     }
 
-    /// A package carrying a behaviour binding declares a minimum app version.
+    /// An application carrying a behaviour binding declares a minimum app version.
     ///
     /// Same reasoning as the spill-extent case: without the stamp an older app
-    /// pulls the package "successfully" and drops the bindings in silence, which
+    /// pulls the application "successfully" and drops the bindings in silence, which
     /// is the failure mode `carries_wave_content` exists to convert into an
     /// honest refusal.
     #[test]
@@ -2605,7 +2607,7 @@ mod tests {
         // the published sheets.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let (wb, _) = make_wave_b_workbook();
 
         let pub_result =
@@ -2632,7 +2634,7 @@ mod tests {
     fn pull_carries_comments_when_opted_in() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let (wb, pkg_sheet_id) = make_wave_b_workbook();
 
         let pub_result =
@@ -2646,7 +2648,7 @@ mod tests {
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
-        // Only the PUBLISHED sheet's comments travel, package sheet id
+        // Only the PUBLISHED sheet's comments travel, application sheet id
         // un-remapped, payload byte-identical (opaque to the calp layer).
         assert_eq!(result.comments.len(), 1, "opted-in comments must be carried by .calp");
         assert_eq!(result.comments[0].sheet_id, pkg_sheet_id);
@@ -2657,7 +2659,7 @@ mod tests {
     fn pull_materializes_charts_with_remapped_sheet_id() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         // A workbook with a chart that lives on its sheet.
         let mut sheet = Sheet::new("Charted".to_string());
@@ -2704,7 +2706,7 @@ mod tests {
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
-        // The chart round-trips, with its sheet_id remapped from the package id
+        // The chart round-trips, with its sheet_id remapped from the application id
         // to the new LOCAL sheet id so it lands on the right sheet.
         assert_eq!(result.charts.len(), 1);
         let chart = &result.charts[0];
@@ -2718,10 +2720,10 @@ mod tests {
     #[test]
     fn pull_restores_sparklines_with_remapped_sheet_id() {
         // C2a: a sparkline must survive publish -> pull with its sheet_id remapped
-        // from the package id to the new LOCAL sheet id (same contract as charts).
+        // from the application id to the new LOCAL sheet id (same contract as charts).
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut sheet = Sheet::new("Sparked".to_string());
         sheet
@@ -2778,7 +2780,7 @@ mod tests {
     fn pull_creates_subscription_metadata() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         let request = PullRequest {
@@ -2793,7 +2795,7 @@ mod tests {
         assert_eq!(sub.resolved_version, "1.0.0");
         assert_eq!(sub.sheets.len(), 2);
 
-        // Local sheet IDs should be different from package sheet IDs
+        // Local sheet IDs should be different from application sheet IDs
         for sheet_sub in &sub.sheets {
             assert_ne!(sheet_sub.package_sheet_id, sheet_sub.local_sheet_id);
         }
@@ -2803,7 +2805,7 @@ mod tests {
     fn pull_with_version_resolution() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_test_workbook();
 
         // Publish v1.0.0, v1.1.0, v2.0.0
@@ -2847,7 +2849,7 @@ mod tests {
     fn pull_nonexistent_package_fails() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let request = PullRequest {
             package_name: "ghost".to_string(),
@@ -2872,9 +2874,9 @@ mod tests {
     /// unwrap_err() requires Debug on the Ok type; PullResult intentionally
     /// has no Debug derive (deep persistence types), so match instead.
     fn expect_pull_err(
-        reg: &LocalRegistry,
+        reg: &LocalWorkspace,
         req: &PullRequest,
-        scope: &RegistryScope,
+        scope: &WorkspaceScope,
         prof: &std::path::Path,
     ) -> CalpError {
         match pull(reg, req, scope, prof, PinPolicy::PinOnFirstUse) {
@@ -2888,7 +2890,7 @@ mod tests {
     /// the signature gate — running first — would otherwise flag). Uses the
     /// persisted publisher keypair so the signature is valid for the new bytes,
     /// letting the test reach the integrity gate it is actually exercising.
-    fn resign_manifest(reg: &LocalRegistry, prof: &std::path::Path, package: &str, version: &str) {
+    fn resign_manifest(reg: &LocalWorkspace, prof: &std::path::Path, package: &str, version: &str) {
         let ver_dir = reg.version_dir(package, version).unwrap();
         let manifest_bytes = fs::read(ver_dir.join(crate::integrity::VERSION_MANIFEST_FILE)).unwrap();
         let kp = crate::signing::PublisherKeypair::load_or_create(prof).unwrap();
@@ -2900,7 +2902,7 @@ mod tests {
     fn pull_roundtrip_passes_integrity_verification() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         // Publish recorded checksums...
@@ -2916,7 +2918,7 @@ mod tests {
     fn pull_fails_on_tampered_data_file() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = publish_test_package(&reg, prof.path());
 
         // Tamper with a published artifact after publish.
@@ -2929,7 +2931,7 @@ mod tests {
         let err = expect_pull_err(&reg, &make_pull_request(), &scope_of(&dir), prof.path());
         assert!(matches!(err, CalpError::ChecksumMismatch { .. }));
         let msg = err.to_string();
-        assert!(msg.contains("Package integrity check failed"), "msg: {}", msg);
+        assert!(msg.contains("Integrity check failed"), "msg: {}", msg);
         assert!(msg.contains("test-pkg@1.0.0"), "msg: {}", msg);
         assert!(msg.contains("data.json"), "msg: {}", msg);
     }
@@ -2938,7 +2940,7 @@ mod tests {
     fn pull_fails_on_corrupted_blob() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = publish_test_package(&reg, prof.path());
 
         // Corrupt a deduped artifact's blob: its content no longer hashes to the
@@ -2960,7 +2962,7 @@ mod tests {
     fn pull_fails_on_deleted_artifact() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = publish_test_package(&reg, prof.path());
 
         // Tamper-by-deletion: remove a deduped artifact's blob -> a hard error.
@@ -2979,10 +2981,10 @@ mod tests {
     fn pull_fails_on_package_published_without_checksums() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
-        // Simulate a pre-checksum (legacy) package: strip the checksum map
+        // Simulate a pre-checksum (legacy) application: strip the checksum map
         // from the version manifest. No backward compatibility: hard error.
         // Re-sign so we get PAST the signature gate (which runs first) and
         // actually exercise the checksum gate this test is about.
@@ -3002,7 +3004,7 @@ mod tests {
     fn pull_ignores_subscriber_submissions() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         // Post-publish event files land inside the version directory —
@@ -3056,7 +3058,7 @@ mod tests {
     fn end_to_end_publish_and_pull_roundtrip() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let original_wb = publish_test_package(&reg, prof.path());
 
         let request = PullRequest {
@@ -3086,7 +3088,7 @@ mod tests {
     fn pull_restores_sheet_presentation_metadata() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         // A sheet carrying rich metadata a pre-D9 pull would have dropped.
         let mut wb = make_test_workbook();
@@ -3171,7 +3173,7 @@ mod tests {
     fn pull_materializes_modules_and_notebooks_with_stripped_exec_metadata() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         // A workbook carrying one module script and one notebook whose cell
         // has non-trivial execution metadata that MUST be stripped on publish.
@@ -3190,7 +3192,7 @@ mod tests {
             cells: vec![persistence::SavedNotebookCell {
                 id: "cell-1".to_string(),
                 source: "1 + 1".to_string(),
-                // Runtime artifacts that must NOT leak into the package.
+                // Runtime artifacts that must NOT leak into the application.
                 last_output: vec![
                     persistence::SavedNotebookOutputItem::text("2"),
                     persistence::SavedNotebookOutputItem::text("cached"),
@@ -3258,7 +3260,7 @@ mod tests {
             &m.scope,
             persistence::SavedScriptScope::Sheet { name } if name == "Data"
         ));
-        // Provenance is stamped with the package name on pull.
+        // Provenance is stamped with the application name on pull.
         assert_eq!(m.source_package.as_deref(), Some("c8-pkg"));
 
         assert_eq!(result.notebooks.len(), 1);
@@ -3282,7 +3284,7 @@ mod tests {
     fn pull_with_no_modules_or_notebooks_returns_empty() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         // The base workbook has no module scripts / notebooks; the manifest
@@ -3306,9 +3308,9 @@ mod tests {
         use calcula_format::features::notebooks::{NotebookCellDef, NotebookDef, NotebookOutputItemDef};
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
-        // Publish a package carrying one (clean) notebook.
+        // Publish an application carrying one (clean) notebook.
         let mut wb = make_test_workbook();
         wb.notebooks = vec![SavedNotebook {
             id: "nb-evil".to_string(),
@@ -3366,7 +3368,7 @@ mod tests {
                 duration_ms: 42,
                 execution_index: Some(7),
             }],
-            // Also try to forge a different package's attribution.
+            // Also try to forge a different application's attribution.
             source_package: Some("trusted-other-pkg".to_string()),
         };
         fs::write(
@@ -3389,7 +3391,7 @@ mod tests {
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
 
         assert_eq!(result.notebooks.len(), 1);
-        // Provenance is re-stamped with the ACTUAL package on pull, overriding the
+        // Provenance is re-stamped with the ACTUAL application on pull, overriding the
         // publisher's forged "trusted-other-pkg" attribution.
         assert_eq!(result.notebooks[0].source_package.as_deref(), Some("evil-pkg"));
         let cell = &result.notebooks[0].cells[0];
@@ -3409,7 +3411,7 @@ mod tests {
         // ORIGIN gate (running before the integrity gate) catches.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         // Tamper the manifest CONTENT while keeping it valid JSON (so it still
@@ -3431,10 +3433,10 @@ mod tests {
 
     #[test]
     fn pull_fails_when_signature_missing() {
-        // No backward compat: a package without a signature is rejected.
+        // No backward compat: an application without a signature is rejected.
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         fs::remove_file(
@@ -3453,14 +3455,14 @@ mod tests {
     fn tofu_first_use_then_verified_on_second_pull() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         // First pull pins the publisher key.
         let first = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
-        // Second pull (same package, same key) verifies against the pin.
+        // Second pull (same application, same key) verifies against the pin.
         let second = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(second.trust_status, TrustStatus::Verified);
     }
@@ -3469,15 +3471,15 @@ mod tests {
     fn tofu_rejects_different_publisher_key_for_same_package() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         publish_test_package(&reg, prof.path());
 
         // First pull pins publisher A's key.
         let first = pull(&reg, &make_pull_request(), &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         assert_eq!(first.trust_status, TrustStatus::FirstUse);
 
-        // Re-sign the SAME package with a DIFFERENT publisher (key B) — as a
-        // registry attacker who controls the manifest would. We swap in B's
+        // Re-sign the SAME application with a DIFFERENT publisher (key B) — as a
+        // workspace attacker who controls the manifest would. We swap in B's
         // public key and a valid B-signature so the crypto check passes but
         // the key differs from the pin.
         let prof_b = TempDir::new().unwrap();

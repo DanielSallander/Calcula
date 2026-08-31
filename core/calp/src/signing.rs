@@ -2,8 +2,8 @@
 //! PURPOSE: Publisher signing (Ed25519) + TOFU publisher-key pinning (S5 phase 2).
 //! CONTEXT: Phase 1 (integrity.rs) made every artifact verifiable from the
 //! version manifest via SHA-256, but the manifest itself was unsigned: anyone
-//! who can write to the registry could rewrite manifest + checksums together.
-//! Phase 2 closes that hole and makes a package's ORIGIN verifiable:
+//! who can write to the workspace could rewrite manifest + checksums together.
+//! Phase 2 closes that hole and makes an application's ORIGIN verifiable:
 //!
 //!   - Each publisher has a persistent Ed25519 keypair in the per-user profile
 //!     directory (`publisher-key.json`), created on first publish with the OS
@@ -16,7 +16,7 @@
 //!     subscriber knows the asserted signer.
 //!   - On pull/refresh/inspect, the signature is verified BEFORE artifact
 //!     checksums, and the publisher key is pinned trust-on-first-use in
-//!     `trusted-publishers.json`, keyed by `(namespace, registry scope, name)`
+//!     `trusted-publishers.json`, keyed by `(namespace, workspace scope, name)`
 //!     — see the `PinKey` doc comment for why the key is not the name alone.
 //!     First pull pins; later pulls must match the pin, else
 //!     PublisherKeyChanged.
@@ -125,10 +125,10 @@ impl PublisherKeypair {
         let content = std::fs::read_to_string(&path)?;
         let file: PublisherKeyFile = serde_json::from_str(&content)?;
         let secret = from_hex(&file.secret_key).ok_or_else(|| {
-            CalpError::Registry("publisher-key.json: secretKey is not valid hex".to_string())
+            CalpError::Workspace("publisher-key.json: secretKey is not valid hex".to_string())
         })?;
         let seed: [u8; 32] = secret.as_slice().try_into().map_err(|_| {
-            CalpError::Registry("publisher-key.json: secretKey must be 32 bytes".to_string())
+            CalpError::Workspace("publisher-key.json: secretKey must be 32 bytes".to_string())
         })?;
         let signing_key = SigningKey::from_bytes(&seed);
         let display_name = if file.display_name.is_empty() {
@@ -196,7 +196,7 @@ impl PublisherKeypair {
 ///
 /// This is the authorization primitive for publisher-only actions
 /// (approve/reject writeback submissions). An empty `publisher_key` (an
-/// unsigned package) can never be owned, so it returns `false`.
+/// unsigned application) can never be owned, so it returns `false`.
 pub fn profile_holds_publisher_key(
     profile_dir: &Path,
     publisher_key: &str,
@@ -217,7 +217,7 @@ pub fn profile_holds_publisher_key(
 /// Verify a detached Ed25519 signature over `bytes` against a hex-encoded
 /// public key. Any failure — bad hex, wrong key length, wrong signature
 /// length, or a signature that does not validate — maps to
-/// ManifestSignatureInvalid (the caller supplies package/version context).
+/// ManifestSignatureInvalid (the caller supplies application/version context).
 ///
 /// Uses `verify_strict`, which rejects signatures made with small-order /
 /// non-canonical keys (the stricter, recommended check).
@@ -251,31 +251,31 @@ pub fn verify_signature(
 // ---------------------------------------------------------------------------
 //
 // WHY THE KEY HAS THREE PARTS. The store used to be a flat `packageName ->
-// publisherKeyHex` map, so a package name mapped to one key for the whole
+// publisherKeyHex` map, so an application name mapped to one key for the whole
 // MACHINE and whoever made first contact with a name owned it: `acme.finance`
 // served once from `\\evil\share` wrote the pin that the genuine `acme.finance`
 // was later measured against, and the real publisher's first release reported
 // `PublisherKeyChanged` — an accusation pointed at the victim. The name was also
-// shared across THREE namespaces: a report package, a script library and an org
+// shared across THREE namespaces: a report application, a script library and an org
 // skin called `acme.finance` all wrote the same row, so an administrator's
 // pre-pin silently overwrote a user's.
 //
-// A pin is now `(namespace, registry scope, name)`, built ONLY through
+// A pin is now `(namespace, workspace scope, name)`, built ONLY through
 // `PinKey::calp` / `PinKey::extension`. Nothing anywhere concatenates a key
 // string: the shape that made `"ext:" + id` a convention rather than a type is
 // exactly the shape that let the three namespaces collide.
 
-use crate::registry_id::RegistryScope;
+use crate::workspace_id::WorkspaceScope;
 
-/// Which trust namespace a pin belongs to. A `.calp` package (report, script
-/// library or registry-published skin — all the same artifact over the same
+/// Which trust namespace a pin belongs to. A `.calp` application (report, script
+/// library or workspace-published skin — all the same artifact over the same
 /// rail) and an installed extension are different kinds of thing with different
 /// naming authorities, and a name in one must never satisfy a lookup in the
 /// other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PinNamespace {
-    /// Anything pulled from a `.calp` registry: reports, script libraries, skins.
+    /// Anything pulled from a `.calp` workspace: reports, script libraries, skins.
     Calp,
     /// An installed third-party extension add-in, keyed by its id.
     Ext,
@@ -297,8 +297,8 @@ impl PinNamespace {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PinKey {
     namespace: PinNamespace,
-    /// The `RegistryScope::id` (normalized key material), or "" where the
-    /// namespace has no registry.
+    /// The `WorkspaceScope::id` (normalized key material), or "" where the
+    /// namespace has no workspace.
     scope: String,
     name: String,
 }
@@ -313,17 +313,17 @@ impl PinKey {
         }
     }
 
-    /// A `.calp` package pinned for ONE registry. Two registries serving the
-    /// same package name hold independent pins, so a squat in one cannot own the
+    /// A `.calp` application pinned for ONE workspace. Two workspaces serving the
+    /// same application name hold independent pins, so a squat in one cannot own the
     /// name in another — and `PinStore::other_scopes_for_name` is what makes the
     /// two visible to each other.
-    pub fn calp(scope: &RegistryScope, package: &str) -> PinKey {
+    pub fn calp(scope: &WorkspaceScope, package: &str) -> PinKey {
         Self::new(PinNamespace::Calp, &scope.id, package)
     }
 
     /// An extension add-in, pinned MACHINE-GLOBALLY by id.
     ///
-    /// This is a decision, not an oversight. There is no registry here — an
+    /// This is a decision, not an oversight. There is no workspace here — an
     /// extension is installed from a folder, and the only candidate scope is the
     /// attacker's own choice of location, so scoping by source folder would give
     /// a bundle dropped in `%USERPROFILE%\Downloads` a pristine scope and a free
@@ -351,9 +351,9 @@ impl PinKey {
 #[serde(rename_all = "camelCase")]
 pub struct PinRecord {
     pub namespace: PinNamespace,
-    /// `RegistryScope::id` — normalized key material. Never displayed.
+    /// `WorkspaceScope::id` — normalized key material. Never displayed.
     pub scope: String,
-    /// The registry location EXACTLY as the user configured it. The only form a
+    /// The workspace location EXACTLY as the user configured it. The only form a
     /// UI, an error or an audit entry may show.
     pub scope_label: String,
     pub name: String,
@@ -419,9 +419,9 @@ impl PinStore {
 
     /// Pins for the SAME namespace and name in a DIFFERENT scope.
     ///
-    /// This is the cross-check that makes registry scoping safe. Without it,
+    /// This is the cross-check that makes workspace scoping safe. Without it,
     /// scoping would trade a loud false alarm (the genuine publisher reported as
-    /// a key change) for a quiet true miss (a hostile registry serving a familiar
+    /// a key change) for a quiet true miss (a hostile workspace serving a familiar
     /// name becoming an ordinary silent first use). With it, first contact in a
     /// new scope can say which of the two it is: same key elsewhere = a migration
     /// or a mirror; a different key elsewhere = a name conflict the user must be
@@ -432,16 +432,16 @@ impl PinStore {
     ///
     ///   * `get` stays exact, so loosening the compare can never GRANT trust —
     ///     `Acme.Finance` can never satisfy a pin recorded for `acme.finance`.
-    ///   * this scan is loose, so a hostile registry cannot dodge the conflict
-    ///     warning by re-casing a name the user already trusts. Local registries
+    ///   * this scan is loose, so a hostile workspace cannot dodge the conflict
+    ///     warning by re-casing a name the user already trusts. Local workspaces
     ///     live on a case-insensitive filesystem, so `Acme.Finance` and
-    ///     `acme.finance` are frequently the very same package anyway; without
+    ///     `acme.finance` are frequently the very same application anyway; without
     ///     this, one flipped letter turned a red `NotPinnedNameConflict` into an
     ///     ordinary amber `NotPinned` — the quiet true miss this cross-check
     ///     exists to prevent.
     ///
-    /// The cost is that two genuinely distinct packages whose names differ only
-    /// by case (possible on an HTTP registry, where paths are case-sensitive)
+    /// The cost is that two genuinely distinct applications whose names differ only
+    /// by case (possible on an HTTP workspace, where paths are case-sensitive)
     /// report a conflict and need the second confirmation. That is the
     /// conservative direction: loud and answerable, not silent.
     pub fn other_scopes_for_name(
@@ -519,7 +519,7 @@ pub fn load_pins(profile_dir: &Path) -> Result<PinStore, CalpError> {
             let file: TrustedPublishersFileV1 = serde_json::from_value(value)?;
             migrate_v1_store(profile_dir, file)
         }
-        other => Err(CalpError::Registry(format!(
+        other => Err(CalpError::Workspace(format!(
             "trusted-publishers.json declares formatVersion {other}, which this build does not \
              understand. Refusing to read it: an unreadable pin store must never be treated as \
              'nothing is pinned'."
@@ -539,9 +539,9 @@ const PIN_FILE_VERSION_U64: u64 = PIN_FILE_VERSION as u64;
 /// **Bare-name `.calp` pins are DISCARDED.** The v1 store does not record where a
 /// pin came from, and there is no honest way to invent it: the available
 /// inference sources (`registries.json`, subscriptions inside `.cala` files) have
-/// no package linkage, and a wrong guess would BIND A PIN TO A REGISTRY IT DOES
+/// no application linkage, and a wrong guess would BIND A PIN TO A WORKSPACE IT DOES
 /// NOT BELONG TO — the silent-trust outcome this whole change exists to
-/// eliminate, most likely to be wrong in precisely the multi-registry case that
+/// eliminate, most likely to be wrong in precisely the multi-workspace case that
 /// motivated it. So they are written to `trusted-publishers.v1.discarded.json`
 /// for the user to audit, and the affected subscriptions re-prompt (they report
 /// `notPinned`, and the Subscriptions pane already says how to fix that).
@@ -574,12 +574,12 @@ fn migrate_v1_store(
         let note = serde_json::json!({
             "formatVersion": 1,
             "discardedAt": now_rfc3339(),
-            "why": "Publisher pins are now scoped to the registry they came from. \
-                    A v1 pin recorded only the package name, so there is no honest way to \
-                    say which registry it belonged to. These pins were discarded rather \
-                    than guessed; the packages will ask again on the next subscribe. \
-                    Nothing reads this file — it is here so you can see what this \
-                    machine used to trust.",
+            "why": "Publisher pins are now scoped to the workspace they came from. \
+                    A v1 pin recorded only the application name, so there is no honest \
+                    way to say which workspace it belonged to. These pins were discarded \
+                    rather than guessed; the applications will ask again on the next \
+                    subscribe. Nothing reads this file — it is here so you can see what \
+                    this machine used to trust.",
             "publishers": discarded,
         });
         std::fs::write(
@@ -612,10 +612,10 @@ fn now_rfc3339() -> String {
 /// store, inserts/updates the row, and writes it back. The profile directory is
 /// created if needed.
 ///
-/// `scope_label` is the registry location as the USER configured it, carried
+/// `scope_label` is the workspace location as the USER configured it, carried
 /// alongside the normalized scope id so a later "what does this machine trust?"
-/// view can name the registry in the user's own spelling. Pass "" for a
-/// namespace with no registry.
+/// view can name the workspace in the user's own spelling. Pass "" for a
+/// namespace with no workspace.
 pub fn pin_publisher(
     profile_dir: &Path,
     key: &PinKey,
@@ -705,7 +705,7 @@ pub fn extension_layout_for_manifest(manifest_path: &Path) -> Option<ExtensionBu
 ///   - otherwise exactly ONE top-level `*.js` -> file bundle for that file
 ///   - zero or several -> an error naming the ambiguity
 pub fn extension_layout_for_source(source: &Path) -> Result<ExtensionBundleLayout, CalpError> {
-    let bad = |msg: String| CalpError::Registry(msg);
+    let bad = |msg: String| CalpError::Workspace(msg);
 
     if source.is_dir() {
         if source.join("index.js").is_file() {
@@ -962,7 +962,7 @@ mod tests {
         assert!(!profile_holds_publisher_key(empty_dir.path(), &pub_key).unwrap());
         assert!(!publisher_key_file_path(empty_dir.path()).exists());
 
-        // An unsigned package (empty publisher_key) can never be owned.
+        // An unsigned application (empty publisher_key) can never be owned.
         assert!(!profile_holds_publisher_key(pub_dir.path(), "").unwrap());
     }
 
@@ -996,8 +996,8 @@ mod tests {
         assert!(!profile_holds_publisher_key(attacker_dir.path(), &victim_key).unwrap());
     }
 
-    fn scope(location: &str) -> RegistryScope {
-        crate::registry_id::registry_scope(location).unwrap()
+    fn scope(location: &str) -> WorkspaceScope {
+        crate::workspace_id::workspace_scope(location).unwrap()
     }
 
     #[test]
@@ -1041,8 +1041,8 @@ mod tests {
         );
     }
 
-    /// The headline property of the key shape: two registries serving the same
-    /// package name hold INDEPENDENT pins.
+    /// The headline property of the key shape: two workspaces serving the same
+    /// application name hold INDEPENDENT pins.
     #[test]
     fn two_registries_serving_one_name_do_not_overwrite_each_other() {
         let dir = TempDir::new().unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
             .all(|r| r.namespace == PinNamespace::Calp));
     }
 
-    /// Two spellings of ONE registry share a pin — the property that stops a
+    /// Two spellings of ONE workspace share a pin — the property that stops a
     /// user who typed `c:/reg` in one dialog and `C:\reg\` in another from
     /// holding two independent trust decisions for the same folder.
     #[test]
@@ -1137,8 +1137,8 @@ mod tests {
     }
 
     /// THE EXISTING STORE. Extension pins carry over exactly; `.calp` pins
-    /// cannot be honestly placed in a registry scope, so they are DISCARDED (to
-    /// an auditable file) and the packages re-prompt.
+    /// cannot be honestly placed in a workspace scope, so they are DISCARDED (to
+    /// an auditable file) and the applications re-prompt.
     #[test]
     fn an_existing_v1_store_keeps_ext_pins_and_discards_the_rest() {
         let dir = TempDir::new().unwrap();
@@ -1165,7 +1165,7 @@ mod tests {
             "cccc"
         );
         // The bare-name .calp pins resolve in NO scope — the user is re-prompted
-        // rather than silently bound to a registry nobody recorded.
+        // rather than silently bound to a workspace nobody recorded.
         for reg in [r"C:\reg", r"\\corp\reg", "https://reg.acme.com/pub"] {
             let s = scope(reg);
             assert!(store.get(&PinKey::calp(&s, "pkg-a")).is_none());
@@ -1309,7 +1309,7 @@ mod tests {
         assert_eq!(key.namespace(), PinNamespace::Ext);
         assert_eq!(key.scope(), "");
         assert_eq!(key.name(), "calcula.example.tax-tools");
-        // ...and it is a different key from a .calp package of the same name.
+        // ...and it is a different key from a .calp application of the same name.
         let reg = scope(r"C:\reg");
         assert_ne!(key, PinKey::calp(&reg, "calcula.example.tax-tools"));
     }

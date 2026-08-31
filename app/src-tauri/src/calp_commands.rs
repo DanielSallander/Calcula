@@ -1,5 +1,5 @@
 //! FILENAME: app/src-tauri/src/calp_commands.rs
-//! PURPOSE: Tauri commands for .calp package operations (publish, pull, etc.).
+//! PURPOSE: Tauri commands for .calp application operations (publish, pull, etc.).
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -25,21 +25,21 @@ pub struct PublishParams {
     pub kind: String,
     pub sheet_indices: Vec<usize>,
     pub published_by: String,
-    /// What this publish IS. `"update"` pushes the next version of a package
+    /// What this publish IS. `"update"` pushes the next version of an application
     /// this workbook is a working copy of and REQUIRES `expected_base_version`;
-    /// `"createNew"` creates a package under a name that must not exist yet.
+    /// `"createNew"` creates an application under a name that must not exist yet.
     ///
-    /// Absent means `"createNew"` — which is the pre-workspace behaviour and
+    /// Absent means `"createNew"` — which is the pre-working-copy behaviour and
     /// stays available for the scripted/model publish paths and for a first
     /// publish from a standalone workbook. It is never a silent fallback for a
     /// failed update: an update whose base is missing is refused, not downgraded.
     #[serde(default)]
     pub mode: Option<String>,
     /// For `"update"`: the version the author worked from, taken from the
-    /// workbook's workspace link and echoed back by the preflight the user saw.
-    /// The base-version gate compares it against the registry head — this is
+    /// workbook's working-copy link and echoed back by the preflight the user saw.
+    /// The base-version gate compares it against the workspace head — this is
     /// the optimistic-concurrency token, and it is the caller's claim about
-    /// their own state, never something re-read from the registry.
+    /// their own state, never something re-read from the workspace.
     #[serde(default)]
     pub expected_base_version: Option<String>,
     /// What changed, in the author's words. Required for `"update"`.
@@ -126,7 +126,7 @@ pub struct PublishResponse {
     /// Number of standalone notebooks published (C8).
     pub notebooks_published: usize,
     /// Transparency report: everything that shipped and everything present in
-    /// the workbook that packages cannot carry yet (no silent drops).
+    /// the workbook that applications cannot carry yet (no silent drops).
     pub report: PublishReport,
     /// Publish-time disclosure warnings from core publish — e.g. a dropdown
     /// pane control whose CellRange item source references a sheet outside
@@ -140,8 +140,8 @@ pub struct PullParams {
     pub registry_path: String,
     pub package_name: String,
     pub version_pin: String,
-    /// The user was shown a CROSS-REGISTRY NAME CONFLICT -- this package name is
-    /// already pinned to a different publisher key from another registry -- and
+    /// The user was shown a CROSS-WORKSPACE NAME CONFLICT -- this application name is
+    /// already pinned to a different publisher key from another workspace -- and
     /// answered a second, differently-worded question accepting it anyway.
     ///
     /// Absent/false is the safe default: a plain subscribe REFUSES a conflict
@@ -150,14 +150,14 @@ pub struct PullParams {
     /// trusting a second claimant to a familiar name.
     #[serde(default)]
     pub accept_name_conflict: bool,
-    /// REFUSE to create a TOFU pin: the package must already be pinned on this
+    /// REFUSE to create a TOFU pin: the application must already be pinned on this
     /// machine or the pull fails.
     ///
     /// Set ONLY by the scripted distribution gateway
     /// (`scripting/distribution_gateway.rs`, `Action::Pull`). Subscribing is the
     /// one .calp flow allowed to mint a pin, and what makes that sound is that a
     /// human was shown the publisher and said yes. A script calling
-    /// `cap.pkgPull` is not that human: it would pin whatever key the registry
+    /// `cap.pkgPull` is not that human: it would pin whatever key the workspace
     /// happened to be serving at that moment, silently, on the author's
     /// authority rather than the user's. `Action::RefreshApply` already reasoned
     /// its way to `RequirePinned` for the same reason; `Pull` did not.
@@ -177,11 +177,11 @@ pub struct PullResponse {
     pub scripts_pulled: usize,
     /// Publisher display name asserted in the verified manifest (S5 phase 2).
     pub publisher_name: String,
-    /// A `CalpTrustStatus` -- the TOFU outcome for THIS registry. Subscribe is a
+    /// A `CalpTrustStatus` -- the TOFU outcome for THIS workspace. Subscribe is a
     /// commit point, so it is one of the pinning states; the frontend surfaces a
     /// first-use notice from it.
     pub trust_status: String,
-    /// Pins held for this same package name in OTHER registries, so the notice
+    /// Pins held for this same application name in OTHER workspaces, so the notice
     /// can say "the publisher you already trust, reached from a new location" --
     /// or, for an accepted conflict, exactly whose key it is competing with.
     pub other_scope_pins: Vec<crate::calp_inspector::OtherScopePinInfo>,
@@ -192,8 +192,8 @@ pub struct PullResponse {
     #[serde(default)]
     pub custom_objects: Vec<PulledCustomObjectDto>,
     /// The TRUE state-vector index of the first user-visible sheet this pull
-    /// created, for the caller to activate.  when the package brought no
-    /// user sheet (a dataset or library package).
+    /// created, for the caller to activate. `None` when the application brought
+    /// no user sheet (a dataset or library application).
     ///
     /// Answered here because only this layer knows the real indices: the sheet
     /// LIST omits object-backed sheets, so a caller deriving a position from it
@@ -203,7 +203,7 @@ pub struct PullResponse {
 }
 
 /// A pulled custom object handed to the frontend for provider materialization
-/// (distribution brick 4). `sheet_index` is the LOCAL sheet index (the package
+/// (distribution brick 4). `sheet_index` is the LOCAL sheet index (the application
 /// sheet remapped), or null for workbook-scoped / unresolvable objects.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,7 +217,7 @@ pub struct PulledCustomObjectDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageInfo {
+pub struct ApplicationInfo {
     pub name: String,
     pub description: String,
     pub kind: String,
@@ -244,7 +244,7 @@ pub struct SheetInfo {
 /// Resolve the per-user Calcula profile directory (%LOCALAPPDATA%\Calcula).
 /// This is the SAME directory used for the subscriber identity; it also holds
 /// the publisher's Ed25519 keypair (`publisher-key.json`) and the TOFU pin
-/// store (`trusted-publishers.json`) for S5 phase 2 package signing.
+/// store (`trusted-publishers.json`) for S5 phase 2 application signing.
 pub(crate) fn calcula_profile_dir() -> std::path::PathBuf {
     let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(local_app_data).join("Calcula")
@@ -274,7 +274,7 @@ struct PublishAssembly {
 /// Build the publish carrier. ONE collector — the same enriched builder as the
 /// .cala save path (active-sheet mirror content, notes/hyperlinks/hidden rows/
 /// page setup, CF/DV, controls, charts, sparklines, tables, named ranges,
-/// slicers, ribbon filters, theme, extension data) — so package fidelity
+/// slicers, ribbon filters, theme, extension data) — so application fidelity
 /// automatically tracks file fidelity. Core publish writes the subset the
 /// .calp format supports; compute_publish_report tells the author exactly
 /// what shipped and what stayed behind.
@@ -290,7 +290,7 @@ fn assemble_publish_workbook(
     timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
     sheet_indices: &[usize],
 ) -> Result<PublishAssembly, String> {
-    // Timelines CARRY into the package. Their EFFECT already travels as the
+    // Timelines CARRY into the application. Their EFFECT already travels as the
     // pivot's hidden_items/slicer_filters, so excluding the control while
     // carrying its filter would hand a subscriber a pivot pinned to the
     // publisher's last date range with no way to change it -- the worse of the
@@ -305,7 +305,7 @@ fn assemble_publish_workbook(
     )?;
 
     // Pane controls (Controls pane) are workbook-scoped and ride in the
-    // package as pane_controls.json (config + current values, sorted
+    // application as pane_controls.json (config + current values, sorted
     // deterministically at publish). Their custom-control/button scripts are
     // ordinary object scripts and ship consent-gated via object_scripts below.
     workbook.pane_controls =
@@ -328,10 +328,10 @@ fn assemble_publish_workbook(
     // carried in that metadata.
     crate::persistence::collect_pivot_definitions(pivot_state, state, &mut workbook);
 
-    // The package contains only the selected sheets: drop pivots whose
+    // The application contains only the selected sheets: drop pivots whose
     // source or destination sheet isn't included, and remap grid-source
-    // sheet indices from workbook positions to package positions (pull
-    // appends package sheets in order, offset by the pre-pull sheet count).
+    // sheet indices from workbook positions to application positions (pull
+    // appends application sheets in order, offset by the pre-pull sheet count).
     {
         let index_map: std::collections::HashMap<usize, usize> = sheet_indices
             .iter()
@@ -399,7 +399,7 @@ fn assemble_publish_workbook(
 
     // Build exclusion regions from pivot protected regions.
     // Pivot output cells are recalculated by subscribers, so we strip them
-    // from the published data — only hard-coded cell values go into the package.
+    // from the published data — only hard-coded cell values go into the application.
     let excluded_regions = {
         let regions = state.protected_regions.lock().map_err(|e| e.to_string())?;
         let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
@@ -437,7 +437,7 @@ pub struct PublishReportItem {
 }
 
 /// What a publish did (or, for the preview, WOULD do) carry — and what stays
-/// behind. No silent drops: anything present in the workbook that packages
+/// behind. No silent drops: anything present in the workbook that applications
 /// cannot carry yet is listed under `excluded` with a reason.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -498,7 +498,7 @@ fn compute_publish_report(
         "sheets with buttons/checkboxes (incl. onSelect wiring)");
     // Embedded pictures. Counted the same way publish SELECTS them — by scanning
     // the published sheets' control payloads for media: handles — so the report
-    // cannot claim a different number from the one the package carries. Media
+    // cannot claim a different number from the one the application carries. Media
     // referenced only from an unpublished sheet is neither shipped nor counted.
     {
         let mut media_refs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -560,7 +560,7 @@ fn compute_publish_report(
         wb.slicers.iter().filter(|s| published_sheet_ids.contains(&s.sheet_id)).count(),
         "slicers on published sheets (position, style, selections, report connections)");
     item(&mut included, "ribbonFilters", wb.ribbon_filters.len(),
-        "ribbon filters (BI-only; re-bound to the package's embedded data sources on pull)");
+        "ribbon filters (BI-only; re-bound to the application's embedded data sources on pull)");
     item(&mut included, "pivotLayouts", wb.pivot_layouts.len(),
         "saved pivot layouts (DSL + source references)");
     item(&mut included, "documentTheme", 1,
@@ -600,7 +600,7 @@ fn compute_publish_report(
     let workbook_protected = usize::from(wb.workbook_protection.is_some());
     item(&mut excluded, "workbookProtection", workbook_protected,
         "workbook structure protection is not carried (a governance feature, not yet distributed)");
-    // WORKBOOK-SCOPED GRID DEFAULTS. A package's sheets are APPENDED to the
+    // WORKBOOK-SCOPED GRID DEFAULTS. An application's sheets are APPENDED to the
     // subscriber's existing workbook, and these two are one-per-workbook, so
     // applying the publisher's values would silently re-size every sheet the
     // subscriber already had. The published sheets' own explicit widths/heights
@@ -614,7 +614,7 @@ fn compute_publish_report(
                 > f64::EPSILON,
     );
     item(&mut excluded, "gridDefaults", non_default_grid_defaults,
-        "your default row height / column width are workbook-wide, and the package's sheets are added to the subscriber's own workbook; explicitly sized rows and columns do travel");
+        "your default row height / column width are workbook-wide, and the application's sheets are added to the subscriber's own workbook; explicitly sized rows and columns do travel");
     // Per-connection "view as" RLS role selections. Deliberately not carried:
     // the selection is the PUBLISHER's impersonation of a role on their own
     // machine, and re-applying it on a subscriber would present that
@@ -633,7 +633,7 @@ fn compute_publish_report(
     .filter(|s| !s.is_empty())
     .count();
     item(&mut excluded, "documentProperties", doc_props,
-        "document properties describe YOUR workbook; the package manifest carries the package's own identity");
+        "document properties describe YOUR workbook; the application manifest carries the application's own identity");
 
     PublishReport { included, excluded }
 }
@@ -655,14 +655,14 @@ fn compute_publish_report(
 /// Serialize the OPEN WORKBOOK into `registry` by running the real publish.
 ///
 /// Used by the working-copy diff to produce a comparable side without writing
-/// anything to a real registry. It deliberately goes through
+/// anything to a real workspace. It deliberately goes through
 /// `assemble_publish_workbook` and `calp::publish::publish` — the same two
 /// calls `calp_publish` makes — rather than a purpose-built serializer, because
-/// a second definition of "what a package contains" drifts from the real one
+/// a second definition of "what an application contains" drifts from the real one
 /// the first time an artifact type is added, and the whole value of a push
 /// preview is that it describes the push that would actually happen.
 ///
-/// The caller supplies an in-memory registry; nothing reaches disk. One
+/// The caller supplies an in-memory workspace; nothing reaches disk. One
 /// documented side effect: like any first publish, this creates the profile's
 /// signing keypair if it does not exist yet — the same file a real publish
 /// would create, and idempotent.
@@ -677,7 +677,7 @@ pub(crate) fn publish_into_for_preview(
     pane_control_state: &State<crate::pane_control::PaneControlState>,
     user_files_state: &State<crate::persistence::UserFilesState>,
     timeline_slicer_state: &State<crate::timeline_slicer::TimelineSlicerState>,
-    registry: &dyn calp::transport::RegistryTransport,
+    registry: &dyn calp::transport::WorkspaceTransport,
     package_name: &str,
     version: SemVer,
     sheet_indices: Vec<usize>,
@@ -713,8 +713,8 @@ pub(crate) fn publish_into_for_preview(
         package_name: package_name.to_string(),
         version,
         kind: "report".to_string(),
-        // A preview package is created, not pushed: there is no prior version
-        // in a fresh in-memory registry, and no gate to satisfy.
+        // A preview application is created, not pushed: there is no prior version
+        // in a fresh in-memory workspace, and no gate to satisfy.
         mode: PushMode::CreateNew,
         change_summary: String::new(),
         sheet_indices,
@@ -776,7 +776,7 @@ pub(crate) fn parse_push_mode(params: &PublishParams) -> Result<calp::PushMode, 
                 .filter(|v| !v.trim().is_empty())
                 .ok_or_else(|| {
                     "CALP_PUSH_NO_BASE: An update must say which version it was based on. \
-                     Re-open the push dialog so it can read the workbook's workspace link."
+                     Re-open the push dialog so it can read the workbook's working-copy link."
                         .to_string()
                 })?;
             Ok(calp::PushMode::Update {
@@ -789,7 +789,7 @@ pub(crate) fn parse_push_mode(params: &PublishParams) -> Result<calp::PushMode, 
     }
 }
 
-/// Publish selected sheets to a local registry.
+/// Publish selected sheets to a local workspace.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn calp_publish(
@@ -809,33 +809,33 @@ pub fn calp_publish(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     // ---- PHASE A: the gates only this layer can run ------------------------
-    // Registry-fact gates (mode, base version, monotonic version, key
-    // continuity) live in core `publish()` under the registry lock, so every
+    // Workspace-fact gates (mode, base version, monotonic version, key
+    // continuity) live in core `publish()` under the workspace lock, so every
     // caller gets them. What is left here is what needs WORKBOOK state, which
     // core cannot see.
     let push_mode = parse_push_mode(&params)?;
 
-    // GATE: a working copy pushes to ITS package. Publishing into a different
-    // package from a linked workbook is either a typo or a misunderstanding,
-    // and both are cheaper to catch here than to discover in a registry.
+    // GATE: a working copy pushes to ITS application. Publishing into a different
+    // application from a linked workbook is either a typo or a misunderstanding,
+    // and both are cheaper to catch here than to discover in a workspace.
     // A structured code, not prose, because the remedy is a UI branch: offer
-    // "publish as a new package" rather than a message the user must decode.
+    // "publish as a new application" rather than a message the user must decode.
     if matches!(push_mode, calp::PushMode::Update { .. }) {
-        let link = state.workspace_link.read().map_err(|e| e.to_string())?;
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
         match link.as_ref() {
             None => {
                 return Err(format!(
                     "CALP_PUSH_NOT_LINKED: This workbook is not a working copy of '{}'. \
-                     Open the package for editing first (Distribution > Open Package for \
-                     Editing), or publish this workbook as a NEW package.",
+                     Open the application for editing first (Distribution > Open Application \
+                     for Editing), or publish this workbook as a NEW application.",
                     params.package_name
                 ));
             }
             Some(l) if !l.targets(&params.registry_path, &params.package_name) => {
                 return Err(format!(
                     "CALP_PUSH_WRONG_TARGET: This workbook is a working copy of '{}' \
-                     ({}), not of '{}'. Push it to the package it came from, or publish \
-                     it as a NEW package.",
+                     ({}), not of '{}'. Push it to the application it came from, or publish \
+                     it as a NEW application.",
                     l.package_name, l.registry_url, params.package_name
                 ));
             }
@@ -843,9 +843,9 @@ pub fn calp_publish(
         }
     }
 
-    // GATE: a SUBSCRIBER may never push to the package it subscribes to. Its
+    // GATE: a SUBSCRIBER may never push to the application it subscribes to. Its
     // sheets carry freshly-minted local ids (pull mints them deliberately), so
-    // the push would hand the package a different identity and every other
+    // the push would hand the application a different identity and every other
     // subscriber's next refresh would see every sheet removed and re-added,
     // orphaning their overrides. This is the identity trap, refused by name.
     {
@@ -859,8 +859,8 @@ pub fn calp_publish(
                 "CALP_PUSH_IS_SUBSCRIBER: This workbook SUBSCRIBES to '{}' — its sheets are \
                  a local copy with their own identity, so publishing from here would look \
                  to every other subscriber like every sheet was deleted and replaced, and \
-                 would discard their local edits. To change the package itself, use \
-                 Distribution > Open Package for Editing.",
+                 would discard their local edits. To change the application itself, use \
+                 Distribution > Open Application for Editing.",
                 params.package_name
             ));
         }
@@ -908,16 +908,22 @@ pub fn calp_publish(
         }
     }
 
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
-    // GATE: an HTTP registry is read-only. Refusing here, before the workbook is
+    // The `workspace.calcula` pointer file is NOT written here. It is written by
+    // `LocalWorkspace::write_application_manifest`, because that is the one call
+    // every route into a workspace makes — this command, the model publish, the
+    // library publish and the skin pack. It sat here instead until an audit
+    // found that two of those four produced markerless workspaces.
+
+    // GATE: an HTTP workspace is read-only. Refusing here, before the workbook is
     // assembled and megabytes are serialized, turns a confusing deep transport
-    // error into a sentence about the registry.
+    // error into a sentence about the workspace.
     if params.registry_path.trim_start().to_lowercase().starts_with("http") {
         return Err(format!(
-            "CALP_PUSH_READONLY_REGISTRY: '{}' is an HTTP registry, which can only be read \
-             from. Push to a file-share registry instead.",
+            "CALP_PUSH_READONLY_REGISTRY: '{}' is an HTTP workspace, which can only be read \
+             from. Push to a file-share workspace instead.",
             params.registry_path
         ));
     }
@@ -928,16 +934,16 @@ pub fn calp_publish(
     let now = chrono::Utc::now().to_rfc3339();
 
     // Empty selection = every sheet — the SAME normalization the preview
-    // applies, so the dry-run report can never describe a different package
+    // applies, so the dry-run report can never describe a different application
     // than the publish that follows it (previously an empty selection
-    // previewed the whole workbook but published a zero-sheet package).
+    // previewed the whole workbook but published a zero-sheet application).
     //
     // ONE EXCEPTION, and it is the reason libraries were unpublishable: a
-    // LIBRARY package's payload is the workbook's standalone MODULE SCRIPTS
+    // LIBRARY application's payload is the workbook's standalone MODULE SCRIPTS
     // (modules/{id}.json — see library_commands.rs), not its sheets. Defaulting
     // an empty selection to "every sheet" is right for a report and wrong here:
     // it would ship the author's entire workbook — data and all — to a shared
-    // registry as a side effect of publishing a function library. A library
+    // workspace as a side effect of publishing a function library. A library
     // therefore publishes ZERO sheets unless the author names sheets explicitly.
     let sheet_indices = if params.kind.eq_ignore_ascii_case(crate::library_commands::LIBRARY_KIND) {
         params.sheet_indices
@@ -1010,13 +1016,13 @@ pub fn calp_publish(
         include_comments: params.include_comments,
         min_app_version: String::new(),
     };
-    // Compatibility stamp: a package carrying Wave A/B artifacts (slicers,
+    // Compatibility stamp: an application carrying Wave A/B artifacts (slicers,
     // ribbon filters, pivot layouts, extension data, comments/scenarios/
     // outlines, non-default theme) declares THIS app's version as its minimum
     // — an older app's pull fails honestly at the compat gate instead of
     // silently dropping those artifacts. Same version source the gate
     // compares against (set_host_app_version(env!("CARGO_PKG_VERSION")) at
-    // startup). Cell-only packages stay pullable by older apps.
+    // startup). Cell-only applications stay pullable by older apps.
     if calp::publish::carries_wave_content(&request)
         // Model writeback declarations are inert to pre-feature apps (they
         // only consult writeback_regions), but the columns' VALUES would be
@@ -1035,22 +1041,22 @@ pub fn calp_publish(
         request.min_app_version = env!("CARGO_PKG_VERSION").to_string();
     }
 
-    // ---- PHASE B: core runs the registry-fact gates under the registry lock --
+    // ---- PHASE B: core runs the workspace-fact gates under the workspace lock --
     let result = calp::publish::publish(&registry, &request, &calcula_profile_dir())
         .map_err(|e| e.to_string())?;
 
     // The push landed. Record it in the workbook's own link, so the NEXT push
-    // knows its base — and so a standalone workbook that just created a package
-    // becomes that package's working copy without a separate step.
+    // knows its base — and so a standalone workbook that just created an application
+    // becomes that application's working copy without a separate step.
     {
-        let published_sheets: Vec<calp::WorkspaceSheetRef> = {
+        let published_sheets: Vec<calp::WorkingCopySheetRef> = {
             let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
             let names = state.sheet_names.read().map_err(|e| e.to_string())?;
             request
                 .sheet_indices
                 .iter()
                 .filter_map(|&i| {
-                    Some(calp::WorkspaceSheetRef {
+                    Some(calp::WorkingCopySheetRef {
                         sheet_id: *ids.get(i)?,
                         name: names.get(i)?.clone(),
                     })
@@ -1059,13 +1065,13 @@ pub fn calp_publish(
         };
         // A push CHANGES what this workbook is (its base version moved), which
         // is saved state — so this is the command's one `mutates` arm, taken
-        // only after the registry has actually accepted the version.
+        // only after the workspace has actually accepted the version.
         let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-        let mut link = state.workspace_link.write(&effect).map_err(|e| e.to_string())?;
+        let mut link = state.working_copy_link.write(&effect).map_err(|e| e.to_string())?;
         match link.as_mut() {
             Some(existing) => existing.record_push(&result.version, &now, published_sheets),
             None => {
-                let mut fresh = calp::WorkspaceLink::new(
+                let mut fresh = calp::WorkingCopyLink::new(
                     &params.registry_path,
                     &result.package_name,
                     &request.kind,
@@ -1141,7 +1147,7 @@ pub struct PublishModelParams {
     pub connection_id: String,
 }
 
-/// Publish a single BI model as a MODEL-ONLY package (kind "dataset", zero
+/// Publish a single BI model as a MODEL-ONLY application (kind "dataset", zero
 /// sheets). This makes the .calp the distribution unit for models — signed
 /// (Ed25519 + TOFU), versioned (semver pins), min-app-gated — replacing loose
 /// .json file hand-off. Subscribing materializes a live BI connection
@@ -1155,12 +1161,12 @@ pub fn calp_publish_model(
     window: tauri::Window,
 ) -> Result<PublishResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
     let version = SemVer::parse(&params.version).map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Capture ONLY the requested connection as a package data source (the
+    // Capture ONLY the requested connection as an application data source (the
     // capture serializes the live engine model, credential-free).
     let (all_sources, all_model_writebacks) = capture_bi_data_sources(&state, &bi_state)?;
     let data_sources: Vec<calp::publish::PublishDataSource> = all_sources
@@ -1191,7 +1197,7 @@ pub fn calp_publish_model(
     }
     let model_name = data_sources[0].name.clone();
 
-    // A minimal carrier: zero sheets, no scripts/tables/names — the package is
+    // A minimal carrier: zero sheets, no scripts/tables/names — the application is
     // the model. Workbook::new()'s default sheet is never published because
     // sheet_indices is empty.
     let workbook = persistence::Workbook::new();
@@ -1217,8 +1223,8 @@ pub fn calp_publish_model(
         data_sources,
         excluded_regions: Vec::new(),
         custom_objects: Vec::new(),
-        include_comments: false, // dataset package: no sheets, no comments
-        // Model-only package: no Wave A/B artifacts, so no minimum — it stays
+        include_comments: false, // dataset application: no sheets, no comments
+        // Model-only application: no Wave A/B artifacts, so no minimum — it stays
         // pullable by older apps. Writeback columns are the exception: a
         // pre-v21 engine refuses the model, so gate honestly.
         min_app_version: String::new(),
@@ -1241,7 +1247,7 @@ pub fn calp_publish_model(
             audit.record(
                 calp::audit::AuditEvent::Published,
                 &format!(
-                    "Published model '{}' as dataset package {} v{}",
+                    "Published model '{}' as dataset application {} v{}",
                     model_name, result.package_name, result.version
                 ),
                 &user,
@@ -1298,7 +1304,7 @@ pub struct PublishPreviewParams {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishPreviewResponse {
-    /// Names of the sheets the preview covered, in package order.
+    /// Names of the sheets the preview covered, in application order.
     pub sheet_names: Vec<String>,
     pub report: PublishReport,
     /// The SAME disclosure warnings a real publish of this selection would
@@ -1310,8 +1316,8 @@ pub struct PublishPreviewResponse {
     /// so the dialog can show the user where they stand before they write a
     /// change summary — rather than making them discover a refusal afterwards.
     ///
-    /// Absent when the preview was asked for without a target package (the
-    /// plain dry-run the Package Explorer's "Preview publish" button runs).
+    /// Absent when the preview was asked for without a target application (the
+    /// plain dry-run the Application Explorer's "Preview publish" button runs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gates: Option<PushGateStatus>,
 }
@@ -1319,7 +1325,7 @@ pub struct PublishPreviewResponse {
 /// Where a prospective push stands against each gate.
 ///
 /// Advisory ONLY. The authoritative evaluation happens inside core `publish()`
-/// under the registry lock, because anything checked out here and acted on
+/// under the workspace lock, because anything checked out here and acted on
 /// later is a TOCTOU window on a share two people publish to. What this buys is
 /// a dialog that can be honest BEFORE the user does the work, not a shortcut
 /// past the gate.
@@ -1328,29 +1334,29 @@ pub struct PublishPreviewResponse {
 pub struct PushGateStatus {
     /// "linked" | "notLinked" | "wrongTarget" | "subscriber"
     pub link_status: String,
-    /// The base version this workbook would declare (from its workspace link).
+    /// The base version this workbook would declare (from its working-copy link).
     pub expected_base: String,
-    /// The registry's current head. Empty when unreachable.
+    /// The workspace's current head. Empty when unreachable.
     pub registry_latest: String,
     pub latest_published_by: String,
     /// True when the head has moved past `expected_base` — a push would be
     /// refused by the base-version gate.
     pub base_stale: bool,
     /// True when this machine holds the key that signed the head (or the
-    /// package has no signed head yet).
+    /// application has no signed head yet).
     pub key_continuity_ok: bool,
-    /// True when the registry can be written to at all (a file share, not HTTP).
+    /// True when the workspace can be written to at all (a file share, not HTTP).
     pub registry_writable: bool,
     /// Suggested next versions from the head.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_next: Option<SuggestedVersions>,
-    /// Why the registry could not be consulted, when it could not be.
+    /// Why the workspace could not be consulted, when it could not be.
     pub registry_error: String,
 }
 
 /// Dry-run of calp_publish: assemble the EXACT carrier a publish would use
 /// (same collector, same filters) and report what would ship vs stay behind —
-/// without writing anything to any registry.
+/// without writing anything to any workspace.
 #[tauri::command]
 pub fn calp_publish_preview(
     state: State<AppState>,
@@ -1420,16 +1426,16 @@ pub fn calp_publish_preview(
 
 /// Evaluate every push gate that can be answered without publishing.
 ///
-/// Failure-tolerant by design: an unreachable registry reports itself in
-/// `registry_error` and leaves the registry-derived fields empty, rather than
+/// Failure-tolerant by design: an unreachable workspace reports itself in
+/// `registry_error` and leaves the workspace-derived fields empty, rather than
 /// failing the whole preview. The dialog then shows what it does know (which
-/// package, which base) instead of nothing at all.
+/// application, which base) instead of nothing at all.
 fn evaluate_push_gates(
     state: &AppState,
     registry_path: &str,
     package_name: &str,
 ) -> Result<PushGateStatus, String> {
-    let link = state.workspace_link.read().map_err(|e| e.to_string())?.clone();
+    let link = state.working_copy_link.read().map_err(|e| e.to_string())?.clone();
     let subscribes_to_target = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         subs.subscriptions
@@ -1457,7 +1463,7 @@ fn evaluate_push_gates(
         registry_latest: String::new(),
         latest_published_by: String::new(),
         base_stale: false,
-        // No head yet (a package about to be created) is not a continuity
+        // No head yet (an application about to be created) is not a continuity
         // failure — there is nothing to be continuous WITH.
         key_continuity_ok: true,
         registry_writable,
@@ -1465,8 +1471,8 @@ fn evaluate_push_gates(
         registry_error: String::new(),
     };
 
-    match crate::calp_registry::open_registry_scoped(registry_path) {
-        Ok((registry, _scope)) => match registry.get_package_manifest(package_name) {
+    match crate::calp_registry::open_workspace_scoped(registry_path) {
+        Ok((registry, _scope)) => match registry.get_application_manifest(package_name) {
             Ok(manifest) => {
                 if let Some(head) = calp::head_version(&manifest) {
                     status.registry_latest = head.to_string();
@@ -1501,7 +1507,7 @@ fn evaluate_push_gates(
                     .unwrap_or(false);
                 }
             }
-            // No such package: a create, not an update. Not an error.
+            // No such application: a create, not an update. Not an error.
             Err(_) => {}
         },
         Err(e) => status.registry_error = e.to_string(),
@@ -1510,19 +1516,19 @@ fn evaluate_push_gates(
     Ok(status)
 }
 
-/// Materialize ONE package's distributed standalone module scripts + notebooks
+/// Materialize ONE application's distributed standalone module scripts + notebooks
 /// into ScriptState (C8). Used by BOTH the initial pull and the version refresh so
 /// upstream updates propagate identically. Distributed standalone scripts/notebooks
 /// are upstream-owned and inert — they appear in the workbook's script/notebook list
 /// but are NEVER auto-executed; they run only on explicit, sandboxed user action.
 ///
 /// Provenance-driven semantics (parity with distributed object scripts):
-/// - REMOVAL-ON-REFRESH: a module/notebook this package shipped before but no longer
+/// - REMOVAL-ON-REFRESH: a module/notebook this application shipped before but no longer
 ///   ships is dropped (so a publisher's deletion reaches the subscriber).
-/// - UPDATE: a same-id entry owned by THIS package is replaced (the corrected
+/// - UPDATE: a same-id entry owned by THIS application is replaced (the corrected
 ///   version lands).
 /// - PRESERVE-LOCAL: a same-id entry that is subscriber-authored (no source_package)
-///   or owned by a DIFFERENT package is kept — a package never silently shadows it
+///   or owned by a DIFFERENT application is kept — an application never silently shadows it
 ///   (the incoming one is skipped + logged). To customize distributed content, copy
 ///   it to a NEW id. `modules`/`notebooks` are already stamped source_package =
 ///   package_name at pull. Notebooks arrive run-clean (exec metadata stripped at pull).
@@ -1537,7 +1543,7 @@ fn materialize_distributed_scripts(
 
     // (id, name) of the modules/notebooks ACTUALLY inserted — conflict-skipped
     // ones excluded, so the provenance ledger never attributes a preserved
-    // local (or other-package) document to this package.
+    // local (or other-application) document to this application.
     let mut applied_modules: Vec<(String, String)> = Vec::new();
     let mut applied_notebooks: Vec<(String, String)> = Vec::new();
     let custom_functions_changed;
@@ -1546,7 +1552,7 @@ fn materialize_distributed_scripts(
         use crate::scripting::types::{ScriptScope, WorkbookScript};
         let mut scripts = script_state.workbook_scripts.write(effect).map_err(|e| e.to_string())?;
         let new_ids: HashSet<&str> = modules.iter().map(|m| m.id.as_str()).collect();
-        // Removal-on-refresh: drop this package's prior modules it no longer
+        // Removal-on-refresh: drop this application's prior modules it no longer
         // ships. The reserved Custom Functions record is exempt: it is
         // subscriber-owned merged data, reconciled per-function below.
         scripts.retain(|id, s| {
@@ -1559,7 +1565,7 @@ fn materialize_distributed_scripts(
         // policy — the fixed record id collides BY DESIGN across every
         // workbook, so preserve-local would silently drop the publisher's
         // entire library whenever the subscriber authored even one function.
-        // Merge per function instead (None = package no longer ships one, so
+        // Merge per function instead (None = application no longer ships one, so
         // its previously-merged functions are stripped).
         let incoming_lib = modules
             .iter()
@@ -1572,8 +1578,8 @@ fn materialize_distributed_scripts(
             if module.id == CUSTOM_FUNCTIONS_LIB_ID {
                 continue; // handled by the per-function merge above
             }
-            // Conflict = an existing same-id entry NOT owned by this package
-            // (local, or a different package). Compute (and clone) up front so the
+            // Conflict = an existing same-id entry NOT owned by this application
+            // (local, or a different application). Compute (and clone) up front so the
             // immutable borrow is released before the insert.
             let conflict: Option<Option<String>> = scripts.get(&module.id).and_then(|e| {
                 if e.source_package.as_deref() == Some(package_name) { None }
@@ -1582,9 +1588,9 @@ fn materialize_distributed_scripts(
             if let Some(existing_owner) = conflict {
                 crate::log_warn!(
                     "CALP",
-                    "module '{}' from package '{}' not applied: id already used by {}",
+                    "module '{}' from application '{}' not applied: id already used by {}",
                     module.id, package_name,
-                    existing_owner.map(|p| format!("package '{}'", p))
+                    existing_owner.map(|p| format!("application '{}'", p))
                         .unwrap_or_else(|| "a local script".to_string()),
                 );
                 continue;
@@ -1624,9 +1630,9 @@ fn materialize_distributed_scripts(
             if let Some(existing_owner) = conflict {
                 crate::log_warn!(
                     "CALP",
-                    "notebook '{}' from package '{}' not applied: id already used by {}",
+                    "notebook '{}' from application '{}' not applied: id already used by {}",
                     nb.id, package_name,
-                    existing_owner.map(|p| format!("package '{}'", p))
+                    existing_owner.map(|p| format!("application '{}'", p))
                         .unwrap_or_else(|| "a local notebook".to_string()),
                 );
                 continue;
@@ -1666,28 +1672,28 @@ fn materialize_distributed_scripts(
 /// is persisted as JSON data (mirrors PERSIST_SCRIPT_ID in @api/customFunctions.ts).
 const CUSTOM_FUNCTIONS_LIB_ID: &str = "__calcula_custom_functions__";
 
-/// Merge a package's custom-function library into the subscriber's reserved
+/// Merge an application's custom-function library into the subscriber's reserved
 /// library record, PER FUNCTION:
 /// - The merged record is ALWAYS subscriber-owned (source_package None), so
 ///   the whole-record removal-on-refresh never deletes local functions.
-/// - Each package function is stamped `sourcePackage` + a `sourceDigest`
-///   content hash inside the JSON. On refresh, an UNMODIFIED package function
+/// - Each application function is stamped `sourcePackage` + a `sourceDigest`
+///   content hash inside the JSON. On refresh, an UNMODIFIED application function
 ///   is replaced by the incoming set (updates AND removals propagate), while a
 ///   function the subscriber has EDITED since the merge (digest mismatch) is
 ///   adopted as local — the subscriber's edit is never silently destroyed.
-/// - A name collision with a local (or other-package) function keeps the
+/// - A name collision with a local (or other-application) function keeps the
 ///   existing one (preserve-local, per function) and logs the skip.
 /// - Incoming names are validated with the same rules as the authoring UI
-///   (JS identifier) — one invalid name in a package must not poison the
+///   (JS identifier) — one invalid name in an application must not poison the
 ///   shared library and break the subscriber's OWN functions at install.
 /// - Library `capabilities` are NOT unioned: the merged record shares the
-///   subscriber's script id and its live capability grants, so a package must
-///   never widen that declared ceiling. A package function needing an
+///   subscriber's script id and its live capability grants, so an application must
+///   never widen that declared ceiling. An application function needing an
 ///   undeclared capability fails closed at the broker until the subscriber
 ///   adds the capability themselves (logged here for transparency).
 ///
-/// `incoming_source` is None when the package ships no library, which strips
-/// the package's previously-merged (unmodified) functions. Returns true when
+/// `incoming_source` is None when the application ships no library, which strips
+/// the application's previously-merged (unmodified) functions. Returns true when
 /// the stored record changed (callers emit "custom-functions:refresh" so the
 /// live UDF registry re-installs without a reopen).
 fn merge_custom_function_library(
@@ -1752,7 +1758,7 @@ fn merge_custom_function_library(
     }
 
     let (existing_fns, caps) = old_source.as_deref().map(parse_lib).unwrap_or_default();
-    // Partition this package's previous contribution: unmodified entries are
+    // Partition this application's previous contribution: unmodified entries are
     // dropped (re-added from incoming below — updates/removals propagate);
     // subscriber-EDITED entries (digest mismatch) are adopted as local so the
     // edit survives, and the collision check then shields them from incoming.
@@ -1776,13 +1782,13 @@ fn merge_custom_function_library(
             }
             crate::log_warn!(
                 "CALP",
-                "custom function '{}' from package '{}' was edited locally: keeping the edited copy as a local function",
+                "custom function '{}' from application '{}' was edited locally: keeping the edited copy as a local function",
                 f.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
                 package_name,
             );
             merged.push(f);
         }
-        // Unmodified package function: dropped here, re-added from incoming.
+        // Unmodified application function: dropped here, re-added from incoming.
     }
 
     if let Some(src) = incoming_source {
@@ -1799,7 +1805,7 @@ fn merge_custom_function_library(
             if !is_valid_function_name(&name) {
                 crate::log_warn!(
                     "CALP",
-                    "custom function '{}' from package '{}' not applied: invalid function name",
+                    "custom function '{}' from application '{}' not applied: invalid function name",
                     name,
                     package_name,
                 );
@@ -1809,7 +1815,7 @@ fn merge_custom_function_library(
             if taken.contains(&key) {
                 crate::log_warn!(
                     "CALP",
-                    "custom function '{}' from package '{}' not applied: the name is already defined in this workbook",
+                    "custom function '{}' from application '{}' not applied: the name is already defined in this workbook",
                     name,
                     package_name,
                 );
@@ -1824,12 +1830,12 @@ fn merge_custom_function_library(
             merged.push(f);
         }
         // Capabilities are deliberately NOT merged (see fn docs) — only log
-        // when the package declares ones the subscriber's library lacks.
+        // when the application declares ones the subscriber's library lacks.
         for c in incoming_caps {
             if !caps.contains(&c) {
                 crate::log_warn!(
                     "CALP",
-                    "package '{}' custom functions declare capability '{}' which this workbook's library does not; those functions will fail closed until the capability is added in the Custom Functions dialog",
+                    "application '{}' custom functions declare capability '{}' which this workbook's library does not; those functions will fail closed until the capability is added in the Custom Functions dialog",
                     package_name,
                     c,
                 );
@@ -1878,7 +1884,7 @@ fn ensure_slot<T: Clone>(v: &mut Vec<T>, idx: usize, default: T) {
 /// Materialize pulled sheet presentation state (merged regions, freeze panes,
 /// tab color, visibility, gridlines, page setup, notes, hyperlinks) into the
 /// per-sheet AppState stores, and keep the index-aligned Vec stores aligned
-/// for appended sheets. Before this, pulled packages carried all of it in
+/// for appended sheets. Before this, pulled applications carried all of it in
 /// sheets/{id}/metadata.json and the Tauri materializer dropped it — the
 /// subscriber lost merges/freeze panes/notes — AND the aligned Vec stores
 /// stayed short, misaligning any sheet added after a pull.
@@ -1886,7 +1892,7 @@ fn ensure_slot<T: Clone>(v: &mut Vec<T>, idx: usize, default: T) {
 /// Reset semantics per materialized sheet (the publisher owns a subscribed
 /// sheet's presentation): used by first pull (fresh sheets, so reset ==
 /// initialize), refresh (overwrite with the new version's state), and the
-/// dev-mode preview loop. `sheets` pairs each source/package sheet id with its
+/// dev-mode preview loop. `sheets` pairs each source/application sheet id with its
 /// carrier Sheet; ids resolve to local indices via `pkg_to_index`.
 fn materialize_pulled_sheet_state(
     state: &AppState,
@@ -1958,7 +1964,7 @@ fn materialize_pulled_sheet_state(
     }
     {
         // User-hidden rows/cols ride along with the rest of the sheet's
-        // presentation state. The package carries them as their own authority
+        // presentation state. The application carries them as their own authority
         // (PublishedSheetMetadata.user_hidden_*), so a subscriber can unhide by
         // hand what the publisher hid by hand.
         for (idx, p) in &targets {
@@ -2142,7 +2148,7 @@ fn materialize_pulled_tables(
 
 /// Normalize the author's sheet selection: empty means "every sheet". Shared
 /// by calp_publish and calp_publish_preview so the dry-run can never describe
-/// a different package than the one a publish with the same input would write.
+/// a different application than the one a publish with the same input would write.
 fn resolve_publish_sheet_indices(
     state: &State<AppState>,
     requested: Vec<usize>,
@@ -2165,7 +2171,7 @@ fn resolve_publish_sheet_indices(
     // hosts one must carry its backing sheet, or the subscriber's pull shows
     // an object whose every cell is #REF!. Expansion happens HERE — the one
     // normalization both publish and preview share — so the dry-run report
-    // can never describe a different package than the publish.
+    // can never describe a different application than the publish.
     let backing: Vec<usize> = {
         let rows = state.floating_ranges.read().map_err(|e| e.to_string())?;
         let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
@@ -2226,7 +2232,7 @@ fn snapshot_on_grid_controls(state: &AppState) -> Result<crate::controls::Contro
 /// control, ribbon filter, or NAMED on-grid control (see
 /// `pane_control_taken_names`), is skipped with a warning. Applied controls
 /// re-base to the end of the subscriber's strip (max existing order + 1,
-/// preserving package-relative order) — the same append semantics
+/// preserving application-relative order) — the same append semantics
 /// create_pane_control uses. Configs carry no inline code by design (D6); a
 /// custom control's script arrives separately as a consent-gated distributed
 /// object script and stays inert until the subscriber consents.
@@ -2237,7 +2243,7 @@ fn snapshot_on_grid_controls(state: &AppState) -> Result<crate::controls::Contro
 ///
 /// Returns (id, name) for each control ACTUALLY inserted, so callers record
 /// provenance-ledger entries only for what landed (a collision-skipped local
-/// control is never attributed to the package).
+/// control is never attributed to the application).
 fn materialize_pulled_pane_controls(
     pane_control_state: &crate::pane_control::PaneControlState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
@@ -2262,7 +2268,7 @@ fn materialize_pulled_pane_controls(
         (names, max_order.map_or(0, |m| m.saturating_add(1)))
     };
 
-    // Package order is already (order, id)-sorted at publish; re-sort
+    // Application order is already (order, id)-sorted at publish; re-sort
     // defensively so re-based positions are deterministic regardless.
     let mut incoming = pulled.to_vec();
     incoming.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
@@ -2299,7 +2305,7 @@ fn materialize_pulled_pane_controls(
 /// strip after `materialize_pulled_pane_controls` ran for `incoming`. Strip
 /// MEMBERSHIP is the criterion — it distinguishes the two skip reasons:
 /// - name-collision skip (or converter drop): the control is ABSENT, so its
-///   package-shipped "pane-{id}" object script would persist host-less
+///   application-shipped "pane-{id}" object script would persist host-less
 ///   (inert, but violating delete-path hygiene) — reported for pruning;
 /// - id-collision skip: the id is PRESENT (the subscriber's own control was
 ///   retained), so the script keeps a live host — NOT reported.
@@ -2325,9 +2331,9 @@ fn orphaned_pane_script_instance_ids(
 /// Strip computed properties from DISTRIBUTED slicer payloads before
 /// materialization (the on-grid controls' `sanitize_distributed_controls`
 /// precedent). A slicer's computed properties are user-authored FORMULAS
-/// evaluated with full grid context — carrying them live from a package would
+/// evaluated with full grid context — carrying them live from an application would
 /// let publisher-authored expressions evaluate in the subscriber's workbook
-/// without the subscriber ever authoring them, outside the per-package,
+/// without the subscriber ever authoring them, outside the per-application,
 /// consent-gated model that governs every other piece of distributed
 /// executable logic. Packaged slicers therefore arrive with their visual and
 /// selection state intact but NO computed properties; the subscriber can
@@ -2350,8 +2356,8 @@ fn sanitize_distributed_slicers(
 /// Materialize pulled slicers into SlicerState — shared by calp_pull and
 /// calp_refresh_apply (Wave A). ADDITIVE with don't-clobber: a slicer whose
 /// id already exists locally is skipped (the refresh path removes the
-/// package's ledger-owned ids first, so v2 replaces v1 while subscriber-
-/// authored slicers are never touched). `resolve` maps the PACKAGE sheet id
+/// application's ledger-owned ids first, so v2 replaces v1 while subscriber-
+/// authored slicers are never touched). `resolve` maps the APPLICATION sheet id
 /// to the local sheet index; a slicer whose sheet wasn't pulled is dropped
 /// (chart semantics). Conversion + computed-property restore go through the
 /// same pub(crate) converters the .cala load path uses — but callers pass
@@ -2421,15 +2427,15 @@ fn materialize_pulled_slicers(
 /// Materialize pulled ribbon filters into RibbonFilterState — shared by
 /// calp_pull and calp_refresh_apply (Wave A). Ribbon filters are BI-only:
 /// a filter whose stable `data_source_id` matches no data source embedded in
-/// the package would dangle (its connection can never materialize on the
+/// the application would dangle (its connection can never materialize on the
 /// subscriber), so it is SKIPPED with a warning. ADDITIVE with don't-clobber
 /// (pane-control precedent): id collisions and case-insensitive name
 /// collisions against pane controls / filters / NAMED on-grid controls (the
 /// GET.CONTROLVALUE namespace) are skipped. Applied filters re-base to the
-/// end of the subscriber's strip, preserving package-relative order. The
+/// end of the subscriber's strip, preserving application-relative order. The
 /// carried connection_id still points at the PUBLISHER's connection — the
 /// data-source re-bind (remap_ribbon_filter_connections) runs after the
-/// package connections materialize.
+/// application connections materialize.
 ///
 /// `on_grid_controls` is a snapshot (its lock already released). LOCK ORDER
 /// (pane_control/types.rs): PaneControlState.controls BEFORE
@@ -2459,7 +2465,7 @@ fn materialize_pulled_ribbon_filters(
         .map_or(0, |m| m.saturating_add(1));
     drop(controls);
 
-    // Package order is already (order, id)-sorted at publish; re-sort
+    // Application order is already (order, id)-sorted at publish; re-sort
     // defensively so re-based positions are deterministic regardless.
     let mut incoming = pulled.to_vec();
     incoming.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
@@ -2467,8 +2473,8 @@ fn materialize_pulled_ribbon_filters(
     let mut applied: Vec<(String, String)> = Vec::new();
     let mut next_order = base_order;
     for saved in &incoming {
-        // Effective package data-source id: the carried stable id, falling
-        // back to the publisher's connection uuid — which IS the package
+        // Effective application data-source id: the carried stable id, falling
+        // back to the publisher's connection uuid — which IS the application
         // data-source id when the publisher authored on a local connection
         // (the bi_pivot_metadata precedent in collect_pivot_definitions).
         let effective_ds_id = saved
@@ -2478,7 +2484,7 @@ fn materialize_pulled_ribbon_filters(
         if !pulled_data_source_ids.contains(&effective_ds_id) {
             crate::log_warn!(
                 "CALP",
-                "Skipping pulled ribbon filter \"{}\": its data source is not embedded in the package",
+                "Skipping pulled ribbon filter \"{}\": its data source is not embedded in the application",
                 saved.name
             );
             continue;
@@ -2497,7 +2503,7 @@ fn materialize_pulled_ribbon_filters(
         let mut filter = crate::persistence::saved_to_ribbon_filter(saved);
         // Stamp the effective ds id so remap_ribbon_filter_connections (which
         // keys off data_source_id) re-binds this filter to the freshly
-        // materialized package connection, and future saves keep the stable id.
+        // materialized application connection, and future saves keep the stable id.
         filter.data_source_id = Some(effective_ds_id);
         filter.order = next_order;
         next_order = next_order.saturating_add(1);
@@ -2508,11 +2514,11 @@ fn materialize_pulled_ribbon_filters(
     Ok(applied)
 }
 
-/// Re-bind slicers sourced from a package BI connection to the freshly
+/// Re-bind slicers sourced from an application BI connection to the freshly
 /// materialized connections (Wave A; mirrors remap_ribbon_filter_connections).
-/// A package connection mints a NEW uuid on every pull, and a BI-sourced
+/// An application connection mints a NEW uuid on every pull, and a BI-sourced
 /// slicer's `cache_source_id` / biConnection report connections carry the
-/// PUBLISHER's connection uuid — which at publish time IS the stable package
+/// PUBLISHER's connection uuid — which at publish time IS the stable application
 /// data-source id, so a string match against the ds map re-binds it.
 fn remap_slicer_bi_connections(
     effect: &crate::document_effect::DocumentEffect,
@@ -2552,7 +2558,7 @@ fn apply_pulled_theme(
     pulled: Option<&engine::ThemeDefinition>,
 ) -> Result<(), String> {
     let Some(theme) = pulled else {
-        return Ok(()); // pre-Wave-A package: no theme carried
+        return Ok(()); // pre-Wave-An application: no theme carried
     };
     let mut current = state.theme.write(effect).map_err(|e| e.to_string())?;
     if *current == engine::ThemeDefinition::default() {
@@ -2560,7 +2566,7 @@ fn apply_pulled_theme(
     } else if *current != *theme {
         crate::log_warn!(
             "CALP",
-            "Package theme not applied: workbook has a custom theme"
+            "Application theme not applied: workbook has a custom theme"
         );
     }
     Ok(())
@@ -2573,7 +2579,7 @@ fn apply_pulled_theme(
 ///
 /// Returns the keys ACTUALLY inserted (sorted for deterministic ledger
 /// order), so callers record "extensionData" provenance-ledger entries for
-/// exactly the state that came from the package — skipped subscriber-owned
+/// exactly the state that came from the application — skipped subscriber-owned
 /// keys are never attributed to it.
 fn merge_pulled_extension_data(
     state: &AppState,
@@ -2611,11 +2617,11 @@ fn merge_pulled_extension_data(
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrustedPublisherPin {
-    /// "calp" (a package/library/skin from a registry) or "ext" (an installed
-    /// add-in, which is pinned machine-globally and has no registry).
+    /// "calp" (an application/library/skin from a workspace) or "ext" (an installed
+    /// add-in, which is pinned machine-globally and has no workspace).
     pub namespace: String,
     pub name: String,
-    /// The registry EXACTLY as the user configured it. Empty for `ext`. The
+    /// The workspace EXACTLY as the user configured it. Empty for `ext`. The
     /// normalized scope id is key material and is deliberately never exposed:
     /// a lowercased canonical path is not a string anyone typed.
     pub scope_label: String,
@@ -2634,7 +2640,7 @@ pub struct TrustedPublisherName {
     pub name: String,
     pub pins: Vec<TrustedPublisherPin>,
     /// More than one DISTINCT publisher key holds this name. This is the only
-    /// surface where an ACCEPTED cross-registry name conflict stays visible
+    /// surface where an ACCEPTED cross-workspace name conflict stays visible
     /// after the dialog that accepted it is gone.
     pub has_key_conflict: bool,
 }
@@ -2653,7 +2659,7 @@ pub struct TrustedPublisherReport {
 
 /// What does this computer trust, and from where?
 ///
-/// Read-only and passive: it opens no registry, verifies nothing, and cannot
+/// Read-only and passive: it opens no workspace, verifies nothing, and cannot
 /// create or remove a pin. It exists because a pin is a durable machine-wide
 /// decision and, until this view, there was nowhere to see the whole set.
 #[tauri::command]
@@ -2736,16 +2742,16 @@ fn calp_trust_status_str(trust: calp::integrity::TrustStatus) -> String {
 ///
 /// Extracted so the decision is directly testable: it is the single place that
 /// answers "may this pull CREATE a TOFU pin?", and getting it wrong means a
-/// script silently deciding which Ed25519 key this machine trusts for a package
+/// script silently deciding which Ed25519 key this machine trusts for an application
 /// name forever after.
 ///
 ///   * `require_pinned` -> [`PinPolicy::RequirePinned`]. Set only by the scripted
-///     gateway. Wins over everything: a script may install a package the user
+///     gateway. Wins over everything: a script may install an application the user
 ///     already trusts, never mint the trust. Note it also outranks
 ///     `accept_name_conflict`, so a script cannot smuggle a conflict-accepting
 ///     pin through by setting both.
 ///   * `accept_name_conflict` -> [`PinPolicy::PinAcceptingNameConflict`]. The
-///     user was shown the cross-registry name conflict and accepted it.
+///     user was shown the cross-workspace name conflict and accepted it.
 ///   * neither -> [`PinPolicy::PinOnFirstUse`]. The ordinary interactive
 ///     Subscribe: a human reviewed the publisher.
 pub(crate) fn pull_pin_policy(params: &PullParams) -> calp::integrity::PinPolicy {
@@ -2758,7 +2764,7 @@ pub(crate) fn pull_pin_policy(params: &PullParams) -> calp::integrity::PinPolicy
     }
 }
 
-/// Pull (subscribe to) a package.
+/// Pull (subscribe to) an application.
 #[tauri::command]
 pub fn calp_pull(
     state: State<AppState>,
@@ -2773,10 +2779,10 @@ pub fn calp_pull(
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // A pull materializes package content into THIS workbook: it changes what a
+    // A pull materializes application content into THIS workbook: it changes what a
     // save writes, and (unlike open_file) nothing resets the flag afterwards.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-    let (registry, scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
     let version_pin = VersionPin::parse(&params.version_pin)
@@ -2791,12 +2797,12 @@ pub fn calp_pull(
     };
 
     // COMMIT POINT. Subscribe is the one .calp flow in which the user has
-    // deliberately chosen to trust this publisher for this package name, so it
+    // deliberately chosen to trust this publisher for this application name, so it
     // is the one flow allowed to CREATE the TOFU pin. Every other .calp path --
     // inspect, workbook open, refresh, reset, writeback, GATHER -- is either
-    // VerifyOnly or RequirePinned. If a package is not yet pinned on this
+    // VerifyOnly or RequirePinned. If an application is not yet pinned on this
     // machine, subscribing here is how it becomes pinned.
-    // A cross-registry NAME CONFLICT is refused unless the user was shown it and
+    // A cross-workspace NAME CONFLICT is refused unless the user was shown it and
     // said yes to a second, differently-worded question. `PinOnFirstUse` errors
     // on a conflict; only the flag set by that confirmation reaches the accepting
     // policy. Both are commit points with a human behind them.
@@ -2813,8 +2819,8 @@ pub fn calp_pull(
     .map_err(|e| e.to_string())?;
 
     // Materialize into the workbook through the shared materializer — the
-    // same code the CHECKOUT path runs, so package fidelity cannot drift
-    // between consuming a package and developing one.
+    // same code the CHECKOUT path runs, so application fidelity cannot drift
+    // between consuming an application and developing one.
     materialize_pull_result(
         &state,
         &effect,
@@ -2830,7 +2836,7 @@ pub fn calp_pull(
     )
 }
 
-/// What a materialization IS — consuming a package, or opening it to develop.
+/// What a materialization IS — consuming an application, or opening it to develop.
 ///
 /// The two paths share every line of the materializer below, which is the
 /// point: the fidelity matrix's root cause was a hand-written per-type
@@ -2839,21 +2845,21 @@ pub fn calp_pull(
 /// here, in three places, rather than in a parallel copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MaterializeMode {
-    /// A subscriber pulling a package to USE it. Records a Subscription with
+    /// A subscriber pulling an application to USE it. Records a Subscription with
     /// the provenance ledger, so refresh/override/reset have something to act
     /// on.
     Subscribe,
-    /// A developer checking a package out to EDIT it. Records NO subscription:
-    /// a working copy is not a subscriber of its own package (the two roles are
+    /// A developer checking an application out to EDIT it. Records NO subscription:
+    /// a working copy is not a subscriber of its own application (the two roles are
     /// exclusive — see docs/design/calp-workspace-collaboration.md §2.3), and a
     /// subscription here would make the workbook refuse its own push.
     Checkout,
 }
 
-/// Materialize a pulled package version into the open workbook.
+/// Materialize a pulled application version into the open workbook.
 ///
 /// Extracted verbatim from `calp_pull` so `calp_checkout` runs the identical
-/// path. Every artifact type the package can carry lands here — sheets and
+/// path. Every artifact type the application can carry lands here — sheets and
 /// their presentation state, tables, charts, sparklines, named ranges, CF/DV,
 /// comments/scenarios/outlines, cell behaviors, controls and their media, pane
 /// controls, custom objects, module scripts, notebooks, slicers, ribbon
@@ -2870,13 +2876,13 @@ pub(crate) fn materialize_pull_result(
     slicer_state: &crate::slicer::SlicerState,
     mut result: calp::pull::PullResult,
     mode: MaterializeMode,
-    // Needed for the one live-refresh emit below: a package that brings custom
+    // Needed for the one live-refresh emit below: an application that brings custom
     // functions must re-install the UDF registry now, or its formulas read
     // #NAME? until the workbook is reopened.
     //
     // OPTIONAL so this function is testable. A `tauri::Window` cannot be built
     // outside a running app, and requiring one made 700 lines of
-    // materialization — every artifact type a package can carry — reachable
+    // materialization — every artifact type an application can carry — reachable
     // only from a live app. That is how the active-sheet mirror desync below
     // shipped. `None` means "no frontend to notify", which is exactly true in
     // a test.
@@ -2897,7 +2903,7 @@ pub(crate) fn materialize_pull_result(
     // Resolve pulled-sheet name collisions against the subscriber's existing
     // sheets (Excel-style "Sheet1 (2)") BEFORE materialization, so the
     // workbook tabs, the provenance ledger, and the persisted subscription's
-    // local_name all agree — subscribing to a package whose sheet shares a
+    // local_name all agree — subscribing to an application whose sheet shares a
     // name with an existing sheet must not produce two identically-named tabs.
     // The publisher-name -> resolved-name map is kept: pulled pivot
     // definitions anchor their output by SHEET NAME (destination_sheet), and
@@ -2942,8 +2948,8 @@ pub(crate) fn materialize_pull_result(
         let base_index = grids.len();
         let mut chart_index_map: std::collections::HashMap<_, usize> =
             std::collections::HashMap::new();
-        // package sheet id -> local sheet index. Named ranges + CF/DV carry the
-        // un-remapped PACKAGE sheet id (unlike charts/sparklines, which pull.rs
+        // application sheet id -> local sheet index. Named ranges + CF/DV carry the
+        // un-remapped APPLICATION sheet id (unlike charts/sparklines, which pull.rs
         // already remapped to the local sheet id), so they need this map.
         let mut pkg_to_index: std::collections::HashMap<_, usize> =
             std::collections::HashMap::new();
@@ -2961,7 +2967,7 @@ pub(crate) fn materialize_pull_result(
             sheet_ids.push(pulled.sheet.id);
             all_cw.push(pulled.sheet.column_widths.clone());
             all_rh.push(pulled.sheet.row_heights.clone());
-            // DYNAMIC-ARRAY OWNERSHIP for the pulled sheet (§2ab). The package
+            // DYNAMIC-ARRAY OWNERSHIP for the pulled sheet (§2ab). The application
             // carries the same spill extents a `.cala` does -- both sides go
             // through `cells_to_sheet_data` / `sheet_data_to_cells` -- so the
             // subscriber's arrays are owned the moment they land, without any
@@ -2992,8 +2998,8 @@ pub(crate) fn materialize_pull_result(
         // and formulas, open it, and only the formulas are there.
         //
         // CHECKOUT is where it bites hardest: the document reset blanks the
-        // mirror and sets active_sheet = 0, and the package's first sheet lands
-        // at index 0 — so the mirror is EMPTY while grids[0] holds the package.
+        // mirror and sets active_sheet = 0, and the application's first sheet lands
+        // at index 0 — so the mirror is EMPTY while grids[0] holds the application.
         // `collect_active_sheet_cells` reads the mirror, so the command was
         // also returning an empty cell list to the frontend.
         //
@@ -3021,7 +3027,7 @@ pub(crate) fn materialize_pull_result(
         // active-sheet mirror, and the next recalculation copies the mirror
         // back over it. Same lost-literals symptom, different route.
         //
-        // A package can itself contain backing sheets (publish auto-joins a
+        // An application can itself contain backing sheets (publish auto-joins a
         // floating range's), so this skips them: landing the user on one would
         // show them a sheet the tab bar deliberately hides.
         first_pulled_user_sheet = {
@@ -3037,9 +3043,9 @@ pub(crate) fn materialize_pull_result(
     }
 
     // Provenance ledger: everything this pull actually materializes. Stored on
-    // the Subscription (subscriptions.json) so the Package Explorer can show
-    // "which objects are connected to this package" and refresh can replace
-    // exactly the package-owned objects.
+    // the Subscription (subscriptions.json) so the Application Explorer can show
+    // "which objects are connected to this application" and refresh can replace
+    // exactly the application-owned objects.
     let mut sub_objects: Vec<calp::manifest::SubscribedObject> = Vec::new();
     let sub_object = |kind: &str, id: String, name: String| calp::manifest::SubscribedObject {
         kind: kind.to_string(),
@@ -3061,7 +3067,7 @@ pub(crate) fn materialize_pull_result(
         materialize_pulled_sheet_state(&state, &effect, &pairs, &pkg_to_index, active)?;
     }
 
-    // Materialize pulled tables. The package carries full table objects
+    // Materialize pulled tables. The application carries full table objects
     // (tables/{id}.json); before this they were read, counted, and then
     // dropped — the subscriber got the cells but lost the table entity (name,
     // structured references, header/filter behavior).
@@ -3127,7 +3133,7 @@ pub(crate) fn materialize_pull_result(
     // Materialize pulled named ranges. Pull is ADDITIVE (unlike .cala load): the
     // subscriber's own names are kept; a pulled name is added only if absent.
     // Keyed by the UPPERCASED name (the case-insensitive lookup invariant);
-    // PublishedNamedRange.sheet_id is the PACKAGE id, mapped to the local index.
+    // PublishedNamedRange.sheet_id is the APPLICATION id, mapped to the local index.
     if !result.named_ranges.is_empty() {
         let mut names = state.named_ranges.write(&effect).map_err(|e| e.to_string())?;
         for nr in &result.named_ranges {
@@ -3149,7 +3155,7 @@ pub(crate) fn materialize_pull_result(
         }
     }
 
-    // §2t ON THE DISTRIBUTION PATH. A package stores every formula as TEXT and
+    // §2t ON THE DISTRIBUTION PATH. An application stores every formula as TEXT and
     // `to_grid()` above re-parsed it, and the lexer upper-cases every bare
     // identifier -- so a publisher's `=BudgetTotal*2` arrives in the
     // subscriber's workbook as `=BUDGETTOTAL*2`, exactly the defect §2t fixed
@@ -3259,12 +3265,12 @@ pub(crate) fn materialize_pull_result(
     }
 
     // Materialize pulled CELL BEHAVIOR bindings (granular bricks phase 2),
-    // remapping each package sheet id to the local index it landed on. Uses the
+    // remapping each application sheet id to the local index it landed on. Uses the
     // same materializer as the .cala load path, so a pulled binding and a loaded
     // one are the same object — and, like a loaded one, a binding naming a
     // script that is not present stays inert until that script arrives.
     //
-    // Until this existed the package carried no bindings at all: a subscriber
+    // Until this existed the application carried no bindings at all: a subscriber
     // pulled a report whose typed cells looked right and did nothing at all,
     // with no line in the publish transparency report to say so.
     if !result.cell_behaviors.is_empty() {
@@ -3278,15 +3284,15 @@ pub(crate) fn materialize_pull_result(
     }
 
     // On-grid name snapshot for the pane-control collision guard below —
-    // taken BEFORE the package's own on-grid controls materialize, so the
+    // taken BEFORE the application's own on-grid controls materialize, so the
     // guard sees only the SUBSCRIBER's pre-existing names. Taking it after
-    // would let the package's own just-landed on-grid names enter
-    // taken_names and shadow the package's own same-named pane controls.
+    // would let the application's own just-landed on-grid names enter
+    // taken_names and shadow the application's own same-named pane controls.
     // (The snapshot's lock is released inside the helper before any other
     // control lock is taken — canonical order preserved.)
     let on_grid_snapshot = snapshot_on_grid_controls(&state)?;
 
-    // Take the package's binary media BEFORE the controls that reference it, so
+    // Take the application's binary media BEFORE the controls that reference it, so
     // a materialized picture never points at bytes that are not there yet. Every
     // blob is re-validated (magic bytes, caps, and its key re-derived from its
     // own content): the signed manifest proves the publisher sent these bytes,
@@ -3308,7 +3314,7 @@ pub(crate) fn materialize_pull_result(
             .iter()
             .map(|p| (p.package_sheet_id, (p.sheet.id, p.name.clone())))
             .collect();
-        // Sanitize AND migrate: a package published before media artifacts
+        // Sanitize AND migrate: an application published before media artifacts
         // existed carries its images base64'd inside the signed controls.json,
         // and materialization writes straight into ControlStorage — so without
         // this the legacy pull is the one route left that puts unvalidated
@@ -3334,7 +3340,7 @@ pub(crate) fn materialize_pull_result(
 
     // Materialize generic custom objects (distribution brick 4). Cell types
     // (the dogfood) are applied Rust-side, mirroring controls: reconstruct a
-    // per-sheet SavedSheetCellTypes and materialize with the package->local
+    // per-sheet SavedSheetCellTypes and materialize with the application->local
     // sheet remap. Unknown kinds fall through to the frontend response
     // (`custom_objects`) for third-party distributable-object providers. Every
     // custom object is recorded in the subscription ledger.
@@ -3379,8 +3385,8 @@ pub(crate) fn materialize_pull_result(
     // Materialize pulled pane controls (Controls pane) into PaneControlState —
     // shared with the refresh path (see materialize_pulled_pane_controls for
     // the collision/ordering semantics). Ledger entries come from the APPLIED
-    // list so a collision-skipped control is never attributed to this package.
-    // `on_grid_snapshot` predates the package's own on-grid materialization
+    // list so a collision-skipped control is never attributed to this application.
+    // `on_grid_snapshot` predates the application's own on-grid materialization
     // above (see the comment at its binding).
     let applied_pane_controls = materialize_pulled_pane_controls(
         &pane_control_state,
@@ -3393,9 +3399,9 @@ pub(crate) fn materialize_pull_result(
     }
 
     // Delete-path hygiene: a collision-skipped pane control must not leave
-    // the package's own just-landed "pane-{id}" object script behind with no
-    // host control. Prune EXACTLY those scripts — this package's Distributed
-    // set only; local scripts, other packages' scripts, and pane scripts of
+    // the application's own just-landed "pane-{id}" object script behind with no
+    // host control. Prune EXACTLY those scripts — this application's Distributed
+    // set only; local scripts, other applications' scripts, and pane scripts of
     // applied/retained (id-collision) controls are untouched. Ledger entries
     // for pruned scripts are dropped too: they never became subscriber state.
     {
@@ -3414,7 +3420,7 @@ pub(crate) fn materialize_pull_result(
                 if orphan {
                     crate::log_warn!(
                         "CALP",
-                        "Pruning distributed script '{}' from package '{}': its host pane control was collision-skipped",
+                        "Pruning distributed script '{}' from application '{}': its host pane control was collision-skipped",
                         s.name, result.package_name
                     );
                     removed_ids.insert(s.id.clone());
@@ -3429,7 +3435,7 @@ pub(crate) fn materialize_pull_result(
     // Materialize pulled standalone module scripts + notebooks (C8) into
     // ScriptState. Shared with the refresh path so updates propagate
     // identically. Ledger entries come from the APPLIED lists so a
-    // conflict-skipped local document is never attributed to this package.
+    // conflict-skipped local document is never attributed to this application.
     let (applied_modules, applied_notebooks, custom_functions_changed) =
         materialize_distributed_scripts(
             &effect,
@@ -3453,13 +3459,13 @@ pub(crate) fn materialize_pull_result(
     }
 
     // Materialize pulled slicers (Wave A) onto their (remapped) local sheet —
-    // shared with the refresh path. Slicers carry the PACKAGE sheet id (CF/DV
+    // shared with the refresh path. Slicers carry the APPLICATION sheet id (CF/DV
     // semantics); one whose sheet wasn't pulled is dropped, one whose id the
     // subscriber already has is skipped. Ledger entries come from the APPLIED
     // list. Slicers referencing pivots/tables keep working because pivot and
-    // table ids are stable EntityIds preserved through the package;
+    // table ids are stable EntityIds preserved through the application;
     // BiConnection-sourced slicers are re-bound to the freshly materialized
-    // package connections below (remap_slicer_bi_connections runs inside
+    // application connections below (remap_slicer_bi_connections runs inside
     // load_embedded_data_sources, next to the ribbon-filter re-bind).
     // Same sanitization discipline as on-grid controls: distributed
     // computed-property formulas never materialize.
@@ -3475,11 +3481,11 @@ pub(crate) fn materialize_pull_result(
     }
 
     // Materialize pulled ribbon filters (Wave A) — workbook-scoped, BI-only.
-    // Filters whose data source is not embedded in the package are skipped
+    // Filters whose data source is not embedded in the application are skipped
     // (they could never re-bind on this machine); id/name collisions are
     // skipped like pane controls. Inserted BEFORE load_embedded_data_sources
     // runs below, so its remap_ribbon_filter_connections call re-binds the
-    // carried publisher connection ids onto the fresh package connections.
+    // carried publisher connection ids onto the fresh application connections.
     let pulled_ds_ids: std::collections::HashSet<String> = result
         .data_sources
         .iter()
@@ -3520,8 +3526,8 @@ pub(crate) fn materialize_pull_result(
 
     // Merge pulled extension data (Wave A) — additive, never overwrites the
     // subscriber's keys. Each key ACTUALLY inserted gets an "extensionData"
-    // ledger entry (id = name = the map key), so the Package Explorer shows
-    // exactly which extension state came from the package.
+    // ledger entry (id = name = the map key), so the Application Explorer shows
+    // exactly which extension state came from the application.
     for key in merge_pulled_extension_data(&state, &effect, &result.extension_data)? {
         sub_objects.push(sub_object("extensionData", key.clone(), key));
     }
@@ -3543,7 +3549,7 @@ pub(crate) fn materialize_pull_result(
     //
     // A CHECKOUT records none. `pull()` builds a Subscription unconditionally
     // (it cannot know which caller it has), and taking it here would make the
-    // working copy a subscriber of the very package it is about to push to —
+    // working copy a subscriber of the very application it is about to push to —
     // which the push gates then refuse, correctly, for the identity reason in
     // §2.3. Dropping it is the mode's whole job.
     match mode {
@@ -3561,7 +3567,7 @@ pub(crate) fn materialize_pull_result(
     // Rebuild writeback index from updated subscriptions
     rebuild_writeback_index(state);
 
-    // Auto-load embedded BI models from the pulled package.
+    // Auto-load embedded BI models from the pulled application.
     // This creates BI connections so that BI pivots have a live engine to query.
     let embedded_connection_ids = load_embedded_data_sources(
         &result.data_sources,
@@ -3575,7 +3581,7 @@ pub(crate) fn materialize_pull_result(
     // next mutation.
     crate::bi::writeback_source::invalidate_writeback_bi();
 
-    // Restore pivot definitions from the package and render to grid.
+    // Restore pivot definitions from the application and render to grid.
     // The source_sheet_index in each definition is relative to the publisher's
     // workbook. We need to offset it by the number of sheets that existed
     // before the pull (since pulled sheets are appended).
@@ -3627,7 +3633,7 @@ pub(crate) fn materialize_pull_result(
         sheets_pulled,
         // Tables actually MATERIALIZED into the workbook (collision-skipped
         // ones excluded) — the old count reported tables merely read from the
-        // package, overstating what happened.
+        // application, overstating what happened.
         tables_pulled: tables_materialized,
         scripts_pulled,
         publisher_name,
@@ -3639,7 +3645,7 @@ pub(crate) fn materialize_pull_result(
 }
 
 // ===========================================================================
-// Checkout — open a published package as a WORKING COPY
+// Checkout — open a published application as a WORKING COPY
 // ===========================================================================
 
 #[derive(Debug, Deserialize)]
@@ -3647,7 +3653,7 @@ pub(crate) fn materialize_pull_result(
 pub struct CheckoutParams {
     pub registry_path: String,
     pub package_name: String,
-    /// A concrete version, or absent for the registry head (what `latest`
+    /// A concrete version, or absent for the workspace head (what `latest`
     /// resolves to, and what a developer means by "open the current one").
     #[serde(default)]
     pub version: Option<String>,
@@ -3669,16 +3675,16 @@ pub struct CheckoutResponse {
     pub custom_objects: Vec<PulledCustomObjectDto>,
 }
 
-/// Open a published package version for editing.
+/// Open a published application version for editing.
 ///
 /// This REPLACES the open document: the workbook becomes a working copy of the
-/// package, carrying the package's own sheet ids so the next push continues its
+/// application, carrying the application's own sheet ids so the next push continues its
 /// identity rather than forking it. The caller is responsible for having
 /// confirmed the loss of unsaved changes — the same contract `open_file` has.
 ///
 /// The materialization is `calp_pull`'s, verbatim (see `materialize_pull_result`),
 /// minus the subscription: a working copy is not a subscriber of its own
-/// package.
+/// application.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn calp_checkout(
@@ -3697,7 +3703,7 @@ pub fn calp_checkout(
 ) -> Result<CheckoutResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
-    let (registry, scope) = crate::calp_registry::open_registry_scoped(&params.registry_path)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
     let version = match params.version.as_deref().filter(|v| !v.trim().is_empty()) {
@@ -3708,7 +3714,7 @@ pub fn calp_checkout(
 
     // Read + verify BEFORE touching the open document. Every gate — signature,
     // TOFU (VerifyOnly), min_app_version, the full per-artifact checksum walk —
-    // runs in here, so a package that fails any of them leaves the user's
+    // runs in here, so an application that fails any of them leaves the user's
     // current workbook exactly as it was.
     let result = calp::checkout::checkout(
         &registry,
@@ -3725,10 +3731,10 @@ pub fn calp_checkout(
         .get_version_manifest(&params.package_name, &resolved_version)
         .map(|m| m.kind)
         .unwrap_or_else(|_| "report".to_string());
-    let base_sheets: Vec<calp::WorkspaceSheetRef> = result
+    let base_sheets: Vec<calp::WorkingCopySheetRef> = result
         .sheets
         .iter()
-        .map(|s| calp::WorkspaceSheetRef {
+        .map(|s| calp::WorkingCopySheetRef {
             sheet_id: s.package_sheet_id,
             name: s.name.clone(),
         })
@@ -3758,8 +3764,8 @@ pub fn calp_checkout(
 
     // The reset leaves one blank "Sheet1". The materializer APPENDS at
     // grids.len(), so leaving it there would put a stray empty sheet in front
-    // of every checked-out package. Drop it — but only when the package
-    // actually brings sheets, so a zero-sheet dataset package does not leave a
+    // of every checked-out application. Drop it — but only when the application
+    // actually brings sheets, so a zero-sheet dataset application does not leave a
     // workbook with no sheets at all.
     if package_brings_sheets {
         state.grids.write(&effect).map_err(|e| e.to_string())?.clear();
@@ -3783,11 +3789,11 @@ pub fn calp_checkout(
         Some(&window),
     )?;
 
-    // The workbook now IS this package version. Record it, so the push gates
-    // have an answer to "which package, from which base".
+    // The workbook now IS this application version. Record it, so the push gates
+    // have an answer to "which application, from which base".
     {
-        let mut link = state.workspace_link.write(&effect).map_err(|e| e.to_string())?;
-        *link = Some(calp::WorkspaceLink::new(
+        let mut link = state.working_copy_link.write(&effect).map_err(|e| e.to_string())?;
+        *link = Some(calp::WorkingCopyLink::new(
             &params.registry_path,
             &params.package_name,
             &kind_for_link,
@@ -3818,12 +3824,12 @@ pub fn calp_checkout(
 }
 
 // ===========================================================================
-// Workspace status — what is this workbook a working copy of?
+// Working-copy status — what is this workbook a working copy of?
 // ===========================================================================
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceVersionInfo {
+pub struct WorkingCopyVersionInfo {
     pub version: String,
     pub published_at: String,
     pub published_by: String,
@@ -3841,7 +3847,7 @@ pub struct SuggestedVersions {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceStatus {
+pub struct WorkingCopyStatus {
     pub registry_url: String,
     pub package_name: String,
     pub kind: String,
@@ -3851,24 +3857,24 @@ pub struct WorkspaceStatus {
     pub last_pushed_version: String,
     pub last_pushed_at: String,
     /// Sheets the base version carried — the push dialog's default selection,
-    /// available even with the registry unreachable.
-    pub base_sheets: Vec<WorkspaceSheetInfo>,
-    /// Whether the registry answered at all. Everything below is meaningful
+    /// available even with the workspace unreachable.
+    pub base_sheets: Vec<WorkingCopySheetInfo>,
+    /// Whether the workspace answered at all. Everything below is meaningful
     /// only when this is true.
     pub registry_reachable: bool,
-    /// The registry's current head version (empty when unreachable).
+    /// The workspace's current head version (empty when unreachable).
     pub head_version: String,
     /// True when the head has moved past this working copy's base — i.e. a push
     /// would be refused by the base-version gate.
     pub is_stale: bool,
-    /// Full published history, newest last (as the package manifest stores it).
-    pub versions: Vec<WorkspaceVersionInfo>,
+    /// Full published history, newest last (as the application manifest stores it).
+    pub versions: Vec<WorkingCopyVersionInfo>,
     /// Next version suggestions from the head.
     pub suggested_next: Option<SuggestedVersions>,
     /// Whether THIS machine's publisher key is the one that signed the head —
     /// i.e. whether the key-continuity gate will pass.
     pub holds_publisher_key: bool,
-    /// Why the registry could not be read, when it could not be. Empty on
+    /// Why the workspace could not be read, when it could not be. Empty on
     /// success. Reported rather than thrown: a working copy must still open and
     /// describe itself with the share offline.
     pub registry_error: String,
@@ -3876,34 +3882,34 @@ pub struct WorkspaceStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceSheetInfo {
+pub struct WorkingCopySheetInfo {
     pub sheet_id: String,
     pub name: String,
 }
 
-/// What package is this workbook a working copy of, and where does it stand
-/// relative to the registry?
+/// What application is this workbook a working copy of, and where does it stand
+/// relative to the workspace?
 ///
-/// Read-only, and deliberately failure-tolerant: an unreachable registry
+/// Read-only, and deliberately failure-tolerant: an unreachable workspace
 /// downgrades the answer to the link's own contents rather than erroring. A
-/// developer on a train must still be able to see which package they are
+/// developer on a train must still be able to see which application they are
 /// editing.
 #[tauri::command]
-pub fn calp_workspace_status(
+pub fn calp_working_copy_status(
     state: State<AppState>,
     window: tauri::Window,
-) -> Result<Option<WorkspaceStatus>, String> {
+) -> Result<Option<WorkingCopyStatus>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     let link = {
-        let guard = state.workspace_link.read().map_err(|e| e.to_string())?;
+        let guard = state.working_copy_link.read().map_err(|e| e.to_string())?;
         match guard.as_ref() {
             Some(l) => l.clone(),
             None => return Ok(None),
         }
     };
 
-    let mut status = WorkspaceStatus {
+    let mut status = WorkingCopyStatus {
         registry_url: link.registry_url.clone(),
         package_name: link.package_name.clone(),
         kind: link.kind.clone(),
@@ -3914,7 +3920,7 @@ pub fn calp_workspace_status(
         base_sheets: link
             .base_sheets
             .iter()
-            .map(|s| WorkspaceSheetInfo {
+            .map(|s| WorkingCopySheetInfo {
                 sheet_id: s.sheet_id.to_string(),
                 name: s.name.clone(),
             })
@@ -3928,11 +3934,11 @@ pub fn calp_workspace_status(
         registry_error: String::new(),
     };
 
-    let manifest = match crate::calp_registry::open_registry_scoped(&link.registry_url)
+    let manifest = match crate::calp_registry::open_workspace_scoped(&link.registry_url)
         .map_err(|e| e.to_string())
         .and_then(|(registry, _)| {
             registry
-                .get_package_manifest(&link.package_name)
+                .get_application_manifest(&link.package_name)
                 .map_err(|e| e.to_string())
                 .map(|m| (registry, m))
         }) {
@@ -3967,7 +3973,7 @@ pub fn calp_workspace_status(
         status.versions = manifest
             .versions
             .iter()
-            .map(|v| WorkspaceVersionInfo {
+            .map(|v| WorkingCopyVersionInfo {
                 version: v.version.clone(),
                 published_at: v.published_at.clone(),
                 published_by: v.published_by.clone(),
@@ -3996,25 +4002,25 @@ pub fn calp_workspace_status(
     Ok(Some(status))
 }
 
-/// Browse packages in a local registry.
+/// Browse applications in a local workspace.
 #[tauri::command]
-pub fn calp_browse_registry(
+pub fn calp_browse_workspace(
     registry_path: String,
     window: tauri::Window,
-) -> Result<Vec<PackageInfo>, String> {
-    // Also callable from the Package Inspector window (its registry picker).
+) -> Result<Vec<ApplicationInfo>, String> {
+    // Also callable from the Application Inspector window (its workspace picker).
     crate::security::window_guard::require_label(
         &window,
-        crate::security::window_guard::MAIN_AND_PACKAGE_INSPECTOR,
+        crate::security::window_guard::MAIN_AND_APPLICATION_INSPECTOR,
     )?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
-    let names = registry.list_packages().map_err(|e| e.to_string())?;
+    let names = registry.list_applications().map_err(|e| e.to_string())?;
     let mut packages = Vec::new();
 
     for name in names {
-        let manifest = registry.get_package_manifest(&name).map_err(|e| e.to_string())?;
+        let manifest = registry.get_application_manifest(&name).map_err(|e| e.to_string())?;
         let mut versions = Vec::new();
 
         for entry in &manifest.versions {
@@ -4033,7 +4039,7 @@ pub fn calp_browse_registry(
             });
         }
 
-        packages.push(PackageInfo {
+        packages.push(ApplicationInfo {
             name: manifest.name,
             description: manifest.description,
             kind: manifest.kind,
@@ -4045,20 +4051,20 @@ pub fn calp_browse_registry(
     Ok(packages)
 }
 
-/// What a package version contains, surfaced BEFORE pulling so the user can
+/// What an application version contains, surfaced BEFORE pulling so the user can
 /// review (and explicitly accept) incoming scripts, data sources, and
 /// writeback regions instead of having them materialized silently.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageInspection {
+pub struct ApplicationInspection {
     pub package_name: String,
     pub resolved_version: String,
     pub sheets: Vec<SheetInfo>,
     pub scripts: Vec<InspectedScript>,
-    /// Standalone module scripts bundled with the package (C8). Surfaced in the
+    /// Standalone module scripts bundled with the application (C8). Surfaced in the
     /// pre-pull review for transparency — they are inert (never auto-executed).
     pub module_scripts: Vec<InspectedModuleScript>,
-    /// Standalone notebooks bundled with the package (C8). Surfaced in the
+    /// Standalone notebooks bundled with the application (C8). Surfaced in the
     /// pre-pull review for transparency — inert until the user runs them.
     pub notebooks: Vec<InspectedNotebook>,
     pub data_sources: Vec<InspectedDataSource>,
@@ -4066,7 +4072,7 @@ pub struct PackageInspection {
     pub table_count: usize,
     pub named_range_count: usize,
     /// Per-object transparency for the pre-pull review: names of the tables
-    /// and named ranges the package carries (counts alone hide what arrives).
+    /// and named ranges the application carries (counts alone hide what arrives).
     pub table_names: Vec<String>,
     pub named_range_names: Vec<String>,
     pub chart_count: usize,
@@ -4074,22 +4080,22 @@ pub struct PackageInspection {
     pub pivot_count: usize,
     /// Sheets carrying cell-anchored controls (buttons/checkboxes).
     pub control_sheet_count: usize,
-    /// Pane controls (Controls pane widgets) the package carries —
+    /// Pane controls (Controls pane widgets) the application carries —
     /// workbook-scoped, materialized into the subscriber's Controls pane.
     pub pane_control_count: usize,
     /// Their display names (per-object transparency, like table_names).
     pub pane_control_names: Vec<String>,
     /// Slicers on the published sheets (Wave A).
     pub slicer_count: usize,
-    /// Ribbon filters the package carries (workbook-scoped, BI-only; Wave A).
+    /// Ribbon filters the application carries (workbook-scoped, BI-only; Wave A).
     pub ribbon_filter_count: usize,
-    /// Saved pivot layouts the package carries (Wave A).
+    /// Saved pivot layouts the application carries (Wave A).
     pub pivot_layout_count: usize,
-    /// Whether the package carries a document theme (always true for packages
+    /// Whether the application carries a document theme (always true for applications
     /// published after Wave A; applied only if the subscriber's theme is
     /// still the default).
     pub has_document_theme: bool,
-    /// Extension-data keys the package carries (Wave A; merged additively —
+    /// Extension-data keys the application carries (Wave A; merged additively —
     /// keys the subscriber already has are never overwritten).
     pub extension_data_count: usize,
     /// Their key names (per-object transparency, like named_range_names), so
@@ -4107,12 +4113,12 @@ pub struct PackageInspection {
     /// the only thing the reviewer can actually compare against what the
     /// publisher told them out of band. A name is not an identity.
     pub publisher_key: String,
-    /// A `CalpTrustStatus` for THIS registry. Inspect is PASSIVE, so first
-    /// contact is `notPinned` — or `notPinnedNameConflict` when another registry
-    /// already holds this package name under a DIFFERENT key. If verification
+    /// A `CalpTrustStatus` for THIS workspace. Inspect is PASSIVE, so first
+    /// contact is `notPinned` — or `notPinnedNameConflict` when another workspace
+    /// already holds this application name under a DIFFERENT key. If verification
     /// fails, inspect returns an Err instead.
     pub trust_status: String,
-    /// Pins held for this same package name in OTHER registries. The Review step
+    /// Pins held for this same application name in OTHER workspaces. The Review step
     /// shows them, because Review must never say nothing and then have Subscribe
     /// fail on a conflict it never mentioned.
     pub other_scope_pins: Vec<crate::calp_inspector::OtherScopePinInfo>,
@@ -4124,9 +4130,9 @@ pub struct InspectedScript {
     pub name: String,
     pub object_type: String,
     pub description: Option<String>,
-    /// The capability ids the package's manifest declares this script needs
+    /// The capability ids the application's manifest declares this script needs
     /// (R19 ceiling). Surfaced BEFORE pulling so the user sees what the
-    /// package's scripts want before accepting.
+    /// application's scripts want before accepting.
     pub requested_capabilities: Vec<String>,
 }
 
@@ -4164,16 +4170,16 @@ pub struct InspectedDataSource {
     pub database: String,
 }
 
-/// Inspect a package version's contents without materializing anything.
+/// Inspect an application version's contents without materializing anything.
 #[tauri::command]
-pub fn calp_inspect_package(
+pub fn calp_inspect_application(
     registry_path: String,
     package_name: String,
     version_pin: String,
     window: tauri::Window,
-) -> Result<PackageInspection, String> {
+) -> Result<ApplicationInspection, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (registry, scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let pin = VersionPin::parse(&version_pin).map_err(|e| e.to_string())?;
@@ -4185,16 +4191,16 @@ pub fn calp_inspect_package(
     // S5 phase 2: read the manifest bytes ONCE, verify the Ed25519 signature +
     // TOFU pin over exactly those bytes, and parse the contents from them BEFORE
     // surfacing anything — inspect is a pre-pull trust surface, so an
-    // unsigned/tampered/hijacked package must fail to inspect, not just to pull.
+    // unsigned/tampered/hijacked application must fail to inspect, not just to pull.
     // Transport-agnostic (reads manifest + .sig via the transport) so an HTTP
-    // registry is verified exactly like a local one — no local dir required, and
+    // workspace is verified exactly like a local one — no local dir required, and
     // no split-view between the signed bytes and the surfaced inventory.
     //
     // PASSIVE -- VerifyOnly. This is the "Review" button in SubscribeDialog, the
     // step whose entire purpose is "nothing is materialized until the user
     // explicitly accepts", and it is additionally script-reachable through
-    // `distribution_gateway::Action::InspectPackage`. Neither reviewing a
-    // package nor a script asking about one is a decision to trust its
+    // `distribution_gateway::Action::InspectPackage`. Neither reviewing an
+    // application nor a script asking about one is a decision to trust its
     // publisher, so first contact reports `notPinned` and writes nothing to the
     // pin store. The publisher name and key are still returned in full -- that
     // is what the user is being asked to judge.
@@ -4326,7 +4332,7 @@ pub fn calp_inspect_package(
             _ => 0,
         };
 
-    Ok(PackageInspection {
+    Ok(ApplicationInspection {
         package_name,
         resolved_version: version,
         publisher_name: manifest.publisher_name.clone(),
@@ -4395,7 +4401,7 @@ pub fn calp_get_subscriptions(
     Ok(subs.clone())
 }
 
-/// Per-subscription answer to "does this machine trust this package's
+/// Per-subscription answer to "does this machine trust this application's
 /// publisher?" — the visible half of the Wave J fail-closed change.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4409,19 +4415,19 @@ pub struct SubscriptionTrustInfo {
     ///                the same everywhere).
     /// "notPinned"  — the signature is valid but nobody here ever agreed to
     ///                trust this publisher for this name. Writeback regions,
-    ///                GATHER and model-writeback columns from this package are
+    ///                GATHER and model-writeback columns from this application are
     ///                INERT until the user subscribes.
-    /// "unavailable"— the registry or the manifest could not be read/verified;
+    /// "unavailable"— the workspace or the manifest could not be read/verified;
     ///                `error` says why.
     pub trust_status: String,
     /// Publisher display name from the (verified) manifest; empty on error.
     pub publisher_name: String,
     /// Publisher Ed25519 public key (hex) from the manifest; empty on error.
     pub publisher_key: String,
-    /// Whether this package declares writeback regions or model-writeback
+    /// Whether this application declares writeback regions or model-writeback
     /// columns — i.e. whether "not pinned" actually costs the user something.
     pub declares_writeback: bool,
-    /// Pins held for this same package name in OTHER registries. A different key
+    /// Pins held for this same application name in OTHER workspaces. A different key
     /// pinned elsewhere is what turns `notPinned` into `notPinnedNameConflict`.
     pub other_scope_pins: Vec<crate::calp_inspector::OtherScopePinInfo>,
     /// Human-readable failure text when `trustStatus` is "unavailable".
@@ -4429,14 +4435,14 @@ pub struct SubscriptionTrustInfo {
 }
 
 /// Report, per subscription, whether this machine has ever agreed to trust the
-/// package's publisher.
+/// application's publisher.
 ///
 /// WHY THIS EXISTS. A `.cala` restores its subscription list on open WITHOUT
 /// pulling. Before Wave J, workbook open (`rebuild_writeback_index`) and every
 /// recalculation (`build_gather_data`) would create a TOFU pin for whatever
-/// package/registry pair the FILE named — so a workbook that arrived by email
-/// could squat the identity of a package the recipient had never heard of.
-/// Those paths are now `RequirePinned` and simply skip an unpinned package.
+/// application/workspace pair the FILE named — so a workbook that arrived by email
+/// could squat the identity of an application the recipient had never heard of.
+/// Those paths are now `RequirePinned` and simply skip an unpinned application.
 ///
 /// That is the correct fail-closed behaviour, but on its own it is invisible:
 /// the writeback regions would just sit there inert. This command makes the
@@ -4457,7 +4463,7 @@ pub fn calp_subscription_trust(
     let mut out = Vec::with_capacity(subs.subscriptions.len());
 
     for sub in &subs.subscriptions {
-        // Dev and file-channel subscriptions have no registry manifest to
+        // Dev and file-channel subscriptions have no workspace manifest to
         // verify; they are excluded from every other trust path too.
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
             continue;
@@ -4475,7 +4481,7 @@ pub fn calp_subscription_trust(
             error: String::new(),
         };
 
-        match crate::calp_registry::open_registry_scoped(&registry_path) {
+        match crate::calp_registry::open_workspace_scoped(&registry_path) {
             Ok((registry, scope)) => match calp::integrity::verify_and_load_manifest_via(
                 registry.as_ref(),
                 &sub.package_name,
@@ -4515,7 +4521,7 @@ pub fn calp_subscription_trust(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageObjectInfo {
+pub struct ApplicationObjectInfo {
     pub kind: String,
     pub id: String,
     pub name: String,
@@ -4528,26 +4534,26 @@ pub struct PackageObjectInfo {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageSheetObjectInfo {
+pub struct ApplicationSheetObjectInfo {
     pub local_name: String,
     pub local_sheet_index: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageObjectsResponse {
+pub struct ApplicationObjectsResponse {
     pub package_name: String,
     pub resolved_version: String,
     pub registry_url: String,
-    pub sheets: Vec<PackageSheetObjectInfo>,
-    pub objects: Vec<PackageObjectInfo>,
+    pub sheets: Vec<ApplicationSheetObjectInfo>,
+    pub objects: Vec<ApplicationObjectInfo>,
 }
 
 /// Resolve one subscription's provenance ledger against the live workbook:
-/// which sheets and objects are connected to this package, and whether each
-/// still exists. Backs the Package Explorer pane.
+/// which sheets and objects are connected to this application, and whether each
+/// still exists. Backs the Application Explorer pane.
 #[tauri::command]
-pub fn calp_get_package_objects(
+pub fn calp_get_application_objects(
     state: State<AppState>,
     pivot_state: State<crate::pivot::types::PivotState>,
     script_state: State<crate::scripting::types::ScriptState>,
@@ -4557,7 +4563,7 @@ pub fn calp_get_package_objects(
     slicer_state: State<crate::slicer::SlicerState>,
     package_name: String,
     window: tauri::Window,
-) -> Result<PackageObjectsResponse, String> {
+) -> Result<ApplicationObjectsResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     let Some(sub) = subs
@@ -4571,12 +4577,12 @@ pub fn calp_get_package_objects(
     let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
     let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
 
-    let sheets: Vec<PackageSheetObjectInfo> = sub
+    let sheets: Vec<ApplicationSheetObjectInfo> = sub
         .sheets
         .iter()
         .map(|s| {
             let idx = sheet_ids.iter().position(|id| *id == s.local_sheet_id);
-            PackageSheetObjectInfo {
+            ApplicationSheetObjectInfo {
                 local_name: idx
                     .and_then(|i| sheet_names.get(i).cloned())
                     .unwrap_or_else(|| s.local_name.clone()),
@@ -4638,7 +4644,7 @@ pub fn calp_get_package_objects(
     let sheet_name_at =
         |idx: usize| -> String { sheet_names.get(idx).cloned().unwrap_or_default() };
 
-    let objects: Vec<PackageObjectInfo> = sub
+    let objects: Vec<ApplicationObjectInfo> = sub
         .objects
         .iter()
         .map(|o| {
@@ -4691,7 +4697,7 @@ pub fn calp_get_package_objects(
                     .unwrap_or((false, String::new())),
                 _ => (false, String::new()),
             };
-            PackageObjectInfo {
+            ApplicationObjectInfo {
                 kind: o.kind.clone(),
                 id: o.id.clone(),
                 name: o.name.clone(),
@@ -4701,7 +4707,7 @@ pub fn calp_get_package_objects(
         })
         .collect();
 
-    Ok(PackageObjectsResponse {
+    Ok(ApplicationObjectsResponse {
         package_name: sub.package_name.clone(),
         resolved_version: sub.resolved_version.clone(),
         registry_url: sub.registry_url.clone(),
@@ -5051,7 +5057,7 @@ pub fn calp_keep_override(
     Ok(layer.keep_override(sid, cid))
 }
 
-/// Export the current override layer as a portable OverridePatch for the given package.
+/// Export the current override layer as a portable OverridePatch for the given application.
 #[tauri::command]
 pub fn calp_export_overrides(
     state: State<AppState>,
@@ -5304,12 +5310,12 @@ pub(crate) fn record_subscription_override_edits(
     }
 }
 
-/// A subscription's registry location, EXACTLY as the subscription stores it.
+/// A subscription's workspace location, EXACTLY as the subscription stores it.
 ///
 /// This deliberately does no `file://` stripping of its own. A publisher pin is
-/// keyed by `(namespace, registry scope, package)`, and the scope is derived by
-/// `calp::registry_id::registry_scope` from the very string handed to
-/// `open_registry_scoped`. Stripping the scheme here first would hand it a
+/// keyed by `(namespace, workspace scope, application)`, and the scope is derived by
+/// `calp::workspace_id::workspace_scope` from the very string handed to
+/// `open_workspace_scoped`. Stripping the scheme here first would hand it a
 /// DIFFERENT string than the one `pull` scoped the pin with:
 ///
 ///   * `file:///C:/reg`      -> `/C:/reg`      -> scope `\c:\reg`  (not `c:\reg`)
@@ -5320,12 +5326,12 @@ pub(crate) fn record_subscription_override_edits(
 /// would report `PublisherNotPinned` and skip — a feature that silently stops
 /// working, which is worse than the squat this key shape was introduced to fix.
 /// `strip_file_scheme` is the ONE stripper, and it lives behind
-/// `registry_scope`; nothing here needs a second one.
+/// `workspace_scope`; nothing here needs a second one.
 fn subscription_registry_path(sub: &calp::manifest::Subscription) -> &str {
     &sub.registry_url
 }
 
-/// Group refreshable subscriptions by registry path, preserving each
+/// Group refreshable subscriptions by workspace path, preserving each
 /// subscription's index into the workbook subscription list. Dev and
 /// channel subscriptions are skipped (they refresh through their own flows).
 fn group_subscriptions_by_registry(
@@ -5347,8 +5353,8 @@ fn group_subscriptions_by_registry(
 }
 
 /// Compute a preview of what a refresh would change, without applying anything.
-/// Each subscription is resolved against its own stored registry URL, so
-/// workbooks subscribed to multiple registries refresh correctly.
+/// Each subscription is resolved against its own stored workspace URL, so
+/// workbooks subscribed to multiple workspaces refresh correctly.
 #[tauri::command]
 pub fn calp_refresh_preview(
     state: State<AppState>,
@@ -5365,19 +5371,19 @@ pub fn calp_refresh_preview(
         total_sheets_removed: 0,
         total_overrides_conflicted: 0,
         total_overrides_auto_cleared: 0,
-        // Starts true and is ANDed down: one registry group whose count was
+        // Starts true and is ANDed down: one workspace group whose count was
         // capped makes the whole figure a floor, and the dialog must say so.
         total_cells_changed_exact: true,
     };
 
     for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
-        let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
-            .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+        let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
+            .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
         let group: Vec<_> = indices.iter()
             .map(|&i| subs.subscriptions[i].clone())
             .collect();
         let preview = calp::refresh::compute_preview(&registry, &group, &layer)
-            .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+            .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
 
         merged.subscription_previews.extend(preview.subscription_previews);
         merged.total_cells_changed += preview.total_cells_changed;
@@ -5394,7 +5400,7 @@ pub fn calp_refresh_preview(
 /// Apply the refresh after the user has confirmed the preview.
 /// Pulls new versions for all subscriptions that have updates and materializes
 /// new/updated sheets into the workbook grids. Each subscription is pulled
-/// from its own stored registry URL.
+/// from its own stored workspace URL.
 #[tauri::command]
 pub fn calp_refresh_apply(
     state: State<AppState>,
@@ -5419,8 +5425,8 @@ pub fn calp_refresh_apply(
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let mut all_payloads = Vec::new();
         for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
-            let (registry, scope) = crate::calp_registry::open_registry_scoped(&registry_path)
-                .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+            let (registry, scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
+                .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
             let group: Vec<_> = indices.iter()
                 .map(|&i| subs.subscriptions[i].clone())
                 .collect();
@@ -5437,7 +5443,7 @@ pub fn calp_refresh_apply(
                 &calcula_profile_dir(),
                 calp::integrity::PinPolicy::RequirePinned,
             )
-            .map_err(|e| format!("Registry '{}': {}", registry_path, e))?;
+            .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
             for mut payload in group_payloads {
                 // pull_all_updates indexed into the group slice; remap back to
                 // the workbook subscription index.
@@ -5579,8 +5585,8 @@ pub fn calp_refresh_apply(
         *state.grid.write(&effect).map_err(|e| e.to_string())? = grid;
     }
 
-    // Map each refreshed package sheet id -> its LOCAL sheet index, so named
-    // ranges + CF/DV (which carry un-remapped PACKAGE sheet ids) materialize onto
+    // Map each refreshed application sheet id -> its LOCAL sheet index, so named
+    // ranges + CF/DV (which carry un-remapped APPLICATION sheet ids) materialize onto
     // the right sheet. Updated sheets resolve via the subscription's local_sheet_id
     // (still the pre-refresh mapping here); new sheets were just appended under
     // their own fresh local id (pulled.sheet.id). Runs AFTER sheet materialization
@@ -5636,7 +5642,7 @@ pub fn calp_refresh_apply(
         }
 
         // §2t ON THE DISTRIBUTION PATH -- see the identical call in `calp_pull`. A
-        // refreshed sheet's formulas were just rebuilt from the package's stored
+        // refreshed sheet's formulas were just rebuilt from the application's stored
         // TEXT, and the lexer upper-cases every bare identifier, so without this a
         // refresh re-spells every defined name on every refreshed sheet.
         crate::persistence::restamp_workbook_name_casing(&state, &effect);
@@ -5834,7 +5840,7 @@ pub fn calp_refresh_apply(
         extra: std::collections::HashMap::new(),
     };
 
-    // Tables: replace this package's own tables (from the provenance ledger)
+    // Tables: replace this application's own tables (from the provenance ledger)
     // with the new version's set, so table changes actually land on refresh.
     // Subscriber-authored tables are not in the ledger and are never touched.
     {
@@ -5882,7 +5888,7 @@ pub fn calp_refresh_apply(
     // Charts: same ledger-scoped replace, so v2 charts actually land on
     // refresh (previously a subscriber stayed on v1 charts forever). Chart
     // sheet ids in the payload are the FRESH local ids this pull minted; map
-    // fresh id -> package id -> existing local index.
+    // fresh id -> application id -> existing local index.
     {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let mut charts = state.charts.write(&effect).map_err(|e| e.to_string())?;
@@ -5927,10 +5933,10 @@ pub fn calp_refresh_apply(
     // v2's (CF/DV semantics — sparklines carry no id, and controls are
     // publisher-owned presentation on subscribed sheets). Yields the on-grid
     // snapshot for the pane-control collision guard below: cloned AFTER the
-    // reset removed the packages' v1 on-grid controls but BEFORE the v2 set
+    // reset removed the applications' v1 on-grid controls but BEFORE the v2 set
     // lands, so the guard sees only the SUBSCRIBER's own on-grid names —
-    // never the packages' own (v1 or just-landed v2) names, which would
-    // shadow the packages' own same-named pane controls.
+    // never the applications' own (v1 or just-landed v2) names, which would
+    // shadow the applications' own same-named pane controls.
     let on_grid_snapshot = {
         let refreshed: std::collections::HashSet<usize> =
             cfdv_pkg_to_index.values().copied().collect();
@@ -6000,7 +6006,7 @@ pub fn calp_refresh_apply(
             for (payload, sanitized) in payloads.iter().zip(admitted_controls.iter()) {
                 // Same admission as first pull: distributed onSelect wiring
                 // (inline script source) never materializes, and a legacy
-                // package's inline base64 arrives as a media handle.
+                // application's inline base64 arrives as a media handle.
                 crate::controls::materialize_saved_controls(
                     sanitized,
                     &mut controls,
@@ -6024,7 +6030,7 @@ pub fn calp_refresh_apply(
     };
 
     // Pane controls: same ledger-scoped replace as tables/charts — remove the
-    // package's own pane controls (from the provenance ledger; subscriber-
+    // application's own pane controls (from the provenance ledger; subscriber-
     // authored ones are never in it and are never touched), then re-add the
     // new version's set through the SAME collision-guarded materializer
     // calp_pull uses (a v2 control landing on a subscriber-taken name is
@@ -6034,9 +6040,9 @@ pub fn calp_refresh_apply(
     // directly and the document-modified flag stays frontend-owned
     // (mark_file_modified after the command returns).
     //
-    // Yields package name -> "pane-{id}" instance ids of incoming pane
+    // Yields application name -> "pane-{id}" instance ids of incoming pane
     // controls whose host did NOT land (collision-skipped, not retained):
-    // the script swap below must not land those packages' host-less pane
+    // the script swap below must not land those applications' host-less pane
     // scripts (delete-path hygiene).
     let orphaned_pane_instances: std::collections::HashMap<
         String,
@@ -6064,7 +6070,7 @@ pub fn calp_refresh_apply(
             }
         }
         // `on_grid_snapshot` was cloned above AFTER the refreshed sheets'
-        // on-grid controls were reset but BEFORE v2's landed, so a package's
+        // on-grid controls were reset but BEFORE v2's landed, so an application's
         // own on-grid names never block its own pane controls (they only
         // guard the subscriber's).
         let mut orphaned: std::collections::HashMap<
@@ -6097,9 +6103,9 @@ pub fn calp_refresh_apply(
     };
 
     // Slicers (Wave A): ledger-scoped REPLACE like charts — remove this
-    // package's own slicers (from the provenance ledger; subscriber-authored
+    // application's own slicers (from the provenance ledger; subscriber-authored
     // ones are never in it), then re-add the new version's set through the
-    // SAME materializer calp_pull uses. Slicers carry PACKAGE sheet ids
+    // SAME materializer calp_pull uses. Slicers carry APPLICATION sheet ids
     // (CF/DV semantics), so cfdv_pkg_to_index resolves the local sheet.
     // Computed properties of removed slicers are dropped with them.
     {
@@ -6152,7 +6158,7 @@ pub fn calp_refresh_apply(
     // guarded materializer calp_pull uses (data-source-unknown / id / name
     // collisions are skipped, never clobbered). The carried connection ids
     // still point at the publisher's connections here — the re-bind onto this
-    // workbook's package connections runs after the data-source refresh below.
+    // workbook's application connections runs after the data-source refresh below.
     {
         {
             let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
@@ -6255,7 +6261,7 @@ pub fn calp_refresh_apply(
     // full v2 set is accurate). Script kinds (objectScript/moduleScript/
     // notebook) are recorded at their point of ACTUAL application below — the
     // swap/materialize conflict guards can skip entries, and a skipped local
-    // script must never be attributed to the package.
+    // script must never be attributed to the application.
     for payload in &payloads {
         let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
         for nr in &payload.pull_result.named_ranges {
@@ -6263,8 +6269,8 @@ pub fn calp_refresh_apply(
         }
     }
 
-    // Re-materialize refreshed package data sources: swap each existing
-    // package connection's engine onto the new version's model (and create
+    // Re-materialize refreshed application data sources: swap each existing
+    // application connection's engine onto the new version's model (and create
     // connections for data sources ADDED in this version). Without this, a
     // dataset (model-only) subscription refresh advanced the version while
     // silently serving the old model. Existing dataSource ledger entries
@@ -6285,11 +6291,11 @@ pub fn calp_refresh_apply(
     }
 
     // Re-bind the just-refreshed ribbon filters + BI-sourced slicers (Wave A)
-    // onto THIS workbook's package connections. The v2 artifacts carry the
-    // PUBLISHER's connection uuids (== the stable package data-source ids);
+    // onto THIS workbook's application connections. The v2 artifacts carry the
+    // PUBLISHER's connection uuids (== the stable application data-source ids);
     // load_embedded_data_sources only remaps for data sources ADDED in this
     // version, so rebuild the full ds-id -> connection map from the existing
-    // package connections and remap once more.
+    // application connections and remap once more.
     {
         let ds_to_conn: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
             bi_state
@@ -6318,10 +6324,10 @@ pub fn calp_refresh_apply(
 
     // Build the upstream-value map for the override rebase: for every
     // override on a refreshed sheet, the new upstream value at the override's
-    // current local position. Package payloads are coordinate-keyed (no
+    // current local position. Application payloads are coordinate-keyed (no
     // per-cell ids yet), so matching is positional — correct when upstream
     // updates values in place; upstream row/column insertions are a known
-    // limitation until packages carry cell-level ids.
+    // limitation until applications carry cell-level ids.
     let (upstream_values, refreshed_sheet_ids) = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
         let layer = state.override_layer.read().map_err(|e| e.to_string())?;
@@ -6365,8 +6371,8 @@ pub fn calp_refresh_apply(
     // C8: likewise collect the refreshed standalone module scripts + notebooks
     // before the move, so the refresh can materialize them (without this they are
     // pulled then silently dropped, leaving a subscriber stuck on the version
-    // present at first subscribe). Kept PER PACKAGE so removal-on-refresh +
-    // preserve-local can scope to the owning package.
+    // present at first subscribe). Kept PER APPLICATION so removal-on-refresh +
+    // preserve-local can scope to the owning application.
     #[allow(clippy::type_complexity)]
     let module_notebook_updates: Vec<(String, Vec<persistence::SavedScript>, Vec<persistence::SavedNotebook>)> =
         payloads
@@ -6459,16 +6465,16 @@ pub fn calp_refresh_apply(
         apply_override_value_to_grid(&state, &effect, ovr.sheet_id, ovr.cell_id, ovr.position, &ovr.current);
     }
 
-    // Swap in the refreshed packages' scripts: replace each package's
+    // Swap in the refreshed applications' scripts: replace each application's
     // previous distributed scripts with the new version's set (already
     // stamped Distributed + restricted by the pull layer) and add new ones.
     // Without this the workbook keeps running v1 scripts against vN sheets
     // and the hash-keyed consent re-prompt can never trigger. Distributed
     // scripts are upstream-owned (read-only locally), so replacement is safe.
-    // (package name, ledger entries) for scripts ACTUALLY applied by the swap
+    // (application name, ledger entries) for scripts ACTUALLY applied by the swap
     // and the module/notebook materialization below — appended to each
     // subscription's ledger afterwards, so a conflict-skipped local script is
-    // never attributed to a package.
+    // never attributed to an application.
     let mut applied_script_entries: Vec<(String, Vec<calp::manifest::SubscribedObject>)> =
         Vec::new();
     {
@@ -6491,12 +6497,12 @@ pub fn calp_refresh_apply(
                 }) {
                     crate::log_warn!(
                         "CALP",
-                        "Skipping distributed script '{}' from package '{}': its host pane control was collision-skipped",
+                        "Skipping distributed script '{}' from application '{}': its host pane control was collision-skipped",
                         script.name, package_name
                     );
                     continue;
                 }
-                // Never let a package script shadow an unrelated local
+                // Never let an application script shadow an unrelated local
                 // script that happens to share its id.
                 if !scripts.iter().any(|s| s.id == script.id) {
                     applied.push(calp::manifest::SubscribedObject {
@@ -6512,7 +6518,7 @@ pub fn calp_refresh_apply(
         }
     }
 
-    // C8: materialize each refreshed package's standalone module scripts +
+    // C8: materialize each refreshed application's standalone module scripts +
     // notebooks so upstream updates (incl. removals) actually land on refresh,
     // while preserving subscriber-local same-id documents.
     let mut any_custom_functions_changed = false;
@@ -6611,7 +6617,7 @@ pub fn calp_refresh_apply(
     }
 
     // Handle MODEL writeback COLUMN changes. There are no drafts to drop —
-    // bi_writeback_set_value submits straight to the registry — but a column
+    // bi_writeback_set_value submits straight to the workspace — but a column
     // that vanished or narrowed stops counting submissions that previously
     // reached the model, and nothing told the user until now.
     {
@@ -6677,7 +6683,7 @@ pub fn calp_refresh_apply(
             crate::undo_commands::rebuild_all_dependencies(&state);
         }
         // GAP B, materialization half (§2z's one-shared-installer rule): a
-        // pulled/refreshed package can carry floating ranges, whose backing
+        // pulled/refreshed application can carry floating ranges, whose backing
         // sheets are never active and therefore never lazily re-edge.
         crate::floating_range::register_object_sheet_edges(&state);
         for idx in refreshed_indices {
@@ -6692,7 +6698,7 @@ pub fn calp_refresh_apply(
         if let Ok(mut audit) = state.audit_log.write(&crate::document_effect::DocumentEffect::deliberately_clean(crate::document_effect::CleanReason::AuditTrail)) {
             audit.record(
                 calp::audit::AuditEvent::Refresh,
-                "Refreshed subscriptions from registry",
+                "Refreshed subscriptions from workspace",
                 &user,
                 &now,
             );
@@ -6714,7 +6720,7 @@ fn audit_user(state: &AppState) -> String {
 }
 
 /// Join up to 8 ids into a readable list, with a "+N more" tail — audit
-/// descriptions are read by humans and a 200-region package must not produce a
+/// descriptions are read by humans and a 200-region application must not produce a
 /// 200-id line.
 ///
 /// Sorts first: callers pass a `HashSet` iterator, so without this the WHICH-8
@@ -6822,7 +6828,7 @@ pub fn calp_dev_subscribe(
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // A dev subscribe materializes package sheets, tables and controls into THIS
+    // A dev subscribe materializes application sheets, tables and controls into THIS
     // workbook and records the subscription -- all persisted, and nothing resets
     // the flag afterwards the way `open_file` does.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -6834,7 +6840,7 @@ pub fn calp_dev_subscribe(
 
     let sheets_pulled = result.sheets.len();
 
-    // Resolve the package name from the subscription that will be created.
+    // Resolve the application name from the subscription that will be created.
     let package_name = format!("dev:{}", params.source_path);
 
     // Materialize pulled sheets into the workbook.
@@ -6895,7 +6901,7 @@ pub fn calp_dev_subscribe(
         materialize_pulled_tables(&effect, &state, &result.tables, &dev_map, Some(&mut dev_objects))?;
     materialize_dev_controls(&state, &effect, &result, &dev_map, &mut dev_objects)?;
 
-    // Store the dev subscription (with the provenance ledger, so the Package
+    // Store the dev subscription (with the provenance ledger, so the Application
     // Explorer works for dev subscriptions too).
     {
         let mut subscription = calp::dev_mode::make_dev_subscription(
@@ -6918,7 +6924,7 @@ pub fn calp_dev_subscribe(
         tables_pulled,
         scripts_pulled: 0,
         // Dev subscriptions pull from the user's own local workbook folder
-        // (not a signed registry package), so there is no publisher to verify.
+        // (not a signed workspace application), so there is no publisher to verify.
         publisher_name: String::new(),
         trust_status: "dev".to_string(),
         other_scope_pins: Vec::new(),
@@ -6991,12 +6997,12 @@ pub fn calp_dev_refresh(
         let idx = subs.subscriptions.iter().position(calp::dev_mode::is_dev_subscription)
             .ok_or_else(|| "No dev subscription found in current workbook".to_string())?;
         // A DEV subscription's `registry_url` is `file://<path-to-a-.cala-file>`
-        // — not a registry, one workbook on disk — so this is a genuine
+        // — not a workspace, one workbook on disk — so this is a genuine
         // filesystem path, not a pin scope. Use the crate's ONE stripper rather
         // than a local `strip_prefix`, which mishandles `file:///C:/...` and
         // `file://server/share`.
         let url = &subs.subscriptions[idx].registry_url;
-        let path = calp::registry_id::strip_file_scheme(url);
+        let path = calp::workspace_id::strip_file_scheme(url);
         (path, idx)
     };
 
@@ -7311,7 +7317,7 @@ pub fn calp_get_writeback_regions(
 /// Why one subscription's writeback regions are NOT installed.
 ///
 /// Without this, "no regions" and "regions unknown" were the same observable
-/// state: an unreachable registry, an unreadable pin store and a package that
+/// state: an unreachable workspace, an unreadable pin store and an application that
 /// genuinely declares no writeback all produced an empty index, so a subscriber
 /// whose form protections were silently INACTIVE saw exactly what a subscriber
 /// with no form sees.
@@ -7329,15 +7335,15 @@ pub struct WritebackRebuildSkip {
 
 /// Classify a manifest-load failure into a skip `reason` string.
 ///
-/// Shared by both on-open registry walks — [`WritebackRebuildSkip`] and
-/// [`PackageConnectionRestoreSkip`] — because the question ("why could this
+/// Shared by both on-open workspace walks — [`WritebackRebuildSkip`] and
+/// [`ApplicationConnectionRestoreSkip`] — because the question ("why could this
 /// subscription's signed manifest not be loaded?") and the answer vocabulary
 /// are the same one. One classifier means the Subscriptions pane cannot report
-/// the same registry failure two different ways.
+/// the same workspace failure two different ways.
 fn calp_skip_reason(err: &calp::error::CalpError) -> &'static str {
     use calp::error::CalpError as E;
     match err {
-        E::Io(_) | E::Registry(_) | E::PackageNotFound(_) | E::VersionNotFound { .. } => {
+        E::Io(_) | E::Workspace(_) | E::ApplicationNotFound(_) | E::VersionNotFound { .. } => {
             "unreachable"
         }
         E::PublisherNotPinned { .. } => "notPinned",
@@ -7374,9 +7380,9 @@ fn next_writeback_rebuild_seq() -> u64 {
 
 /// Rebuild the writeback index from the version manifests of all active
 /// subscriptions. Each subscription's manifest is read from its own stored
-/// registry URL. Called after pull and refresh — both of which need the new
+/// workspace URL. Called after pull and refresh — both of which need the new
 /// declarations to have landed before they return (refresh diffs old against
-/// new to invalidate drafts), so this walks EVERY registry synchronously.
+/// new to invalidate drafts), so this walks EVERY workspace synchronously.
 ///
 /// Workbook OPEN uses [`rebuild_writeback_index_deferring_http`] instead.
 pub(crate) fn rebuild_writeback_index(state: &AppState) {
@@ -7394,14 +7400,14 @@ struct RebuildOutcome {
     deferred_http: bool,
 }
 
-/// The WORKBOOK-OPEN variant: local (`file://`) registries are walked inline,
-/// HTTP registries are handed to a worker thread and installed when they land.
+/// The WORKBOOK-OPEN variant: local (`file://`) workspaces are walked inline,
+/// HTTP workspaces are handed to a worker thread and installed when they land.
 ///
 /// `open_file` called the synchronous rebuild directly, and each HTTP
 /// subscription costs two blocking artifact reads with a 30-second timeout — so
-/// opening a `.cala` that named an unreachable HTTP registry hung the whole app
+/// opening a `.cala` that named an unreachable HTTP workspace hung the whole app
 /// on the open, before a single cell was drawn, with no way to cancel. Local
-/// registries stay inline because they cost microseconds and because the
+/// workspaces stay inline because they cost microseconds and because the
 /// writeback guards must be armed before the user can type.
 pub(crate) fn rebuild_writeback_index_deferring_http(state: &AppState) {
     let seq = next_writeback_rebuild_seq();
@@ -7414,7 +7420,7 @@ pub(crate) fn rebuild_writeback_index_deferring_http(state: &AppState) {
         rebuild_writeback_index_inner(state, true, seq);
         return;
     };
-    // A plain OS thread: the registry transports use `reqwest::blocking`, which
+    // A plain OS thread: the workspace transports use `reqwest::blocking`, which
     // must not park an async-runtime worker for the full timeout.
     std::thread::spawn(move || {
         use tauri::{Emitter, Manager};
@@ -7437,7 +7443,7 @@ pub(crate) fn rebuild_writeback_index_deferring_http(state: &AppState) {
 
 /// The shared walk.
 ///
-/// `include_http = false` skips HTTP registries and records them as `deferred`.
+/// `include_http = false` skips HTTP workspaces and records them as `deferred`.
 /// `seq` is the ticket taken by the rebuild REQUEST this pass belongs to: if a
 /// newer request has been made by the time the walk finishes, this pass installs
 /// NOTHING (see [`WRITEBACK_REBUILD_SEQ`]).
@@ -7450,7 +7456,7 @@ fn rebuild_writeback_index_inner(
     // is built from the same declarations and must go with it.
     invalidate_gather_cache(state);
 
-    // CLONED, not held: the walk below is registry I/O (seconds, over HTTP), and
+    // CLONED, not held: the walk below is workspace I/O (seconds, over HTTP), and
     // holding the subscriptions lock across it blocks every reader of the list.
     let subscriptions = match state.subscriptions.read() {
         Ok(s) => s.subscriptions.clone(),
@@ -7483,7 +7489,7 @@ fn rebuild_writeback_index_inner(
             });
             continue;
         }
-        let (registry, scope) = match crate::calp_registry::open_registry_scoped(registry_path) {
+        let (registry, scope) = match crate::calp_registry::open_workspace_scoped(registry_path) {
             Ok(r) => r,
             Err(e) => {
                 crate::log_warn!(
@@ -7513,10 +7519,10 @@ fn rebuild_writeback_index_inner(
         // REQUIRES AN EXISTING PIN. This was the highest-severity pin site in
         // the whole distribution stack: opening a `.cala` -- a file that arrives
         // by email -- walked the subscription list the FILE names and pinned a
-        // publisher key for every (package, registry) pair in it, with no user
+        // publisher key for every (application, workspace) pair in it, with no user
         // gesture whatsoever. A crafted workbook naming `acme.finance` at an
-        // attacker-controlled registry squatted the pin before the victim had
-        // ever heard of the real package, and the genuine publisher's first
+        // attacker-controlled workspace squatted the pin before the victim had
+        // ever heard of the real application, and the genuine publisher's first
         // release then read as `publisherChanged`. Now an unpinned subscription
         // is skipped -- its regions stay inert until the user subscribes here
         // themselves. `calp_subscription_trust` surfaces exactly that state to
@@ -7531,14 +7537,14 @@ fn rebuild_writeback_index_inner(
                 // Same trust rule for MODEL writeback columns: only a
                 // signature-verified manifest may declare one. Mirrored here so
                 // refresh can diff the pre/post sets without re-walking every
-                // subscription's registry.
+                // subscription's workspace.
                 if let Some(ref model_wbs) = ver_manifest.model_writebacks {
                     all_model_decls.extend(model_wbs.iter().cloned());
                 }
             }
-            // NOT silent. An unreachable registry, an unreadable pin store and a
-            // package that was never pinned all used to produce the same empty
-            // index as a package with no writeback at all — so a subscriber
+            // NOT silent. An unreachable workspace, an unreadable pin store and an
+            // application that was never pinned all used to produce the same empty
+            // index as an application with no writeback at all — so a subscriber
             // whose form protections were INACTIVE could not tell.
             Err(e) => {
                 crate::log_warn!(
@@ -7607,8 +7613,8 @@ fn rebuild_writeback_index_inner(
 /// Every subscription whose writeback regions could NOT be installed by the
 /// last rebuild, and why. Empty means every subscription's regions are live.
 ///
-/// The Subscriptions / Writeback panes need this to distinguish "this package
-/// declares no writeback" from "this package's writeback regions are UNKNOWN, so
+/// The Subscriptions / Writeback panes need this to distinguish "this application
+/// declares no writeback" from "this application's writeback regions are UNKNOWN, so
 /// its protections are not in force".
 #[tauri::command]
 pub fn calp_get_writeback_rebuild_skips(
@@ -7776,7 +7782,7 @@ pub(crate) fn get_subscriber_identity(state: &AppState) -> Result<calp::Submitte
 
 /// Resolve the subscription that declares the given writeback region.
 /// Returns (package_name, resolved_version, registry_path). This is what
-/// makes multi-subscription workbooks submit to the right package — the
+/// makes multi-subscription workbooks submit to the right application — the
 /// region id is looked up in each subscription's version manifest.
 fn owning_subscription_for_region(
     state: &AppState,
@@ -7789,20 +7795,20 @@ fn owning_subscription_for_region(
         }
         let registry_path = subscription_registry_path(sub).to_string();
         let Ok((registry, scope)) =
-            crate::calp_registry::open_registry_scoped(&registry_path)
+            crate::calp_registry::open_workspace_scoped(&registry_path)
         else {
             continue;
         };
         // Verify before believing a subscription's claim to own this region —
         // the authoritative submit re-validates too, but locating the target
-        // registry from an unsigned manifest would let a hostile registry claim
+        // workspace from an unsigned manifest would let a hostile workspace claim
         // regions it does not legitimately declare.
         //
-        // ALREADY-TRUSTED: submitting to a region means acting on a package the
+        // ALREADY-TRUSTED: submitting to a region means acting on an application the
         // user subscribed to. `load_pinned_manifest_via` returns the manifest
         // ALONE -- under RequirePinned the only possible success is Verified, so
         // unlike the previous `let Ok((_, manifest))` there is no trust answer
-        // being silently thrown away. An unpinned package owns no region here.
+        // being silently thrown away. An unpinned application owns no region here.
         let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
             registry.as_ref(), &sub.package_name, &sub.resolved_version, &scope, &calcula_profile_dir(),
         )
@@ -7825,11 +7831,11 @@ fn owning_subscription_for_region(
     ))
 }
 
-/// Versions of a package strictly OLDER than `resolved_version` (semver
+/// Versions of an application strictly OLDER than `resolved_version` (semver
 /// order). Used for lenient carry-forward — a subscriber pinned behind must
 /// not see submissions made against newer versions.
 pub(crate) fn older_package_versions(
-    registry: &dyn calp::RegistryTransport,
+    registry: &dyn calp::WorkspaceTransport,
     package_name: &str,
     resolved_version: &str,
 ) -> Vec<String> {
@@ -7838,7 +7844,7 @@ pub(crate) fn older_package_versions(
         Err(_) => return Vec::new(),
     };
     registry
-        .get_package_manifest(package_name)
+        .get_application_manifest(package_name)
         .map(|m| {
             m.versions
                 .iter()
@@ -7849,7 +7855,7 @@ pub(crate) fn older_package_versions(
         .unwrap_or_default()
 }
 
-/// Whether the registry already holds a Submitted/Approved record for this
+/// Whether the workspace already holds a Submitted/Approved record for this
 /// slot from the current subscriber, in the resolved version or any older
 /// one. One-shot/locked lifecycle policies must consult this: the local
 /// writeback layer is volatile (reset when the workbook is reopened without
@@ -7864,7 +7870,7 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
         return false;
     };
     let Ok((registry, _scope)) =
-        crate::calp_registry::open_registry_scoped(&registry_path)
+        crate::calp_registry::open_workspace_scoped(&registry_path)
     else {
         return false;
     };
@@ -7898,7 +7904,7 @@ fn registry_has_own_submission(state: &AppState, region_id: &str, row: u32, col:
 /// to be untrue (a region was detached, a submission was withdrawn), and serving
 /// a value the user just deleted is worse than serving none. The rebuild is
 /// queued here rather than performed inline — see `build_gather_data` for why
-/// nothing on this path may block on registry I/O.
+/// nothing on this path may block on workspace I/O.
 pub(crate) fn invalidate_gather_cache(state: &AppState) {
     crate::bi::writeback_source::invalidate_writeback_bi();
     if let Ok(mut cache) = state.gather_cache.lock() {
@@ -7967,7 +7973,7 @@ fn check_lifecycle_policy(
 /// Save a writeback draft for a cell in a writeback region.
 /// Auto-mints a CellId if the cell doesn't have one yet.
 /// Enforces the region's schema and lifecycle policy; regions with the
-/// `immediate` submission policy are auto-submitted to the registry on save.
+/// `immediate` submission policy are auto-submitted to the workspace on save.
 #[tauri::command]
 pub fn calp_save_writeback_draft(
     state: State<AppState>,
@@ -8034,7 +8040,7 @@ pub fn calp_save_writeback_draft(
             })
         };
         // One-shot/locked policies must also consult the authoritative
-        // registry record — the local layer alone is defeated by reopening
+        // workspace record — the local layer alone is defeated by reopening
         // the workbook without saving.
         let already_submitted = already_submitted
             || (matches!(
@@ -8133,7 +8139,7 @@ pub fn calp_save_writeback_draft(
         wb_layer.set_draft(submission);
     }
 
-    // `immediate` regions go straight to the registry — saving IS submitting.
+    // `immediate` regions go straight to the workspace — saving IS submitting.
     if auto_submit {
         submit_region_internal(&state, &effect, &region_id, window_app_handle(&window))?;
     }
@@ -8152,17 +8158,17 @@ pub fn calp_get_writeback_layer(
     Ok(layer.clone())
 }
 
-/// Reconcile the local writeback layer's submission STATES from the registry —
+/// Reconcile the local writeback layer's submission STATES from the workspace —
 /// the return leg of the writeback loop (P0). After a subscriber submits, the
-/// publisher may approve or reject the value in the registry; without this the
+/// publisher may approve or reject the value in the workspace; without this the
 /// local layer (which drives the WritebackPane and the grid cell styling) would
 /// stay "submitted" forever and a rejected contributor would never be told.
 ///
 /// For each locally-submitted (non-Draft) entry, adopt the state of the
-/// subscriber's OWN current registry record for that (region, cell) slot —
+/// subscriber's OWN current workspace record for that (region, cell) slot —
 /// newest across the resolved version and older ones (lenient carry-forward).
 /// Unsent drafts (Draft state) are left untouched.
-/// Reconcile local submission states from the registry.
+/// Reconcile local submission states from the workspace.
 ///
 /// TAKES `&FileState`, NOT A READY-MADE `DocumentEffect`, ON PURPOSE. This runs on
 /// every workbook load (the Distribution extension calls `calp_reconcile_writeback`
@@ -8171,7 +8177,7 @@ pub fn calp_get_writeback_layer(
 /// user touched anything — the close prompt fired on a document that had merely been
 /// looked at, which is precisely the "prompt stops meaning anything" failure the
 /// `Navigation` and `AuditTrail` clean arms exist to prevent. So the effect is
-/// constructed only once we know the registry actually disagrees with what we hold.
+/// constructed only once we know the workspace actually disagrees with what we hold.
 fn reconcile_writeback_layer_internal(
     state: &AppState,
     file_state: &crate::persistence::FileState,
@@ -8193,7 +8199,7 @@ fn reconcile_writeback_layer_internal(
 
     let own = get_subscriber_identity(state)?;
 
-    // Build (region, row, col) -> current registry record for our OWN slots.
+    // Build (region, row, col) -> current workspace record for our OWN slots.
     let mut by_slot: std::collections::HashMap<
         (String, u32, u32),
         calp::writeback::WritebackSubmission,
@@ -8205,7 +8211,7 @@ fn reconcile_writeback_layer_internal(
             continue;
         };
         let Ok((registry, _scope)) =
-            crate::calp_registry::open_registry_scoped(&registry_path)
+            crate::calp_registry::open_workspace_scoped(&registry_path)
         else {
             continue;
         };
@@ -8238,7 +8244,7 @@ fn reconcile_writeback_layer_internal(
         }
     }
 
-    // Would adopting the registry actually CHANGE anything? Decided before any
+    // Would adopting the workspace actually CHANGE anything? Decided before any
     // effect exists, so a reconcile that finds nothing new leaves the document
     // exactly as clean as it was.
     let has_changes = {
@@ -8261,7 +8267,7 @@ fn reconcile_writeback_layer_internal(
         return Ok(());
     }
 
-    // Adopt the registry state + review feedback onto local non-Draft entries.
+    // Adopt the workspace state + review feedback onto local non-Draft entries.
     {
         let effect = crate::document_effect::DocumentEffect::mutates(file_state);
         let mut layer = state.writeback_layer.write(&effect).map_err(|e| e.to_string())?;
@@ -8279,7 +8285,7 @@ fn reconcile_writeback_layer_internal(
     Ok(())
 }
 
-/// Reconcile local submission states from the registry (approved/rejected
+/// Reconcile local submission states from the workspace (approved/rejected
 /// read-back) and return the updated writeback layer. This is what the
 /// subscriber's UI calls to learn the fate of what they submitted.
 #[tauri::command]
@@ -8289,7 +8295,7 @@ pub fn calp_reconcile_writeback(
     window: tauri::Window,
 ) -> Result<calp::writeback::WritebackLayer, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // Reconciling only dirties when the registry actually moved a submission on --
+    // Reconciling only dirties when the workspace actually moved a submission on --
     // see `reconcile_writeback_layer_internal`; this runs on every workbook load.
     reconcile_writeback_layer_internal(&state, &file_state)?;
     let layer = state.writeback_layer.read().map_err(|e| e.to_string())?;
@@ -8335,17 +8341,17 @@ pub fn calp_reconcile_writeback(
 //     true/null/undefined/string REJECTS the submission. It never silently
 //     passes. It also never blocks more than the submit of the one region that
 //     declares it: the workbook stays open, other regions still submit, drafts
-//     are still saved and editable, and the error names the package, the
+//     are still saved and editable, and the error names the application, the
 //     version and the validator so the user knows exactly what to chase.
 //
 // CONSENT. Publisher code that runs on a subscriber's machine goes through the
 // same door as every other distributed script: the shared consent store in the
 // workbook (`.calcula/script-consent.json`, written by @api/distributedConsent),
-// keyed by package AND by SHA-256 of the exact source. Changing the body changes
+// keyed by application AND by SHA-256 of the exact source. Changing the body changes
 // the hash and re-prompts; an un-consented validator fails closed at submit.
-// Validators are keyed under `<package>::writeback-validators` so granting them
+// Validators are keyed under `<application>::writeback-validators` so granting them
 // neither clobbers nor inherits the object-script consent record for the same
-// package (two independent writers, one file).
+// application (two independent writers, one file).
 //
 // The frontend mirror in @api/writebackValidators.ts mounts the SAME source in
 // the hardened worker realm for as-you-type feedback. That run is advisory by
@@ -8358,7 +8364,7 @@ const VALIDATOR_SOURCE_KEY: &str = "customValidatorSource";
 /// The workbook-embedded distributed-script consent store.
 const SCRIPT_CONSENT_FILE: &str = ".calcula/script-consent.json";
 
-/// Consent-store package key for a package's writeback validators.
+/// Consent-store application key for an application's writeback validators.
 /// MUST match `writebackValidatorConsentKey` in @api/writebackValidators.ts.
 fn validator_consent_key(package_name: &str) -> String {
     format!("{}::writeback-validators", package_name)
@@ -8470,7 +8476,7 @@ pub(crate) fn read_script_consent_file(app: &tauri::AppHandle) -> Option<serde_j
 }
 
 /// Whether the user has consented to run this exact validator body for this
-/// package. Fails closed on every uncertainty (no file, no record, hash drift).
+/// application. Fails closed on every uncertainty (no file, no record, hash drift).
 fn validator_consented(
     app: &tauri::AppHandle,
     package_name: &str,
@@ -8734,8 +8740,8 @@ fn validator_context(
 }
 
 /// Enforce a region's publisher-shipped validator over a batch of values about
-/// to be written to the registry. Any refusal is returned as a user-facing
-/// message naming the package, version and validator.
+/// to be written to the workspace. Any refusal is returned as a user-facing
+/// message naming the application, version and validator.
 fn enforce_custom_validator(
     app: &tauri::AppHandle,
     decl: &calp::WritebackRegionDeclaration,
@@ -8912,9 +8918,9 @@ mod writeback_validator_tests {
         assert!(consent_granted_in(&file, &key, &id, "abc123"));
         // Source drift -> no consent (the publisher swapped the code).
         assert!(!consent_granted_in(&file, &key, &id, "def456"));
-        // Another validator in the same package is not covered.
+        // Another validator in the same application is not covered.
         assert!(!consent_granted_in(&file, &key, &validator_script_id("other"), "abc123"));
-        // The package's OBJECT-SCRIPT record must not grant validators.
+        // The application's OBJECT-SCRIPT record must not grant validators.
         assert!(!consent_granted_in(&file, "pkg", &id, "abc123"));
     }
 
@@ -9083,12 +9089,12 @@ mod writeback_validator_tests {
     }
 }
 
-/// Submit all drafts for a region to the registry of the subscription that
+/// Submit all drafts for a region to the workspace of the subscription that
 /// actually declares the region.
 ///
-/// Registry writes happen FIRST; local drafts are only advanced to Submitted
+/// Workspace writes happen FIRST; local drafts are only advanced to Submitted
 /// after every write succeeded. Advancing first would permanently mark values
-/// as submitted that the registry never received (retry would be a no-op
+/// as submitted that the workspace never received (retry would be a no-op
 /// because submit_region only advances Draft-state entries).
 fn submit_region_internal(
     state: &AppState,
@@ -9130,7 +9136,7 @@ fn submit_region_internal(
     // installation. Drafts are stamped with the installation identity on save,
     // but the writeback layer is persisted in the .cala — opening a crafted file
     // could seed a draft attributed to a victim, which would otherwise be written
-    // into the victim's registry slot. Refuse rather than impersonate.
+    // into the victim's workspace slot. Refuse rather than impersonate.
     let own = get_subscriber_identity(state)?;
     if let Some(bad) = to_submit.iter().find(|s| s.submitter.id != own.id) {
         return Err(format!(
@@ -9139,15 +9145,15 @@ fn submit_region_internal(
         ));
     }
 
-    // Write to registry BEFORE mutating local state.
-    let (registry, scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    // Write to workspace BEFORE mutating local state.
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     // RE-VALIDATE on the authoritative submit path (P0). Schema + lifecycle
     // validation in calp_save_writeback_draft is UX-only and bypassable: a
     // scripted client calling calp_submit_region directly, or a tampered .cala
     // seeding the writeback layer, would otherwise land schema/lifecycle-
-    // violating values in the shared registry where GATHER aggregates them. The
+    // violating values in the shared workspace where GATHER aggregates them. The
     // declaration is resolved from the signature-VERIFIED version manifest
     // (Ed25519 + TOFU over the single trusted copy), not the in-memory layer, so
     // this trust gate stays sound even if the write side is ever made writable
@@ -9161,8 +9167,8 @@ fn submit_region_internal(
     // found the region, so reaching this point without a declaration means the
     // manifest changed, failed its signature, or became unreadable between the
     // two reads — none of which is a reason to skip every schema, lifecycle and
-    // completeness gate and still persist to the shared registry.
-    // ALREADY-TRUSTED (RequirePinned): you can only submit to a package you
+    // completeness gate and still persist to the shared workspace.
+    // ALREADY-TRUSTED (RequirePinned): you can only submit to an application you
     // subscribed to. The fail-closed `else` below already turns an absent
     // declaration into a refusal, so an unpinned publisher lands there too.
     let decl = calp::integrity::load_pinned_manifest_via(
@@ -9224,7 +9230,7 @@ fn submit_region_internal(
             })?;
         }
         // Lifecycle (deadline / one-shot / locked). One-shot & locked
-        // consult the authoritative registry record; others ignore the flag.
+        // consult the authoritative workspace record; others ignore the flag.
         let already_submitted = matches!(
             decl.lifecycle,
             Some(calp::writeback::LifecyclePolicy::Never)
@@ -9234,7 +9240,7 @@ fn submit_region_internal(
     }
 
     // PUBLISHER-SHIPPED CUSTOM VALIDATOR (see the section above). Runs over the
-    // whole batch BEFORE any registry write, from the same signature-verified
+    // whole batch BEFORE any workspace write, from the same signature-verified
     // declaration as the schema, in the embedded QuickJS realm, and fails closed
     // — so a script calling this path directly (via the `distribution.writeback`
     // gateway or `calp_submit_region`) is judged by exactly the same code as a
@@ -9283,8 +9289,8 @@ fn submit_region_internal(
     Ok(count)
 }
 
-/// Submit all drafts for a region. The owning subscription's registry is
-/// resolved from the region id — no registry path parameter needed.
+/// Submit all drafts for a region. The owning subscription's workspace is
+/// resolved from the region id — no workspace path parameter needed.
 #[tauri::command]
 pub fn calp_submit_region(
     state: State<AppState>,
@@ -9303,11 +9309,11 @@ pub fn calp_submit_region(
 /// drafts believing they're done. Returns the total values submitted.
 ///
 /// PARTIAL SUCCESS IS REPORTED AS SUCH. Each region commits durably and
-/// independently (registry write, then local drafts advance to Submitted), so
+/// independently (workspace write, then local drafts advance to Submitted), so
 /// when region 3 of 5 fails validation, regions 1-2 are already sent. Bailing
 /// with `?` reported that as a total failure — the contributor was told nothing
 /// went through while their answers were in fact already in the publisher's
-/// registry, which is the one thing a data-collection UI must never get wrong.
+/// workspace, which is the one thing a data-collection UI must never get wrong.
 /// The error text now names what DID send, so a retry is an informed choice.
 #[tauri::command]
 pub fn calp_submit_all_regions(
@@ -9364,7 +9370,7 @@ pub struct OutboundValue {
 }
 
 /// A read-only preview of EXACTLY what `calp_submit_region` would send: the
-/// destination package + registry, the submitter identity it would be sent as,
+/// destination application + workspace, the submitter identity it would be sent as,
 /// and each draft value — so the user reviews what leaves the machine, to whom,
 /// and as whom, BEFORE it leaves (transparency blind spot: outbound-data preview).
 #[derive(serde::Serialize)]
@@ -9386,7 +9392,7 @@ pub struct OutboundSubmissionPreview {
     /// backend will run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator: Option<OutboundValidator>,
-    /// Set when the region declares a validator NAME but the package ships no
+    /// Set when the region declares a validator NAME but the application ships no
     /// BODY for it. Submission will be refused; surfaced so the pane can say so
     /// before the user fills the region in.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -9459,11 +9465,11 @@ pub fn calp_preview_region_submission(
     // backend executes. (The in-memory declarations cache is deliberately not
     // used here: it would let a stale/unsigned copy be what the user approves.)
     let (validator, validator_error) = {
-        let decl = crate::calp_registry::open_registry_scoped(&registry_path)
+        let decl = crate::calp_registry::open_workspace_scoped(&registry_path)
             .ok()
             .and_then(|(registry, scope)| {
                 // ALREADY-TRUSTED (RequirePinned): the consent prompt for a
-                // submit to a subscribed package. Same manifest and same gate
+                // submit to a subscribed application. Same manifest and same gate
                 // as the submit itself, so what the user approves is what runs.
                 calp::integrity::load_pinned_manifest_via(
                     &*registry,
@@ -9510,12 +9516,12 @@ pub fn calp_preview_region_submission(
     })
 }
 
-/// Render a published package version to a self-contained HTML string the
+/// Render a published application version to a self-contained HTML string the
 /// recipient can open WITHOUT Calcula (recipient reach). `mode` is "static" (a
 /// stacked, print-ready report) or "viewer" (a multi-sheet tabbed viewer). The
 /// frontend then saves the string as .html or opens it for print-to-PDF.
 #[tauri::command]
-pub fn calp_export_package_html(
+pub fn calp_export_application_html(
     registry_path: String,
     package_name: String,
     version: String,
@@ -9523,19 +9529,19 @@ pub fn calp_export_package_html(
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // RAW location — `open_registry_scoped` owns the `file://` handling (and the
+    // RAW location — `open_workspace_scoped` owns the `file://` handling (and the
     // pin scope derived from it). See `subscription_registry_path`.
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     let export_mode = match mode.as_str() {
         "viewer" => calp::HtmlExportMode::Viewer,
         _ => calp::HtmlExportMode::Static,
     };
     let opts = calp::HtmlExportOptions { mode: export_mode };
-    calp::render_package_html(&registry, &package_name, &version, &opts).map_err(|e| e.to_string())
+    calp::render_application_html(&registry, &package_name, &version, &opts).map_err(|e| e.to_string())
 }
 
-/// Authorize a PUBLISHER-only writeback action against a package version —
+/// Authorize a PUBLISHER-only writeback action against an application version —
 /// both the review actions (approve/reject) and the "see all submissions"
 /// reads (dashboard load, CSV/Parquet export). Proof of publisher ownership is
 /// possession of the Ed25519 signing key whose public key the SIGNED version
@@ -9550,7 +9556,7 @@ pub fn calp_export_package_html(
 /// deliberately bypass the per-subscriber GATHER filtering because "a region's
 /// owner manages all of it". Without this gate that bypass was available to
 /// every subscriber holding the workbook, so the promise was not kept.
-/// "They can read the shared registry folder anyway" is not a defense: the
+/// "They can read the shared workspace folder anyway" is not a defense: the
 /// app must not be the tool that does it.
 /// `pub(crate)` so the SCRIPT distribution gateway
 /// (`scripting::distribution_gateway`) can run the SAME publisher gate before
@@ -9558,7 +9564,7 @@ pub fn calp_export_package_html(
 /// check written from scratch, which is exactly the drift this function exists
 /// to prevent.
 pub(crate) fn require_publisher(
-    registry: &dyn calp::RegistryTransport,
+    registry: &dyn calp::WorkspaceTransport,
     package_name: &str,
     version: &str,
 ) -> Result<(), String> {
@@ -9575,12 +9581,12 @@ pub(crate) fn require_publisher(
         return Ok(());
     }
 
-    // A CO-PUBLISHER may review too. A package a team develops together is a
-    // package the team collects data for together: routing every approval
-    // through whoever happened to create the package would reinstate the
+    // A CO-PUBLISHER may review too. An application a team develops together is an
+    // application the team collects data for together: routing every approval
+    // through whoever happened to create the application would reinstate the
     // release-manager bottleneck one step to the left. Authorization is the
     // same root-signed list the push gate consults, so there is one answer to
-    // "who is behind this package", not two.
+    // "who is behind this application", not two.
     if let Some(root_key) =
         calp::publishers::root_key_of(registry, package_name).map_err(|e| e.to_string())?
     {
@@ -9605,19 +9611,19 @@ pub(crate) fn require_publisher(
 }
 
 /// Resolve a grid writeback region's owning subscription and assert the caller
-/// is that package's publisher. Shared by the dashboard load and both exports,
+/// is that application's publisher. Shared by the dashboard load and both exports,
 /// so all three enforce identically.
 pub(crate) fn require_region_publisher(state: &AppState, region_id: &str) -> Result<(), String> {
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(state, region_id)?;
     let (registry, _scope) =
-        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
+        crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
     require_publisher(&*registry, &package_name, &resolved_version)
 }
 
 /// The MODEL-writeback twin of `require_region_publisher`: resolve the
 /// subscription that declares a writeback COLUMN and assert the caller holds
-/// that package's Ed25519 signing key.
+/// that application's Ed25519 signing key.
 ///
 /// Used by the script gateway to fail publisher-only actions BEFORE dispatch
 /// (so the denial is audited as a capability event, not just an error string).
@@ -9630,7 +9636,7 @@ pub(crate) fn require_model_writeback_publisher(
     let (package_name, resolved_version, registry_path, _) =
         owning_subscription_for_model_writeback(state, writeback_id)?;
     let (registry, _scope) =
-        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
+        crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
     require_publisher(&*registry, &package_name, &resolved_version)
 }
 
@@ -9849,13 +9855,13 @@ fn ensure_writeback_draft_on_sheet(
 // 1. WHO IS ACTING is already answered by the index being non-empty.
 //    `rebuild_writeback_index` builds this index EXCLUSIVELY from the
 //    signature-verified version manifests of the workbook's active
-//    SUBSCRIPTIONS. A publisher authoring their own package is not subscribed
+//    SUBSCRIPTIONS. A publisher authoring their own application is not subscribed
 //    to it, so their workbook's index is empty and every guard below returns
 //    on its first lock. A non-empty index therefore means "this is a
 //    subscriber's copy of somebody else's published report", which is exactly
 //    the case where restructuring the form is never legitimate. That is why no
 //    `require_region_publisher` escape hatch is wired in here: it would cost a
-//    registry open plus an Ed25519 verification per gesture to re-answer a
+//    workspace open plus an Ed25519 verification per gesture to re-answer a
 //    question the empty-index fast path already answers for free.
 //
 // 2. WHY THE SINGLE-CELL "a draft already exists => allow" RULE DOES NOT APPLY.
@@ -10228,7 +10234,7 @@ mod writeback_claim_tests {
         // the SIGNED version manifest names (`profile_holds_publisher_key`,
         // covered cryptographically in core/calp/src/signing.rs). What must
         // hold HERE is that the gate fails CLOSED when ownership cannot be
-        // established at all — no subscription, no registry, no manifest —
+        // established at all — no subscription, no workspace, no manifest —
         // instead of falling through to "allowed". A subscriber's script
         // reaching `listSubmissions` / `setSubmissionState` lands exactly here.
         let (state, _) = state_with_region();
@@ -10405,7 +10411,7 @@ mod writeback_claim_tests {
 }
 
 /// Resolve the subscription that declares a model writeback column, returning
-/// (package, resolved version, registry path, the SIGNED declaration). The
+/// (application, resolved version, workspace path, the SIGNED declaration). The
 /// declaration always comes from the signature-verified manifest — it is the
 /// governance every submit gate below re-validates against.
 fn owning_subscription_for_model_writeback(
@@ -10420,11 +10426,11 @@ fn owning_subscription_for_model_writeback(
         // RAW location, and RAW is also what is returned to the caller — which
         // opens it again. See `subscription_registry_path`.
         let registry_path = sub.registry_url.clone();
-        let Ok((registry, scope)) = crate::calp_registry::open_registry_scoped(&registry_path) else {
+        let Ok((registry, scope)) = crate::calp_registry::open_workspace_scoped(&registry_path) else {
             continue;
         };
         // ALREADY-TRUSTED (RequirePinned), same reasoning as
-        // `owning_subscription_for_region`: an unpinned package declares
+        // `owning_subscription_for_region`: an unpinned application declares
         // nothing here rather than pinning itself on a cell edit.
         let Ok(manifest) = calp::integrity::load_pinned_manifest_via(
             registry.as_ref(),
@@ -10449,12 +10455,12 @@ fn owning_subscription_for_model_writeback(
         }
     }
     Err(format!(
-        "No subscription declares writeback column '{}' — the package may need a re-pull",
+        "No subscription declares writeback column '{}' — the application may need a re-pull",
         writeback_id
     ))
 }
 
-/// Submit one model writeback entry to the owning package's registry
+/// Submit one model writeback entry to the owning application's workspace
 /// (SUBSCRIBED connections — bi_writeback_set_value routes here).
 ///
 /// P0-parity gates, all against the SIGNED manifest's declaration (never the
@@ -10527,7 +10533,7 @@ pub(crate) fn submit_model_writeback(
     };
 
     let (registry, _scope) =
-        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
+        crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
     registry
         .save_submission(&package_name, &resolved_version, &submission)
         .map_err(|e| e.to_string())?;
@@ -10555,7 +10561,7 @@ pub(crate) fn submit_model_writeback(
     Ok(())
 }
 
-/// List a model writeback column's registry submissions (publisher review).
+/// List a model writeback column's workspace submissions (publisher review).
 /// PUBLISHER-GATED, matching `calp_set_model_submission_state`: this returns
 /// every submitter's raw values and identity for the column.
 #[tauri::command]
@@ -10568,7 +10574,7 @@ pub fn calp_list_model_submissions(
     let (package_name, resolved_version, registry_path, _) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
     let (registry, _scope) =
-        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
+        crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
     // AUTHORIZATION (parity with calp_set_model_submission_state): this returns
     // EVERY submitter's raw values and identity for the column. Publisher only.
     require_publisher(&*registry, &package_name, &resolved_version)?;
@@ -10588,7 +10594,7 @@ pub fn calp_list_model_submissions(
 
 /// Approve or reject a MODEL writeback submission (publisher action, engine
 /// v21 writeback columns). Same authorization as grid submissions: possession
-/// of the package's signing key. The decision is an append-only ReviewEvent
+/// of the application's signing key. The decision is an append-only ReviewEvent
 /// under the version's `reviews/` subtree, targeting the submission by id —
 /// the history record itself is immutable, and its state is derived at read
 /// time by the fold.
@@ -10617,7 +10623,7 @@ pub fn calp_set_model_submission_state(
     let (package_name, resolved_version, registry_path, _) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
     let (registry, _scope) =
-        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
+        crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
 
     // AUTHORIZATION (P0 parity): approve/reject is publisher-only — without
     // this any subscriber could self-approve a masterData value.
@@ -10681,7 +10687,7 @@ pub fn calp_set_model_submission_state(
 /// The decision is an append-only ReviewEvent under the version's `reviews/`
 /// subtree, targeting the CURRENT submission event for the slot by id — the
 /// submission file itself is never rewritten (publisher and submitter never
-/// write the same path, which is what keeps shared/synced registries
+/// write the same path, which is what keeps shared/synced workspaces
 /// conflict-free). If the submitter re-submits after the decision, the review
 /// targets a superseded event and the slot folds back to Submitted ("approve
 /// what you saw"). `on_approval` regions only aggregate Approved submissions
@@ -10713,7 +10719,7 @@ pub fn calp_set_submission_state(
 
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     // AUTHORIZATION (P0): approve/reject is publisher-only. Without this, any
@@ -10839,7 +10845,7 @@ pub struct RegionSubmissionInfo {
 /// owner manages all of it — which is why it is PUBLISHER-GATED. Without that
 /// gate the visibility bypass was reachable by every subscriber holding the
 /// workbook, breaking the `own_only` promise the contributor was shown.
-/// Resolves the owning subscription (package + version + registry) for the
+/// Resolves the owning subscription (application + version + workspace) for the
 /// region, then collects the current record per (submitter, cell) slot across
 /// the resolved version and older ones (lenient carry-forward).
 #[tauri::command]
@@ -10859,7 +10865,7 @@ pub fn calp_load_region_submissions(
     if let Ok((package_name, resolved_version, registry_path)) =
         owning_subscription_for_region(&state, &region_id)
     {
-        if let Ok((registry, _scope)) = crate::calp_registry::open_registry_scoped(&registry_path) {
+        if let Ok((registry, _scope)) = crate::calp_registry::open_workspace_scoped(&registry_path) {
             refresh_rollup_if_publisher(&registry, &package_name, &resolved_version);
         }
     }
@@ -10876,14 +10882,14 @@ fn load_region_current_submissions(
 ) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(state, region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
     let mut versions = vec![resolved_version.clone()];
     versions.extend(older_package_versions(&registry, &package_name, &resolved_version));
 
     // Newest version first: keep the current record per (submitter, cell)
-    // slot. Each version's load is already collapsed by the registry fold, so
+    // slot. Each version's load is already collapsed by the workspace fold, so
     // `or_insert` only arbitrates ACROSS versions.
     let mut by_slot: std::collections::HashMap<(String, u32, u32), calp::writeback::WritebackSubmission> =
         std::collections::HashMap::new();
@@ -11165,14 +11171,14 @@ pub fn calp_export_region_submissions_parquet(
 
 /// Best-effort: (re)materialize the per-version Parquet rollup of the CURRENT
 /// (folded) submissions at `{version}/submissions/_rollup.parquet`, so a
-/// database can read the whole collection by pointing at the registry folder —
+/// database can read the whole collection by pointing at the workspace folder —
 /// no per-event JSON parsing, and no manual export. It lives UNDER
-/// `submissions/` (a post-publish subtree excluded from the package integrity
+/// `submissions/` (a post-publish subtree excluded from the application integrity
 /// walk) so it never trips pull, and it is a non-`.json` file so it is ignored
 /// by submission loading. Failures are logged, not surfaced — the JSON events
 /// remain the source of truth and the next refresh self-heals the rollup.
 fn materialize_submissions_parquet(
-    registry: &dyn calp::RegistryTransport,
+    registry: &dyn calp::WorkspaceTransport,
     package: &str,
     version: &str,
 ) {
@@ -11196,14 +11202,14 @@ fn materialize_submissions_parquet(
 }
 
 /// Publisher-gated, best-effort rollup refresh. Only the PUBLISHER's machine
-/// (holder of the package signing key) ever regenerates `_rollup.parquet`, so
+/// (holder of the application signing key) ever regenerates `_rollup.parquet`, so
 /// exactly one machine owns that path — a sync client can never fork it into
 /// "conflicted copies" the way multi-machine rewrites would. Called from
 /// review actions and publisher inbox/review-pane loads, so the rollup also
 /// picks up submissions (grid AND model/store-table) that arrived while the
 /// publisher was only reading.
 fn refresh_rollup_if_publisher(
-    registry: &dyn calp::RegistryTransport,
+    registry: &dyn calp::WorkspaceTransport,
     package: &str,
     version: &str,
 ) {
@@ -11223,20 +11229,20 @@ fn refresh_rollup_if_publisher(
     }
 }
 
-/// Whether the publisher has opted this package into the auto-materialized
-/// Parquet rollup. Stored in the (unsigned) package manifest's `extra` —
-/// package-level, default OFF, flippable any time by the publisher. It gates
+/// Whether the publisher has opted this application into the auto-materialized
+/// Parquet rollup. Stored in the (unsigned) application manifest's `extra` —
+/// application-level, default OFF, flippable any time by the publisher. It gates
 /// *whether* the rollup is regenerated, not a security boundary, so the unsigned
-/// package manifest is the right home (no per-version, no signing churn).
-fn rollup_enabled(registry: &dyn calp::RegistryTransport, package: &str) -> bool {
+/// application manifest is the right home (no per-version, no signing churn).
+fn rollup_enabled(registry: &dyn calp::WorkspaceTransport, package: &str) -> bool {
     registry
-        .get_package_manifest(package)
+        .get_application_manifest(package)
         .ok()
         .and_then(|m| m.extra.get("writebackRollup").and_then(|v| v.as_bool()))
         .unwrap_or(false)
 }
 
-/// Read whether the Parquet rollup is enabled for the package owning a region.
+/// Read whether the Parquet rollup is enabled for the application owning a region.
 #[tauri::command]
 pub fn calp_get_writeback_rollup(
     state: State<AppState>,
@@ -11245,13 +11251,13 @@ pub fn calp_get_writeback_rollup(
 ) -> Result<bool, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, _v, registry_path) = owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     Ok(rollup_enabled(&registry, &package_name))
 }
 
 /// Publisher-only: enable/disable the auto-materialized Parquet rollup for the
-/// package owning a region. Enabling materializes it immediately so the file
+/// application owning a region. Enabling materializes it immediately so the file
 /// appears at once (not just on the next submit/approve).
 #[tauri::command]
 pub fn calp_set_writeback_rollup(
@@ -11263,17 +11269,17 @@ pub fn calp_set_writeback_rollup(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     require_publisher(&registry, &package_name, &resolved_version)?;
 
-    // The package-manifest read-modify-write is the ONE mutable-file update on
-    // this path — guard it with the registry's publish lock so a concurrent
+    // The application-manifest read-modify-write is the ONE mutable-file update on
+    // this path — guard it with the workspace's publish lock so a concurrent
     // publish can't lose the flag (or the flag lose a version-list update).
     // Submission/review event paths never take any lock, by design.
     let _manifest_guard = registry.lock().map_err(|e| e.to_string())?;
     let mut manifest = registry
-        .get_package_manifest(&package_name)
+        .get_application_manifest(&package_name)
         .map_err(|e| e.to_string())?;
     if enabled {
         manifest
@@ -11283,7 +11289,7 @@ pub fn calp_set_writeback_rollup(
         manifest.extra.remove("writebackRollup");
     }
     registry
-        .write_package_manifest(&manifest)
+        .write_application_manifest(&manifest)
         .map_err(|e| e.to_string())?;
     drop(_manifest_guard);
 
@@ -11321,7 +11327,7 @@ pub fn calp_region_response_status(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let (package_name, resolved_version, registry_path) =
         owning_subscription_for_region(&state, &region_id)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     // AUTHORIZATION: `responded` names every contributor across all submitters
     // — the same cross-submitter disclosure as the inbox, just aggregated.
@@ -11431,7 +11437,7 @@ pub(crate) fn apply_gather_governance(
     submissions.retain(|s| !matches!(s.value, calp::writeback::SubmissionValue::Empty));
 
     // READ-SIDE SCHEMA INTEGRITY (P0): the publisher's ValueSchema is enforced
-    // on the honest submit path, but the registry is a shared directory — a
+    // on the honest submit path, but the workspace is a shared directory — a
     // hand-written submission file can carry an out-of-range or wrong-type value.
     // Drop anything that fails the region's schema so it can never reach an
     // aggregate. (Honest submissions already passed this exact check at submit,
@@ -11590,8 +11596,8 @@ pub(crate) fn merge_lenient_submissions(
 /// refresh eagerly via `invalidate_gather_cache`.
 const GATHER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How long an HTTP registry that failed is left alone before it is tried again.
-/// Without this, an unreachable registry pays a full connect timeout on EVERY
+/// How long an HTTP workspace that failed is left alone before it is tried again.
+/// Without this, an unreachable workspace pays a full connect timeout on EVERY
 /// rebuild — 30s per artifact, every TTL window, forever.
 const GATHER_REGISTRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -11604,7 +11610,7 @@ static GATHER_REFRESH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 static GATHER_REFRESH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// HTTP registry location -> the instant before which it must not be retried.
+/// HTTP workspace location -> the instant before which it must not be retried.
 fn gather_registry_backoff(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
     static BACKOFF: std::sync::OnceLock<
@@ -11613,9 +11619,9 @@ fn gather_registry_backoff(
     BACKOFF.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Whether this registry is currently marked dead. LOCAL registries are never
+/// Whether this workspace is currently marked dead. LOCAL workspaces are never
 /// backed off — a missing directory fails in microseconds, and skipping it would
-/// hide a registry the user just plugged back in.
+/// hide a workspace the user just plugged back in.
 fn registry_is_backed_off(location: &str) -> bool {
     if !crate::calp_registry::is_http_location(location) {
         return false;
@@ -11628,7 +11634,7 @@ fn registry_is_backed_off(location: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Mark an HTTP registry unreachable for `GATHER_REGISTRY_BACKOFF`.
+/// Mark an HTTP workspace unreachable for `GATHER_REGISTRY_BACKOFF`.
 fn mark_registry_unreachable(location: &str) {
     if !crate::calp_registry::is_http_location(location) {
         return;
@@ -11694,10 +11700,10 @@ fn gather_fingerprint(
 ///
 /// This is called from eight places on the calculation path, including
 /// `update_cell` (i.e. every keystroke that commits a cell) and every recalc
-/// pass. It used to build the map INLINE: open every subscribed registry, read
+/// pass. It used to build the map INLINE: open every subscribed workspace, read
 /// and Ed25519-verify a pinned version manifest per subscription (two artifact
 /// reads plus a pin-store disk read each), then scan the whole submission tree.
-/// For an HTTP-registry subscriber that is `reqwest::blocking` with a 30-second
+/// For an HTTP-workspace subscriber that is `reqwest::blocking` with a 30-second
 /// timeout per request — so a single keystroke could freeze the UI for half a
 /// minute, and the 2-second TTL meant it froze again two seconds later.
 ///
@@ -11717,7 +11723,7 @@ fn gather_fingerprint(
 /// building inline — otherwise GATHER would silently never populate.
 pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, engine::GatherRegionData> {
     // Fast path: no writeback regions known to this workbook — no cache, no
-    // worker, no registry I/O. (Declarations are rebuilt at pull, refresh, and
+    // worker, no workspace I/O. (Declarations are rebuilt at pull, refresh, and
     // workbook open.)
     if state
         .writeback_declarations
@@ -11756,7 +11762,7 @@ pub fn build_gather_data(state: &AppState) -> std::collections::HashMap<String, 
 /// Run [`rebuild_gather_cache`] on a background OS thread, then recalculate and
 /// repaint if the data actually changed.
 ///
-/// A plain `std::thread`, deliberately: the registry transports use
+/// A plain `std::thread`, deliberately: the workspace transports use
 /// `reqwest::blocking`, which must not run on the async runtime's worker pool
 /// (it would park a runtime thread for the full 30s timeout).
 pub(crate) fn queue_gather_refresh() {
@@ -11818,7 +11824,7 @@ pub(crate) fn queue_gather_refresh() {
 }
 
 /// Build a GatherRegionData map from the current subscriptions for formula
-/// evaluation, doing the actual registry I/O. BLOCKING — run it on a worker
+/// evaluation, doing the actual workspace I/O. BLOCKING — run it on a worker
 /// thread (see [`queue_gather_refresh`]), never on the edit path.
 ///
 /// Stores the result in `state.gather_cache` before returning it.
@@ -11839,7 +11845,7 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
             continue;
         }
 
-        // An HTTP registry that just failed is not asked again for
+        // An HTTP workspace that just failed is not asked again for
         // GATHER_REGISTRY_BACKOFF. Every read below costs a full 30s connect
         // timeout when the host is down, and there are several per subscription.
         if registry_is_backed_off(&sub.registry_url) {
@@ -11847,7 +11853,7 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
         }
 
         // RAW location — see `subscription_registry_path`.
-        let (registry, scope) = match crate::calp_registry::open_registry_scoped(&sub.registry_url)
+        let (registry, scope) = match crate::calp_registry::open_workspace_scoped(&sub.registry_url)
         {
             Ok(r) => r,
             Err(_) => {
@@ -11866,17 +11872,17 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
         // on the calculation path, behind only a 2s TTL cache). As a pinning
         // site it re-armed continuously: it would silently RE-CREATE a pin the
         // user had just deleted from trusted-publishers.json, on the very next
-        // keystroke. GATHER for an unpinned package now yields nothing.
+        // keystroke. GATHER for an unpinned application now yields nothing.
         let ver_manifest = match calp::integrity::load_pinned_manifest_via(
             registry.as_ref(), &sub.package_name, &sub.resolved_version, &scope, &calcula_profile_dir(),
         ) {
             Ok(m) => {
                 // Reached the host and read a verified manifest — whatever the
-                // backoff thought, this registry is alive.
+                // backoff thought, this workspace is alive.
                 clear_registry_backoff(&sub.registry_url);
                 m
             }
-            // Could be an unreadable network OR a legitimately unpinned package.
+            // Could be an unreadable network OR a legitimately unpinned application.
             // Backing off either way is correct: the unpinned case yields
             // nothing however often it is retried, so retrying it every two
             // seconds over HTTP buys the user only latency.
@@ -11967,7 +11973,7 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
 
             // First subscription declaring a region wins, matching the
             // submit path (owning_subscription_for_region) — last-wins here
-            // would read a different registry than submits write to.
+            // would read a different workspace than submits write to.
             result
                 .entry(region.id.clone())
                 .or_insert(engine::GatherRegionData { submissions: gather_subs });
@@ -11983,8 +11989,8 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
 
 #[cfg(test)]
 mod gather_hot_path_tests {
-    //! GATHER must never do registry I/O on the edit path, and an unreachable
-    //! registry must not be re-dialed every two seconds.
+    //! GATHER must never do workspace I/O on the edit path, and an unreachable
+    //! workspace must not be re-dialed every two seconds.
 
     use super::*;
 
@@ -12038,8 +12044,8 @@ mod gather_hot_path_tests {
     /// THE hot-path property: an EXPIRED cache is still served immediately.
     ///
     /// This used to fall through to a full rebuild — open every subscribed
-    /// registry, read and Ed25519-verify a pinned manifest, scan the submission
-    /// tree — INSIDE `update_cell`. Over an HTTP registry that is
+    /// workspace, read and Ed25519-verify a pinned manifest, scan the submission
+    /// tree — INSIDE `update_cell`. Over an HTTP workspace that is
     /// `reqwest::blocking` with a 30-second timeout, so one keystroke could
     /// freeze the UI, and the 2-second TTL meant it froze again two seconds
     /// later. The refresh is now queued to a worker instead.
@@ -12085,7 +12091,7 @@ mod gather_hot_path_tests {
         assert!(state.gather_cache.lock().unwrap().is_none());
     }
 
-    // --- Per-registry failure backoff --------------------------------------
+    // --- Per-workspace failure backoff --------------------------------------
 
     #[test]
     fn an_unreachable_http_registry_is_backed_off_and_local_ones_never_are() {
@@ -12098,7 +12104,7 @@ mod gather_hot_path_tests {
         mark_registry_unreachable(http);
         assert!(
             registry_is_backed_off(http),
-            "an unreachable HTTP registry must not be re-dialed every TTL window"
+            "an unreachable HTTP workspace must not be re-dialed every TTL window"
         );
 
         mark_registry_unreachable(local);
@@ -12141,7 +12147,7 @@ mod gather_hot_path_tests {
 
 #[cfg(test)]
 mod writeback_rebuild_tests {
-    //! Workbook OPEN must not block on HTTP registries, and a subscription whose
+    //! Workbook OPEN must not block on HTTP workspaces, and a subscription whose
     //! regions could not be installed must say so.
 
     use super::*;
@@ -12205,7 +12211,7 @@ mod writeback_rebuild_tests {
         assert_eq!(skips[0].package_name, "acme.finance");
     }
 
-    /// Local registries stay INLINE — the write guards must be armed before the
+    /// Local workspaces stay INLINE — the write guards must be armed before the
     /// user can type, and a local read costs microseconds.
     #[test]
     fn local_subscriptions_are_never_deferred() {
@@ -12218,12 +12224,12 @@ mod writeback_rebuild_tests {
 
         assert!(
             !outcome.deferred_http,
-            "a local registry must be walked inline"
+            "a local workspace must be walked inline"
         );
         let skips = state.writeback_rebuild_skips.lock().unwrap();
         assert!(
             skips.iter().all(|s| s.reason != "deferred"),
-            "a local registry must never be deferred: {:?}",
+            "a local workspace must never be deferred: {:?}",
             skips
         );
     }
@@ -12345,7 +12351,7 @@ mod writeback_rebuild_tests {
             "publisherChanged"
         );
         assert_eq!(
-            calp_skip_reason(&E::PackageNotFound("p".into())),
+            calp_skip_reason(&E::ApplicationNotFound("p".into())),
             "unreachable"
         );
         assert_eq!(
@@ -12752,7 +12758,7 @@ mod gather_governance_tests {
 #[cfg(test)]
 mod audit_summary_tests {
     //! `summarize_ids` bounds the audit description a refresh writes when it
-    //! invalidates writeback regions — a 200-region package must not produce a
+    //! invalidates writeback regions — a 200-region application must not produce a
     //! 200-id line in the workbook's audit log.
     use super::summarize_ids;
 
@@ -12815,7 +12821,7 @@ mod merge_lenient_tests {
     use calp::SubmitterIdentity;
 
     /// One stable sheet id for the whole module. The same region id across two
-    /// package versions necessarily sits on the same sheet, so minting a fresh
+    /// application versions necessarily sits on the same sheet, so minting a fresh
     /// random id per fixture call would have made every "old version" look like
     /// it lived somewhere else — which the geometry gate (correctly) treats as
     /// incompatible.
@@ -13103,19 +13109,19 @@ mod writeback_export_tests {
     }
 
     // Integration: the auto-materialize writes a real rollup into a real
-    // registry, it reads back as Parquet with one row per slot, and it is
+    // workspace, it reads back as Parquet with one row per slot, and it is
     // invisible to the integrity walk (so it never trips pull) and to
     // submission loading.
     #[test]
     fn rollup_materializes_reads_back_and_is_integrity_excluded() {
-        use calp::registry::LocalRegistry;
+        use calp::workspace::LocalWorkspace;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-        // A throwaway registry under the OS temp dir.
+        // A throwaway workspace under the OS temp dir.
         let root = std::env::temp_dir().join(format!("calcula_wb_rollup_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let reg = LocalRegistry::open(&root).unwrap();
+        let reg = LocalWorkspace::open(&root).unwrap();
 
         // Two submissions (two slots) — one numeric, one text — plus a
         // RESUBMISSION of the first slot (a third event file): the rollup must
@@ -13162,23 +13168,23 @@ mod writeback_export_tests {
 
     #[test]
     fn rollup_toggle_defaults_off_and_flips_on() {
-        use calp::manifest::PackageManifest;
-        use calp::registry::LocalRegistry;
+        use calp::manifest::ApplicationManifest;
+        use calp::workspace::LocalWorkspace;
 
         let root = std::env::temp_dir().join(format!("calcula_wb_toggle_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let reg = LocalRegistry::open(&root).unwrap();
+        let reg = LocalWorkspace::open(&root).unwrap();
 
-        let mut pm = PackageManifest::new("pkg", "report", "auth", "2026-01-01T00:00:00Z");
-        reg.write_package_manifest(&pm).unwrap();
+        let mut pm = ApplicationManifest::new("pkg", "report", "auth", "2026-01-01T00:00:00Z");
+        reg.write_application_manifest(&pm).unwrap();
         // Default OFF (opt-in).
         assert!(!super::rollup_enabled(&reg, "pkg"));
 
         // Publisher flips it on (what calp_set_writeback_rollup persists).
         pm.extra
             .insert("writebackRollup".to_string(), serde_json::Value::Bool(true));
-        reg.write_package_manifest(&pm).unwrap();
+        reg.write_application_manifest(&pm).unwrap();
         assert!(super::rollup_enabled(&reg, "pkg"));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -13211,7 +13217,7 @@ pub fn calp_get_subscriber_identity(
     get_subscriber_identity(&state)
 }
 
-/// Suggest the next version for a package given a bump type ("major", "minor", "patch").
+/// Suggest the next version for an application given a bump type ("major", "minor", "patch").
 #[tauri::command]
 pub fn calp_next_version(
     registry_path: String,
@@ -13220,10 +13226,10 @@ pub fn calp_next_version(
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (registry, _scope) = crate::calp_registry::open_registry_scoped(&registry_path)
+    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
 
-    let manifest = registry.get_package_manifest(&package_name)
+    let manifest = registry.get_application_manifest(&package_name)
         .map_err(|e| e.to_string())?;
 
     // Parse all available versions and find the latest.
@@ -13251,7 +13257,7 @@ pub fn calp_next_version(
 }
 
 // ============================================================================
-// Pivot Restoration for Pulled Packages
+// Pivot Restoration for Pulled Applications
 // ============================================================================
 
 /// Connection spec info extracted from a model's connectionSpecs.
@@ -13268,7 +13274,7 @@ pub struct ConnectionSpecInfo {
 /// - the engine's persisted sources catalog (v14+) at `model.sources` —
 ///   `{ id, kind, preferred_auth, connection: { host, port, database } }` —
 ///   which is what Model-Editor-authored models carry. Without this fallback a
-///   subscribed package's connection lands with an empty database and any
+///   subscribed application's connection lands with an empty database and any
 ///   live connect silently targets the user's default database (where the
 ///   model's schema does not exist).
 pub fn extract_connection_spec_info(model_json: &serde_json::Value) -> ConnectionSpecInfo {
@@ -13448,8 +13454,8 @@ fn read_pulled_model(
     Some((json_value, model))
 }
 
-/// Load embedded BI model data sources from a pulled package into BiState.
-/// Returns a mapping from package data source ID to the created connection ID.
+/// Load embedded BI model data sources from a pulled application into BiState.
+/// Returns a mapping from application data source ID to the created connection ID.
 /// Also re-binds ribbon filters AND BI-sourced slicers (Wave A) saved against
 /// a previous session's connection uuid to the freshly minted ones (via the
 /// stable data_source_id / publisher connection uuid respectively).
@@ -13494,7 +13500,7 @@ fn load_embedded_data_sources(
         });
 
         // Restore materialized calculated-table snapshots carried in the
-        // package: the subscriber may have no source access, so this is the
+        // application: the subscriber may have no source access, so this is the
         // only data those derived tables get until a refresh succeeds.
         for (table, path) in &ds.calculated_table_snapshots {
             match read_ipc_batch(path) {
@@ -13545,7 +13551,7 @@ fn load_embedded_data_sources(
         // Allocate a connection ID and register the connection
         let conn_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
 
-        // Build bindings from the package definition
+        // Build bindings from the application definition
         let bindings: Vec<crate::bi::types::BiBindRequest> = ds.definition.bindings.iter().map(|b| {
             crate::bi::types::BiBindRequest {
                 model_table: b.model_table.clone(),
@@ -13555,14 +13561,14 @@ fn load_embedded_data_sources(
             }
         }).collect();
 
-        // Use server/database from model's connectionSpecs, falling back to package metadata
+        // Use server/database from model's connectionSpecs, falling back to application metadata
         let conn_server = if !spec_info.server.is_empty() { spec_info.server.clone() } else { ds.definition.server.clone() };
         let conn_database = if !spec_info.database.is_empty() { spec_info.database.clone() } else { ds.definition.database.clone() };
         let conn_preferred_auth = spec_info.preferred_auth.clone();
 
         // Derive the connection type from the model's connectionSpecs,
-        // falling back to the package manifest. (Previously hardcoded to
-        // PostgreSQL regardless of what the package declared.)
+        // falling back to the application manifest. (Previously hardcoded to
+        // PostgreSQL regardless of what the application declared.)
         let conn_type = if !spec_info.connector_type.is_empty() {
             ConnectionType::parse_or_default(&spec_info.connector_type)
         } else {
@@ -13572,7 +13578,7 @@ fn load_embedded_data_sources(
         let connection = Connection {
             id: conn_id,
             name: ds.definition.name.clone(),
-            description: format!("Embedded model from package ({})", ds.definition.id),
+            description: format!("Embedded model from application ({})", ds.definition.id),
             connection_type: conn_type,
             connection_string: String::new(), // subscriber provides credentials via Connect
             server: conn_server.clone(),
@@ -13588,8 +13594,8 @@ fn load_embedded_data_sources(
             is_connected: false,
             active_queries: std::collections::HashMap::new(),
             package_data_source_id: Some(ds.definition.id.clone()),
-            // Restore a saved "view as" RLS role for this package connection
-            // (keyed by package data source id), if one was persisted.
+            // Restore a saved "view as" RLS role for this application connection
+            // (keyed by application data source id), if one was persisted.
             active_role: bi_state.pending_role_for(Some(&ds.definition.id), None),
             base_model: Some(base_model),
             calculated_measures: Vec::new(),
@@ -13611,7 +13617,7 @@ fn load_embedded_data_sources(
         );
     }
 
-    // `load_embedded_data_sources` runs on the OPEN path (restoring package
+    // `load_embedded_data_sources` runs on the OPEN path (restoring application
     // connections from the file), so this re-bind must not dirty a freshly opened
     // workbook -- same reasoning as every other store rebuild in open_file.
     let load = crate::document_effect::DocumentEffect::deliberately_clean(
@@ -13623,7 +13629,7 @@ fn load_embedded_data_sources(
     ds_to_conn
 }
 
-/// Re-materialize refreshed package data sources onto their EXISTING
+/// Re-materialize refreshed application data sources onto their EXISTING
 /// connections: swap the shared engine's model to the new version's and
 /// update the connection's base_model (workbook calculated measures
 /// re-applied on top). Without this, refreshing a dataset (model-only)
@@ -13746,16 +13752,16 @@ fn refresh_embedded_data_sources(
     newly_created
 }
 
-/// Why one subscription's PACKAGE BI connections were NOT re-materialized when
+/// Why one subscription's APPLICATION BI connections were NOT re-materialized when
 /// the workbook was opened.
 ///
-/// Same purpose as [`WritebackRebuildSkip`]: without it, "this package has no
-/// data sources" and "this package's model could not be verified on this
+/// Same purpose as [`WritebackRebuildSkip`]: without it, "this application has no
+/// data sources" and "this application's model could not be verified on this
 /// machine" are the same observable state — no connection — and a subscriber
 /// staring at a pivot that says it has no model cannot tell which.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PackageConnectionRestoreSkip {
+pub struct ApplicationConnectionRestoreSkip {
     pub package_name: String,
     pub registry_url: String,
     /// One of: `unreachable`, `notPinned`, `publisherChanged`, `badManifest`,
@@ -13767,13 +13773,13 @@ pub struct PackageConnectionRestoreSkip {
 }
 
 /// Re-materialize the BI connections a `.calp` pull created, when a subscribed
-/// workbook is OPENED. Returns package-data-source-id -> live ConnectionId so
+/// workbook is OPENED. Returns application-data-source-id -> live ConnectionId so
 /// the caller can re-point saved BI pivots at them.
 ///
 /// ## THE HOLE THIS CLOSES
 ///
-/// `capture_local_bi_connections` deliberately skips package connections when
-/// saving a `.cala`: a package's model belongs to the publisher and travels in
+/// `capture_local_bi_connections` deliberately skips application connections when
+/// saving a `.cala`: an application's model belongs to the publisher and travels in
 /// the `.calp`, and embedding a copy in every subscriber's workbook would mean
 /// a subscriber's file could serve a model no publisher ever signed. That was
 /// right, but nothing put those connections BACK. Measured on a saved
@@ -13786,22 +13792,22 @@ pub struct PackageConnectionRestoreSkip {
 ///
 /// ## THE DESIGN
 ///
-/// Re-materialize from the SUBSCRIPTION LEDGER (which package, which registry,
-/// which resolved version) plus the LOCAL PACKAGE CACHE (the registry the pull
+/// Re-materialize from the SUBSCRIPTION LEDGER (which application, which workspace,
+/// which resolved version) plus the LOCAL APPLICATION CACHE (the workspace the pull
 /// read), through `calp::pull::load_verified_data_sources` — which runs the
 /// same three gates `pull` runs, in the same order, under
 /// `PinPolicy::RequirePinned`. See its doc comment for the full chain.
 ///
-/// The earlier decision that a PULL is the only thing that creates a package
+/// The earlier decision that a PULL is the only thing that creates an application
 /// connection was deliberate and is not weakened here: this cannot create a
-/// connection for a package that was never pulled and pinned on this machine
+/// connection for an application that was never pulled and pinned on this machine
 /// (`RequirePinned` makes first contact a hard error), it cannot mint a pin, and
 /// it cannot advance a version — it re-materializes exactly the version the
 /// ledger says the subscriber already accepted.
 ///
 /// ## WHAT HAPPENS WHEN IT CANNOT
 ///
-/// * **Package missing / registry gone / version deleted / offline** — the
+/// * **Application missing / workspace gone / version deleted / offline** — the
 ///   manifest read fails, the subscription is SKIPPED, no connection is made.
 ///   The workbook opens with its cells (the last pull's data is in the `.cala`)
 ///   and its pivots report no connection, exactly as before this function
@@ -13810,30 +13816,30 @@ pub struct PackageConnectionRestoreSkip {
 ///   tampered with** — `load_verified_data_sources` errors and the subscription
 ///   is SKIPPED. There is deliberately no fallback to the unverified bytes: a
 ///   subscriber that cannot prove which model it has gets no model.
-/// * **HTTP registry** — skipped WITHOUT any network I/O. Two reasons, both
+/// * **HTTP workspace** — skipped WITHOUT any network I/O. Two reasons, both
 ///   decisive: `local_artifact_path` returns `None` for a non-local transport,
-///   so a package connection has never materialized from an HTTP registry even
+///   so an application connection has never materialized from an HTTP workspace even
 ///   on the pull path (nothing is lost here that a pull would have given); and
 ///   verifying artifacts over HTTP means downloading every artifact behind a
 ///   30-second-timeout blocking read, on the open, before a cell is drawn —
 ///   the precise hang `rebuild_writeback_index_deferring_http` was written to
 ///   avoid.
 /// * **Dev / channel subscriptions** — skipped silently, as in every other
-///   registry walk: a dev subscription's source is a local `.cala`, not a
-///   signed registry package, so there is no manifest to verify.
+///   workspace walk: a dev subscription's source is a local `.cala`, not a
+///   signed workspace application, so there is no manifest to verify.
 ///
-/// Every non-silent skip is recorded in `state.package_connection_restore_skips`
-/// and surfaced by `calp_get_package_connection_skips`.
+/// Every non-silent skip is recorded in `state.application_connection_restore_skips`
+/// and surfaced by `calp_get_application_connection_skips`.
 ///
 /// ADDITIVE, like `restore_local_bi_connections`: a data source that already has
 /// a live connection is left alone, so this can never double-materialize.
-pub(crate) fn restore_package_bi_connections(
+pub(crate) fn restore_application_bi_connections(
     state: &AppState,
     bi_state: &BiState,
     ribbon_filter_state: &crate::ribbon_filter::RibbonFilterState,
     slicer_state: &crate::slicer::SlicerState,
 ) -> std::collections::HashMap<String, crate::bi::types::ConnectionId> {
-    // CLONED, not held: the walk below is registry I/O and manifest hashing.
+    // CLONED, not held: the walk below is workspace I/O and manifest hashing.
     let subscriptions = match state.subscriptions.read() {
         Ok(s) => s.subscriptions.clone(),
         Err(_) => return std::collections::HashMap::new(),
@@ -13841,7 +13847,7 @@ pub(crate) fn restore_package_bi_connections(
 
     let mut ds_to_conn: std::collections::HashMap<String, crate::bi::types::ConnectionId> =
         std::collections::HashMap::new();
-    let mut skips: Vec<PackageConnectionRestoreSkip> = Vec::new();
+    let mut skips: Vec<ApplicationConnectionRestoreSkip> = Vec::new();
 
     for sub in &subscriptions {
         if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
@@ -13850,7 +13856,7 @@ pub(crate) fn restore_package_bi_connections(
         // RAW location — see `subscription_registry_path`.
         let registry_path = subscription_registry_path(sub);
         if crate::calp_registry::is_http_location(registry_path) {
-            skips.push(PackageConnectionRestoreSkip {
+            skips.push(ApplicationConnectionRestoreSkip {
                 package_name: sub.package_name.clone(),
                 registry_url: registry_path.to_string(),
                 reason: "unsupportedTransport".to_string(),
@@ -13861,17 +13867,17 @@ pub(crate) fn restore_package_bi_connections(
             });
             continue;
         }
-        let (registry, scope) = match crate::calp_registry::open_registry_scoped(registry_path) {
+        let (registry, scope) = match crate::calp_registry::open_workspace_scoped(registry_path) {
             Ok(r) => r,
             Err(e) => {
                 crate::log_warn!(
                     "CALP",
-                    "package connections: {} skipped ({}): {}",
+                    "application connections: {} skipped ({}): {}",
                     sub.package_name,
                     calp_skip_reason(&e),
                     e
                 );
-                skips.push(PackageConnectionRestoreSkip {
+                skips.push(ApplicationConnectionRestoreSkip {
                     package_name: sub.package_name.clone(),
                     registry_url: registry_path.to_string(),
                     reason: calp_skip_reason(&e).to_string(),
@@ -13892,13 +13898,13 @@ pub(crate) fn restore_package_bi_connections(
             Err(e) => {
                 crate::log_warn!(
                     "CALP",
-                    "package connections: {}@{} skipped ({}): {}",
+                    "application connections: {}@{} skipped ({}): {}",
                     sub.package_name,
                     sub.resolved_version,
                     calp_skip_reason(&e),
                     e
                 );
-                skips.push(PackageConnectionRestoreSkip {
+                skips.push(ApplicationConnectionRestoreSkip {
                     package_name: sub.package_name.clone(),
                     registry_url: registry_path.to_string(),
                     reason: calp_skip_reason(&e).to_string(),
@@ -13936,14 +13942,14 @@ pub(crate) fn restore_package_bi_connections(
         }
     }
 
-    if let Ok(mut s) = state.package_connection_restore_skips.lock() {
+    if let Ok(mut s) = state.application_connection_restore_skips.lock() {
         *s = skips;
     }
 
     if !ds_to_conn.is_empty() {
         crate::log_info!(
             "CALP",
-            "restored {} package BI connection(s) on open",
+            "restored {} application BI connection(s) on open",
             ds_to_conn.len()
         );
         // The engines were created after the open-path writeback rebuild, so
@@ -13955,23 +13961,23 @@ pub(crate) fn restore_package_bi_connections(
     ds_to_conn
 }
 
-/// Every subscription whose PACKAGE BI connections could not be restored when
-/// this workbook was opened, and why. Empty means every subscribed package's
-/// model is live (or the package declares no data source).
+/// Every subscription whose APPLICATION BI connections could not be restored when
+/// this workbook was opened, and why. Empty means every subscribed application's
+/// model is live (or the application declares no data source).
 #[tauri::command]
-pub fn calp_get_package_connection_skips(
+pub fn calp_get_application_connection_skips(
     state: State<AppState>,
     window: tauri::Window,
-) -> Result<Vec<PackageConnectionRestoreSkip>, String> {
+) -> Result<Vec<ApplicationConnectionRestoreSkip>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     state
-        .package_connection_restore_skips
+        .application_connection_restore_skips
         .lock()
         .map(|s| s.clone())
         .map_err(|e| e.to_string())
 }
 
-/// Restore pivot definitions from a pulled .calp package: deserialize, rebuild
+/// Restore pivot definitions from a pulled .calp application: deserialize, rebuild
 /// cache from source grid data, calculate the view, and write output cells.
 fn restore_pulled_pivots(
     effect: &crate::document_effect::DocumentEffect,
@@ -14020,7 +14026,7 @@ fn restore_pulled_pivots(
 
         // The pivot anchors its output by sheet NAME. If collision resolution
         // renamed the pulled sheet ("Sheet1" -> "Sheet1 (2)"), rewrite the
-        // stored anchor so the pivot lands on the package's own sheet — not on
+        // stored anchor so the pivot lands on the application's own sheet — not on
         // the subscriber's same-named sheet (or sheet 0 via the fallback).
         if let Some(ref dest) = def.destination_sheet {
             if let Some(renamed) = sheet_rename_map.get(dest) {
@@ -14040,7 +14046,7 @@ fn restore_pulled_pivots(
             def.source_range_display = Some("BI Model".to_string());
         }
 
-        // Build cache — try grid data first (even for BI pivots, the package
+        // Build cache — try grid data first (even for BI pivots, the application
         // includes a snapshot of the data), fall back to empty cache.
         let source_sheet_idx = saved.source_sheet_index.map(|i| i + sheet_offset);
         let (mut cache, _field_names) = if let Some(idx) = source_sheet_idx {
@@ -14100,9 +14106,9 @@ fn restore_pulled_pivots(
         if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(effect) {
             for meta_json in bi_pivot_metadata {
                 if let Ok(saved) = serde_json::from_value::<SavedBiPivotMetadata>(meta_json.clone()) {
-                    // Route each pivot to ITS package data source. Packages
+                    // Route each pivot to ITS application data source. Applications
                     // published before data_source_id existed fall back to
-                    // the first embedded connection (single-source packages
+                    // the first embedded connection (single-source applications
                     // are unaffected; multi-source ones should republish).
                     let conn_id = saved
                         .data_source_id
@@ -14115,7 +14121,7 @@ fn restore_pulled_pivots(
                         saved.pivot_id, saved.model_tables.len(), saved.measures.len(), saved.data_source_id, conn_id);
                     bi_meta.insert(saved.pivot_id, BiPivotMetadata {
                         connection_id: conn_id,
-                        // Keep the PACKAGE data source id so re-saves and
+                        // Keep the APPLICATION data source id so re-saves and
                         // re-publishes keep routing this pivot correctly.
                         data_source_id: saved.data_source_id.clone(),
                         model_tables: saved.model_tables,
@@ -14234,8 +14240,8 @@ fn capture_bi_data_sources(
         let ds_id = conn.id.to_string();
 
         // Convert bindings
-        let bindings: Vec<calp::PackageBinding> = conn.bindings.iter().map(|b| {
-            calp::PackageBinding {
+        let bindings: Vec<calp::TableBinding> = conn.bindings.iter().map(|b| {
+            calp::TableBinding {
                 model_table: b.model_table.clone(),
                 schema: b.schema.clone(),
                 source_table: b.source_table.clone(),
@@ -14434,7 +14440,7 @@ pub async fn calp_refresh_data(
 
     // Collect data sources from all subscriptions
     let subscription_data: Vec<(
-        calp::PackageDataSource,
+        calp::ApplicationDataSource,
         std::path::PathBuf,
         Option<String>, // saved connection string
     )> = {
@@ -14449,7 +14455,7 @@ pub async fn calp_refresh_data(
 
             // RAW location — see `subscription_registry_path`.
             let (registry, scope) =
-                match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+                match crate::calp_registry::open_workspace_scoped(&sub.registry_url) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
@@ -14458,8 +14464,8 @@ pub async fn calp_refresh_data(
             // decide WHERE this command opens a database connection and sends
             // the subscriber's credentials (a saved connection string, or their
             // Windows identity via SSPI). An unverified read meant anyone able
-            // to write the registry directory — a shared folder, a synced drive
-            // — could repoint a subscribed package's data source at a host they
+            // to write the workspace directory — a shared folder, a synced drive
+            // — could repoint a subscribed application's data source at a host they
             // control and harvest the credentials on the next Refresh, with no
             // signature to break and nothing on screen to notice. Same gate the
             // writeback rebuild uses: verified against the publisher key this
@@ -14502,7 +14508,7 @@ pub async fn calp_refresh_data(
                     Ok(None) => {
                         crate::log_warn!(
                             "CALP",
-                            "Data source '{}' model refresh is unsupported for this registry transport (no local artifact); skipping",
+                            "Data source '{}' model refresh is unsupported for this workspace transport (no local artifact); skipping",
                             ds.id
                         );
                         continue;
@@ -14554,7 +14560,7 @@ pub async fn calp_refresh_data(
         };
 
         // Detect ModelBundle format. Parse failures skip THIS source — one
-        // corrupt package must not abort verification of the others.
+        // corrupt application must not abort verification of the others.
         let actual_model_json = if model_json.get("formatVersion").is_some() {
             match model_json.get("model") {
                 Some(m) => m.clone(),
@@ -14667,13 +14673,13 @@ pub fn calp_save_data_source_config(
         // Find any subscription that references this data source.
         // RAW location — see `subscription_registry_path`.
         let (registry, scope) =
-            match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+            match crate::calp_registry::open_workspace_scoped(&sub.registry_url) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
 
         // TRUST-BEARING READ, for the same reason `calp_refresh_data`'s is: the
-        // data-source list this walks decides which package owns a data source
+        // data-source list this walks decides which application owns a data source
         // id, and its `server` / `database` are what the connection dialog shows
         // and what a refresh then connects to. Only a manifest signed by the
         // publisher key this machine pinned may answer.
@@ -14727,13 +14733,13 @@ pub fn calp_get_data_sources(
 
         // RAW location — see `subscription_registry_path`.
         let (registry, scope) =
-            match crate::calp_registry::open_registry_scoped(&sub.registry_url) {
+            match crate::calp_registry::open_workspace_scoped(&sub.registry_url) {
                 Ok(r) => r,
                 Err(_) => continue,
             };
 
         // TRUST-BEARING READ, for the same reason `calp_refresh_data`'s is: the
-        // data-source list this walks decides which package owns a data source
+        // data-source list this walks decides which application owns a data source
         // id, and its `server` / `database` are what the connection dialog shows
         // and what a refresh then connects to. Only a manifest signed by the
         // publisher key this machine pinned may answer.
@@ -14859,10 +14865,10 @@ pub fn calp_reset_subscription(
 
     // Re-pull the EXACT resolved version (signature + TOFU + checksum gates run
     // again — reset must not materialize content weaker-verified than pull did).
-    // The registry as the SUBSCRIPTION recorded it: the scope derived from it is
+    // The workspace as the SUBSCRIPTION recorded it: the scope derived from it is
     // the one the original subscribe pinned under, which is what RequirePinned
     // below is measured against.
-    let (registry, scope) = crate::calp_registry::open_registry_scoped(&params.registry_url)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_url)
         .map_err(|e| e.to_string())?;
     let request = calp::pull::PullRequest {
         package_name: params.package_name.clone(),
@@ -14870,7 +14876,7 @@ pub fn calp_reset_subscription(
             .map_err(|e| e.to_string())?,
         now: chrono::Utc::now().to_rfc3339(),
     };
-    // ALREADY-TRUSTED: "Reset to published" restores a package the user
+    // ALREADY-TRUSTED: "Reset to published" restores an application the user
     // subscribed to. Re-pulling the exact resolved version must not be a way to
     // acquire the pin the subscribe step never granted.
     let result = calp::pull::pull(
@@ -14898,7 +14904,7 @@ pub fn calp_reset_subscription(
             .collect()
     };
     if targets.is_empty() {
-        return Err("None of this package's sheets are present in the workbook.".to_string());
+        return Err("None of this application's sheets are present in the workbook.".to_string());
     }
     let local_sheet_ids: Vec<SheetId> = targets.iter().map(|(_, sid, _)| *sid).collect();
 
@@ -14961,7 +14967,7 @@ pub fn calp_reset_subscription(
     };
     let overrides_cleared = snapshot.overrides.len();
 
-    // The reset also restores the PACKAGE's pivot definitions — a subscriber
+    // The reset also restores the APPLICATION's pivot definitions — a subscriber
     // changing "the layout" usually means the pivot layout, and resetting only
     // the sheet cells would let the modified pivot immediately re-render its
     // changed layout over the pristine content. Map each published definition
@@ -15066,7 +15072,7 @@ pub fn calp_reset_subscription(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Apply: replace each tracked sheet's grid (style-remapped into the shared
-    // registry, exactly like pull/refresh), widths, heights, and merges.
+    // workspace, exactly like pull/refresh), widths, heights, and merges.
     let mut active_affected = false;
     {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
@@ -15081,9 +15087,9 @@ pub fn calp_reset_subscription(
             grid.remap_style_indices(&remap);
             if *idx < grids.len() {
                 grids[*idx] = grid;
-                // Reset to package replaces the sheet's whole grid, so the
+                // Reset to application replaces the sheet's whole grid, so the
                 // subscriber's own spill claims for it go with it and the
-                // package's extents take their place.
+                // application's extents take their place.
                 crate::spill_restore::restore_spill_extents_for_sheet(
                     state.inner(),
                     *idx,
@@ -15149,7 +15155,7 @@ pub fn calp_reset_subscription(
     }
 
     // §2t ON THE DISTRIBUTION PATH -- see `calp_pull`. A reset rebuilds each
-    // tracked sheet's formulas from the package's stored TEXT through the same
+    // tracked sheet's formulas from the application's stored TEXT through the same
     // lexer, so without this a "reset to published state" also re-spells every
     // defined name on those sheets in capitals.
     crate::persistence::restamp_workbook_name_casing(&state, &effect);
@@ -15490,7 +15496,7 @@ mod c8_materialize_tests {
     use super::materialize_distributed_scripts;
     use crate::scripting::types::{ScriptScope, ScriptState, WorkbookScript};
 
-    /// A pulled module, stamped with its source package (as pull does).
+    /// A pulled module, stamped with its source application (as pull does).
     fn mk_module(pkg: &str, id: &str, source: &str) -> persistence::SavedScript {
         persistence::SavedScript {
             id: id.to_string(),
@@ -15567,7 +15573,7 @@ mod c8_materialize_tests {
                 source_package: None,
             },
         );
-        // A package ships its own "m1" -> the local one is preserved, package skipped.
+        // An application ships its own "m1" -> the local one is preserved, application skipped.
         materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg", &[mk_module("pkg", "m1", "upstream")], &[]).unwrap();
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "my local edit");
@@ -15578,7 +15584,7 @@ mod c8_materialize_tests {
     fn does_not_let_one_package_shadow_anothers_same_id() {
         let st = ScriptState::new();
         materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-a", &[mk_module("pkg-a", "m1", "from-a")], &[]).unwrap();
-        // A second package reuses the id -> the first package keeps ownership.
+        // A second application reuses the id -> the first application keeps ownership.
         materialize_distributed_scripts(&crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default()), &st, "pkg-b", &[mk_module("pkg-b", "m1", "from-b")], &[]).unwrap();
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "from-a");
@@ -15619,7 +15625,7 @@ mod pane_control_pull_tests {
         }
     }
 
-    /// A pulled (package) checkbox pane control.
+    /// A pulled (application) checkbox pane control.
     fn saved(name: &str, order: u32) -> persistence::SavedPaneControl {
         persistence::SavedPaneControl {
             id: identity::EntityId::from_bytes(identity::generate_uuid_v7()),
@@ -15716,18 +15722,18 @@ mod pane_control_pull_tests {
     #[test]
     fn package_own_on_grid_names_never_shadow_its_pane_controls() {
         // The calp_pull/refresh ordering contract: the on-grid snapshot handed
-        // to the materializer is taken BEFORE the package's own on-grid
-        // controls land. A package shipping BOTH an on-grid button and a pane
+        // to the materializer is taken BEFORE the application's own on-grid
+        // controls land. An application shipping BOTH an on-grid button and a pane
         // control named "Threshold" must still get its pane control applied —
         // the guard protects the SUBSCRIBER's pre-existing names, not the
-        // package against itself.
+        // application against itself.
         let pane = PaneControlState::new();
         let filters = RibbonFilterState::new();
         // Subscriber's pre-pull on-grid state: one named control of their own.
         let mut storage: ControlStorage = HashMap::new();
         storage.insert((0, 0, 0), on_grid("static", "LocalName"));
         let snapshot = storage.clone(); // what calp_pull snapshots pre-materialization
-        // The package's own on-grid control materializes (same name as its
+        // The application's own on-grid control materializes (same name as its
         // pane control) — AFTER the snapshot, so it must not enter taken_names.
         storage.insert((3, 1, 1), on_grid("static", "Threshold"));
 
@@ -15737,7 +15743,7 @@ mod pane_control_pull_tests {
         assert_eq!(applied.len(), 1, "applied: {:?}", applied);
         assert_eq!(
             applied[0].1, "Threshold",
-            "the package's own on-grid name must not block its own pane control"
+            "the application's own on-grid name must not block its own pane control"
         );
         // The subscriber's name still guards: "LocalName" was skipped.
         assert!(pane.controls.lock().unwrap().values().all(|c| c.name == "Threshold"));
@@ -15819,7 +15825,7 @@ mod tofu_pin_policy_guard_tests {
     ///
     /// Both are commit points with a human behind them:
     ///   * `calp_commands::calp_pull`      — Subscribe, after the user reviewed
-    ///     the package and its publisher key in the Subscribe dialog.
+    ///     the application and its publisher key in the Subscribe dialog.
     ///   * `library_commands::library_resolve(confirm: true)` — Install, after
     ///     the user approved the resolved closure.
     ///
@@ -15852,7 +15858,7 @@ mod tofu_pin_policy_guard_tests {
             let prod = scan(src.split("#[cfg(test)]").next().unwrap());
             // BOTH pinning policies are counted. `PinAcceptingNameConflict` is
             // `PinOnFirstUse` plus a second, differently-worded confirmation
-            // that the user saw a cross-registry name conflict — it is the same
+            // that the user saw a cross-workspace name conflict — it is the same
             // KIND of statement (the user decided to trust a publisher), so it
             // belongs to the same budget. Counting only one of them would let a
             // new pinning call site hide behind the other.
@@ -15923,7 +15929,7 @@ mod tofu_pin_policy_guard_tests {
         assert_eq!(
             verifier_calls, 2,
             "calp_commands.rs should call the policy-taking verifier exactly twice \
-             (calp_inspect_package = VerifyOnly, calp_subscription_trust = VerifyOnly); \
+             (calp_inspect_application = VerifyOnly, calp_subscription_trust = VerifyOnly); \
              calp_pull goes through calp::pull::pull. Found {verifier_calls}."
         );
 
@@ -15945,10 +15951,10 @@ mod tofu_pin_policy_guard_tests {
         }
     }
 
-    /// A `.calp` pin is filed under a REGISTRY SCOPE, and the scope has to come
-    /// from the same string the registry was opened with. `open_registry_scoped`
+    /// A `.calp` pin is filed under a WORKSPACE SCOPE, and the scope has to come
+    /// from the same string the workspace was opened with. `open_workspace_scoped`
     /// is what makes those inseparable, so nothing in the app crate may open a
-    /// registry any other way.
+    /// workspace any other way.
     #[test]
     fn every_registry_is_opened_together_with_its_pin_scope() {
         for (name, src) in [
@@ -15964,7 +15970,7 @@ mod tofu_pin_policy_guard_tests {
             assert!(
                 !prod.contains("calp_registry::open_registry("),
                 "{name} opens a registry without deriving its pin scope. Use \
-                 calp_registry::open_registry_scoped: a pin written under a scope derived from \
+                 calp_registry::open_workspace_scoped: a pin written under a scope derived from \
                  one string and read under a scope derived from another is a pin that silently \
                  never matches."
             );
@@ -15974,7 +15980,7 @@ mod tofu_pin_policy_guard_tests {
     /// THE SCOPE MUST BE DERIVED FROM THE STRING THE USER CONFIGURED — including
     /// its `file://` prefix.
     ///
-    /// `open_registry_scoped` makes the transport and the pin scope arrive
+    /// `open_workspace_scoped` makes the transport and the pin scope arrive
     /// together, but that only helps if it is handed the SAME string `pull`
     /// scoped the pin with. Ten call sites in this crate ran their own
     /// `strip_prefix("file://")` on a subscription's `registry_url` first, which
@@ -15986,8 +15992,8 @@ mod tofu_pin_policy_guard_tests {
     /// The pin was then written under one identity and looked up under another,
     /// so `RequirePinned` answered `PublisherNotPinned` and writeback, GATHER
     /// and model writeback silently went inert for those subscriptions — a pin
-    /// that is never consulted is not a pin. `calp::registry_id::strip_file_scheme`
-    /// is the one stripper, and `registry_scope` already calls it; no caller
+    /// that is never consulted is not a pin. `calp::workspace_id::strip_file_scheme`
+    /// is the one stripper, and `workspace_scope` already calls it; no caller
     /// needs a second one.
     #[test]
     fn nothing_pre_strips_the_file_scheme_before_deriving_a_scope() {
@@ -16008,8 +16014,8 @@ mod tofu_pin_policy_guard_tests {
             assert!(
                 !prod.contains(r#"strip_prefix("file://")"#),
                 "{name} strips the file:// scheme itself. Pass the location through unchanged \
-                 (open_registry_scoped derives the scope from it), or use \
-                 calp::registry_id::strip_file_scheme when a real filesystem path is genuinely \
+                 (open_workspace_scoped derives the scope from it), or use \
+                 calp::workspace_id::strip_file_scheme when a real filesystem path is genuinely \
                  needed. A hand-rolled strip disagrees with the one the pin was scoped by, and \
                  the mismatch is silent: the package simply stops being trusted."
             );
@@ -16060,7 +16066,7 @@ mod tofu_pin_policy_guard_tests {
 ///
 /// THE SAME PRODUCER THE XLSX LOSS REPORT NEEDED, for the other distribution
 /// path — and it was needed for the same reason. `compute_publish_report` is a
-/// hand-maintained list of what a package carries and what it leaves behind, and
+/// hand-maintained list of what an application carries and what it leaves behind, and
 /// it had drifted exactly the way the xlsx one had: `cell_behaviors` was neither
 /// carried nor mentioned (a published report's typed cells arrived inert), and
 /// `workbook_protection`, `bi_connection_roles` and the two workbook-wide grid
@@ -16075,9 +16081,9 @@ mod tofu_pin_policy_guard_tests {
 ///
 /// The field names come out of `core/persistence/src/lib.rs` at TEST TIME
 /// (`the_publish_report_covers_every_workbook_field`), so a new `Workbook` field
-/// cannot be added without deciding whether a package carries it.
+/// cannot be added without deciding whether an application carries it.
 ///
-/// `CARRIED` = the publish writes it into the package. `EXCLUDED` = dropped, and
+/// `CARRIED` = the publish writes it into the application. `EXCLUDED` = dropped, and
 /// `compute_publish_report` tells the author. `SILENT` = dropped without a line,
 /// WITH the reason it does not need one.
 #[cfg(test)]

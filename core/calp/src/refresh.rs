@@ -18,8 +18,8 @@ use crate::integrity::PinPolicy;
 use crate::manifest::Subscription;
 use crate::overrides::{OverrideLayer, OverrideValue};
 use crate::pull::{self, PullRequest, PullResult};
-use crate::registry_id::RegistryScope;
-use crate::transport::RegistryTransport;
+use crate::workspace_id::WorkspaceScope;
+use crate::transport::WorkspaceTransport;
 use crate::version::VersionPin;
 
 // ============================================================================
@@ -125,7 +125,7 @@ pub struct RefreshResult {
 
 /// Compute a refresh preview for all subscriptions without applying changes.
 pub fn compute_preview(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     subscriptions: &[Subscription],
     override_layer: &OverrideLayer,
 ) -> Result<RefreshPreview, CalpError> {
@@ -267,10 +267,10 @@ pub fn compute_preview(
 /// budget bites, so the dialog can say "at least N" instead of inventing one.
 ///
 /// Degrades rather than failing: an old version whose manifest is unreadable
-/// (pruned, or a registry that has gone away mid-preview) yields
+/// (pruned, or a workspace that has gone away mid-preview) yields
 /// `(0, false, 0)` — "unknown", never "nothing".
 fn count_upstream_cell_changes(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package: &str,
     old_version: &str,
     new_version: &str,
@@ -348,14 +348,14 @@ pub struct RefreshPayload {
 /// fails with `PublisherNotPinned` instead of quietly minting the pin under the
 /// label "get the latest version".
 ///
-/// `scope` is the registry these subscriptions live in — every subscription in
-/// one batch comes from one registry (the app groups them by scope before
+/// `scope` is the workspace these subscriptions live in — every subscription in
+/// one batch comes from one workspace (the app groups them by scope before
 /// calling), so the pin each refresh is measured against is the pin the original
 /// subscribe wrote.
 pub fn pull_all_updates(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     subscriptions: &[Subscription],
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<Vec<RefreshPayload>, CalpError> {
@@ -379,7 +379,7 @@ pub fn pull_all_updates(
         // Shares pull()'s ORIGIN + INTEGRITY gates (signature, TOFU,
         // checksums). The same TOFU pin store (profile_dir) is used, so a
         // refresh to a version signed by a changed publisher key fails here —
-        // and, under RequirePinned, so does a refresh of a package this machine
+        // and, under RequirePinned, so does a refresh of an application this machine
         // never agreed to trust in the first place.
         let result = pull::pull(registry, &request, scope, profile_dir, policy)?;
 
@@ -501,14 +501,14 @@ mod tests {
     use super::*;
     use persistence::SavedCell;
     use crate::manifest::SubscribedSheet;
-    use crate::registry::LocalRegistry;
+    use crate::workspace::LocalWorkspace;
     use tempfile::TempDir;
     use crate::publish::{self, PublishRequest, PushMode};
     use crate::version::SemVer;
 
-    /// The scope a real call site derives from the registry's location.
-    fn scope_of(dir: &TempDir) -> RegistryScope {
-        crate::registry_id::registry_scope(&dir.path().to_string_lossy()).unwrap()
+    /// The scope a real call site derives from the workspace's location.
+    fn scope_of(dir: &TempDir) -> WorkspaceScope {
+        crate::workspace_id::workspace_scope(&dir.path().to_string_lossy()).unwrap()
     }
 
     fn make_workbook() -> persistence::Workbook {
@@ -521,8 +521,8 @@ mod tests {
         wb
     }
 
-    fn setup_registry_with_versions(dir: &TempDir, prof: &std::path::Path) -> LocalRegistry {
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+    fn setup_registry_with_versions(dir: &TempDir, prof: &std::path::Path) -> LocalWorkspace {
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_workbook();
 
         for ver in [(1, 0, 0), (1, 1, 0)] {
@@ -594,7 +594,7 @@ mod tests {
     fn preview_reports_the_cells_that_actually_changed() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         // v1.0.0, then v1.1.0 with two cells edited and one added.
         let wb = make_workbook();
@@ -785,13 +785,13 @@ mod tests {
     #[test]
     fn refresh_pull_carries_the_new_versions_pane_controls() {
         // v1 ships a slider; v1.1 reconfigures it AND adds a checkbox. The
-        // refresh pull must hand the app layer the FULL v1.1 set in package
-        // order (the replace-exactly-package-owned materialization happens
+        // refresh pull must hand the app layer the FULL v1.1 set in application
+        // order (the replace-exactly-application-owned materialization happens
         // app-side; a refresh that dropped pane_controls left subscribers on
         // first-pull pane controls forever).
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let slider_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());
         let checkbox_id = identity::EntityId::from_bytes(identity::generate_uuid_v7());

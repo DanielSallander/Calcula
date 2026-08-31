@@ -8,7 +8,7 @@
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
 import { DialogExtensions, registerMenuItem, unregisterMenuItem } from "@api/ui";
 import { IconEncrypt } from "@api";
-import { workspace } from "@api/system";
+import { workbook } from "@api/system";
 import type { PasswordPromptRequest, PasswordPromptResult } from "@api/system";
 import { EncryptFileDialog } from "./EncryptFileDialog";
 import type { EncryptDialogResult } from "./EncryptFileDialog";
@@ -46,7 +46,7 @@ function promptUnlock(
 async function openEncryptDialog(): Promise<void> {
   let alreadyEncrypted = false;
   try {
-    alreadyEncrypted = await workspace.isEncrypted();
+    alreadyEncrypted = await workbook.isEncrypted();
   } catch {
     alreadyEncrypted = false;
   }
@@ -64,9 +64,9 @@ async function openEncryptDialog(): Promise<void> {
             { title: "Remove encryption?", kind: "warning" },
           );
           if (!ok) return;
-          await workspace.removePassword();
+          await workbook.removePassword();
         } else {
-          await workspace.encrypt(result.password, result.remember);
+          await workbook.encrypt(result.password, result.remember);
         }
       } catch (error) {
         console.error("[Encryption] action failed:", error);
@@ -91,7 +91,7 @@ function activate(_context: ExtensionContext): void {
   });
 
   // The open flow (file-api) calls this hook when it hits an encrypted file.
-  workspace.registerPasswordPrompt(promptUnlock);
+  workbook.registerPasswordPrompt(promptUnlock);
 
   registerMenuItem("file", {
     id: MENU_ITEM_ID,
@@ -109,7 +109,7 @@ function deactivate(): void {
   if (!isActivated) return;
   DialogExtensions.unregisterDialog(ENCRYPT_DIALOG_ID);
   DialogExtensions.unregisterDialog(UNLOCK_DIALOG_ID);
-  workspace.registerPasswordPrompt(null);
+  workbook.registerPasswordPrompt(null);
   unregisterMenuItem("file", MENU_ITEM_ID);
   isActivated = false;
 }

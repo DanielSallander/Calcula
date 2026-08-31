@@ -334,16 +334,16 @@ pub(crate) fn collect_distributed_writeback_entries(
             continue;
         }
         // The RAW `registry_url`, exactly as the subscription stores it. Do NOT
-        // pre-strip `file://` here: `open_registry_scoped` derives the pin scope
+        // pre-strip `file://` here: `open_workspace_scoped` derives the pin scope
         // from the string it is given, and the crate's one stripper
-        // (`calp::registry_id::strip_file_scheme`) understands forms a local
+        // (`calp::workspace_id::strip_file_scheme`) understands forms a local
         // `strip_prefix("file://")` mangles — `file:///C:/reg` would arrive as
         // `/C:/reg` and scope as `\c:\reg`, `file://server/share` as a path
         // relative to the process cwd. Either way the pin written at subscribe
         // is looked up under a different scope, `RequirePinned` reports
         // `PublisherNotPinned`, and writeback goes inert with no message.
         let Ok((registry, scope)) =
-            crate::calp_registry::open_registry_scoped(&sub.registry_url)
+            crate::calp_registry::open_workspace_scoped(&sub.registry_url)
         else {
             continue;
         };

@@ -39,9 +39,9 @@ use calp::integrity::{
     sha256_hex, PinPolicy, VERSION_MANIFEST_FILE, VERSION_MANIFEST_SIG_FILE,
 };
 use calp::manifest::VersionManifest;
-use calp::registry_id::RegistryScope;
+use calp::workspace_id::WorkspaceScope;
 use calp::signing::{load_pins, pin_publisher, verify_signature, PinKey, PinNamespace};
-use calp::transport::RegistryTransport;
+use calp::transport::WorkspaceTransport;
 use calp::version::VersionPin;
 use calcula_format::features::scripts::ScriptDef;
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,7 @@ use crate::calp_commands::calcula_profile_dir;
 use crate::security::window_guard;
 
 /// The manifest `kind` a package must declare to be usable as a script library.
-/// Kept as a string comparison (PackageManifest.kind is a free-form String with
+/// Kept as a string comparison (ApplicationManifest.kind is a free-form String with
 /// a "report" default) so no core enum has to grow a variant for this slice.
 pub(crate) const LIBRARY_KIND: &str = "library";
 
@@ -166,10 +166,10 @@ pub fn library_trust_is_pinned(status: &str) -> bool {
 /// would make a batch that fails part way leave pins behind for the packages it
 /// happened to reach first — a partial "install" the user never completed.
 fn verify_library_manifest(
-    t: &dyn RegistryTransport,
+    t: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<VerifiedLibraryManifest, CalpError> {
@@ -177,7 +177,7 @@ fn verify_library_manifest(
     let manifest_bytes = t
         .read_artifact(package, version, VERSION_MANIFEST_FILE)?
         .ok_or_else(|| {
-            CalpError::Registry(format!(
+            CalpError::Workspace(format!(
                 "version-manifest.json not found for {package}@{version}"
             ))
         })?;
@@ -305,7 +305,7 @@ struct VerifiedLibraryManifest {
 /// `resolve_libraries` returns `Err`, no package in that batch is pinned.
 fn commit_pending_pins(
     profile_dir: &Path,
-    scope: &RegistryScope,
+    scope: &WorkspaceScope,
     pins: &[(String, String)],
 ) -> Result<(), CalpError> {
     for (package, key) in pins {
@@ -425,7 +425,7 @@ pub fn library_resolve(
         PinPolicy::VerifyOnly
     };
     let (registry, scope) =
-        crate::calp_registry::open_registry_scoped(&registry_path).map_err(|e| e.to_string())?;
+        crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
     resolve_libraries(
         registry.as_ref(),
         &scope,
@@ -437,10 +437,10 @@ pub fn library_resolve(
 
 /// The command's whole body, minus the window guard and the transport
 /// construction — split out so it is unit-testable against an in-process
-/// `LocalRegistry` without a Tauri window.
+/// `LocalWorkspace` without a Tauri window.
 pub fn resolve_libraries(
-    registry: &dyn calp::transport::RegistryTransport,
-    scope: &RegistryScope,
+    registry: &dyn calp::transport::WorkspaceTransport,
+    scope: &WorkspaceScope,
     profile_dir: &std::path::Path,
     requests: &[LibraryRequest],
     policy: PinPolicy,
@@ -461,7 +461,7 @@ pub fn resolve_libraries(
         // version manifest so a non-library package is refused without reading
         // any of its code.
         let package_manifest = registry
-            .get_package_manifest(&request.package)
+            .get_application_manifest(&request.package)
             .map_err(|e| e.to_string())?;
         if package_manifest.kind != LIBRARY_KIND {
             return Err(format!(
@@ -618,8 +618,8 @@ pub fn resolve_libraries(
 mod tests {
     use super::*;
     use calp::integrity::{VERSION_MANIFEST_FILE, VERSION_MANIFEST_SIG_FILE};
-    use calp::manifest::{PackageManifest, PublishedModuleScript, VersionEntry, VersionManifest};
-    use calp::registry::LocalRegistry;
+    use calp::manifest::{ApplicationManifest, PublishedModuleScript, VersionEntry, VersionManifest};
+    use calp::workspace::LocalWorkspace;
     use calp::signing::PublisherKeypair;
     use tempfile::TempDir;
 
@@ -639,7 +639,7 @@ mod tests {
     /// artifacts first, then the checksum map, then the manifest, then the
     /// detached Ed25519 signature over the manifest bytes AS WRITTEN.
     fn publish_library(
-        registry: &LocalRegistry,
+        registry: &LocalWorkspace,
         keypair: &PublisherKeypair,
         pkg: &str,
         ver: &str,
@@ -698,8 +698,8 @@ mod tests {
         }
 
         let mut pkg_manifest = registry
-            .get_package_manifest(pkg)
-            .unwrap_or_else(|_| PackageManifest::new(pkg, kind, "tester", "2026-08-01T00:00:00Z"));
+            .get_application_manifest(pkg)
+            .unwrap_or_else(|_| ApplicationManifest::new(pkg, kind, "tester", "2026-08-01T00:00:00Z"));
         pkg_manifest.kind = kind.to_string();
         pkg_manifest.versions.push(VersionEntry {
             version: ver.to_string(),
@@ -710,28 +710,28 @@ mod tests {
             publisher_key: String::new(),
             extra: Default::default(),
         });
-        registry.write_package_manifest(&pkg_manifest).unwrap();
+        registry.write_application_manifest(&pkg_manifest).unwrap();
     }
 
     struct Fixture {
         _reg_dir: TempDir,
         profile: TempDir,
-        registry: LocalRegistry,
+        registry: LocalWorkspace,
         /// The pin scope the registry's location resolves to — pins are filed
         /// under (registry, package), so a test that omits it is not testing
         /// the thing the production call site does.
-        scope: RegistryScope,
+        scope: WorkspaceScope,
         keypair: PublisherKeypair,
     }
 
-    fn scope_of(dir: &TempDir) -> RegistryScope {
-        calp::registry_id::registry_scope(&dir.path().to_string_lossy()).unwrap()
+    fn scope_of(dir: &TempDir) -> WorkspaceScope {
+        calp::workspace_id::workspace_scope(&dir.path().to_string_lossy()).unwrap()
     }
 
     fn fixture() -> Fixture {
         let reg_dir = TempDir::new().unwrap();
         let profile = TempDir::new().unwrap();
-        let registry = LocalRegistry::open(reg_dir.path()).unwrap();
+        let registry = LocalWorkspace::open(reg_dir.path()).unwrap();
         let keypair = PublisherKeypair::load_or_create(profile.path()).unwrap();
         let scope = scope_of(&reg_dir);
         Fixture {
@@ -1021,7 +1021,7 @@ mod tests {
 
     fn pinned_key(
         profile: &std::path::Path,
-        scope: &RegistryScope,
+        scope: &WorkspaceScope,
         pkg: &str,
     ) -> Option<String> {
         load_pins(profile)
@@ -1179,7 +1179,7 @@ mod tests {
         // purely about the pin store and not about which key signed which
         // version inside one registry.
         let genuine_dir = TempDir::new().unwrap();
-        let genuine_registry = LocalRegistry::open(genuine_dir.path()).unwrap();
+        let genuine_registry = LocalWorkspace::open(genuine_dir.path()).unwrap();
         let genuine_scope = scope_of(&genuine_dir);
         publish_library(
             &genuine_registry,
@@ -1258,7 +1258,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.contains("already trusted on this computer from a DIFFERENT registry"),
+            err.contains("already trusted on this computer from a DIFFERENT workspace"),
             "an unacknowledged conflict must refuse, got: {err}"
         );
         assert_eq!(pinned_key(f.profile.path(), &f.scope, "acme.stats"), None);
@@ -1290,7 +1290,7 @@ mod tests {
 
         // A SECOND registry serves the same library name under a different key.
         let other_dir = TempDir::new().unwrap();
-        let other_registry = LocalRegistry::open(other_dir.path()).unwrap();
+        let other_registry = LocalWorkspace::open(other_dir.path()).unwrap();
         let other_scope = scope_of(&other_dir);
         let other_profile = TempDir::new().unwrap();
         let other_keypair = PublisherKeypair::load_or_create(other_profile.path()).unwrap();
@@ -1358,7 +1358,7 @@ mod tests {
 
         // The SAME publisher key republishes into a new registry.
         let new_dir = TempDir::new().unwrap();
-        let new_registry = LocalRegistry::open(new_dir.path()).unwrap();
+        let new_registry = LocalWorkspace::open(new_dir.path()).unwrap();
         let new_scope = scope_of(&new_dir);
         publish_library(
             &new_registry, &f.keypair, "acme.stats", "1.0.0", "library",

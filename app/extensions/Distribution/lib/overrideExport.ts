@@ -9,7 +9,7 @@ export interface OverrideExportDeps {
   getSubscriptions: () => Promise<{ subscriptions: { packageName: string }[] }>;
   exportOverrides: (packageName: string) => Promise<unknown>;
   saveJsonPatch: (json: string, suggestedName: string) => Promise<string | null>;
-  /** Pick a package when more than one subscription exists. Resolve null to
+  /** Pick an application when more than one subscription exists. Resolve null to
    *  cancel. ASYNC because every real dialog under Tauri is. */
   prompt: (message: string, defaultValue: string) => Promise<string | null> | string | null;
   alert: (message: string) => Promise<void> | void;
@@ -18,7 +18,7 @@ export interface OverrideExportDeps {
 /**
  * Export this subscriber's override layer as a shareable `.json` patch.
  * Returns the saved file path, or null when nothing was exported (no
- * subscription, the user cancelled the package picker, or the save dialog was
+ * subscription, the user cancelled the application picker, or the save dialog was
  * cancelled). Throwing is left to the caller to surface.
  */
 export async function runOverrideExport(deps: OverrideExportDeps): Promise<string | null> {

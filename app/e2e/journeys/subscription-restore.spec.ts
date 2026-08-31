@@ -26,7 +26,7 @@
  *                               opens on the last pull's cells;
  *   - artifact tampered with -> no connection, a DIFFERENT named skip, and NO
  *                               fallback to the unverified bytes;
- *   - and neither is silent: `calp_get_package_connection_skips` reports both,
+ *   - and neither is silent: `calp_get_application_connection_skips` reports both,
  *     because "this package has no data source" and "this package's model could
  *     not be verified on this machine" must not be the same observable state.
  *
@@ -148,7 +148,7 @@ interface Skip {
 }
 
 async function skips(page: Page): Promise<Skip[]> {
-  return invoke<Skip[]>(page, "calp_get_package_connection_skips", {});
+  return invoke<Skip[]>(page, "calp_get_application_connection_skips", {});
 }
 
 /** The subscription ledger — the thing the restore reads. */

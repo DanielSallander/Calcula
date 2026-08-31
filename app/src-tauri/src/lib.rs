@@ -637,7 +637,7 @@ pub struct AppState {
     /// Written at checkout and at every push; read by the push gates to decide
     /// what a publish IS (a new package, or the next version of this one) and
     /// which base version it claims. `None` = a standalone workbook.
-    pub workspace_link: crate::document_effect::Persisted<Option<calp::WorkspaceLink>>,
+    pub working_copy_link: crate::document_effect::Persisted<Option<calp::WorkingCopyLink>>,
     /// Override layer: consumer-side edits to subscribed (.calp) cells
     /// PERSISTED (user_files/overrides.json) -> `Persisted<T>`.
     pub override_layer: crate::document_effect::Persisted<calp::OverrideLayer>,
@@ -670,9 +670,9 @@ pub struct AppState {
     /// package cache under `PinPolicy::RequirePinned` — so "this package has no
     /// data source" and "this package's model could not be verified here" would
     /// otherwise be the same observable state: a pivot with no connection.
-    /// Surfaced by `calp_get_package_connection_skips`.
-    pub package_connection_restore_skips:
-        Mutex<Vec<crate::calp_commands::PackageConnectionRestoreSkip>>,
+    /// Surfaced by `calp_get_application_connection_skips`.
+    pub application_connection_restore_skips:
+        Mutex<Vec<crate::calp_commands::ApplicationConnectionRestoreSkip>>,
     /// Subscriber identity for writeback submissions.
     pub subscriber_identity: Mutex<Option<calp::SubmitterIdentity>>,
     /// Central cell identity registry for stable CellId tracking.
@@ -882,14 +882,14 @@ pub fn create_app_state() -> AppState {
         extension_data: document_effect::Persisted::new(std::collections::HashMap::new()),
         sheet_ids: document_effect::Persisted::new(vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())]),
         subscriptions: crate::document_effect::Persisted::new(calp::manifest::SubscriptionManifest::default()),
-        workspace_link: crate::document_effect::Persisted::new(None),
+        working_copy_link: crate::document_effect::Persisted::new(None),
         override_layer: crate::document_effect::Persisted::new(calp::OverrideLayer::new()),
         audit_log: crate::document_effect::Persisted::new(calp::audit::AuditLog::new()),
         writeback_index: Mutex::new(calp::WritebackIndex::default()),
         writeback_declarations: Mutex::new(Vec::new()),
         model_writeback_declarations: Mutex::new(Vec::new()),
         writeback_rebuild_skips: Mutex::new(Vec::new()),
-        package_connection_restore_skips: Mutex::new(Vec::new()),
+        application_connection_restore_skips: Mutex::new(Vec::new()),
         gather_cache: Mutex::new(None),
         subscriber_identity: Mutex::new(None),
         id_registry: Mutex::new(identity::IdRegistry::new()),
@@ -6417,7 +6417,7 @@ pub fn run() {
             // Workspace collaboration: open a package as a working copy, and
             // report where that working copy stands against the registry.
             calp_commands::calp_checkout,
-            calp_commands::calp_workspace_status,
+            calp_commands::calp_working_copy_status,
             // Version diffs: two published versions, one sheet drilled down, and
             // the open working copy against the version it came from.
             calp_diff::calp_diff_versions,
@@ -6430,12 +6430,12 @@ pub fn run() {
             calp_publishers::calp_list_co_publishers,
             calp_publishers::calp_set_co_publishers,
             calp_publishers::calp_my_publisher_key,
-            calp_commands::calp_browse_registry,
+            calp_commands::calp_browse_workspace,
             // Registry providers (distribution brick 1): saved-registry catalog
-            calp_registry::calp_list_registries,
-            calp_registry::calp_add_registry,
-            calp_registry::calp_remove_registry,
-            calp_commands::calp_inspect_package,
+            calp_registry::calp_list_workspaces,
+            calp_registry::calp_add_workspace,
+            calp_registry::calp_remove_workspace,
+            calp_commands::calp_inspect_application,
             // Package Inspector window (read-only deep inspection)
             calp_inspector::calp_inspector_resolve_location,
             calp_inspector::calp_inspector_overview,
@@ -6448,10 +6448,10 @@ pub fn run() {
             library_commands::library_resolve,
             calp_commands::calp_get_subscriptions,
             calp_commands::calp_get_writeback_rebuild_skips,
-            calp_commands::calp_get_package_connection_skips,
+            calp_commands::calp_get_application_connection_skips,
             calp_commands::calp_subscription_trust,
             calp_commands::calp_list_trusted_publishers,
-            calp_commands::calp_get_package_objects,
+            calp_commands::calp_get_application_objects,
             calp_commands::calp_get_overrides,
             calp_commands::calp_revert_override,
             calp_commands::calp_accept_upstream,
@@ -6489,7 +6489,7 @@ pub fn run() {
             calp_commands::calp_set_writeback_rollup,
             calp_commands::calp_region_response_status,
             calp_commands::calp_preview_region_submission,
-            calp_commands::calp_export_package_html,
+            calp_commands::calp_export_application_html,
             calp_commands::calp_set_submission_state,
             calp_commands::calp_load_region_submissions,
             calp_commands::calp_refresh_data,

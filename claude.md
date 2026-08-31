@@ -10,7 +10,22 @@ At the same time, Calcula must fix the legitimate downsides that got VBA shunned
 
 - **Security:** Custom code must run sandboxed, with tiered access levels -- never with full machine access like VBA macros. (Current state: DONE through Wave 3. Object scripts run in per-script hardened Worker realms; distributed extensions that opt in run sandboxed too; all privileged reach is broker-mediated behind a capability model -- the canonical id list is `ALL_CAPABILITY_IDS` in `app/src/api/scriptHost/capabilityIds.ts`, never re-typed elsewhere -- with a declared-capability ceiling, consent, and audit. Notebooks/one-off scripts run in an isolated Rust QuickJS interpreter over cloned grid state. See docs/design/wave3-scripting-security.md.)
 - **Transparency:** Custom code must be visible and auditable. The user must always know where code resides and what it can touch -- never hidden inside a binary file. Scripts arriving in distributed packages must not run without explicit consent. (Current state: DONE through Wave 3. Consent + a per-script audit ring + a transparency panel; Ed25519 signing/TOFU for .calp packages AND distributed extensions via signed sidecar manifests verified at scan; a single queryable script-surface taxonomy. One per-workbook audit trail now spans all script activity: the Rust QuickJS surfaces (notebook/one-off/MCP) record always-on, structured grid-mutation entries (surface + id + sheet + range), and capability calls also persist -- net.fetch/bi.query/bi.sql authoritatively server-side in their Rust gates, and the rest (storage/ui.html/formula.udf + broker-policy denials) via a write-through from the broker ring -- so capability use survives reload too. Surfaced as "Scripts"/"Capabilities" categories in the audit viewer. The codeInventory "reach" for grid-only surfaces is no longer asserted: `core/script-engine/src/manifest.rs` is the source of truth and its own test BOOTS a real QuickJS runtime to diff the manifest against what the realm actually registers (both directions), while `app/src/api/__tests__/interpreterReachDrift.test.ts` reads that Rust file at test time and diffs it against every TypeScript consumer. The direction is fixed Rust -> TypeScript, because the renderer can be compromised and the interpreter is where the sandbox is.)
-- **Distribution:** Excel's model of emailing copies of files is replaced by `.calp` packages: publish/subscribe report distribution, plus two-way data collection via writeback
+- **Distribution:** Excel's model of emailing copies of files is replaced by `.calp` **applications**
+  published into a **workspace**: publish/subscribe report distribution, plus two-way data collection
+  via writeback. The vocabulary is Power BI's, and deliberately: a *workspace* is the folder or URL
+  that hosts applications, an *application* is the `.calp` a team develops together, and a developer
+  opens one as a **working copy** (Distribution > Open Application for Editing) to edit and push it
+  back through the gates in `core/calp/src/publish.rs`. A workspace carries a `workspace.calcula`
+  pointer file so it can be selected in a FILE dialog rather than a folder picker; the pointer and
+  its directory collapse to one pin scope in `strip_workspace_marker`
+  (`core/calp/src/workspace_id.rs`), because if they did not, one user who browsed to the file and
+  another who typed the folder would pin the same publisher under two identities and the second
+  would see a name-conflict hijack warning aimed at a colleague. **`package` and `registry` survive
+  ONLY as wire and on-disk names** -- serde fields (`package_name`, `registry_url`, `registryPath`),
+  filenames (`calp-manifest.json`), the `caps.packages` script namespace, and the `"package-inspector"`
+  Tauri window label matched by `capabilities/package-inspector.json`. Renaming any of those breaks a
+  contract; renaming a type, a command, a UI string or a doc does not. See
+  `docs/design/calp-workspace-collaboration.md`.
 
 Every feature decision should serve this vision: maximum user customizability, with the security and transparency that Excel/VBA never had.
 
@@ -322,7 +337,7 @@ in `tests/regression/bug-ledger.json` via its allocator, which assigns ids and r
   a pure-CRLF file as LF, and `grep -c $'\x00'` degrades to an empty pattern that "matches" every
   line, so it can never detect a NUL byte. Measure endings and NUL bytes with node, not the shell.
 
-`generate_handler!` in `app/src-tauri/src/lib.rs` registers 783 commands (recounted 2026-08-29; bracket-matched parse, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). It read 761 for eleven days while the tree held 769: nothing enforces this number, so re-run the parse rather than trusting the sentence. Its debug-build
+`generate_handler!` in `app/src-tauri/src/lib.rs` registers 787 commands (recounted 2026-08-31; bracket-matched parse, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). It read 761 for eleven days while the tree held 769, and both pages read 783 for two days while the tree held 787: nothing enforces this number, so re-run the parse rather than trusting the sentence. Its debug-build
 dispatch frame sits on the OS MAIN thread (tao requires the event loop there, so wrapping it in a
 larger-stack `thread::spawn` panics); `app/src-tauri/build.rs` links with `/STACK:33554432` (32 MB)
 to hold it. Adding commands in bulk eats that headroom -- the symptom is

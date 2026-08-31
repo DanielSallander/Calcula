@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/Distribution/components/inspector/ObjectsSection.tsx
-// PURPOSE: Every object the package carries, grouped by kind, with the
+// PURPOSE: Every object the application carries, grouped by kind, with the
 //          identifying fields that matter per kind. Deeper (raw) views live
 //          under Artifacts & Integrity.
 
@@ -71,7 +71,7 @@ export function ObjectsSection({
   return (
     <div>
       <h2 style={sectionTitleStyle}>Objects</h2>
-      {!anything && <StatusLine empty emptyText="This package carries no objects beyond its sheets." />}
+      {!anything && <StatusLine empty emptyText="This application carries no objects beyond its sheets." />}
 
       <Group title={`Tables (${overview.tables.length})`} empty={overview.tables.length === 0}>
         <table style={tableStyle}>

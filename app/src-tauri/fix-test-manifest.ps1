@@ -39,11 +39,26 @@
 # blocks. And this script reports through Write-Host, so `2>&1 | Out-File`
 # captures nothing - use `*>&1`.
 
+# DEFAULTS TO $env:CARGO_TARGET_DIR, which `core/setup-rust-env.ps1` sets to a
+# path OUTSIDE the repo (Dropbox locks the in-repo `target/` mid-build). This
+# used to default to the in-repo `target/` unconditionally, so with the env var
+# set it scanned an empty directory, found nothing to do, and printed
+# "Done. 0 exe(s) patched." — a SUCCESS line for a complete no-op, after which
+# every app-crate test still died with 0xC0000139.
 param(
-    [string]$TargetDir = (Join-Path $PSScriptRoot "target")
+    [string]$TargetDir = $(
+        if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR }
+        else { Join-Path $PSScriptRoot "target" }
+    )
 )
 
 $ErrorActionPreference = "Stop"
+
+$deps0 = Join-Path $TargetDir "debug\deps"
+if (-not (Test-Path $deps0)) {
+    Write-Error ("no such directory: " + $deps0 +
+        " - pass -TargetDir, or source core/setup-rust-env.ps1 so CARGO_TARGET_DIR is set.")
+}
 
 # Locate mt.exe in the Windows SDK (prefer the host architecture's bin).
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }

@@ -1,5 +1,5 @@
-// FILENAME: app/extensions/Distribution/lib/openPackageInspectorWindow.ts
-// PURPOSE: Creates and manages the Package Inspector Tauri window (standalone
+// FILENAME: app/extensions/Distribution/lib/openApplicationInspectorWindow.ts
+// PURPOSE: Creates and manages the Application Inspector Tauri window (standalone
 //          read-only .calp browser). Follows the hardened ModelEditor opener:
 //          re-attaches to an existing window after a main-webview reload
 //          (getByLabel), coalesces concurrent opens, and never lets the
@@ -12,17 +12,19 @@ import {
   type InspectorOpenPayload,
 } from "./inspectorWindowEvents";
 
+// Historical spelling, kept deliberately: this exact string is the Tauri window
+// label matched by app/src-tauri/capabilities/package-inspector.json.
 const WINDOW_LABEL = "package-inspector";
 
 let inspectorWindow: WebviewWindow | null = null;
 let opening: Promise<void> | null = null;
 
 /**
- * Open the Package Inspector in its own window. If already open (including a
+ * Open the Application Inspector in its own window. If already open (including a
  * window that survived a main-webview reload), focus it and — when given —
- * point it at the requested package.
+ * point it at the requested application.
  */
-export function openPackageInspectorWindow(
+export function openApplicationInspectorWindow(
   payload: InspectorOpenPayload | null = null,
 ): Promise<void> {
   // Coalesce: a second click while the window is being created joins the
@@ -69,7 +71,7 @@ async function doOpen(payload: InspectorOpenPayload | null): Promise<void> {
 
   inspectorWindow = new WebviewWindow(WINDOW_LABEL, {
     url: "/packageInspector.html",
-    title: "Calcula - Package Inspector",
+    title: "Calcula - Application Inspector",
     width: 1150,
     height: 780,
     minWidth: 760,

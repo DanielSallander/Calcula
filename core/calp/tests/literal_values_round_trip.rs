@@ -1,5 +1,5 @@
 //! FILENAME: core/calp/tests/literal_values_round_trip.rs
-//! PURPOSE: A published package must carry LITERAL cells, not only formulas.
+//! PURPOSE: A published application must carry LITERAL cells, not only formulas.
 //! CONTEXT: Reported 2026-08-30 — publish a sheet holding both hard-coded
 //! values and formulas, subscribe from a fresh app, and only the formulas
 //! arrive. This is the data-loss class the whole distribution story is judged
@@ -7,15 +7,15 @@
 //!
 //! This file covers the CORE half: publish -> pull, with no app state involved.
 //! If it passes, the loss is in the Tauri materialization layer; if it fails,
-//! the package itself never carried the values.
+//! the application itself never carried the values.
 
 use tempfile::TempDir;
 
 use calp::integrity::PinPolicy;
 use calp::publish::{self, PublishRequest, PushMode};
 use calp::pull::{self, PullRequest};
-use calp::registry::LocalRegistry;
-use calp::transport::RegistryTransport;
+use calp::workspace::LocalWorkspace;
+use calp::transport::WorkspaceTransport;
 use calp::version::{SemVer, VersionPin};
 
 use engine::cell::Cell;
@@ -44,7 +44,7 @@ fn mixed_workbook() -> Workbook {
     wb
 }
 
-fn publish_it(reg: &LocalRegistry, prof: &std::path::Path, wb: &Workbook) {
+fn publish_it(reg: &LocalWorkspace, prof: &std::path::Path, wb: &Workbook) {
     let request = PublishRequest {
         workbook: wb,
         package_name: "literals".to_string(),
@@ -71,12 +71,12 @@ fn publish_it(reg: &LocalRegistry, prof: &std::path::Path, wb: &Workbook) {
 
 #[test]
 fn the_published_artifact_contains_the_literal_cells() {
-    // Layer 1: did the PACKAGE ever carry them? Read the artifact bytes rather
+    // Layer 1: did the APPLICATION ever carry them? Read the artifact bytes rather
     // than any parsed convenience — if the values are not in the file, nothing
     // downstream can invent them.
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
     let wb = mixed_workbook();
     publish_it(&reg, prof.path(), &wb);
 
@@ -100,8 +100,8 @@ fn a_pull_materializes_literals_as_well_as_formulas() {
     // materializer receives.
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
-    let scope = calp::registry_scope(dir.path().to_str().unwrap()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
+    let scope = calp::workspace_scope(dir.path().to_str().unwrap()).unwrap();
     let wb = mixed_workbook();
     publish_it(&reg, prof.path(), &wb);
 
@@ -159,8 +159,8 @@ fn a_checkout_materializes_literals_as_well_as_formulas() {
     // artifact walk but takes a different sheet-id mode.
     let dir = TempDir::new().unwrap();
     let prof = TempDir::new().unwrap();
-    let reg = LocalRegistry::open(dir.path()).unwrap();
-    let scope = calp::registry_scope(dir.path().to_str().unwrap()).unwrap();
+    let reg = LocalWorkspace::open(dir.path()).unwrap();
+    let scope = calp::workspace_scope(dir.path().to_str().unwrap()).unwrap();
     let wb = mixed_workbook();
     publish_it(&reg, prof.path(), &wb);
 

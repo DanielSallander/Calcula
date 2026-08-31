@@ -1,12 +1,12 @@
 // FILENAME: app/src-tauri/src/calp_inspector.rs
-// PURPOSE: Read-only deep inspection of a published .calp package version for
-//          the standalone Package Inspector window. Everything is surfaced
-//          from the registry WITHOUT subscribing or materializing anything.
+// PURPOSE: Read-only deep inspection of a published .calp application version for
+//          the standalone Application Inspector window. Everything is surfaced
+//          from the workspace WITHOUT subscribing or materializing anything.
 // SECURITY: Every command verifies the Ed25519 manifest signature + TOFU pin
-//          first (same gate as calp_inspect_package), and the content-surfacing
+//          first (same gate as calp_inspect_application), and the content-surfacing
 //          commands additionally run the FULL per-artifact SHA-256 walk before
-//          reading anything — a tampered package fails to inspect, not just to
-//          pull (a loose file dropped into a shared registry folder shadows the
+//          reading anything — a tampered application fails to inspect, not just to
+//          pull (a loose file dropped into a shared workspace folder shadows the
 //          committed blob on read, so manifest-signature-only would display
 //          attacker bytes under a "verified" banner). Artifacts are
 //          enumerated/read ONLY via the signed manifest's artifact_checksums
@@ -27,7 +27,7 @@ use calp::integrity::{
     VerifiedManifest,
 };
 use calp::manifest::VersionManifest;
-use calp::transport::RegistryTransport;
+use calp::transport::WorkspaceTransport;
 use calp::version::VersionPin;
 use calp::writeback::{SubmissionState, SubmissionValue};
 use calcula_format::cell_ref;
@@ -46,7 +46,7 @@ use crate::security::window_guard;
 // Shared helpers
 // ============================================================================
 
-/// Open the registry, resolve the pin, and verify the manifest signature +
+/// Open the workspace, resolve the pin, and verify the manifest signature +
 /// TOFU pin. The single trust choke point for every inspector command.
 ///
 /// `check_artifacts` additionally runs the full per-artifact SHA-256 walk
@@ -56,7 +56,7 @@ use crate::security::window_guard;
 ///
 /// PASSIVE — `PinPolicy::VerifyOnly`. Inspection is the surface that exists so
 /// the user can decide WHETHER to trust a publisher; it must not make that
-/// decision for them. `PackageInspectorApp.tsx` fires the overview
+/// decision for them. `ApplicationInspectorApp.tsx` fires the overview
 /// automatically on browse/drop/cross-window handover, so merely POINTING the
 /// inspector at a folder used to write a TOFU pin — the direct analogue of the
 /// Wave-H "scanning pinned on every launch" bug. First contact now reports
@@ -69,7 +69,7 @@ fn open_verified(
     check_artifacts: bool,
 ) -> Result<
     (
-        Box<dyn RegistryTransport>,
+        Box<dyn WorkspaceTransport>,
         String,
         TrustStatus,
         Vec<OtherScopePin>,
@@ -78,14 +78,14 @@ fn open_verified(
     String,
 > {
     let (registry, scope) =
-        crate::calp_registry::open_registry_scoped(registry_path).map_err(|e| e.to_string())?;
+        crate::calp_registry::open_workspace_scoped(registry_path).map_err(|e| e.to_string())?;
     let pin = VersionPin::parse(version_pin).map_err(|e| e.to_string())?;
     let resolved = registry
         .resolve_version(package_name, &pin)
         .map_err(|e| e.to_string())?;
     let version = resolved.to_string();
-    // The pin is scoped to the registry this inspection is reading, so pointing
-    // the inspector at a second registry serving a familiar package name reports
+    // The pin is scoped to the workspace this inspection is reading, so pointing
+    // the inspector at a second workspace serving a familiar application name reports
     // the name conflict instead of quietly reading as ordinary first contact.
     let VerifiedManifest {
         trust,
@@ -109,7 +109,7 @@ fn open_verified(
         )
         .map_err(|e| {
             format!(
-                "Package integrity check failed — the contents do not match the publisher's \
+                "Application integrity check failed — the contents do not match the publisher's \
                  signature, so they will not be displayed: {}",
                 e
             )
@@ -135,7 +135,7 @@ pub(crate) fn open_verified_content(
     package_name: &str,
     version_pin: &str,
     check_artifacts: bool,
-) -> Result<(Box<dyn RegistryTransport>, String, VersionManifest), String> {
+) -> Result<(Box<dyn WorkspaceTransport>, String, VersionManifest), String> {
     let (registry, version, _trust, _other_scope_pins, manifest) =
         open_verified(registry_path, package_name, version_pin, check_artifacts)?;
     Ok((registry, version, manifest))
@@ -161,8 +161,8 @@ pub(crate) fn trust_status_str(trust: TrustStatus) -> String {
     .to_string()
 }
 
-/// Wire shape for a pin held for the SAME package name in a DIFFERENT registry.
-/// Only the user's own spelling of the other registry is exposed — never the
+/// Wire shape for a pin held for the SAME application name in a DIFFERENT workspace.
+/// Only the user's own spelling of the other workspace is exposed — never the
 /// normalized scope id, which is key material and not a thing anyone typed.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,7 +187,7 @@ pub fn other_scope_pins_wire(pins: &[OtherScopePin]) -> Vec<OtherScopePinInfo> {
 /// Read + parse an optional JSON artifact; None when absent or unparseable
 /// (the raw artifact view still shows unparseable bytes verbatim).
 fn read_json<T: serde::de::DeserializeOwned>(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
     rel_path: &str,
@@ -251,18 +251,18 @@ fn submission_value_display(value: &SubmissionValue) -> (String, String) {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResolvedRegistryLocation {
-    /// The registry ROOT to browse (walked up from whatever was picked).
+pub struct ResolvedWorkspaceLocation {
+    /// The workspace ROOT to browse (walked up from whatever was picked).
     pub registry_path: String,
-    /// Set when the picked folder was a package (or version) directory.
+    /// Set when the picked folder was an application (or version) directory.
     pub package_name: Option<String>,
     /// Set when the picked folder was a specific version directory.
     pub version: Option<String>,
 }
 
 /// Users naturally browse INTO the thing they want to inspect —
-/// `C:\reg\sales-report\1.0.0` — but a registry location is the ROOT folder
-/// (`C:\reg`), so a raw browse finds nothing. Recognize a package directory
+/// `C:\reg\sales-report\1.0.0` — but a workspace location is the ROOT folder
+/// (`C:\reg`), so a raw browse finds nothing. Recognize an application directory
 /// (contains calp-manifest.json) or a version directory (its parent does) and
 /// walk up to the root, remembering what was picked so the UI can pre-select
 /// it. Purely local probing; anything unrecognized passes through unchanged.
@@ -270,12 +270,12 @@ pub struct ResolvedRegistryLocation {
 pub fn calp_inspector_resolve_location(
     path: String,
     window: tauri::Window,
-) -> Result<ResolvedRegistryLocation, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+) -> Result<ResolvedWorkspaceLocation, String> {
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
 
-    // HTTP registries have no local directory structure to probe.
+    // HTTP workspaces have no local directory structure to probe.
     if crate::calp_registry::is_http_location(&path) {
-        return Ok(ResolvedRegistryLocation {
+        return Ok(ResolvedWorkspaceLocation {
             registry_path: path,
             package_name: None,
             version: None,
@@ -285,22 +285,22 @@ pub fn calp_inspector_resolve_location(
     // The crate's ONE `file://` stripper — a local `strip_prefix("file://")`
     // leaves `file:///C:/reg` as `/C:/reg` (an unopenable path) and turns
     // `file://server/share` into a cwd-relative one.
-    let raw = calp::registry_id::strip_file_scheme(&path);
+    let raw = calp::workspace_id::strip_file_scheme(&path);
     let picked = std::path::PathBuf::from(&raw);
 
-    // The package name comes from the manifest (authoritative), not the
+    // The application name comes from the manifest (authoritative), not the
     // directory name.
     let manifest_name = |dir: &std::path::Path| -> Option<String> {
         let bytes = std::fs::read(dir.join("calp-manifest.json")).ok()?;
-        serde_json::from_slice::<calp::manifest::PackageManifest>(&bytes)
+        serde_json::from_slice::<calp::manifest::ApplicationManifest>(&bytes)
             .ok()
             .map(|m| m.name)
     };
 
-    // Picked the PACKAGE directory: registry is its parent.
+    // Picked the APPLICATION directory: workspace is its parent.
     if let Some(name) = manifest_name(&picked) {
         if let Some(registry) = picked.parent() {
-            return Ok(ResolvedRegistryLocation {
+            return Ok(ResolvedWorkspaceLocation {
                 registry_path: registry.display().to_string(),
                 package_name: Some(name),
                 version: None,
@@ -308,7 +308,7 @@ pub fn calp_inspector_resolve_location(
         }
     }
 
-    // Picked a VERSION directory: its parent is the package directory.
+    // Picked a VERSION directory: its parent is the application directory.
     if let Some(pkg_dir) = picked.parent() {
         if let Some(name) = manifest_name(pkg_dir) {
             if let Some(registry) = pkg_dir.parent() {
@@ -317,7 +317,7 @@ pub fn calp_inspector_resolve_location(
                     .is_file()
                     .then(|| picked.file_name().map(|s| s.to_string_lossy().to_string()))
                     .flatten();
-                return Ok(ResolvedRegistryLocation {
+                return Ok(ResolvedWorkspaceLocation {
                     registry_path: registry.display().to_string(),
                     package_name: Some(name),
                     version,
@@ -326,7 +326,7 @@ pub fn calp_inspector_resolve_location(
         }
     }
 
-    Ok(ResolvedRegistryLocation {
+    Ok(ResolvedWorkspaceLocation {
         registry_path: raw,
         package_name: None,
         version: None,
@@ -343,7 +343,7 @@ pub struct InspectorVersionEntry {
     pub version: String,
     pub published_at: String,
     pub published_by: String,
-    /// The version this one was pushed from — the package's own lineage.
+    /// The version this one was pushed from — the application's own lineage.
     /// Empty for a first version, and for versions published before push
     /// lineage was recorded.
     pub base_version: String,
@@ -354,7 +354,7 @@ pub struct InspectorVersionEntry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InspectorPackageInfo {
+pub struct InspectorApplicationInfo {
     pub name: String,
     pub description: String,
     pub kind: String,
@@ -371,14 +371,14 @@ pub struct InspectorManifestInfo {
     pub published_at: String,
     pub published_by: String,
     pub publisher_name: String,
-    /// Lowercase hex Ed25519 public key (empty = unsigned; such packages
+    /// Lowercase hex Ed25519 public key (empty = unsigned; such applications
     /// fail verification before this DTO is ever built).
     pub publisher_key: String,
     pub min_app_version: String,
     /// A `CalpTrustStatus` — the TOFU outcome for this inspection, scoped to the
-    /// registry being inspected.
+    /// workspace being inspected.
     pub trust_status: String,
-    /// Pins held for this SAME package name in OTHER registries. Populated for
+    /// Pins held for this SAME application name in OTHER workspaces. Populated for
     /// every status, so the overview can show "you already trust this publisher
     /// from elsewhere" as readily as "a different key claims this name".
     pub other_scope_pins: Vec<OtherScopePinInfo>,
@@ -450,9 +450,9 @@ pub struct InspectorSlicerInfo {
     pub sheet_name: String,
     pub field_name: String,
     /// Filter level: 1 = ordinary, 2..=9 = PINNED. Surfaced because a pin
-    /// changes what the package's measures return — a `CLEAR`/`RESET`
+    /// changes what the application's measures return — a `CLEAR`/`RESET`
     /// measure keeps respecting a pinned filter — so a subscriber
-    /// inspecting the package must be able to see it before subscribing.
+    /// inspecting the application must be able to see it before subscribing.
     pub filter_level: u8,
 }
 
@@ -558,7 +558,7 @@ pub struct InspectorArtifactEntry {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectorOverview {
-    pub package: InspectorPackageInfo,
+    pub package: InspectorApplicationInfo,
     pub resolved_version: String,
     pub manifest: InspectorManifestInfo,
     pub sheets: Vec<InspectorSheetSummary>,
@@ -610,7 +610,7 @@ struct SheetDataProbe {
     cells: BTreeMap<String, CellProbe>,
 }
 
-/// Resolve a package sheet id (as JSON string) to its display name.
+/// Resolve an application sheet id (as JSON string) to its display name.
 fn sheet_name_for(names: &HashMap<String, String>, sheet_id: &str) -> String {
     names
         .get(sheet_id)
@@ -620,7 +620,7 @@ fn sheet_name_for(names: &HashMap<String, String>, sheet_id: &str) -> String {
 
 /// Per-sheet artifact rows ("which sheets carry feature X"), resolved to names.
 fn sheet_feature_list(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
     rel_path: &str,
@@ -634,8 +634,8 @@ fn sheet_feature_list(
         .collect()
 }
 
-/// Full deep overview of a package version — the Package Inspector's landing
-/// payload. Read-only; verifies signature + TOFU like calp_inspect_package.
+/// Full deep overview of an application version — the Application Inspector's landing
+/// payload. Read-only; verifies signature + TOFU like calp_inspect_application.
 #[tauri::command]
 pub fn calp_inspector_overview(
     registry_path: String,
@@ -643,14 +643,14 @@ pub fn calp_inspector_overview(
     version_pin: String,
     window: tauri::Window,
 ) -> Result<InspectorOverview, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
     let (registry, version, trust, other_scope_pins, manifest) =
         open_verified(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
     let profile_dir = calcula_profile_dir();
 
     let pkg_manifest = reg
-        .get_package_manifest(&package_name)
+        .get_application_manifest(&package_name)
         .map_err(|e| e.to_string())?;
 
     let sheet_names: HashMap<String, String> = manifest
@@ -927,7 +927,7 @@ pub fn calp_inspector_overview(
             .unwrap_or(false);
 
     Ok(InspectorOverview {
-        package: InspectorPackageInfo {
+        package: InspectorApplicationInfo {
             name: pkg_manifest.name,
             description: pkg_manifest.description,
             kind: pkg_manifest.kind,
@@ -1156,7 +1156,7 @@ pub fn calp_inspector_sheet(
     max_cells: Option<usize>,
     window: tauri::Window,
 ) -> Result<InspectorSheetDetail, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
     let (registry, version, manifest) =
         open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
@@ -1165,7 +1165,7 @@ pub fn calp_inspector_sheet(
         .sheets
         .iter()
         .find(|s| s.sheet_id.to_string() == sheet_id)
-        .ok_or_else(|| format!("Sheet '{}' is not in this package version.", sheet_id))?;
+        .ok_or_else(|| format!("Sheet '{}' is not in this application version.", sheet_id))?;
 
     let data: SheetData = read_json(
         reg,
@@ -1323,7 +1323,7 @@ pub struct InspectorNotebookDetail {
     pub id: String,
     pub name: String,
     /// Cell sources only — execution outputs are stripped at publish, and any
-    /// residual output in a hand-crafted package is deliberately NOT surfaced.
+    /// residual output in a hand-crafted application is deliberately NOT surfaced.
     pub cells: Vec<InspectorNotebookCell>,
 }
 
@@ -1347,7 +1347,7 @@ pub struct InspectorScripts {
 /// The reserved module-script id carrying the Custom Functions library.
 const CUSTOM_FUNCTIONS_MODULE_ID: &str = "__calcula_custom_functions__";
 
-/// Every line of code a package carries, with full source.
+/// Every line of code an application carries, with full source.
 #[tauri::command]
 pub fn calp_inspector_scripts(
     registry_path: String,
@@ -1355,7 +1355,7 @@ pub fn calp_inspector_scripts(
     version_pin: String,
     window: tauri::Window,
 ) -> Result<InspectorScripts, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
     let (registry, version, manifest) =
         open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
@@ -1524,7 +1524,7 @@ pub struct InspectorModel {
     pub has_writeback_history: bool,
 }
 
-/// Summary of one embedded BI model (schema only — packages never carry
+/// Summary of one embedded BI model (schema only — applications never carry
 /// credentials). Field access is defensive because the engine's model JSON is
 /// snake_case while a ModelBundle wrapper is camelCase.
 #[tauri::command]
@@ -1535,7 +1535,7 @@ pub fn calp_inspector_model(
     data_source_id: String,
     window: tauri::Window,
 ) -> Result<InspectorModel, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
     let (registry, version, manifest) =
         open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
@@ -1544,7 +1544,7 @@ pub fn calp_inspector_model(
         .data_sources
         .iter()
         .find(|d| d.id == data_source_id)
-        .ok_or_else(|| format!("Data source '{}' is not in this package.", data_source_id))?;
+        .ok_or_else(|| format!("Data source '{}' is not in this application.", data_source_id))?;
 
     let raw: serde_json::Value = read_json(reg, &package_name, &version, &ds.model_path)
         .ok_or_else(|| format!("Model artifact '{}' is missing or unreadable.", ds.model_path))?;
@@ -1784,7 +1784,7 @@ pub fn calp_inspector_writeback(
     version_pin: String,
     window: tauri::Window,
 ) -> Result<InspectorWriteback, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
     let (registry, version, manifest) =
         open_verified_content(&registry_path, &package_name, &version_pin, true)?;
     let reg = registry.as_ref();
@@ -1854,7 +1854,7 @@ pub fn calp_inspector_writeback(
             .unwrap_or(false);
 
     // Folded current state (separate, UNSIGNED trust domain). Failures degrade
-    // to "no activity" — a missing submissions tree is normal for a package
+    // to "no activity" — a missing submissions tree is normal for an application
     // nobody has responded to.
     let submissions = if is_publisher {
         reg.load_current_submissions(&package_name, &version)
@@ -1985,7 +1985,7 @@ pub fn calp_inspector_artifact(
     artifact_path: String,
     window: tauri::Window,
 ) -> Result<InspectorArtifact, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
     // No up-front artifact walk: this command hashes the requested artifact
     // itself and REPORTS a mismatch (verified: false) instead of failing —
     // it is the audit surface for exactly that case.
@@ -1998,7 +1998,7 @@ pub fn calp_inspector_artifact(
         .cloned()
         .ok_or_else(|| {
             format!(
-                "'{}' is not an artifact of this package version (only signed artifacts are readable).",
+                "'{}' is not an artifact of this application version (only signed artifacts are readable).",
                 artifact_path
             )
         })?;
@@ -2006,7 +2006,7 @@ pub fn calp_inspector_artifact(
     let bytes = registry
         .read_artifact(&package_name, &version, &artifact_path)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Artifact '{}' is missing from the registry.", artifact_path))?;
+        .ok_or_else(|| format!("Artifact '{}' is missing from the workspace.", artifact_path))?;
 
     let actual = sha256_hex(&bytes);
     let verified = actual == expected;
@@ -2074,7 +2074,7 @@ pub fn calp_inspector_verify_artifacts(
     version_pin: String,
     window: tauri::Window,
 ) -> Result<InspectorVerifyReport, String> {
-    window_guard::require_label(&window, window_guard::MAIN_AND_PACKAGE_INSPECTOR)?;
+    window_guard::require_label(&window, window_guard::MAIN_AND_APPLICATION_INSPECTOR)?;
     // Reaching this point means the SIGNATURE verified (open_verified errors
     // otherwise, and the UI surfaces that error as the report). The artifact
     // walk is deliberately NOT run up-front here — this command's whole job
@@ -2107,7 +2107,7 @@ pub fn calp_inspector_verify_artifacts(
     }
 
     // Loose files the manifest does not list. After blob commit the version
-    // dir holds nothing loose, so this is usually empty for local registries.
+    // dir holds nothing loose, so this is usually empty for local workspaces.
     let unlisted: Vec<String> = reg
         .list_artifacts(&package_name, &version)
         .unwrap_or_default()

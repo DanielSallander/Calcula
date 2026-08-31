@@ -1,7 +1,7 @@
-// FILENAME: app/extensions/Distribution/components/PackageExplorerPanel.tsx
-// PURPOSE: Package Explorer — transparency pane for .calp connections.
+// FILENAME: app/extensions/Distribution/components/ApplicationExplorerPanel.tsx
+// PURPOSE: Application Explorer — transparency pane for .calp connections.
 // Subscriber view: which sheets/objects in this workbook are connected to each
-// subscribed package (from the pull-time provenance ledger), with presence
+// subscribed application (from the pull-time provenance ledger), with presence
 // checks and click-to-navigate. Author view: a dry-run publish preview showing
 // exactly what a publish would ship and what would stay behind.
 
@@ -9,18 +9,18 @@ import React, { useCallback, useEffect, useState } from "react";
 import type { PanelSectionProps } from "@api/uiTypes";
 import {
   getSubscriptions,
-  getPackageObjects,
+  getApplicationObjects,
   publishPreview,
   setActiveSheetApi,
   onAppEvent,
   AppEvents,
 } from "@api";
 import type {
-  PackageObjectsResponse,
+  ApplicationObjectsResponse,
   PublishReport,
   PublishPreviewResponse,
 } from "@api";
-import { openPackageInspectorWindow } from "../lib/openPackageInspectorWindow";
+import { openApplicationInspectorWindow } from "../lib/openApplicationInspectorWindow";
 
 const KIND_LABELS: Record<string, string> = {
   table: "Tables",
@@ -84,22 +84,22 @@ const mutedStyle: React.CSSProperties = { opacity: 0.65 };
 // ============================================================================
 
 export function ConnectedObjectsSection(_props: PanelSectionProps): React.ReactElement {
-  const [packages, setPackages] = useState<PackageObjectsResponse[]>([]);
+  const [packages, setPackages] = useState<ApplicationObjectsResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
       const subs = await getSubscriptions();
-      // Per-package isolation: one failed resolution (e.g. a subscription
-      // detached mid-flight) must not blank the healthy packages.
+      // Per-application isolation: one failed resolution (e.g. a subscription
+      // detached mid-flight) must not blank the healthy applications.
       const settled = await Promise.allSettled(
-        subs.subscriptions.map((s) => getPackageObjects(s.packageName)),
+        subs.subscriptions.map((s) => getApplicationObjects(s.packageName)),
       );
       setPackages(
         settled
           .filter(
-            (r): r is PromiseFulfilledResult<PackageObjectsResponse> =>
+            (r): r is PromiseFulfilledResult<ApplicationObjectsResponse> =>
               r.status === "fulfilled",
           )
           .map((r) => r.value),
@@ -128,8 +128,8 @@ export function ConnectedObjectsSection(_props: PanelSectionProps): React.ReactE
   if (loaded && packages.length === 0) {
     return (
       <div style={{ ...sectionStyle, ...mutedStyle }}>
-        No package subscriptions in this workbook. Subscribe to a .calp package
-        via Distribution &gt; Subscribe to Package to see its connected objects here.
+        No subscriptions in this workbook. Subscribe to a .calp application via
+        Distribution &gt; Subscribe to Application to see its connected objects here.
       </div>
     );
   }
@@ -151,9 +151,9 @@ export function ConnectedObjectsSection(_props: PanelSectionProps): React.ReactE
                 cursor: "pointer",
                 textDecoration: "underline",
               }}
-              title="Open this package in the standalone Package Inspector window"
+              title="Open this application in the standalone Application Inspector window"
               onClick={() =>
-                void openPackageInspectorWindow({
+                void openApplicationInspectorWindow({
                   registryPath: pkg.registryUrl,
                   packageName: pkg.packageName,
                   versionPin: pkg.resolvedVersion,

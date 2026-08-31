@@ -8,7 +8,7 @@
 //          for `componentDidCatch` / `getDerivedStateFromError` across
 //          `app/src` and `app/extensions` -- across FIVE React roots (the main
 //          window plus the Chart Spec Editor, Object Script Editor, Model
-//          Editor and Package Inspector windows). React 18 unmounts the whole
+//          Editor and Application Inspector windows). React 18 unmounts the whole
 //          tree when a render throws with no boundary above it, and every one
 //          of those windows is `<div id="root"></div>` and nothing else. So the
 //          user got a white window with no message.

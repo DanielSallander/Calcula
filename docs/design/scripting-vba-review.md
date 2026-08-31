@@ -1179,7 +1179,7 @@ this table are both wrong until someone re-derives from code.
     implementation follows it and the reasoning (especially why `base.callImport` and not
     `base.callMethod`) is the load-bearing part.
     → **DESIGNED (pre-Wave-H plan): `docs/design/script-package-manager.md`** (2026-07-31). Decision: a library is a
-    `.calp` of a new `PackageKind::Library`; imports are *declared* (`// @uses alias pkg@pin`) and
+    `.calp` whose manifest `kind` is `"library"`; imports are *declared* (`// @uses alias pkg@pin`) and
     host-resolved against a workbook lockfile; the shim is a new `base.callImport` over the existing
     `hostCallExposed` relay — **not** `base.callMethod`, whose global `public:true` flag would expose
     library exports to every peer script. Governing rule: a dependency's effective ceiling is
@@ -2032,9 +2032,9 @@ changing the body, and one package's consent never covering another's module.
   exploitable today (a `.cala` file is not a registry directory), which is exactly why it was worth
   closing before it became so. Fixed at `distribution_gateway.rs:409`, pinned by a test that asserts
   against the same `calp::dev_mode::is_dev_subscription` predicate the production code uses.
-- *The HTTP registry transport did not validate path components.* `LocalRegistry` runs every
-  package/version/artifact component through `calp::registry::validate_component` before joining it
-  into a path; `HttpRegistry` built its URLs by concatenation, and a URL parser RESOLVES `..` — so a
+- *The HTTP registry transport did not validate path components.* `LocalWorkspace` runs every
+  package/version/artifact component through `calp::workspace::validate_component` before joining it
+  into a path; `HttpWorkspace` built its URLs by concatenation, and a URL parser RESOLVES `..` — so a
   package name of `../..` addressed a location outside the registry the user configured. Bounded (the
   authority is fixed by `base_url` and redirects are disabled, so it is not SSRF), but "only
   registries you configured" is the rule the entire gateway rests on, and a rule enforced on one

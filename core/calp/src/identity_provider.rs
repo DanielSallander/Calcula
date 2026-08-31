@@ -2,7 +2,7 @@
 //! PURPOSE: Local subscriber identity for writeback submissions.
 //! CONTEXT: Each Calcula installation has a stable subscriber identity
 //! derived from the OS username and a machine-generated UUID. This identity
-//! is attached to every writeback submission so the registry can attribute
+//! is attached to every writeback submission so the workspace can attribute
 //! contributions to specific subscribers.
 //!
 //! The identity is stored in the Calcula user profile directory (not per-

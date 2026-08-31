@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use calp::diff::{DiffOptions, DiffSide, SheetCellDiff, VersionDiff};
-use calp::transport::RegistryTransport;
+use calp::transport::WorkspaceTransport;
 
 use crate::bi::types::BiState;
 use crate::AppState;
@@ -46,7 +46,7 @@ pub fn calp_diff_versions(
 ) -> Result<VersionDiff, String> {
     crate::security::window_guard::require_label(
         &window,
-        crate::security::window_guard::MAIN_AND_PACKAGE_INSPECTOR,
+        crate::security::window_guard::MAIN_AND_APPLICATION_INSPECTOR,
     )?;
 
     let (from_registry, from_version, from_manifest) = crate::calp_inspector::open_verified_content(
@@ -101,7 +101,7 @@ pub fn calp_diff_sheet_cells(
 ) -> Result<SheetCellDiff, String> {
     crate::security::window_guard::require_label(
         &window,
-        crate::security::window_guard::MAIN_AND_PACKAGE_INSPECTOR,
+        crate::security::window_guard::MAIN_AND_APPLICATION_INSPECTOR,
     )?;
 
     // The cap is the caller's, bounded by ours. A drill-down is a table a
@@ -204,7 +204,7 @@ pub fn calp_diff_working_copy(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     // Resolve the target from the link unless the caller overrode it.
-    let link = state.workspace_link.read().map_err(|e| e.to_string())?.clone();
+    let link = state.working_copy_link.read().map_err(|e| e.to_string())?.clone();
     let registry_path = params
         .registry_path
         .clone()
@@ -235,7 +235,7 @@ pub fn calp_diff_working_copy(
     )?;
 
     // The working-copy side: a real publish into memory.
-    let memory = calp::MemoryRegistry::new();
+    let memory = calp::MemoryWorkspace::new();
     let working_version = calp::SemVer::new(0, 0, 0);
     crate::calp_commands::publish_into_for_preview(
         &state,

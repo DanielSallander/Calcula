@@ -1,7 +1,11 @@
 // FILENAME: app/extensions/Distribution/lib/inspectorWindowEvents.ts
-// PURPOSE: Cross-window event bridge between the main window and the Package
+// PURPOSE: Cross-window event bridge between the main window and the Application
 //          Inspector window, through the sanctioned @api/backend door (raw
 //          @tauri-apps/api/event is banned in extensions).
+// NOTE:     The wire names below still spell the window "package-inspector".
+//           That string is a runtime identifier matched by
+//           app/src-tauri/capabilities/package-inspector.json, so it is
+//           deliberately left at its historical spelling.
 
 import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 
@@ -9,7 +13,7 @@ import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 // Event names
 // ============================================================================
 
-/** Main -> inspector: open/focus a specific package (fields may be empty). */
+/** Main -> inspector: open/focus a specific application (fields may be empty). */
 const OPEN_PACKAGE = "package-inspector:open-package";
 /** Inspector -> main: the window mounted and its listeners are live. */
 const INSPECTOR_READY = "package-inspector:inspector-ready";

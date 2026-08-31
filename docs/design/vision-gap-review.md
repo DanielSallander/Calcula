@@ -142,7 +142,7 @@ carry-forward included; the publisher dashboard remains D5/Wave 3):
   script source hash so upstream script changes re-prompt.
 - **T2 done** — Subscribe is now a two-step flow: Review Contents (sheets,
   scripts, data sources, writeback regions, tables — via new
-  `calp_inspect_package`) → Accept and Subscribe. `scriptsPulled` is mirrored
+  `calp_inspect_application`) → Accept and Subscribe. `scriptsPulled` is mirrored
   in the TS PullResponse and surfaced in the result message.
 - **D4 done** — writeback governance is enforced: visibility (own_only
   filters to own; own_plus_aggregate anonymizes other submitters), approval
@@ -421,7 +421,7 @@ A later batch (this session) closed more of Pillar 2:
 - **C8 — distribute module scripts + notebooks via `.calp` (done):** publish/pull
   now carry standalone module scripts (`workbook.scripts`) and notebooks
   (`workbook.notebooks`) as inert, signed + checksummed, transparent artifacts
-  (surfaced pre-pull in `calp_inspect_package`); notebook execution metadata is
+  (surfaced pre-pull in `calp_inspect_application`); notebook execution metadata is
   stripped defensively **at pull** (so a forged-but-signed package can't show fake
   output); module scripts/notebooks replace by id so upstream updates land on
   refresh. A 9-agent adversarial review caught + fixed 5 real defects (refresh
@@ -523,15 +523,15 @@ mostly missing.
 - **D6. Subscription manager + registry browser.** Wire the ~17 caller-less
   commands: list subscriptions (pin/resolved/last refresh), per-subscription
   refresh/re-pin/detach/export-import overrides, package browser for
-  Subscribe/Publish (`calp_browse_registry` returns full version history, unused —
+  Subscribe/Publish (`calp_browse_workspace` returns full version history, unused —
   Subscribe is blind text fields), update-available badge on open.
 - **D7. Registry robustness.** `package_name` and `submitter_id` are joined raw
   into filesystem paths (path traversal from a hostile package name); all writes are
   plain `fs::write` with no atomic rename and no locking around manifest
   read-modify-write (design risk R2, never implemented). Validate at the
-  LocalRegistry boundary; write-temp+rename; lockfile.
+  LocalWorkspace boundary; write-temp+rename; lockfile.
 - **D8. HTTP registry transport + authenticated identity.** Extract a
-  `RegistryTransport` trait (fs impl stays); add HTTP (reqwest already in app deps);
+  `WorkspaceTransport` trait (fs impl stays); add HTTP (reqwest already in app deps);
   bind submitter identity to an authenticated principal — today it's a spoofable
   local JSON (OS username + UUID). The design doc itself says "Writeback requires
   authenticated subscribers."
@@ -743,7 +743,7 @@ aggregates residence + reach, and code arrives/ships silently in both directions
 - **T2. Pre-pull package review.** Subscribe currently materializes scripts, BI
   connection definitions, and writeback regions silently — consent must happen
   before code lands, with an explicit accept step listing contents
-  (`calp_browse_registry` is a partial seed; `PullResponse` doesn't even mirror
+  (`calp_browse_workspace` is a partial seed; `PullResponse` doesn't even mirror
   `scripts_pulled`, so the toast can't mention code arrived).
 - **T3. Script updates on refresh: diff + re-consent.** Refresh today never updates
   scripts at all (`apply_refresh` ignores `pull_result.object_scripts`) — subscribers

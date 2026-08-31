@@ -308,25 +308,25 @@ packages live* and *what travels*, but never *how signing/integrity/merge*
 work (those stay hardcoded and mandatory).
 
 **Brick 1 — Registry providers (SHIPPED).** The `.calp` core already had a
-`RegistryTransport` trait; only `LocalRegistry` existed. Added
-`HttpRegistry` (app crate, `reqwest::blocking`, **read-only**) + an
+`WorkspaceTransport` trait; only `LocalWorkspace` existed. Added
+`HttpWorkspace` (app crate, `reqwest::blocking`, **read-only**) + an
 `open_registry(location)` factory that routes by URL scheme
 (`file://`/path → local, `http(s)://` → HTTP), so **any static HTTPS host
 (S3, nginx, GitHub Pages) is a valid read-only registry with no server code**.
 Every calp command constructs its registry through the one factory; the two
-`refresh` functions were generified `&LocalRegistry → &dyn RegistryTransport`,
-and a forwarding `impl RegistryTransport for Box<dyn RegistryTransport>` lets
+`refresh` functions were generified `&LocalWorkspace → &dyn WorkspaceTransport`,
+and a forwarding `impl WorkspaceTransport for Box<dyn WorkspaceTransport>` lets
 the factory return a boxed transport that callers pass as `&dyn`. **The trust
 chain is transport-agnostic** — an HTTP pull runs the identical Ed25519
 signature + TOFU pin + min-app-version + per-artifact SHA-256 verification
 (inspect switched to `verify_manifest_signature_via`). A per-machine
 saved-registry catalog (`registries.json` in the profile dir, never the
-workbook) + a picker in the Subscribe dialog. `@api/distributionRegistries.ts`.
+workbook) + a picker in the Subscribe dialog. `@api/distributionWorkspaces.ts`.
 
 **Brick 2 — Pluggable package kinds (SHIPPED).** `registerPackageKind({ id,
 label, description, refreshDefaults })` — the publish picker and package
 inspection now show domain kinds beyond report/template/dataset. Frontend-only
-(`@api/packageKinds.ts`): the `kind` string already flows end-to-end and the
+(`@api/applicationKinds.ts`): the `kind` string already flows end-to-end and the
 backend falls back to `report` semantics for unknown kinds.
 *Honest limit:* `refreshDefaults` is advisory metadata — the refresh pipeline
 is not yet kind-aware (nor for the built-ins), so kinds drive labels/intent,
@@ -394,8 +394,8 @@ the dogfood, materialized Rust-side** (mirroring controls, with the
 package→local sheet remap, on pull AND refresh) — proving the channel
 end-to-end. Third-party JS providers use the same channel through
 `@api/distributableObjects.ts`: `registerDistributableObjectProvider({ kind,
-collect, materialize })`; `publishPackage` auto-collects providers into the
-package and `pullPackage` auto-dispatches non-built-in kinds back to them.
+collect, materialize })`; `publishApplication` auto-collects providers into the
+package and `subscribeToApplication` auto-dispatches non-built-in kinds back to them.
 This is the seam that lets a **third-party custom pivot ship its definition** in
 a `.calp`. *Deferred:* refresh-side dispatch to JS providers (cell types refresh
 Rust-side today); `blocking: true` writeback verdicts remain a phase-3 grid item.

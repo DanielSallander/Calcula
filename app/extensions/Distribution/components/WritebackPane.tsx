@@ -87,7 +87,7 @@ function OutboundPreviewPanel({
         <div>
           To: <strong>{preview.packageName}</strong> v{preview.resolvedVersion}
         </div>
-        <div style={{ wordBreak: "break-all" }}>Registry: {preview.registryPath}</div>
+        <div style={{ wordBreak: "break-all" }}>Workspace: {preview.registryPath}</div>
         <div>
           As: <strong>{preview.submitterName || "(unknown)"}</strong>
           {preview.submitterId ? ` (${preview.submitterId})` : ""}
@@ -130,7 +130,7 @@ function OutboundPreviewPanel({
   );
 }
 
-/** Review-and-approve gate for a package's publisher-shipped writeback
+/** Review-and-approve gate for an application's publisher-shipped writeback
  *  validators. The Rust submit path runs these bodies itself, out of the
  *  Ed25519-verified manifest, and REFUSES the submission until the user has
  *  approved this exact source — so without this panel a validated region is
@@ -158,7 +158,7 @@ function ValidatorConsentPanel({
       }}
     >
       <div style={{ fontWeight: 600, marginBottom: 4 }}>
-        Review and approve this package&apos;s input checks
+        Review and approve this application&apos;s input checks
       </div>
       <div style={{ color: "#555", marginBottom: 6 }}>
         <strong>{entry.packageName}</strong> ships{" "}
@@ -268,8 +268,8 @@ export function WritebackPane() {
     };
   }, [refresh]);
 
-  // The user reviewed a package's validator source and approved it. Approval is
-  // per (package, validator body hash): a republished body asks again.
+  // The user reviewed an application's validator source and approved it. Approval
+  // is per (application, validator body hash): a republished body asks again.
   const handleApproveValidators = useCallback(
     async (entry: PendingValidatorConsent) => {
       setApproving(entry.packageName);
@@ -311,8 +311,8 @@ export function WritebackPane() {
     setSubmitting(regionId);
     setSubmitError(null);
     try {
-      // The backend resolves the owning subscription's registry from the
-      // region id — no registry path needed here.
+      // The backend resolves the owning subscription's workspace from the
+      // region id — no workspace path needed here.
       const count = await submitRegion(regionId);
       console.log(`[WritebackPane] Submitted ${count} values for region ${regionId}`);
       setPreview(null);
@@ -457,7 +457,7 @@ export function WritebackPane() {
                 {blocked && <BlockedValidatorNotice blocked={blocked} />}
                 {!blocked && awaitingConsent && (
                   <div style={{ fontSize: 11, color: "#b06000", marginTop: 4 }}>
-                    Waiting for you to approve this package&apos;s input checks (above)
+                    Waiting for you to approve this application&apos;s input checks (above)
                     — submissions are refused until then.
                   </div>
                 )}

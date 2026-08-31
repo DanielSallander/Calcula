@@ -66,7 +66,7 @@ function pickVersion(pkg: FakePackage, pin: string): string {
 }
 
 const invokeBackend = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
-  if (cmd === "calp_browse_registry") {
+  if (cmd === "calp_browse_workspace") {
     return [...registry.entries()].map(([name, p]) => ({
       name,
       description: p.description,

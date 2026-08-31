@@ -1,6 +1,6 @@
 // FILENAME: app/extensions/Distribution/lib/reportExport.ts
 // PURPOSE: Save / print the self-contained HTML report rendered from a .calp
-//          package version (recipient reach: A = save .html, B = print -> Save
+//          application version (recipient reach: A = save .html, B = print -> Save
 //          as PDF, C = save the multi-sheet viewer .html). All three flow from
 //          one rendered HTML string; the mode is chosen when rendering.
 
@@ -62,7 +62,7 @@ export async function saveParquetReport(
 
 /**
  * Save an override patch (C2c) as a user-chosen `.json` file, so a subscriber
- * can share their override layer with another subscriber of the same package.
+ * can share their override layer with another subscriber of the same application.
  * Returns the path written, or null if the user cancelled.
  */
 export async function saveJsonPatch(

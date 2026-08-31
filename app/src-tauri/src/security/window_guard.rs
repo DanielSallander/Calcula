@@ -27,8 +27,8 @@ pub const MAIN_AND_OBJECT_SCRIPT_EDITOR: &[&str] = &["main", "object-script-edit
 pub const MAIN_AND_MODEL_EDITOR: &[&str] = &["main", "model-editor"];
 
 /// The standalone Package Inspector window browses registries and runs the
-/// read-only calp_inspector_* commands (plus calp_browse_registry) itself.
-pub const MAIN_AND_PACKAGE_INSPECTOR: &[&str] = &["main", "package-inspector"];
+/// read-only calp_inspector_* commands (plus calp_browse_workspace) itself.
+pub const MAIN_AND_APPLICATION_INSPECTOR: &[&str] = &["main", "package-inspector"];
 
 /// Reject the call unless the invoking window's label is in `allowed`.
 /// First line of every guarded command:

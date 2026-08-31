@@ -20,7 +20,7 @@
 //!
 //! DELIBERATE DEVIATION from the agreed contract's `pub async fn`: this command
 //! is SYNC. Every function it dispatches into is sync and does registry I/O,
-//! and an HTTP registry (`calp_registry::HttpRegistry`) uses
+//! and an HTTP registry (`calp_registry::HttpWorkspace`) uses
 //! `reqwest::blocking`, which must NOT run on the async runtime. Tauri runs
 //! sync commands on a worker thread, exactly like every other `calp_*` command.
 //! The IPC surface is identical from TypeScript (`invoke("script_writeback",

@@ -5,10 +5,10 @@
 
 import { describe, it, expect, vi } from "vitest";
 import {
-  registerPackageKind,
-  listPackageKinds,
-  getPackageKind,
-} from "../packageKinds";
+  registerApplicationKind,
+  listApplicationKinds,
+  getApplicationKind,
+} from "../applicationKinds";
 import {
   registerWritebackValidator,
   listWritebackValidators,
@@ -27,7 +27,7 @@ import {
 
 describe("package kinds", () => {
   it("ships the three built-ins first", () => {
-    expect(listPackageKinds().slice(0, 3).map((k) => k.id)).toEqual([
+    expect(listApplicationKinds().slice(0, 3).map((k) => k.id)).toEqual([
       "report",
       "template",
       "dataset",
@@ -35,41 +35,41 @@ describe("package kinds", () => {
   });
 
   it("registers a custom kind and lists it after built-ins", () => {
-    const cleanup = registerPackageKind({ id: "Budget-Model", label: "Budget Model" });
+    const cleanup = registerApplicationKind({ id: "Budget-Model", label: "Budget Model" });
     try {
       // id is normalized to lowercase.
-      expect(getPackageKind("budget-model")?.label).toBe("Budget Model");
-      expect(listPackageKinds().some((k) => k.id === "budget-model")).toBe(true);
+      expect(getApplicationKind("budget-model")?.label).toBe("Budget Model");
+      expect(listApplicationKinds().some((k) => k.id === "budget-model")).toBe(true);
     } finally {
       cleanup();
     }
-    expect(getPackageKind("budget-model")).toBeNull();
+    expect(getApplicationKind("budget-model")).toBeNull();
   });
 
   it("restores a built-in after overriding it", () => {
-    const cleanup = registerPackageKind({ id: "report", label: "Custom Report" });
-    expect(getPackageKind("report")?.label).toBe("Custom Report");
+    const cleanup = registerApplicationKind({ id: "report", label: "Custom Report" });
+    expect(getApplicationKind("report")?.label).toBe("Custom Report");
     cleanup();
-    expect(getPackageKind("report")?.label).toBe("Report");
+    expect(getApplicationKind("report")?.label).toBe("Report");
   });
 
   it("a stale cleanup does not clobber a later same-id registration (custom id)", () => {
-    const cleanupA = registerPackageKind({ id: "shared", label: "A" });
-    const cleanupB = registerPackageKind({ id: "shared", label: "B" }); // B is live
+    const cleanupA = registerApplicationKind({ id: "shared", label: "A" });
+    const cleanupB = registerApplicationKind({ id: "shared", label: "B" }); // B is live
     // A deactivates out of nesting order — must NOT remove B's live entry.
     cleanupA();
-    expect(getPackageKind("shared")?.label).toBe("B");
+    expect(getApplicationKind("shared")?.label).toBe("B");
     cleanupB();
-    expect(getPackageKind("shared")).toBeNull();
+    expect(getApplicationKind("shared")).toBeNull();
   });
 
   it("a stale cleanup does not revert a later override of a built-in", () => {
-    const cleanupA = registerPackageKind({ id: "report", label: "Report A" });
-    const cleanupB = registerPackageKind({ id: "report", label: "Report B" }); // B is live
+    const cleanupA = registerApplicationKind({ id: "report", label: "Report A" });
+    const cleanupB = registerApplicationKind({ id: "report", label: "Report B" }); // B is live
     cleanupA(); // stale — must not restore the built-in under B
-    expect(getPackageKind("report")?.label).toBe("Report B");
+    expect(getApplicationKind("report")?.label).toBe("Report B");
     cleanupB(); // now restore the built-in
-    expect(getPackageKind("report")?.label).toBe("Report");
+    expect(getApplicationKind("report")?.label).toBe("Report");
   });
 });
 

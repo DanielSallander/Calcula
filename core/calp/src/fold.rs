@@ -1,6 +1,6 @@
 //! FILENAME: core/calp/src/fold.rs
 //! PURPOSE: Deterministic current-state fold over append-only writeback events.
-//! CONTEXT: The registry stores submissions and publisher review decisions as
+//! CONTEXT: The workspace stores submissions and publisher review decisions as
 //! immutable event files — no path is ever written twice by anyone — so
 //! shared/synced storage (SMB, Dropbox) can never lose an update or produce a
 //! meaningful "conflicted copy". Current state is DERIVED, database-style,
@@ -37,7 +37,7 @@ fn cmp_review_events(a: &ReviewEvent, b: &ReviewEvent) -> Ordering {
     cmp_timestamps(&a.reviewed_at, &b.reviewed_at).then_with(|| a.id.cmp(&b.id))
 }
 
-/// Fold raw registry events into the CURRENT set of submissions.
+/// Fold raw workspace events into the CURRENT set of submissions.
 ///
 /// Rules (each deterministic, so shuffled input yields identical output):
 /// 1. Events are deduplicated by id — a byte-duplicated immutable event (e.g.

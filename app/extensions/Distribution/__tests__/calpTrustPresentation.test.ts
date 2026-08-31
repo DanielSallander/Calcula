@@ -3,7 +3,7 @@
 //          OWN presentation row everywhere it surfaces, and only the state that
 //          means "this machine pinned this key" may be called verified.
 // CONTEXT: Wave J made pinning a decision instead of a side effect. Passive
-//          surfaces (Package Inspector, the Subscribe dialog's Review step, the
+//          surfaces (Application Inspector, the Subscribe dialog's Review step, the
 //          subscription trust report) now answer `notPinned` on first contact
 //          instead of silently writing a pin.
 //
@@ -135,16 +135,16 @@ describe("the Rust trust vocabulary is complete and honest", () => {
     expect(fn![0]).not.toContain('"notPinnedNameConflict"');
   });
 
-  it("the pin key is scoped to a registry, and only in one place", () => {
-    // THE BUG THIS WAVE FIXED. A pin keyed by package NAME alone let whoever
-    // made first contact with a name own it machine-wide: a package served once
-    // from a hostile share wrote the pin the genuine publisher was later
+  it("the pin key is scoped to a workspace, and only in one place", () => {
+    // THE BUG THIS WAVE FIXED. A pin keyed by application NAME alone let whoever
+    // made first contact with a name own it machine-wide: an application served
+    // once from a hostile share wrote the pin the genuine publisher was later
     // measured against, so the real author's first release read as
-    // "publisherChanged". The key is now (namespace, registry scope, name), and
+    // "publisherChanged". The key is now (namespace, workspace scope, name), and
     // it may only be BUILT by the two sanctioned constructors.
     const signing = read("../core/calp/src/signing.rs");
     const production = signing.split("#[cfg(test)]")[0];
-    expect(production).toMatch(/pub fn calp\(scope: &RegistryScope, package: &str\) -> PinKey/);
+    expect(production).toMatch(/pub fn calp\(scope: &WorkspaceScope, package: &str\) -> PinKey/);
     expect(production).toMatch(/pub fn extension\(id: &str\) -> PinKey/);
     expect(
       production.match(/PinKey \{\n {12}namespace,/g)?.length ?? 0,
@@ -157,13 +157,13 @@ describe("the Rust trust vocabulary is complete and honest", () => {
 
     // ...and the verifier cannot be called without a scope.
     const integrityProd = INTEGRITY_RS.split("#[cfg(test)]")[0];
-    expect(integrityProd).toContain("    scope: &RegistryScope,");
-    expect(integrityProd).not.toContain("Option<RegistryScope>");
-    expect(integrityProd).not.toContain("impl Default for RegistryScope");
+    expect(integrityProd).toContain("    scope: &WorkspaceScope,");
+    expect(integrityProd).not.toContain("Option<WorkspaceScope>");
+    expect(integrityProd).not.toContain("impl Default for WorkspaceScope");
   });
 });
 
-describe("Package Inspector overview badge", () => {
+describe("Application Inspector overview badge", () => {
   const rows = objectKeys(
     OVERVIEW,
     /const TRUST_BADGE: Record<CalpTrustStatus,[\s\S]*?\n\};/,
@@ -208,7 +208,7 @@ describe("Package Inspector overview badge", () => {
   });
 
   it("paints both name-conflict states as danger", () => {
-    // A name claimed by two registries under two keys is the loudest thing this
+    // A name claimed by two workspaces under two keys is the loudest thing this
     // vocabulary can say. Neither state may be painted amber or green.
     for (const status of ["notPinnedNameConflict", "firstUseAcceptedNameConflict"]) {
       const row = OVERVIEW.match(new RegExp(`\\n  ${status}: \\{[\\s\\S]*?\\n  \\},`));
@@ -232,7 +232,7 @@ describe("Subscribe dialog review step", () => {
     }
   });
 
-  it("shows WHO signed the package, not just what is inside it", () => {
+  it("shows WHO signed the application, not just what is inside it", () => {
     // Review is the pre-subscribe trust surface and it is PASSIVE — the backend
     // reports the publisher but writes no pin — so the identity has to be
     // legible here or the user is agreeing to something they were never shown.
@@ -287,9 +287,9 @@ describe("Subscriptions pane trust notice", () => {
     }
   });
 
-  it("tells the user how to activate an untrusted package", () => {
-    // The fail-closed change is invisible without this: a workbook that names a
-    // package nobody here subscribed to shows inert writeback/GATHER, and the
+  it("tells the user how to activate an untrusted application", () => {
+    // The fail-closed change is invisible without this: a workbook that names an
+    // application nobody here subscribed to shows inert writeback/GATHER, and the
     // user needs to be told that subscribing is what fixes it.
     // Scoped to TRUST_NOTICE. The unscoped `SUB_PANE.match(/\n  notPinned: \{/)`
     // this replaced silently retargeted the moment the pane grew a SECOND table
@@ -300,7 +300,7 @@ describe("Subscriptions pane trust notice", () => {
     expect(table, "TRUST_NOTICE moved or was renamed").toBeTruthy();
     const row = table![0].match(/\n  notPinned: \{[\s\S]*?\n  \},/)![0];
     expect(row).toMatch(/not trusted on this computer/i);
-    expect(row).toMatch(/Subscribe to Package/);
+    expect(row).toMatch(/Subscribe to Application/);
   });
 
   it("does not collapse an UNKNOWN status into the silent 'verified' branch", () => {
@@ -326,6 +326,6 @@ describe("Subscriptions pane trust notice", () => {
     expect(unknownBranch, "no rendering for an unrecognised status").toBeTruthy();
     expect(unknownBranch![0]).toMatch(/Unrecognised/i);
     expect(unknownBranch![0]).toMatch(/trustDanger/);
-    expect(unknownBranch![0]).toMatch(/do not treat the package as trusted/i);
+    expect(unknownBranch![0]).toMatch(/do not treat the application as trusted/i);
   });
 });

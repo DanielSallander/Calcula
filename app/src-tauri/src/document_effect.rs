@@ -1132,7 +1132,7 @@ mod tests {
     /// `AppState`'s field declarations as (name, type text), with WRAPPED
     /// declarations joined.
     ///
-    /// The joining is not fussiness. `package_connection_restore_skips` puts its
+    /// The joining is not fussiness. `application_connection_restore_skips` puts its
     /// type on a continuation line, and a per-line reading of the struct counts it
     /// as carrying no lock at all -- which is exactly how a count of these fields
     /// came out wrong for the fourth time on 2026-08-17. Parse the declarations,

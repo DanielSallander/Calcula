@@ -1,19 +1,19 @@
 //! FILENAME: core/calp/src/html_export.rs
-//! PURPOSE: Self-contained HTML renderer for a published .calp package version.
+//! PURPOSE: Self-contained HTML renderer for a published .calp application version.
 //! CONTEXT: "Recipient reach" — let a publisher turn a published report into a
 //! single offline `.html` file any phone/Mac/browser can open WITHOUT Calcula.
 //!
-//! This reads a published version's artifacts through the `RegistryTransport`
+//! This reads a published version's artifacts through the `WorkspaceTransport`
 //! seam (so it works for any transport, local or future HTTP) exactly the way
 //! `pull.rs` does — `sheets/{id}/data.json`, `styles.json`, `layout.json`,
 //! `metadata.json` — then renders ONE self-contained HTML document: no external
 //! CSS/JS/font/image references, everything inline, so the file works offline.
 //!
-//! SECURITY: a `.calp` package is THIRD-PARTY content. Every value lifted from
-//! the package — cell text, sheet names, publisher name, package name — is
+//! SECURITY: a `.calp` application is THIRD-PARTY content. Every value lifted from
+//! the application — cell text, sheet names, publisher name, application name — is
 //! HTML-escaped before insertion (`&`, `<`, `>`, `"`, `'`). The only `<script>`
 //! ever emitted is the fixed viewer-toggle in Viewer mode, which references NO
-//! package data as code. A published cell value can therefore never inject
+//! application data as code. A published cell value can therefore never inject
 //! markup or script.
 
 use std::collections::HashMap;
@@ -26,9 +26,9 @@ use persistence::{SavedCell, SavedCellValue, SavedMergedRegion};
 
 use crate::error::CalpError;
 use crate::manifest::PublishedSheetMetadata;
-use crate::transport::RegistryTransport;
+use crate::transport::WorkspaceTransport;
 
-/// Output flavor for [`render_package_html`].
+/// Output flavor for [`render_application_html`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HtmlExportMode {
     /// All sheets stacked under `<h2>` headings, print/PDF-friendly, no script.
@@ -49,7 +49,7 @@ impl Default for HtmlExportOptions {
     }
 }
 
-/// A single sheet, read + resolved from the package, ready to render.
+/// A single sheet, read + resolved from the application, ready to render.
 struct RenderSheet {
     name: String,
     cells: HashMap<(u32, u32), SavedCell>,
@@ -66,14 +66,14 @@ struct RenderSheet {
 const DEFAULT_COL_WIDTH: f64 = 80.0;
 const DEFAULT_ROW_HEIGHT: f64 = 22.0;
 
-/// Render a published `.calp` package version as ONE self-contained HTML
-/// document. The package is read through `registry` (any `RegistryTransport`),
-/// so this works for the local registry today and a future HTTP one unchanged.
+/// Render a published `.calp` application version as ONE self-contained HTML
+/// document. The application is read through `registry` (any `WorkspaceTransport`),
+/// so this works for the local workspace today and a future HTTP one unchanged.
 ///
 /// Returns the complete HTML as a `String`. No external references are emitted:
 /// the file is fully offline-portable.
-pub fn render_package_html(
-    registry: &dyn RegistryTransport,
+pub fn render_application_html(
+    registry: &dyn WorkspaceTransport,
     package: &str,
     version: &str,
     opts: &HtmlExportOptions,
@@ -249,7 +249,7 @@ fn build_static_body(out: &mut String, sheets: &[RenderSheet]) {
 }
 
 /// Viewer mode: a row of tabs + one toggled `<div data-sheet>` per sheet, plus a
-/// fixed vanilla toggle script that references no package data as code.
+/// fixed vanilla toggle script that references no application data as code.
 fn build_viewer_body(out: &mut String, sheets: &[RenderSheet]) {
     // Tabs.
     out.push_str("<nav class=\"calp-tabs\" role=\"tablist\">\n");
@@ -277,7 +277,7 @@ fn build_viewer_body(out: &mut String, sheets: &[RenderSheet]) {
         out.push_str("</div>\n");
     }
 
-    // Fixed toggle script (no package data flows into code).
+    // Fixed toggle script (no application data flows into code).
     out.push_str(viewer_script());
 }
 
@@ -557,7 +557,7 @@ fn style_attr(decls: &[String]) -> String {
     if decls.is_empty() {
         return String::new();
     }
-    // CRITICAL: declarations include package-controlled values (notably the
+    // CRITICAL: declarations include application-controlled values (notably the
     // font-family name). Without escaping, a font name like `x"><script>...`
     // would break out of the style="" attribute and inject markup into the
     // report a recipient opens in a browser. Escaping the whole declaration
@@ -654,7 +654,7 @@ fn escape_html(s: &str) -> String {
 }
 
 // ===========================================================================
-// Static assets (CSS + viewer script) — fixed, no package data
+// Static assets (CSS + viewer script) — fixed, no application data
 // ===========================================================================
 
 fn base_css(mode: HtmlExportMode) -> &'static str {
@@ -753,7 +753,7 @@ table.calp-gridlines td {
 "#;
 
 /// The fixed viewer-toggle script. Vanilla JS, no dependencies, references NO
-/// package data as code — it only reads `data-tab` / `data-sheet` indices set
+/// application data as code — it only reads `data-tab` / `data-sheet` indices set
 /// by the (escaped) markup above.
 fn viewer_script() -> &'static str {
     r#"<script>
@@ -790,7 +790,7 @@ fn viewer_script() -> &'static str {
 mod tests {
     use super::*;
     use crate::publish::{self, PublishRequest, PushMode};
-    use crate::registry::LocalRegistry;
+    use crate::workspace::LocalWorkspace;
     use crate::version::SemVer;
     use engine::cell::Cell;
     use engine::style::{CellStyle, Color};
@@ -899,7 +899,7 @@ mod tests {
     fn publish_and_render(opts: &HtmlExportOptions) -> String {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
         let wb = make_workbook();
 
         let request = PublishRequest {
@@ -925,7 +925,7 @@ mod tests {
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
 
-        render_package_html(&reg, "Sales Report", "1.2.0", opts).unwrap()
+        render_application_html(&reg, "Sales Report", "1.2.0", opts).unwrap()
     }
 
     #[test]
@@ -1012,7 +1012,7 @@ mod tests {
 
     #[test]
     fn style_attr_blocks_attribute_breakout() {
-        // A package-controlled style value (e.g. a malicious font-family name)
+        // An application-controlled style value (e.g. a malicious font-family name)
         // must NOT be able to break out of the style="" attribute and inject
         // markup into the report a recipient opens in a browser.
         let evil = r#"font-family:x"><script>alert(1)</script>"#.to_string();
@@ -1026,7 +1026,7 @@ mod tests {
     fn empty_sheet_renders_placeholder() {
         let dir = TempDir::new().unwrap();
         let prof = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(dir.path()).unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
 
         let mut wb = Workbook::default();
         wb.sheets = vec![Sheet::new("Blank".to_string())];
@@ -1054,7 +1054,7 @@ mod tests {
         };
         publish::publish(&reg, &request, prof.path()).unwrap();
 
-        let html = render_package_html(
+        let html = render_application_html(
             &reg,
             "blank-pkg",
             "1.0.0",

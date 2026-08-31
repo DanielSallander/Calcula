@@ -38,7 +38,7 @@ describe("runOverrideExport (C2c)", () => {
     expect(result).toBe("C:/out.json");
   });
 
-  it("multiple subscriptions -> the prompt picks the package", async () => {
+  it("multiple subscriptions -> the prompt picks the application", async () => {
     const deps = makeDeps({
       getSubscriptions: vi
         .fn()

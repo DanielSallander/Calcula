@@ -432,7 +432,7 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "bi.connector": "feed external data into your BI model as a data connector",
   "ui.dialog": "show you a dialog and receive what you enter",
   "distribution.writeback":
-    "fill in the input cells of a subscribed package and send your answers to its publisher (and, if it can sign the package, read and approve everyone else's)",
+    "fill in the input cells of a subscribed application and send your answers to its publisher (and, if it can sign the application, read and approve everyone else's)",
   // Honest on THREE counts, and the third one used to be wrong. It starts ITSELF
   // (the novel authority); it only does so while the app is open (the honest
   // limit — a user who reads "on a schedule" and pictures a service emailing
@@ -475,12 +475,12 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   // is the honest limit that makes this grantable — a script cannot become a
   // publisher, only act as one you already are.
   "distribution.publish":
-    "publish this workbook to one of your package registries, signed with YOUR publisher key, where everyone subscribed to that package will receive it. It leaves this machine and cannot be taken back. It can only publish to registries you already added, and only if you have published something yourself before — a script cannot create your publisher identity",
+    "publish this workbook to one of your workspaces, signed with YOUR publisher key, where everyone subscribed to that application will receive it. It leaves this machine and cannot be taken back. It can only publish to workspaces you already added, and only if you have published something yourself before — a script cannot create your publisher identity",
   // INBOUND. Deliberately phrased as "somebody else's code arrives", because
   // that is the risk, and then the two bounds that contain it: it cannot reach a
-  // registry you did not add, and it cannot switch the code on.
+  // workspace you did not add, and it cannot switch the code on.
   "distribution.subscribe":
-    "bring somebody else's published packages into this workbook — their sheets, their data and any code they carry — and update the ones you already subscribe to. It can only use registries you added yourself, everything it brings in is signature-checked exactly as if you had subscribed by hand, and any code that arrives stays switched off until you approve it (including code that CHANGED in an update)",
+    "bring somebody else's published applications into this workbook — their sheets, their data and any code they carry — and update the ones you already subscribe to. It can only use workspaces you added yourself, everything it brings in is signature-checked exactly as if you had subscribed by hand, and any code that arrives stays switched off until you approve it (including code that CHANGED in an update)",
 };
 
 /** One-line description of a capability id, for transparency UI (extension

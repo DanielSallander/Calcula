@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/Distribution/components/inspector/ScriptsSection.tsx
-// PURPOSE: Full-source transparency for every line of code the package
+// PURPOSE: Full-source transparency for every line of code the application
 //          carries: object scripts (with the SIGNED capability ceiling),
 //          module scripts, notebooks, and the Custom Functions library.
 
@@ -10,7 +10,7 @@ import {
   type InspectorScripts,
 } from "@api/distribution";
 import type { CapabilityId } from "@api";
-import type { InspectorContext } from "./PackageInspectorApp";
+import type { InspectorContext } from "./ApplicationInspectorApp";
 import {
   Badge,
   StatusLine,
@@ -37,18 +37,18 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // NOT "store data on this device": the store is the workbook's own virtual
   // filesystem (.calcula/script-data/<scriptId>.json — scriptHost/host.ts), so
   // it travels inside the .cala to everyone the file is sent to. Word for word
-  // the same phrase as @api/capabilities.ts and SubscribeDialog.tsx.
+  // the same phrase as @api/scriptHost/capabilities.ts and SubscribeDialog.tsx.
   storage:
-    "store its own private data inside this workbook file (256 KB; it travels with the file if you share it)",
+    "store its own private data inside this workbook file (up to 256 KB; it travels with the file if you share it)",
   "ui.html": "render custom HTML UI",
   "formula.udf": "define formula functions",
   "bi.connector": "feed external data into the BI model",
   "ui.dialog": "interrupt you with a dialog and read your answer",
   // Both halves of the .calp collection loop. The publisher half (read
-  // everyone's answers, approve/reject them) additionally needs the package
+  // everyone's answers, approve/reject them) additionally needs the application's
   // signing key, but the phrase must not understate what the grant covers.
   "distribution.writeback":
-    "fill in and send the input cells of a subscribed package — and, for a package it can sign, read and approve everyone else's answers",
+    "fill in and send the input cells of a subscribed application — and, for an application it can sign, read and approve everyone else's answers",
   // The only capability whose effects OUTLIVE the session that consented to it:
   // the job is saved in the workbook and resumes on reopen. The phrase must say
   // both halves (unattended + persisted) or the inspector understates the reach.
@@ -60,22 +60,22 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   "file.picker":
     "ask you to pick a file to save data into or to read — one file per ask, chosen by you, and it is never told where your files are",
   // The inspector is read WITHOUT running anything, so this line is often the
-  // only warning a reviewer gets that a package installs a key hook at all.
+  // only warning a reviewer gets that an application installs a key hook at all.
   // It therefore names the taking AND the two bounds that keep it from being
   // Application.OnKey: it cannot take keys the app needs, and it sees nothing
   // else you type.
   "ui.shortcut":
     "take over one Ctrl+Shift+letter keyboard shortcut so pressing it runs its code — never a shortcut Calcula needs or something else already uses, and it never sees anything else you type",
   // Reviewed WITHOUT running anything, so this line may be the only warning
-  // that a package hands somebody else's code the contents of the workbook it
+  // that an application hands somebody else's code the contents of the workbook it
   // lands in. It names the push ("is shown"), because nothing in the code reads
   // as a cell read: the host volunteers the values.
   "grid.read":
     "be shown the contents of your cells — the displayed value of every cell on screen when it styles them, and the old value, new value and formula of every cell that changes",
   "distribution.publish":
-    "publish workbooks to your package registries, signed with YOUR publisher key — only to registries you added, and only if you already have a publisher identity",
+    "publish workbooks to your workspaces, signed with YOUR publisher key — only to workspaces you added, and only if you already have a publisher identity",
   "distribution.subscribe":
-    "pull other packages into the workbook and refresh the ones it subscribes to — only from registries you added, verified exactly as an interactive subscribe is",
+    "pull other applications into the workbook and refresh the ones it subscribes to — only from workspaces you added, verified exactly as an interactive subscribe is",
 };
 
 function CapabilityBadges({ capabilities }: { capabilities: string[] }): React.ReactElement {
@@ -137,7 +137,7 @@ export function ScriptsSection({
     return (
       <div>
         <h2 style={sectionTitleStyle}>Scripts &amp; Code</h2>
-        <StatusLine empty emptyText="This package carries no scripts, notebooks, or custom functions." />
+        <StatusLine empty emptyText="This application carries no scripts, notebooks, or custom functions." />
       </div>
     );
   }
@@ -234,7 +234,7 @@ export function ScriptsSection({
                 <CapabilityBadges capabilities={data.customFunctions.capabilities} />
               </div>
               <div style={{ ...mutedStyle, fontSize: 11, marginTop: 4 }}>
-                Merged per-function at pull; a package can never widen the subscriber&apos;s
+                Merged per-function at pull; an application can never widen the subscriber&apos;s
                 capability ceiling. Full library JSON: Artifacts &amp; Integrity.
               </div>
             </div>

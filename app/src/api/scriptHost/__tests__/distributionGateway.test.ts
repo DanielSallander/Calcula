@@ -43,7 +43,7 @@ import { EXTENSION_BROKER_METHODS } from "../extensionProtocol";
 import { isConsentCurrent, sha256Hex, type ConsentRecord } from "../../distributedConsent";
 import { LIBRARY_PACKAGE_KIND as DIST_LIBRARY_KIND } from "../../distribution";
 import { LIBRARY_PACKAGE_KIND as CONSUMER_LIBRARY_KIND } from "../../scriptLibraries/registry";
-import { listPackageKinds, getPackageKind } from "../../packageKinds";
+import { listApplicationKinds, getApplicationKind } from "../../applicationKinds";
 
 const PUBLISH_CAP = "distribution.publish";
 const SUBSCRIBE_CAP = "distribution.subscribe";
@@ -256,8 +256,8 @@ describe("rule 2 — the script path is the same code as the UI path", () => {
       "calp_cmds::calp_pull(",
       "calp_cmds::calp_refresh_apply(",
       "calp_cmds::calp_refresh_preview(",
-      "calp_cmds::calp_inspect_package(",
-      "calp_cmds::calp_browse_registry(",
+      "calp_cmds::calp_inspect_application(",
+      "calp_cmds::calp_browse_workspace(",
       "calp_cmds::calp_publish(",
       "calp_cmds::calp_publish_model(",
       "calp_cmds::calp_publish_preview(",
@@ -296,7 +296,7 @@ describe("rule 2 — the script path is the same code as the UI path", () => {
     // ...and it threads the registry SCOPE through as well: a pin belongs to
     // the registry it came from, and a refresh must be measured against the pin
     // the original subscribe wrote, not against some other registry's.
-    expect(refreshSrc).toContain("scope: &RegistryScope,");
+    expect(refreshSrc).toContain("scope: &WorkspaceScope,");
     // ...and refresh threads the pin POLICY through rather than choosing one:
     // "get the latest version of something I subscribed to" is not the trust
     // decision that Subscribe is, so `calp_refresh_apply` passes RequirePinned
@@ -334,7 +334,7 @@ describe("rule 3 — a script cannot name a registry the user did not add", () =
   it("the gate is fed by saved registries AND existing subscriptions only", () => {
     expect(gatewaySrc).toContain("fn require_configured_registry");
     const fn = sliceBetween(gatewaySrc, "fn configured_registries", "fn require_configured_registry");
-    expect(fn).toContain("calp_list_registries");
+    expect(fn).toContain("calp_list_workspaces");
     expect(fn).toContain("state.subscriptions");
     // Nothing else may widen the set — in particular not the payload.
     expect(fn).not.toContain("payload");
@@ -352,8 +352,8 @@ describe("rule 3 — a script cannot name a registry the user did not add", () =
     // with no signature, no publisher key and no pin.
     const parse = sliceBetween(gatewaySrc, "fn parse(raw: &str)", "fn as_str(self)");
     for (const refused of [
-      "addRegistry",
-      "removeRegistry",
+      "addWorkspace",
+      "removeWorkspace",
       "devSubscribe",
       "devRefresh",
       "detach",
@@ -376,7 +376,7 @@ describe("rule 3 — a script cannot name a registry the user did not add", () =
     // but it would also be a lie in the transparency panel.
     const block = sliceBetween(hostSrc, 'case "cap.pkgListRegistries"', 'case "cap.connectorRegister"');
     expect(block.length).toBeGreaterThan(500);
-    for (const refused of ["detach", "devSubscribe", "addRegistry", "importOverrides"]) {
+    for (const refused of ["detach", "devSubscribe", "addWorkspace", "importOverrides"]) {
       expect(block).not.toContain(`"${refused}"`);
     }
   });
@@ -641,9 +641,9 @@ describe("a library author can finally publish one", () => {
   });
 
   it("the publish picker offers it (it did not, so nobody could ship one)", () => {
-    const kinds = listPackageKinds().map((k) => k.id);
+    const kinds = listApplicationKinds().map((k) => k.id);
     expect(kinds).toContain("library");
-    expect(getPackageKind("library")?.label).toBe("Script library");
+    expect(getApplicationKind("library")?.label).toBe("Script library");
     // The three original built-ins keep their order and position.
     expect(kinds.slice(0, 3)).toEqual(["report", "template", "dataset"]);
   });

@@ -99,15 +99,47 @@ function referencedCommands(): Reference[] {
   for (const rel of SCANNED) walk(path.join(REPO, rel), files);
 
   const refs: Reference[] = [];
-  // `invoke("x")`, `invoke<T>("x")`, `.invoke("x")`, `invokeBackend("x")`.
-  const re = /\binvoke(?:Backend)?\s*(?:<[^>()]*>)?\s*\(\s*"([a-z_][a-z_0-9]*)"/g;
+  // TWO shapes, because the app and the E2E harness call differently.
+  //
+  //   app:  `invoke("x")`, `invoke<T>("x")`, `.invoke("x")`, `invokeBackend("x")`
+  //   e2e:  `invoke(page, "x", args)` — the harness threads the Playwright page
+  //         in front, so the command is the SECOND argument.
+  //
+  // Matched in TWO STEPS rather than one regex, because the single-regex form
+  // could not span the generics the E2E harness actually writes:
+  //
+  //     await invoke<{
+  //       subscriptions?: Array<{ packageName: string }>;
+  //     }>(page, "calp_get_subscriptions", {});
+  //
+  // A `<[^>()]*>` type argument cannot contain the `>` of `Array<…>` and cannot
+  // cross a newline, so every call of that shape was invisible — 52 command
+  // names that appear NOWHERE else in the tree, called against the REAL backend
+  // in the only place that exercises them end to end, unchecked by the only
+  // gate that checks `invoke` strings. TypeScript cannot help: the argument is
+  // a string literal.
+  //
+  // Step 1 finds the call opening (lazy type argument, newlines allowed); step
+  // 2 reads the first string argument, permitting one leading identifier.
+  const CALL = /\binvoke(?:Backend)?\s*(?:<[\s\S]*?>\s*)?\(/g;
+  const FIRST_STRING_ARG = /^\s*(?:[A-Za-z_$][\w$.]*\s*,\s*)?"([a-z_][a-z_0-9]*)"/;
   for (const file of files) {
     const rel = path.relative(REPO, file).replace(/\\/g, "/");
-    // A TEST names commands that deliberately do not exist — `"x"`, `"nope"`,
-    // `"my_command"` — to exercise error paths. Scanning them would make the
-    // guard permanently red on fixtures, and a guard that reds a clean tree is
-    // one somebody switches off.
-    if (/\.(test|spec)\.tsx?$/.test(rel) || rel.includes("/__tests__/")) continue;
+    // A UNIT TEST names commands that deliberately do not exist — `"x"`,
+    // `"nope"`, `"my_command"` — to exercise error paths. Scanning them would
+    // make the guard permanently red on fixtures, and a guard that reds a clean
+    // tree is one somebody switches off.
+    //
+    // E2E SPECS ARE THE OPPOSITE and are scanned. They drive the REAL backend,
+    // so every name in them is a real call site — exactly what this guard is
+    // for. `app/e2e` was already in SCANNED, and then the filter below threw
+    // away all 174 of its `.spec.ts` files: 654 literal command names,
+    // including the ones in the very file this guard's header cites as its
+    // reason for existing. Nothing was broken by it, but the eight commands
+    // renamed in the 2026-08-31 vocabulary change would have been invisible to
+    // the only gate that checks `invoke` strings — which are not typechecked.
+    const isE2e = rel.startsWith("app/e2e/");
+    if (!isE2e && (/\.(test|spec)\.tsx?$/.test(rel) || rel.includes("/__tests__/"))) continue;
 
     const src = fs.readFileSync(file, "utf8");
     // Comments are stripped FIRST: `@example invokeBackend("my_command")` in a
@@ -116,10 +148,15 @@ function referencedCommands(): Reference[] {
       .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1) => p1 + " ".repeat(Math.max(0, m.length - p1.length)));
 
     let m: RegExpExecArray | null;
-    re.lastIndex = 0;
-    while ((m = re.exec(code)) !== null) {
+    CALL.lastIndex = 0;
+    while ((m = CALL.exec(code)) !== null) {
+      const after = m.index + m[0].length;
+      // 300 chars is comfortably past `page, "some_command_name",` and stops
+      // the scan from wandering into an unrelated later string.
+      const arg = FIRST_STRING_ARG.exec(code.slice(after, after + 300));
+      if (!arg) continue;
       refs.push({
-        command: m[1],
+        command: arg[1],
         file: rel,
         line: code.slice(0, m.index).split("\n").length,
       });

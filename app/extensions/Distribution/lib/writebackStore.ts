@@ -94,7 +94,7 @@ export async function refreshWritebackSnapshot(): Promise<WritebackRegionEntry[]
     getWritebackRegions(),
     // Reconcile first so cell states reflect the publisher's approve/reject
     // decisions (the return leg). Falls back to the plain layer if reconcile
-    // fails (e.g. offline registry), and to empty if that fails too.
+    // fails (e.g. offline workspace), and to empty if that fails too.
     reconcileWriteback()
       .catch(() => getWritebackLayer())
       .catch(() => ({ formatVersion: 1, drafts: [] })),

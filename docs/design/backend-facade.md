@@ -9,14 +9,14 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | How counted |
-|---|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | **783** | bracket-matched parse of `lib.rs` (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | **822** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | **100** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
-| Feature-open commands | 667 | 673 | **683** | 783 − 100 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | **338** | exported functions/consts in `backend.ts` |
-| Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | current suite |
+| Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | Recounted (2026-08-31) | How counted |
+|---|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | **787** | bracket-matched parse of `lib.rs` (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | **822** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | **100** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
+| Feature-open commands | 667 | 673 | 683 | **687** | 787 − 100 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | **338** | exported functions/consts in `backend.ts` |
+| Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | 109,126 / 898 files | current suite |
 
 **The 2026-08-27 recount is the point of the row, not the numbers.** CLAUDE.md and this file
 are supposed to be two INDEPENDENT counts of the same thing, which only works if both are
@@ -25,9 +25,14 @@ documents kept quoting the old ones: the command count was **769** at the parent
 by 8 before the four `script_authoring` commands in this change took it to 773 — and the
 denylist had grown from 94 to 100 with nobody updating either page. A figure nothing enforces
 goes stale silently; the AppState census in `document_effect.rs` is the shape that does not,
-and it is the shape any of these would need to stop drifting for good. Vitest's total is left
-alone deliberately: re-running the suite is the only honest way to measure it, and quoting a
-number I did not measure is exactly the failure this paragraph is about.
+and it is the shape any of these would need to stop drifting for good.
+
+**And it drifted again, in two days.** At the 2026-08-31 recount `generate_handler!` held 787,
+not the 783 both pages claimed — the vocabulary rename added no commands, so the four are work
+that landed on 2026-08-29 after the recount in the row beside this one. Two days is the shortest
+drift interval yet recorded here, which is the argument for the enforced-census shape rather
+than another careful recount. The Vitest row is now measured rather than skipped, because the
+same argument applies: a row left blank is a row nobody re-measures.
 
 Also corrected below: the `is_bi_granted` / `grant_script_bi` paragraph (those symbols were
 **deleted** and generalized — the control was strengthened, not dropped), and the "third-party

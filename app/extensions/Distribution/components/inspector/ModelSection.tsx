@@ -1,5 +1,5 @@
 // FILENAME: app/extensions/Distribution/components/inspector/ModelSection.tsx
-// PURPOSE: Embedded BI models (package data sources): connection target
+// PURPOSE: Embedded BI models (application data sources): connection target
 //          (schema only, never credentials), bindings, and the full model
 //          summary — tables, columns, measures, relationships, snapshots.
 
@@ -9,7 +9,7 @@ import {
   type InspectorModel,
   type InspectorOverview,
 } from "@api/distribution";
-import type { InspectorContext } from "./PackageInspectorApp";
+import type { InspectorContext } from "./ApplicationInspectorApp";
 import {
   ACCENT,
   BORDER,
@@ -100,7 +100,7 @@ export function ModelSection({
     return (
       <div>
         <h2 style={sectionTitleStyle}>Data Model</h2>
-        <StatusLine empty emptyText="This package embeds no BI data sources." />
+        <StatusLine empty emptyText="This application embeds no BI data sources." />
       </div>
     );
   }

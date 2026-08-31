@@ -1011,7 +1011,7 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     ("calp_diff_working_copy", "runs the publish assembly against an IN-MEMORY registry to compare the open document with the version it was authored from. It holds the same states `calp_publish` does for the same reason — it is a publish, just not to a real registry — and, like the dry run, writes nothing anywhere"),
     ("calp_push_merge_analyze", "diffs the registry head and the open document against a common base to decide whether two people's changes overlap. Read-only: it runs the publish assembly in memory, exactly as the working-copy diff does"),
     ("calp_push_merge_apply", "brings the intervening version's CELL changes into the open document and moves the workspace link's base forward. It edits the current document — it does not replace it — and the writes go through `apply_script_modified_grids`, which is the ordinary edit pipeline (undo, recalculation, dirty flag, events)"),
-    ("calp_get_package_objects", "reads a package's inventory to show it"),
+    ("calp_get_application_objects", "reads a package's inventory to show it"),
     // -- Materializes package content INTO the open document ------------------
     ("calp_pull", "SUBSCRIBING adds a package's sheets and data sources to the CURRENT document. It is the one flow that legitimately CREATES a BI connection (`load_embedded_data_sources`), so running the reset here would delete the connection the pull had just made"),
     ("calp_refresh_apply", "advances an existing subscription in place; same document, newer package content"),
@@ -2341,7 +2341,7 @@ fn every_store_the_save_path_reads_is_gated_by_a_document_effect() {
     let fns = index_functions(&sources);
     let reads = store_accesses(&call_closure(&fns, SAVE_ROOTS));
 
-    // The declarations, with WRAPPED ones joined: `package_connection_restore_skips`
+    // The declarations, with WRAPPED ones joined: `application_connection_restore_skips`
     // puts its type on a continuation line, and a per-line reading of the struct
     // mistakes it for a field with no lock at all.
     let lib = sources

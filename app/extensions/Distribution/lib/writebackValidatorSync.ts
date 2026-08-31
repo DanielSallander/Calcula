@@ -15,7 +15,7 @@
 //          FAILURE MODES ARE DELIBERATE: a region whose validator is missing a
 //          body, or not yet approved, still opens, still accepts typing and
 //          still saves drafts. Only SUBMIT is blocked, and `pending` /
-//          `blocked` below carry a message naming the package and the
+//          `blocked` below carry a message naming the application and the
 //          validator so the pane can say exactly what to do about it.
 
 import {
@@ -37,7 +37,7 @@ export interface WritebackRegionEntryLike {
 
 export type { WritebackValidatorDescriptor };
 
-/** One package's validators awaiting the user's approval. */
+/** One application's validators awaiting the user's approval. */
 export interface PendingValidatorConsent {
   packageName: string;
   validators: WritebackValidatorDescriptor[];
@@ -53,13 +53,13 @@ export interface BlockedValidatorRegion {
 export interface WritebackValidatorSyncResult {
   /** Approved validators now mounted for advisory checks. */
   mounted: WritebackValidatorDescriptor[];
-  /** Packages whose validators need the user's review + approval. */
+  /** Applications whose validators need the user's review + approval. */
   pending: PendingValidatorConsent[];
   /** Regions that cannot be submitted at all until the publisher acts. */
   blocked: BlockedValidatorRegion[];
 }
 
-/** Emitted after every sync pass so the WritebackPane can show which packages
+/** Emitted after every sync pass so the WritebackPane can show which applications
  *  are waiting for the user to review a validator, and which regions cannot be
  *  submitted at all. The pane reads `lastWritebackValidatorSync()` — the event
  *  carries no payload so a late subscriber never renders a stale snapshot. */
@@ -115,7 +115,7 @@ async function doSync(
 
   for (const [packageName, descriptors] of byPackage) {
     // Dedupe by validator name: several regions may share one validator, and
-    // the consent record is per (package, validator), not per region.
+    // the consent record is per (application, validator), not per region.
     const unique = new Map<string, WritebackValidatorDescriptor>();
     for (const d of descriptors) unique.set(d.name, d);
 
@@ -162,7 +162,7 @@ export function syncWritebackValidators(
 }
 
 /**
- * Record the user's approval of a package's validators (after they reviewed the
+ * Record the user's approval of an application's validators (after they reviewed the
  * source) and mount them. Returns the descriptors that are now live.
  */
 export async function approveAndMountWritebackValidators(

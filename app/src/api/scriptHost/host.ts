@@ -104,7 +104,7 @@ import type {
   ScriptDialogPromptOptions,
   ScriptDialogTextOptions,
 } from "./scriptDialogSpec";
-import { AppEvents, emitAppEvent, onAppEvent, type PackageUpdatedPayload } from "../events";
+import { AppEvents, emitAppEvent, onAppEvent, type ApplicationUpdatedPayload } from "../events";
 import type { PullResponse } from "../distribution";
 import {
   registerLifecycleGuard,
@@ -3150,7 +3150,7 @@ function scheduleOwnerOf(definition: HostMountDefinition): {
  *
  *  1. frontend distributable-object providers materialize the custom objects
  *     Rust does not know about (`applyPulledCustomObjects` — the exact call
- *     `pullPackage` makes), and
+ *     `subscribeToApplication` makes), and
  *  2. `PACKAGE_UPDATED` fires, which makes the ScriptableObjects extension
  *     re-read the workbook's scripts. That path mounts ONLY what persisted
  *     consent already covers — and consent is keyed by SHA-256 OF THE SOURCE,
@@ -3169,7 +3169,7 @@ async function announcePulledPackage(response: PullResponse | null): Promise<voi
     const { applyPulledCustomObjects } = await import("../distribution");
     await applyPulledCustomObjects(response);
   }
-  const payload: PackageUpdatedPayload = response
+  const payload: ApplicationUpdatedPayload = response
     ? {
         packageName: response.packageName,
         version: response.resolvedVersion,
@@ -5572,7 +5572,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_distribution", {
         scriptId: definition.id,
-        action: "browseRegistry",
+        action: "listApplicationsInWorkspace",
         payload: { registryPath: registry },
       });
     }
@@ -5581,7 +5581,7 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_distribution", {
         scriptId: definition.id,
-        action: "inspectPackage",
+        action: "inspectApplication",
         payload: { registryPath: registry, packageName, versionPin },
       });
     }

@@ -191,7 +191,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   // vRangeFormatUnlocked, NOT vRangeFormat: this ONE row additionally accepts
   // the protection attributes locked / formulaHidden (Wave 3 item 8). The
   // restricted rows keep refusing them — a distributed script is forced to the
-  // restricted tier at pull, so packaged code can never unlock cells.
+  // restricted tier at pull, so distributed code can never unlock cells.
   "api.setRangeFormat":    { tier: "unlocked", class: "mutate", validate: vRangeFormatUnlocked, limits: { maxCells: MAX_RANGE_CELLS },
                              desc: "Change how cells look on any sheet (font, colour, alignment, number format, borders), including whether a cell is locked while its sheet is protected" },
   "api.clearRangeFormat":  { tier: "unlocked", class: "mutate", validate: vRangeRef, limits: { maxCells: MAX_RANGE_CELLS },
@@ -906,7 +906,7 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              validate: vScheduleCancel, limits: { perMinute: 60 },
                              desc: "Cancel one of its own schedules" },
   // ---- distribution.writeback: fill in and SEND the input cells of a
-  //      subscribed .calp package — the automation half of the collection loop
+  //      subscribed .calp application — the automation half of the collection loop
   //      (bulk form-fill, validate-then-submit, a review bot). Every row
   //      dispatches into the Rust script_writeback gateway, which re-checks the
   //      grant and then calls the SAME calp_* command the interactive UI calls,
@@ -916,17 +916,17 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   //      THE SPLIT THAT MATTERS: the first five rows are the SUBSCRIBER side
   //      (your own answers). The last two are the PUBLISHER side — they read
   //      other people's submitted data and decide its fate — and Rust gates
-  //      them on Ed25519 key possession over the signed package manifest, so
+  //      them on Ed25519 key possession over the signed application manifest, so
   //      holding the capability is NOT enough. Their desc says so plainly. ----
   "cap.writebackListRegions": { tier: "restricted", capability: "distribution.writeback", class: "read",
                              validate: vNone, limits: { perMinute: 60 },
-                             desc: "List the input areas a subscribed package asks you to fill in (where they are and what kind of value they expect)" },
+                             desc: "List the input areas a subscribed application asks you to fill in (where they are and what kind of value they expect)" },
   "cap.writebackGetLayer": { tier: "restricted", capability: "distribution.writeback", class: "read",
                              validate: vNone, limits: { perMinute: 60 },
                              desc: "Read the answers you have entered so far and whether each one is unsent, sent, approved or rejected" },
   "cap.writebackSaveDraft":{ tier: "restricted", capability: "distribution.writeback", class: "mutate",
                              validate: vWritebackSaveDraft, limits: { perMinute: 240 },
-                             desc: "Fill in one input cell of a subscribed package (checked against the publisher's rules, and sent straight away if the package asks for that)" },
+                             desc: "Fill in one input cell of a subscribed application (checked against the publisher's rules, and sent straight away if the application asks for that)" },
   "cap.writebackSubmit":   { tier: "restricted", capability: "distribution.writeback", class: "net",
                              validate: vWritebackRegionId, limits: { perMinute: 12 },
                              desc: "Send your filled-in answers for one input area to the publisher — they leave this machine and you cannot take them back" },
@@ -935,15 +935,15 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
                              desc: "See exactly which values would leave this machine, and to whom, before anything is sent" },
   "cap.writebackListSubmissions": { tier: "restricted", capability: "distribution.writeback", class: "read",
                              validate: vWritebackListSubmissions, limits: { perMinute: 60 },
-                             desc: "Read what EVERY respondent submitted — their answers and their names — for an area you publish (only possible if this workbook can sign that package)" },
+                             desc: "Read what EVERY respondent submitted — their answers and their names — for an area you publish (only possible if this workbook can sign that application)" },
   "cap.writebackReview":   { tier: "restricted", capability: "distribution.writeback", class: "net",
                              validate: vWritebackReview, limits: { perMinute: 12 },
-                             desc: "Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that package)" },
+                             desc: "Approve or reject somebody else's submitted answer for an area you publish, changing what everyone downstream sees (only possible if this workbook can sign that application)" },
   // ---- distribution.subscribe (INBOUND) + distribution.publish (OUTBOUND):
-  //      the .calp package loop, automated. Every row dispatches into the Rust
+  //      the .calp application loop, automated. Every row dispatches into the Rust
   //      `script_distribution` gateway, which re-checks the ROW'S OWN capability
-  //      grant, refuses any registry the user has not already configured,
-  //      demands Ed25519 publisher-key possession before a registry write, and
+  //      grant, refuses any workspace the user has not already configured,
+  //      demands Ed25519 publisher-key possession before a workspace write, and
   //      then calls the SAME calp_* command the interactive UI calls — so a
   //      scripted pull is verified identically to a human's (signature, TOFU
   //      pin, per-artifact SHA-256, min_app_version) and a scripted publish is
@@ -958,8 +958,8 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   //      classification detail. A DISTRIBUTED script is forced to the restricted
   //      tier at pull (calp::pull stamps Restricted + Distributed), so the tier
   //      gate makes this whole family unreachable from code that arrived in a
-  //      package. That is deliberate: a package whose scripts could pull further
-  //      packages is a self-propagating code channel, and no consent prompt can
+  //      application. That is deliberate: an application whose scripts could pull
+  //      further applications is a self-propagating code channel, and no consent prompt can
   //      make that safe. A distributed report that wants fresh content asks the
   //      user to press Refresh. Beyond that, `pull` appends sheets to the
   //      WORKBOOK and `publish` reads EVERY sheet and sends it off the machine,
@@ -969,41 +969,41 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   //      THE ONE THING NONE OF THESE ROWS CAN DO: consent. A pulled object
   //      script lands unmounted and consent-gated; module scripts and notebooks
   //      land inert. These methods move DATA, never permission — including when
-  //      a refresh replaces the CALLING script's own package (its consent is
+  //      a refresh replaces the CALLING script's own application (its consent is
   //      keyed by source hash, so a changed script re-prompts and does not run).
   "cap.pkgListRegistries": { tier: "unlocked", capability: "distribution.subscribe", class: "read",
                              validate: vNone, limits: { perMinute: 60 },
-                             desc: "See which package registries you have set up on this machine" },
+                             desc: "See which workspaces you have set up on this machine" },
   "cap.pkgListSubscriptions": { tier: "unlocked", capability: "distribution.subscribe", class: "read",
                              validate: vNone, limits: { perMinute: 60 },
-                             desc: "See which packages this workbook is subscribed to, and which version of each" },
+                             desc: "See which applications this workbook is subscribed to, and which version of each" },
   "cap.pkgBrowse":         { tier: "unlocked", capability: "distribution.subscribe", class: "net",
                              validate: vDistRegistry, limits: { perMinute: 20 },
-                             desc: "List the packages available in one of the registries you have set up" },
+                             desc: "List the applications available in one of the workspaces you have set up" },
   "cap.pkgInspect":        { tier: "unlocked", capability: "distribution.subscribe", class: "net",
                              validate: vDistPackageRef, limits: { perMinute: 20 },
-                             desc: "Look inside a published package before taking it — its sheets, its data sources and every script it carries — without bringing anything in" },
+                             desc: "Look inside a published application before taking it — its sheets, its data sources and every script it carries — without bringing anything in" },
   "cap.pkgPull":           { tier: "unlocked", capability: "distribution.subscribe", class: "net",
                              validate: vDistPackageRef, limits: { perMinute: 6 },
-                             desc: "Bring somebody else's published package into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only registries you already added can be used)" },
+                             desc: "Bring somebody else's published application into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only workspaces you already added can be used)" },
   "cap.pkgRefreshPreview": { tier: "unlocked", capability: "distribution.subscribe", class: "net",
                              validate: vNone, limits: { perMinute: 20 },
-                             desc: "Check whether newer versions of the packages you subscribe to are available, and what would change" },
+                             desc: "Check whether newer versions of the applications you subscribe to are available, and what would change" },
   "cap.pkgRefreshApply":   { tier: "unlocked", capability: "distribution.subscribe", class: "net",
                              validate: vNone, limits: { perMinute: 6 },
-                             desc: "Update every package this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it)" },
+                             desc: "Update every application this workbook subscribes to, bringing in the publishers' newest content (any script whose code changed is switched off again until you re-approve it)" },
   "cap.pkgPublishPreview": { tier: "unlocked", capability: "distribution.publish", class: "read",
                              validate: vDistPublishPreview, limits: { perMinute: 60 },
                              desc: "Work out what publishing this workbook would ship, and what it would leave behind, without sending anything" },
   "cap.pkgNextVersion":    { tier: "unlocked", capability: "distribution.publish", class: "net",
                              validate: vDistNextVersion, limits: { perMinute: 20 },
-                             desc: "Ask a registry what the next version number of one of your packages would be" },
+                             desc: "Ask a workspace what the next version number of one of your applications would be" },
   "cap.pkgPublish":        { tier: "unlocked", capability: "distribution.publish", class: "net",
                              validate: vDistPublish, limits: { perMinute: 3 },
-                             desc: "Publish this workbook to one of your registries as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before)" },
+                             desc: "Publish this workbook to one of your workspaces as a new version, signed with YOUR publisher key, where everyone subscribed to it will receive it — this leaves the machine and cannot be taken back (only possible if you have published something yourself before)" },
   "cap.pkgPublishModel":   { tier: "unlocked", capability: "distribution.publish", class: "net",
                              validate: vDistPublishModel, limits: { perMinute: 3 },
-                             desc: "Publish one of your BI models to one of your registries as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel)" },
+                             desc: "Publish one of your BI models to one of your workspaces as a new version, signed with YOUR publisher key (schema only — no data and no credentials travel)" },
   // ---- ui.dialog (B4): ask the user a question and branch on the answer —
   //      the VBA MsgBox / InputBox / UserForm shape, which until now no script
   //      surface had (base.notify is one-way; render.setHtml only paints inside

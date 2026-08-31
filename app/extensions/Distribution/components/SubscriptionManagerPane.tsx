@@ -1,13 +1,13 @@
 // FILENAME: app/extensions/Distribution/components/SubscriptionManagerPane.tsx
 // PURPOSE: Task pane listing all .calp subscriptions with management actions (D6).
 // CONTEXT: Wires the previously caller-less calp_get_subscriptions + calp_detach
-//          so the user can see what they're subscribed to (package, pinned vs
-//          resolved version, registry, sheet count) and detach — instead of
+//          so the user can see what they're subscribed to (application, pinned
+//          vs resolved version, workspace, sheet count) and detach — instead of
 //          subscriptions being invisible in-memory state.
 //          It also surfaces PUBLISHER TRUST (calp_subscription_trust). A .cala
 //          restores its subscription list on open WITHOUT pulling, so a workbook
-//          received from someone else can name packages this computer never
-//          subscribed to. Those packages' writeback regions / GATHER / model
+//          received from someone else can name applications this computer never
+//          subscribed to. Those applications' writeback regions / GATHER / model
 //          writeback columns are deliberately INERT: the code paths that read
 //          their declarations require an existing TOFU pin instead of creating
 //          one, because a file that merely arrives must not be able to squat a
@@ -28,12 +28,12 @@ import {
   exportPackageHtml,
   resetSubscription,
   getWritebackRebuildSkips,
-  getPackageConnectionSkips,
+  getApplicationConnectionSkips,
   WRITEBACK_INDEX_CHANGED_EVENT,
   type Subscription,
   type SubscriptionTrustInfo,
   type WritebackRebuildSkip,
-  type PackageConnectionRestoreSkip,
+  type ApplicationConnectionRestoreSkip,
 } from "@api/distribution";
 import { pivot } from "@api/pivot";
 import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
@@ -50,7 +50,7 @@ const trustKey = (t: SubscriptionTrustInfo) => `${t.packageName}@${t.registryUrl
  * `verified` intentionally renders NOTHING: the normal, expected case should not
  * add noise. Everything else is called out.
  */
-/** The other registries holding this package name, in the user's own spelling. */
+/** The other workspaces holding this application name, in the user's own spelling. */
 function otherScopeLabels(t: SubscriptionTrustInfo): string {
   return (t.otherScopePins ?? [])
     .filter((p) => !p.sameKey)
@@ -62,7 +62,7 @@ function otherScopeLabels(t: SubscriptionTrustInfo): string {
  * How each `WritebackRebuildSkip.reason` reads.
  *
  * The point of this table is a distinction the pane could not previously draw:
- * "this package declares no writeback" and "this package's writeback regions
+ * "this application declares no writeback" and "this application's writeback regions
  * could not be read, so its form protections are NOT in force" both produced an
  * empty index and therefore an identical, silent screen. A subscriber typing
  * into a form whose deadline, value types and required-field rules were never
@@ -72,99 +72,99 @@ function otherScopeLabels(t: SubscriptionTrustInfo): string {
  * has no row for must render as a warning, never as nothing.
  */
 const WRITEBACK_SKIP_NOTICE: Record<string, { tone: "warn" | "danger"; text: string }> = {
-  // Not a failure: the workbook-open rebuild walks local registries inline and
+  // Not a failure: the workbook-open rebuild walks local workspaces inline and
   // hands HTTP ones to a worker, so this is the normal state for a second or two.
   deferred: {
     tone: "warn",
-    text: "Loading this package's form rules from its registry...",
+    text: "Loading this application's form rules from its workspace...",
   },
   unreachable: {
     tone: "danger",
     text:
-      "Registry unreachable, so this package's form rules could not be read. " +
+      "Workspace unreachable, so this application's form rules could not be read. " +
       "Its deadlines, required fields and value checks are NOT in force.",
   },
   notPinned: {
     tone: "danger",
     text:
-      "This computer has never agreed to trust this package's publisher, so its " +
+      "This computer has never agreed to trust this application's publisher, so its " +
       "form rules are not loaded. Subscribe to it once to activate them.",
   },
   publisherChanged: {
     tone: "danger",
     text:
       "The publisher's signing key does not match the one this computer trusted. " +
-      "Calcula is refusing to load this package's form rules.",
+      "Calcula is refusing to load this application's form rules.",
   },
   badManifest: {
     tone: "danger",
-    text: "This package's manifest is damaged, so its form rules could not be read.",
+    text: "This application's manifest is damaged, so its form rules could not be read.",
   },
   appTooOld: {
     tone: "danger",
-    text: "This package needs a newer version of Calcula; its form rules were not loaded.",
+    text: "This application needs a newer version of Calcula; its form rules were not loaded.",
   },
 };
 
 const skipKey = (s: WritebackRebuildSkip) => `${s.packageName}@${s.registryUrl}`;
 
 /**
- * How each `PackageConnectionRestoreSkip.reason` reads.
+ * How each `ApplicationConnectionRestoreSkip.reason` reads.
  *
- * The distinction this draws: a package BI connection is NOT stored in the
- * subscriber's `.cala` (the model is the publisher's and travels in the
- * `.calp`), so reopening a subscribed report rebuilds it from the local package
- * cache under the same signature + pin + checksum gates a pull runs. When that
- * fails the report still shows its last-pulled cells, and the only other symptom
- * is a pivot quietly reporting no connection — indistinguishable from a package
- * that never had a data source. Same "unknown reason renders as a warning, never
- * as nothing" rule as the two tables above.
+ * The distinction this draws: an application's BI connection is NOT stored in
+ * the subscriber's `.cala` (the model is the publisher's and travels in the
+ * `.calp`), so reopening a subscribed report rebuilds it from the local
+ * application cache under the same signature + pin + checksum gates a pull runs.
+ * When that fails the report still shows its last-pulled cells, and the only
+ * other symptom is a pivot quietly reporting no connection — indistinguishable
+ * from an application that never had a data source. Same "unknown reason renders
+ * as a warning, never as nothing" rule as the two tables above.
  */
 const CONNECTION_SKIP_NOTICE: Record<string, { tone: "warn" | "danger"; text: string }> = {
   unreachable: {
     tone: "danger",
     text:
-      "Registry unreachable, so this package's data model could not be verified. " +
+      "Workspace unreachable, so this application's data model could not be verified. " +
       "Its report shows the data from the last refresh; nothing is live.",
   },
   notPinned: {
     tone: "danger",
     text:
-      "This computer has never agreed to trust this package's publisher, so its " +
+      "This computer has never agreed to trust this application's publisher, so its " +
       "data model was not loaded. Subscribe to it once to activate it.",
   },
   publisherChanged: {
     tone: "danger",
     text:
       "The publisher's signing key does not match the one this computer trusted. " +
-      "Calcula is refusing to load this package's data model.",
+      "Calcula is refusing to load this application's data model.",
   },
   badManifest: {
     tone: "danger",
     text:
-      "This package's contents no longer match what its publisher signed, so its " +
+      "This application's contents no longer match what its publisher signed, so its " +
       "data model was NOT loaded.",
   },
   appTooOld: {
     tone: "danger",
-    text: "This package needs a newer version of Calcula; its data model was not loaded.",
+    text: "This application needs a newer version of Calcula; its data model was not loaded.",
   },
   unsupportedTransport: {
     tone: "warn",
     text:
-      "This package is served over HTTP, which does not yet provide a local model " +
+      "This application is served over HTTP, which does not yet provide a local model " +
       "file, so its data model is not connected. Its report cells are unaffected.",
   },
 };
 
-const connSkipKey = (s: PackageConnectionRestoreSkip) => `${s.packageName}@${s.registryUrl}`;
+const connSkipKey = (s: ApplicationConnectionRestoreSkip) => `${s.packageName}@${s.registryUrl}`;
 
 const TRUST_NOTICE: Record<
   SubscriptionTrustInfo["trustStatus"],
   { tone: "ok" | "warn" | "danger"; text: (t: SubscriptionTrustInfo) => string } | null
 > = {
   verified: null,
-  // Normal operation, like : the authority traces to the key this
+  // Normal operation, like `verified`: the authority traces to the key this
   // machine pinned. The Inspector says WHO signed when somebody asks.
   trustedDelegate: null,
   firstUse: {
@@ -174,46 +174,46 @@ const TRUST_NOTICE: Record<
   firstUseKnownPublisher: {
     tone: "warn",
     text: (t) =>
-      `Publisher ${t.publisherName || "(unnamed)"} was trusted for ${t.registryUrl || "this registry"} ` +
-      `just now. The same publisher key was already trusted for this package from ` +
-      `${otherScopeLabels(t) || "another registry"} — a move, a mirror, or the same location ` +
+      `Publisher ${t.publisherName || "(unnamed)"} was trusted for ${t.registryUrl || "this workspace"} ` +
+      `just now. The same publisher key was already trusted for this application from ` +
+      `${otherScopeLabels(t) || "another workspace"} — a move, a mirror, or the same location ` +
       `spelled differently.`,
   },
   firstUseAcceptedNameConflict: {
     tone: "danger",
     text: (t) =>
-      `Publisher ${t.publisherName || "(unnamed)"} was trusted for ${t.registryUrl || "this registry"} ` +
-      `even though ${otherScopeLabels(t) || "another registry"} holds this package name under a ` +
-      `DIFFERENT publisher key. You accepted that conflict. Two registries claiming one name is ` +
-      `what a package hijack looks like — re-check both publishers if you did not expect this.`,
+      `Publisher ${t.publisherName || "(unnamed)"} was trusted for ${t.registryUrl || "this workspace"} ` +
+      `even though ${otherScopeLabels(t) || "another workspace"} holds this application name under a ` +
+      `DIFFERENT publisher key. You accepted that conflict. Two workspaces claiming one name is ` +
+      `what an application hijack looks like — re-check both publishers if you did not expect this.`,
   },
   notPinned: {
     tone: "danger",
     text: (t) =>
       `Publisher ${t.publisherName || "(unnamed)"} is not trusted on this computer. ` +
-      `This workbook references the package, but nobody here ever subscribed to it, so its ` +
+      `This workbook references the application, but nobody here ever subscribed to it, so its ` +
       (t.declaresWriteback
         ? "writeback regions and GATHER formulas stay inactive. "
         : "published declarations are ignored. ") +
-      `Use Distribution \u2192 Subscribe to Package to review the publisher and activate it.`,
+      `Use Distribution \u2192 Subscribe to Application to review the publisher and activate it.`,
   },
   notPinnedNameConflict: {
     tone: "danger",
     text: (t) =>
       `NAME CONFLICT: this workbook references '${t.packageName}' from ` +
-      `${t.registryUrl || "a registry"}, but ${otherScopeLabels(t) || "another registry"} is ` +
-      `already trusted for that same package name under a DIFFERENT publisher key. The ` +
+      `${t.registryUrl || "a workspace"}, but ${otherScopeLabels(t) || "another workspace"} is ` +
+      `already trusted for that same application name under a DIFFERENT publisher key. The ` +
       `signature is valid, which only proves the bytes were not altered \u2014 it does not say ` +
       `who signed them. ` +
       (t.declaresWriteback
         ? "Writeback regions and GATHER formulas stay inactive. "
         : "Published declarations are ignored. ") +
-      `Use Distribution \u2192 Subscribe to Package to compare both publishers before trusting either.`,
+      `Use Distribution \u2192 Subscribe to Application to compare both publishers before trusting either.`,
   },
   unavailable: {
     tone: "warn",
     text: (t) =>
-      `Could not verify this package at ${t.registryUrl || "its registry"}: ${t.error || "unknown error"}`,
+      `Could not verify this application at ${t.registryUrl || "its workspace"}: ${t.error || "unknown error"}`,
   },
 };
 
@@ -221,7 +221,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
   const [subs, setSubs] = useState<Subscription[]>([]);
   const [trust, setTrust] = useState<Record<string, SubscriptionTrustInfo>>({});
   const [skips, setSkips] = useState<Record<string, WritebackRebuildSkip>>({});
-  const [connSkips, setConnSkips] = useState<Record<string, PackageConnectionRestoreSkip>>({});
+  const [connSkips, setConnSkips] = useState<Record<string, ApplicationConnectionRestoreSkip>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDetach, setConfirmingDetach] = useState(false);
@@ -285,10 +285,10 @@ export function SubscriptionManagerPane(): React.ReactElement {
       } catch {
         setSkips({});
       }
-      // ...and which subscribed packages' BI connections this open could not
+      // ...and which subscribed applications' BI connections this open could not
       // re-materialize. Same non-fatal treatment: the list itself must survive.
       try {
-        const rows = await getPackageConnectionSkips();
+        const rows = await getApplicationConnectionSkips();
         setConnSkips(Object.fromEntries(rows.map((r) => [connSkipKey(r), r])));
       } catch {
         setConnSkips({});
@@ -305,7 +305,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
     // Re-list when the workbook changes (pull / refresh / detach touch subscriptions).
     const unsub = onAppEvent(AppEvents.SHEET_CHANGED, refresh);
     // ...and when the writeback index is rebuilt. Workbook open defers HTTP
-    // registries to a worker, so the first paint of this pane legitimately shows
+    // workspaces to a worker, so the first paint of this pane legitimately shows
     // `deferred`; this is how those rows resolve to their real state.
     const unsubIndex = onAppEvent(WRITEBACK_INDEX_CHANGED_EVENT, refresh);
     return () => {
@@ -386,7 +386,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
       <div style={styles.list}>
         {subs.length === 0 ? (
           <div style={styles.empty}>
-            Not subscribed to any package. Use <strong>Distribution &rarr; Subscribe to Package</strong>.
+            Not subscribed to any application. Use <strong>Distribution &rarr; Subscribe to Application</strong>.
           </div>
         ) : (
           subs.map((s) => {
@@ -418,8 +418,8 @@ export function SubscriptionManagerPane(): React.ReactElement {
                     return (
                       <div style={styles.trustDanger}>
                         {`Unrecognised publisher-trust state '${String(t.trustStatus)}' for ` +
-                          `${t.packageName || "this package"}. This build of Calcula cannot ` +
-                          `interpret it, so do not treat the package as trusted.`}
+                          `${t.packageName || "this application"}. This build of Calcula cannot ` +
+                          `interpret it, so do not treat the application as trusted.`}
                       </div>
                     );
                   }
@@ -439,7 +439,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
                   // skip record proves is not true.
                   const text =
                     notice?.text ??
-                    `This package's writeback form rules were not loaded ('${skip.reason}'), ` +
+                    `This application's writeback form rules were not loaded ('${skip.reason}'), ` +
                       `so its deadlines and value checks are not in force.`;
                   const tone = notice?.tone ?? "danger";
                   return (
@@ -460,7 +460,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
                   // skip record proves is not true.
                   const text =
                     notice?.text ??
-                    `This package's data model was not loaded ('${skip.reason}'), so its ` +
+                    `This application's data model was not loaded ('${skip.reason}'), so its ` +
                       `report is not connected to live data.`;
                   const tone = notice?.tone ?? "danger";
                   return (
@@ -505,7 +505,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
                   {confirmingReset === subKey(s) ? (
                     <>
                       <span style={styles.resetWarning}>
-                        Discards your changes to this package&apos;s{" "}
+                        Discards your changes to this application&apos;s{" "}
                         {s.sheets.length} sheet{s.sheets.length !== 1 ? "s" : ""} (cell
                         edits, formatting, sizes, merges, overrides, pivot layouts) and
                         restores the published v{s.resolvedVersion}. You can undo with
@@ -531,7 +531,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
                       onClick={() => { setConfirmingReset(subKey(s)); setResetStatus(null); }}
                       disabled={resetting !== null}
                       style={styles.smallBtn}
-                      title="Restore this package's sheets to the published content (undoable)"
+                      title="Restore this application's sheets to the published content (undoable)"
                     >
                       Reset to published...
                     </button>
@@ -549,7 +549,7 @@ export function SubscriptionManagerPane(): React.ReactElement {
         <div style={styles.footer}>
           {confirmingDetach ? (
             <>
-              <span style={styles.confirmHint}>Detach from all packages?</span>
+              <span style={styles.confirmHint}>Detach from all applications?</span>
               <button onClick={() => setConfirmingDetach(false)} style={styles.smallBtn}>Cancel</button>
               <button onClick={handleDetachAll} style={{ ...styles.smallBtn, ...styles.danger }}>Detach all</button>
             </>

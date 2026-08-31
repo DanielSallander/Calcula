@@ -1,26 +1,26 @@
 //! FILENAME: core/calp/src/publishers.rs
-//! PURPOSE: Who, besides the package's original publisher, may push to it.
+//! PURPOSE: Who, besides the application's original publisher, may push to it.
 //! CONTEXT: A profile holds exactly ONE Ed25519 keypair, and it is that user's
-//! identity for every package they publish and for reviewing writeback. So
+//! identity for every application they publish and for reviewing writeback. So
 //! "share the team key" is not a small compromise — it overwrites each
 //! developer's personal publishing identity machine-wide, makes a compromise
 //! team-wide, and removes attribution entirely. Delegation is the alternative.
 //!
 //! # The shape
 //!
-//! The package's ROOT key is the key that signed its FIRST version. That is an
+//! The application's ROOT key is the key that signed its FIRST version. That is an
 //! immutable anchor: version 1 cannot be republished, so nothing can move it.
 //!
-//! The root signs a `publishers.json` at the package root listing delegate
+//! The root signs a `publishers.json` at the application root listing delegate
 //! keys. A push is allowed from the root or any listed delegate.
 //!
 //! It lives beside `calp-manifest.json` rather than inside a version, for two
 //! reasons: adding a colleague must not require publishing a version, and the
-//! statement is about the package rather than about any one version of it.
+//! statement is about the application rather than about any one version of it.
 //!
 //! # What the subscriber sees: nothing new
 //!
-//! TOFU still pins ONE key per (registry, package) — the ROOT key. A version
+//! TOFU still pins ONE key per (workspace, application) — the ROOT key. A version
 //! signed by a delegate verifies by chain: the version is signed by K, and K
 //! appears in a `publishers.json` signed by the pinned root. The pin store, its
 //! format and its prompts are untouched; the trust panel gains one line naming
@@ -31,9 +31,9 @@
 //! On a share that developers can write to, REMOVING a delegate is
 //! rollback-vulnerable: someone can restore an older `publishers.json` along
 //! with its still-valid signature. `revision` is monotonic and clients remember
-//! the highest they have seen per package, which makes that DETECTABLE rather
+//! the highest they have seen per application, which makes that DETECTABLE rather
 //! than silent. It does not make it preventable. Real revocation means rotating
-//! the root key, which is out of scope — and the registry was never a trust
+//! the root key, which is out of scope — and the workspace was never a trust
 //! boundary against people who can write to it (see `calp-distribution.md`).
 
 use std::collections::HashMap;
@@ -43,9 +43,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CalpError;
 use crate::signing::{verify_signature, PublisherKeypair};
-use crate::transport::RegistryTransport;
+use crate::transport::WorkspaceTransport;
 
-/// The co-publisher list, at the package root.
+/// The co-publisher list, at the application root.
 pub const PUBLISHERS_FILE: &str = "publishers.json";
 /// Its detached Ed25519 signature, by the ROOT key.
 pub const PUBLISHERS_SIG_FILE: &str = "publishers.sig";
@@ -55,9 +55,9 @@ pub const PUBLISHERS_SIG_FILE: &str = "publishers.sig";
 pub struct PublisherList {
     pub format_version: u32,
     pub package_name: String,
-    /// The key that signed the package's first version. Repeated here so a
+    /// The key that signed the application's first version. Repeated here so a
     /// reader can check that this list claims the root it was verified against
-    /// — a list signed by the right key but naming a different package or root
+    /// — a list signed by the right key but naming a different application or root
     /// is a list from somewhere else.
     pub root_key: String,
     /// Monotonic. A client that has seen revision N refuses an older one,
@@ -98,7 +98,7 @@ impl PublisherList {
     ///
     /// The root is always included whether or not it is listed, because it is
     /// authorized by construction — a list that could exclude the root would be
-    /// a list that could lock the owner out of their own package.
+    /// a list that could lock the owner out of their own application.
     pub fn allowed_keys(&self) -> Vec<String> {
         let mut keys = vec![self.root_key.clone()];
         for entry in &self.authorized_keys {
@@ -114,17 +114,17 @@ impl PublisherList {
     }
 }
 
-/// The package's ROOT key: whoever signed its earliest published version.
+/// The application's ROOT key: whoever signed its earliest published version.
 ///
-/// Reads the version manifest rather than the package manifest's `versions`
+/// Reads the version manifest rather than the application manifest's `versions`
 /// entry, because the version manifest is SIGNED and the list entry is not.
-/// Returns `None` for a package with no versions, or one whose first version
+/// Returns `None` for an application with no versions, or one whose first version
 /// predates signing.
 pub fn root_key_of(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package: &str,
 ) -> Result<Option<String>, CalpError> {
-    let manifest = registry.get_package_manifest(package)?;
+    let manifest = registry.get_application_manifest(package)?;
     let mut versions = manifest.parsed_versions();
     versions.sort();
     let Some(first) = versions.first() else {
@@ -139,8 +139,9 @@ pub fn root_key_of(
 
 /// Load the co-publisher list, verified against `root_key`.
 ///
-/// `Ok(None)` means the package has no list — which is not a failure: a package
-/// with a single publisher never needs one, and that is the common case.
+/// `Ok(None)` means the application has no list — which is not a failure: an
+/// application with a single publisher never needs one, and that is the common
+/// case.
 ///
 /// Every way the list can be wrong is an ERROR rather than a `None`, because
 /// "there is no list" and "there is a list I could not trust" must not produce
@@ -149,14 +150,14 @@ pub fn root_key_of(
 /// which sounds safe until you remember the attacker's goal might be exactly to
 /// make the real delegates disappear.
 pub fn load_verified(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package: &str,
     root_key: &str,
 ) -> Result<Option<PublisherList>, CalpError> {
-    let Some(bytes) = registry.read_package_artifact(package, PUBLISHERS_FILE)? else {
+    let Some(bytes) = registry.read_application_artifact(package, PUBLISHERS_FILE)? else {
         return Ok(None);
     };
-    let Some(sig) = registry.read_package_artifact(package, PUBLISHERS_SIG_FILE)? else {
+    let Some(sig) = registry.read_application_artifact(package, PUBLISHERS_SIG_FILE)? else {
         return Err(CalpError::PublisherListInvalid {
             package: package.to_string(),
             reason: "the co-publisher list is not signed".to_string(),
@@ -171,7 +172,7 @@ pub fn load_verified(
         CalpError::PublisherListInvalid {
             package: package.to_string(),
             reason:
-                "the co-publisher list is not signed by the key that published this package"
+                "the co-publisher list is not signed by the key that published this application"
                     .to_string(),
         }
     })?;
@@ -188,7 +189,7 @@ pub fn load_verified(
         return Err(CalpError::PublisherListInvalid {
             package: package.to_string(),
             reason: format!(
-                "the co-publisher list names the package '{}', not this one",
+                "the co-publisher list names the application '{}', not this one",
                 list.package_name
             ),
         });
@@ -209,21 +210,21 @@ pub fn load_verified(
 /// delegate add friends, which is the whole reason the list is a separate
 /// root-signed artifact rather than a field in a version manifest.
 pub fn write_signed(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     list: &PublisherList,
     keypair: &PublisherKeypair,
 ) -> Result<(), CalpError> {
     if keypair.public_key_hex() != list.root_key {
         return Err(CalpError::PublisherListInvalid {
             package: list.package_name.clone(),
-            reason: "only the publisher who created this package can change who may publish to it"
+            reason: "only the publisher who created this application can change who may publish to it"
                 .to_string(),
         });
     }
     let bytes = serde_json::to_vec_pretty(list)?;
     let signature = keypair.sign(&bytes);
-    registry.write_package_artifact(&list.package_name, PUBLISHERS_FILE, &bytes)?;
-    registry.write_package_artifact(
+    registry.write_application_artifact(&list.package_name, PUBLISHERS_FILE, &bytes)?;
+    registry.write_application_artifact(
         &list.package_name,
         PUBLISHERS_SIG_FILE,
         signature.as_bytes(),
@@ -234,7 +235,7 @@ pub fn write_signed(
 /// Load the list for `package` if it has one, given a profile that may hold the
 /// root key. A convenience for the app layer's "can I manage this?" question.
 pub fn load_for_profile(
-    registry: &dyn RegistryTransport,
+    registry: &dyn WorkspaceTransport,
     package: &str,
     profile_dir: &Path,
 ) -> Result<(Option<String>, Option<PublisherList>, bool), CalpError> {
@@ -255,16 +256,16 @@ pub fn load_for_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::LocalRegistry;
+    use crate::workspace::LocalWorkspace;
     use tempfile::TempDir;
 
     fn keypair(dir: &TempDir) -> PublisherKeypair {
         PublisherKeypair::load_or_create(dir.path()).unwrap()
     }
 
-    fn setup() -> (TempDir, LocalRegistry, TempDir, PublisherKeypair) {
+    fn setup() -> (TempDir, LocalWorkspace, TempDir, PublisherKeypair) {
         let reg_dir = TempDir::new().unwrap();
-        let reg = LocalRegistry::open(reg_dir.path()).unwrap();
+        let reg = LocalWorkspace::open(reg_dir.path()).unwrap();
         let prof = TempDir::new().unwrap();
         let kp = keypair(&prof);
         (reg_dir, reg, prof, kp)
@@ -276,7 +277,7 @@ mod tests {
         assert_eq!(
             load_verified(&reg, "pkg", &kp.public_key_hex()).unwrap(),
             None,
-            "single-publisher packages are the common case and need no list"
+            "single-publisher applications are the common case and need no list"
         );
     }
 
@@ -305,7 +306,7 @@ mod tests {
              lock the owner out of their own package"
         );
         assert!(!loaded.allows("deadbeef"));
-        assert!(!loaded.allows(""), "an unsigned package is not authorized by an empty key");
+        assert!(!loaded.allows(""), "an unsigned application is not authorized by an empty key");
     }
 
     #[test]
@@ -335,7 +336,7 @@ mod tests {
 
         let mut tampered = serde_json::to_value(&list).unwrap();
         tampered["authorizedKeys"] = serde_json::json!([{ "key": "aa".repeat(32) }]);
-        reg.write_package_artifact(
+        reg.write_application_artifact(
             "pkg",
             PUBLISHERS_FILE,
             serde_json::to_vec_pretty(&tampered).unwrap().as_slice(),
@@ -350,7 +351,7 @@ mod tests {
     fn a_list_with_no_signature_is_refused() {
         let (_d, reg, _p, root) = setup();
         let list = PublisherList::new("pkg", &root.public_key_hex(), "2026-08-29T00:00:00Z");
-        reg.write_package_artifact(
+        reg.write_application_artifact(
             "pkg",
             PUBLISHERS_FILE,
             serde_json::to_vec_pretty(&list).unwrap().as_slice(),
@@ -363,14 +364,14 @@ mod tests {
 
     #[test]
     fn a_list_borrowed_from_another_package_is_refused() {
-        // Correctly signed by this root, but written for a different package —
+        // Correctly signed by this root, but written for a different application —
         // copying it across is not a way to inherit its delegates.
         let (_d, reg, _p, root) = setup();
         let list = PublisherList::new("other-pkg", &root.public_key_hex(), "2026-08-29T00:00:00Z");
         let bytes = serde_json::to_vec_pretty(&list).unwrap();
         let sig = root.sign(&bytes);
-        reg.write_package_artifact("pkg", PUBLISHERS_FILE, &bytes).unwrap();
-        reg.write_package_artifact("pkg", PUBLISHERS_SIG_FILE, sig.as_bytes()).unwrap();
+        reg.write_application_artifact("pkg", PUBLISHERS_FILE, &bytes).unwrap();
+        reg.write_application_artifact("pkg", PUBLISHERS_SIG_FILE, sig.as_bytes()).unwrap();
 
         let err = load_verified(&reg, "pkg", &root.public_key_hex()).unwrap_err();
         assert!(matches!(err, CalpError::PublisherListInvalid { .. }), "got {err:?}");
@@ -386,8 +387,8 @@ mod tests {
         let list = PublisherList::new("pkg", &root.public_key_hex(), "2026-08-29T00:00:00Z");
         let bytes = serde_json::to_vec_pretty(&list).unwrap();
         let sig = impostor.sign(&bytes);
-        reg.write_package_artifact("pkg", PUBLISHERS_FILE, &bytes).unwrap();
-        reg.write_package_artifact("pkg", PUBLISHERS_SIG_FILE, sig.as_bytes()).unwrap();
+        reg.write_application_artifact("pkg", PUBLISHERS_FILE, &bytes).unwrap();
+        reg.write_application_artifact("pkg", PUBLISHERS_SIG_FILE, sig.as_bytes()).unwrap();
 
         let err = load_verified(&reg, "pkg", &root.public_key_hex()).unwrap_err();
         assert!(matches!(err, CalpError::PublisherListInvalid { .. }), "got {err:?}");

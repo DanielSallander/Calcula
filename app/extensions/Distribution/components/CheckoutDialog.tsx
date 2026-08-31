@@ -1,35 +1,36 @@
 // FILENAME: app/extensions/Distribution/components/CheckoutDialog.tsx
-// PURPOSE: Open a published package version as a WORKING COPY — the author-side
+// PURPOSE: Open a published application version as a WORKING COPY — the author-side
 // counterpart of Subscribe.
-// CONTEXT: Subscribing gets you a COPY of a package to use; checking out gets
-// you the package itself to change. The difference that matters is identity:
-// a checked-out workbook keeps the package's sheet ids, so pushing it produces
-// the next version rather than something that merely shares the name. Publishing
-// from a subscribed copy would orphan every other subscriber's local edits,
-// which is why the push gate refuses it and points here.
+// CONTEXT: Subscribing gets you a COPY of an application to use; opening one
+// for editing gets you the application itself to change. The difference that
+// matters is identity: a checked-out workbook keeps the application's sheet
+// ids, so pushing it produces the next version rather than something that
+// merely shares the name. Publishing from a subscribed copy would orphan every
+// other subscriber's local edits, which is why the push gate refuses it and
+// points here.
 
 import React, { useEffect, useMemo, useState } from "react";
-import type { DialogProps, PackageInfo } from "@api";
-import { browseRegistry, checkoutPackage } from "@api";
+import type { DialogProps, ApplicationInfo } from "@api";
+import { listApplicationsInWorkspace, checkoutApplication } from "@api";
 import { confirmAsync } from "@api/dialogs";
 import { isFileModified } from "@api/filesystem";
-import { listRegistries, type SavedRegistry, isHttpRegistry } from "@api/distributionRegistries";
+import { listWorkspaces, type SavedWorkspace, isHttpWorkspace } from "@api/distributionWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
-import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
+import { pickWorkspaceFile } from "../lib/pickWorkspace";
 
 export function CheckoutDialog({ onClose }: DialogProps) {
   const win = useDialogWindow({ minWidth: 460, minHeight: 380 });
 
-  const [saved, setSaved] = useState<SavedRegistry[]>([]);
+  const [saved, setSaved] = useState<SavedWorkspace[]>([]);
   const [registryPath, setRegistryPath] = useState("");
-  const [packages, setPackages] = useState<PackageInfo[] | null>(null);
+  const [packages, setPackages] = useState<ApplicationInfo[] | null>(null);
   const [selectedPackage, setSelectedPackage] = useState<string>("");
   const [selectedVersion, setSelectedVersion] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    listRegistries()
+    listWorkspaces()
       .then(setSaved)
       .catch(() => setSaved([]));
   }, []);
@@ -46,27 +47,29 @@ export function CheckoutDialog({ onClose }: DialogProps) {
     [pkg],
   );
 
+  // Opening for editing always targets a workspace somebody already published
+  // into, and the pointer file is written by
+  // `LocalWorkspace::write_application_manifest` — the one write every publish
+  // route makes — so there is exactly one gesture here and no folder fallback.
+  // A location with no `workspace.calcula` has no applications in it either.
+  // The text field still takes a typed or pasted path, which is how an
+  // `https://` workspace is reached.
   const handleBrowseFolder = async () => {
-    try {
-      const selected = await openNativeDialog({
-        directory: true,
-        multiple: false,
-        title: "Select Registry Folder",
-      });
-      if (selected && typeof selected === "string") setRegistryPath(selected);
-    } catch {
-      // user cancelled
+    const selected = await pickWorkspaceFile();
+    if (selected) {
+      setRegistryPath(selected);
+      void loadPackages(selected);
     }
   };
 
   const loadPackages = async (location: string) => {
     setError(null);
-    setBusy("Reading registry…");
+    setBusy("Reading workspace…");
     setPackages(null);
     setSelectedPackage("");
     setSelectedVersion("");
     try {
-      const list = await browseRegistry(location);
+      const list = await listApplicationsInWorkspace(location);
       setPackages(list);
       if (list.length === 1) selectPackage(list[0]);
     } catch (err: unknown) {
@@ -76,7 +79,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
     }
   };
 
-  const selectPackage = (p: PackageInfo) => {
+  const selectPackage = (p: ApplicationInfo) => {
     setSelectedPackage(p.name);
     // Default to the newest version — the one a push would be based on.
     setSelectedVersion(p.versions.length ? p.versions[p.versions.length - 1].version : "");
@@ -84,7 +87,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
 
   const handleCheckout = async () => {
     setError(null);
-    // Opening a package REPLACES the document, exactly as File > Open does.
+    // Opening an application REPLACES the document, exactly as File > Open does.
     // `confirmAsync` (never window.confirm — that returns a Promise under Tauri
     // and a bare `if (!confirm(...))` never fires) and it fails CLOSED, so a
     // dialog that cannot be shown means "do not discard".
@@ -96,7 +99,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
     }
     setBusy("Opening…");
     try {
-      const result = await checkoutPackage({
+      const result = await checkoutApplication({
         registryPath,
         packageName: selectedPackage,
         version: selectedVersion || undefined,
@@ -110,7 +113,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
     }
   };
 
-  const httpRegistry = registryPath.trim() !== "" && isHttpRegistry(registryPath);
+  const httpRegistry = registryPath.trim() !== "" && isHttpWorkspace(registryPath);
 
   const windowStyle: React.CSSProperties = {
     position: "fixed",
@@ -172,7 +175,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
   return (
     <div ref={win.ref} style={{ ...windowStyle, ...win.style }}>
       <div style={headerStyle} onMouseDown={win.onHeaderMouseDown}>
-        <span style={{ fontWeight: 600 }}>Open Package for Editing</span>
+        <span style={{ fontWeight: 600 }}>Open Application for Editing</span>
         <button
           style={{
             background: "transparent",
@@ -199,14 +202,14 @@ export function CheckoutDialog({ onClose }: DialogProps) {
             lineHeight: 1.45,
           }}
         >
-          Opens the package as a working copy you can edit and push back. This
-          replaces the current workbook, and the copy keeps the package&rsquo;s own
-          identity — so subscribers see your next version as an update, not as a
-          new report.
+          Opens the application as a working copy you can edit and push back.
+          This replaces the current workbook, and the copy keeps the
+          application&rsquo;s own identity — so subscribers see your next version
+          as an update, not as a new report.
         </div>
 
         <div style={fieldStyle}>
-          <label>Registry</label>
+          <label>Workspace</label>
           {saved.length > 0 && (
             <select
               style={inputStyle}
@@ -219,7 +222,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
                 }
               }}
             >
-              <option value="">Choose a saved registry…</option>
+              <option value="">Choose a saved workspace…</option>
               {saved.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.name} — {r.location}
@@ -232,9 +235,13 @@ export function CheckoutDialog({ onClose }: DialogProps) {
               style={{ ...inputStyle, flex: 1 }}
               value={registryPath}
               onChange={(e) => setRegistryPath(e.target.value)}
-              placeholder="C:\shared\registry"
+              placeholder="C:\shared\workspace"
             />
-            <button onClick={handleBrowseFolder} style={{ whiteSpace: "nowrap" }}>
+            <button
+              onClick={handleBrowseFolder}
+              style={{ whiteSpace: "nowrap" }}
+              title="Pick a workspace by its workspace.calcula file"
+            >
               Browse…
             </button>
             <button
@@ -242,7 +249,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
               disabled={!registryPath.trim()}
               style={{ whiteSpace: "nowrap" }}
             >
-              List packages
+              List applications
             </button>
           </div>
           {httpRegistry && (
@@ -261,7 +268,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
 
         {packages && packages.length > 0 && (
           <div style={fieldStyle}>
-            <label>Package</label>
+            <label>Application</label>
             <select
               style={inputStyle}
               value={selectedPackage}
@@ -270,7 +277,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
                 if (p) selectPackage(p);
               }}
             >
-              <option value="">Choose a package…</option>
+              <option value="">Choose an application…</option>
               {packages.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.name}

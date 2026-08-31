@@ -1674,7 +1674,7 @@ export const IconPackage = (
   </svg>
 );
 
-/** Box with up arrow (Publish Package) */
+/** Box with up arrow (Publish Application) */
 export const IconPublishPackage = (
   <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
     <path d="M2.5 8v6h11V8" />
@@ -1683,7 +1683,7 @@ export const IconPublishPackage = (
   </svg>
 );
 
-/** Box with down arrow (Subscribe to Package) */
+/** Box with down arrow (Subscribe to Application) */
 export const IconSubscribePackage = (
   <svg viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth="1.3" style={iconStyle}>
     <path d="M2.5 8v6h11V8" />

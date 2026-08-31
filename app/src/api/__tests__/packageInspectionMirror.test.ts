@@ -1,5 +1,5 @@
 //! FILENAME: app/src/api/__tests__/packageInspectionMirror.test.ts
-// PURPOSE: `PackageInspection` is the PRE-PULL REVIEW — everything a user is
+// PURPOSE: `ApplicationInspection` is the PRE-PULL REVIEW — everything a user is
 //          shown about a .calp package before the commit point that mounts its
 //          code. Rust decides what a package contains; TypeScript decides what
 //          the user is told. A field Rust returns and TypeScript does not
@@ -48,23 +48,23 @@ function tsInterfaceFields(name: string): string[] {
 
 const snakeToCamel = (s: string): string => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 
-describe("PackageInspection mirrors the Rust struct the pre-pull review is built from", () => {
+describe("ApplicationInspection mirrors the Rust struct the pre-pull review is built from", () => {
   it("declares EVERY field calp_commands.rs returns", () => {
-    const rust = rustStructFields("PackageInspection").map(snakeToCamel).sort();
-    const ts = new Set(tsInterfaceFields("PackageInspection"));
+    const rust = rustStructFields("ApplicationInspection").map(snakeToCamel).sort();
+    const ts = new Set(tsInterfaceFields("ApplicationInspection"));
     const undisclosed = rust.filter((f) => !ts.has(f));
     expect(
       undisclosed,
       `these fields come back from inspect_package and the API type does not declare them, so ` +
         `nothing in the Subscribe review can render them. A package's contents that the user is ` +
-        `not shown before subscribing arrive undisclosed. Add them to PackageInspection in ` +
+        `not shown before subscribing arrive undisclosed. Add them to ApplicationInspection in ` +
         `app/src/api/distribution.ts (camelCase, mirroring the Rust field exactly).`,
     ).toEqual([]);
   });
 
   it("declares nothing Rust does not send (no phantom disclosure)", () => {
-    const rust = new Set(rustStructFields("PackageInspection").map(snakeToCamel));
-    const phantom = tsInterfaceFields("PackageInspection").filter((f) => !rust.has(f));
+    const rust = new Set(rustStructFields("ApplicationInspection").map(snakeToCamel));
+    const phantom = tsInterfaceFields("ApplicationInspection").filter((f) => !rust.has(f));
     expect(
       phantom,
       `declared in TypeScript but never sent by Rust — a review that renders these shows the ` +
@@ -73,7 +73,7 @@ describe("PackageInspection mirrors the Rust struct the pre-pull review is built
   });
 
   it("moduleScripts and notebooks specifically are declared (the found gap)", () => {
-    const ts = tsInterfaceFields("PackageInspection");
+    const ts = tsInterfaceFields("ApplicationInspection");
     expect(ts).toContain("moduleScripts");
     expect(ts).toContain("notebooks");
   });
