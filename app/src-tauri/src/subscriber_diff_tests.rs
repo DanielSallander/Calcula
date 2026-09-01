@@ -251,3 +251,38 @@ fn the_subscriber_guard_refuses_rather_than_substituting() {
         "the guard stopped refusing — a substituted scope is a scope nobody chose"
     );
 }
+
+// ---------------------------------------------------------------------------
+// C. "Was this sheet in the base version?" is an IDENTITY question
+// ---------------------------------------------------------------------------
+
+/// THE PUBLISH DIALOG MUST BE ABLE TO ASK BY ID.
+///
+/// Reported from live testing: open an application for editing into a workbook
+/// that already has a `Sheet1`, change a cell, push — and the dialog listed the
+/// application's own sheet as "(new — not in v1.0.0)" while silently treating
+/// the author's unrelated `Sheet1` as part of the application.
+///
+/// The cause was a NAME comparison against `WorkingCopyLink::base_sheets`, whose
+/// names are recorded at CHECKOUT — before `resolve_sheet_name_collisions`
+/// renames the incoming sheet to `Sheet1 (2)`. Additive checkout makes that
+/// collision ordinary rather than exotic. Identity is the sheet id, and a
+/// working copy's ids ARE the application's.
+///
+/// SABOTAGE: drop `sheet_id` from `PublishPreviewSheet`; the frontend then has
+/// nothing to compare but the name again.
+#[test]
+fn the_publish_preview_reports_a_sheet_id() {
+    let body = body_of("pub(crate) fn publish_preview_sheet_list(");
+    assert!(
+        body.contains("sheet_id:"),
+        "the publish preview stopped reporting sheet ids, so the dialog can only \
+         match base sheets by NAME — which a collision rename breaks"
+    );
+    assert!(
+        body.contains("sheet_ids.get(i)"),
+        "the id must come from the state vector BY INDEX: the list filters \
+         object-backed sheets while `i` stays the true position, so a zip would \
+         hand each row its neighbour's identity"
+    );
+}

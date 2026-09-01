@@ -684,7 +684,19 @@ export function PublishDialog({ onClose, data }: DialogProps) {
             >
               {availableSheets.map((sheet) => {
                 const name = sheet.name;
-                const inBase = workspace?.baseSheets.some((s) => s.name === name) ?? false;
+                // BY SHEET ID, never by name. `base_sheets` records each name as
+                // it stood at CHECKOUT, and additive checkout renames on
+                // collision: pull an application's "Sheet1" into a workbook that
+                // already has one and the application's sheet becomes
+                // "Sheet1 (2)". Name-matching then marks the application's own
+                // sheet "(new — not in v…)" while quietly counting the author's
+                // unrelated "Sheet1" as part of the application. Reported from
+                // live testing, from exactly that sequence.
+                //
+                // The ids line up because a working copy's sheet ids ARE the
+                // application's — that preservation is what checkout is for.
+                const inBase =
+                  workspace?.baseSheets.some((s) => s.sheetId === sheet.sheetId) ?? false;
                 return (
                   <label
                     key={sheet.index}

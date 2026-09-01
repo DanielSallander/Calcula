@@ -472,7 +472,17 @@ pub fn count_sheet_data_changes(
     after: &calcula_format::sheet_data::SheetData,
 ) -> CellChangeCounts {
     let mut counts = CellChangeCounts::default();
+    // The same spill skip `walk_cells` applies. These two must agree: they are
+    // the counted and the itemised view of one question, and the refresh preview
+    // reads the first while the diff dialog reads the second.
+    let spilled = unchanged_spill_cells(before, after);
+    let derived = |a1: &str| {
+        calcula_format::cell_ref::from_a1(a1).is_some_and(|rc| spilled.contains(&rc))
+    };
     for (a1, b) in &before.cells {
+        if derived(a1) {
+            continue;
+        }
         match after.cells.get(a1) {
             None => counts.removed += 1,
             Some(a) => {
@@ -486,7 +496,7 @@ pub fn count_sheet_data_changes(
         }
     }
     for a1 in after.cells.keys() {
-        if !before.cells.contains_key(a1) {
+        if !before.cells.contains_key(a1) && !derived(a1) {
             counts.added += 1;
         }
     }
@@ -1364,6 +1374,7 @@ pub(crate) fn walk_cells(
 
     let mut counts = CellChangeCounts::default();
     let mut sample: Vec<CellDiff> = Vec::new();
+    let spilled = unchanged_spill_cells(before, after);
     let keys: BTreeSet<&String> = before.cells.keys().chain(after.cells.keys()).collect();
     // Sorted by (row, col) rather than by A1 string, so "A10" does not sort
     // before "A2" in a table a person reads.
@@ -1374,6 +1385,11 @@ pub(crate) fn walk_cells(
     ordered.sort_by_key(|(_, rc)| *rc);
 
     for (a1, (row, col)) in ordered {
+        // Inside a dynamic array whose origin did not change: derived output,
+        // not an edit. See `unchanged_spill_cells`.
+        if spilled.contains(&(row, col)) {
+            continue;
+        }
         let b = before.cells.get(a1);
         let a = after.cells.get(a1);
         let change = match (b, a) {
@@ -1408,11 +1424,82 @@ pub(crate) fn walk_cells(
     (counts, sample)
 }
 
+/// Are these two cells the same AUTHORED cell?
+///
+/// A CACHED RESULT IS NOT AN EDIT. For a cell that carries a formula, `v`, `t`,
+/// `e` and `sp` are all *derived* — the last computed value, its type, its error
+/// state, and how far the array spilled. A subscriber or a co-developer
+/// recalculates on load, so a formula cell whose formula is unchanged has
+/// nothing in it that anybody typed.
+///
+/// Reported from live testing: change one hard-coded number, push, and the diff
+/// claimed TWO cells changed — the number, and the `=C2*2` beside it whose
+/// formula was identical on both sides. The second row was the first row's
+/// consequence, listed as if it were a second decision. On a real sheet one
+/// edited input produces a column of them, and the count that gates the push
+/// dialog inflates with noise that is already fully explained by the rows above
+/// it.
+///
+/// So: same non-empty formula on both sides ⇒ compare only what a person can
+/// author on a formula cell, which is the rich-text runs. Everything else is the
+/// engine's answer to a question neither side changed.
+///
+/// A cell that GAINS or LOSES a formula still differs, because `f` differs. A
+/// literal cell is compared in full, because for a literal `v` IS the authored
+/// content.
 fn cells_equal(
     a: &calcula_format::sheet_data::CellEntry,
     b: &calcula_format::sheet_data::CellEntry,
 ) -> bool {
+    if a.f.is_some() && a.f == b.f {
+        return a.rt == b.rt;
+    }
     a.t == b.t && a.v == b.v && a.f == b.f && a.e == b.e && a.sp == b.sp && a.rt == b.rt
+}
+
+/// Cells that are the OUTPUT of a dynamic array whose origin did not change.
+///
+/// The sibling of the formula rule in [`cells_equal`], for the one case that
+/// rule cannot see. A spilled cell is written as a plain value-only entry — no
+/// `f` — so it is indistinguishable from a literal when looked at alone, and
+/// `cells_equal` compares it in full. But it is every bit as derived: the origin
+/// carries the formula and an `sp` extent naming the rectangle its result
+/// occupies, and everything inside that rectangle is the engine's answer.
+///
+/// Without this, editing one input to `=SEQUENCE(n)` or a spilling `FILTER`
+/// reports the whole spilled block as changed — the same "one edit, a column of
+/// consequences" noise the formula rule removes, arriving by the one door it
+/// does not cover.
+///
+/// STRICT ON PURPOSE. A cell is skipped only when the origin exists on BOTH
+/// sides with the same formula AND the same extent. A spill that moved, grew,
+/// shrank or changed formula fails all three, so its cells are compared
+/// normally — and a literal that has replaced a spilled cell shows up, because
+/// then the origin's extent no longer covers it or the origin itself changed.
+fn unchanged_spill_cells(
+    before: &calcula_format::sheet_data::SheetData,
+    after: &calcula_format::sheet_data::SheetData,
+) -> BTreeSet<(u32, u32)> {
+    let mut covered = BTreeSet::new();
+    for (a1, b) in &before.cells {
+        let (Some(sp), Some(_)) = (b.sp.as_ref(), b.f.as_ref()) else { continue };
+        let Some(a) = after.cells.get(a1) else { continue };
+        if a.f != b.f || a.sp.as_ref() != Some(sp) {
+            continue;
+        }
+        let Some((r0, c0, r1, c1)) = calcula_format::cell_ref::range_from_a1(sp) else { continue };
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                // The ORIGIN itself is not skipped here: it carries the formula,
+                // so `cells_equal`'s formula rule already settles it, and
+                // skipping it would hide a rich-text change on it.
+                if (r, c) != (r0, c0) {
+                    covered.insert((r, c));
+                }
+            }
+        }
+    }
+    covered
 }
 
 fn snapshot(c: &calcula_format::sheet_data::CellEntry) -> CellSnapshot {
@@ -1579,4 +1666,189 @@ mod tests {
             assert_eq!(items2.get(k), Some(v), "{k} must compare equal after a reorder");
         }
     }
+    // ======================================================================
+    // A cached result is not an edit
+    // ======================================================================
+    //
+    // Reported from live testing: change one hard-coded number in a checked-out
+    // application, push, and the diff claimed TWO cells changed — the number,
+    // and the `=C2*2` beside it whose formula was identical on both sides. The
+    // second row was the first row's consequence, listed as a second decision.
+    //
+    // A subscriber and a co-developer both recalculate on load, so for a cell
+    // that carries a formula the value, type, error state and spill extent are
+    // all the engine's answer, not anybody's edit.
+
+    fn cell_sp(
+        t: &str,
+        v: serde_json::Value,
+        f: Option<&str>,
+        sp: Option<&str>,
+    ) -> calcula_format::sheet_data::CellEntry {
+        calcula_format::sheet_data::CellEntry {
+            v,
+            t: t.to_string(),
+            f: f.map(|s| s.to_string()),
+            e: None,
+            rt: None,
+            sp: sp.map(|s| s.to_string()),
+        }
+    }
+
+    /// THE REPORTED DEFECT, reduced to its two cells.
+    ///
+    /// SABOTAGE: delete the `a.f.is_some() && a.f == b.f` branch from
+    /// `cells_equal`. The count goes back to 2 and D2 reappears in the sample.
+    #[test]
+    fn a_recalculated_formula_cell_is_not_a_change() {
+        let before = sheet(&[
+            ("C2", cell("n", serde_json::json!(20.0), None)),
+            ("D2", cell("n", serde_json::json!(40.0), Some("C2*2"))),
+        ]);
+        let after = sheet(&[
+            // The edit.
+            ("C2", cell("n", serde_json::json!(30.0), None)),
+            // Its consequence: same formula, new cached value.
+            ("D2", cell("n", serde_json::json!(60.0), Some("C2*2"))),
+        ]);
+
+        let counts = count_sheet_data_changes(&before, &after);
+        assert_eq!(counts.modified, 1, "only the cell somebody typed in");
+        assert_eq!(counts.total(), 1);
+
+        let (walked, sample) = walk_cells(Some(&before), Some(&after), 10);
+        assert_eq!(walked, counts, "the counted and the itemised view must agree");
+        assert_eq!(sample.len(), 1);
+        assert_eq!(sample[0].a1, "C2");
+    }
+
+    /// The positive control. A rewritten formula is an edit, and the diff must
+    /// still say so — otherwise the rule above has simply gone blind.
+    #[test]
+    fn a_rewritten_formula_is_still_a_change() {
+        let before = sheet(&[("D2", cell("n", serde_json::json!(40.0), Some("C2*2")))]);
+        let after = sheet(&[("D2", cell("n", serde_json::json!(40.0), Some("C2*4")))]);
+        let counts = count_sheet_data_changes(&before, &after);
+        assert_eq!(counts.modified, 1);
+        assert_eq!(counts.formula_changes, 1);
+    }
+
+    /// A LITERAL's value IS its authored content, and must keep comparing in
+    /// full. The rule is scoped to cells that carry a formula.
+    ///
+    /// SABOTAGE: drop the `a.f.is_some()` term, so two literals with equal
+    /// (None) formulas compare only their rich text — every typed number becomes
+    /// invisible.
+    #[test]
+    fn a_literal_value_change_is_still_a_change() {
+        let before = sheet(&[("A1", cell("n", serde_json::json!(1.0), None))]);
+        let after = sheet(&[("A1", cell("n", serde_json::json!(2.0), None))]);
+        assert_eq!(count_sheet_data_changes(&before, &after).modified, 1);
+    }
+
+    /// Replacing a formula with a hard-coded number is one of the most
+    /// consequential edits there is, and `f` differing is what catches it.
+    #[test]
+    fn losing_or_gaining_a_formula_is_a_change() {
+        let formula = sheet(&[("A1", cell("n", serde_json::json!(4.0), Some("B1*2")))]);
+        let literal = sheet(&[("A1", cell("n", serde_json::json!(4.0), None))]);
+        assert_eq!(
+            count_sheet_data_changes(&formula, &literal).modified,
+            1,
+            "a formula replaced by its own current value is still an edit"
+        );
+        assert_eq!(count_sheet_data_changes(&literal, &formula).modified, 1);
+    }
+
+    /// Rich text is authored even on a formula cell, so it survives the rule.
+    ///
+    /// SABOTAGE: `return true` in the formula branch instead of comparing `rt`.
+    #[test]
+    fn rich_text_on_an_unchanged_formula_is_a_change() {
+        let plain = cell("s", serde_json::json!("x"), Some("A1"));
+        let mut styled = plain.clone();
+        // Deserialized rather than constructed: `RichTextRun` lives in `engine`
+        // and is re-exported into the entry, so this test does not need to name
+        // the type or track its fields.
+        styled.rt = Some(
+            serde_json::from_value(serde_json::json!([{ "text": "x", "bold": true }])).unwrap(),
+        );
+        assert_eq!(
+            count_sheet_data_changes(&sheet(&[("B1", plain)]), &sheet(&[("B1", styled)])).modified,
+            1
+        );
+    }
+
+    /// An ERROR appearing in a formula cell is derived too — the formula did not
+    /// change, its input did, and that input is reported on its own row.
+    #[test]
+    fn a_formula_cell_that_started_erroring_is_not_itself_a_change() {
+        let before = sheet(&[
+            ("A1", cell("n", serde_json::json!(2.0), None)),
+            ("B1", cell("n", serde_json::json!(5.0), Some("10/A1"))),
+        ]);
+        let mut errored = cell("e", serde_json::json!(null), Some("10/A1"));
+        errored.e = Some("#DIV/0!".to_string());
+        let after = sheet(&[
+            ("A1", cell("n", serde_json::json!(0.0), None)),
+            ("B1", errored),
+        ]);
+        let counts = count_sheet_data_changes(&before, &after);
+        assert_eq!(counts.modified, 1, "the input, not the error it caused");
+    }
+
+    // ----------------------------------------------------------------------
+    // The spill sibling
+    // ----------------------------------------------------------------------
+
+    /// A spilled cell carries no formula, so it is indistinguishable from a
+    /// literal on its own — but everything inside an unchanged origin's extent
+    /// is that origin's output. Without this, editing one input to a spilling
+    /// formula reports the whole block.
+    ///
+    /// SABOTAGE: make `unchanged_spill_cells` return an empty set.
+    #[test]
+    fn the_output_of_an_unchanged_spill_is_not_a_change() {
+        let before = sheet(&[
+            ("A1", cell("n", serde_json::json!(3.0), None)),
+            ("C1", cell_sp("n", serde_json::json!(1.0), Some("SEQUENCE(A1)"), Some("C1:C3"))),
+            ("C2", cell("n", serde_json::json!(2.0), None)),
+            ("C3", cell("n", serde_json::json!(3.0), None)),
+        ]);
+        let after = sheet(&[
+            ("A1", cell("n", serde_json::json!(3.0), None)),
+            ("C1", cell_sp("n", serde_json::json!(10.0), Some("SEQUENCE(A1)"), Some("C1:C3"))),
+            ("C2", cell("n", serde_json::json!(20.0), None)),
+            ("C3", cell("n", serde_json::json!(30.0), None)),
+        ]);
+        let counts = count_sheet_data_changes(&before, &after);
+        assert_eq!(counts.total(), 0, "the origin's formula and extent both held");
+
+        let (walked, sample) = walk_cells(Some(&before), Some(&after), 10);
+        assert_eq!(walked, counts, "the two views must agree about spills too");
+        assert!(sample.is_empty());
+    }
+
+    /// A spill that GREW is a real change, and its new cells must be visible.
+    /// The skip is scoped to an origin whose formula AND extent both held.
+    ///
+    /// SABOTAGE: compare only the formula in `unchanged_spill_cells`, not `sp`.
+    #[test]
+    fn a_spill_whose_extent_moved_is_compared_normally() {
+        let before = sheet(&[
+            ("C1", cell_sp("n", serde_json::json!(1.0), Some("SEQUENCE(A1)"), Some("C1:C2"))),
+            ("C2", cell("n", serde_json::json!(2.0), None)),
+        ]);
+        let after = sheet(&[
+            ("C1", cell_sp("n", serde_json::json!(1.0), Some("SEQUENCE(A1)"), Some("C1:C3"))),
+            ("C2", cell("n", serde_json::json!(2.0), None)),
+            ("C3", cell("n", serde_json::json!(3.0), None)),
+        ]);
+        let counts = count_sheet_data_changes(&before, &after);
+        assert!(
+            counts.total() > 0,
+            "the array now covers a third row — that is a change, not noise"
+        );
+    }
+
 }

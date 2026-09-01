@@ -468,6 +468,51 @@ was wired to a user; two were already live in the push preview.
    and **an empty list does not mean nothing would change**. A sentence that
    always applies beats a flag that is always on.
 
+#### A cached result is not an edit (2026-09-01)
+
+`cells_equal` compared every field of a cell entry, including `v`, `t`, `e` and
+`sp` — all of which are DERIVED for a cell that carries a formula. Reported from
+live testing: change one hard-coded number in a checked-out application, push,
+and the diff claimed two cells changed — the number, and the `=C2*2` beside it
+whose formula was identical on both sides. The second row was the first row's
+consequence, listed as if it were a second decision. On a real sheet one edited
+input produces a column of them, inflating the count the push dialog is gated on.
+
+Subscribers and co-developers both recalculate on load, so:
+
+- **Same non-empty formula on both sides ⇒ compare only the rich-text runs**, the
+  one thing a person can author on a formula cell. A cell that GAINS or LOSES a
+  formula still differs (`f` differs), and a LITERAL is compared in full, because
+  for a literal `v` *is* the authored content.
+- **Cells inside an unchanged spill extent are skipped.** A spilled cell is
+  written as a value-only entry with no `f`, so it is indistinguishable from a
+  literal on its own — but the origin's `f` + `sp` names the rectangle its result
+  occupies, and everything inside is the engine's answer. Strict on purpose: the
+  skip needs the origin present on both sides with the same formula AND the same
+  extent, so a spill that moved, grew or shrank is compared normally.
+
+`count_sheet_data_changes` and `walk_cells` apply both rules identically — they
+are the counted and the itemised view of one question, read by the refresh
+preview and the diff dialog respectively.
+
+#### "Was this sheet in the base version?" is an identity question (2026-09-01)
+
+The publish dialog marked a row "(new — not in v&lt;base&gt;)" by comparing NAMES
+against `WorkingCopyLink::base_sheets`. Those names are recorded at CHECKOUT,
+before `resolve_sheet_name_collisions` runs — and additive checkout makes that
+collision ordinary: pull an application's `Sheet1` into a workbook that already
+has one and the application's sheet becomes `Sheet1 (2)`.
+
+Reported from live testing, and the failure is symmetrical: the application's own
+sheet was marked new, while the author's unrelated `Sheet1` was silently counted
+as part of the application. `PublishPreviewSheet` now carries `sheet_id` and the
+dialog compares that. A working copy's sheet ids ARE the application's, so they
+line up directly — that preservation is what checkout is for.
+
+Note the default SELECTION was already correct: it comes from
+`working_copy_base_sheets`, which is id-keyed. Only the marker was name-matched,
+which is why the wrong sheets were labelled while the right ones stayed ticked.
+
 ### Subscribed sheets and publishing
 
 A sheet materialized by a subscription is its publisher's content. It is therefore

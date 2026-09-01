@@ -1364,6 +1364,17 @@ pub struct PublishPreviewResponse {
 pub struct PublishPreviewSheet {
     /// TRUE workbook index — the value to send back in `sheetIndices`.
     pub index: usize,
+    /// The workbook's stable sheet uuid, so the dialog can tell "this sheet was
+    /// in the base version" from "a sheet with the same NAME was".
+    ///
+    /// A working copy's ids ARE the application's, so this is directly
+    /// comparable with `WorkingCopyLink::base_sheets[].sheet_id`. Comparing the
+    /// NAMES instead is wrong the moment a name moves, and additive checkout
+    /// moves names as a matter of course: pulling an application's `Sheet1` into
+    /// a workbook that already has one renames it `Sheet1 (2)`, so the
+    /// application's own sheet stops matching its base entry while the author's
+    /// unrelated `Sheet1` starts matching it.
+    pub sheet_id: String,
     pub name: String,
     /// The application this sheet came from; empty when it is the author's own.
     pub subscribed_to: String,
@@ -2401,12 +2412,16 @@ pub(crate) fn publish_preview_sheet_list(
 ) -> Result<Vec<PublishPreviewSheet>, String> {
     let names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
     let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
     let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
 
     Ok((0..names.len())
         .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
         .map(|i| PublishPreviewSheet {
             index: i,
+            // `.get(i)`, never a zip: the filter above drops object-backed
+            // sheets while `i` stays the TRUE state-vector index.
+            sheet_id: sheet_ids.get(i).map(|s| s.to_string()).unwrap_or_default(),
             name: names[i].clone(),
             subscribed_to: provenance
                 .origin(i)

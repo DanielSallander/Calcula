@@ -122,6 +122,14 @@ export interface PublishPreviewResponse {
 export interface PublishPreviewSheet {
   /** TRUE workbook index — the value to send back in `sheetIndices`. */
   index: number;
+  /**
+   * The workbook's stable sheet uuid, directly comparable with
+   * `WorkingCopySheetInfo.sheetId` — a working copy's ids ARE the
+   * application's.
+   *
+   * Use THIS to decide "was this sheet in the base version", never the name.
+   */
+  sheetId: string;
   name: string;
   /** The application this sheet came from; empty when it is the author's own. */
   subscribedTo: string;
