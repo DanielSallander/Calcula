@@ -260,6 +260,9 @@ mod subscribed_sheet_tests;
 mod refresh_resolution_tests;
 
 #[cfg(test)]
+mod subscriber_diff_tests;
+
+#[cfg(test)]
 mod document_store_census_tests;
 
 #[cfg(test)]

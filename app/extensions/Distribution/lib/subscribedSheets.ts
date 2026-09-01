@@ -106,6 +106,19 @@ export function provenanceForSheetIndex(index: number): SheetProvenanceEntry | n
 }
 
 /**
+ * Full WORKING-COPY provenance by workbook index, for the push tab item.
+ *
+ * A SIBLING, not a widening of `provenanceForSheetIndex`, whose subscribed-only
+ * contract the detach and reset items rely on. Pushing FROM a subscribed sheet
+ * is refused by name in Rust (`CALP_PUSH_IS_SUBSCRIBER`), so an item offered
+ * there would be a menu entry whose command cannot run.
+ */
+export function workingCopyForSheetIndex(index: number): SheetProvenanceEntry | null {
+  const entry = byIndex.get(index);
+  return entry?.role === "workingCopy" ? entry : null;
+}
+
+/**
  * How many SUBSCRIBED sheets in this workbook came from one application, so a
  * confirm can say what a whole-application reset will touch.
  *

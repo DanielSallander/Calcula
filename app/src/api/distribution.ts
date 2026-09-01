@@ -1207,8 +1207,31 @@ export function diffWorkingCopy(params?: {
   registryPath?: string;
   packageName?: string;
   baseVersion?: string;
+  /**
+   * Sheets the comparison covers. Omitted means "the publish default".
+   *
+   * FOR A SUBSCRIBER THIS IS REQUIRED and the backend refuses without it: the
+   * publish default for a subscribing workbook is every sheet you own EXCEPT
+   * the subscribed ones, which is the inverse of "compare my subscribed sheets
+   * against the published version".
+   */
   sheetIndices?: number[];
+  /**
+   * Pass TRUE whenever the diff is shown as a preview of something that does not
+   * touch comments. The publish assembly writes `comments.json` only when this
+   * is set, so against a base version published WITH comments the working side
+   * has none and every comment reads as removed — a change the previewed act
+   * will not make.
+   */
   includeComments?: boolean;
+  /**
+   * Keep only these APPLICATION sheet ids and recompute the totals.
+   *
+   * A subscriber diff otherwise reports a DETACHED sheet as removed (gone from
+   * the ledger, still in the published manifest) and a locally-added floating
+   * range's backing sheet as added — neither of which a reset touches.
+   */
+  scopeSheetIds?: string[];
 }): Promise<WorkingCopyDiff> {
   return invokeBackend("calp_diff_working_copy", { params: params ?? {} });
 }
@@ -1395,6 +1418,14 @@ export interface SheetProvenanceInfo {
    * consumer never has to join two round trips that can tear.
    */
   sheetId: string;
+  /**
+   * The PUBLISHER's id for this sheet. On a subscriber this is a DIFFERENT uuid
+   * from `sheetId` — pull mints fresh local ids — and it is the one every
+   * published artifact and every diff row is keyed by, so anything lining local
+   * sheets up against published content needs this one. On a working copy the
+   * two coincide.
+   */
+  packageSheetId: string;
   /** The LIVE name — renaming a subscribed sheet is allowed. */
   sheetName: string;
   packageName: string;

@@ -202,6 +202,11 @@ pub(crate) struct SheetOrigin {
     /// is actually looking at.
     pub sheet_name: String,
     pub local_sheet_id: identity::SheetId,
+    /// The PUBLISHER's id for this sheet. A different uuid from the local one on
+    /// a subscriber (pull mints fresh ids), and the key every published artifact
+    /// and every diff row is named by — so anything that has to line a local
+    /// sheet up against published content needs this and not `local_sheet_id`.
+    pub package_sheet_id: identity::SheetId,
 }
 
 /// Which local sheet INDICES came from a subscribed `.calp` application.
@@ -240,6 +245,7 @@ impl SheetProvenance {
                             .cloned()
                             .unwrap_or_else(|| sheet.local_name.clone()),
                         local_sheet_id: sheet.local_sheet_id,
+                        package_sheet_id: sheet.package_sheet_id,
                     },
                 );
             }

@@ -398,6 +398,76 @@ dataset subscription legitimately has zero sheets.
 
 A detached sheet becomes ordinary: publishable, deletable, and no longer refreshed.
 
+### Seeing the difference before deciding (2026-09-01)
+
+Three sheet-tab items, all showing the same kind of per-cell comparison, all built
+on `calp_diff_working_copy` — which runs the REAL publish assembly into a
+`MemoryWorkspace` and diffs that against the published artifact, so the preview
+and the act are the same code:
+
+| Right-click a… | Item | What it does |
+|---|---|---|
+| subscribed sheet | *View changes vs "&lt;app&gt;"…* | read-only |
+| subscribed sheet | *Reset "&lt;app&gt;" to published…* | the same view, with the confirm |
+| working-copy sheet | *Push changes to "&lt;app&gt;"…* | opens the Publish dialog, which already fetches and shows this diff |
+
+The reset and view entries are ONE dialog with a `mode`. Two dialogs would be two
+answers to "what have I changed" and they would drift. **The dialog owns the
+confirm** — not a style choice: `ui.dialogs.show()` returns `void`, so a menu item
+cannot await a dialog and act on its answer.
+
+**Push opens the existing Publish dialog rather than a smaller one.** That dialog
+is already the push surface and already carries the stale-base gate, the merge
+outcome, the version bump and the required change summary; a leaner push dialog
+would be four second sources of truth about what a push is. The tab item passes a
+`focusSheetName` HINT that highlights the row and deliberately does not tick it —
+a right-click must not change what leaves the machine.
+
+#### Four ways this preview could have lied, and what stops each
+
+A preview that understates or misdescribes a destructive act is worse than no
+preview, because it manufactures confidence. All four were found before any of it
+was wired to a user; two were already live in the push preview.
+
+1. **The inverse scope.** An empty `sheetIndices` means "the publish default",
+   and for a workbook that SUBSCRIBES that default is every sheet you own *minus*
+   the subscribed ones — so the preview would describe sheets the reset does not
+   touch and omit every one it does. `calp_diff_working_copy` now refuses with
+   `CALP_DIFF_NEEDS_SHEETS` rather than substituting: the scope of a diff shown
+   before a destructive act must be visible at the call site. **The guard does not
+   test the working-copy link**, because a workbook can be the working copy of X
+   *and* a subscriber of Y — a first-class state since checkout became additive,
+   and exactly what this feature creates by putting all three items on one menu.
+   A `link.is_none()` test sails past for such a workbook and hands it X's sheets
+   for a diff of Y.
+2. **Sheets the act will not touch.** A DETACHED sheet is gone from the ledger but
+   still in the published manifest, so the raw diff calls it `removed` while
+   `calp_reset_subscription` skips it. A floating range the subscriber added to a
+   subscribed sheet drags its LOCAL backing sheet into the assembly, where it
+   reads as `added`. `scope_sheet_ids` filters both out **and recomputes the
+   totals** — a filtered list under a carried-over header counts rows the list
+   does not show.
+3. **Every comment "removed".** The publish assembly writes `comments.json` only
+   when `include_comments` is set; against a base published WITH comments the
+   working side had none and every comment read as removed. Both previews now
+   pass it. *This was live in the push preview*, which called `diffWorkingCopy()`
+   with no arguments at all — which also meant unticking a sheet left the panel
+   describing a push that still carried it.
+4. **Formatting, which the diff cannot honestly itemise.** A reset also restores
+   cell formatting, widths, heights, merges and pivot definitions. The engine
+   collapses those into per-sheet booleans, and those booleans are **not
+   trustworthy at sheet granularity**: every published sheet carries the WHOLE
+   workbook style registry (`Sheet::from_grid` takes `styles.all_styles()`), and
+   registries only ever append — so `stylesTableChanged` is true between
+   essentially any publisher and any subscriber who has ever formatted anything,
+   on every sheet. Surfacing it would print a warning against sheets nobody
+   touched.
+
+   So the dialog does not surface it, and says the honest thing instead: the cell
+   list is complete, formatting and layout are restored too and are not listed,
+   and **an empty list does not mean nothing would change**. A sentence that
+   always applies beats a flag that is always on.
+
 ### Subscribed sheets and publishing
 
 A sheet materialized by a subscription is its publisher's content. It is therefore

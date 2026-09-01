@@ -7326,6 +7326,13 @@ pub struct SheetProvenanceInfo {
     /// The workbook's stable sheet uuid. Both keys come from ONE snapshot, so a
     /// consumer never has to join two round trips that can tear.
     pub sheet_id: String,
+    /// The PUBLISHER's id for this sheet. On a subscriber this is a different
+    /// uuid from `sheet_id` — pull mints fresh local ids — and it is the one
+    /// every published artifact and every DIFF ROW is keyed by, so a caller
+    /// lining local sheets up against published content needs this one. On a
+    /// working copy the two coincide, because preserving the application's sheet
+    /// identity is what checkout is for.
+    pub package_sheet_id: String,
     /// The LIVE name, not the ledger's `local_name` — renaming is allowed.
     pub sheet_name: String,
     pub package_name: String,
@@ -7389,6 +7396,7 @@ pub(crate) fn sheet_provenance_rows(state: &AppState) -> Result<Vec<SheetProvena
                 return Some(SheetProvenanceInfo {
                     sheet_index: i,
                     sheet_id: o.local_sheet_id.to_string(),
+                    package_sheet_id: o.package_sheet_id.to_string(),
                     sheet_name: o.sheet_name.clone(),
                     package_name: o.package_name.clone(),
                     registry_url: o.registry_url.clone(),
@@ -7404,6 +7412,9 @@ pub(crate) fn sheet_provenance_rows(state: &AppState) -> Result<Vec<SheetProvena
             Some(SheetProvenanceInfo {
                 sheet_index: i,
                 sheet_id: sid.to_string(),
+                // The SAME id: checkout preserves the application's sheet
+                // identity, which is the whole point of a working copy.
+                package_sheet_id: sid.to_string(),
                 sheet_name: sheet_names.get(i).cloned().unwrap_or_default(),
                 package_name: l.package_name.clone(),
                 registry_url: l.registry_url.clone(),

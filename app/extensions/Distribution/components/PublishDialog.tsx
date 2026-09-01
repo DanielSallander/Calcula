@@ -42,7 +42,12 @@ import { PublishReportView } from "./ApplicationExplorerPanel";
 /** Which of the two things this dialog is doing right now. */
 type Mode = "loading" | "push" | "create";
 
-export function PublishDialog({ onClose }: DialogProps) {
+export function PublishDialog({ onClose, data }: DialogProps) {
+  // Opened from a sheet tab? Then highlight where that sheet sits in the push.
+  // Narrowed with a typeof guard rather than cast: `data` is
+  // `Record<string, unknown>` and comes from a caller this component does not
+  // control.
+  const focusSheetName = typeof data?.focusSheetName === "string" ? data.focusSheetName : undefined;
   const win = useDialogWindow({ minWidth: 460, minHeight: 400 });
 
   const [mode, setMode] = useState<Mode>("loading");
@@ -197,12 +202,31 @@ export function PublishDialog({ onClose }: DialogProps) {
   // into memory and diffing it against the base. Loaded once the workbook is
   // known to be a working copy, because that is when there is a base to compare
   // against at all.
+  //
+  // IT DESCRIBES THE PUSH THE BUTTON WILL MAKE, which took two fixes.
+  //
+  // It used to call `diffWorkingCopy()` with no arguments. That meant (a) the
+  // sheet selection was ignored — untick a sheet and the panel still described
+  // a push that carried it — and (b) `includeComments` defaulted to false while
+  // the actual publish may include them, so against a base published WITH
+  // comments the working side had no `comments.json` and every comment read as
+  // REMOVED. A change the push was not making, presented as a change it was.
+  //
+  // Deps are RAW STATE only: `selectedIndices` and `previewSignature` are
+  // declared below this effect, and a dep array is evaluated at the call site
+  // during render, so naming either here is a ReferenceError on first render.
+  // They are called inside the body instead, exactly as `runPreview` does.
   useEffect(() => {
     if (mode !== "push" || !workspace?.baseVersion) return;
+    // Explicit rather than accidental: an empty selection means "the publish
+    // default", which for a working copy IS the link's base_sheets — benign,
+    // but benign by coincidence. Wait until the list has loaded so the request
+    // says what it means.
+    if (availableSheets.length === 0) return;
     let cancelled = false;
     setDiffBusy(true);
     setDiffError(null);
-    diffWorkingCopy()
+    diffWorkingCopy({ sheetIndices: selectedIndices(), includeComments })
       .then((result) => {
         if (!cancelled) setDiff(result.diff);
       })
@@ -217,7 +241,8 @@ export function PublishDialog({ onClose }: DialogProps) {
     return () => {
       cancelled = true;
     };
-  }, [mode, workspace?.baseVersion, pushed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, workspace?.baseVersion, pushed, sheetSelection, availableSheets.length, includeComments]);
 
   // When the base is stale, WHY it is stale matters more than the fact. Ask
   // whether the intervening work actually overlaps yours before telling the
@@ -669,6 +694,14 @@ export function PublishDialog({ onClose }: DialogProps) {
                       gap: "6px",
                       padding: "2px 0",
                       cursor: "pointer",
+                      // A HINT, not a selection. When this dialog was opened
+                      // from a sheet tab, mark where that sheet sits in the
+                      // push — but never tick it. A right-click that changes
+                      // what leaves the machine is the thing the "(new — not in
+                      // v…)" marker exists to keep deliberate.
+                      background:
+                        focusSheetName === name ? "var(--bg-selected, #e8f0fe)" : undefined,
+                      borderRadius: focusSheetName === name ? "3px" : undefined,
                     }}
                   >
                     <input

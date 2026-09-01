@@ -162,10 +162,34 @@ pub struct DiffWorkingCopyParams {
     pub base_version: Option<String>,
     /// Sheets the comparison should cover. Empty = the same default a publish
     /// would take.
+    ///
+    /// FOR A SUBSCRIBER DIFF THIS MUST BE EXPLICIT, and the command refuses
+    /// otherwise. "The publish default" for a workbook that subscribes is *every
+    /// user sheet MINUS the subscribed ones* — the exact inverse of what a
+    /// "compare my subscribed sheets against the published version" request
+    /// means. The refusal is deliberate rather than a silent substitution: the
+    /// scope of a diff shown before a destructive act must be visible at the
+    /// call site.
     #[serde(default)]
     pub sheet_indices: Option<Vec<usize>>,
     #[serde(default)]
     pub include_comments: bool,
+    /// Keep only these APPLICATION sheet ids in the result, and recompute the
+    /// totals over what survives.
+    ///
+    /// A subscriber's diff otherwise reports two changes a reset will never
+    /// make. A sheet DETACHED from the application is gone from the ledger but
+    /// still in the published manifest, so it reads as `removed` — while
+    /// `calp_reset_subscription` skips it, because it resolves targets through
+    /// the ledger. And a floating range the subscriber added to a subscribed
+    /// sheet drags its LOCAL backing sheet into the publish assembly, where it
+    /// is absent from the base manifest and reads as `added`.
+    ///
+    /// Both are the same class of lie: the preview naming a sheet the act does
+    /// not touch. `None` leaves the diff whole, which is what the push preview
+    /// wants — there, every sheet in the link's base_sheets IS in scope.
+    #[serde(default)]
+    pub scope_sheet_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,6 +258,36 @@ pub fn calp_diff_working_copy(
         true,
     )?;
 
+    // A SUBSCRIBER DIFF MUST NAME ITS SHEETS. An empty `sheet_indices` means
+    // "the publish default", and for a workbook that subscribes to this
+    // application that default is *every user sheet MINUS the subscribed ones* —
+    // the exact inverse of "compare my subscribed sheets against the published
+    // version". The preview would then describe sheets the reset does not touch
+    // and omit every sheet it does.
+    //
+    // THE GUARD DOES NOT LOOK AT THE LINK, deliberately. A workbook can be the
+    // working copy of application X *and* a subscriber of application Y at the
+    // same time — that is a first-class state since checkout became additive,
+    // and it is exactly the configuration this feature creates by putting reset,
+    // view-changes and push on one tab menu. A `link.is_none()` test would sail
+    // past for such a workbook and hand it X's base_sheets for a diff of Y.
+    // What matters is only whether THIS application is subscribed.
+    //
+    // A refusal, never a silent substitution: filling in the tracked indices
+    // here would hide a caller bug and make the scope of a diff shown before a
+    // destructive act invisible at the call site.
+    if params.sheet_indices.as_ref().is_none_or(|v| v.is_empty())
+        && !subscription_sheet_map(&state, &package_name)?.is_empty()
+    {
+        return Err(format!(
+            "CALP_DIFF_NEEDS_SHEETS: This workbook SUBSCRIBES to '{}', so a comparison \
+             must name the sheets it covers. Without them the diff would describe \
+             every sheet you own EXCEPT the subscribed ones, which is the opposite \
+             of what was asked.",
+            package_name
+        ));
+    }
+
     // The working-copy side: a real publish into memory.
     let memory = calp::MemoryWorkspace::new();
     let working_version = calp::SemVer::new(0, 0, 0);
@@ -280,7 +334,50 @@ pub fn calp_diff_working_copy(
     )
     .map_err(|e| e.to_string())?;
 
-    Ok(WorkingCopyDiff { package_name, base_version, diff })
+    Ok(WorkingCopyDiff {
+        package_name,
+        base_version,
+        diff: scope_diff(diff, params.scope_sheet_ids.as_deref()),
+    })
+}
+
+/// Keep only `scope`'s APPLICATION sheet ids, and recompute the totals from what
+/// survives.
+///
+/// A subscriber's diff otherwise names two changes a reset will never make:
+///
+/// * A DETACHED sheet is gone from the subscription ledger but still in the
+///   published manifest, so `diff_sides` reports it `removed` — while
+///   `calp_reset_subscription` skips it, because it resolves its targets through
+///   that same ledger.
+/// * A floating range the subscriber added to a subscribed sheet drags its LOCAL
+///   backing sheet into the publish assembly (the expansion runs on the final
+///   selection in every branch), where it is absent from the base manifest and
+///   reads as `added`.
+///
+/// Both are the same class of lie — the preview naming a sheet the act does not
+/// touch — and both are invisible without this, because each looks like an
+/// ordinary row.
+///
+/// `None` leaves the diff whole. That is what the PUSH preview wants: there every
+/// sheet in the link's `base_sheets` really is in scope, and a sheet genuinely
+/// added or removed by the push is exactly what the author needs to see.
+pub(crate) fn scope_diff(mut diff: VersionDiff, scope: Option<&[String]>) -> VersionDiff {
+    let Some(scope) = scope else { return diff };
+    let keep: std::collections::HashSet<&str> = scope.iter().map(|s| s.as_str()).collect();
+    diff.sheets.retain(|s| keep.contains(s.sheet_id.as_str()));
+
+    // Recomputed, never carried over: a filtered list under an unfiltered header
+    // is a strip that counts rows the list below does not show.
+    let cell_total = |s: &calp::diff::SheetDiffSummary| s.cells_added + s.cells_removed + s.cells_modified;
+    diff.totals.sheets_changed = diff
+        .sheets
+        .iter()
+        .filter(|s| s.change != "modified" || cell_total(s) > 0)
+        .count();
+    diff.totals.cells_changed = diff.sheets.iter().map(cell_total).sum();
+    diff.totals.cells_changed_exact = diff.sheets.iter().all(|s| s.counts_exact);
+    diff
 }
 
 /// local sheet id -> package sheet id, for a workbook that subscribes to

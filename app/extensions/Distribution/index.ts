@@ -32,6 +32,7 @@ import {
   PUBLISH_MODEL_DIALOG_ID,
   SUBSCRIBE_DIALOG_ID,
   REFRESH_PREVIEW_DIALOG_ID,
+  SUBSCRIPTION_DIFF_DIALOG_ID,
   DESIGNATE_WRITEBACK_DIALOG_ID,
   CONNECTION_DIALOG_ID,
   PublishDialogDefinition,
@@ -40,6 +41,7 @@ import {
   PublishModelDialogDefinition,
   SubscribeDialogDefinition,
   RefreshPreviewDialogDefinition,
+  SubscriptionDiffDialogDefinition,
   DesignateWritebackDialogDefinition,
   ConnectionDialogDefinition,
 } from "./manifest";
@@ -98,8 +100,8 @@ import { SUBSCRIBED_CHIP, WORKING_COPY_CHIP } from "./lib/roleChipColors";
 import {
   provenanceForSheetId,
   provenanceForSheetIndex,
+  workingCopyForSheetIndex,
   subscriptionForSheetIndex,
-  subscribedSheetCountForApplication,
   refreshSubscribedSheets,
   resetSubscribedSheets,
 } from "./lib/subscribedSheets";
@@ -338,6 +340,12 @@ function activate(context: ExtensionContext): void {
   // It sits on the tab because that is where the sheet is. The command itself is
   // per-APPLICATION, not per-sheet, so the confirm names how many sheets it will
   // touch rather than pretending the scope is the one tab you right-clicked.
+  // THE DIALOG OWNS THE CONFIRM, and it has to: `ui.dialogs.show()` returns
+  // void, so a menu item cannot await a dialog and act on the answer. The
+  // reset call, its aftermath and the two-step confirm all live in
+  // `SubscriptionDiffDialog`. What used to be here was a text-only
+  // `confirmAsync` — a sentence as the basis for a decision about work you may
+  // not remember making.
   sheetExtensions.registerContextMenuItem({
     id: "distribution:resetSheet",
     label: (ctx) => {
@@ -345,38 +353,78 @@ function activate(context: ExtensionContext): void {
       return p ? `Reset "${p.packageName}" to published...` : "Reset to published...";
     },
     visible: (ctx) => provenanceForSheetIndex(ctx.index) !== null,
-    onClick: async (ctx) => {
+    onClick: (ctx) => {
       const p = provenanceForSheetIndex(ctx.index);
       if (!p) return;
-      const n = subscribedSheetCountForApplication(p.registryUrl, p.packageName);
-      const scope =
-        n > 1
-          ? `all ${n} sheets from "${p.packageName}"`
-          : `"${ctx.sheet.name}"`;
-      // `confirmAsync`, never the `confirm` global — under Tauri that returns a
-      // Promise, so the guard would never fire. Fails CLOSED.
-      const ok = await confirmAsync(
-        `Discard your local changes to ${scope} and restore the published ` +
-          `v${p.resolvedVersion}?\n\n` +
-          `Cells, formatting, sizes and merges go back to what the publisher ` +
-          `shipped, and your overrides on those sheets are cleared. Sheets you ` +
-          `created yourself are untouched.\n\n` +
-          `This is one undo step — Ctrl+Z brings your work back.`,
-        { title: "Reset to published" },
-      );
-      if (!ok) return;
-      try {
-        await resetSubscription(p.registryUrl, p.packageName);
-        // Pivots, recalc, sheet list, grid, controls. The published content
-        // ships with pivot output stripped, so without the redraw the reset
-        // sheet shows a blank pivot region.
-        await announceSubscribedContentReplaced();
-      } catch (err: unknown) {
-        await alertAsync(String(err), { title: "Could not reset the subscription" });
-      }
+      context.ui.dialogs.show(SUBSCRIPTION_DIFF_DIALOG_ID, {
+        registryUrl: p.registryUrl,
+        packageName: p.packageName,
+        resolvedVersion: p.resolvedVersion,
+        mode: "reset",
+      });
     },
   });
   cleanupFns.push(() => sheetExtensions.unregisterContextMenuItem("distribution:resetSheet"));
+
+  // THE SAME COMPARISON, WITHOUT THE LOADED GUN. Looking at what you have
+  // changed is a reasonable thing to want on its own, and making it reachable
+  // only through a button labelled "Reset" teaches people not to press the
+  // button that answers their question.
+  sheetExtensions.registerContextMenuItem({
+    id: "distribution:viewSheetChanges",
+    label: (ctx) => {
+      const p = provenanceForSheetIndex(ctx.index);
+      return p ? `View changes vs "${p.packageName}"...` : "View changes vs application...";
+    },
+    visible: (ctx) => provenanceForSheetIndex(ctx.index) !== null,
+    separatorAfter: true,
+    onClick: (ctx) => {
+      const p = provenanceForSheetIndex(ctx.index);
+      if (!p) return;
+      context.ui.dialogs.show(SUBSCRIPTION_DIFF_DIALOG_ID, {
+        registryUrl: p.registryUrl,
+        packageName: p.packageName,
+        resolvedVersion: p.resolvedVersion,
+        mode: "view",
+      });
+    },
+  });
+  cleanupFns.push(() =>
+    sheetExtensions.unregisterContextMenuItem("distribution:viewSheetChanges"),
+  );
+
+  // PUSH, from where the sheet is. The other side of the same workflow: a
+  // developer editing a checked-out application should not have to leave the
+  // tab to publish the next version.
+  //
+  // It opens the EXISTING publish dialog rather than a smaller one. That dialog
+  // is already the push surface, already fetches and shows the working-copy
+  // diff, and already carries the stale-base gate, the merge outcome, the
+  // version bump and the required change summary. A leaner push dialog would be
+  // four second sources of truth about what a push is.
+  //
+  // The label names the APPLICATION, never the sheet: a push carries the link's
+  // whole base_sheets set, exactly as reset covers a whole subscription.
+  sheetExtensions.registerContextMenuItem({
+    id: "distribution:pushFromTab",
+    label: (ctx) => {
+      const p = workingCopyForSheetIndex(ctx.index);
+      return p ? `Push changes to "${p.packageName}"...` : "Push changes to application...";
+    },
+    visible: (ctx) => workingCopyForSheetIndex(ctx.index) !== null,
+    separatorAfter: true,
+    onClick: (ctx) => {
+      const p = workingCopyForSheetIndex(ctx.index);
+      if (!p) return;
+      // A HINT, never a selection. The dialog highlights the row so the
+      // developer can see where the sheet they right-clicked sits in the push,
+      // but it must not TICK it: a right-click that changes what leaves the
+      // machine is exactly what the "(new — not in v…)" marker exists to keep
+      // deliberate.
+      context.ui.dialogs.show(PUBLISH_DIALOG_ID, { focusSheetName: ctx.sheet.name });
+    },
+  });
+  cleanupFns.push(() => sheetExtensions.unregisterContextMenuItem("distribution:pushFromTab"));
 
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);
@@ -384,12 +432,14 @@ function activate(context: ExtensionContext): void {
   context.ui.dialogs.register(PublishModelDialogDefinition);
   context.ui.dialogs.register(SubscribeDialogDefinition);
   context.ui.dialogs.register(RefreshPreviewDialogDefinition);
+  context.ui.dialogs.register(SubscriptionDiffDialogDefinition);
   context.ui.dialogs.register(DesignateWritebackDialogDefinition);
   context.ui.dialogs.register(ConnectionDialogDefinition);
   cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_MODEL_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(SUBSCRIBE_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(REFRESH_PREVIEW_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(SUBSCRIPTION_DIFF_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(DESIGNATE_WRITEBACK_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(CONNECTION_DIALOG_ID));
 

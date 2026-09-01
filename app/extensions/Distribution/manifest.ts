@@ -8,6 +8,7 @@ import { CheckoutDialog } from "./components/CheckoutDialog";
 import { PublishModelDialog } from "./components/PublishModelDialog";
 import { SubscribeDialog } from "./components/SubscribeDialog";
 import { RefreshPreviewDialog } from "./components/RefreshPreviewDialog";
+import { SubscriptionDiffDialog } from "./components/SubscriptionDiffDialog";
 import { DesignateWritebackDialog } from "./components/DesignateWritebackDialog";
 import { ConnectionDialog } from "./components/ConnectionDialog";
 
@@ -47,6 +48,8 @@ export const CHECKOUT_DIALOG_ID = "distribution:checkoutDialog";
 export const PUBLISH_MODEL_DIALOG_ID = "distribution:publishModelDialog";
 export const SUBSCRIBE_DIALOG_ID = "distribution:subscribeDialog";
 export const REFRESH_PREVIEW_DIALOG_ID = "distribution:refreshPreviewDialog";
+/** One id for BOTH subscriber-diff entries; `data.mode` picks the footer. */
+export const SUBSCRIPTION_DIFF_DIALOG_ID = "distribution:subscriptionDiffDialog";
 export const DESIGNATE_WRITEBACK_DIALOG_ID = "distribution:designateWritebackDialog";
 export const CONNECTION_DIALOG_ID = "distribution:connectionDialog";
 
@@ -89,6 +92,16 @@ export const RefreshPreviewDialogDefinition: DialogDefinition = {
   priority: 100,
   // Non-modal floating window: the workbook stays interactive while it is
   // open, so a grid-level Escape must not dismiss it.
+  dismissOnEscape: false,
+};
+
+export const SubscriptionDiffDialogDefinition: DialogDefinition = {
+  id: SUBSCRIPTION_DIFF_DIALOG_ID,
+  component: SubscriptionDiffDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+  // Non-modal floating window: the workbook stays interactive while it is
+  // open, so a grid-level Escape must not dismiss it. That matters more here
+  // than elsewhere — the whole point is to look at the sheets while deciding.
   dismissOnEscape: false,
 };
 
