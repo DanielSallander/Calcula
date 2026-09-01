@@ -451,6 +451,7 @@ fn compute_publish_report(
     state: &AppState,
     sheet_indices: &[usize],
     include_comments: bool,
+    selection: &PublishSelection,
 ) -> PublishReport {
     let wb = &assembly.workbook;
     let published_sheet_ids: std::collections::HashSet<SheetId> = sheet_indices
@@ -635,6 +636,18 @@ fn compute_publish_report(
     item(&mut excluded, "documentProperties", doc_props,
         "document properties describe YOUR workbook; the application manifest carries the application's own identity");
 
+    // PROVENANCE, last, because it qualifies rows above rather than adding a new
+    // kind of content. The rows come from the SELECTION, not from a second walk:
+    // the carrier and the disclosure must not be able to disagree about which
+    // sheets are leaving.
+    let (included_subscribed, excluded_subscribed) = subscribed_sheet_report_rows(selection);
+    if let Some(row) = included_subscribed {
+        included.push(row);
+    }
+    if let Some(row) = excluded_subscribed {
+        excluded.push(row);
+    }
+
     PublishReport { included, excluded }
 }
 
@@ -680,10 +693,11 @@ pub(crate) fn publish_into_for_preview(
     registry: &dyn calp::transport::WorkspaceTransport,
     package_name: &str,
     version: SemVer,
+    kind: &str,
     sheet_indices: Vec<usize>,
     include_comments: bool,
 ) -> Result<(), String> {
-    let sheet_indices = resolve_publish_sheet_indices(state, sheet_indices)?;
+    let sheet_indices = resolve_publish_sheet_indices(state, kind, sheet_indices)?.indices;
     let assembly = assemble_publish_workbook(
         state,
         bi_state,
@@ -850,18 +864,18 @@ pub fn calp_publish(
     // orphaning their overrides. This is the identity trap, refused by name.
     {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-        if subs
-            .subscriptions
-            .iter()
-            .any(|s| s.package_name == params.package_name && s.version_pin != "dev")
-        {
+        if subscribes_to(
+            &subs.subscriptions,
+            &params.registry_path,
+            &params.package_name,
+        ) {
             return Err(format!(
-                "CALP_PUSH_IS_SUBSCRIBER: This workbook SUBSCRIBES to '{}' — its sheets are \
-                 a local copy with their own identity, so publishing from here would look \
+                "CALP_PUSH_IS_SUBSCRIBER: This workbook SUBSCRIBES to '{}' at {} — its sheets \
+                 are a local copy with their own identity, so publishing from here would look \
                  to every other subscriber like every sheet was deleted and replaced, and \
                  would discard their local edits. To change the application itself, use \
                  Distribution > Open Application for Editing.",
-                params.package_name
+                params.package_name, params.registry_path
             ));
         }
     }
@@ -945,11 +959,12 @@ pub fn calp_publish(
     // it would ship the author's entire workbook — data and all — to a shared
     // workspace as a side effect of publishing a function library. A library
     // therefore publishes ZERO sheets unless the author names sheets explicitly.
-    let sheet_indices = if params.kind.eq_ignore_ascii_case(crate::library_commands::LIBRARY_KIND) {
-        params.sheet_indices
-    } else {
-        resolve_publish_sheet_indices(&state, params.sheet_indices)?
-    };
+    //
+    // THE LIBRARY RULE NOW LIVES IN THE RESOLVER, not here. It used to be this
+    // branch, which `calp_publish_preview` did not have — so a library preview
+    // described every sheet for a publish that shipped none.
+    let selection = resolve_publish_sheet_indices(&state, &params.kind, params.sheet_indices)?;
+    let sheet_indices = selection.indices.clone();
 
     let assembly = assemble_publish_workbook(
         &state,
@@ -964,7 +979,7 @@ pub fn calp_publish(
         &sheet_indices,
     )?;
     let report =
-        compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments);
+        compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
 
     let PublishAssembly {
         workbook,
@@ -1292,6 +1307,12 @@ pub struct PublishPreviewParams {
     /// comments exactly where the real publish would put them (default false).
     #[serde(default)]
     pub include_comments: bool,
+    /// The application's kind, so the dry run resolves the SAME sheets a publish
+    /// would. Absent means "report" — the ordinary case. Only `"library"`
+    /// changes the answer (zero sheets by default), and a library preview that
+    /// omitted it described every sheet for a publish that ships none.
+    #[serde(default)]
+    pub kind: String,
     /// The push target, when the caller is previewing an actual push rather
     /// than running a content-only dry run. Supplying both turns the response's
     /// `gates` field on.
@@ -1320,6 +1341,34 @@ pub struct PublishPreviewResponse {
     /// plain dry-run the Application Explorer's "Preview publish" button runs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gates: Option<PushGateStatus>,
+    /// Every sheet the author may choose from, with its TRUE workbook index and
+    /// its provenance.
+    ///
+    /// `sheet_names` above is a different question — the names of what the
+    /// PREVIEWED selection covered. A dialog that builds its checkbox list from
+    /// that has no way to name a sheet the default withheld, and no way to map a
+    /// checkbox back to a workbook index except by position, which stops being
+    /// true the moment the default excludes anything.
+    #[serde(default)]
+    pub sheets: Vec<PublishPreviewSheet>,
+    /// The indices an empty selection resolves to. The dialog sends these
+    /// EXPLICITLY rather than `[]`, so "everything ticked" can never silently
+    /// mean "everything minus the subscribed ones".
+    #[serde(default)]
+    pub default_sheet_indices: Vec<usize>,
+}
+
+/// One row of the publish dialog's sheet list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPreviewSheet {
+    /// TRUE workbook index — the value to send back in `sheetIndices`.
+    pub index: usize,
+    pub name: String,
+    /// The application this sheet came from; empty when it is the author's own.
+    pub subscribed_to: String,
+    /// Whether a DEFAULT publish would include it (i.e. ticked on open).
+    pub default_selected: bool,
 }
 
 /// Where a prospective push stands against each gate.
@@ -1373,8 +1422,12 @@ pub fn calp_publish_preview(
 ) -> Result<PublishPreviewResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
-    let sheet_indices =
-        resolve_publish_sheet_indices(&state, params.sheet_indices.unwrap_or_default())?;
+    let selection = resolve_publish_sheet_indices(
+        &state,
+        &params.kind,
+        params.sheet_indices.unwrap_or_default(),
+    )?;
+    let sheet_indices = selection.indices.clone();
 
     let assembly = assemble_publish_workbook(
         &state,
@@ -1389,7 +1442,7 @@ pub fn calp_publish_preview(
         &sheet_indices,
     )?;
     let report =
-        compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments);
+        compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
     // Same checks core publish runs, over the same carrier — so the author sees
     // dangling dropdown references AND macro-linked buttons whose macro is not in
     // the module set at PREVIEW time, not only after the artifact is written.
@@ -1421,7 +1474,15 @@ pub fn calp_publish_preview(
         _ => None,
     };
 
-    Ok(PublishPreviewResponse { sheet_names, report, warnings, gates })
+    let sheets = publish_preview_sheet_list(&state, &selection)?;
+    Ok(PublishPreviewResponse {
+        sheet_names,
+        report,
+        warnings,
+        gates,
+        sheets,
+        default_sheet_indices: selection.indices.clone(),
+    })
 }
 
 /// Evaluate every push gate that can be answered without publishing.
@@ -1436,11 +1497,13 @@ fn evaluate_push_gates(
     package_name: &str,
 ) -> Result<PushGateStatus, String> {
     let link = state.working_copy_link.read().map_err(|e| e.to_string())?.clone();
+    // THE SAME QUESTION THE REAL GATE ASKS, through the same function. This
+    // hand-rolled its own walk and ignored `registry_path` entirely, so the
+    // advisory panel could report "subscriber" for a target the real gate would
+    // let through — a preview disagreeing with the publish it previews.
     let subscribes_to_target = {
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
-        subs.subscriptions
-            .iter()
-            .any(|s| s.package_name == package_name && s.version_pin != "dev")
+        subscribes_to(&subs.subscriptions, registry_path, package_name)
     };
 
     let (link_status, expected_base) = if subscribes_to_target {
@@ -2146,26 +2209,139 @@ fn materialize_pulled_tables(
     Ok(materialized)
 }
 
-/// Normalize the author's sheet selection: empty means "every sheet". Shared
-/// by calp_publish and calp_publish_preview so the dry-run can never describe
-/// a different application than the one a publish with the same input would write.
-fn resolve_publish_sheet_indices(
-    state: &State<AppState>,
+/// Does this workbook SUBSCRIBE to the application it is about to push to?
+///
+/// NAME **AND** WORKSPACE. A name alone is not an application: two teams may each
+/// publish `sales` to their own share, and refusing a push to YOUR `sales`
+/// because you subscribe to THEIRS is a gate refusing for a reason that is not
+/// the reason the gate exists. The check used to compare the name only, and had
+/// no test at all.
+///
+/// The dead `version_pin != "dev"` clause is gone with it. A dev subscription's
+/// `package_name` is `dev:<source path>` (`calp::dev_mode`), which can never
+/// equal a target application name, so the exemption never excluded anything —
+/// and leaving it there would let it silently activate if dev subscriptions ever
+/// gained real names. `channel:` subscriptions carry REAL names and were never
+/// exempt; they are caught, correctly.
+pub(crate) fn subscribes_to(
+    subscriptions: &[calp::manifest::Subscription],
+    registry_path: &str,
+    package_name: &str,
+) -> bool {
+    subscriptions.iter().any(|s| {
+        s.package_name == package_name && calp::same_workspace(&s.registry_url, registry_path)
+    })
+}
+
+/// The sheet ids the working copy's BASE version carried, or `None` when this
+/// workbook is not a working copy of anything.
+///
+/// `Some(empty)` is meaningful and distinct from `None`: a library or dataset
+/// application legitimately carries no sheets, and its default publish is zero
+/// sheets, not every sheet in the author's workbook.
+fn working_copy_base_sheets(
+    state: &AppState,
+) -> Result<Option<std::collections::HashSet<identity::SheetId>>, String> {
+    let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+    Ok(link
+        .as_ref()
+        .map(|l| l.base_sheets.iter().map(|s| s.sheet_id).collect()))
+}
+
+/// One sheet named in a publish, with where it came from.
+#[derive(Debug, Clone)]
+pub(crate) struct ProvenancedSheet {
+    pub name: String,
+    pub package_name: String,
+}
+
+/// What a publish will ship, and what it withheld because it belongs to somebody
+/// else.
+///
+/// The reason travels WITH the selection rather than being recomputed by the
+/// report, so the disclosure and the carrier can never disagree about which
+/// sheets are leaving.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PublishSelection {
+    /// Workbook indices that will be published.
+    pub indices: Vec<usize>,
+    /// Subscribed sheets the DEFAULT selection withheld. Empty when the author
+    /// named sheets explicitly — then nothing was withheld.
+    pub withheld_subscribed: Vec<ProvenancedSheet>,
+    /// Subscribed sheets the author DELIBERATELY ticked. An informed act, and
+    /// still a DISCLOSED one.
+    pub included_subscribed: Vec<ProvenancedSheet>,
+}
+
+/// Normalize the author's sheet selection: empty means "every sheet you own".
+/// Shared by calp_publish and calp_publish_preview so the dry-run can never
+/// describe a different application than the one a publish with the same input
+/// would write.
+pub(crate) fn resolve_publish_sheet_indices(
+    state: &AppState,
+    kind: &str,
     requested: Vec<usize>,
-) -> Result<Vec<usize>, String> {
-    let mut selected: Vec<usize> = if !requested.is_empty() {
+) -> Result<PublishSelection, String> {
+    let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let explicit = !requested.is_empty();
+
+    let mut selected: Vec<usize> = if explicit {
         requested
+    } else if kind.eq_ignore_ascii_case(crate::library_commands::LIBRARY_KIND) {
+        // A LIBRARY's payload is its standalone MODULE SCRIPTS, not its sheets.
+        // Defaulting to "every sheet" would ship the author's whole workbook to a
+        // shared workspace as a side effect of publishing a function library.
+        //
+        // This rule used to live in `calp_publish` and NOT in
+        // `calp_publish_preview`, so a library preview described every sheet for
+        // a publish that shipped none — the exact drift the doc comment above
+        // claims is impossible. It lives here now so both callers inherit it.
+        Vec::new()
+    } else if let Some(base) = working_copy_base_sheets(state)? {
+        // A WORKING COPY publishes the APPLICATION's sheets, not the workbook's.
+        //
+        // Checkout is additive — the application's sheets join the workbook you
+        // already had open — so "every sheet" would sweep your own unrelated work
+        // into somebody else's application on the next push. That is the same
+        // leak the subscribed filter below closes, arriving from the other
+        // direction, and the link already records exactly which sheets the base
+        // version carried.
+        //
+        // A sheet you ADD to the application is published by ticking it: the
+        // dialog marks non-base sheets "(new — not in v<base>)", so the tick is
+        // informed rather than a default nobody chose.
+        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        (0..sheet_names.len())
+            .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
+            .filter(|&i| ids.get(i).map(|id| base.contains(id)).unwrap_or(false))
+            .collect()
     } else {
         // "Every sheet" means every USER sheet: object-backed sheets are not
         // selectable anywhere (no tab, no picker), so an explicit-selection
         // publish never names them and the default must not either — they
         // join below, through their owner, exactly like an explicit selection.
         let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
-        let count = state.sheet_names.read().map_err(|e| e.to_string())?.len();
+        let count = sheet_names.len();
         (0..count)
             .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
+            .filter(|&i| !provenance.is_subscribed(i))
+            // A sheet that came from a subscribed application is its PUBLISHER's
+            // content, not yours. Excluded from the DEFAULT only — the explicit
+            // branch above is untouched, which is what keeps a deliberate tick
+            // working. Without this, publishing application B from a workbook
+            // subscribed to A shipped A's sheets inside B under your key.
             .collect()
     };
+
+    let named = |i: usize| -> Option<ProvenancedSheet> {
+        provenance.origin(i).map(|o| ProvenancedSheet {
+            name: o.sheet_name.clone(),
+            package_name: o.package_name.clone(),
+        })
+    };
+    let _ = explicit;
 
     // FLOATING RANGES TRAVEL WITH THEIR HOST SHEET: a published sheet that
     // hosts one must carry its backing sheet, or the subscriber's pull shows
@@ -2189,7 +2365,123 @@ fn resolve_publish_sheet_indices(
             selected.push(idx);
         }
     }
-    Ok(selected)
+
+    // BOTH computed from the FINAL set, after the backing-sheet expansion — a
+    // subscribed sheet that arrived through its host is disclosed as included,
+    // not reported as withheld while it ships.
+    //
+    // WITHHELD is "subscribed and not selected", however the selection arrived.
+    // Scoping it to the default-only branch would have been the obvious reading
+    // of "excluded by default", and it would go quiet the moment the author
+    // unticked any unrelated sheet — the dialog sends an explicit list as soon as
+    // one checkbox moves. What the author needs to know is what is being left
+    // behind, not which code path decided it.
+    let included_subscribed: Vec<ProvenancedSheet> =
+        selected.iter().copied().filter_map(named).collect();
+    let withheld_subscribed: Vec<ProvenancedSheet> = (0..sheet_names.len())
+        .filter(|&i| provenance.is_subscribed(i) && !selected.contains(&i))
+        .filter_map(named)
+        .collect();
+
+    Ok(PublishSelection {
+        indices: selected,
+        withheld_subscribed,
+        included_subscribed,
+    })
+}
+
+/// The publish dialog's sheet list: every choosable sheet, its TRUE index, and
+/// whether it belongs to somebody else.
+///
+/// Object-backed sheets are omitted for the same reason `build_sheet_list` omits
+/// them — they are not selectable anywhere, and travel with their host.
+pub(crate) fn publish_preview_sheet_list(
+    state: &AppState,
+    selection: &PublishSelection,
+) -> Result<Vec<PublishPreviewSheet>, String> {
+    let names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?.clone();
+    let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
+
+    Ok((0..names.len())
+        .filter(|&i| crate::sheets::is_user_sheet(&visibility, i))
+        .map(|i| PublishPreviewSheet {
+            index: i,
+            name: names[i].clone(),
+            subscribed_to: provenance
+                .origin(i)
+                .map(|o| o.package_name.clone())
+                .unwrap_or_default(),
+            default_selected: selection.indices.contains(&i),
+        })
+        .collect())
+}
+
+/// The two provenance lines of the publish report.
+///
+/// Extracted as a pure function because `compute_publish_report` needs nine
+/// `State<T>` handles to reach, and a report line nothing can test is a report
+/// line that drifts from what actually ships.
+///
+/// Returns `(included, excluded)`. Both are `None` at zero count, inheriting the
+/// report's own rule that an empty row is not a row.
+pub(crate) fn subscribed_sheet_report_rows(
+    selection: &PublishSelection,
+) -> (Option<PublishReportItem>, Option<PublishReportItem>) {
+    let apps = |rows: &[ProvenancedSheet]| -> String {
+        let mut names: Vec<String> = rows.iter().map(|r| r.package_name.clone()).collect();
+        names.sort();
+        names.dedup();
+        names.join(", ")
+    };
+    /// The sheets themselves, so the author can see WHICH tabs this is about
+    /// without counting. Truncated past six — a disclosure nobody can read is a
+    /// disclosure nobody acts on.
+    fn sheets_of(rows: &[ProvenancedSheet]) -> String {
+        let mut names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
+        names.sort();
+        if names.len() > 6 {
+            let extra = names.len() - 6;
+            names.truncate(6);
+            return format!("{} and {} more", names.join(", "), extra);
+        }
+        names.join(", ")
+    }
+
+    let included = if selection.included_subscribed.is_empty() {
+        None
+    } else {
+        Some(PublishReportItem {
+            category: "subscribedSheets".to_string(),
+            count: selection.included_subscribed.len(),
+            // DELIBERATELY overlaps the `sheets` count above it in the report:
+            // these sheets ARE being published and are counted there. This line
+            // says something the count cannot — whose content it is.
+            detail: format!(
+                "sheets you ticked that came from {} ({}) — you are republishing another \
+                 publisher's content under your name",
+                apps(&selection.included_subscribed),
+                sheets_of(&selection.included_subscribed)
+            ),
+        })
+    };
+
+    let excluded = if selection.withheld_subscribed.is_empty() {
+        None
+    } else {
+        Some(PublishReportItem {
+            category: "subscribedSheets".to_string(),
+            count: selection.withheld_subscribed.len(),
+            detail: format!(
+                "sheets that came from {} ({}) — they belong to their publisher, not to \
+                 this application. Tick one in the sheet list to publish it deliberately",
+                apps(&selection.withheld_subscribed),
+                sheets_of(&selection.withheld_subscribed)
+            ),
+        })
+    };
+
+    (included, excluded)
 }
 
 /// Uppercased name-collision set for pulled pane controls: existing pane
@@ -2779,6 +3071,33 @@ pub fn calp_pull(
     window: tauri::Window,
 ) -> Result<PullResponse, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    // ROLE GATE — the mirror of `CALP_CHECKOUT_IS_SUBSCRIBER`, and the other half
+    // of the §2.3 rule "one role per application". Checkout refused a subscriber;
+    // nothing refused the reverse, so a developer could subscribe to the very
+    // application their workbook was the working copy of and end up with the
+    // application's sheets present TWICE — once as theirs to push, once as
+    // somebody's to refresh over — which is the confusion this whole invariant
+    // exists to prevent, arriving by the one door that was left open.
+    //
+    // BEFORE the `DocumentEffect`, which dirties at construction: a refusal must
+    // not leave the document modified.
+    {
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+        if let Some(existing) = link.as_ref() {
+            if existing.targets(&params.registry_path, &params.package_name) {
+                return Err(format!(
+                    "CALP_PULL_IS_WORKING_COPY: This workbook is the WORKING COPY of '{}' \
+                     (based on v{}) — its sheets are already here, and they are yours to \
+                     push. Subscribing to it as well would add a second, read-only copy \
+                     of the same content. To see what a subscriber sees, use a dev \
+                     subscription in a new window instead.",
+                    existing.package_name, existing.base_version
+                ));
+            }
+        }
+    }
+
     // A pull materializes application content into THIS workbook: it changes what a
     // save writes, and (unlike open_file) nothing resets the flag afterwards.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
@@ -3673,14 +3992,26 @@ pub struct CheckoutResponse {
     /// `open_file` returns, so the frontend refreshes through one code path.
     pub cells: Vec<crate::api_types::CellData>,
     pub custom_objects: Vec<PulledCustomObjectDto>,
+    /// TRUE state-vector index of the application's first user sheet, so the
+    /// caller can land the user on it. `None` for an application that brings no
+    /// sheets (a dataset or a library).
+    ///
+    /// The index the BACKEND reported, never list arithmetic: the sheet list
+    /// omits object-backed sheets, so `len - materialized` names the wrong one
+    /// whenever a floating range is present.
+    pub first_sheet_index: Option<usize>,
 }
 
 /// Open a published application version for editing.
 ///
-/// This REPLACES the open document: the workbook becomes a working copy of the
-/// application, carrying the application's own sheet ids so the next push continues its
-/// identity rather than forking it. The caller is responsible for having
-/// confirmed the loss of unsaved changes — the same contract `open_file` has.
+/// ADDS the application's sheets to the open workbook, carrying the
+/// application's own sheet ids so the next push continues its identity rather
+/// than forking it. It used to REPLACE the document — which meant the price of
+/// opening an application for editing was whatever you were working on.
+///
+/// A workbook holds at most one working-copy link, so the two ways that breaks
+/// are refused up front: already a working copy of another application, and
+/// already a subscriber to THIS one.
 ///
 /// The materialization is `calp_pull`'s, verbatim (see `materialize_pull_result`),
 /// minus the subscription: a working copy is not a subscriber of its own
@@ -3696,8 +4027,11 @@ pub fn calp_checkout(
     ribbon_filter_state: State<'_, crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<'_, crate::pane_control::PaneControlState>,
     slicer_state: State<'_, crate::slicer::SlicerState>,
-    user_files_state: State<'_, crate::persistence::UserFilesState>,
-    timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    // Kept in the signature though the additive checkout no longer resets them:
+    // removing a Tauri command parameter is a wire change, and these two are the
+    // stores a future non-additive path would need again.
+    _user_files_state: State<'_, crate::persistence::UserFilesState>,
+    _timeline_slicer_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
     params: CheckoutParams,
     window: tauri::Window,
 ) -> Result<CheckoutResponse, String> {
@@ -3739,41 +4073,58 @@ pub fn calp_checkout(
             name: s.name.clone(),
         })
         .collect();
-    let package_brings_sheets = !result.sheets.is_empty();
+
+    // ROLE GATES, before anything is written.
+    //
+    // Checkout ADDS the application's sheets to the open workbook rather than
+    // replacing the document — losing the sheet you were working on to open an
+    // application for editing is not a trade anyone asked for. But a workbook
+    // holds at most ONE working-copy link, and the roles are exclusive PER
+    // APPLICATION (docs/design/calp-workspace-collaboration.md §2.3), so the two
+    // ways that breaks are refused here with the remedy named.
+    {
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+        if let Some(existing) = link.as_ref() {
+            if existing.targets(&params.registry_path, &params.package_name) {
+                return Err(format!(
+                    "CALP_CHECKOUT_ALREADY_OPEN: This workbook is already a working copy of \
+                     '{}' (based on v{}). Its sheets are the ones you are looking at.",
+                    existing.package_name, existing.base_version
+                ));
+            }
+            return Err(format!(
+                "CALP_CHECKOUT_ALREADY_LINKED: This workbook is already a working copy of \
+                 '{}', and a workbook can be a working copy of only one application — \
+                 otherwise a push has no single answer to 'which application am I \
+                 pushing?'. Open '{}' in a new window instead.",
+                existing.package_name, params.package_name
+            ));
+        }
+    }
+    {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        if subscribes_to(
+            &subs.subscriptions,
+            &params.registry_path,
+            &params.package_name,
+        ) {
+            return Err(format!(
+                "CALP_CHECKOUT_IS_SUBSCRIBER: This workbook already SUBSCRIBES to '{}'. A \
+                 workbook can hold one role per application, not both — a subscribed copy's \
+                 sheets carry their own local identity, and editing them as the application \
+                 itself is exactly the confusion that would produce. Remove the subscription \
+                 first (Distribution > Manage Subscriptions), or open the application in a \
+                 new window.",
+                params.package_name
+            ));
+        }
+    }
 
     // ONE effect for the whole command. Unlike `new_file`/`open_file` — which
     // tear down under `deliberately_clean` because they END clean — a checkout
-    // ends DIRTY: the working copy exists only in memory until the user saves
-    // it somewhere, and closing without saving must prompt.
+    // ends DIRTY: the application's sheets exist only in memory until the user
+    // saves, and closing without saving must prompt.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
-
-    // Replace the document. Same shared reset both document-replacing paths
-    // use, so a store nobody thought of cannot survive into the working copy.
-    crate::persistence::reset_document_scoped_stores(
-        &state,
-        &user_files_state,
-        &slicer_state,
-        &ribbon_filter_state,
-        &pane_control_state,
-        &script_state,
-        &pivot_state,
-        &bi_state,
-        &timeline_slicer_state,
-        &effect,
-    )?;
-
-    // The reset leaves one blank "Sheet1". The materializer APPENDS at
-    // grids.len(), so leaving it there would put a stray empty sheet in front
-    // of every checked-out application. Drop it — but only when the application
-    // actually brings sheets, so a zero-sheet dataset application does not leave a
-    // workbook with no sheets at all.
-    if package_brings_sheets {
-        state.grids.write(&effect).map_err(|e| e.to_string())?.clear();
-        state.sheet_names.write(&effect).map_err(|e| e.to_string())?.clear();
-        state.sheet_ids.write(&effect).map_err(|e| e.to_string())?.clear();
-        state.all_column_widths.write(&effect).map_err(|e| e.to_string())?.clear();
-        state.all_row_heights.write(&effect).map_err(|e| e.to_string())?.clear();
-    }
 
     let materialized = materialize_pull_result(
         &state,
@@ -3803,11 +4154,11 @@ pub fn calp_checkout(
         ));
     }
 
-    // A working copy has no file of its own yet: the first Ctrl+S must be a
-    // Save As, not an overwrite of whatever document was open before.
-    *file_state.current_path.lock().map_err(|e| e.to_string())? = None;
-    *file_state.session_password.lock().map_err(|e| e.to_string())? = None;
-    *file_state.is_encrypted.lock().map_err(|e| e.to_string())? = false;
+    // THE FILE PATH IS LEFT ALONE. It used to be cleared, because a checkout
+    // replaced the document and the resulting working copy genuinely had no file
+    // of its own. It is now additive: the application's sheets join the workbook
+    // the user already has open, so clearing the path would turn their next
+    // Ctrl+S into a Save As for a file they never closed.
 
     let cells = crate::persistence::collect_active_sheet_cells(&state)?;
 
@@ -3820,6 +4171,7 @@ pub fn calp_checkout(
         trust_status: materialized.trust_status,
         cells,
         custom_objects: materialized.custom_objects,
+        first_sheet_index: materialized.first_pulled_sheet_index,
     })
 }
 
@@ -5504,6 +5856,13 @@ pub fn calp_refresh_apply(
                 .collect();
 
             for pulled in &payload.pull_result.sheets {
+                // DETACHED: the subscriber took this sheet. Upstream no longer
+                // speaks for it, so a refresh must neither overwrite the copy
+                // they now own nor append a second one beside it.
+                if sub.detached_sheets.contains(&pulled.package_sheet_id) {
+                    continue;
+                }
+
                 let (mut grid, local_styles) = pulled.sheet.to_grid();
 
                 // Remap local style indices (cells AND row/column tiers) to the
@@ -6803,6 +7162,242 @@ pub fn calp_detach(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachSheetParams {
+    /// Workbook index. An INDEX, not a name: this is invoked from the tab, and a
+    /// subscriber may rename a subscribed sheet, so the name is not a stable key.
+    pub sheet_index: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachSheetResponse {
+    pub package_name: String,
+    /// Override LEDGER entries dropped. The CELLS are untouched — see below.
+    pub overrides_dropped: usize,
+    /// True when this was the subscription's last remaining holding.
+    pub subscription_removed: bool,
+}
+
+/// Where one sheet came from, for the surfaces that mark it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetProvenanceInfo {
+    /// TRUE workbook index. Shifts on insert/delete/move, so a consumer that
+    /// caches it must re-read when the sheet list changes.
+    pub sheet_index: usize,
+    /// The workbook's stable sheet uuid. Both keys come from ONE snapshot, so a
+    /// consumer never has to join two round trips that can tear.
+    pub sheet_id: String,
+    /// The LIVE name, not the ledger's `local_name` — renaming is allowed.
+    pub sheet_name: String,
+    pub package_name: String,
+    pub registry_url: String,
+    pub resolved_version: String,
+    /// WHICH ROLE this sheet holds toward that application: `"subscribed"` (it
+    /// came from somebody else's application and is refreshed from it) or
+    /// `"workingCopy"` (it IS the application, and a push carries it).
+    ///
+    /// The two answers look identical on a tab and behave oppositely, which is
+    /// the whole reason this is reported per sheet rather than per workbook.
+    /// Before checkout was additive it did not need to be: a working copy was
+    /// the WHOLE document, so the status-bar chip said it once and every tab
+    /// inherited the answer. Now the application's sheets sit beside the
+    /// author's own in one workbook, so the answer varies by tab again.
+    pub role: String,
+}
+
+/// `SheetProvenanceInfo::role` for a sheet pulled from a subscribed application.
+pub(crate) const SHEET_ROLE_SUBSCRIBED: &str = "subscribed";
+/// `SheetProvenanceInfo::role` for a sheet this workbook is the working copy of.
+pub(crate) const SHEET_ROLE_WORKING_COPY: &str = "workingCopy";
+
+/// Which sheets came from a published application, and in which ROLE.
+///
+/// Read-only, so no `DocumentEffect`. ONE answer for the tab badge, the
+/// context-menu predicate and the publish dialog — `calp_get_subscriptions`
+/// returns the raw ledger with no workbook indices, and
+/// `calp_get_application_objects` is per-application and pulls nine other stores.
+///
+/// TWO SOURCES, ONE LIST. Subscribed sheets come from the subscription ledger;
+/// working-copy sheets come from the working-copy link's `base_sheets`, whose
+/// ids ARE local ids because checkout preserves the application's sheet identity
+/// (`SheetIdMode::PreserveApplication`) — that preservation is the whole point of
+/// checkout. A sheet cannot hold both roles: the role gates in `calp_checkout`
+/// refuse the overlap outright, and the subscription branch wins here anyway.
+#[tauri::command]
+pub fn calp_get_sheet_provenance(
+    state: State<AppState>,
+    window: tauri::Window,
+) -> Result<Vec<SheetProvenanceInfo>, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    sheet_provenance_rows(&state)
+}
+
+/// The body of [`calp_get_sheet_provenance`], without the `Window` its guard
+/// needs — so the two-source join can be tested rather than only compiled.
+pub(crate) fn sheet_provenance_rows(state: &AppState) -> Result<Vec<SheetProvenanceInfo>, String> {
+    let provenance = crate::sheets::SheetProvenance::snapshot(state)?;
+    let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let link = state.working_copy_link.read().map_err(|e| e.to_string())?.clone();
+    let base_sheets: std::collections::HashSet<identity::SheetId> = link
+        .as_ref()
+        .map(|l| l.base_sheets.iter().map(|s| s.sheet_id).collect())
+        .unwrap_or_default();
+
+    Ok((0..sheet_names.len())
+        .filter_map(|i| {
+            if let Some(o) = provenance.origin(i) {
+                return Some(SheetProvenanceInfo {
+                    sheet_index: i,
+                    sheet_id: o.local_sheet_id.to_string(),
+                    sheet_name: o.sheet_name.clone(),
+                    package_name: o.package_name.clone(),
+                    registry_url: o.registry_url.clone(),
+                    resolved_version: o.resolved_version.clone(),
+                    role: SHEET_ROLE_SUBSCRIBED.to_string(),
+                });
+            }
+            let sid = *sheet_ids.get(i)?;
+            if !base_sheets.contains(&sid) {
+                return None;
+            }
+            let l = link.as_ref()?;
+            Some(SheetProvenanceInfo {
+                sheet_index: i,
+                sheet_id: sid.to_string(),
+                sheet_name: sheet_names.get(i).cloned().unwrap_or_default(),
+                package_name: l.package_name.clone(),
+                registry_url: l.registry_url.clone(),
+                resolved_version: l.base_version.clone(),
+                role: SHEET_ROLE_WORKING_COPY.to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Detach ONE sheet from the application that provided it: keep the sheet, stop
+/// tracking it.
+///
+/// `calp_detach` is the workbook-wide hammer — every subscription, every
+/// override. This is the per-sheet form the distribution design has always
+/// described ("save the sheet locally, detaching just that sheet from upstream")
+/// and is the remedy the delete guard points at.
+///
+/// THE CELLS ARE NOT TOUCHED. The override layer is a LEDGER, not a shadow
+/// store: an edit on a subscribed sheet already wrote through to the grid and
+/// merely recorded baseline+current alongside. What detaching discards is the
+/// ability to revert to upstream — which is what detaching MEANS.
+#[tauri::command]
+pub fn calp_detach_sheet(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    params: DetachSheetParams,
+    window: tauri::Window,
+) -> Result<DetachSheetResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    detach_sheet_inner(&state, &file_state, params.sheet_index)
+}
+
+pub(crate) fn detach_sheet_inner(
+    state: &AppState,
+    file_state: &crate::persistence::FileState,
+    sheet_index: usize,
+) -> Result<DetachSheetResponse, String> {
+    let (local_sid, sheet_name) = {
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let sid = *ids
+            .get(sheet_index)
+            .ok_or_else(|| format!("Sheet index {} is out of range.", sheet_index))?;
+        (sid, names.get(sheet_index).cloned().unwrap_or_default())
+    };
+
+    // GATE AND MUTATION IN ONE CRITICAL SECTION. Tauri dispatches on a thread
+    // pool, so a read-then-drop-then-write would be a TOCTOU window in which a
+    // concurrent refresh could re-add the very sheet being detached.
+    let pending = state.subscriptions.lock_pending().map_err(|e| e.to_string())?;
+
+    let (sub_index, package_sheet_id, package_name) = {
+        let subs = &*pending;
+        let found = subs
+            .subscriptions
+            .iter()
+            .enumerate()
+            .find_map(|(i, sub)| {
+                sub.sheets
+                    .iter()
+                    .find(|s| s.local_sheet_id == local_sid)
+                    .map(|s| (i, s.package_sheet_id, sub.package_name.clone()))
+            });
+        found.ok_or_else(|| {
+            format!(
+                "Sheet '{}' did not come from a published application — there is nothing to detach.",
+                sheet_name
+            )
+        })?
+    };
+
+    // Constructed AFTER the only gate that can refuse: `mutates` dirties the
+    // document at construction, so building it earlier would dirty on a refusal.
+    let effect = crate::document_effect::DocumentEffect::mutates(file_state);
+    let mut subs = pending.authorize(&effect);
+
+    let subscription_removed = {
+        let sub = &mut subs.subscriptions[sub_index];
+        sub.sheets.retain(|s| s.local_sheet_id != local_sid);
+        if !sub.detached_sheets.contains(&package_sheet_id) {
+            sub.detached_sheets.push(package_sheet_id);
+        }
+        // Remove the whole row only when it owns NOTHING else. A library or
+        // dataset subscription legitimately has zero sheets, so "no sheets ⇒
+        // delete" would be wrong; "nothing left at all ⇒ delete" is not.
+        sub.sheets.is_empty() && sub.objects.is_empty() && sub.data_source_configs.is_empty()
+    };
+    if subscription_removed {
+        subs.subscriptions.remove(sub_index);
+    }
+    drop(subs);
+
+    // Lock order subscriptions -> override_layer, matching `calp_detach`.
+    let overrides_dropped = {
+        let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
+        let before = layer.overrides.len();
+        layer.overrides.retain(|o| o.sheet_id != local_sid);
+        before - layer.overrides.len()
+    };
+
+    // A REBUILD, not the hand-clear `calp_detach` does: something usually
+    // survives here. It invalidates the gather cache itself, so one call covers
+    // both.
+    rebuild_writeback_index(state);
+
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let user = audit_user(state);
+        if let Ok(mut audit) = state.audit_log.write(
+            &crate::document_effect::DocumentEffect::deliberately_clean(
+                crate::document_effect::CleanReason::AuditTrail,
+            ),
+        ) {
+            audit.record(
+                calp::audit::AuditEvent::Detach,
+                &format!("Detached sheet '{}' from '{}'", sheet_name, package_name),
+                &user,
+                &now,
+            );
+        }
+    }
+
+    Ok(DetachSheetResponse {
+        package_name,
+        overrides_dropped,
+        subscription_removed,
+    })
 }
 
 // ============================================================================
@@ -12174,6 +12769,7 @@ mod writeback_rebuild_tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: Default::default(),
         }
     }

@@ -171,27 +171,35 @@ const RESET_FUNCTIONS: &[&str] = &[
 /// here so the next reader does not have to redo it. A document-replacing path
 /// is one that ends holding a DIFFERENT document than it started with; both of
 /// these are `#[tauri::command]`s with no in-crate callers, and there is no
-/// third. In particular:
+/// third. THE TEST OF MEMBERSHIP IS THE TEAR-DOWN, NOT THE SIZE OF THE CHANGE: a
+/// command that adds thirty sheets is not replacing the document, and a command
+/// that empties it is, however little it puts back. In particular:
 ///
 /// * **AutoRecover restore is `open_file`.** A `.calar` snapshot is routed to the
 ///   Calcula reader by `format_extension` and opened through the ordinary open
 ///   path — there is no separate restore command (pinned by
 ///   `autorecover_snapshots_route_to_the_calcula_reader`).
-/// * **`.calp` pull, refresh and reset-to-published are NOT document-replacing.**
-///   They materialize package content INTO the open document and are the one
-///   flow that legitimately SUPPLIES a BI connection: a subscribed report needs
-///   its model, and `load_embedded_data_sources` is the only thing that ever
-///   creates one for a package data source. Running the reset there would delete
-///   the connection the pull had just created. The connection therefore lives
-///   exactly as long as the document that pulled it, which is the correct
-///   lifetime and the one this census enforces at both ends.
-/// `calp_checkout` is the third: opening a published package as a WORKING COPY
-/// replaces the document exactly as File > Open does — the package's sheets,
-/// scripts, model and controls become the workbook. It differs from the other
-/// two only in where the content comes from and in ending DIRTY (the working
-/// copy has no file of its own yet), neither of which changes what has to be
-/// torn down first.
-const DOCUMENT_REPLACING_PATHS: &[&str] = &["new_file", "open_file", "calp_checkout"];
+/// * **`.calp` pull, refresh, reset-to-published and CHECKOUT are NOT
+///   document-replacing.** They materialize package content INTO the open
+///   document and are the one flow that legitimately SUPPLIES a BI connection: a
+///   subscribed report needs its model, and `load_embedded_data_sources` is the
+///   only thing that ever creates one for a package data source. Running the
+///   reset there would delete the connection the pull had just created. The
+///   connection therefore lives exactly as long as the document that pulled it,
+///   which is the correct lifetime and the one this census enforces at both ends.
+///
+///   `calp_checkout` WAS listed here as a third replacing path, and was removed
+///   on 2026-09-01 when it stopped replacing anything. Opening an application
+///   for editing used to tear the document down and rebuild it from the package,
+///   which meant the price of LOOKING at an application was whatever the user had
+///   on screen — reported from live testing as "when I open an application for
+///   editing it discards the sheet I am working with", and reported the day
+///   before as a hard error, because the tab strip kept pointing at sheets the
+///   backend no longer had. It now appends, exactly as a pull does, and is
+///   pinned that way by `subscribed_sheet_tests::checkout_does_not_tear_the_open_document_down`.
+///   Its stores are the pull's stores; the reasoning in the bullet above covers
+///   it unchanged.
+const DOCUMENT_REPLACING_PATHS: &[&str] = &["new_file", "open_file"];
 
 /// Stores the save path reads that the reset deliberately does not touch.
 ///
@@ -1015,6 +1023,7 @@ const NOT_DOCUMENT_REPLACING: &[(&str, &str)] = &[
     // -- Materializes package content INTO the open document ------------------
     ("calp_pull", "SUBSCRIBING adds a package's sheets and data sources to the CURRENT document. It is the one flow that legitimately CREATES a BI connection (`load_embedded_data_sources`), so running the reset here would delete the connection the pull had just made"),
     ("calp_refresh_apply", "advances an existing subscription in place; same document, newer package content"),
+    ("calp_checkout", "OPENING AN APPLICATION FOR EDITING adds its sheets to the CURRENT document, exactly as `calp_pull` does — it shares `materialize_pull_result` with it, including `load_embedded_data_sources`, so the same reasoning applies verbatim: resetting here would delete the BI connection the materialization had just created. It was listed in DOCUMENT_REPLACING_PATHS until 2026-09-01, when it stopped replacing the document; the reason for the change is in `calp-workspace-collaboration.md` §2.4 and the no-tear-down property is pinned by `subscribed_sheet_tests::checkout_does_not_tear_the_open_document_down`"),
     // -- Pivot operations on the open document --------------------------------
     ("update_pivot_fields", "edits one pivot"),
     ("update_bi_pivot_fields", "edits one BI pivot"),

@@ -258,6 +258,10 @@ struct MergeContext {
     registry_url: String,
     package_name: String,
     base_version: String,
+    /// The application's kind, from the link. Threaded into the in-memory
+    /// publish so a LIBRARY working copy diffs the same zero sheets a real
+    /// library push would ship, instead of its author's whole workbook.
+    kind: String,
 }
 
 impl MergeContext {
@@ -275,6 +279,7 @@ impl MergeContext {
             registry_url: link.registry_url.clone(),
             package_name: link.package_name.clone(),
             base_version: link.base_version.clone(),
+            kind: link.kind.clone(),
         })
     }
 }
@@ -376,6 +381,7 @@ fn diff_working_copy_against_base(
         &memory,
         &ctx.package_name,
         working_version.clone(),
+        &ctx.kind,
         Vec::new(),
         false,
     )?;

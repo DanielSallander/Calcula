@@ -131,11 +131,34 @@ export interface SheetContext {
 
 export interface SheetContextMenuItem {
   id: string;
-  label: string;
+  label: string | ((context: SheetContext) => string);
   icon?: React.ReactNode;
   disabled?: boolean | ((context: SheetContext) => boolean);
+  /**
+   * Whether the item appears at all. Default: always.
+   *
+   * DISTINCT FROM `disabled`, and the difference matters for an item that only
+   * applies to SOME sheets: "Detach from 'vendor-kpis'" greyed out on every
+   * ordinary tab is clutter that teaches the reader to ignore the menu.
+   * `disabled` is for "this applies here but you may not do it right now"
+   * (Protection greys Rename); `visible` is for "this does not apply here".
+   * `GridContextMenuItem` has carried both for the same reason.
+   */
+  visible?: (context: SheetContext) => boolean;
   separatorAfter?: boolean;
   onClick: (context: SheetContext) => void | Promise<void>;
+}
+
+/**
+ * A menu item with every predicate already applied for one specific sheet.
+ *
+ * The renderer receives THIS, not the registration: a component should never
+ * have to know that a label or a disabled flag might be a function.
+ */
+export interface ResolvedSheetContextMenuItem
+  extends Omit<SheetContextMenuItem, "label" | "disabled" | "visible"> {
+  label: string;
+  disabled?: boolean;
 }
 
 // ============================================================================
@@ -183,7 +206,7 @@ export interface SheetExtensionsService {
   registerContextMenuItem(item: SheetContextMenuItem): void;
   unregisterContextMenuItem(id: string): void;
   getContextMenuItems(): SheetContextMenuItem[];
-  getContextMenuItemsForContext(context: SheetContext): SheetContextMenuItem[];
+  getContextMenuItemsForContext(context: SheetContext): ResolvedSheetContextMenuItem[];
 }
 
 // ============================================================================
@@ -314,7 +337,7 @@ export const sheetExtensions = {
   getContextMenuItems(): SheetContextMenuItem[] {
     return sheetExtensionsService?.getContextMenuItems() ?? [];
   },
-  getContextMenuItemsForContext(context: SheetContext): SheetContextMenuItem[] {
+  getContextMenuItemsForContext(context: SheetContext): ResolvedSheetContextMenuItem[] {
     return sheetExtensionsService?.getContextMenuItemsForContext(context) ?? [];
   },
 };

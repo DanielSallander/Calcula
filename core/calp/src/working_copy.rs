@@ -106,10 +106,8 @@ impl WorkingCopyLink {
     /// errs toward "yes, that's your application" so the gate's refusal text is
     /// about the real problem rather than a trailing backslash.
     pub fn targets(&self, registry_url: &str, package_name: &str) -> bool {
-        fn norm(s: &str) -> String {
-            s.trim().trim_end_matches(['/', '\\']).to_lowercase()
-        }
-        self.package_name == package_name && norm(&self.registry_url) == norm(registry_url)
+        self.package_name == package_name
+            && crate::workspace_id::same_workspace(&self.registry_url, registry_url)
     }
 
     /// Record a successful push: the pushed version becomes the new base.

@@ -5,6 +5,8 @@
 import { invokeBackend } from "./backend";
 import type { CellData } from "./types";
 import { AppEvents, emitAppEvent } from "./events";
+import { announceBackendStateReplaced } from "../core/lib/file-api";
+import { setActiveSheet } from "../core/lib/tauri-api";
 import type {
   WritebackSubmissionNotice,
   WritebackSubmissionReceivedPayload,
@@ -98,6 +100,33 @@ export interface PublishPreviewResponse {
   /** Where a push to the previewed target stands against each gate. Present
    * only when the preview was given a target application. */
   gates?: PushGateStatus;
+  /**
+   * Every sheet the author may choose from, with its TRUE workbook index.
+   *
+   * `sheetNames` above answers a different question — what the PREVIEWED
+   * selection covered. A dialog building its checkbox list from that cannot name
+   * a sheet the default withheld, and can only map a checkbox back to a workbook
+   * index by position, which stops being true the moment the default excludes
+   * anything.
+   */
+  sheets?: PublishPreviewSheet[];
+  /**
+   * The indices an empty selection resolves to. Send these EXPLICITLY rather
+   * than `[]`, so "everything ticked" can never silently mean "everything minus
+   * the subscribed ones".
+   */
+  defaultSheetIndices?: number[];
+}
+
+/** One row of the publish dialog's sheet list. */
+export interface PublishPreviewSheet {
+  /** TRUE workbook index — the value to send back in `sheetIndices`. */
+  index: number;
+  name: string;
+  /** The application this sheet came from; empty when it is the author's own. */
+  subscribedTo: string;
+  /** Whether a DEFAULT publish would include it. */
+  defaultSelected: boolean;
 }
 
 /** Suggested next versions, computed from the workspace head. */
@@ -413,6 +442,15 @@ export interface CheckoutResponse {
   /** Custom objects of kinds handled by frontend providers (brick 4);
    *  {@link checkoutApplication} dispatches these automatically. */
   customObjects?: PulledDistributableObject[];
+  /**
+   * TRUE state-vector index of the application's first sheet, so the caller can
+   * land the user on it. `null` for an application that brings no sheets.
+   *
+   * The index the BACKEND reported, never `sheets.length - materialized`: the
+   * sheet list omits object-backed sheets, so that arithmetic names the wrong
+   * sheet whenever a floating range is present.
+   */
+  firstSheetIndex?: number | null;
 }
 
 /**
@@ -918,11 +956,19 @@ export function publishPreview(
   includeComments?: boolean,
   /** Supply both to have the response carry {@link PushGateStatus}. */
   target?: { registryPath: string; packageName: string },
+  /**
+   * The application's kind, so the dry run resolves the SAME sheets a publish
+   * would. Only `"library"` changes the answer (zero sheets by default) — and a
+   * library preview that omitted it described every sheet for a publish that
+   * ships none.
+   */
+  kind?: string,
 ): Promise<PublishPreviewResponse> {
   return invokeBackend("calp_publish_preview", {
     params: {
       sheetIndices: sheetIndices ?? null,
       includeComments: includeComments ?? false,
+      kind: kind ?? "",
       registryPath: target?.registryPath ?? null,
       packageName: target?.packageName ?? null,
     },
@@ -932,10 +978,12 @@ export function publishPreview(
 /**
  * Open a published application version as a WORKING COPY.
  *
- * REPLACES the open document, so the caller must have confirmed the loss of
- * unsaved changes first — the same contract `openFileAtPath` has. The resulting
- * workbook carries the application's own sheet ids, which is what lets a later push
- * continue the application's identity instead of forking it.
+ * ADDS the application's sheets to the open workbook — it used to REPLACE the
+ * document, which meant the price of opening an application for editing was
+ * whatever you had on screen. The added sheets carry the application's own sheet
+ * ids, which is what lets a later push continue its identity instead of forking
+ * it, and a push defaults to the application's sheets alone so your own work is
+ * not swept into somebody else's application.
  */
 export async function checkoutApplication(params: CheckoutParams): Promise<CheckoutResponse> {
   const response = await invokeBackend<CheckoutResponse>("calp_checkout", { params });
@@ -943,12 +991,41 @@ export async function checkoutApplication(params: CheckoutParams): Promise<Check
   if (response.customObjects?.length) {
     await materializePulledObjects(response.customObjects);
   }
-  // The document was replaced. Announce it exactly as an open does, so every
-  // listener (scripts host, title bar, panes) re-reads rather than trusting a
-  // cache from the previous document. `path` is empty because a working copy
-  // has no file yet — its first save is a Save As.
+  // AFTER_OPEN, because the application brought SCRIPTS, cell types and custom
+  // functions with it, and those listeners re-read on exactly this. `path` stays
+  // empty: nothing was opened from disk.
   emitAppEvent(AppEvents.AFTER_OPEN, { path: "", source: "checkout" });
+  // AND the four backend-state caches plus the SHEET LIST, through the one
+  // helper `open_file`/`new_file` use. Emitting AFTER_OPEN alone is not enough
+  // and this is not a theory: the tab strip does not listen for AFTER_OPEN, so
+  // it kept the PREVIOUS sheet list, and clicking a tab asked the backend for a
+  // sheet index that no longer existed — "Sheet index 1 out of range". The
+  // identical bug was found and fixed for File > New in 2026-08-07; checkout
+  // re-created it by writing its own sequence instead of calling this.
+  //
+  // Still the right call now that checkout APPENDS rather than replaces: the
+  // application's sheets arrive with their own outline, hyperlinks, validations,
+  // annotations and display flags, so every one of those caches is stale.
+  announceBackendStateReplaced();
   emitAppEvent(AppEvents.DIRTY_STATE_CHANGED, { isDirty: true });
+
+  // Land on the application, using the index the BACKEND reported — the same
+  // contract subscribe uses, and for the same reason: the sheet list omits
+  // object-backed sheets, so any arithmetic over its length names the wrong one.
+  // Must run AFTER the announce above, whose SHEET_CHANGED carries index 0.
+  const first = response.firstSheetIndex;
+  if (first !== undefined && first !== null) {
+    try {
+      const sheetsResult = await setActiveSheet(first);
+      emitAppEvent(AppEvents.SHEET_CHANGED, {
+        sheetIndex: first,
+        sheetName: sheetsResult.sheets.find((s) => s.index === first)?.name ?? "",
+      });
+    } catch (err) {
+      // Costs the landing, not the checkout: the sheets are already in.
+      console.warn("[Checkout] Could not activate the application's first sheet:", err);
+    }
+  }
   return response;
 }
 
@@ -1219,6 +1296,69 @@ export function refreshApply(): Promise<RefreshResult> {
 
 export function detach(): Promise<void> {
   return invokeBackend("calp_detach");
+}
+
+/** Where one sheet came from, when it did not come from you. */
+export interface SheetProvenanceInfo {
+  /**
+   * TRUE workbook index. Shifts on insert/delete/move, so a consumer caching it
+   * must re-read when the sheet list changes.
+   */
+  sheetIndex: number;
+  /**
+   * The workbook's stable sheet uuid. Both keys come from ONE snapshot, so a
+   * consumer never has to join two round trips that can tear.
+   */
+  sheetId: string;
+  /** The LIVE name — renaming a subscribed sheet is allowed. */
+  sheetName: string;
+  packageName: string;
+  registryUrl: string;
+  resolvedVersion: string;
+  /**
+   * Which role this sheet holds toward that application. The two look identical
+   * on a tab and behave oppositely: a `"subscribed"` sheet is refreshed from the
+   * workspace and stays out of your publishes; a `"workingCopy"` sheet IS the
+   * application, and a push carries it.
+   *
+   * Reported per SHEET because checkout is additive — the application's sheets
+   * sit beside your own in one workbook, so the status-bar chip alone can no
+   * longer answer it.
+   */
+  role: SheetProvenanceRole;
+}
+
+/** @see SheetProvenanceInfo.role */
+export type SheetProvenanceRole = "subscribed" | "workingCopy";
+
+export interface DetachSheetResponse {
+  packageName: string;
+  /** Override LEDGER entries dropped. The cells are untouched. */
+  overridesDropped: number;
+  /** True when this was the subscription's last remaining holding. */
+  subscriptionRemoved: boolean;
+}
+
+/**
+ * Which sheets came from a subscribed application.
+ *
+ * The ONE answer for the tab badge, the sheet context menu and the publish
+ * dialog — `getSubscriptions()` returns the raw ledger with no workbook indices.
+ */
+export function getSheetProvenance(): Promise<SheetProvenanceInfo[]> {
+  return invokeBackend("calp_get_sheet_provenance");
+}
+
+/**
+ * Detach ONE sheet from the application that provided it: keep the sheet, stop
+ * tracking it.
+ *
+ * The cells are NOT touched — the override layer is a ledger, and the grid
+ * already holds your values. What you lose is the ability to revert to upstream,
+ * which is what detaching means. Irreversible without a refresh.
+ */
+export function detachSheet(sheetIndex: number): Promise<DetachSheetResponse> {
+  return invokeBackend("calp_detach_sheet", { params: { sheetIndex } });
 }
 
 export interface ResetSubscriptionResponse {

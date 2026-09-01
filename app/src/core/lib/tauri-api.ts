@@ -1446,6 +1446,15 @@ export interface SheetInfo {
   tabColor?: string;
   /** Sheet visibility: "visible", "hidden", or "veryHidden" */
   visibility: SheetVisibility;
+  /**
+   * The workbook's stable sheet uuid.
+   *
+   * OPTIONAL on purpose. A frontend running against an older `app_lib.dll` must
+   * degrade to "no mark", not to a type error — and anything that follows a
+   * sheet must key on THIS, never on `index` (shifts on insert/delete/move) or
+   * `name` (shifts on rename).
+   */
+  sheetId?: string;
 }
 
 export interface SheetsResult {

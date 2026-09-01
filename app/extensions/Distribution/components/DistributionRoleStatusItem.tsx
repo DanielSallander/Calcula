@@ -24,6 +24,11 @@ import React, { useCallback, useEffect, useState } from "react";
 import type { WorkingCopyStatus } from "@api";
 import { workingCopyStatus, getSubscriptions, AppEvents, onAppEvent, openPanel } from "@api";
 import { APPLICATION_EXPLORER_PANEL_ID } from "../manifest";
+import {
+  SUBSCRIBED_CHIP,
+  WORKING_COPY_CHIP,
+  WORKING_COPY_STALE_CHIP,
+} from "../lib/roleChipColors";
 
 interface Role {
   workingCopy: WorkingCopyStatus | null;
@@ -107,17 +112,28 @@ export function DistributionRoleStatusItem(): React.ReactElement | null {
   return (
     <div style={wrap} onClick={open} title={title} role="button" tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") open(); }}>
+      {/*
+        Glyphs and colours come from lib/roleChipColors — the SAME constants the
+        sheet-tab mark uses. Read seconds apart by the same person, so a green ↓
+        here and something else on a tab would read as two different facts.
+      */}
       {workingCopy && (
-        <span style={chip(stale ? "#fef7e0" : "#e8f0fe", stale ? "#a05a00" : "#1a56b8")}>
+        <span
+          style={chip(
+            stale ? WORKING_COPY_STALE_CHIP.bg : WORKING_COPY_CHIP.bg,
+            stale ? WORKING_COPY_STALE_CHIP.fg : WORKING_COPY_CHIP.fg,
+          )}
+        >
           {/* A pencil for "you may edit and push this" — the author side. */}
-          ✎ Working copy: {workingCopy.packageName} v{workingCopy.baseVersion}
+          {WORKING_COPY_CHIP.glyph} Working copy: {workingCopy.packageName} v
+          {workingCopy.baseVersion}
           {stale ? " (behind)" : ""}
         </span>
       )}
       {subscriptions.length > 0 && (
-        <span style={chip("#e8f5e9", "#137333")}>
+        <span style={chip(SUBSCRIBED_CHIP.bg, SUBSCRIBED_CHIP.fg)}>
           {/* A down arrow for "this came from somewhere else" — read-only. */}
-          ↓ Subscribed:{" "}
+          {SUBSCRIBED_CHIP.glyph} Subscribed:{" "}
           {subscriptions.length === 1
             ? `${subscriptions[0].packageName} v${subscriptions[0].resolvedVersion}`
             : `${subscriptions.length} applications`}

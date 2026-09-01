@@ -52,7 +52,7 @@ pub use pull::SheetIdMode;
 pub use working_copy::{WorkingCopyLink, WorkingCopySheetRef};
 pub use overrides::{OverrideLayer, CellOverride, OverrideValue, OverridePatch};
 pub use workspace::LocalWorkspace;
-pub use workspace_id::{workspace_scope, WorkspaceScope};
+pub use workspace_id::{same_workspace, workspace_scope, WorkspaceScope};
 pub use transport::WorkspaceTransport;
 pub use version::{VersionPin, SemVer};
 pub use fold::fold_submissions;

@@ -67,10 +67,12 @@ import {
   saveWritebackDraft,
   refreshData,
   getSheetIdForIndex,
+  detachSheet,
   WRITEBACK_INDEX_CHANGED_EVENT,
   type SubmissionValue,
 } from "@api/distribution";
 import { emitAppEvent } from "@api/events";
+import { confirmAsync, alertAsync } from "@api/dialogs";
 import {
   ExtensionRegistry,
   IconPackage,
@@ -86,8 +88,18 @@ import {
   IconRefreshData,
   registerStatusBarItem,
   unregisterStatusBarItem,
+  registerSheetTabDecorationProvider,
+  invalidateSheetTabDecorations,
+  sheetExtensions,
 } from "@api";
 import { DistributionRoleStatusItem } from "./components/DistributionRoleStatusItem";
+import { SUBSCRIBED_CHIP, WORKING_COPY_CHIP } from "./lib/roleChipColors";
+import {
+  provenanceForSheetId,
+  subscriptionForSheetIndex,
+  refreshSubscribedSheets,
+  resetSubscribedSheets,
+} from "./lib/subscribedSheets";
 
 /** Status-bar item id for the working-copy / subscriber role badge. */
 const ROLE_STATUS_ITEM_ID = "distribution:roleBadge";
@@ -209,6 +221,107 @@ function activate(context: ExtensionContext): void {
     priority: 60,
   });
   cleanupFns.push(() => unregisterStatusBarItem(ROLE_STATUS_ITEM_ID));
+
+  // WHICH SHEETS ARE MINE? The status badge above answers it for the WORKBOOK;
+  // this answers it per tab, and says WHICH KIND of not-yours it is, because the
+  // two behave oppositely on the one gesture that matters:
+  //
+  //   ↓ subscribed  — somebody else's. Refreshed from the workspace, your edits
+  //                   on it become overrides, and it stays OUT of your publishes.
+  //   ✎ working copy — the application itself. A push CARRIES this sheet.
+  //
+  // Working-copy sheets were deliberately NOT marked while checkout replaced the
+  // document: essentially every tab was the application's, so a badge on all of
+  // them was noise the status chip already covered. Checkout is now additive —
+  // the application's sheets join a workbook that keeps its own — so the answer
+  // varies per tab again, which is the test this seam's existence rests on.
+  cleanupFns.push(
+    registerSheetTabDecorationProvider({
+      id: "distribution:subscribedSheet",
+      priority: 10,
+      provider: (sheet) => {
+        const entry = provenanceForSheetId(sheet.sheetId);
+        if (!entry) return null;
+        if (entry.role === "workingCopy") {
+          return {
+            glyph: WORKING_COPY_CHIP.glyph,
+            color: WORKING_COPY_CHIP.fg,
+            background: WORKING_COPY_CHIP.bg,
+            tooltip:
+              `This sheet belongs to the application "${entry.packageName}", which this ` +
+              `workbook is the working copy of. Pushing publishes it as the next ` +
+              `version; your own sheets beside it are not carried.`,
+          };
+        }
+        return {
+          glyph: SUBSCRIBED_CHIP.glyph,
+          color: SUBSCRIBED_CHIP.fg,
+          background: SUBSCRIBED_CHIP.bg,
+          tooltip:
+            `This sheet came from the application "${entry.packageName}". It is refreshed ` +
+            `from the workspace, your edits on it are kept as overrides, and it is ` +
+            `left out of a publish unless you tick it deliberately.`,
+        };
+      },
+    }),
+  );
+
+  const reloadSubscribedSheets = async (): Promise<void> => {
+    if (await refreshSubscribedSheets()) invalidateSheetTabDecorations();
+  };
+  // These three, and not SHEET_CHANGED: that fires on every tab click, and
+  // re-reading the ledger per click buys an answer that cannot have changed.
+  // Nor the sheet add/delete/rename events — the provider keys on `sheetId`, so
+  // none of them alters any answer, and the strip re-renders on them anyway.
+  cleanupFns.push(context.events.on(AppEvents.AFTER_OPEN, () => void reloadSubscribedSheets()));
+  cleanupFns.push(context.events.on(AppEvents.AFTER_NEW, () => void reloadSubscribedSheets()));
+  cleanupFns.push(
+    context.events.on(AppEvents.PACKAGE_UPDATED, () => void reloadSubscribedSheets()),
+  );
+  // Subscriptions may already exist: the workbook was opened before we activated.
+  void reloadSubscribedSheets();
+  cleanupFns.push(() => resetSubscribedSheets());
+
+  // DETACH — the deliberate way to make a subscribed sheet yours, and the remedy
+  // the backend's delete guard points at by name. `visible`, not `disabled`: an
+  // item greyed out on every ordinary tab is clutter that teaches people to
+  // ignore the menu.
+  sheetExtensions.registerContextMenuItem({
+    id: "distribution:detachSheet",
+    label: (ctx) => {
+      const app = subscriptionForSheetIndex(ctx.index);
+      return app ? `Detach from "${app}"` : "Detach from application";
+    },
+    visible: (ctx) => subscriptionForSheetIndex(ctx.index) !== null,
+    separatorAfter: true,
+    onClick: async (ctx) => {
+      const app = subscriptionForSheetIndex(ctx.index);
+      if (!app) return;
+      // `confirmAsync`, never the `confirm` global — under Tauri that returns a
+      // Promise, so `if (!confirm(m))` tests `!Promise`, which is always false
+      // and the guard NEVER fires. Fails CLOSED.
+      const ok = await confirmAsync(
+        `Detach "${ctx.sheet.name}" from the application "${app}"?\n\n` +
+          `The sheet and everything in it stays. What stops is the connection: it ` +
+          `will no longer be refreshed from the workspace, you lose the ability to ` +
+          `revert its cells to the published version, and it becomes yours to ` +
+          `publish. This cannot be undone except by subscribing again.`,
+        { title: "Detach sheet" },
+      );
+      if (!ok) return;
+      try {
+        await detachSheet(ctx.index);
+        await reloadSubscribedSheets();
+        // The badge, the Application Explorer and any open publish dialog all
+        // read provenance; one announcement refreshes them together.
+        emitAppEvent(AppEvents.PACKAGE_UPDATED, {});
+        invalidateSheetTabDecorations();
+      } catch (err: unknown) {
+        await alertAsync(String(err), { title: "Could not detach the sheet" });
+      }
+    },
+  });
+  cleanupFns.push(() => sheetExtensions.unregisterContextMenuItem("distribution:detachSheet"));
 
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);

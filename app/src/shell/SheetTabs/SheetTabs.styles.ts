@@ -171,6 +171,39 @@ export const SourceIndicator = styled.span`
   font-weight: bold;
 `;
 
+interface TabDecorationProps {
+  $color?: string;
+  $background?: string;
+}
+
+/**
+ * A mark an extension put on this tab (see @api/sheetTabDecorations).
+ *
+ * Sets its OWN colour and weight rather than inheriting, so the mark means the
+ * same thing on the active tab as on an inactive one — `Tab` shifts to the
+ * accent colour and weight 600 when active, which would otherwise repaint the
+ * mark and make it read as a different state.
+ *
+ * Small, and never the loudest thing in the tab: the sheet's NAME is what the
+ * user is looking for.
+ */
+export const TabDecoration = styled.span<TabDecorationProps>`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  margin-right: 4px;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  color: ${props => props.$color || v('--text-secondary')};
+  ${props => props.$background && `
+    background-color: ${props.$background};
+    border-radius: 7px;
+    padding: 1px 4px;
+  `}
+`;
+
 interface AddButtonProps {
   $disabled?: boolean;
 }

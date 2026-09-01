@@ -26,16 +26,34 @@ export interface SheetContext {
 export interface SheetContextMenuItem {
   /** Unique identifier */
   id: string;
-  /** Display label */
-  label: string;
+  /** Display label, or a function of the sheet it is shown for. */
+  label: string | ((context: SheetContext) => string);
   /** Optional icon */
   icon?: React.ReactNode;
   /** Whether the item is disabled */
   disabled?: boolean | ((context: SheetContext) => boolean);
+  /**
+   * Whether the item appears at all. Default: always. See the `@api` mirror for
+   * why this is distinct from `disabled`.
+   */
+  visible?: (context: SheetContext) => boolean;
   /** Whether to show a separator after this item */
   separatorAfter?: boolean;
   /** Click handler */
   onClick: (context: SheetContext) => void | Promise<void>;
+}
+
+/**
+ * A menu item with every predicate already applied for one specific sheet.
+ *
+ * The renderer receives THIS, not the registration: a component should never
+ * have to know that a label or a disabled flag might be a function, and typing
+ * the resolver's output is what stops it having to.
+ */
+export interface ResolvedSheetContextMenuItem
+  extends Omit<SheetContextMenuItem, "label" | "disabled" | "visible"> {
+  label: string;
+  disabled?: boolean;
 }
 
 /** Event types for sheet operations */
@@ -107,14 +125,31 @@ class SheetExtensionRegistry {
   /**
    * Get context menu items filtered by context (respecting disabled state).
    */
-  getContextMenuItemsForContext(context: SheetContext): SheetContextMenuItem[] {
-    return this.getContextMenuItems().map((item) => ({
-      ...item,
-      disabled:
-        typeof item.disabled === "function"
-          ? item.disabled(context)
-          : item.disabled,
-    }));
+  getContextMenuItemsForContext(context: SheetContext): ResolvedSheetContextMenuItem[] {
+    return this.getContextMenuItems()
+      // `visible` first: an item that does not apply to THIS sheet is dropped,
+      // not greyed. A predicate that throws hides the item rather than taking
+      // the whole menu down with it.
+      .filter((item) => {
+        if (!item.visible) return true;
+        try {
+          return item.visible(context);
+        } catch (error) {
+          console.error(`[SheetExtensions] visible() threw for "${item.id}":`, error);
+          return false;
+        }
+      })
+      .map((item) => ({
+        ...item,
+        // Resolved here so the renderer never has to know a label can be dynamic
+        // — an item whose label names the application it would detach from
+        // cannot be a constant.
+        label: typeof item.label === "function" ? item.label(context) : item.label,
+        disabled:
+          typeof item.disabled === "function"
+            ? item.disabled(context)
+            : item.disabled,
+      }));
   }
 
   // --------------------------------------------------------------------------

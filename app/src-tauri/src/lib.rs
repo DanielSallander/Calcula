@@ -254,6 +254,9 @@ mod calp_materialize_tests;
 mod calp_push_gate_tests;
 
 #[cfg(test)]
+mod subscribed_sheet_tests;
+
+#[cfg(test)]
 mod document_store_census_tests;
 
 #[cfg(test)]
@@ -6462,6 +6465,8 @@ pub fn run() {
             calp_commands::calp_refresh_apply,
             calp_commands::calp_reset_subscription,
             calp_commands::calp_detach,
+            calp_commands::calp_detach_sheet,
+            calp_commands::calp_get_sheet_provenance,
             calp_commands::calp_dev_subscribe,
             calp_commands::calp_dev_refresh,
             calp_commands::calp_rename_cell_id,

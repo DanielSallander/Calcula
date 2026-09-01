@@ -1439,6 +1439,7 @@ mod tests {
             channel: "dev".to_string(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: Default::default(),
         };
         assert!(calp::dev_mode::is_dev_subscription(&dev));
@@ -1453,6 +1454,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: Default::default(),
         };
         assert!(!calp::dev_mode::is_dev_subscription(&real));

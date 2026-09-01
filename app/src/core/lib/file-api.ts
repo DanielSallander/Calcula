@@ -318,8 +318,15 @@ export async function openFileAtPath(path: string): Promise<CellData[] | null> {
  * (script hosts, cell types, custom functions), and the four caches
  * deliberately listen for the state they own rather than for "something
  * happened".
+ *
+ * EXPORTED because `new_file` and `open_file` are no longer the only commands
+ * that replace the whole document: `calp_checkout` does too. It assembled its
+ * own announce sequence instead of calling this, and re-created the phantom-tab
+ * bug described below, symptom for symptom — "Sheet index 1 out of range" after
+ * opening an application for editing. Any path that replaces the document calls
+ * THIS; none of them writes its own sequence.
  */
-function announceBackendStateReplaced(): void {
+export function announceBackendStateReplaced(): void {
   emitAppEvent(AppEvents.OUTLINE_CHANGED, { command: 'document_replaced' });
   emitAppEvent(AppEvents.HYPERLINKS_CHANGED, { sheetIndex: null });
   emitAppEvent(AppEvents.VALIDATIONS_CHANGED, {});

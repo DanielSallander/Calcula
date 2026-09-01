@@ -20,6 +20,7 @@ import type {
   MergeAnalysisResponse,
   PublishReport,
   PushGateStatus,
+  PublishPreviewSheet,
   VersionDiff,
   WorkingCopyStatus,
 } from "@api";
@@ -66,9 +67,20 @@ export function PublishDialog({ onClose }: DialogProps) {
   const [kind, setKind] = useState("report");
   const [changeSummary, setChangeSummary] = useState("");
   const [includeComments, setIncludeComments] = useState(false);
-  /** Sheet ids picked by name; empty selection = every sheet. */
-  const [sheetSelection, setSheetSelection] = useState<Set<string>>(new Set());
-  const [availableSheets, setAvailableSheets] = useState<string[]>([]);
+  /**
+   * Ticked sheets, by TRUE workbook index.
+   *
+   * Was a Set of NAMES mapped back to an index by POSITION in the name list —
+   * which was already fragile and became wrong the moment the default stopped
+   * being "every sheet": object-backed sheets and now subscribed ones make list
+   * position and workbook index different numbers.
+   */
+  const [sheetSelection, setSheetSelection] = useState<Set<number>>(new Set());
+  const [availableSheets, setAvailableSheets] = useState<PublishPreviewSheet[]>([]);
+  /** What an untouched dialog would publish, straight from the backend. */
+  const [defaultIndices, setDefaultIndices] = useState<number[]>([]);
+  /** True once the user has moved a checkbox — before that we mirror the default. */
+  const [selectionTouched, setSelectionTouched] = useState(false);
 
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -108,7 +120,9 @@ export function PublishDialog({ onClose }: DialogProps) {
         setPackageName(link.packageName);
         setKind(link.kind || "report");
         setVersion(link.suggestedNext?.patch ?? link.baseVersion);
-        setSheetSelection(new Set(link.baseSheets.map((s) => s.name)));
+        // NOT seeded from `link.baseSheets` any more: those are NAMES, and the
+        // selection is now workbook indices. The backend's `defaultSheetIndices`
+        // is the authority, and it already knows what to withhold.
         setMode("push");
       } else {
         setMode("create");
@@ -129,12 +143,16 @@ export function PublishDialog({ onClose }: DialogProps) {
           registryPath.trim() && packageName.trim()
             ? { registryPath, packageName }
             : undefined;
-        const result = await publishPreview(selectedIndices(), includeComments, target);
+        const result = await publishPreview(selectedIndices(), includeComments, target, kind);
         setReport(result.report);
         setReportLabel(`${label} ${result.sheetNames.join(", ")}`);
         setWarnings(result.warnings);
         setGates(result.gates ?? null);
-        setAvailableSheets(result.sheetNames);
+        if (result.sheets) setAvailableSheets(result.sheets);
+        if (result.defaultSheetIndices) {
+          setDefaultIndices(result.defaultSheetIndices);
+          if (!selectionTouched) setSheetSelection(new Set(result.defaultSheetIndices));
+        }
         setReportFor(previewSignature());
         setStatus(null);
       } catch (err: unknown) {
@@ -158,8 +176,15 @@ export function PublishDialog({ onClose }: DialogProps) {
           [],
           false,
           registryPath.trim() && packageName.trim() ? { registryPath, packageName } : undefined,
+          kind,
         );
-        setAvailableSheets(result.sheetNames);
+        if (result.sheets) setAvailableSheets(result.sheets);
+        if (result.defaultSheetIndices) {
+          setDefaultIndices(result.defaultSheetIndices);
+          // Only while the user has not chosen: re-seeding after a checkbox
+          // moved would silently undo their choice on every target change.
+          if (!selectionTouched) setSheetSelection(new Set(result.defaultSheetIndices));
+        }
         setGates(result.gates ?? null);
       } catch {
         // A failure here costs the checkbox list, not the dialog.
@@ -247,12 +272,19 @@ export function PublishDialog({ onClose }: DialogProps) {
   const previewSignature = (): string =>
     JSON.stringify({ i: selectedIndices(), c: includeComments });
 
+  /**
+   * The sheets to publish, as TRUE workbook indices.
+   *
+   * ALWAYS EXPLICIT once the list has loaded — never the empty array. Empty
+   * means "resolve the default" to the backend, and the default now WITHHOLDS
+   * subscribed sheets; sending it when the user has deliberately ticked one
+   * would silently drop the thing they just asked for. The two collapses this
+   * used to do (empty set, and all-ticked) both meant "empty", which is exactly
+   * how that would have happened.
+   */
   const selectedIndices = (): number[] => {
-    if (sheetSelection.size === 0 || availableSheets.length === 0) return [];
-    if (sheetSelection.size === availableSheets.length) return [];
-    return availableSheets
-      .map((name, i) => (sheetSelection.has(name) ? i : -1))
-      .filter((i) => i >= 0);
+    if (availableSheets.length === 0) return [];
+    return Array.from(sheetSelection).sort((a, b) => a - b);
   };
 
   // Publishing is the ONE flow with two legitimate gestures, and the second is
@@ -625,11 +657,12 @@ export function PublishDialog({ onClose }: DialogProps) {
                 padding: "4px 6px",
               }}
             >
-              {availableSheets.map((name) => {
+              {availableSheets.map((sheet) => {
+                const name = sheet.name;
                 const inBase = workspace?.baseSheets.some((s) => s.name === name) ?? false;
                 return (
                   <label
-                    key={name}
+                    key={sheet.index}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -640,20 +673,41 @@ export function PublishDialog({ onClose }: DialogProps) {
                   >
                     <input
                       type="checkbox"
-                      checked={sheetSelection.size === 0 || sheetSelection.has(name)}
+                      checked={sheetSelection.has(sheet.index)}
                       onChange={(e) => {
+                        setSelectionTouched(true);
                         setSheetSelection((prev) => {
-                          const next = new Set(
-                            prev.size === 0 ? availableSheets : Array.from(prev),
-                          );
-                          if (e.target.checked) next.add(name);
-                          else next.delete(name);
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(sheet.index);
+                          else next.delete(sheet.index);
                           return next;
                         });
                       }}
                     />
                     <span>{name}</span>
-                    {mode === "push" && !inBase && (
+                    {/*
+                      A subscribed sheet is somebody else's content. It is
+                      unticked by default and says whose it is right here, so
+                      ticking it is an informed act rather than an accident.
+                    */}
+                    {sheet.subscribedTo && (
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          color: "#137333",
+                          background: "#e8f5e9",
+                          borderRadius: "8px",
+                          padding: "0 6px",
+                        }}
+                        title={
+                          `This sheet came from the application "${sheet.subscribedTo}". ` +
+                          "Publishing it republishes another publisher's content under your name."
+                        }
+                      >
+                        ↓ from {sheet.subscribedTo}
+                      </span>
+                    )}
+                    {mode === "push" && !inBase && !sheet.subscribedTo && (
                       <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
                         (new — not in v{workspace?.baseVersion})
                       </span>

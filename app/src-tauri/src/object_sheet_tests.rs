@@ -95,7 +95,14 @@ fn listed(state: &AppState) -> Vec<(usize, String)> {
     let freeze_configs = state.freeze_configs.read().unwrap();
     let tab_colors = state.tab_colors.read().unwrap();
     let sheet_visibility = state.sheet_visibility.read().unwrap();
-    crate::sheets::build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility)
+    let sheet_ids = state.sheet_ids.read().unwrap();
+    crate::sheets::build_sheet_list(
+        &sheet_names,
+        &freeze_configs,
+        &tab_colors,
+        &sheet_visibility,
+        &sheet_ids,
+    )
         .into_iter()
         .map(|s| (s.index, s.name))
         .collect()

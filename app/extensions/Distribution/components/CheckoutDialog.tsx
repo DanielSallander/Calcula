@@ -12,8 +12,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { DialogProps, ApplicationInfo } from "@api";
 import { listApplicationsInWorkspace, checkoutApplication } from "@api";
-import { confirmAsync } from "@api/dialogs";
-import { isFileModified } from "@api/filesystem";
 import { listWorkspaces, type SavedWorkspace, isHttpWorkspace } from "@api/distributionWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
 import { pickWorkspaceFile } from "../lib/pickWorkspace";
@@ -87,16 +85,11 @@ export function CheckoutDialog({ onClose }: DialogProps) {
 
   const handleCheckout = async () => {
     setError(null);
-    // Opening an application REPLACES the document, exactly as File > Open does.
-    // `confirmAsync` (never window.confirm — that returns a Promise under Tauri
-    // and a bare `if (!confirm(...))` never fires) and it fails CLOSED, so a
-    // dialog that cannot be shown means "do not discard".
-    if (await isFileModified()) {
-      const ok = await confirmAsync(
-        `Discard unsaved changes and open ${selectedPackage} v${selectedVersion} for editing?`,
-      );
-      if (!ok) return;
-    }
+    // NO DIRTY-CHECK CONFIRM ANY MORE, because there is nothing to discard:
+    // opening an application for editing ADDS its sheets to the workbook you
+    // already have open. It used to replace the document the way File > Open
+    // does, which meant the price of looking at an application was the sheet you
+    // were working on.
     setBusy("Opening…");
     try {
       const result = await checkoutApplication({
@@ -202,8 +195,9 @@ export function CheckoutDialog({ onClose }: DialogProps) {
             lineHeight: 1.45,
           }}
         >
-          Opens the application as a working copy you can edit and push back.
-          This replaces the current workbook, and the copy keeps the
+          Adds the application&rsquo;s sheets to this workbook as a working copy
+          you can edit and push back. Your own sheets stay where they are, and a
+          push carries the application&rsquo;s sheets only. The copy keeps the
           application&rsquo;s own identity — so subscribers see your next version
           as an update, not as a new report.
         </div>

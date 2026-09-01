@@ -222,6 +222,12 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   // human-only here too. calp_import_overrides injects cell content from a
   // hand-carried patch that never passed a signed pull, and calp_detach
   // destroys the provenance record the whole .calp transparency story rests on.
+  // calp_detach_sheet destroys it ONE SHEET AT A TIME, which is the same act at
+  // a finer grain — leaving it feature-open would make the workbook-wide gate a
+  // formality a script could simply loop around.
+  //
+  // calp_get_sheet_provenance is deliberately NOT here: it only discloses what
+  // the Application Explorer already shows, and the tab badge needs it.
   distributionTrust: [
     "calp_add_workspace",
     "calp_remove_workspace",
@@ -229,6 +235,7 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
     "calp_dev_refresh",
     "calp_import_overrides",
     "calp_detach",
+    "calp_detach_sheet",
   ],
 };
 

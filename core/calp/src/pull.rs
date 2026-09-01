@@ -861,6 +861,7 @@ pub fn pull_with_options(
         // Filled by the app layer after materialization (it knows what actually
         // landed vs was skipped on collision).
         objects: Vec::new(),
+        detached_sheets: Vec::new(),
         extra: HashMap::new(),
     };
 

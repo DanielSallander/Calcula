@@ -250,6 +250,9 @@ pub fn calp_diff_working_copy(
         &memory,
         &package_name,
         working_version.clone(),
+        // From the link, so a LIBRARY working copy diffs the same zero sheets a
+        // real library push would ship rather than its author's whole workbook.
+        link.as_ref().map(|l| l.kind.as_str()).unwrap_or(""),
         params.sheet_indices.clone().unwrap_or_default(),
         params.include_comments,
     )?;

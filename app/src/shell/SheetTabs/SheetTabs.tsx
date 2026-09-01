@@ -37,13 +37,17 @@ import {
   getSelectedSheetIndices,
   // Sheet-switch prefetch (BUG-0052)
   primeSheetSwitch,
+  // Extension-contributed tab marks (subscribed sheets, and whatever comes next)
+  getSheetTabDecorations,
+  onSheetTabDecorationsChanged,
+  MAX_SHEET_TAB_DECORATION_GLYPHS,
 } from "../../api";
 import { isGlobalFormulaMode, getGlobalCursorPosition } from "../../api/editing";
 import type {
   SheetInfo,
   SheetsResult,
   SheetContext,
-  SheetContextMenuItem,
+  ResolvedSheetContextMenuItem,
 } from "../../api";
 import * as S from './SheetTabs.styles';
 import { alertAsync, promptAsync } from "@api/dialogs";
@@ -66,6 +70,16 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
 
   // Sheet grouping: tracks which sheets are selected (Ctrl+Click)
   const [groupedSheets, setGroupedSheets] = useState<Set<number>>(new Set());
+
+  // Bumped when an extension registers a tab mark or says its answer changed.
+  // The strip renders once; extensions activate AFTER it mounts, and a .calp
+  // pull can land while it is up — neither has any other way to reach these
+  // pixels. (Same shape as ActivityBar's script-presence tick.)
+  const [decorationTick, setDecorationTick] = useState(0);
+  useEffect(
+    () => onSheetTabDecorationsChanged(() => setDecorationTick((t) => t + 1)),
+    [],
+  );
 
   // Sync local activeIndex with Redux state when it changes from outside
   // This handles the case when commitEdit switches back to the source sheet
@@ -720,7 +734,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   );
 
   const getContextMenuItems = useCallback(
-    (sheetIndex: number): SheetContextMenuItem[] => {
+    (sheetIndex: number): ResolvedSheetContextMenuItem[] => {
       const sheet = sheets[sheetIndex];
       if (!sheet) return [];
 
@@ -737,7 +751,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   );
 
   const handleContextMenuItemClick = useCallback(
-    async (item: SheetContextMenuItem) => {
+    async (item: ResolvedSheetContextMenuItem) => {
       if (!contextMenu) return;
 
       const sheet = sheets[contextMenu.sheetIndex];
@@ -899,7 +913,10 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       container.removeEventListener('scroll', handleScroll);
       resizeObserver.disconnect();
     };
-  }, [updateHiddenCounts, sheets]);
+    // `decorationTick`: marks WIDEN tabs, so the overflow counters must be
+    // recomputed when one appears. Without it the "(3)" chips go stale the
+    // moment an extension activates and stay stale until the next resize.
+  }, [updateHiddenCounts, sheets, decorationTick]);
 
   // Auto-scroll active tab into view when it changes
   useEffect(() => {
@@ -1026,6 +1043,15 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
               !isTabSelected(sheet) &&
               !isTabSelected(visibleSheets[visIdx - 1]);
 
+            // Extension-contributed marks — "this sheet came from an
+            // application", and whatever else asks later. Keyed on `sheetId`,
+            // never on the index or the name, both of which move.
+            const decorations = getSheetTabDecorations({
+              index: sheet.index,
+              name: sheet.name,
+              sheetId: sheet.sheetId,
+            });
+
             return (
               <S.Tab
                 key={sheet.index}
@@ -1050,13 +1076,38 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
                   : undefined
                 }
                 title={
-                  isInFormulaMode
-                    ? isSourceSheet
-                      ? `Formula source: ${sheet.name}`
-                      : `Click to select cells from ${sheet.name}`
-                    : `${sheet.name} (right-click for options)`
+                  [
+                    isInFormulaMode
+                      ? isSourceSheet
+                        ? `Formula source: ${sheet.name}`
+                        : `Click to select cells from ${sheet.name}`
+                      : `${sheet.name} (right-click for options)`,
+                    // EVERY mark's reason, including any past the glyph cap —
+                    // the cap limits pixels, never disclosure.
+                    ...decorations.map((d) => d.tooltip).filter(Boolean),
+                  ].join("\n\n")
                 }
               >
+                {/*
+                  Marks LEAD, the `[*]` formula-source marker TRAILS. Two glyph
+                  runs at the same edge read as one string ("Sales ↓ [*]"); this
+                  way "what this sheet permanently IS" and "what it is doing
+                  right now" sit on opposite sides of the name. Leading also
+                  lines the glyphs up in a column down the strip, which is what
+                  makes it scannable.
+                */}
+                {decorations.slice(0, MAX_SHEET_TAB_DECORATION_GLYPHS).map((d) => (
+                  <S.TabDecoration
+                    key={d.id}
+                    data-sheet-tab-decoration={d.id}
+                    $color={d.color}
+                    $background={d.background}
+                    role="img"
+                    aria-label={d.tooltip}
+                  >
+                    {d.glyph}
+                  </S.TabDecoration>
+                ))}
                 {sheet.name}
                 {isSourceSheet && <S.SourceIndicator> [*]</S.SourceIndicator>}
               </S.Tab>

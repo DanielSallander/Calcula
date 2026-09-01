@@ -133,6 +133,31 @@ pub fn strip_workspace_marker(location: &str) -> String {
     }
 }
 
+/// Are these two location strings the same workspace, for the purpose of a UI
+/// prefill or a REFUSAL gate?
+///
+/// Compares the user's own spelling, case-insensitively and ignoring a trailing
+/// separator: the same share reached as `\\srv\reports` and `\\srv\reports\` is
+/// one share.
+///
+/// USE THIS, NOT `workspace_scope(..).id`, on a refusal path. `workspace_scope`
+/// returns `Err` for a location it cannot open — and in a gate that refuses, an
+/// `Err` resolves to "not a match", i.e. the gate OPENS on malformed input.
+/// Trailing-separator and case folding has no failure mode. Where workspace
+/// IDENTITY is the question (which pin does this belong to?), scope ids remain
+/// the right answer.
+///
+/// ONE COPY. `WorkingCopyLink::targets` had a private `norm` closure doing
+/// exactly this, and the push gate's subscriber check had no comparison at all —
+/// it matched on the application NAME alone, so a push to YOUR `sales` was
+/// refused because you subscribe to somebody else's `sales`.
+pub fn same_workspace(a: &str, b: &str) -> bool {
+    fn norm(s: &str) -> String {
+        s.trim().trim_end_matches(['/', '\\']).to_lowercase()
+    }
+    norm(a) == norm(b)
+}
+
 /// Derive the pin scope for a workspace location.
 ///
 /// Returns `Err` for a location no workspace could be opened from (empty, a

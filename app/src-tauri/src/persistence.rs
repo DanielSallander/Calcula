@@ -5800,6 +5800,7 @@ mod distribution_user_file_restore_tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: Default::default(),
         }
     }

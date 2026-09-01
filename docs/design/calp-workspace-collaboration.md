@@ -183,6 +183,96 @@ no `@api` seam for it, so an extension cannot set it without one. That is a
 seam worth adding if the badge proves not to be enough, not a rule worth
 breaking.
 
+**And PER SHEET, because the answer varies by tab.** The status chip answers
+"what is this workbook"; a sheet that came from an application sits beside your
+own, looks identical, and behaves oppositely on the one gesture that matters. So
+the tab carries the same glyph the chip does, through a new general seam
+(`@api/sheetTabDecorations`) rather than the shell reaching into Distribution: any
+extension may mark any sheet for any reason.
+
+Two marks, because there are two ways a sheet is not simply yours and they point
+in opposite directions:
+
+- `↓` **subscribed** — somebody else's. Refreshed from the workspace, your edits
+  become overrides, and it stays OUT of your publishes unless you tick it.
+- `✎` **working copy** — the application itself. A push CARRIES this sheet.
+
+Telling a user "not yours" without saying which would be worse than saying
+nothing: the two differ precisely on whether Push takes the sheet. The role
+travels with the sheet in one snapshot (`calp_get_sheet_provenance` reports
+`role`), so the tab, the context menu and the publish dialog cannot disagree.
+
+Two things that seam does differently from the `columnHeaderOverrides` registry it
+is otherwise modelled on, both deliberate. **Marks compose**: a sheet can honestly
+be subscribed *and* protected, so every non-null provider answers rather than the
+first one winning — first-non-null would let whichever extension registered at a
+lower priority silently suppress the other. And it **carries a change channel**:
+the canvas repaints every frame, so a canvas provider can be a pure pull, but the
+tab strip is React and renders once — while extensions activate *after* it mounts
+and a pull can land while it is up.
+
+Working-copy sheets were NOT marked at first, and the reason is worth keeping
+because it is what changed: while checkout REPLACED the document, essentially
+every tab in a working copy came from the application, so a badge on all of them
+was noise the status chip already covered. Checkout is now additive (§2.4), so a
+working copy holds the application's sheets *and* the author's own, and the mark
+earns its place there too — same rule, opposite answer, because the underlying
+fact moved.
+
+### 2.4 Checkout ADDS; it does not replace
+
+*Open Application for Editing* used to behave like *File > Open*: it tore the
+open document down and rebuilt it from the package. That made looking at an
+application cost whatever you had on screen, and it was reported from live
+testing twice in two days — first as a hard error ("Sheet index 1 out of range",
+because the tab strip kept pointing at sheets the backend no longer had), then as
+the complaint underneath it: *"when I open an application for editing it discards
+the sheet I am working with."*
+
+Checkout now appends, exactly as a subscribe does. The consequences are all
+consequences of that one change:
+
+- **A push carries the application's sheets only.** Publishing "every sheet" was
+  a safe default when the document WAS the application; it now sweeps the
+  author's unrelated work into somebody else's application. The default selection
+  is the working-copy link's `base_sheets`, so a push adds a sheet only when the
+  author ticks it (`working_copy_base_sheets`, pinned by
+  `a_working_copy_publishes_only_the_applications_sheets_by_default`).
+- **The workbook keeps its FILE.** The old checkout cleared the current path
+  because it produced a wholly new document; clearing it now would turn the next
+  Ctrl+S into a Save As for a file the user never closed.
+- **The roles are enforced at the door, not discovered at the push.** A workbook
+  holds one role per application and one working-copy link overall, so checkout
+  refuses three overlaps by name and states the remedy:
+  `CALP_CHECKOUT_ALREADY_OPEN` (you are already this application's working copy),
+  `CALP_CHECKOUT_ALREADY_LINKED` (a workbook cannot be the working copy of two
+  applications — a push would have no single answer to "which one?"), and
+  `CALP_CHECKOUT_IS_SUBSCRIBER` (you subscribe to this application; a subscribed
+  copy's sheets carry fresh local ids, and editing them AS the application is the
+  identity trap of §2.3 wearing a different hat).
+
+  **Both directions, which is a fix, not a symmetry for its own sake.** §2.3's
+  rule reads "one role per application", but only checkout enforced it: nothing
+  stopped a developer subscribing to the very application their workbook was the
+  working copy of, which put the same sheets in the workbook twice — once theirs
+  to push, once somebody's to refresh over. `calp_pull` now refuses that with
+  `CALP_PULL_IS_WORKING_COPY` and points at dev subscribe in a new window, which
+  is the surface that actually answers "what will a subscriber see". Both gates
+  ask through `WorkingCopyLink::targets` / `subscribes_to`, which compare name
+  AND workspace — two teams' identically named `sales` on different shares are
+  different applications, and a gate that refused across them would be refusing
+  for a reason that is not the reason it exists.
+- **The user lands on the application.** The backend reports
+  `first_sheet_index` — the TRUE state-vector index — rather than letting the
+  frontend derive it from the sheet list, which omits object-backed sheets and so
+  names the wrong tab as soon as a floating range exists. Subscribe learned this
+  the expensive way; checkout inherits the answer instead of the lesson.
+- **It is no longer a document-replacing path.** It was listed as the third
+  member of `DOCUMENT_REPLACING_PATHS` in the document-store census and had to
+  run `reset_document_scoped_stores`; it now belongs with pull and refresh, which
+  materialize package content INTO the open document. Tearing the stores down
+  would delete the BI connection the materialization had just created.
+
 ## 3. Invariants
 
 1. **Versions are immutable.** Publishing over an existing version is refused.
@@ -352,11 +442,11 @@ deliberately does not carry does not come back:
 
 **Built (2026-08-29).**
 
-- **Workflow.** `calp_checkout` opens an application as a working copy with its
-  sheet ids preserved, reusing `pull()`'s artifact walk and all three trust gates
-  through a `SheetIdMode`. `WorkingCopyLink` persists in the `.cala`
-  (`user_files/working_copy_link.json`) as `Persisted<T>`, is reset by the shared
-  document-replacement path, and is what the push gates read. `PushMode` makes
+- **Workflow.** `calp_checkout` ADDS an application's sheets to the open workbook
+  with their sheet ids preserved (§2.4), reusing `pull()`'s artifact walk and all
+  three trust gates through a `SheetIdMode`. `WorkingCopyLink` persists in the
+  `.cala` (`user_files/working_copy_link.json`) as `Persisted<T>`, is reset by the
+  shared document-replacement path, and is what the push gates read. `PushMode` makes
   create-vs-update a decision the caller cannot skip; the workspace-fact gates
   moved into core `publish()` under one widened workspace lock with a heartbeat,
   closing the check-then-commit race. `base_version` and `change_summary` are in

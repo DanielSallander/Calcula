@@ -278,6 +278,41 @@ on) surface as their own category in the conflicts pane. For deleted sheets,
 the user explicitly chooses: save the sheet locally (detaching just that sheet
 from upstream) or accept the deletion (overrides on that sheet are discarded).
 
+### Per-sheet detach (implemented 2026-08-31)
+
+`calp_detach_sheet` is the per-sheet form of the workbook-wide `calp_detach`, and
+it is reachable directly — right-click a subscribed sheet's tab > *Detach from
+"&lt;application&gt;"*. It is also the remedy the delete guard names: a subscribed
+sheet cannot be deleted while it is still tracked, because the subscription would
+be left pointing at a sheet that no longer exists.
+
+Detaching drops the sheet's `SubscribedSheet` entry, records the application sheet
+id in `Subscription.detached_sheets` so a later refresh does not re-adopt it, and
+discards that sheet's override-layer rows. **The cells are not touched.** The
+override layer is a ledger, not a shadow store — an edit on a subscribed sheet
+already wrote through to the grid and merely recorded baseline and current
+alongside. What detaching discards is the ability to revert to upstream, which is
+what detaching means. The subscription row itself is removed only when it owns
+nothing else at all (no sheets, no objects, no data-source configs); a library or
+dataset subscription legitimately has zero sheets.
+
+A detached sheet becomes ordinary: publishable, deletable, and no longer refreshed.
+
+### Subscribed sheets and publishing
+
+A sheet materialized by a subscription is its publisher's content. It is therefore
+**excluded from a publish by default** and disclosed under "Stays behind", naming
+the application it came from. The author may still tick one deliberately, and that
+gets its own "Will publish" line saying plainly that they are republishing another
+publisher's content under their name.
+
+This was not true until 2026-08-31: nothing on the publish path consulted the
+subscription ledger, so publishing application B from a workbook subscribed to
+application A shipped A's sheets inside B, counted as the author's own. The one
+gate that existed refused only when the target NAME equalled a subscribed name —
+it never compared workspaces, so two teams each publishing `sales` to their own
+share collided, and it had no test.
+
 ## UI: Overrides Pane
 
 A side pane with three views (filterable or tabbed - implementation choice):

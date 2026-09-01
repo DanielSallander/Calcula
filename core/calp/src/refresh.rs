@@ -441,8 +441,14 @@ pub fn apply_refresh(
             }
         }
 
-        // Count added sheets
+        // Count added sheets. A DETACHED sheet is neither added nor updated: the
+        // subscriber took it, so upstream no longer speaks for it. Without this
+        // it counts as added every single refresh, forever, and the app layer
+        // re-materializes it beside the copy the user detached.
         for pulled in &pull.sheets {
+            if sub.detached_sheets.contains(&pulled.package_sheet_id) {
+                continue;
+            }
             if !old_package_sheet_ids.contains(&pulled.package_sheet_id) {
                 sheets_added += 1;
             } else {
@@ -455,6 +461,9 @@ pub fn apply_refresh(
         // fresh local ids, but the materialized grids, the override layer,
         // and the workbook's sheet list keep using the original ones.
         let mut new_sheets = pull.subscription.sheets.clone();
+        // ...and drop the detached ones entirely, or the ledger would re-adopt a
+        // sheet the user deliberately made theirs.
+        new_sheets.retain(|s| !sub.detached_sheets.contains(&s.package_sheet_id));
         for new_sheet in new_sheets.iter_mut() {
             if let Some(old) = sub.sheets.iter()
                 .find(|s| s.package_sheet_id == new_sheet.package_sheet_id)
@@ -573,6 +582,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -651,6 +661,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -682,6 +693,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -712,6 +724,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -736,6 +749,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -767,6 +781,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -854,6 +869,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -883,6 +899,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
 
@@ -959,6 +976,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
             objects: Vec::new(),
+            detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
         let mut layer = OverrideLayer::new();

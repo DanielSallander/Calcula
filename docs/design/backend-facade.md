@@ -9,14 +9,14 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | Recounted (2026-08-31) | How counted |
+| Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | Recounted (2026-09-01) | How counted |
 |---|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | **787** | bracket-matched parse of `lib.rs` (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | **822** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | **100** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
-| Feature-open commands | 667 | 673 | 683 | **687** | 787 − 100 |
+| Commands in `generate_handler!` | 761 | 773 | 783 | **785** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | **824** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | **101** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
+| Feature-open commands | 667 | 673 | 683 | **684** | 785 − 101 |
 | Typed wrappers in `backend.ts` | ~229 | 327 | 338 | **338** | exported functions/consts in `backend.ts` |
-| Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | 109,126 / 898 files | current suite |
+| Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | 109,188 / 906 files | current suite |
 
 **The 2026-08-27 recount is the point of the row, not the numbers.** CLAUDE.md and this file
 are supposed to be two INDEPENDENT counts of the same thing, which only works if both are
@@ -27,12 +27,25 @@ denylist had grown from 94 to 100 with nobody updating either page. A figure not
 goes stale silently; the AppState census in `document_effect.rs` is the shape that does not,
 and it is the shape any of these would need to stop drifting for good.
 
-**And it drifted again, in two days.** At the 2026-08-31 recount `generate_handler!` held 787,
-not the 783 both pages claimed — the vocabulary rename added no commands, so the four are work
-that landed on 2026-08-29 after the recount in the row beside this one. Two days is the shortest
-drift interval yet recorded here, which is the argument for the enforced-census shape rather
-than another careful recount. The Vitest row is now measured rather than skipped, because the
-same argument applies: a row left blank is a row nobody re-measures.
+**And then the PARSE turned out to be wrong, which is worse than drift.** The 2026-08-31 and
+2026-08-29 recounts reported 787 and 789 from a script that split the `generate_handler!`
+bracket on commas and stripped `//` per *chunk*. Four of the doc comments inside that bracket
+contain a comma ("…so it stays reachable while X, but not Y"), so each of those swallowed the
+command name that followed it into a comment fragment AND left four more fragments standing as
+entries — net **+4, in the direction that flatters the number**. The line-wise parse in the
+"How counted" column above gives **785**, every entry a valid path, none duplicated. A count
+whose method is not written down is not reproducible, so the method is now in the table.
+
+CLAUDE.md said 783 through all of this. It was closer than either "recount" — not because it
+was maintained, but because two errors in opposite directions cancelled. That is exactly the
+failure the AppState census in `document_effect.rs` does not have: it re-derives the number at
+build time and fails the build when it moves. Any of these rows would need that shape to stop
+drifting for good; until then, **re-run the parse, and record how you ran it.**
+
+The 2026-09-01 column is a real +2 on top of the corrected 783: the subscribed-sheet work added
+`calp_detach_sheet` and `calp_get_sheet_provenance`. Both pages were re-parsed together after
+that change, which is the whole discipline — a number updated on one of two "independent" pages
+is a number that has stopped being independently checked.
 
 Also corrected below: the `is_bi_granted` / `grant_script_bi` paragraph (those symbols were
 **deleted** and generalized — the control was strengthened, not dropped), and the "third-party

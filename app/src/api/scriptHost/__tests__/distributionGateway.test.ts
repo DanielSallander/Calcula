@@ -651,15 +651,34 @@ describe("a library author can finally publish one", () => {
   it("a library publishes ZERO sheets by default, not the whole workbook", () => {
     // The trap this closes: every other kind reads an empty sheet selection as
     // "all sheets", so publishing a function library would have shipped the
-    // author's entire workbook — data included — to a shared registry.
+    // author's entire workbook — data included — to a shared workspace.
+    //
+    // THE RULE MOVED, and this assertion moved with it. It used to be a branch
+    // inside `calp_publish`, which `calp_publish_preview` did NOT have — so a
+    // library PREVIEW described every sheet for a publish that shipped none,
+    // while the shared resolver's own doc comment claimed the dry run "can never
+    // describe a different application than the publish". Pinning it to the
+    // branch is what let the two drift; it is pinned to the SHARED resolver now,
+    // which is the thing both callers go through.
     expect(calpCommandsSrc).toContain("library_commands::LIBRARY_KIND");
     const block = sliceBetween(
       calpCommandsSrc,
-      "let sheet_indices = if params.kind",
+      "fn resolve_publish_sheet_indices(",
+      "// FLOATING RANGES TRAVEL WITH THEIR HOST SHEET",
+    );
+    expect(block).toContain("LIBRARY_KIND");
+    expect(block).toContain("Vec::new()");
+  });
+
+  it("the library rule is NOT re-branched in the publish command", () => {
+    // The other half of the fix: one rule, one place. A second copy in
+    // `calp_publish` is how the preview came to disagree with the publish.
+    const publishBody = sliceBetween(
+      calpCommandsSrc,
+      "pub fn calp_publish(",
       "let assembly = assemble_publish_workbook",
     );
-    expect(block).toContain("params.sheet_indices");
-    expect(block).toContain("resolve_publish_sheet_indices");
+    expect(publishBody).not.toMatch(/if params\.kind\.eq_ignore_ascii_case/);
   });
 
   it("the scripted publish path can emit the library kind", () => {

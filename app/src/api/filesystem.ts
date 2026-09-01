@@ -33,6 +33,10 @@ export {
   markFileModified,
   updateWindowTitle,
   getCurrentFilePath,
+  // For any command that replaces the WHOLE document without going through
+  // open/new — `calp_checkout` is the only one today. Hand-rolling the announce
+  // sequence is what left a phantom tab whose backend index no longer existed.
+  announceBackendStateReplaced,
 } from "../core/lib/file-api";
 
 // ============================================================================

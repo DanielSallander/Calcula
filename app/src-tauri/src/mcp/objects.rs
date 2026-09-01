@@ -1812,6 +1812,7 @@ mod tests {
                     freeze_col: None,
                     tab_color: String::new(),
                     visibility: "visible".to_string(),
+                    sheet_id: String::new(),
                 },
                 crate::sheets::SheetInfo {
                     index: 1,
@@ -1820,6 +1821,7 @@ mod tests {
                     freeze_col: None,
                     tab_color: "#ff0000".to_string(),
                     visibility: "hidden".to_string(),
+                    sheet_id: String::new(),
                 },
             ],
             active_index: 1,

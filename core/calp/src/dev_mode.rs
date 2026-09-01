@@ -121,6 +121,7 @@ pub fn make_dev_subscription(
         channel: "dev".to_string(),
         data_source_configs: Vec::new(),
         objects: Vec::new(),
+        detached_sheets: Vec::new(),
         extra: std::collections::HashMap::new(),
     }
 }
@@ -230,6 +231,7 @@ mod tests {
             channel: "dev".to_string(),
             data_source_configs: Vec::new(),
         objects: Vec::new(),
+        detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(is_dev_subscription(&sub));
@@ -244,6 +246,7 @@ mod tests {
             channel: String::new(),
             data_source_configs: Vec::new(),
         objects: Vec::new(),
+        detached_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(!is_dev_subscription(&normal_sub));

@@ -44,6 +44,16 @@ pub struct SheetInfo {
     /// Sheet visibility: "visible", "hidden", or "veryHidden"
     #[serde(default = "default_visibility")]
     pub visibility: String,
+    /// The workbook's stable sheet uuid, as a canonical 36-char string.
+    ///
+    /// THE ONLY SAFE KEY for anything that must follow a sheet: indices shift on
+    /// insert/delete/move and names shift on rename. It rides in the SAME payload
+    /// that gives a consumer its sheet list, which is the point — resolving it
+    /// through a separate `get_sheet_ids` round trip lets the two answers tear
+    /// against each other while a `.calp` pull is appending sheets, and a mark
+    /// landing on the wrong tab is worse than no mark at all.
+    #[serde(default)]
+    pub sheet_id: String,
 }
 
 fn default_visibility() -> String {
@@ -67,6 +77,7 @@ pub(crate) fn build_sheet_list(
     freeze_configs: &[FreezeConfig],
     tab_colors: &[String],
     sheet_visibility: &[String],
+    sheet_ids: &[identity::SheetId],
 ) -> Vec<SheetInfo> {
     sheet_names
         .iter()
@@ -88,6 +99,15 @@ pub(crate) fn build_sheet_list(
                 freeze_col: freeze.freeze_col,
                 tab_color: tab_colors.get(index).cloned().unwrap_or_default(),
                 visibility: vis,
+                // `.get(index)`, NEVER a zip over the filtered iterator: the
+                // filter above drops object-backed sheets but `index` stays the
+                // TRUE position, and `sheet_ids` is parallel to the UNFILTERED
+                // state vectors. Zipping after filtering would shift every id by
+                // the number of floating-range backing sheets ahead of it.
+                sheet_id: sheet_ids
+                    .get(index)
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -164,6 +184,97 @@ pub(crate) fn ensure_user_sheet(
              Use the floating range commands instead.",
             action, index
         ))
+    }
+}
+
+// ============================================================================
+// Sheet provenance — which sheets came from a subscribed application
+// ============================================================================
+
+/// Where one sheet came from, when it did not come from the user.
+#[derive(Debug, Clone)]
+pub(crate) struct SheetOrigin {
+    pub package_name: String,
+    pub registry_url: String,
+    pub resolved_version: String,
+    /// The LIVE workbook name, NOT `SubscribedSheet::local_name` — a subscriber
+    /// may rename a subscribed sheet, and a refusal must name the tab the user
+    /// is actually looking at.
+    pub sheet_name: String,
+    pub local_sheet_id: identity::SheetId,
+}
+
+/// Which local sheet INDICES came from a subscribed `.calp` application.
+///
+/// Snapshotted ONCE per command from the two stores that answer it (`sheet_ids`
+/// and `subscriptions`), because the alternative is an O(sheets x subscriptions)
+/// re-walk at four call sites — publish, the delete guard, per-sheet detach and
+/// the tab badge — each free to decide for itself what "subscribed" means. That
+/// is exactly how the publish path came to know nothing about subscriptions at
+/// all, and shipped other publishers' sheets under the author's key.
+///
+/// LOCK ORDER: takes `sheet_ids` then `subscriptions`, both READ, both released
+/// before it returns. Call it holding neither.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct SheetProvenance {
+    by_index: HashMap<usize, SheetOrigin>,
+}
+
+impl SheetProvenance {
+    pub(crate) fn snapshot(state: &AppState) -> Result<Self, String> {
+        let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+
+        let mut by_index = HashMap::new();
+        for (index, sid) in sheet_ids.iter().enumerate() {
+            if let Some((sub, sheet)) = subs.subscribed_sheet(*sid) {
+                by_index.insert(
+                    index,
+                    SheetOrigin {
+                        package_name: sub.package_name.clone(),
+                        registry_url: sub.registry_url.clone(),
+                        resolved_version: sub.resolved_version.clone(),
+                        sheet_name: sheet_names
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| sheet.local_name.clone()),
+                        local_sheet_id: sheet.local_sheet_id,
+                    },
+                );
+            }
+        }
+        Ok(Self { by_index })
+    }
+
+    pub(crate) fn origin(&self, index: usize) -> Option<&SheetOrigin> {
+        self.by_index.get(&index)
+    }
+
+    pub(crate) fn is_subscribed(&self, index: usize) -> bool {
+        self.by_index.contains_key(&index)
+    }
+
+}
+
+/// The standard refusal for a sheet command aimed at a SUBSCRIBED sheet — the
+/// sibling of [`ensure_user_sheet`].
+///
+/// Names the application AND the remedy, because unlike an object sheet this is a
+/// real tab the user right-clicked: the message is the whole interaction.
+pub(crate) fn ensure_unsubscribed_sheet(
+    provenance: &SheetProvenance,
+    index: usize,
+    action: &str,
+) -> Result<(), String> {
+    match provenance.origin(index) {
+        None => Ok(()),
+        Some(origin) => Err(format!(
+            "Cannot {} sheet '{}': it came from the application '{}' and is still \
+             connected to it. Detach it first (right-click the tab > Detach from \
+             '{}'), then {} it.",
+            action, origin.sheet_name, origin.package_name, origin.package_name, action
+        )),
     }
 }
 
@@ -737,7 +848,7 @@ pub fn get_sheets(state: State<AppState>) -> SheetsResult {
     let sheet_visibility = state.sheet_visibility.read().unwrap();
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
         active_index,
     }
 }
@@ -991,7 +1102,7 @@ pub(crate) fn activate_sheet(state: &AppState, index: usize) -> Result<SheetsRes
 
     (
         SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
             active_index: index,
         },
         switched,
@@ -1320,7 +1431,7 @@ pub(crate) fn add_sheet_inner(
     *current_grid = engine::grid::Grid::new();
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
         active_index: *active_sheet,
     }
     }; // drop all locks before rebuilding dependency maps
@@ -1384,6 +1495,30 @@ pub(crate) fn delete_sheet_impl(
     allow_object: bool,
 ) -> Result<SheetsResult, String> {
     crate::protection::check_workbook_structure(state, "delete a sheet")?;
+
+    // MAY this sheet be deleted, before "can the workbook survive it".
+    //
+    // A subscribed sheet is somebody else's content, still tracked and still
+    // refreshed; deleting it silently would leave the subscription pointing at a
+    // sheet that no longer exists. `detach` is the deliberate way to make it
+    // yours, and the message says so.
+    //
+    // POSITION IS LOAD-BEARING, and it is why this does not sit beside
+    // `ensure_user_sheet` further down even though the two read alike:
+    // `DocumentEffect::mutates` dirties the document AT CONSTRUCTION, and that
+    // construction is below. `ensure_user_sheet` therefore already dirties the
+    // file on a refusal — a pre-existing wart this guard must not copy, because
+    // unlike an object sheet (unreachable from any UI, so hitting it is a
+    // programming error) a subscribed sheet is a real tab a user right-clicked,
+    // and a refusal they can act on must not leave the file modified.
+    //
+    // It also runs before the repairability walk, which parses every formula on
+    // every sheet: refusing for a formula reason a sheet that may not be deleted
+    // at all is both wasteful and confusing.
+    {
+        let provenance = SheetProvenance::snapshot(state)?;
+        ensure_unsubscribed_sheet(&provenance, index, "delete")?;
+    }
 
     // PRE-FLIGHT, under READ locks, before the document is marked dirty and
     // before a single store is touched.
@@ -1847,7 +1982,7 @@ pub(crate) fn delete_sheet_impl(
     }
 
     SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
         active_index: *active_sheet,
     }
     }; // drop all locks before rebuilding dependency maps
@@ -2064,7 +2199,7 @@ pub(crate) fn rename_sheet_inner(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
         active_index: active_sheet,
     };
 
@@ -2160,7 +2295,7 @@ pub(crate) fn set_freeze_panes_impl(
     };
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
         active_index: active_sheet,
     };
     drop(freeze_configs);
@@ -2353,7 +2488,7 @@ pub fn move_sheet(
     ensure_user_sheet(&sheet_visibility, to_index, "move onto")?;
     if from_index == to_index {
         return Ok(SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
             active_index: *active_sheet,
         });
     }
@@ -2519,7 +2654,7 @@ pub fn move_sheet(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
         active_index: new_active,
     };
 
@@ -2776,7 +2911,7 @@ pub fn copy_sheet(
     }
 
     let result = SheetsResult {
-        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+        sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
         active_index: new_index,
     };
 
@@ -2922,7 +3057,7 @@ pub(crate) fn hide_sheet_inner(
         };
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
             active_index: switch_to.unwrap_or(active_sheet),
         };
         (result, switch_to, previous_visibility, active_sheet)
@@ -3006,7 +3141,7 @@ pub(crate) fn unhide_sheet_inner(
         sheet_visibility[index] = "visible".to_string();
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
             active_index: active_sheet,
         };
         (result, previous_visibility)
@@ -3072,7 +3207,7 @@ pub(crate) fn set_tab_color_inner(
         tab_colors[index] = color;
 
         let result = SheetsResult {
-            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility),
+            sheets: build_sheet_list(&sheet_names, &freeze_configs, &tab_colors, &sheet_visibility, &state.sheet_ids.read().unwrap()),
             active_index: active_sheet,
         };
         (result, previous_tab_colors)

@@ -722,6 +722,7 @@ export type {
   GridContextMenuItem,
   SheetContext,
   SheetContextMenuItem,
+  ResolvedSheetContextMenuItem,
 } from "./extensions";
 
 // ============================================================================
@@ -1493,6 +1494,24 @@ export type {
   RowGutterWidgetRegistration,
 } from "./rowHeaderOverrides";
 
+// Sheet Tab Decorations — marks in the tab strip. Unlike the header overrides
+// above these COMPOSE (a sheet can be subscribed AND protected) and they carry a
+// change channel, because the strip is React and renders once.
+export {
+  registerSheetTabDecorationProvider,
+  hasSheetTabDecorations,
+  getSheetTabDecorations,
+  invalidateSheetTabDecorations,
+  onSheetTabDecorationsChanged,
+  MAX_SHEET_TAB_DECORATION_GLYPHS,
+} from "./sheetTabDecorations";
+
+export type {
+  SheetTabTarget,
+  SheetTabDecoration,
+  SheetTabDecorationRegistration,
+} from "./sheetTabDecorations";
+
 // Grid Layers (granular bricks phase 4: full-viewport z-anchored paint layers)
 export {
   registerGridLayer,
@@ -1968,6 +1987,8 @@ export {
   refreshPreview,
   refreshApply,
   detach,
+  detachSheet,
+  getSheetProvenance,
   refreshData,
   saveDataSourceConfig,
   getDataSources,
@@ -1991,6 +2012,10 @@ export type {
   PublishReport,
   PublishReportItem,
   PublishPreviewResponse,
+  PublishPreviewSheet,
+  SheetProvenanceInfo,
+  SheetProvenanceRole,
+  DetachSheetResponse,
   PublishModelParams,
   PullParams,
   PullResponse,

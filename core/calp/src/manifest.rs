@@ -605,6 +605,19 @@ pub struct Subscription {
     /// subscriber-authored ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<SubscribedObject>,
+    /// APPLICATION sheet ids the subscriber has deliberately DETACHED — made
+    /// their own, and no longer refreshed.
+    ///
+    /// A tombstone, because dropping the `SubscribedSheet` entry alone is not
+    /// enough: the subscription still covers the application, so the next refresh
+    /// would see the sheet as newly added and re-materialize it beside the
+    /// detached copy as `Sheet1 (2)`. Detach has to mean detached.
+    ///
+    /// No `.cala` format bump: an older reader that drops this re-adds a sheet on
+    /// refresh, which is visible annoyance rather than a misreading — and
+    /// `extra`'s flatten preserves it verbatim across a save anyway.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detached_sheets: Vec<SheetId>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -640,6 +653,28 @@ pub struct SubscribedSheet {
     pub local_name: String,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+impl SubscriptionManifest {
+    /// The subscription that materialized `local_sheet_id`, and its ledger entry.
+    ///
+    /// THE one answer to "did this sheet come from an application?". It lives
+    /// next to `SubscribedSheet` because a reader that drifts from the record is
+    /// how the two ids get confused: refresh matches on `package_sheet_id`,
+    /// everything local matches on `local_sheet_id`, and only the second is a key
+    /// into THIS workbook. Matching on the wrong one finds nothing at best, and
+    /// the wrong sheet after a remap at worst.
+    pub fn subscribed_sheet(
+        &self,
+        local_sheet_id: SheetId,
+    ) -> Option<(&Subscription, &SubscribedSheet)> {
+        self.subscriptions.iter().find_map(|sub| {
+            sub.sheets
+                .iter()
+                .find(|s| s.local_sheet_id == local_sheet_id)
+                .map(|s| (sub, s))
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
