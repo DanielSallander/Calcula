@@ -32,8 +32,12 @@ import {
   pushMergeApply,
   workingCopyStatus,
   undo,
+  showDialog,
+  listApplicationsInWorkspace,
 } from "@api";
+import type { ApplicationInfo } from "@api";
 import { holdBackCells, type HoldBackCellRef } from "@api/distribution";
+import { CHECKOUT_DIALOG_ID } from "../manifest";
 import { VersionDiffView, cellKeyOf } from "./VersionDiffView";
 
 /**
@@ -97,6 +101,12 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    * could not show is pushed, which is exactly what a push has always done.
    */
   const [excludedCells, setExcludedCells] = useState<Set<string>>(new Set());
+  /**
+   * What the chosen workspace already holds. `null` while unread — which is a
+   * different state from "read, and empty", and the two must not look alike:
+   * "no applications yet" is a fact, "not asked yet" is not.
+   */
+  const [existingApps, setExistingApps] = useState<ApplicationInfo[] | null>(null);
   /**
    * Ticked sheets, by TRUE workbook index.
    *
@@ -479,6 +489,67 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     }
   };
 
+  // Read what the workspace already holds, so a taken name is knowable BEFORE
+  // the button rather than as a refusal after it. Create mode only: a push
+  // already knows its application, and listing the others would be noise.
+  useEffect(() => {
+    if (mode !== "create" || registryPath.trim() === "") {
+      setExistingApps(null);
+      return;
+    }
+    let cancelled = false;
+    setExistingApps(null);
+    listApplicationsInWorkspace(registryPath)
+      .then((apps) => {
+        if (!cancelled) setExistingApps(apps);
+      })
+      .catch(() => {
+        // An unreachable or not-yet-a-workspace location costs the LISTING, not
+        // the dialog — the publish gates still run server-side, and refusing to
+        // show the name field because a folder could not be read would be worse
+        // than showing it without the hint.
+        if (!cancelled) setExistingApps([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, registryPath]);
+
+  /**
+   * Subscribed sheets the author has TICKED — somebody else's content, about to
+   * leave under this author's name and signature.
+   *
+   * Not a refusal, deliberately. Republishing a vendor's sheet inside a
+   * composite report is legitimate with permission, and a dead checkbox would
+   * push people to copy-paste the content into a fresh sheet instead — which
+   * strips the provenance badge, drops it out of the subscription ledger, and
+   * takes it out of every guard built around it. That converts a DISCLOSED
+   * republish into an undetectable one, which is worse than the thing it was
+   * meant to prevent.
+   *
+   * What was thin is WHEN it is disclosed: the publish report says so
+   * afterwards, and nothing said so at the moment of ticking. This is that
+   * moment.
+   */
+  const tickedSubscribed = availableSheets.filter(
+    (s) => s.subscribedTo && sheetSelection.has(s.index),
+  );
+
+  /**
+   * The application this name would collide with, if any.
+   *
+   * CASE-INSENSITIVE. `get_application_manifest` resolves a name to a directory,
+   * and on Windows that lookup is case-insensitive — so `Sales` and `sales` are
+   * one application on the platform this ships on, and a case-sensitive hint
+   * would promise a name the publish then refuses.
+   */
+  const nameClash =
+    mode === "create" && packageName.trim() !== ""
+      ? (existingApps ?? []).find(
+          (a) => a.name.toLowerCase() === packageName.trim().toLowerCase(),
+        ) ?? null
+      : null;
+
   // Why this dialog cannot push yet, in the user's words — shown live beside the
   // button AND returned on click, so the reason is visible before the gesture and
   // unmissable after it. Pure and unit-tested; see lib/pushReadiness.ts for why
@@ -494,6 +565,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       sheetsSelected: sheetSelection.size,
       sheetsAvailable: availableSheets.length,
       kind,
+      nameAlreadyTaken: nameClash !== null,
     });
   const blocked = blockingReason();
   const canPush = !blocked && !pushed;
@@ -662,6 +734,67 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                 onChange={(e) => setPackageName(e.target.value)}
                 placeholder="sales-report"
               />
+              {/* WHAT IS ALREADY IN THERE. The dialog used to say nothing about
+                  the workspace it was pointed at, so a name that was already
+                  taken produced `ApplicationAlreadyExists` only after clicking
+                  Publish — a refusal for something knowable the moment the
+                  workspace was chosen. */}
+              {existingApps === null && registryPath.trim() !== "" && (
+                <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                  Reading the workspace…
+                </div>
+              )}
+              {existingApps !== null && existingApps.length === 0 && (
+                <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                  This workspace has no applications yet.
+                </div>
+              )}
+              {existingApps !== null && existingApps.length > 0 && !nameClash && (
+                <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                  Already here: {existingApps.map((a) => a.name).join(", ")}
+                </div>
+              )}
+              {nameClash && (
+                <div
+                  style={{
+                    fontSize: "12px",
+                    marginTop: 4,
+                    padding: "8px",
+                    borderRadius: "4px",
+                    background: "var(--conflict-bg, #fff3cd)",
+                    color: "var(--conflict-text, #856404)",
+                  }}
+                >
+                  <div>
+                    <strong>{nameClash.name}</strong> already exists in this workspace
+                    {nameClash.versions.length > 0 && (
+                      <> (latest v{nameClash.versions[nameClash.versions.length - 1].version})</>
+                    )}
+                    . Publishing cannot create a second application under that name.
+                  </div>
+                  {/* THE RIGHT DOOR, not a second publish path. Adding a sheet to
+                      an application you never checked out has no base version to
+                      declare, so nothing could tell whether you were about to
+                      overwrite somebody else's push. Checkout gives you that
+                      base; your own sheets stay where they are. */}
+                  <div style={{ marginTop: 6 }}>
+                    To add a sheet to it, open it for editing first — your own sheets
+                    stay where they are, and the push carries the application&rsquo;s.
+                  </div>
+                  <button
+                    style={{ marginTop: 6, fontSize: "11px" }}
+                    onClick={() => {
+                      showDialog(CHECKOUT_DIALOG_ID, {
+                        registryPath,
+                        packageName: nameClash.name,
+                      });
+                      onClose();
+                    }}
+                  >
+                    Open &ldquo;{nameClash.name}&rdquo; for editing instead
+                  </button>
+                </div>
+              )}
             </div>
           </>
         )}
@@ -910,6 +1043,38 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                 );
               })}
             </div>
+            {/* AT THE MOMENT OF TICKING, not in the report afterwards. Ticking
+                is allowed — see `tickedSubscribed` for why a dead checkbox
+                would be worse — but it must not be quiet. */}
+            {tickedSubscribed.length > 0 && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: "8px",
+                  borderRadius: "4px",
+                  fontSize: "12px",
+                  background: "var(--conflict-bg, #fff3cd)",
+                  color: "var(--conflict-text, #856404)",
+                }}
+              >
+                {tickedSubscribed.length === 1 ? (
+                  <>
+                    <strong>{tickedSubscribed[0].name}</strong> came from{" "}
+                    <strong>{tickedSubscribed[0].subscribedTo}</strong>.
+                  </>
+                ) : (
+                  <>
+                    <strong>{tickedSubscribed.length} sheets</strong> came from{" "}
+                    {[...new Set(tickedSubscribed.map((s) => s.subscribedTo))].join(", ")}.
+                  </>
+                )}{" "}
+                Publishing {tickedSubscribed.length === 1 ? "it" : "them"} redistributes
+                another publisher&rsquo;s content inside your application, under your name
+                and signature. Your local edits to{" "}
+                {tickedSubscribed.length === 1 ? "it" : "them"} travel too. Untick to leave{" "}
+                {tickedSubscribed.length === 1 ? "it" : "them"} behind.
+              </div>
+            )}
           </div>
         )}
 

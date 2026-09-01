@@ -23,6 +23,7 @@ const ready: PushReadinessInput = {
   sheetsSelected: 1,
   sheetsAvailable: 2,
   kind: "report",
+  nameAlreadyTaken: false,
 };
 
 describe("pushBlockingReason", () => {
@@ -141,5 +142,45 @@ describe("an empty tick-list is not an empty publish", () => {
       changeSummary: "Something real",
     });
     expect(reason).toMatch(/sheet/i);
+  });
+});
+
+describe("a name that is already taken is knowable before the click", () => {
+  // `publish()` refuses it with ApplicationAlreadyExists, but only after the
+  // button — a refusal for something the dialog could have known the moment the
+  // workspace was chosen. Knowing it earlier is what lets the dialog offer the
+  // right door (open that application for editing) instead of a dead end.
+
+  it("blocks a create whose name already exists, and names both remedies", () => {
+    // SABOTAGE: delete the nameAlreadyTaken check.
+    const reason = pushBlockingReason({
+      ...ready,
+      mode: "create",
+      packageName: "sales-report",
+      nameAlreadyTaken: true,
+    });
+    expect(reason).toBeTruthy();
+    expect(reason).toContain("sales-report");
+    // Both ways out: rename, or check the existing one out.
+    expect(reason).toMatch(/another name/i);
+    expect(reason).toMatch(/editing/i);
+  });
+
+  it("does not block when the name is free", () => {
+    expect(
+      pushBlockingReason({ ...ready, mode: "create", nameAlreadyTaken: false }),
+    ).toBeNull();
+  });
+
+  it("is checked before the version, so the user fixes the real problem first", () => {
+    // Ordering guard: a taken name with an empty version must complain about the
+    // NAME — the version is a field they can fill in, the name is a dead end.
+    const reason = pushBlockingReason({
+      ...ready,
+      mode: "create",
+      version: "",
+      nameAlreadyTaken: true,
+    });
+    expect(reason).toMatch(/already exists/i);
   });
 });

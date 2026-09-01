@@ -31,6 +31,15 @@ export interface PushReadinessInput {
    * kind the empty-selection refusal must not apply to.
    */
   kind: string;
+  /**
+   * True when CREATE mode has been typed a name that already exists in the
+   * chosen workspace.
+   *
+   * The backend refuses it (`CalpError::ApplicationAlreadyExists`), but only
+   * after the click. Knowing it earlier is what lets the dialog offer the right
+   * door — opening that application for editing — instead of a dead end.
+   */
+  nameAlreadyTaken: boolean;
 }
 
 /**
@@ -50,6 +59,16 @@ export function pushBlockingReason(i: PushReadinessInput): string | null {
       : "Choose the workspace to publish into.";
   }
   if (i.packageName.trim() === "") return "Give the application a name.";
+  // Refused here rather than left to the backend, because the remedy is a UI
+  // branch: this workbook cannot create a second application under that name,
+  // but it CAN open the existing one for editing and add a sheet to it.
+  if (i.nameAlreadyTaken) {
+    return (
+      `An application called "${i.packageName.trim()}" already exists in this ` +
+      "workspace. Choose another name, or open that one for editing and push a " +
+      "new version of it."
+    );
+  }
   if (i.version.trim() === "") return "Give this version a number.";
   // AN EMPTY TICK-LIST IS NOT AN EMPTY PUBLISH. On the wire, an empty
   // `sheetIndices` means "resolve the default", which for a working copy is the

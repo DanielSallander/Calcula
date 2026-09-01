@@ -16,11 +16,18 @@ import { listWorkspaces, type SavedWorkspace, isHttpWorkspace } from "@api/distr
 import { useDialogWindow } from "@api/dialogWindow";
 import { pickWorkspaceFile } from "../lib/pickWorkspace";
 
-export function CheckoutDialog({ onClose }: DialogProps) {
+export function CheckoutDialog({ onClose, data }: DialogProps) {
   const win = useDialogWindow({ minWidth: 460, minHeight: 380 });
 
+  // Opened from somewhere that already knows the answer — today the Publish
+  // dialog, when the name you typed turns out to be an application that already
+  // exists. Narrowed with typeof guards rather than cast: `data` is
+  // `Record<string, unknown>` from a caller this component does not control.
+  const preRegistry = typeof data?.registryPath === "string" ? data.registryPath : "";
+  const prePackage = typeof data?.packageName === "string" ? data.packageName : "";
+
   const [saved, setSaved] = useState<SavedWorkspace[]>([]);
-  const [registryPath, setRegistryPath] = useState("");
+  const [registryPath, setRegistryPath] = useState(preRegistry);
   const [packages, setPackages] = useState<ApplicationInfo[] | null>(null);
   const [selectedPackage, setSelectedPackage] = useState<string>("");
   const [selectedVersion, setSelectedVersion] = useState<string>("");
@@ -31,7 +38,12 @@ export function CheckoutDialog({ onClose }: DialogProps) {
     listWorkspaces()
       .then(setSaved)
       .catch(() => setSaved([]));
-  }, []);
+    // Pre-pointed: load the workspace straight away and pre-select the
+    // application, so arriving here from "this name already exists" lands on the
+    // thing that already exists rather than on an empty form.
+    if (preRegistry) void loadPackages(preRegistry, prePackage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preRegistry, prePackage]);
 
   const pkg = useMemo(
     () => packages?.find((p) => p.name === selectedPackage) ?? null,
@@ -60,7 +72,7 @@ export function CheckoutDialog({ onClose }: DialogProps) {
     }
   };
 
-  const loadPackages = async (location: string) => {
+  const loadPackages = async (location: string, preferName?: string) => {
     setError(null);
     setBusy("Reading workspace…");
     setPackages(null);
@@ -69,7 +81,13 @@ export function CheckoutDialog({ onClose }: DialogProps) {
     try {
       const list = await listApplicationsInWorkspace(location);
       setPackages(list);
-      if (list.length === 1) selectPackage(list[0]);
+      // Case-insensitively, matching how the workspace resolves a name to a
+      // directory on the platform this ships on.
+      const preferred = preferName
+        ? list.find((p) => p.name.toLowerCase() === preferName.toLowerCase())
+        : undefined;
+      if (preferred) selectPackage(preferred);
+      else if (list.length === 1) selectPackage(list[0]);
     } catch (err: unknown) {
       setError(String(err));
     } finally {
