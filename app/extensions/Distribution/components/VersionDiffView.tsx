@@ -19,15 +19,55 @@
 import React, { useState } from "react";
 import type { CellDiff, ObjectChange, SheetDiffSummary, VersionDiff } from "@api";
 
+/**
+ * A cell the caller is letting the user opt OUT of, identified the way both the
+ * diff and the backend name one.
+ */
+export interface DiffCellKey {
+  sheetId: string;
+  row: number;
+  col: number;
+}
+
+export const cellKeyOf = (sheetId: string, c: CellDiff): string =>
+  `${sheetId}:${c.row}:${c.col}`;
+
+/**
+ * Makes the cell rows checkable.
+ *
+ * OPTIONAL, so the read-only caller (the inspector's Compare view, which diffs
+ * two PUBLISHED versions and has nothing to act on) is unchanged and cannot grow
+ * a checkbox that would mean nothing.
+ *
+ * AN EXCLUSION SET, never an inclusion set. The row list is a bounded sample —
+ * 50 changed cells per sheet — so a changed cell may have no row at all. Storing
+ * what the user OPTED OUT of means everything unseen keeps the default, and an
+ * empty set is bit-identical to the behaviour before any of this existed.
+ */
+export interface DiffSelection {
+  /** `cellKeyOf` strings the user unticked. */
+  excluded: ReadonlySet<string>;
+  onToggle: (sheetId: string, cell: CellDiff, include: boolean) => void;
+  /** Column header for the checkbox, e.g. "Reset". */
+  label: string;
+}
+
 export interface VersionDiffViewProps {
   diff: VersionDiff;
   /** Fetch every changed cell of one sheet, when the caller can. */
   onDrillDown?: (sheetId: string) => void;
   /** Rows already fetched by `onDrillDown`, keyed by sheet id. */
   drilledCells?: Record<string, { rows: CellDiff[]; total: number; truncated: boolean }>;
+  /** Omit for a read-only diff. */
+  selection?: DiffSelection;
 }
 
-export function VersionDiffView({ diff, onDrillDown, drilledCells }: VersionDiffViewProps) {
+export function VersionDiffView({
+  diff,
+  onDrillDown,
+  drilledCells,
+  selection,
+}: VersionDiffViewProps) {
   const nothing =
     diff.totals.cellsChanged === 0 &&
     diff.totals.objectsAdded === 0 &&
@@ -58,6 +98,7 @@ export function VersionDiffView({ diff, onDrillDown, drilledCells }: VersionDiff
                 sheet={s}
                 onDrillDown={onDrillDown}
                 drilled={drilledCells?.[s.sheetId]}
+                selection={selection}
               />
             ))}
         </Section>
@@ -159,12 +200,16 @@ function SheetRow({
   sheet,
   onDrillDown,
   drilled,
+  selection,
 }: {
   sheet: SheetDiffSummary;
   onDrillDown?: (sheetId: string) => void;
   drilled?: { rows: CellDiff[]; total: number; truncated: boolean };
+  selection?: DiffSelection;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  // OPEN BY DEFAULT when the rows are actionable. A checkbox behind a "show
+  // cells" link is a decision most people will never find they had.
+  const [expanded, setExpanded] = useState(!!selection);
   const rows = drilled?.rows ?? sheet.sample;
   const showingAll = drilled !== undefined;
 
@@ -218,26 +263,61 @@ function SheetRow({
           <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "11px" }}>
             <thead>
               <tr>
+                {selection && <th style={thStyle}>{selection.label}</th>}
                 <th style={thStyle}>Cell</th>
                 <th style={thStyle}>Before</th>
                 <th style={thStyle}>After</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((c) => (
-                <tr key={c.a1}>
-                  <td style={tdStyle}>
-                    <ChangeChip change={c.change} /> {c.a1}
-                  </td>
-                  <td style={{ ...tdStyle, ...cellTextStyle }}>{renderCell(c.before)}</td>
-                  <td style={{ ...tdStyle, ...cellTextStyle }}>{renderCell(c.after)}</td>
-                </tr>
-              ))}
+              {rows.map((c) => {
+                const key = cellKeyOf(sheet.sheetId, c);
+                const included = !selection?.excluded.has(key);
+                return (
+                  <tr key={c.a1}>
+                    {selection && (
+                      <td style={tdStyle}>
+                        <input
+                          type="checkbox"
+                          checked={included}
+                          aria-label={`${selection.label} ${sheet.name}!${c.a1}`}
+                          onChange={(e) =>
+                            selection.onToggle(sheet.sheetId, c, e.target.checked)
+                          }
+                        />
+                      </td>
+                    )}
+                    <td style={{ ...tdStyle, opacity: included ? 1 : 0.45 }}>
+                      <ChangeChip change={c.change} /> {c.a1}
+                    </td>
+                    <td
+                      style={{ ...tdStyle, ...cellTextStyle, opacity: included ? 1 : 0.45 }}
+                    >
+                      {renderCell(c.before)}
+                    </td>
+                    <td
+                      style={{ ...tdStyle, ...cellTextStyle, opacity: included ? 1 : 0.45 }}
+                    >
+                      {renderCell(c.after)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           {!showingAll && sheet.sampleTruncated && (
             <div style={{ ...mutedStyle, marginTop: 4 }}>
               Showing {rows.length} of {cellTotal(sheet)}.
+              {/* NO SILENT CAP. With checkboxes on screen the unlisted cells are
+                  not merely unseen — they are undecided, and they will be acted
+                  on. Say so where the list ends. */}
+              {selection && (
+                <>
+                  {" "}
+                  The {cellTotal(sheet) - rows.length} not listed will be{" "}
+                  {selection.label.toLowerCase()} — there is no row to untick.
+                </>
+              )}
               {onDrillDown && (
                 <button style={linkButtonStyle} onClick={() => onDrillDown(sheet.sheetId)}>
                   Show all

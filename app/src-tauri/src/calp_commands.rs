@@ -15550,6 +15550,29 @@ pub struct DataSourceInfo {
 pub struct ResetSubscriptionParams {
     pub registry_url: String,
     pub package_name: String,
+    /// Cells to LEAVE ALONE — the rows the author unticked in the diff.
+    ///
+    /// AN EXCLUSION SET, NEVER AN INCLUSION SET, and that is the whole safety
+    /// property: the diff list is a bounded SAMPLE (50 changed cells per sheet),
+    /// so a changed cell may have no row for the author to tick. Absent means
+    /// restored, which makes an empty list bit-identical to the whole-sheet
+    /// reset this command has always done, and makes every cell the dialog could
+    /// not show default to the behaviour the author already expects.
+    #[serde(default)]
+    pub excluded_cells: Vec<ResetCellRef>,
+}
+
+/// One cell the author chose to keep, named the way a diff row names it.
+///
+/// By the PUBLISHER's sheet id, because that is what a diff row carries and what
+/// the published artifact is keyed by. The command already holds the
+/// package→local mapping to resolve it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCellRef {
+    pub package_sheet_id: SheetId,
+    pub row: u32,
+    pub col: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -15597,6 +15620,12 @@ pub fn calp_reset_subscription(
     state: State<AppState>,
     file_state: State<crate::persistence::FileState>,
     pivot_state: State<crate::pivot::types::PivotState>,
+    // For the recalculation at the end. A partial reset installs a MIXTURE of
+    // the author's cells and the publisher's, so the formulas reading across
+    // that boundary have to be re-evaluated before anybody looks at them.
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     params: ResetSubscriptionParams,
     window: tauri::Window,
 ) -> Result<ResetSubscriptionResponse, String> {
@@ -15663,6 +15692,65 @@ pub fn calp_reset_subscription(
         return Err("None of this application's sheets are present in the workbook.".to_string());
     }
     let local_sheet_ids: Vec<SheetId> = targets.iter().map(|(_, sid, _)| *sid).collect();
+
+    // WHAT THE AUTHOR UNTICKED, translated into this workbook's own ids. A diff
+    // row names the PUBLISHER's sheet; the grid is keyed by the local one.
+    let excluded_by_sheet: std::collections::HashMap<SheetId, std::collections::HashSet<(u32, u32)>> = {
+        let mut m: std::collections::HashMap<SheetId, std::collections::HashSet<(u32, u32)>> =
+            std::collections::HashMap::new();
+        for c in &params.excluded_cells {
+            // A cell naming a sheet this reset does not cover is dropped rather
+            // than refused: the dialog's list can outlive a detach, and an
+            // exclusion for a sheet nobody is resetting changes nothing.
+            if let Some(local) = pkg_to_local.get(&c.package_sheet_id) {
+                m.entry(*local).or_default().insert((c.row, c.col));
+            }
+        }
+        m
+    };
+
+    // A DYNAMIC ARRAY IS ONE THING, so it cannot be half-kept.
+    //
+    // Keeping the author's formula at a spill ORIGIN while the published
+    // extents are installed over the sheet leaves the origin claiming a
+    // rectangle the published version decided, computed from a formula the
+    // published version does not have. Refused by name rather than silently
+    // resolved either way: this is rare, and a wrong answer here corrupts a
+    // whole block of cells rather than one.
+    if !excluded_by_sheet.is_empty() {
+        let mut offenders: Vec<String> = Vec::new();
+        // The LIVE origins, by (sheet index, row, col). `spill_ranges` is the
+        // authority for which origin owns which cells; `engine::Cell` carries no
+        // spill of its own.
+        let live_spills = state.spill_ranges.read().map_err(|e| e.to_string())?.clone();
+        for (idx, local_sid, pulled) in &targets {
+            let Some(kept) = excluded_by_sheet.get(local_sid) else { continue };
+            for &(r, c) in kept {
+                let local_origin = live_spills.contains_key(&(*idx, r, c));
+                let published_origin = pulled
+                    .sheet
+                    .cells
+                    .get(&(r, c))
+                    .is_some_and(|sc| sc.spill.is_some());
+                if local_origin || published_origin {
+                    offenders.push(format!(
+                        "{}!{}",
+                        pulled.name,
+                        calcula_format::cell_ref::to_a1(r, c)
+                    ));
+                }
+            }
+        }
+        if !offenders.is_empty() {
+            return Err(format!(
+                "CALP_RESET_SPILL_CELL: {} is the origin of a dynamic array, so it cannot be \
+                 kept while the rest of the sheet is restored — the array's shape and its \
+                 formula have to agree. Either include it in the reset, or reset nothing on \
+                 that sheet and edit it afterwards.",
+                offenders.join(", ")
+            ));
+        }
+    }
 
     // Snapshot the CURRENT state of every affected sheet + its overrides,
     // BEFORE anything is replaced — this is the undo payload. The ACTIVE
@@ -15835,12 +15923,34 @@ pub fn calp_reset_subscription(
         let mut shared_styles = state.style_registry.write(&effect).map_err(|e| e.to_string())?;
         let mut all_cw = state.all_column_widths.write(&effect).map_err(|e| e.to_string())?;
         let mut all_rh = state.all_row_heights.write(&effect).map_err(|e| e.to_string())?;
-        for (idx, _, pulled) in &targets {
+        for (idx, local_sid, pulled) in &targets {
             let (mut grid, local_styles) = pulled.sheet.to_grid();
             // Remap local style indices (cells AND row/column tiers) to the
             // shared registry, preserving explicit-default duplicates.
             let remap = shared_styles.merge_remap(&local_styles);
             grid.remap_style_indices(&remap);
+
+            // KEEP WHAT THE AUTHOR UNTICKED. Copied out of the live grid AFTER
+            // the remap, so the kept cell brings its own style index — which is
+            // already a shared-registry index and must not be remapped again.
+            //
+            // The style rides on the cell because that is where `engine::Cell`
+            // carries it; the SHEET-level presentation (widths, heights, merges)
+            // is still replaced wholesale below, which the dialog says out loud.
+            if let Some(kept) = excluded_by_sheet.get(local_sid) {
+                if let Some(live) = grids.get(*idx) {
+                    for &(r, c) in kept {
+                        match live.get_cell(r, c) {
+                            Some(cell) => grid.set_cell(r, c, cell.clone()),
+                            // The author kept a cell that is EMPTY locally. That
+                            // is a real choice — they deleted it — so the
+                            // published content must not come back into it.
+                            None => grid.clear_cell(r, c),
+                        }
+                    }
+                }
+            }
+
             if *idx < grids.len() {
                 grids[*idx] = grid;
                 // Reset to application replaces the sheet's whole grid, so the
@@ -15916,13 +16026,49 @@ pub fn calp_reset_subscription(
     // defined name on those sheets in capitals.
     crate::persistence::restamp_workbook_name_casing(&state, &effect);
 
-    // Clear the override layer for the reset sheets — the pristine content IS
-    // the state now; stale overrides would re-assert the discarded edits.
+    // Clear the override layer for the RESTORED cells — the pristine content IS
+    // the state there now, and a stale override would re-assert the discarded
+    // edit the next time a refresh re-overlays the layer onto the grid.
+    //
+    // PER CELL, not per sheet, once anything is unticked. An override on a cell
+    // the author chose to KEEP is still true — the grid still holds their value
+    // and the ledger still records what upstream had — so dropping it would
+    // leave the workbook holding a local edit with nothing to say it is one:
+    // invisible in the Overrides pane, and silently republished as the
+    // publisher's own content on the next push from anyone who checks it out.
+    //
+    // The position comes from the id registry first, exactly as every other
+    // consumer of an override resolves it; an override is id-anchored precisely
+    // so it survives a structural shift, and its recorded `position` is only the
+    // fallback for a cell whose id the registry has lost.
     {
+        let positions: std::collections::HashMap<(SheetId, CellId), (u32, u32)> = {
+            let layer = state.override_layer.read().map_err(|e| e.to_string())?;
+            let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+            layer
+                .overrides
+                .iter()
+                .map(|o| {
+                    let pos = id_reg
+                        .cell_position(o.sheet_id, o.cell_id)
+                        .unwrap_or(o.position);
+                    ((o.sheet_id, o.cell_id), pos)
+                })
+                .collect()
+        };
         let mut layer = state.override_layer.write(&effect).map_err(|e| e.to_string())?;
-        layer
-            .overrides
-            .retain(|o| !local_sheet_ids.contains(&o.sheet_id));
+        layer.overrides.retain(|o| {
+            if !local_sheet_ids.contains(&o.sheet_id) {
+                return true;
+            }
+            let pos = positions
+                .get(&(o.sheet_id, o.cell_id))
+                .copied()
+                .unwrap_or(o.position);
+            excluded_by_sheet
+                .get(&o.sheet_id)
+                .is_some_and(|kept| kept.contains(&pos))
+        });
     }
 
     // Restore the published pivot definitions with an EMPTY cache — the
@@ -15948,6 +16094,31 @@ pub fn calp_reset_subscription(
     }
     // GAP B, reset half — same reasoning as the pull/refresh path above.
     crate::floating_range::register_object_sheet_edges(&state);
+
+    // RECALCULATE HERE, in the command, the way the refresh path does.
+    //
+    // A whole-sheet reset installed a coherent published sheet, so leaving the
+    // evaluation to the frontend was survivable. A PARTIAL reset installs a
+    // MIXTURE — the author's cell beside the publisher's — and a formula reading
+    // across that boundary holds a number computed from neither state. The
+    // frontend does call `calculateNow`, but inside a try/catch that logs and
+    // continues, so a failure there leaves the user looking at values that never
+    // coexisted, with nothing to say so.
+    //
+    // Nothing on the receiving side would ever repair it either: neither a pull,
+    // nor a checkout, nor opening the file evaluates a cell.
+    {
+        let indices: Vec<usize> = targets.iter().map(|(idx, _, _)| *idx).collect();
+        for idx in indices {
+            crate::calculation::recalculate_sheet_values(
+                &state,
+                &user_files_state,
+                &pivot_state,
+                idx,
+                Some((&*pane_control_state, &*ribbon_filter_state)),
+            );
+        }
+    }
 
     crate::log_info!(
         "CALP",

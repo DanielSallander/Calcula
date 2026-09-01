@@ -286,3 +286,106 @@ fn the_publish_preview_reports_a_sheet_id() {
          hand each row its neighbour's identity"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D. Per-cell reset: the four conditions that make it correct
+// ---------------------------------------------------------------------------
+//
+// Unticking a row in the reset diff means "keep my value here, restore the
+// rest". That is sound on the reset side — unlike the push side, where the
+// receiver never recalculates — but only if four things hold. Each has a guard.
+
+/// AN EXCLUSION SET, NEVER AN INCLUSION SET.
+///
+/// The diff rows are a bounded sample (50 changed cells per sheet), so a changed
+/// cell may have no row for anyone to tick. Storing what was opted OUT of makes
+/// every unseen cell keep the default, and makes an untouched dialog reset
+/// exactly what a whole-sheet reset always did.
+///
+/// SABOTAGE: rename the field to `included_cells` and invert the test. An empty
+/// list then resets NOTHING, and every cell past the 50th is silently spared.
+#[test]
+fn the_reset_selection_is_an_exclusion_set() {
+    let body = body_of("pub struct ResetSubscriptionParams {");
+    assert!(
+        body.contains("excluded_cells"),
+        "the reset selection stopped being an exclusion set — a cell with no row \
+         would then default to NOT being reset"
+    );
+    let cmd = body_of("pub fn calp_reset_subscription(");
+    assert!(
+        cmd.contains("#[serde(default)]") || body.contains("#[serde(default)]"),
+        "an omitted list must deserialize, so a caller that sends none keeps the \
+         whole-sheet behaviour"
+    );
+}
+
+/// THE OVERRIDE LEDGER MUST FOLLOW THE CELLS.
+///
+/// Reset used to clear every override on the reset sheets. With a partial reset
+/// that is wrong in the direction that loses work: an override on a cell the
+/// author KEPT is still true — the grid holds their value, the ledger records
+/// what upstream had — and dropping it leaves a local edit with nothing to say
+/// it is one. Invisible in the Overrides pane, and republished as the
+/// publisher's own content by the next person who checks the application out.
+///
+/// SABOTAGE: restore the old `retain(|o| !local_sheet_ids.contains(&o.sheet_id))`.
+#[test]
+fn a_kept_cell_keeps_its_override() {
+    let body = body_of("pub fn calp_reset_subscription(");
+    assert!(
+        body.contains("excluded_by_sheet"),
+        "the override sweep no longer consults the exclusion set, so it clears \
+         overrides for cells the reset deliberately did not touch"
+    );
+    assert!(
+        body.contains("cell_position("),
+        "the override's position must come from the id registry first — an \
+         override is id-anchored so it survives a structural shift, and its \
+         recorded position is only the fallback"
+    );
+}
+
+/// A PARTIAL RESET MUST RECALCULATE, IN THE COMMAND.
+///
+/// A whole-sheet reset installed a coherent published sheet. A partial one
+/// installs a MIXTURE, and a formula reading across that boundary holds a number
+/// computed from neither state. The frontend does call `calculateNow`, but
+/// inside a try/catch that logs and continues — and nothing on any receiving
+/// side would ever repair it, because neither a pull, nor a checkout, nor
+/// opening the file evaluates a cell.
+///
+/// SABOTAGE: delete the `recalculate_sheet_values` loop and lean on the
+/// frontend.
+#[test]
+fn a_reset_recalculates_the_sheets_it_mixed() {
+    let body = body_of("pub fn calp_reset_subscription(");
+    assert!(
+        body.contains("recalculate_sheet_values("),
+        "the reset stopped recalculating — a partial reset then leaves formulas \
+         holding values computed from neither the local nor the published state"
+    );
+}
+
+/// A DYNAMIC ARRAY IS ONE THING.
+///
+/// Keeping the author's formula at a spill ORIGIN while the published extents
+/// are installed leaves the origin claiming a rectangle the published version
+/// decided, computed from a formula it does not have. Refused by name: this is
+/// rare, and the wrong answer corrupts a block rather than a cell.
+///
+/// SABOTAGE: delete the `CALP_RESET_SPILL_CELL` block.
+#[test]
+fn a_spill_origin_cannot_be_half_kept() {
+    let body = body_of("pub fn calp_reset_subscription(");
+    assert!(
+        body.contains("CALP_RESET_SPILL_CELL"),
+        "a spill origin can now be excluded, leaving the array's shape and its \
+         formula disagreeing"
+    );
+    assert!(
+        body.contains("spill_ranges"),
+        "the local origins must come from `spill_ranges` — `engine::Cell` \
+         carries no spill of its own, so a cell-level test would always be false"
+    );
+}

@@ -1428,9 +1428,18 @@ pub(crate) fn walk_cells(
 ///
 /// A CACHED RESULT IS NOT AN EDIT. For a cell that carries a formula, `v`, `t`,
 /// `e` and `sp` are all *derived* — the last computed value, its type, its error
-/// state, and how far the array spilled. A subscriber or a co-developer
-/// recalculates on load, so a formula cell whose formula is unchanged has
-/// nothing in it that anybody typed.
+/// state, and how far the array spilled. A formula cell whose formula did not
+/// change holds nothing anybody typed, and whatever moved in it is fully
+/// explained by the precedent that DID change, which has a row of its own.
+///
+/// NOT because the receiver recalculates — it does not, and the first version of
+/// this comment said otherwise. `materialize_pull_result` (pull and checkout)
+/// evaluates no cell, and `open_file` rebuilds dependency EDGES without
+/// evaluating. A published cached value is displayed verbatim, indefinitely.
+/// That makes this a rule about what the diff REPORTS, never a licence to
+/// publish a value computed from inputs that did not ship: see
+/// `calp_publish`'s refusal to publish a workbook with a cancelled
+/// recalculation, which exists for exactly that reason.
 ///
 /// Reported from live testing: change one hard-coded number, push, and the diff
 /// claimed TWO cells changed — the number, and the `=C2*2` beside it whose

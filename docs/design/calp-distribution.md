@@ -468,6 +468,55 @@ was wired to a user; two were already live in the push preview.
    and **an empty list does not mean nothing would change**. A sentence that
    always applies beats a flag that is always on.
 
+#### Per-cell selection: sound on reset, not on push (2026-09-01)
+
+The reset diff's rows carry checkboxes. Untick one and that cell keeps your
+value while the rest of the sheet is restored. **An exclusion set, never an
+inclusion set** — the rows are a bounded sample (50 changed cells per sheet), so
+a changed cell may have no row at all; storing what was opted OUT of means every
+unseen cell keeps the default and an untouched dialog resets exactly what a
+whole-sheet reset always did. The list says, per sheet, how many changes it could
+not show.
+
+Four things came with it, each a data-integrity condition rather than polish:
+
+1. **The override ledger follows the cells, not the sheet.** Reset used to clear
+   every override on the reset sheets. On a KEPT cell that is wrong in the
+   direction that loses work: the grid holds the subscriber's value and the
+   ledger records what upstream had, so dropping it leaves a local edit with
+   nothing to say it is one — invisible in the Overrides pane, and republished as
+   the publisher's own content by the next person who checks the application out.
+2. **The recalculation moved into the Rust command.** A whole-sheet reset
+   installed a coherent published sheet; a partial one installs a MIXTURE, and a
+   formula reading across that boundary holds a number computed from neither
+   state. The frontend does call `calculateNow`, but inside a try/catch that logs
+   and continues.
+3. **A spill origin cannot be half-kept** (`CALP_RESET_SPILL_CELL`). Keeping the
+   author's formula while the published extents install leaves the array's shape
+   and its formula disagreeing. Refused by name rather than resolved either way.
+4. **The checkboxes cover cell values and formulas only.** Formatting, widths,
+   heights, merges and pivot definitions stay wholesale, and the dialog says so.
+
+**The push side does NOT get per-cell checkboxes, and the reason is structural.**
+Unticking a cell at publish time ships a formula whose inputs did not ship, and
+nothing on any receiving machine ever repairs it: neither `materialize_pull_result`
+(pull and checkout) nor `open_file` evaluates a cell. Worse, the corruption is
+invisible in the very list the checkboxes would sit on — `cells_equal` hides
+formula cells whose formula did not change, so `C2 = A1*2` is never a row while
+its stale value still travels. Unticking one input silently corrupts an unbounded
+set of cells the author was never shown.
+
+The repo had already ruled on this shape: `calp_publish` hard-refuses a workbook
+carrying a cancelled recalculation, because *"every subscriber pulls cells that
+look authoritative and are silently stale … a data-correctness bug in the
+distribution story, not a UI nicety."* A per-cell publish filter manufactures
+that state deliberately.
+
+The owner's chosen semantics — publish without the change, keep it locally — are
+sound only if the published artifact is RECALCULATED without those cells. See
+`docs/design/open-items.md` §2.aa for what that costs and why it is not a
+contained change.
+
 #### A cached result is not an edit (2026-09-01)
 
 `cells_equal` compared every field of a cell entry, including `v`, `t`, `e` and

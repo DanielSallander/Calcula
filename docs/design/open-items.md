@@ -658,6 +658,49 @@ is the kind of silence this program exists to remove. Decide whether refresh sho
 definitions (matching reset) or keep the subscriber's (matching today), then SAY which in the
 preview.
 
+### 2.aa Per-cell selection on the PUSH side needs a state-agnostic evaluator (2026-09-01)
+
+**Owner decision taken 2026-09-01:** unticking a change in the push diff should mean *publish
+without it, keep it locally* — the git-index model. Not *discard it from my workbook*.
+
+That is sound only if the published artifact is RECALCULATED without those cells, because
+nothing on the receiving side ever will be: `materialize_pull_result` (pull and checkout)
+evaluates no cell, and `open_file` rebuilds dependency edges without evaluating.
+
+**Why it is not a contained change.** The intended shape — clone the grids, revert the unticked
+cells in the clone, recalculate the clone, publish the clone — needs an evaluation pass that can
+run against caller-supplied grids. Half of that already exists: `build_workbook_plan`
+(`app/src-tauri/src/calculation.rs`) takes `grids: &[engine::Grid]` by slice and builds the whole
+workbook dependency graph, so the ORDER is computable off-state. The evaluation itself is not:
+`run_calculation_pass` and `recalculate_sheet_values` take `state.grid.write()`,
+`state.grids.write()` and a dozen further `State<T>` handles directly. Making either
+state-agnostic is a refactor of the most consequential code in the product.
+
+**The mechanisms that do NOT work, and why — so nobody re-derives them:**
+
+- *Substitute base values at serialization time.* One injection point exists (the `Cow` in
+  `core/calp/src/publish.rs` that feeds both `data.json` and `cell_styles.json`), and it
+  publishes an internally inconsistent artifact. This is the option the whole question is about
+  rejecting.
+- *Transient write* (`DocumentEffect::transient`): revert, publish, restore. Technically legal,
+  and wrong here. The restore registry is in memory, so a crash during the publish — which is
+  network I/O to a share — leaves the document reverted with the author's edits gone, because a
+  transient write is not in the undo stack. `scenario_show` accepts that window because a
+  scenario is cheap to re-apply; a developer's uncommitted work is not.
+- *Real undoable revert, publish, then programmatic undo.* Safe (a crash leaves the edits in the
+  undo stack and the document dirty for AutoRecover) and it does deliver the chosen semantics —
+  but the author watches their own sheet hold reverted values for the duration of a network
+  publish, and any failure path has to guarantee the un-revert. This is the fallback if the
+  evaluator refactor is judged too large.
+
+**Also required whichever route is taken:** cells that cannot be re-derived locally — CUBE, UDF
+and GATHER — must REFUSE rather than ship, when one lies in the dependency closure of an
+unticked cell. `build_workbook_plan` supplies that closure.
+
+The RESET side of the same request shipped 2026-09-01 and is unaffected; it is sound because the
+artifact produced is the subscriber's own live workbook and the command now recalculates the
+sheets it mixed.
+
 ---
 
 ## 3. How to keep this file honest

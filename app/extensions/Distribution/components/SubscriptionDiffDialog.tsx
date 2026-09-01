@@ -42,9 +42,10 @@ import {
   resetSubscription,
   getSheetProvenance,
   type WorkingCopyDiff,
+  type ResetCellRef,
 } from "@api/distribution";
 import { useDialogWindow } from "@api/dialogWindow";
-import { VersionDiffView } from "./VersionDiffView";
+import { VersionDiffView, cellKeyOf } from "./VersionDiffView";
 import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
 
 /** What the caller asked for. `mode` is the only difference between the two. */
@@ -85,6 +86,15 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  /**
+   * Cells the author unticked, as `cellKeyOf` strings.
+   *
+   * AN EXCLUSION SET. The diff rows are a bounded sample, so a changed cell may
+   * have no row — storing what was opted OUT of means every cell the dialog
+   * could not show keeps the default, and an untouched dialog resets exactly
+   * what it always did.
+   */
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!req) {
@@ -146,7 +156,18 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
     setResetting(true);
     setError(null);
     try {
-      const r = await resetSubscription(req.registryUrl, req.packageName);
+      // The keys carry the PUBLISHER's sheet id already — a diff row is named by
+      // it — so this is a parse, not a lookup that could go stale.
+      const excludedCells: ResetCellRef[] = [...excluded].map((k) => {
+        const at = k.lastIndexOf(":");
+        const rowAt = k.lastIndexOf(":", at - 1);
+        return {
+          packageSheetId: k.slice(0, rowAt),
+          row: Number(k.slice(rowAt + 1, at)),
+          col: Number(k.slice(at + 1)),
+        };
+      });
+      const r = await resetSubscription(req.registryUrl, req.packageName, excludedCells);
       await announceSubscribedContentReplaced();
       setResult(
         `Reset ${req.packageName} to v${r.resolvedVersion}: ${r.sheetsReset} sheet(s), ` +
@@ -265,7 +286,41 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
               </div>
             )}
 
-            {!loading && diff && <VersionDiffView diff={diff.diff} />}
+            {!loading && diff && (
+              <VersionDiffView
+                diff={diff.diff}
+                // Only the destructive entry gets checkboxes. The read-only view
+                // has nothing to act on, and a checkbox that does nothing is a
+                // promise the dialog cannot keep.
+                selection={
+                  isReset
+                    ? {
+                        excluded,
+                        label: "Reset",
+                        onToggle: (sheetId, c, include) =>
+                          setExcluded((prev) => {
+                            const next = new Set(prev);
+                            const key = cellKeyOf(sheetId, c);
+                            if (include) next.delete(key);
+                            else next.add(key);
+                            return next;
+                          }),
+                      }
+                    : undefined
+                }
+              />
+            )}
+
+            {isReset && excluded.size > 0 && (
+              <div style={{ fontSize: "11px", marginTop: 8, display: "flex", gap: 8 }}>
+                <span style={secondary}>
+                  Keeping your version of {excluded.size} cell(s).
+                </span>
+                <button style={{ fontSize: "11px" }} onClick={() => setExcluded(new Set())}>
+                  Reset all listed
+                </button>
+              </div>
+            )}
 
             {/* THE GAP, STATED. Cell values are exact; the rest is restored and
                 not itemised. See the file header for why the engine's
@@ -281,12 +336,14 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
                   ...secondary,
                 }}
               >
-                Cell values and formulas are listed in full above.{" "}
-                {isReset ? "A reset also restores" : "A reset would also restore"} cell
-                formatting, column widths, row heights, merged regions and the
-                application&rsquo;s pivot definitions on these sheets, and clears your
-                overrides — none of which is itemised here. An empty list above does not
-                mean nothing would change.
+                {isReset
+                  ? "The checkboxes cover cell values and formulas only. A reset also restores"
+                  : "A reset would also restore"}{" "}
+                cell formatting, column widths, row heights, merged regions and the
+                application&rsquo;s pivot definitions on these sheets{" "}
+                {isReset ? "— wholesale, with no per-cell choice — " : "and "}
+                clears your overrides on the cells it restores. None of that is itemised
+                here, and an empty list above does not mean nothing would change.
               </div>
             )}
 

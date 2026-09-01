@@ -1498,12 +1498,27 @@ export interface ResetSubscriptionResponse {
  * sizes, merges, overrides) on those sheets AND restoring the application's
  * published pivot definitions (layout changes revert). One undo step.
  */
+/** One cell to LEAVE ALONE during a reset, named the way a diff row names it. */
+export interface ResetCellRef {
+  /** The PUBLISHER's sheet id — what a diff row carries. */
+  packageSheetId: string;
+  row: number;
+  col: number;
+}
+
 export function resetSubscription(
   registryUrl: string,
   packageName: string,
+  /**
+   * Cells the author unticked in the diff. An EXCLUSION set, never an inclusion
+   * set: the diff list is a bounded sample, so a cell with no row must default
+   * to being restored — which makes omitting this bit-identical to the
+   * whole-sheet reset this has always been.
+   */
+  excludedCells?: ResetCellRef[],
 ): Promise<ResetSubscriptionResponse> {
   return invokeBackend("calp_reset_subscription", {
-    params: { registryUrl, packageName },
+    params: { registryUrl, packageName, excludedCells: excludedCells ?? [] },
   });
 }
 
