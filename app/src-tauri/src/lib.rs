@@ -6472,6 +6472,7 @@ pub fn run() {
             calp_commands::calp_reset_subscription,
             calp_commands::calp_detach,
             calp_commands::calp_detach_sheet,
+            calp_commands::calp_hold_back_cells,
             calp_commands::calp_get_sheet_provenance,
             calp_commands::calp_dev_subscribe,
             calp_commands::calp_dev_refresh,

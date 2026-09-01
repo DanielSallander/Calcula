@@ -1498,6 +1498,62 @@ export interface ResetSubscriptionResponse {
  * sizes, merges, overrides) on those sheets AND restoring the application's
  * published pivot definitions (layout changes revert). One undo step.
  */
+/** One cell the author unticked in the PUSH diff. */
+export interface HoldBackCellRef {
+  /** The diff row's sheet id. A working copy's ids ARE the application's. */
+  sheetId: string;
+  row: number;
+  col: number;
+}
+
+export interface HoldBackCellsResponse {
+  cellsHeldBack: number;
+  /**
+   * True when a write happened and an undo entry therefore exists.
+   *
+   * The caller MUST call `undo()` exactly once when this is true and MUST NOT
+   * when it is false — a bare undo with nothing to reverse takes back the
+   * author's own last edit.
+   */
+  undoRecorded: boolean;
+}
+
+/**
+ * Put the base version's value back into the cells the author unticked, so the
+ * push that follows publishes a workbook without those changes.
+ *
+ * HALF OF A PAIR, and the caller owns the other half:
+ *
+ * ```ts
+ * const { undoRecorded } = await holdBackCells(...);
+ * try { await publishApplication(...); }
+ * finally { if (undoRecorded) await undo(); }
+ * ```
+ *
+ * The `finally` is the entire safety property. Substituting values as the
+ * artifact is written would be simpler and is wrong: nothing on the receiving
+ * side ever recalculates — neither pull, nor checkout, nor opening the file
+ * evaluates a cell — so a formula whose inputs did not ship would show a number
+ * that was never true, on every subscriber's screen, forever. And invisibly,
+ * because the diff hides formula cells whose formula did not change, so the
+ * corrupted dependents never appear as rows to untick.
+ *
+ * Reverting in the live document instead means the publish serializes a real,
+ * recalculated workbook state. The cost is that the author's sheet holds the
+ * reverted values for the duration of the publish. If the app dies in between,
+ * the write is in the undo stack and the document is dirty, so Ctrl+Z and
+ * AutoRecover both recover it.
+ */
+export function holdBackCells(params: {
+  registryPath: string;
+  packageName: string;
+  /** The version this push is based on — where the held-back values come from. */
+  baseVersion: string;
+  cells: HoldBackCellRef[];
+}): Promise<HoldBackCellsResponse> {
+  return invokeBackend("calp_hold_back_cells", { params });
+}
+
 /** One cell to LEAVE ALONE during a reset, named the way a diff row names it. */
 export interface ResetCellRef {
   /** The PUBLISHER's sheet id — what a diff row carries. */

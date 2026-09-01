@@ -1209,6 +1209,7 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("calp_commands.rs", "calp_refresh_apply", "as calp_revert_override"),
         ("scripting/commands.rs", "parse_script_formula_writes", "builds a detached grid; apply_script_modified_grids_core recalculates"),
         ("calp_merge.rs", "overlay_their_cells", "builds a DETACHED copy of the grids with the intervening version's cells laid over it; it mutates nothing in AppState and hands the result to apply_script_modified_grids, which diffs, records undo and recalculates — the same arrangement parse_script_formula_writes has"),
+        ("calp_commands.rs", "calp_hold_back_cells", "the same arrangement as overlay_their_cells above: a DETACHED clone of the grids with the base version's cells laid over the unticked positions, handed to apply_script_modified_grids, which owns the spill map for the write. Nothing in AppState is mutated here"),
         ("tables.rs", "write_table_formula_cell", "helper: one totals cell; its two callers seed the shared cascade"),
         ("undo_commands.rs", "apply_changes", "every SetCell restore is a cascade seed, and the cascade's tear-down phase releases whatever the restored cell stopped owning"),
         ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes cascades"),

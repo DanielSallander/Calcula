@@ -31,8 +31,25 @@ import {
   pushMergeAnalyze,
   pushMergeApply,
   workingCopyStatus,
+  undo,
 } from "@api";
-import { VersionDiffView } from "./VersionDiffView";
+import { holdBackCells, type HoldBackCellRef } from "@api/distribution";
+import { VersionDiffView, cellKeyOf } from "./VersionDiffView";
+
+/**
+ * `cellKeyOf` in reverse. The key carries the diff row's SHEET ID, which for a
+ * working copy is directly the application's — so this is a parse, not a lookup
+ * that could go stale between the tick and the push.
+ */
+const parseCellKey = (k: string): HoldBackCellRef => {
+  const colAt = k.lastIndexOf(":");
+  const rowAt = k.lastIndexOf(":", colAt - 1);
+  return {
+    sheetId: k.slice(0, rowAt),
+    row: Number(k.slice(rowAt + 1, colAt)),
+    col: Number(k.slice(colAt + 1)),
+  };
+};
 import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
 import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
@@ -72,6 +89,14 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   const [kind, setKind] = useState("report");
   const [changeSummary, setChangeSummary] = useState("");
   const [includeComments, setIncludeComments] = useState(false);
+  /**
+   * Cells the author unticked in the diff, as `cellKeyOf` strings.
+   *
+   * AN EXCLUSION SET. The diff rows are a bounded sample, so a changed cell may
+   * have no row — storing what was opted OUT of means every cell the dialog
+   * could not show is pushed, which is exactly what a push has always done.
+   */
+  const [excludedCells, setExcludedCells] = useState<Set<string>>(new Set());
   /**
    * Ticked sheets, by TRUE workbook index.
    *
@@ -238,6 +263,12 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       .finally(() => {
         if (!cancelled) setDiffBusy(false);
       });
+    // THE EXCLUSIONS DO NOT SURVIVE A REFETCH. The diff re-runs when the sheet
+    // selection or includeComments changes, and a key kept from the previous
+    // answer could name a row that no longer exists — an invisible exclusion
+    // acting on a push nobody reviewed. Clearing is the honest reset: every
+    // change on screen is ticked, which is where the dialog always starts.
+    setExcludedCells(new Set());
     return () => {
       cancelled = true;
     };
@@ -343,6 +374,41 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       return;
     }
     setError(null);
+
+    // HOLD BACK THE UNTICKED CELLS, then publish, then always put them back.
+    //
+    // The `finally` below is the entire safety property, and it is why this
+    // lives here rather than inside `calp_publish`: guaranteeing an un-revert
+    // across that command's six `?` sites would mean restructuring its critical
+    // region, and the guard that pins that region's shape goes BLIND rather
+    // than red when it moves.
+    //
+    // What the author sees: their sheet holds the base values while the publish
+    // runs, then snaps back. If the app dies in between, the hold-back is in the
+    // undo stack and the document is dirty — Ctrl+Z and AutoRecover both
+    // recover it.
+    let heldBack = false;
+    if (mode === "push" && excludedCells.size > 0 && workspace?.baseVersion) {
+      setStatus("Holding back unticked changes…");
+      try {
+        const r = await holdBackCells({
+          registryPath,
+          packageName,
+          baseVersion: workspace.baseVersion,
+          cells: [...excludedCells].map(parseCellKey),
+        });
+        heldBack = r.undoRecorded;
+      } catch (e: unknown) {
+        // Nothing was written, so there is nothing to put back. Refuse the push
+        // rather than silently publishing the changes the author unticked.
+        setStatus(null);
+        setError(
+          `Could not hold back the unticked changes, so nothing was published: ${String(e)}`,
+        );
+        return;
+      }
+    }
+
     setStatus(mode === "push" ? "Pushing…" : "Publishing…");
     try {
       const result = await publishApplication({
@@ -379,6 +445,26 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     } catch (err: unknown) {
       setError(explainPushError(String(err)));
       setStatus(null);
+    } finally {
+      // ALWAYS, on both paths. A failed publish must not leave the author's
+      // workbook holding the base values, and a SUCCESSFUL one must not either
+      // — the whole point is that the held-back edits stay local.
+      if (heldBack) {
+        try {
+          await undo();
+          // The undo restored the cells; the canvas is still showing what the
+          // hold-back painted.
+          window.dispatchEvent(new CustomEvent("grid:refresh"));
+        } catch (e: unknown) {
+          // The one failure this dialog cannot repair, so it must not be quiet:
+          // the author's edits are still in the undo stack, and that is the
+          // sentence they need.
+          setError(
+            `Your unticked changes were rolled back for the push and could NOT be ` +
+              `restored automatically (${String(e)}). Press Ctrl+Z once to bring them back.`,
+          );
+        }
+      }
     }
   };
 
@@ -626,7 +712,49 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                   Could not compare against v{workspace?.baseVersion}: {diffError}
                 </span>
               )}
-              {diff && !diffBusy && <VersionDiffView diff={diff} />}
+              {diff && !diffBusy && (
+                <VersionDiffView
+                  diff={diff}
+                  // Only a PUSH can hold a change back. A first publish has no
+                  // base version to take the held-back value from, so a
+                  // checkbox there would be a control with nothing behind it.
+                  selection={
+                    mode === "push" && workspace?.baseVersion
+                      ? {
+                          excluded: excludedCells,
+                          label: "Push",
+                          onToggle: (sheetId, c, include) =>
+                            setExcludedCells((prev) => {
+                              const next = new Set(prev);
+                              const key = cellKeyOf(sheetId, c);
+                              if (include) next.delete(key);
+                              else next.add(key);
+                              return next;
+                            }),
+                        }
+                      : undefined
+                  }
+                />
+              )}
+              {excludedCells.size > 0 && (
+                <div
+                  style={{
+                    fontSize: "11px",
+                    marginTop: 6,
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "baseline",
+                  }}
+                >
+                  <span style={{ color: "var(--conflict-text, #856404)" }}>
+                    {excludedCells.size} change(s) stay local — the published version keeps
+                    v{workspace?.baseVersion}&rsquo;s value there.
+                  </span>
+                  <button style={{ fontSize: "11px" }} onClick={() => setExcludedCells(new Set())}>
+                    Push all
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}

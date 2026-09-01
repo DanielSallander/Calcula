@@ -4191,6 +4191,214 @@ pub fn calp_checkout(
 }
 
 // ===========================================================================
+// Holding a change back from a push
+// ===========================================================================
+
+/// One cell the author unticked in the push diff.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoldBackCellRef {
+    /// The diff row's sheet id. A working copy's sheet ids ARE the
+    /// application's, so this is directly a local sheet id.
+    pub sheet_id: String,
+    pub row: u32,
+    pub col: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoldBackCellsParams {
+    pub registry_path: String,
+    pub package_name: String,
+    /// The version to take the held-back cells' values FROM — the base this
+    /// push is being made against.
+    pub base_version: String,
+    pub cells: Vec<HoldBackCellRef>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HoldBackCellsResponse {
+    /// How many cells were actually written back. A cell already equal to its
+    /// base value is still counted: the caller must undo exactly what it asked
+    /// for, and a count that silently shrank would make that impossible to
+    /// verify.
+    pub cells_held_back: usize,
+    /// TRUE when a write happened and therefore an undo entry exists. The
+    /// caller MUST call `undo` exactly once when this is true, and must NOT
+    /// when it is false — a bare `undo` with nothing to reverse would take back
+    /// the author's own last edit.
+    pub undo_recorded: bool,
+}
+
+/// Put the BASE version's value back into the cells the author unticked, so the
+/// push that follows publishes a workbook without those changes.
+///
+/// THIS IS HALF OF A PAIR. The caller's contract is:
+///
+/// ```text
+///   holdBackCells(...)        // returns undoRecorded
+///   try   { publish(...) }
+///   finally { if (undoRecorded) undo() }
+/// ```
+///
+/// and the `finally` is the whole safety property. It is deliberately NOT
+/// folded into `calp_publish`: doing it there would mean restructuring that
+/// command's 190-line critical region so an un-revert ran on each of its six
+/// `?` sites, and the guard that pins its shape
+/// (`distributionGateway.test.ts`, which slices the source between
+/// `pub fn calp_publish(` and `let assembly = assemble_publish_workbook`) goes
+/// BLIND rather than red if that region moves. A `try/finally` in one caller is
+/// a stronger guarantee than six hand-written error paths, and leaves the most
+/// consequential command in the distribution stack untouched.
+///
+/// WHY REVERT AT ALL, rather than substituting values as the artifact is
+/// written. Nothing on the receiving side ever recalculates: neither
+/// `materialize_pull_result` (pull AND checkout) nor `open_file` evaluates a
+/// cell. A published artifact assembled with some cells rolled back and their
+/// dependents left as-is would show numbers that were never true, on every
+/// subscriber's screen, indefinitely — and INVISIBLY, because `cells_equal`
+/// hides formula cells whose formula did not change, so the corrupted
+/// dependents never appear as diff rows to untick. Reverting in the live
+/// document means the publish serializes a real, recalculated workbook state.
+///
+/// It also means the recalculation is an ORDINARY one, so there is no class of
+/// cell that has to be refused. (CUBE and UDF cells are PRESERVED rather than
+/// re-derived on this path — the batch pipeline passes no prefetch and no
+/// resolver — which is the right answer for them anyway: their values come from
+/// a model or a script, not from the workbook cells being rolled back.)
+///
+/// SURVIVES A CRASH. The write goes through the ordinary script-grid pipeline,
+/// so it lands in the undo stack and dirties the document. If the process dies
+/// between this and the `undo`, the author's edits are recoverable with Ctrl+Z
+/// and AutoRecover has them. That is the property `DocumentEffect::transient`
+/// could not offer — its restore registry is in memory and its writes are not
+/// undoable — which is why this is not a transient write.
+///
+/// The sibling is `calp_merge::overlay_their_cells`, which does the same thing
+/// (read a published version's cells, overlay them into cloned grids, apply
+/// through the script pipeline) from a different selection source. They are not
+/// one function because the selection differs — a diff there, an explicit cell
+/// list here — and folding them together would put a merge concept in the
+/// publish path.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn calp_hold_back_cells(
+    state: State<AppState>,
+    file_state: State<'_, crate::persistence::FileState>,
+    user_files_state: State<crate::persistence::UserFilesState>,
+    pivot_state: State<crate::pivot::types::PivotState>,
+    pane_control_state: State<crate::pane_control::PaneControlState>,
+    ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
+    params: HoldBackCellsParams,
+    window: tauri::Window,
+) -> Result<HoldBackCellsResponse, String> {
+    crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+
+    if params.cells.is_empty() {
+        return Ok(HoldBackCellsResponse { cells_held_back: 0, undo_recorded: false });
+    }
+
+    // The base side, through the same verification every content read uses.
+    let (registry, base_version, _manifest) = crate::calp_inspector::open_verified_content(
+        &params.registry_path,
+        &params.package_name,
+        &format!("={}", params.base_version),
+        true,
+    )?;
+
+    let sheet_ids = state.sheet_ids.read().map_err(|e| e.to_string())?.clone();
+    let mut grids = state.grids.read().map_err(|e| e.to_string())?.clone();
+    let active_sheet = *state.active_sheet.read().map_err(|e| e.to_string())?;
+
+    // Group by sheet so each sheet's artifact is read once.
+    let mut by_sheet: std::collections::HashMap<String, Vec<(u32, u32)>> =
+        std::collections::HashMap::new();
+    for c in &params.cells {
+        by_sheet.entry(c.sheet_id.clone()).or_default().push((c.row, c.col));
+    }
+
+    let mut held = 0usize;
+    for (sheet_id, positions) in &by_sheet {
+        let Some(local_index) = sheet_ids.iter().position(|id| id.to_string() == *sheet_id) else {
+            return Err(format!(
+                "CALP_HOLDBACK_NO_SHEET: the sheet '{}' named by the selection is not in this \
+                 workbook any more. Close the push dialog and reopen it so the list matches.",
+                sheet_id
+            ));
+        };
+
+        // A sheet the base version does not have cannot hold anything back: the
+        // author is ADDING it, and the unit for that is the sheet checkbox.
+        let data = registry
+            .read_artifact(
+                &params.package_name,
+                &base_version,
+                &format!("sheets/{}/data.json", sheet_id),
+            )
+            .map_err(|e| e.to_string())?;
+        let base_cells = match data {
+            Some(bytes) => {
+                let sd: calcula_format::sheet_data::SheetData =
+                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                calcula_format::sheet_data::sheet_data_to_cells(&sd)
+            }
+            None => std::collections::HashMap::new(),
+        };
+
+        let grid = grids
+            .get_mut(local_index)
+            .ok_or_else(|| "Sheet index out of range while holding cells back.".to_string())?;
+
+        for pos in positions {
+            match base_cells.get(pos) {
+                // TYPED, never re-parsed from a display string: the base value
+                // goes back as the cell it was. Round-tripping "30.0" through
+                // the input parser would read as TEXT under a locale whose
+                // decimal separator is a comma.
+                Some(saved) => {
+                    grid.cells.insert(*pos, saved.to_cell());
+                }
+                // The base had nothing here — the author ADDED this cell, and
+                // holding that addition back means the cell is empty in the
+                // published version.
+                None => {
+                    grid.cells.remove(pos);
+                }
+            }
+            held += 1;
+        }
+    }
+
+    // Through the SAME pipeline a script write and a merge use: one undo
+    // transaction, dependency maps, recalculation, dirty flag, events. The
+    // recalculation is the point — a rolled-back input whose dependents still
+    // showed the author's numbers is exactly the artifact this exists to avoid.
+    crate::scripting::commands::apply_script_modified_grids(
+        &state,
+        &file_state,
+        &user_files_state,
+        &pivot_state,
+        &pane_control_state,
+        &ribbon_filter_state,
+        &grids,
+        active_sheet,
+        held as u32,
+        "calpHoldBack",
+        &format!("{}@{}", params.package_name, base_version),
+    )?;
+
+    Ok(HoldBackCellsResponse {
+        cells_held_back: held,
+        // `apply_script_modified_grids` returns early without recording anything
+        // when `cells_modified == 0`, which `held > 0` excludes. The caller keys
+        // its `undo` on this, so it must describe what actually happened rather
+        // than what was asked for.
+        undo_recorded: held > 0,
+    })
+}
+
+// ===========================================================================
 // Working-copy status — what is this workbook a working copy of?
 // ===========================================================================
 

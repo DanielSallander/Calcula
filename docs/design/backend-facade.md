@@ -11,10 +11,10 @@ resolved-asymmetry paragraph named two symbols that no longer exist.
 
 | Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | Recounted (2026-09-01) | How counted |
 |---|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | **785** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| Commands in `generate_handler!` | 761 | 773 | 783 | **786** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
 | `#[tauri::command]` attributes | 798 | 815 | 822 | **824** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
 | Privileged (denylisted) commands | ~30 | 94 | 100 | **101** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
-| Feature-open commands | 667 | 673 | 683 | **684** | 785 − 101 |
+| Feature-open commands | 667 | 673 | 683 | **685** | 786 − 101 |
 | Typed wrappers in `backend.ts` | ~229 | 327 | 338 | **338** | exported functions/consts in `backend.ts` |
 | Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | 109,188 / 906 files | current suite |
 

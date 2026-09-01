@@ -152,6 +152,12 @@ fn surface_label(surface: &str) -> &'static str {
         "run_script" => "A script",
         "mcp" => "An AI tool",
         "notebook" => "A notebook cell",
+        // Not scripts, but they reach the grid through this same pipeline
+        // because it is the one that records undo, recalculates dependents and
+        // sets the dirty flag. Labelled honestly so an audit entry does not tell
+        // the user a script edited their cells when a distribution command did.
+        "calpMerge" => "A merge from the workspace",
+        "calpHoldBack" => "A push holding a change back",
         _ => "A script",
     }
 }
