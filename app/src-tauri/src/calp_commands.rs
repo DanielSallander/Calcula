@@ -317,6 +317,65 @@ fn assemble_publish_workbook(
         }
     }
 
+    // A LOCAL RENAME DOES NOT TRAVEL. An application sheet publishes under the
+    // name the application already knows it by, taken from the working-copy
+    // link's `base_sheets`, never from this workbook's live tab.
+    //
+    // The leak this closes had nothing to do with deliberate renames. Checkout
+    // is ADDITIVE, so pulling an application's "Sheet1" into a workbook that
+    // already has one renames the INCOMING sheet to "Sheet1 (2)" — a collision
+    // in THIS author's workbook and nowhere else. Publishing the live name then
+    // renamed that sheet for every subscriber, on the DEFAULT push, with no tick
+    // and no author action: the default selection is exactly `base_sheets`, and
+    // `publish()` copies `sheet.name` straight into the manifest.
+    //
+    // And names are the formula reference key. Cross-sheet refs inside a package
+    // are stored as raw text and resolved by a first-match case-insensitive name
+    // lookup, so a renamed sheet re-points every `=Sheet1!A1` in the package at
+    // whatever the subscriber happens to call "Sheet1" — silently.
+    //
+    // It was also self-erasing: `record_push` overwrites `base_sheets` from the
+    // live names after a successful push, so one leaked push and the drift is no
+    // longer detectable offline.
+    //
+    // A DELIBERATE rename therefore does not travel either, and that is the
+    // 2026-09-01 decision rather than an oversight: renaming a sheet that
+    // subscribers hold formulas against is a breaking change, and push is the
+    // wrong gesture for it. It belongs to a workspace-side edit that can be
+    // reviewed as such. Until that exists, a working copy's tab name is local.
+    //
+    // Applied HERE, so the publish, the dry-run preview and the working-copy
+    // diff all see the same names — `assemble_publish_workbook` is the one door
+    // all three go through.
+    //
+    // Returns local name -> published name for every sheet it renamed, because
+    // anything else in the workbook that refers to a sheet BY NAME has to follow
+    // it. Today that is the pivot definitions' `destination_sheet`; the map
+    // exists so the next such consumer is a compile-time question rather than a
+    // silent drop.
+    let renamed_for_publish: std::collections::HashMap<String, String> = {
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+        let mut renamed = std::collections::HashMap::new();
+        if let Some(link) = link.as_ref() {
+            let published_name: std::collections::HashMap<identity::SheetId, String> = link
+                .base_sheets
+                .iter()
+                .map(|s| (s.sheet_id, s.name.clone()))
+                .collect();
+            for &idx in sheet_indices {
+                if let Some(sheet) = workbook.sheets.get_mut(idx) {
+                    if let Some(name) = published_name.get(&sheet.id) {
+                        if sheet.name != *name {
+                            renamed.insert(sheet.name.clone(), name.clone());
+                            sheet.name = name.clone();
+                        }
+                    }
+                }
+            }
+        }
+        renamed
+    };
+
     // Standalone module scripts / notebooks live in ScriptState, not AppState.
     // With these present, the publish request's None ("all from the workbook")
     // ships every module script + notebook (C8).
@@ -338,17 +397,45 @@ fn assemble_publish_workbook(
             .enumerate()
             .map(|(package_idx, &wb_idx)| (wb_idx, package_idx))
             .collect();
+        // LOWERCASED, because every other sheet-name comparison in the product
+        // is `eq_ignore_ascii_case` — the lexer uppercases bare identifiers, so
+        // `Data` and `data` are one name to a formula. This set was matched
+        // case-SENSITIVELY, which silently DROPPED a pivot whose
+        // `destination_sheet` was recorded as `data` from an application whose
+        // tab is spelled `Data`. Found while closing the rename leak; the two
+        // are the same class of defect, a name compared one way here and
+        // another way everywhere else.
         let published_names: std::collections::HashSet<String> = sheet_indices
             .iter()
-            .filter_map(|&i| workbook.sheets.get(i).map(|s| s.name.clone()))
+            .filter_map(|&i| workbook.sheets.get(i).map(|s| s.name.to_ascii_lowercase()))
             .collect();
 
         workbook.pivot_definitions.retain_mut(|def| {
+            // A PIVOT FOLLOWS ITS SHEET. If the sheet was restored to the name
+            // the application publishes it under, the pivot's
+            // `destination_sheet` — which records the LOCAL tab — has to be
+            // rewritten to match, or the published pivot names a sheet the
+            // package does not contain and this retain drops it outright.
+            if let Some(local) = def
+                .definition
+                .get("destination_sheet")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            {
+                if let Some(published) = renamed_for_publish.get(&local) {
+                    if let Some(obj) = def.definition.as_object_mut() {
+                        obj.insert(
+                            "destination_sheet".to_string(),
+                            serde_json::Value::String(published.clone()),
+                        );
+                    }
+                }
+            }
             let dest_ok = def
                 .definition
                 .get("destination_sheet")
                 .and_then(|v| v.as_str())
-                .map_or(true, |name| published_names.contains(name));
+                .map_or(true, |name| published_names.contains(&name.to_ascii_lowercase()));
             if !dest_ok {
                 return false;
             }

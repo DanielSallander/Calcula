@@ -543,6 +543,49 @@ pub fn publish(
         }
     }).collect();
 
+    // NO TWO SHEETS MAY SHARE A NAME IN ONE VERSION.
+    //
+    // Nothing checked this. A workbook cannot hold a duplicate —
+    // `ensure_sheet_name_is_free` refuses it — but a published VERSION could,
+    // because `VersionManifest.sheets` is a plain `Vec` keyed by nothing, and
+    // `sheet_indices` is never deduped at any layer, so even the SAME index
+    // twice signed and published cleanly.
+    //
+    // What it costs a subscriber is not cosmetic. Cross-sheet references inside
+    // a package are stored as raw TEXT and resolved by a FIRST-MATCH
+    // case-insensitive name lookup, so once `resolve_sheet_name_collisions`
+    // renames one of the two on pull, the package's own `=Sheet1!A1` binds to
+    // whichever sheet won the name — with no `#REF!` and no warning.
+    //
+    // CASE-INSENSITIVE, matching every other sheet-name comparison in the
+    // product: the lexer uppercases bare identifiers, so `Data` and `data` are
+    // one name to a formula and must be one name here.
+    //
+    // Here rather than in the Tauri command so EVERY publish route is covered,
+    // the scripted gateway included — it has no dialog to warn through.
+    {
+        let mut seen: std::collections::HashMap<String, &PublishedSheet> =
+            std::collections::HashMap::new();
+        for s in &sheets {
+            let key = s.name.to_ascii_lowercase();
+            if let Some(first) = seen.get(&key) {
+                let detail = if first.sheet_id == s.sheet_id {
+                    "The same sheet was named twice in the selection.".to_string()
+                } else {
+                    format!(
+                        "One is the sheet the application already publishes under that name; \
+                         the other is a sheet you are adding. Rename yours before publishing \
+                         it — a subscriber resolves cross-sheet formulas by NAME, so two \
+                         sheets called '{}' would silently bind each other's references.",
+                        s.name
+                    )
+                };
+                return Err(CalpError::DuplicateSheetName { name: s.name.clone(), detail });
+            }
+            seen.insert(key, s);
+        }
+    }
+
     let named_ranges: Vec<PublishedNamedRange> = request.workbook.named_ranges.iter()
         .filter(|nr| match nr.sheet_id {
             None => true,
@@ -2173,4 +2216,137 @@ mod tests {
             SemVer::new(2, 0, 0),
         ]);
     }
+    // ======================================================================
+    // No two sheets in one version may share a name
+    // ======================================================================
+    //
+    // Asked by the owner: "what will happen if I try to publish a new sheet
+    // with the same name as a sheet that is already published in the workspace?
+    // It should get rejected right?" It was not. `publish()` bounds-checked each
+    // index and copied `sheet.name` straight into the manifest — no set, no
+    // dedup, no comparison against the base version it already had in hand.
+    //
+    // What it costs a subscriber is not cosmetic. `VersionManifest.sheets` is a
+    // plain Vec keyed by nothing, so both names ship; `resolve_sheet_name_collisions`
+    // then renames one on pull; and because cross-sheet references inside a
+    // package are stored as raw TEXT and resolved by a FIRST-MATCH
+    // case-insensitive name lookup, the package's own `=Sheet1!A1` binds to
+    // whichever sheet won the name — with no #REF! and no warning.
+
+    /// Two DIFFERENT sheets sharing a name are refused, and the message says
+    /// which one to rename.
+    ///
+    /// SABOTAGE: delete the duplicate-name block from `publish()`.
+    #[test]
+    fn two_sheets_with_one_name_are_refused() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![
+            persistence::Sheet::new("Sales".to_string()),
+            persistence::Sheet::new("Sales".to_string()),
+        ];
+
+        let err = publish_two_sheets(&reg, &wb, prof.path(), vec![0, 1]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Sales"), "the message must name the sheet: {msg}");
+        assert!(
+            msg.to_lowercase().contains("rename"),
+            "the message must name the remedy: {msg}"
+        );
+    }
+
+    /// CASE-INSENSITIVE, because the lexer uppercases bare identifiers and every
+    /// other sheet-name comparison in the product is `eq_ignore_ascii_case`.
+    /// `Data` and `data` are one name to a formula, so they must be one name
+    /// here.
+    ///
+    /// SABOTAGE: compare `s.name` directly instead of its lowercase form.
+    #[test]
+    fn names_differing_only_in_case_are_the_same_name() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![
+            persistence::Sheet::new("Data".to_string()),
+            persistence::Sheet::new("data".to_string()),
+        ];
+
+        assert!(publish_two_sheets(&reg, &wb, prof.path(), vec![0, 1]).is_err());
+    }
+
+    /// THE SAME INDEX TWICE. `sheet_indices` is never deduped at any layer —
+    /// not the frontend Set, not the params, not `resolve_publish_sheet_indices`,
+    /// not the scripted gateway — so a repeated index produced two manifest
+    /// entries sharing BOTH name and sheet_id, and signed cleanly.
+    ///
+    /// Its message differs from the collision one because the remedy differs:
+    /// there is nothing to rename, the selection is simply wrong.
+    #[test]
+    fn the_same_sheet_named_twice_is_refused_in_its_own_words() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![persistence::Sheet::new("Only".to_string())];
+
+        let err = publish_two_sheets(&reg, &wb, prof.path(), vec![0, 0]).unwrap_err();
+        assert!(
+            err.to_string().contains("named twice"),
+            "a repeated index is a selection mistake, not a naming one: {err}"
+        );
+    }
+
+    /// THE POSITIVE CONTROL. Distinct names still publish — the refusal must not
+    /// have become "no two sheets".
+    #[test]
+    fn distinct_names_still_publish() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+
+        let mut wb = persistence::Workbook::default();
+        wb.sheets = vec![
+            persistence::Sheet::new("Sales".to_string()),
+            persistence::Sheet::new("Costs".to_string()),
+        ];
+
+        assert!(publish_two_sheets(&reg, &wb, prof.path(), vec![0, 1]).is_ok());
+    }
+
+    fn publish_two_sheets(
+        reg: &LocalWorkspace,
+        wb: &persistence::Workbook,
+        prof: &std::path::Path,
+        sheet_indices: Vec<usize>,
+    ) -> Result<crate::publish::PublishResult, CalpError> {
+        let request = PublishRequest {
+            model_writebacks: None,
+            workbook: wb,
+            package_name: "dupes".to_string(),
+            version: SemVer::new(1, 0, 0),
+            kind: "report".to_string(),
+            mode: crate::publish::test_mode_for(reg, "dupes"),
+            change_summary: "test".to_string(),
+            sheet_indices,
+            now: "2026-01-01T00:00:00Z".to_string(),
+            published_by: "tester".to_string(),
+            writeback_regions: None,
+            object_scripts: None,
+            module_scripts: None,
+            notebooks: None,
+            data_sources: Vec::new(),
+            excluded_regions: Vec::new(),
+            custom_objects: Vec::new(),
+            include_comments: false,
+            min_app_version: String::new(),
+        };
+        publish(reg, &request, prof)
+    }
+
 }

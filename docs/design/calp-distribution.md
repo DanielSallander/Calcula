@@ -517,6 +517,61 @@ sound only if the published artifact is RECALCULATED without those cells. See
 `docs/design/open-items.md` §2.aa for what that costs and why it is not a
 contained change.
 
+#### Sheet names: a local rename does not travel, and two sheets may not share one (2026-09-01)
+
+Two defects, one cause: **nothing on the publish path compared sheet names to
+anything.** `publish()` bounds-checked each index and copied `sheet.name` into
+the manifest.
+
+**A local collision rename leaked upstream, on the DEFAULT push.** Checkout is
+additive, so pulling an application's `Sheet1` into a workbook that already has
+one renames the *incoming* sheet to `Sheet1 (2)` — a collision in that one
+author's workbook and nowhere else. `assemble_publish_workbook` names sheets from
+the live `state.sheet_names`, and the default selection is exactly `base_sheets`,
+so a push with nothing changed renamed that sheet **for every subscriber**, with
+no tick and no author action.
+
+Names are the formula reference key. Cross-sheet references inside a package are
+stored as raw TEXT and resolved by a **first-match case-insensitive name lookup**
+(`calculation.rs`, `lib.rs::normalize_cross_sheet_refs`), so a renamed sheet
+re-points every `=Sheet1!A1` in the package at whatever the subscriber happens to
+call `Sheet1` — no `#REF!`, no warning, and `restamp_sheet_casing` then cements
+the new spelling. It was also self-erasing: `record_push` overwrites
+`base_sheets` from the live names, so after one leaked push the drift is no
+longer detectable offline.
+
+**An application sheet now publishes under the name the LINK records**, taken
+from `base_sheets` in `assemble_publish_workbook` — the one door the publish, the
+dry-run preview and the working-copy diff all go through, so all three agree.
+
+**Renames are therefore out of push entirely** (owner decision, 2026-09-01). A
+deliberate rename does not travel either, and that is the point rather than a
+casualty: renaming a sheet subscribers hold formulas against is a breaking
+change, and push is the wrong gesture for it. Until a reviewable workspace-side
+rename exists, a working copy's tab name is local. A pivot's `destination_sheet`
+records the local tab, so it is rewritten through the same map — otherwise the
+retention check drops every pivot on a restored sheet.
+
+**And two sheets in one version may no longer share a name**
+(`CalpError::DuplicateSheetName`, refused in `core/calp/src/publish.rs` so every
+route is covered including the scripted gateway). A workbook cannot hold a
+duplicate, but a published version could: `VersionManifest.sheets` is a plain
+`Vec` keyed by nothing and `sheet_indices` was never deduped at any layer, so
+even the same index twice signed and published cleanly. The refusal is
+case-insensitive, and separates the two cases — a genuine collision names the
+sheet to rename; a repeated index says the selection is wrong.
+
+Note the interaction: restoring published names is what *creates* the collision
+the refusal catches. Tick both your own `Sheet1` and the application's, and the
+application's is restored to `Sheet1` — at which point the version would carry
+two. That is the correct place to stop, and the message names which one to rename.
+
+**A third defect fell out of the same code.** The pivot-retention set compared
+names case-SENSITIVELY while every other sheet-name comparison in the product is
+`eq_ignore_ascii_case`, so a pivot whose `destination_sheet` was recorded as
+`data` against a tab spelled `Data` was silently dropped from the application.
+Both halves of that comparison are now lowercased.
+
 #### A cached result is not an edit (2026-09-01)
 
 `cells_equal` compared every field of a cell entry, including `v`, `t`, `e` and

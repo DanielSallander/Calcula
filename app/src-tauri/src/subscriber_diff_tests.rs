@@ -389,3 +389,100 @@ fn a_spill_origin_cannot_be_half_kept() {
          carries no spill of its own, so a cell-level test would always be false"
     );
 }
+
+// ---------------------------------------------------------------------------
+// E. A local rename does not travel upstream
+// ---------------------------------------------------------------------------
+
+/// THE LEAK. Checkout is ADDITIVE, so pulling an application's "Sheet1" into a
+/// workbook that already has one renames the INCOMING sheet to "Sheet1 (2)" — a
+/// collision in THIS author's workbook and nowhere else. Publishing the LIVE
+/// name then renamed that sheet for every subscriber.
+///
+/// It needed no author action: the default push selection is exactly
+/// `base_sheets`, `assemble_publish_workbook` names sheets from the live
+/// `state.sheet_names`, and `publish()` copies `sheet.name` into the manifest.
+///
+/// And names are the formula reference key — cross-sheet refs inside a package
+/// are stored as raw text and resolved by a FIRST-MATCH case-insensitive name
+/// lookup, so a renamed sheet re-points every `=Sheet1!A1` in the package at
+/// whatever the subscriber calls "Sheet1", silently.
+///
+/// SABOTAGE: delete the `renamed_for_publish` block from
+/// `assemble_publish_workbook`.
+#[test]
+fn a_published_sheet_keeps_the_name_the_application_knows_it_by() {
+    let body = body_of("fn assemble_publish_workbook(");
+    assert!(
+        body.contains("renamed_for_publish"),
+        "the publish assembly stopped restoring published sheet names, so a \
+         local collision rename ships upstream again"
+    );
+    assert!(
+        body.contains("base_sheets"),
+        "the published name must come from the working-copy LINK — it is the \
+         only record of what the application calls the sheet"
+    );
+}
+
+/// IT MUST RUN BEFORE THE NAME IS READ FOR ANYTHING ELSE. The pivot-retention
+/// set is built from the workbook's sheet names, so restoring the names after
+/// it would compare a restored name against a set of local ones and silently
+/// drop every pivot on a renamed sheet.
+///
+/// SABOTAGE: move the `renamed_for_publish` block below `let published_names`.
+#[test]
+fn the_name_restoration_precedes_everything_that_reads_a_sheet_name() {
+    let body = body_of("fn assemble_publish_workbook(");
+    let restore = body
+        .find("renamed_for_publish")
+        .expect("the restoration is gone");
+    let names = body
+        .find("let published_names")
+        .expect("the pivot-retention set is gone");
+    assert!(
+        restore < names,
+        "the pivot-retention set is built from sheet names, so the restoration \
+         must happen first or every pivot on a renamed sheet is dropped"
+    );
+}
+
+/// A PIVOT FOLLOWS ITS SHEET. `destination_sheet` records the LOCAL tab; if the
+/// sheet publishes under a different name the pivot has to be rewritten too, or
+/// the published pivot names a sheet the package does not contain.
+///
+/// SABOTAGE: delete the `destination_sheet` rewrite.
+#[test]
+fn a_pivot_is_repointed_at_the_published_sheet_name() {
+    let body = body_of("fn assemble_publish_workbook(");
+    let rewrite = body
+        .find("renamed_for_publish.get(&local)")
+        .expect("the pivot destination rewrite is gone");
+    let check = body
+        .find("map_or(true, |name| published_names.contains")
+        .expect("the pivot retention check moved");
+    assert!(
+        rewrite < check,
+        "the pivot must be repointed BEFORE the retention check reads its \
+         destination, or the rewrite happens to a pivot already dropped"
+    );
+}
+
+/// SHEET NAMES ARE COMPARED CASE-INSENSITIVELY, everywhere. The lexer uppercases
+/// bare identifiers, so `Data` and `data` are one name to a formula. This set
+/// was matched case-SENSITIVELY, which silently dropped a pivot whose
+/// `destination_sheet` was recorded as `data` from a tab spelled `Data`.
+///
+/// SABOTAGE: drop the `.to_ascii_lowercase()` from either side.
+#[test]
+fn the_pivot_retention_set_is_case_insensitive_like_every_other_name_compare() {
+    let body = body_of("fn assemble_publish_workbook(");
+    assert!(
+        body.contains("s.name.to_ascii_lowercase()"),
+        "the published-name set is case-sensitive again"
+    );
+    assert!(
+        body.contains("published_names.contains(&name.to_ascii_lowercase())"),
+        "the lookup side is case-sensitive again — both halves have to agree"
+    );
+}

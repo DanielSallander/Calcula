@@ -35,6 +35,19 @@ pub enum CalpError {
     #[error("Sheet not found in workbook: {0}")]
     SheetNotFound(String),
 
+    /// Two sheets in one published version would carry the same name.
+    ///
+    /// A workbook cannot hold two sheets with the same name — `ensure_sheet_name_is_free`
+    /// refuses it, case-insensitively — but a published VERSION could, because
+    /// `VersionManifest.sheets` is a plain `Vec` keyed by nothing. A subscriber
+    /// pulling such a version gets one of them renamed by
+    /// `resolve_sheet_name_collisions`, and since cross-sheet formulas inside a
+    /// package are stored as raw TEXT and resolved by a first-match
+    /// case-insensitive name lookup, the package's own `=Sheet1!A1` would then
+    /// bind to whichever sheet won the name — silently, with no `#REF!`.
+    #[error("Two sheets in this version would both be called '{name}'. {detail}")]
+    DuplicateSheetName { name: String, detail: String },
+
     #[error("Workspace error: {0}")]
     Workspace(String),
 

@@ -248,6 +248,17 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     // but benign by coincidence. Wait until the list has loaded so the request
     // says what it means.
     if (availableSheets.length === 0) return;
+    // NOTHING TICKED, NOTHING TO DESCRIBE. An empty `sheetIndices` means "the
+    // default" on the wire, so fetching here would render a diff of the base
+    // sheets under a list showing no selection — which is exactly the "glitchy"
+    // panel this was reported as. The push is refused in that state anyway
+    // (`pushBlockingReason`), so there is no push for the panel to describe.
+    if (kind !== "library" && sheetSelection.size === 0) {
+      setDiff(null);
+      setDiffError(null);
+      setExcludedCells(new Set());
+      return;
+    }
     let cancelled = false;
     setDiffBusy(true);
     setDiffError(null);
@@ -273,7 +284,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, workspace?.baseVersion, pushed, sheetSelection, availableSheets.length, includeComments]);
+  }, [mode, workspace?.baseVersion, pushed, sheetSelection, availableSheets.length, includeComments, kind]);
 
   // When the base is stale, WHY it is stale matters more than the fact. Ask
   // whether the intervening work actually overlaps yours before telling the
@@ -473,7 +484,17 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   // unmissable after it. Pure and unit-tested; see lib/pushReadiness.ts for why
   // it is a sentence rather than the boolean it used to be.
   const blockingReason = (): string | null =>
-    pushBlockingReason({ mode, registryPath, packageName, version, changeSummary, pushed });
+    pushBlockingReason({
+      mode,
+      registryPath,
+      packageName,
+      version,
+      changeSummary,
+      pushed,
+      sheetsSelected: sheetSelection.size,
+      sheetsAvailable: availableSheets.length,
+      kind,
+    });
   const blocked = blockingReason();
   const canPush = !blocked && !pushed;
 

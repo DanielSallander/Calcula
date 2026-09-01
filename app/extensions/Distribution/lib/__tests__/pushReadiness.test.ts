@@ -20,6 +20,9 @@ const ready: PushReadinessInput = {
   version: "1.0.1",
   changeSummary: "Adds the regional split.",
   pushed: false,
+  sheetsSelected: 1,
+  sheetsAvailable: 2,
+  kind: "report",
 };
 
 describe("pushBlockingReason", () => {
@@ -92,5 +95,51 @@ describe("pushBlockingReason", () => {
       expect(r!.length, `too terse to act on: ${r}`).toBeGreaterThan(20);
       expect(r!.trim().endsWith("."), `not a sentence: ${r}`).toBe(true);
     }
+  });
+});
+
+describe("an empty tick-list is not an empty publish", () => {
+  // Reported from live testing: "even if no sheets are selected it shows a diff
+  // in the section above. It looks a bit glitchy."
+  //
+  // The glitch was the dialog being honest about a push the checkboxes denied.
+  // On the wire an empty `sheetIndices` means "resolve the default", which for a
+  // working copy is the base version's sheets — so pressing Push with every box
+  // clear would have published the default set.
+
+  it("blocks a push with nothing ticked, and says which control to use", () => {
+    // SABOTAGE: delete the sheetsSelected check. The dialog then pushes the
+    // base sheets while the list shows none selected.
+    const reason = pushBlockingReason({ ...ready, sheetsSelected: 0 });
+    expect(reason).toBeTruthy();
+    expect(reason).toMatch(/sheet/i);
+  });
+
+  it("does not block before the sheet list has loaded", () => {
+    // `sheetsAvailable === 0` is "still loading", not "nothing to publish".
+    // SABOTAGE: drop the sheetsAvailable > 0 term — the button then refuses on
+    // open, before the user could possibly have ticked anything.
+    expect(
+      pushBlockingReason({ ...ready, sheetsSelected: 0, sheetsAvailable: 0 }),
+    ).toBeNull();
+  });
+
+  it("lets a LIBRARY publish zero sheets, because that is what a library is", () => {
+    // A function library ships no data; zero sheets is the correct answer for
+    // that kind and the only kind it is correct for.
+    // SABOTAGE: drop the kind check.
+    expect(
+      pushBlockingReason({ ...ready, kind: "library", sheetsSelected: 0 }),
+    ).toBeNull();
+  });
+
+  it("still blocks a report with nothing ticked even when a summary is present", () => {
+    // Ordering guard: the summary check must not shadow this one.
+    const reason = pushBlockingReason({
+      ...ready,
+      sheetsSelected: 0,
+      changeSummary: "Something real",
+    });
+    expect(reason).toMatch(/sheet/i);
   });
 });

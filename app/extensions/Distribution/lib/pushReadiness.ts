@@ -21,6 +21,16 @@ export interface PushReadinessInput {
   changeSummary: string;
   /** True once a push has landed — the dialog is then a receipt. */
   pushed: boolean;
+  /** How many sheets are ticked. */
+  sheetsSelected: number;
+  /** How many the dialog is offering. 0 while the list is still loading. */
+  sheetsAvailable: number;
+  /**
+   * The application kind. `"library"` is the one kind for which zero sheets is
+   * the CORRECT answer — a function library ships no data — so it is the one
+   * kind the empty-selection refusal must not apply to.
+   */
+  kind: string;
 }
 
 /**
@@ -41,6 +51,25 @@ export function pushBlockingReason(i: PushReadinessInput): string | null {
   }
   if (i.packageName.trim() === "") return "Give the application a name.";
   if (i.version.trim() === "") return "Give this version a number.";
+  // AN EMPTY TICK-LIST IS NOT AN EMPTY PUBLISH. On the wire, an empty
+  // `sheetIndices` means "resolve the default", which for a working copy is the
+  // base version's sheets — so pressing Push with every box clear would publish
+  // the default set, and the diff panel above would (correctly, and very
+  // confusingly) describe that set while the list showed nothing selected.
+  //
+  // Reported from live testing as "even if no sheets are selected it shows a
+  // diff in the section above. It looks a bit glitchy." The glitch was the
+  // dialog being honest about a push the checkboxes denied.
+  //
+  // Refused rather than reinterpreted: "publish nothing" is not a gesture
+  // anybody wants, and "publish the default" is not what an empty list says.
+  if (
+    i.kind !== "library" &&
+    i.sheetsAvailable > 0 &&
+    i.sheetsSelected === 0
+  ) {
+    return "Tick at least one sheet to publish.";
+  }
   // CREATE may omit it — there is no history to explain yet. A PUSH may not:
   // the summary is what the next reader of the version list actually sees.
   if (i.mode === "push" && i.changeSummary.trim() === "") {
