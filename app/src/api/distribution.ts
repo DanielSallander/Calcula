@@ -850,6 +850,17 @@ export interface RefreshPreview {
   totalSheetsRemoved: number;
   totalOverridesConflicted: number;
   totalOverridesAutoCleared: number;
+  /**
+   * False when a cell count was capped by the diff budget. The dialog must then
+   * say "at least N" rather than "N".
+   */
+  totalCellsChangedExact: boolean;
+  /**
+   * True when every override-bearing sheet was examined, so the conflict list is
+   * the whole truth. False must BLOCK Apply: a resolver may not present a
+   * partial list as a complete set of decisions.
+   */
+  conflictsExact: boolean;
 }
 
 export interface SubscriptionPreview {
@@ -860,8 +871,74 @@ export interface SubscriptionPreview {
   sheetsRemoved: SheetChangeInfo[];
   sheetsUpdated: SheetChangeInfo[];
   cellsChanged: number;
+  /** Whether `cellsChanged` is the whole truth or a bounded floor. */
+  cellsChangedExact: boolean;
+  /** How many sheets had a changed data artifact, even when the count was capped. */
+  sheetsWithDataChanges: number;
   overridesConflicted: number;
   overridesAutoCleared: number;
+  /**
+   * Every conflict this refresh would create, one row per cell.
+   *
+   * Computed with the SAME predicate the apply uses, from the same artifact —
+   * `overridesConflicted` is `conflicts.length`. It used to be "every override
+   * on a sheet whose artifact changed", so a sheet where the publisher edited
+   * one cell and you had edited twenty others reported twenty conflicts and
+   * produced one.
+   */
+  conflicts: ConflictPreviewCell[];
+  /** Sheets whose artifacts could not be read, so their conflicts are unknown. */
+  unexaminedSheets: UnexaminedSheet[];
+}
+
+/** One conflicted cell: base, mine, theirs. */
+export interface ConflictPreviewCell {
+  /** LOCAL sheet id — the key the resolution takes, and the one this workbook holds. */
+  localSheetId: string;
+  cellId: string;
+  /** The LIVE local name: a subscriber may rename a subscribed sheet. */
+  sheetName: string;
+  /** (row, col) — a JSON array, mirroring Rust's `(u32, u32)`. */
+  position: [number, number];
+  /** A1 of `position`, so the dialog does not re-implement the conversion. */
+  a1: string;
+  /** base — what upstream held when you made the edit. */
+  baseline: OverrideValue;
+  /** mine — what you typed. */
+  current: OverrideValue;
+  /** theirs — what upstream holds now. */
+  upstreamNew: OverrideValue;
+}
+
+/** A sheet the preview could not read, and why. */
+export interface UnexaminedSheet {
+  packageSheetId: string;
+  sheetName: string;
+  /** `"unreadable"` — missing, too large to parse, or the workspace went away. */
+  reason: string;
+}
+
+/** What to do with one conflicted cell. */
+export type ResolutionChoice = "keepMine" | "takeTheirs";
+
+/**
+ * One resolved cell, keyed the way the override layer is keyed: (sheet, cell)
+ * ids, never a position. Positions move under a refresh; the layer is
+ * id-anchored precisely so an override survives a structural shift.
+ */
+export interface CellResolution {
+  sheetId: string;
+  cellId: string;
+  choice: ResolutionChoice;
+}
+
+export interface RefreshApplyParams {
+  /**
+   * Only the cells the user actually decided on. Anything unlisted keeps the
+   * local value and stays flagged — which is exactly what a refresh did before
+   * there was anything to decide.
+   */
+  resolutions?: CellResolution[];
 }
 
 export interface SheetChangeInfo {
@@ -1290,8 +1367,16 @@ export function refreshPreview(): Promise<RefreshPreview> {
   return invokeBackend("calp_refresh_preview");
 }
 
-export function refreshApply(): Promise<RefreshResult> {
-  return invokeBackend("calp_refresh_apply");
+/**
+ * Apply a refresh the user has previewed.
+ *
+ * Omitting `params` — or passing no resolutions — keeps every local value and
+ * leaves every conflict flagged, which is what this did before it could be told
+ * otherwise. The script gateway relies on that default: a script may take an
+ * update, never adjudicate one.
+ */
+export function refreshApply(params?: RefreshApplyParams): Promise<RefreshResult> {
+  return invokeBackend("calp_refresh_apply", { params: params ?? null });
 }
 
 export function detach(): Promise<void> {

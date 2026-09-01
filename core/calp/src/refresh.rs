@@ -41,6 +41,10 @@ pub struct RefreshPreview {
     /// False when any subscription's cell count was capped by a budget. The
     /// dialog must then say "at least N" rather than "N".
     pub total_cells_changed_exact: bool,
+    /// True when EVERY override-bearing sheet was examined, so the conflict
+    /// list is the whole truth. False gates Apply: the user cannot be asked to
+    /// resolve a list that silently omits rows.
+    pub conflicts_exact: bool,
 }
 
 /// Preview for a single subscription's refresh.
@@ -68,6 +72,56 @@ pub struct SubscriptionPreview {
     pub overrides_conflicted: usize,
     /// Overrides that would auto-clear (match new upstream).
     pub overrides_auto_cleared: usize,
+    /// EVERY conflict this refresh would create, one row per cell, carrying the
+    /// full three-way triple the resolver needs: baseline (base), current
+    /// (mine), upstream_new (theirs).
+    ///
+    /// Computed with the same predicate the apply uses
+    /// ([`crate::overrides::classify_rebase`]), from the same artifact, so the
+    /// dialog cannot ask about cells the apply will not touch. `overrides_conflicted`
+    /// is `conflicts.len()` — it used to be "every override on a changed sheet",
+    /// a number nobody had computed.
+    pub conflicts: Vec<ConflictPreviewCell>,
+    /// Sheets whose artifacts could not be examined, so their conflicts are
+    /// unknown. NEVER a silent cap: `calp_refresh_apply` refuses while this is
+    /// non-empty, because a resolver that silently omits rows would tell the
+    /// user they had decided everything.
+    pub unexamined_sheets: Vec<UnexaminedSheet>,
+}
+
+/// One conflicted cell, ready for a three-way resolver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictPreviewCell {
+    /// The LOCAL sheet id — the key `accept_upstream` / `keep_override` take,
+    /// and the one the workbook actually holds. The publisher's id is a
+    /// different uuid on a subscriber.
+    pub local_sheet_id: SheetId,
+    pub cell_id: CellId,
+    /// The LIVE local sheet name: a subscriber may rename a subscribed sheet.
+    pub sheet_name: String,
+    /// (row, col) as resolved for the refresh — the id registry's answer where
+    /// it has one, the override's recorded position otherwise.
+    pub position: (u32, u32),
+    /// A1 of `position`, so the dialog does not re-implement the conversion.
+    pub a1: String,
+    /// base — what upstream held when the override was made.
+    pub baseline: OverrideValue,
+    /// mine — what the subscriber typed.
+    pub current: OverrideValue,
+    /// theirs — what upstream holds now.
+    pub upstream_new: OverrideValue,
+}
+
+/// A sheet the preview could not read, and why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnexaminedSheet {
+    pub package_sheet_id: SheetId,
+    pub sheet_name: String,
+    /// `"unreadable"` — the artifact is missing, too large to parse, or the
+    /// workspace went away mid-preview.
+    pub reason: String,
 }
 
 /// Info about a sheet change in a refresh preview.
@@ -124,10 +178,22 @@ pub struct RefreshResult {
 // ============================================================================
 
 /// Compute a refresh preview for all subscriptions without applying changes.
+///
+/// `override_positions` is the ONE input the preview lacked and the apply has:
+/// where each override's cell actually sits now. The apply resolves it as
+/// `id_registry.cell_position(sheet, cell).unwrap_or(ovr.position)`, and the id
+/// registry lives in the app's `AppState`, not here — so the caller resolves it
+/// and hands it over. Absent entries fall back to the override's recorded
+/// position, exactly as the apply's `unwrap_or` does.
+///
+/// Without it the preview cannot name a cell's upstream value, which is why the
+/// conflict figure was a fabricated estimate (every override on a changed sheet)
+/// for as long as it was.
 pub fn compute_preview(
     registry: &dyn WorkspaceTransport,
     subscriptions: &[Subscription],
     override_layer: &OverrideLayer,
+    override_positions: &HashMap<(SheetId, CellId), (u32, u32)>,
 ) -> Result<RefreshPreview, CalpError> {
     let mut sub_previews = Vec::new();
     let mut total_cells = 0;
@@ -136,6 +202,7 @@ pub fn compute_preview(
     let mut total_conflicts = 0;
     let total_cleared = 0;
     let mut total_cells_exact = true;
+    let mut conflicts_exact = true;
 
     for sub in subscriptions {
         let pin = VersionPin::parse(&sub.version_pin)?;
@@ -198,10 +265,23 @@ pub fn compute_preview(
             }
         }
 
-        // Estimate conflict count from overrides on updated sheets
-        let conflict_estimate: usize = sheets_updated.iter()
-            .map(|s| s.override_count)
-            .sum();
+        // THE REAL CONFLICTS, not an estimate.
+        //
+        // This was `sheets_updated.iter().map(|s| s.override_count).sum()` —
+        // every override on any sheet whose artifact changed, whether or not
+        // upstream had touched that particular cell. On a sheet where the
+        // publisher edited one cell and the subscriber had edited twenty
+        // others, the dialog reported twenty conflicts and the apply created
+        // one. The number was never computed; it was inferred from a proxy.
+        let (conflicts, unexamined_sheets) = collect_conflicts(
+            registry,
+            &sub.package_name,
+            &new_version_str,
+            sub,
+            &sheets_updated,
+            override_layer,
+            override_positions,
+        );
 
         // REAL cell counts, bounded.
         //
@@ -226,20 +306,25 @@ pub fn compute_preview(
             cells_changed,
             cells_changed_exact: cells_exact,
             sheets_with_data_changes,
-            overrides_conflicted: conflict_estimate,
+            overrides_conflicted: conflicts.len(),
             overrides_auto_cleared: 0,
             sheets_added: sheets_added.clone(),
             sheets_removed: sheets_removed.clone(),
             sheets_updated: sheets_updated.clone(),
+            conflicts,
+            unexamined_sheets,
         };
 
         if !cells_exact {
             total_cells_exact = false;
         }
+        if !preview.unexamined_sheets.is_empty() {
+            conflicts_exact = false;
+        }
         total_cells += preview.cells_changed;
         total_added += sheets_added.len();
         total_removed += sheets_removed.len();
-        total_conflicts += conflict_estimate;
+        total_conflicts += preview.overrides_conflicted;
 
         sub_previews.push(preview);
     }
@@ -252,7 +337,100 @@ pub fn compute_preview(
         total_overrides_conflicted: total_conflicts,
         total_overrides_auto_cleared: total_cleared,
         total_cells_changed_exact: total_cells_exact,
+        conflicts_exact,
     })
+}
+
+/// Every conflict one subscription's refresh would create, plus the sheets that
+/// could not be read.
+///
+/// Reaches the SAME verdict the apply does, by construction rather than by
+/// coincidence: it reads the new version's `data.json`, runs it through
+/// `sheet_data_to_cells` — the exact conversion `pull()` uses — and asks
+/// [`crate::overrides::classify_rebase`], the predicate `rebase` itself now asks.
+///
+/// NOT budgeted by sheet count, deliberately, and this is the one place that
+/// differs from `count_upstream_cell_changes`. A cell count may honestly be "at
+/// least N"; a list of decisions the user is about to make may not be "some of
+/// them". Anything unreadable is REPORTED as unexamined rather than skipped, and
+/// the apply refuses while that list is non-empty.
+#[allow(clippy::too_many_arguments)]
+fn collect_conflicts(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+    new_version: &str,
+    sub: &Subscription,
+    sheets_updated: &[SheetChangeInfo],
+    override_layer: &OverrideLayer,
+    override_positions: &HashMap<(SheetId, CellId), (u32, u32)>,
+) -> (Vec<ConflictPreviewCell>, Vec<UnexaminedSheet>) {
+    /// Per-sheet cap on a data artifact, matching `count_upstream_cell_changes`.
+    const MAX_BYTES: usize = 4 * 1024 * 1024;
+
+    let mut conflicts = Vec::new();
+    let mut unexamined = Vec::new();
+
+    for changed in sheets_updated {
+        // A sheet with no local edits cannot produce a conflict, and reading its
+        // artifact would buy nothing. This is a skip that costs no honesty.
+        if changed.override_count == 0 {
+            continue;
+        }
+        let Some(sheet_sub) = sub
+            .sheets
+            .iter()
+            .find(|s| s.package_sheet_id == changed.sheet_id)
+        else {
+            continue;
+        };
+        let local_sid = sheet_sub.local_sheet_id;
+
+        let rel = format!("sheets/{}/data.json", changed.sheet_id);
+        let parsed: Option<calcula_format::sheet_data::SheetData> =
+            match registry.read_artifact(package, new_version, &rel) {
+                Ok(Some(bytes)) if bytes.len() <= MAX_BYTES => serde_json::from_slice(&bytes).ok(),
+                _ => None,
+            };
+        let Some(data) = parsed else {
+            unexamined.push(UnexaminedSheet {
+                package_sheet_id: changed.sheet_id,
+                sheet_name: changed.name.clone(),
+                reason: "unreadable".to_string(),
+            });
+            continue;
+        };
+
+        // THE SAME CONVERSION THE PULL USES (pull.rs feeds `sheet_data_to_cells`
+        // into the payload the apply then reads), so the two sides cannot
+        // disagree about what upstream holds at a cell.
+        let upstream_cells = calcula_format::sheet_data::sheet_data_to_cells(&data);
+
+        for ovr in override_layer.overrides_for_sheet(local_sid) {
+            let pos = override_positions
+                .get(&(local_sid, ovr.cell_id))
+                .copied()
+                .unwrap_or(ovr.position);
+            let upstream_new =
+                crate::overrides::override_value_from_saved(upstream_cells.get(&pos));
+            if crate::overrides::classify_rebase(ovr, &upstream_new)
+                != crate::overrides::RebaseOutcome::Conflict
+            {
+                continue;
+            }
+            conflicts.push(ConflictPreviewCell {
+                local_sheet_id: local_sid,
+                cell_id: ovr.cell_id,
+                sheet_name: sheet_sub.local_name.clone(),
+                position: pos,
+                a1: calcula_format::cell_ref::to_a1(pos.0, pos.1),
+                baseline: ovr.baseline.clone(),
+                current: ovr.current.clone(),
+                upstream_new,
+            });
+        }
+    }
+
+    (conflicts, unexamined)
 }
 
 /// How many cells actually changed between the version a subscriber is on and
@@ -587,7 +765,7 @@ mod tests {
         };
 
         let layer = OverrideLayer::new();
-        let preview = compute_preview(&reg, &[sub], &layer).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
 
         assert_eq!(preview.subscription_previews.len(), 1);
         assert_eq!(preview.subscription_previews[0].new_version, "1.1.0");
@@ -665,7 +843,8 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let preview = compute_preview(&reg, &[sub], &OverrideLayer::new()).unwrap();
+        let preview =
+            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.cells_changed, 2, "one edited cell and one added cell");
         assert!(p.cells_changed_exact, "small package: the count is the whole truth");
@@ -697,7 +876,8 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let preview = compute_preview(&reg, &[sub], &OverrideLayer::new()).unwrap();
+        let preview =
+            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.new_version, "1.1.0", "an update IS available");
         assert_eq!(p.cells_changed, 0, "…but the same workbook was republished");
@@ -729,7 +909,7 @@ mod tests {
         };
 
         let layer = OverrideLayer::new();
-        let preview = compute_preview(&reg, &[sub], &layer).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
         assert!(preview.subscription_previews.is_empty());
     }
 
@@ -1003,4 +1183,325 @@ mod tests {
         assert!(subs.is_empty());
         assert_eq!(layer.count(), 0);
     }
+    // ======================================================================
+    // The preview and the apply must name the SAME conflicts
+    // ======================================================================
+
+    /// Publish two versions of a one-cell sheet, the second holding `after`.
+    fn two_versions(
+        dir: &TempDir,
+        prof: &std::path::Path,
+        before: f64,
+        after: f64,
+    ) -> (LocalWorkspace, SheetId) {
+        let reg = LocalWorkspace::open(dir.path()).unwrap();
+        let mut wb = persistence::Workbook::default();
+        let mut sheet = persistence::Sheet::new("Sheet1".to_string());
+        sheet
+            .cells
+            .insert((0, 0), SavedCell::from_cell(&engine::cell::Cell::new_number(before)));
+        wb.sheets = vec![sheet];
+        let sheet_id = wb.sheets[0].id;
+
+        let publish_it = |wb: &persistence::Workbook, version: SemVer| {
+            let request = PublishRequest {
+                model_writebacks: None,
+                workbook: wb,
+                package_name: "parity".to_string(),
+                version,
+                kind: "report".to_string(),
+                mode: crate::publish::test_mode_for(&reg, "parity"),
+                change_summary: "test push".to_string(),
+                sheet_indices: vec![0],
+                now: "2026-01-01T00:00:00Z".to_string(),
+                published_by: "tester".to_string(),
+                writeback_regions: None,
+                object_scripts: None,
+                module_scripts: None,
+                notebooks: None,
+                data_sources: Vec::new(),
+                excluded_regions: Vec::new(),
+                custom_objects: Vec::new(),
+                include_comments: false,
+                min_app_version: String::new(),
+            };
+            publish::publish(&reg, &request, prof).unwrap();
+        };
+        publish_it(&wb, SemVer::new(1, 0, 0));
+
+        let mut v2 = wb.clone();
+        v2.sheets[0].cells.insert(
+            (0, 0),
+            SavedCell::from_cell(&engine::cell::Cell::new_number(after)),
+        );
+        publish_it(&v2, SemVer::new(1, 1, 0));
+        (reg, sheet_id)
+    }
+
+    /// One override at `position`, upstream once held `baseline`, the subscriber
+    /// typed `current`.
+    fn parity_override(
+        sheet_id: SheetId,
+        cell_id: CellId,
+        position: (u32, u32),
+        baseline: &str,
+        current: &str,
+    ) -> crate::overrides::CellOverride {
+        crate::overrides::CellOverride {
+            sheet_id,
+            cell_id,
+            position,
+            baseline: OverrideValue::Value { display: baseline.to_string() },
+            current: OverrideValue::Value { display: current.to_string() },
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            modified_at: "2026-01-01T00:00:00Z".to_string(),
+            author: String::new(),
+            conflict: false,
+            upstream_new: None,
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    fn parity_subscription(
+        dir: &TempDir,
+        package_sheet_id: SheetId,
+        local_sheet_id: SheetId,
+    ) -> Subscription {
+        Subscription {
+            package_name: "parity".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: "^1.0.0".to_string(),
+            resolved_version: "1.0.0".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: vec![SubscribedSheet {
+                package_sheet_id,
+                local_sheet_id,
+                local_name: "Sheet1".to_string(),
+                extra: std::collections::HashMap::new(),
+            }],
+            channel: String::new(),
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            detached_sheets: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    /// THE GUARD THIS WHOLE CHANGE RESTS ON. The refresh dialog now asks the
+    /// user to decide, cell by cell, what happens to their edits. If the preview
+    /// names a different set of cells than the apply acts on, the dialog is
+    /// worse than useless: the user resolves conflicts that do not exist and is
+    /// never shown the ones that do.
+    ///
+    /// The two sides used entirely different code — the preview inferred a count
+    /// from "overrides on a changed sheet", the apply compared values — so this
+    /// could not even be asked before. They now share
+    /// `overrides::classify_rebase` and both feed it from `sheet_data_to_cells`.
+    ///
+    /// SABOTAGE: in `collect_conflicts`, drop the `classify_rebase` filter and
+    /// push every override. The preview then reports 1 and the apply 0.
+    #[test]
+    fn the_preview_and_the_apply_agree_a_cell_is_not_a_conflict() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        // Upstream moved 100 -> 100: the cell did not actually change.
+        let (reg, pkg_sheet) = two_versions(&dir, prof.path(), 100.0, 100.0);
+        let local_sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        let cell_id = CellId::from_bytes(identity::generate_uuid_v7());
+
+        let mut layer = OverrideLayer::new();
+        layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "999"));
+
+        let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let p = &preview.subscription_previews[0];
+        assert_eq!(
+            p.conflicts.len(),
+            0,
+            "upstream did not touch this cell — the OLD code reported it as a \
+             conflict purely because the sheet's artifact changed"
+        );
+        assert_eq!(p.overrides_conflicted, 0);
+
+        // And the apply, from the same artifact, reaches the same verdict.
+        let mut upstream = HashMap::new();
+        upstream.insert(
+            (local_sheet, cell_id),
+            OverrideValue::Value { display: "100".to_string() },
+        );
+        let (conflicts, _) = layer.rebase(&upstream);
+        assert_eq!(conflicts, 0, "the apply must agree with the preview");
+    }
+
+    /// The positive control: a cell upstream really did change appears in BOTH,
+    /// with the full three-way triple the resolver renders.
+    ///
+    /// SABOTAGE: make `collect_conflicts` read the OLD version's artifact
+    /// instead of the new one — `upstream_new` then equals `baseline` and the
+    /// list empties.
+    #[test]
+    fn the_preview_and_the_apply_agree_a_cell_is_a_conflict() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let (reg, pkg_sheet) = two_versions(&dir, prof.path(), 100.0, 150.0);
+        let local_sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        let cell_id = CellId::from_bytes(identity::generate_uuid_v7());
+
+        let mut layer = OverrideLayer::new();
+        layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "999"));
+
+        let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let p = &preview.subscription_previews[0];
+        assert_eq!(p.conflicts.len(), 1, "upstream changed a cell the user had edited");
+
+        let c = &p.conflicts[0];
+        assert_eq!(
+            c.local_sheet_id, local_sheet,
+            "the LOCAL id — the key the resolver sends back"
+        );
+        assert_eq!(c.cell_id, cell_id);
+        assert_eq!(c.a1, "A1");
+        assert_eq!(c.baseline, OverrideValue::Value { display: "100".to_string() }, "base");
+        assert_eq!(c.current, OverrideValue::Value { display: "999".to_string() }, "mine");
+        assert_eq!(
+            c.upstream_new,
+            OverrideValue::Value { display: "150".to_string() },
+            "theirs"
+        );
+
+        // The apply agrees, from the value the preview reported as "theirs".
+        let mut upstream = HashMap::new();
+        upstream.insert((local_sheet, cell_id), c.upstream_new.clone());
+        let (conflicts, _) = layer.rebase(&upstream);
+        assert_eq!(conflicts, 1);
+    }
+
+    /// A cell where the subscriber independently typed what upstream now says is
+    /// NOT a conflict — `auto_clear_matching` drops the override entirely. The
+    /// preview must not offer a decision about a cell that will silently vanish,
+    /// and the apply must not COUNT it: `rebase` used to increment for every
+    /// changed-upstream cell including the ones it deleted two lines later.
+    ///
+    /// SABOTAGE: reorder `classify_rebase` to test `upstream != baseline` before
+    /// the auto-clear branch.
+    #[test]
+    fn a_cell_the_subscriber_already_agreed_with_is_not_a_conflict() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let (reg, pkg_sheet) = two_versions(&dir, prof.path(), 100.0, 150.0);
+        let local_sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        let cell_id = CellId::from_bytes(identity::generate_uuid_v7());
+
+        let mut layer = OverrideLayer::new();
+        // The subscriber typed 150 before the publisher did.
+        layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "150"));
+
+        let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        assert_eq!(preview.subscription_previews[0].conflicts.len(), 0);
+
+        let mut upstream = HashMap::new();
+        upstream.insert(
+            (local_sheet, cell_id),
+            OverrideValue::Value { display: "150".to_string() },
+        );
+        let (conflicts, cleared) = layer.rebase(&upstream);
+        assert_eq!(conflicts, 0, "counted only when it SURVIVES auto-clear");
+        assert_eq!(cleared, 1);
+        assert_eq!(layer.count(), 0);
+    }
+
+    /// The preview follows the ID REGISTRY, not the recorded position, exactly
+    /// as the apply does. An override is id-anchored so it survives structural
+    /// shifts; reading the recorded position would look at whatever now occupies
+    /// the old coordinates.
+    ///
+    /// SABOTAGE: ignore `override_positions` in `collect_conflicts` and always
+    /// use `ovr.position`.
+    #[test]
+    fn the_preview_reads_the_cell_the_id_registry_points_at() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        // A1 = 100 -> 150. The override CLAIMS to live at B2, which is empty
+        // upstream, but the registry says it is really at A1.
+        let (reg, pkg_sheet) = two_versions(&dir, prof.path(), 100.0, 150.0);
+        let local_sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        let cell_id = CellId::from_bytes(identity::generate_uuid_v7());
+
+        let mut layer = OverrideLayer::new();
+        layer.set_override(parity_override(local_sheet, cell_id, (1, 1), "100", "999"));
+
+        let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
+
+        // Without the registry: reads B2, which is empty, so it reports a
+        // conflict against the wrong "theirs".
+        let blind = compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new()).unwrap();
+        assert_eq!(
+            blind.subscription_previews[0].conflicts[0].upstream_new,
+            OverrideValue::Empty,
+            "the recorded position points at an empty cell"
+        );
+
+        // With it: reads A1 and reports the real upstream value.
+        let mut positions = HashMap::new();
+        positions.insert((local_sheet, cell_id), (0u32, 0u32));
+        let seeing = compute_preview(&reg, &[sub], &layer, &positions).unwrap();
+        let c = &seeing.subscription_previews[0].conflicts[0];
+        assert_eq!(c.position, (0, 0));
+        assert_eq!(c.a1, "A1");
+        assert_eq!(c.upstream_new, OverrideValue::Value { display: "150".to_string() });
+    }
+
+    /// A sheet whose artifact cannot be read makes the conflict list INCOMPLETE,
+    /// and says so. The dialog blocks Apply on this, because resolving a partial
+    /// list silently decides the rows nobody was shown.
+    ///
+    /// SABOTAGE: `continue` instead of pushing to `unexamined` — the list then
+    /// looks complete and Apply unblocks.
+    #[test]
+    fn an_unreadable_sheet_makes_the_conflict_list_inexact() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let (reg, pkg_sheet) = two_versions(&dir, prof.path(), 100.0, 150.0);
+        let local_sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        let cell_id = CellId::from_bytes(identity::generate_uuid_v7());
+
+        let mut layer = OverrideLayer::new();
+        layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "999"));
+
+        // Make the new version's data artifact unreadable. Artifacts are
+        // content-addressed and deduped into `.blobs`, so there may be no
+        // per-version copy to delete — resolve the hash through the manifest,
+        // exactly as `read_artifact` does, and remove BOTH forms.
+        let rel = format!("sheets/{}/data.json", pkg_sheet);
+        let manifest = reg.get_version_manifest("parity", "1.1.0").unwrap();
+        let hash = manifest
+            .artifact_checksums
+            .get(&rel)
+            .expect("the sheet's data artifact is not in the manifest")
+            .clone();
+        let blob = dir.path().join(".blobs").join(&hash[0..2]).join(&hash);
+        let per_version = dir.path().join("parity").join("1.1.0").join(&rel);
+        let removed = std::fs::remove_file(&blob).is_ok()
+            | std::fs::remove_file(&per_version).is_ok();
+        assert!(
+            removed,
+            "neither the blob ({}) nor the per-version copy ({}) existed — the \
+             workspace layout moved",
+            blob.display(),
+            per_version.display()
+        );
+
+        let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let p = &preview.subscription_previews[0];
+        assert_eq!(p.unexamined_sheets.len(), 1);
+        assert_eq!(p.unexamined_sheets[0].reason, "unreadable");
+        assert!(
+            !preview.conflicts_exact,
+            "an incomplete list must NOT be presented as a complete set of decisions"
+        );
+    }
+
 }

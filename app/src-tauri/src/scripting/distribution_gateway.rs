@@ -985,6 +985,13 @@ fn dispatch(
                 ribbon_filter_state.clone(),
                 pane_control_state.clone(),
                 slicer_state.clone(),
+                // NO RESOLUTIONS. A script has no conflict dialog to answer
+                // with, so it gets the default a refresh has always had: every
+                // local value kept, every conflict left flagged for the person
+                // who can actually decide. The gateway already refuses the
+                // resolution verbs (acceptUpstream / keepOverride) for the same
+                // reason — a script may take an update, never adjudicate one.
+                None,
                 window.clone(),
             )?;
             serde_json::to_value(result).map_err(|e| e.to_string())

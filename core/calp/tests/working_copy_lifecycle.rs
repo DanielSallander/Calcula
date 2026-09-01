@@ -167,8 +167,13 @@ fn identity_survives_checkout_and_push() {
 
     // The subscriber refreshes. THIS is the assertion the whole design exists
     // for: the sheet is updated in place, not removed and re-added.
-    let preview =
-        refresh::compute_preview(&reg, &subscriptions, &OverrideLayer::new()).unwrap();
+    let preview = refresh::compute_preview(
+        &reg,
+        &subscriptions,
+        &OverrideLayer::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
     let sub_preview = &preview.subscription_previews[0];
     assert_eq!(sub_preview.new_version, "1.1.0");
     assert!(

@@ -630,6 +630,34 @@ that is *already inside the current selection* leaves the object selection intac
 (`app/src/core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts:107`), so the object's
 items can appear on a cell far from the object — which looks like the menu working.
 
+### 2.z Refresh never re-materializes a subscribed application's PIVOTS (2026-09-01)
+
+`calp_refresh_apply` (`app/src-tauri/src/calp_commands.rs`) never reads
+`pull_result.pivot_definitions` and never writes `pivot_state.pivot_tables`. It deliberately
+carries the OLD pivot ledger entries forward — the filter at the ledger merge keeps
+`o.kind == "pivot" || o.kind == "dataSource" || o.kind == "extensionData"` from the previous
+version — with a comment stating that a refresh "does not touch" those kinds.
+
+Two consequences, one now mitigated and one still open:
+
+- **Blank pivot regions — MITIGATED 2026-09-01.** Publish strips pivot OUTPUT cells (subscribers
+  recalculate them); refresh replaces the whole grid with that stripped artifact. The frontend
+  now re-renders every pivot cache through `announceSubscribedContentReplaced`
+  (`app/extensions/Distribution/lib/refreshAftermath.ts`), which is the fan-out
+  `calp_reset_subscription`'s caller has always done and the refresh dialog never did. The
+  cells come back.
+- **STILL OPEN: a publisher's pivot CHANGES never reach a subscriber.** Adding, deleting or
+  re-laying-out a pivot in v2 ships in the artifact and is then discarded by the ledger merge,
+  so the subscriber keeps v1's definitions forever. Nothing in the preview or the result
+  reports this. `calp_reset_subscription` restores published definitions correctly and is the
+  worked example to copy; the pull path does it via `restore_pulled_pivots`.
+
+Not a data-loss bug — the subscriber's own layout survives, which is arguably the friendlier
+default — but it is undeclared, and "the publisher changed the report and you did not get it"
+is the kind of silence this program exists to remove. Decide whether refresh should adopt v2's
+definitions (matching reset) or keep the subscriber's (matching today), then SAY which in the
+preview.
+
 ---
 
 ## 3. How to keep this file honest

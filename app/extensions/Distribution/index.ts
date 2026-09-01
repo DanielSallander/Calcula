@@ -68,6 +68,7 @@ import {
   refreshData,
   getSheetIdForIndex,
   detachSheet,
+  resetSubscription,
   WRITEBACK_INDEX_CHANGED_EVENT,
   type SubmissionValue,
 } from "@api/distribution";
@@ -96,10 +97,13 @@ import { DistributionRoleStatusItem } from "./components/DistributionRoleStatusI
 import { SUBSCRIBED_CHIP, WORKING_COPY_CHIP } from "./lib/roleChipColors";
 import {
   provenanceForSheetId,
+  provenanceForSheetIndex,
   subscriptionForSheetIndex,
+  subscribedSheetCountForApplication,
   refreshSubscribedSheets,
   resetSubscribedSheets,
 } from "./lib/subscribedSheets";
+import { announceSubscribedContentReplaced } from "./lib/refreshAftermath";
 
 /** Status-bar item id for the working-copy / subscriber role badge. */
 const ROLE_STATUS_ITEM_ID = "distribution:roleBadge";
@@ -322,6 +326,57 @@ function activate(context: ExtensionContext): void {
     },
   });
   cleanupFns.push(() => sheetExtensions.unregisterContextMenuItem("distribution:detachSheet"));
+
+  // RESET TO PUBLISHED — the other thing you can want to do to a subscribed
+  // sheet, and until now the hardest to find.
+  //
+  // Reported from live testing: "I subscribed to a sheet, overwrote some values,
+  // clicked refresh subscription, and nothing happened." Refresh is not that
+  // verb — it fetches a NEWER version, and there wasn't one. The verb they
+  // wanted was this, and it lived four clicks deep in a task pane.
+  //
+  // It sits on the tab because that is where the sheet is. The command itself is
+  // per-APPLICATION, not per-sheet, so the confirm names how many sheets it will
+  // touch rather than pretending the scope is the one tab you right-clicked.
+  sheetExtensions.registerContextMenuItem({
+    id: "distribution:resetSheet",
+    label: (ctx) => {
+      const p = provenanceForSheetIndex(ctx.index);
+      return p ? `Reset "${p.packageName}" to published...` : "Reset to published...";
+    },
+    visible: (ctx) => provenanceForSheetIndex(ctx.index) !== null,
+    onClick: async (ctx) => {
+      const p = provenanceForSheetIndex(ctx.index);
+      if (!p) return;
+      const n = subscribedSheetCountForApplication(p.registryUrl, p.packageName);
+      const scope =
+        n > 1
+          ? `all ${n} sheets from "${p.packageName}"`
+          : `"${ctx.sheet.name}"`;
+      // `confirmAsync`, never the `confirm` global — under Tauri that returns a
+      // Promise, so the guard would never fire. Fails CLOSED.
+      const ok = await confirmAsync(
+        `Discard your local changes to ${scope} and restore the published ` +
+          `v${p.resolvedVersion}?\n\n` +
+          `Cells, formatting, sizes and merges go back to what the publisher ` +
+          `shipped, and your overrides on those sheets are cleared. Sheets you ` +
+          `created yourself are untouched.\n\n` +
+          `This is one undo step — Ctrl+Z brings your work back.`,
+        { title: "Reset to published" },
+      );
+      if (!ok) return;
+      try {
+        await resetSubscription(p.registryUrl, p.packageName);
+        // Pivots, recalc, sheet list, grid, controls. The published content
+        // ships with pivot output stripped, so without the redraw the reset
+        // sheet shows a blank pivot region.
+        await announceSubscribedContentReplaced();
+      } catch (err: unknown) {
+        await alertAsync(String(err), { title: "Could not reset the subscription" });
+      }
+    },
+  });
+  cleanupFns.push(() => sheetExtensions.unregisterContextMenuItem("distribution:resetSheet"));
 
   // Register dialogs
   context.ui.dialogs.register(PublishDialogDefinition);

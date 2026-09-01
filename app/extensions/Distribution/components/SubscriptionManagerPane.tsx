@@ -22,7 +22,6 @@ import {
   emitAppEvent,
   onAppEvent,
   AppEvents,
-  calculateNow,
 } from "@api";
 import {
   exportPackageHtml,
@@ -35,8 +34,8 @@ import {
   type WritebackRebuildSkip,
   type ApplicationConnectionRestoreSkip,
 } from "@api/distribution";
-import { pivot } from "@api/pivot";
 import { saveHtmlReport, printHtmlReport } from "../lib/reportExport";
+import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
 
 const subKey = (s: Subscription) => `${s.packageName}@${s.registryUrl}`;
 const trustKey = (t: SubscriptionTrustInfo) => `${t.packageName}@${t.registryUrl}`;
@@ -325,27 +324,12 @@ export function SubscriptionManagerPane(): React.ReactElement {
     try {
       const r = await resetSubscription(s.registryUrl, s.packageName);
       setConfirmingReset(null);
-      // Re-render pivot output: the published content ships with pivot output
-      // cells STRIPPED (subscribers recalculate them), so after the sheet
-      // content is reset the pivots must redraw onto the pristine sheet.
-      try {
-        const allPivots = await pivot.getAll();
-        for (const p of allPivots) {
-          try { await pivot.refreshCache(p.id); } catch { /* non-fatal */ }
-        }
-        window.dispatchEvent(new Event("pivot:refresh"));
-      } catch (err) {
-        console.error("[Distribution] Pivot re-render after reset failed:", err);
-      }
-      // Recalculate (cross-sheet formulas referencing the reset sheets) and
-      // refetch grid data so the restored content shows.
-      try {
-        await calculateNow();
-      } catch (err) {
-        console.error("[Distribution] Recalc after reset failed:", err);
-      }
-      emitAppEvent(AppEvents.SHEET_CHANGED, {});
-      window.dispatchEvent(new CustomEvent("grid:refresh"));
+      // Pivots, recalc, sheet list, grid, controls — the fan-out this handler
+      // used to spell out inline. It moved to `refreshAftermath` when the
+      // refresh dialog turned out to need the same five steps and had grown a
+      // DIFFERENT three of them: it never re-rendered pivots, so a refreshed
+      // sheet's pivot region went blank and stayed blank.
+      await announceSubscribedContentReplaced();
       setResetStatus(
         `Reset ${s.packageName} to v${r.resolvedVersion}: ${r.sheetsReset} sheet(s), ` +
         `${r.pivotsReset} pivot(s), ${r.overridesCleared} override(s) cleared. ` +

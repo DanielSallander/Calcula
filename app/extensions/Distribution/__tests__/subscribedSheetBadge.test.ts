@@ -136,10 +136,14 @@ describe("working-copy sheets carry a DIFFERENT mark", () => {
     await refreshSubscribedSheets();
     expect(provenanceForSheetId("LOCAL-1")).toEqual({
       packageName: "vendor-kpis",
+      registryUrl: "C:\\shared\\ws",
+      resolvedVersion: "2.1.0",
       role: "subscribed",
     });
     expect(provenanceForSheetId("APP-SHEET-1")).toEqual({
       packageName: "sales-report",
+      registryUrl: "C:\\shared\\ws",
+      resolvedVersion: "1.4.0",
       role: "workingCopy",
     });
   });

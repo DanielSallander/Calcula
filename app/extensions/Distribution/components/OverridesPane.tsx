@@ -15,90 +15,16 @@ import {
   AppEvents,
   type OverrideLayer,
   type CellOverride,
-  type OverrideValue,
 } from "@api";
+// The three-way row lives beside the refresh resolver that also renders it.
+// Two copies of a base/mine/theirs comparison is how the pane and the dialog
+// come to disagree about which value is "theirs".
+import { ThreeWayRow, posToRef } from "./ThreeWayRow";
 import { saveJsonPatch } from "../lib/reportExport";
 import { runOverrideExport } from "../lib/overrideExport";
 import { promptAsync, alertAsync } from "@api/dialogs";
 
 type TabId = "overrides" | "conflicts" | "pending";
-
-/** Format an OverrideValue for display */
-function formatValue(val: OverrideValue | null): string {
-  if (!val) return "";
-  switch (val.type) {
-    case "value": return val.display;
-    case "formula": return `=${val.formula}`;
-    case "empty": return "(empty)";
-  }
-}
-
-/** Format a cell position as A1 reference */
-function posToRef(pos: [number, number]): string {
-  let col = "";
-  let c = pos[1];
-  do {
-    col = String.fromCharCode(65 + (c % 26)) + col;
-    c = Math.floor(c / 26) - 1;
-  } while (c >= 0);
-  return `${col}${pos[0] + 1}`;
-}
-
-/** Single override row in the list */
-function OverrideRow({
-  ovr,
-  onRevert,
-  onAcceptUpstream,
-  onKeepOverride,
-}: {
-  ovr: CellOverride;
-  onRevert: () => void;
-  onAcceptUpstream: () => void;
-  onKeepOverride: () => void;
-}) {
-  return (
-    <div
-      style={{
-        padding: "6px 8px",
-        borderBottom: "1px solid var(--border-color, #e0e0e0)",
-        backgroundColor: ovr.conflict ? "var(--conflict-bg, #fff3cd)" : "transparent",
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontWeight: 500, fontFamily: "monospace" }}>
-          {posToRef(ovr.position)}
-        </span>
-        <span style={{ fontSize: "11px", color: "var(--text-secondary, #888)" }}>
-          {ovr.conflict ? "CONFLICT" : "override"}
-        </span>
-      </div>
-      <div style={{ fontSize: "12px", marginTop: "2px" }}>
-        <span style={{ color: "var(--text-secondary, #888)" }}>Upstream: </span>
-        <span>{formatValue(ovr.baseline)}</span>
-        {ovr.conflict && ovr.upstreamNew && (
-          <>
-            <span style={{ color: "var(--text-secondary, #888)" }}>{" -> "}</span>
-            <span style={{ color: "var(--conflict-text, #856404)" }}>{formatValue(ovr.upstreamNew)}</span>
-          </>
-        )}
-      </div>
-      <div style={{ fontSize: "12px" }}>
-        <span style={{ color: "var(--text-secondary, #888)" }}>Local: </span>
-        <span style={{ fontWeight: 500 }}>{formatValue(ovr.current)}</span>
-      </div>
-      <div style={{ marginTop: "4px", display: "flex", gap: "4px" }}>
-        {ovr.conflict ? (
-          <>
-            <button onClick={onAcceptUpstream} style={{ fontSize: "11px" }}>Accept Upstream</button>
-            <button onClick={onKeepOverride} style={{ fontSize: "11px" }}>Keep Mine</button>
-          </>
-        ) : (
-          <button onClick={onRevert} style={{ fontSize: "11px" }}>Revert</button>
-        )}
-      </div>
-    </div>
-  );
-}
 
 /** Main overrides pane component */
 export function OverridesPane() {
@@ -197,9 +123,14 @@ export function OverridesPane() {
       );
     }
     return items.map((ovr) => (
-      <OverrideRow
+      <ThreeWayRow
         key={`${ovr.sheetId}-${ovr.cellId}`}
-        ovr={ovr}
+        mode="act"
+        a1={posToRef(ovr.position)}
+        baseline={ovr.baseline}
+        current={ovr.current}
+        upstreamNew={ovr.upstreamNew ?? null}
+        conflict={ovr.conflict}
         onRevert={() => handleRevert(ovr)}
         onAcceptUpstream={() => handleAcceptUpstream(ovr)}
         onKeepOverride={() => handleKeepOverride(ovr)}

@@ -224,6 +224,69 @@ Before applying a refresh, show a refresh preview: cells changed, sheets added
 or removed, named ranges added or removed, and which existing overrides will
 become conflicts. The user confirms before the pull is applied.
 
+#### Refresh means "fetch a newer version". Nothing else. (clarified 2026-09-01)
+
+`compute_preview` and `pull_all_updates` both begin by skipping any subscription
+whose resolved version already equals the workspace head
+(`core/calp/src/refresh.rs`). A subscriber who edits a subscribed sheet and then
+clicks *Refresh Subscriptions* therefore gets "No Updates Available" and no Apply
+button — a true sentence answering a question they were not asking.
+
+Reported from live testing as *"I subscribed to a sheet, overwrote some values,
+clicked refresh subscription, and nothing happened."* The verb they wanted is
+`calp_reset_subscription` ("discard my local edits, restore the published
+content"), which existed but was reachable only from Distribution > Manage
+Subscriptions.
+
+The fix is not to widen refresh — a refresh that undid local edits when no new
+version existed would be a different and much more destructive command wearing
+the same label. It is to put the other verb where the user already is:
+
+- **On the sheet tab**, beside *Detach* — right-click a subscribed sheet >
+  *Reset "&lt;application&gt;" to published…*. The command is per-APPLICATION, so
+  the confirm names how many sheets it will touch rather than implying the scope
+  is the one tab.
+- **In the empty refresh state**, which now says what refresh does and does not
+  do, and offers a per-subscription *Reset to published…* button.
+
+#### The preview is per-cell, and Apply is a decision (2026-09-01)
+
+`SubscriptionPreview` carries `conflicts: Vec<ConflictPreviewCell>` — every
+conflicted cell with its full three-way triple — plus `unexamined_sheets` for any
+artifact that could not be read. `overrides_conflicted` is now `conflicts.len()`.
+
+It used to be `sheets_updated.map(|s| s.override_count).sum()`: every override on
+any sheet whose artifact changed, whether or not upstream had touched that
+particular cell. On a sheet where the publisher edited one cell and the subscriber
+had edited twenty others, the dialog reported twenty conflicts and the apply
+created one. **The number was never computed; it was inferred from a proxy.**
+
+Making it real required one shared predicate, because the preview reads workspace
+artifacts in `core/calp` and the apply reads a pulled payload in the app crate:
+
+- `overrides::override_value_from_saved` moved from the app crate into
+  `core/calp/src/overrides.rs`, and both sides feed it from
+  `calcula_format::sheet_data::sheet_data_to_cells` — the same conversion `pull()`
+  uses, so they agree **by construction** rather than by two converters that
+  happen to match.
+- `overrides::classify_rebase` is the decision `rebase` itself now asks:
+  `Unchanged` / `AutoCleared` / `Conflict`.
+- `compute_preview` takes an `override_positions` map. The apply resolves a cell
+  as `id_registry.cell_position(...).unwrap_or(ovr.position)`; the registry is app
+  state that `core/calp` cannot see, so the caller snapshots it and hands it over.
+  Without it the preview reads the recorded position and, after any structural
+  shift, the wrong cell.
+
+`rebase` also stopped counting conflicts it deletes: it incremented for every
+changed-upstream cell including the ones `auto_clear_matching` removed two lines
+later, so a refresh producing zero conflicted overrides could report "1 conflict
+created" — and the preview and the apply could never have been made to agree.
+
+**A capped list is refused, not truncated.** A cell COUNT may honestly be "at
+least N"; a list of decisions the user is about to make may not be "some of them".
+Any unreadable sheet sets `conflicts_exact: false` and the dialog blocks Apply
+rather than silently resolving the rows nobody was shown.
+
 ### Detach
 
 An explicit "detach from upstream" command strips the subscription manifest
@@ -272,6 +335,43 @@ override was made. Three resolution actions per conflict:
 - Accept upstream (discards override)
 - Keep override (override rebased onto new upstream baseline)
 - See both (opens a side-by-side view)
+
+### Resolving DURING the refresh (2026-09-01)
+
+Both verbs existed and both worked — `OverrideLayer::accept_upstream` and
+`keep_override` — but only from the Overrides pane, *after* a refresh had already
+replaced the sheet. The decision was available at the wrong moment: by the time
+the user could make it, the thing they were deciding about had happened.
+
+`calp_refresh_apply` now takes `resolutions: Vec<CellResolution>`, keyed
+`(sheetId, cellId)` — never a position, because positions move under a refresh and
+the layer is id-anchored precisely so an override survives a structural shift.
+Each names `keepMine` or `takeTheirs`. **An omitted or empty list is exactly
+today's behaviour**: every local value kept, every conflict left flagged. That is
+also what the script gateway passes, because a script has no dialog to answer with
+— it may take an update, never adjudicate one.
+
+**Where the loop sits is the whole correctness argument.** It must run:
+
+- BELOW `apply_refresh`, because `rebase` is what sets `conflict` and
+  `upstream_new`; above it, `keep_override` finds no upstream value and returns
+  false.
+- ABOVE the `to_overlay` snapshot, which is a **clone** of the surviving overrides
+  painted onto the grids some forty lines later. Resolve after the clone and
+  `accept_upstream` removes the override from the layer while the clone still
+  holds it — so the user picks "take theirs", the dialog agrees, and the grid gets
+  "mine". Silently.
+
+`take theirs` writes nothing to the grid: the wholesale replacement already put
+pristine upstream content in that cell, so dropping the override IS the operation
+and the re-overlay simply skips it. Pinned by
+`app/src-tauri/src/refresh_resolution_tests.rs`, whose ordering guard fails with
+that exact message when the loop is moved.
+
+The dialog renders each row through `ThreeWayRow`, the component extracted from
+the Overrides pane's own conflict row — one markup, two modes (`act` fires now,
+`choose` records a pending decision), so the pane and the dialog cannot come to
+disagree about which value is "theirs".
 
 Structural conflicts (e.g., upstream deleted a sheet the user has overrides
 on) surface as their own category in the conflicts pane. For deleted sheets,

@@ -1350,7 +1350,10 @@ fn read_sheet_data_capped(
 }
 
 /// Walk the union of two sparse cell maps.
-fn walk_cells(
+/// The one cell walker. `pub(crate)` so the refresh preview can emit the same
+/// per-cell rows the version diff renders, instead of a second walker that
+/// agrees with this one only until the next `CellEntry` field is added.
+pub(crate) fn walk_cells(
     before: Option<&calcula_format::sheet_data::SheetData>,
     after: Option<&calcula_format::sheet_data::SheetData>,
     sample_cap: usize,

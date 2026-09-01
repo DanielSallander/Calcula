@@ -31,6 +31,91 @@ pub enum OverrideValue {
     Empty,
 }
 
+/// The canonical `OverrideValue` for an upstream cell, `None` meaning the cell
+/// is absent from the payload.
+///
+/// THIS IS THE ONE PREDICATE BOTH SIDES OF A REFRESH MUST SHARE. It used to live
+/// in the app crate as `calp_commands::override_value_from_saved`, reachable only
+/// from the APPLY path — so the refresh PREVIEW could not compute the conflicts
+/// the apply was about to create, and did not try: it reported every override on
+/// a changed sheet as a conflict. A preview that names cells the apply will not
+/// touch is worse than no preview, because the user resolves conflicts that do
+/// not exist and is not shown the ones that do.
+///
+/// It lives here now, and both sides feed it from
+/// `calcula_format::sheet_data::sheet_data_to_cells`, so they agree BY
+/// CONSTRUCTION rather than by two converters that happen to match today.
+///
+/// `SavedCellValue::Error` stores the CANONICAL LITERAL (`#DIV/0!`, `#LIMIT!`, …)
+/// — the same form the app's `override_display` produces from an engine
+/// `CellError`. Both must keep agreeing: letting either side drift to the Rust
+/// variant name would make every error-cell override a permanent spurious
+/// conflict.
+pub fn override_value_from_saved(cell: Option<&persistence::SavedCell>) -> OverrideValue {
+    match cell {
+        None => OverrideValue::Empty,
+        Some(c) => {
+            if let Some(ref formula) = c.formula {
+                OverrideValue::Formula { formula: formula.clone() }
+            } else {
+                match &c.value {
+                    persistence::SavedCellValue::Empty => OverrideValue::Empty,
+                    persistence::SavedCellValue::Number(n) => {
+                        OverrideValue::Value { display: n.to_string() }
+                    }
+                    persistence::SavedCellValue::Text(s) => {
+                        OverrideValue::Value { display: s.clone() }
+                    }
+                    persistence::SavedCellValue::Boolean(b) => OverrideValue::Value {
+                        display: if *b { "TRUE".to_string() } else { "FALSE".to_string() },
+                    },
+                    persistence::SavedCellValue::Error(s) => {
+                        OverrideValue::Value { display: s.clone() }
+                    }
+                    other => OverrideValue::Value { display: format!("{:?}", other) },
+                }
+            }
+        }
+    }
+}
+
+/// What a refresh will do to one override, decided from the same three values
+/// [`OverrideLayer::rebase`] decides from.
+///
+/// Extracted so the preview can ANSWER the question rather than estimate it, and
+/// so the answer is a single expression rather than two `if`s in two crates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    /// Upstream did not touch the cell: the override survives, silently.
+    Unchanged,
+    /// Upstream moved the cell to exactly what the subscriber already typed, or
+    /// the subscriber has restored the baseline. The override is dropped as
+    /// redundant — `auto_clear_matching`.
+    AutoCleared,
+    /// Upstream changed the cell to something else. THIS is a conflict, and the
+    /// only case the resolver has anything to ask about.
+    Conflict,
+}
+
+/// Classify one override against the value upstream now holds at its cell.
+///
+/// Mirrors [`OverrideLayer::rebase`] followed by
+/// [`OverrideLayer::auto_clear_matching`] for a single record. `rebase` is still
+/// the thing that MUTATES; this is the same decision made without a `&mut`, so a
+/// preview and an apply cannot reach different verdicts.
+pub fn classify_rebase(ovr: &CellOverride, upstream_new: &OverrideValue) -> RebaseOutcome {
+    // auto_clear_matching runs AFTER rebase and wins over the conflict flag, so
+    // it is tested first here for the same reason.
+    if ovr.current == *upstream_new || ovr.current == ovr.baseline {
+        return RebaseOutcome::AutoCleared;
+    }
+    if *upstream_new != ovr.baseline {
+        RebaseOutcome::Conflict
+    } else {
+        RebaseOutcome::Unchanged
+    }
+}
+
 /// A single override record: one consumer-side modification to an upstream cell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,17 +270,33 @@ impl OverrideLayer {
 
         for ovr in self.overrides.iter_mut() {
             let key = (ovr.sheet_id, ovr.cell_id);
-            if let Some(new_upstream) = upstream_values.get(&key) {
-                if *new_upstream != ovr.baseline {
-                    // Upstream changed — conflict
-                    ovr.conflict = true;
-                    ovr.upstream_new = Some(new_upstream.clone());
-                    conflicts += 1;
-                } else {
-                    // Upstream unchanged — no conflict, clear any prior conflict
-                    ovr.conflict = false;
-                    ovr.upstream_new = None;
-                }
+            let Some(new_upstream) = upstream_values.get(&key) else { continue };
+
+            // ONE classifier, shared with the refresh PREVIEW. If this branched
+            // on its own the preview could name a different set of conflicts
+            // than the apply creates, and a resolver that asks about the wrong
+            // cells is worse than no resolver.
+            let outcome = classify_rebase(ovr, new_upstream);
+
+            if *new_upstream != ovr.baseline {
+                // Record what upstream now holds even when this will auto-clear:
+                // `auto_clear_matching` below needs it to recognise "the
+                // subscriber already typed what upstream now says".
+                ovr.upstream_new = Some(new_upstream.clone());
+                ovr.conflict = outcome == RebaseOutcome::Conflict;
+            } else {
+                // Upstream unchanged — no conflict, clear any prior conflict.
+                ovr.conflict = false;
+                ovr.upstream_new = None;
+            }
+
+            // COUNTED ONLY WHEN IT SURVIVES. This used to increment for every
+            // changed-upstream cell, including the ones `auto_clear_matching`
+            // deletes two lines later — so a refresh that produced zero
+            // conflicted overrides could still report "1 conflict created", and
+            // the preview and the apply could never be made to agree.
+            if outcome == RebaseOutcome::Conflict {
+                conflicts += 1;
             }
         }
 

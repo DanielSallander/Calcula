@@ -5519,39 +5519,15 @@ fn override_value_from_cell(cell: Option<&engine::Cell>) -> calp::OverrideValue 
 
 /// Canonical OverrideValue for a pulled payload cell (None = absent cell).
 /// Mirror of `override_value_from_cell` for persistence::SavedCell.
+///
+/// THE BODY MOVED TO `core/calp/src/overrides.rs` and this is now a one-line
+/// delegation. It lived here, in the app crate, where only the APPLY path could
+/// reach it — so the refresh PREVIEW, which runs against workspace artifacts in
+/// `core/calp`, could not compute the conflicts the apply was about to create.
+/// It did not try: it reported every override on a changed sheet as a conflict.
+/// One predicate in one crate is what lets the preview and the apply agree.
 pub(crate) fn override_value_from_saved(cell: Option<&persistence::SavedCell>) -> calp::OverrideValue {
-    match cell {
-        None => calp::OverrideValue::Empty,
-        Some(c) => {
-            if let Some(ref formula) = c.formula {
-                calp::OverrideValue::Formula { formula: formula.clone() }
-            } else {
-                match &c.value {
-                    persistence::SavedCellValue::Empty => calp::OverrideValue::Empty,
-                    persistence::SavedCellValue::Number(n) => {
-                        calp::OverrideValue::Value { display: n.to_string() }
-                    }
-                    persistence::SavedCellValue::Text(s) => {
-                        calp::OverrideValue::Value { display: s.clone() }
-                    }
-                    persistence::SavedCellValue::Boolean(b) => calp::OverrideValue::Value {
-                        display: if *b { "TRUE".to_string() } else { "FALSE".to_string() },
-                    },
-                    // SavedCellValue::Error stores the CANONICAL LITERAL
-                    // (`#DIV/0!`, `#LIMIT!`, ...) — the same form
-                    // `override_display` produces from an engine `CellError`.
-                    // Both sides must keep agreeing: wrapping this in another
-                    // Debug, or letting either side drift back to the Rust
-                    // variant name, would make every error-cell override a
-                    // permanent spurious conflict.
-                    persistence::SavedCellValue::Error(s) => {
-                        calp::OverrideValue::Value { display: s.clone() }
-                    }
-                    other => calp::OverrideValue::Value { display: format!("{:?}", other) },
-                }
-            }
-        }
-    }
+    calp::overrides::override_value_from_saved(cell)
 }
 
 /// Record consumer-side overrides for committed edits on a subscribed sheet.
@@ -5716,6 +5692,30 @@ pub fn calp_refresh_preview(
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     let layer = state.override_layer.read().map_err(|e| e.to_string())?;
 
+    // WHERE EACH OVERRIDDEN CELL ACTUALLY SITS. The apply resolves this as
+    // `id_registry.cell_position(sheet, cell).unwrap_or(ovr.position)`; the
+    // preview must resolve it identically or it will read the wrong upstream
+    // cell and report conflicts that do not exist. The id registry is app state
+    // and `core/calp` cannot see it, so it is snapshotted here and handed over.
+    //
+    // SCOPED SO THE LOCK IS RELEASED before the workspace loop below: `id_registry`
+    // is a bare `Mutex` on the grid write path, and the loop does workspace I/O
+    // that can be a remote transport. Lock order subscriptions -> override_layer
+    // -> id_registry, which is the order this function already takes them in.
+    let override_positions: std::collections::HashMap<(SheetId, CellId), (u32, u32)> = {
+        let id_reg = state.id_registry.lock().map_err(|e| e.to_string())?;
+        layer
+            .overrides
+            .iter()
+            .map(|o| {
+                let pos = id_reg
+                    .cell_position(o.sheet_id, o.cell_id)
+                    .unwrap_or(o.position);
+                ((o.sheet_id, o.cell_id), pos)
+            })
+            .collect()
+    };
+
     let mut merged = calp::refresh::RefreshPreview {
         subscription_previews: Vec::new(),
         total_cells_changed: 0,
@@ -5726,6 +5726,10 @@ pub fn calp_refresh_preview(
         // Starts true and is ANDed down: one workspace group whose count was
         // capped makes the whole figure a floor, and the dialog must say so.
         total_cells_changed_exact: true,
+        // Same shape, higher stakes: one unreadable sheet makes the CONFLICT
+        // LIST incomplete, and a resolver may not present a partial list as a
+        // complete set of decisions. Apply refuses while this is false.
+        conflicts_exact: true,
     };
 
     for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
@@ -5734,8 +5738,9 @@ pub fn calp_refresh_preview(
         let group: Vec<_> = indices.iter()
             .map(|&i| subs.subscriptions[i].clone())
             .collect();
-        let preview = calp::refresh::compute_preview(&registry, &group, &layer)
-            .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
+        let preview =
+            calp::refresh::compute_preview(&registry, &group, &layer, &override_positions)
+                .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
 
         merged.subscription_previews.extend(preview.subscription_previews);
         merged.total_cells_changed += preview.total_cells_changed;
@@ -5744,9 +5749,47 @@ pub fn calp_refresh_preview(
         merged.total_overrides_conflicted += preview.total_overrides_conflicted;
         merged.total_overrides_auto_cleared += preview.total_overrides_auto_cleared;
         merged.total_cells_changed_exact &= preview.total_cells_changed_exact;
+        merged.conflicts_exact &= preview.conflicts_exact;
     }
 
     Ok(merged)
+}
+
+/// What to do with ONE conflicted cell when the refresh applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResolutionChoice {
+    /// Today's behaviour, and the default for any cell the caller does not name:
+    /// the local value survives, rebased onto the new upstream baseline.
+    KeepMine,
+    /// Discard the local edit and take what the publisher now says. The grid
+    /// already holds the pristine upstream content — the wholesale replacement
+    /// ran before any of this — so dropping the override IS the whole write.
+    TakeTheirs,
+}
+
+/// One resolved cell, keyed the way the override layer is keyed.
+///
+/// (sheetId, cellId), never (sheetIndex, row, col): positions move under a
+/// refresh, and the layer is id-anchored precisely so an override survives a
+/// structural shift.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellResolution {
+    /// The LOCAL sheet id, as `calp_refresh_preview` reports it.
+    pub sheet_id: SheetId,
+    pub cell_id: CellId,
+    pub choice: ResolutionChoice,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshApplyParams {
+    /// Only the cells the user actually decided on. An omitted or empty list
+    /// means every conflict keeps the local value and stays flagged — which is
+    /// exactly what a refresh did before there was anything to decide.
+    #[serde(default)]
+    pub resolutions: Vec<CellResolution>,
 }
 
 /// Apply the refresh after the user has confirmed the preview.
@@ -5764,12 +5807,14 @@ pub fn calp_refresh_apply(
     ribbon_filter_state: State<crate::ribbon_filter::RibbonFilterState>,
     pane_control_state: State<crate::pane_control::PaneControlState>,
     slicer_state: State<crate::slicer::SlicerState>,
+    params: Option<RefreshApplyParams>,
     window: tauri::Window,
 ) -> Result<calp::refresh::RefreshResult, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    // A refresh rewrites subscribed sheets, names, CF/DV and tables in place:
-    // same reasoning as calp_pull.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
+    // `Option`, so the in-process script gateway can pass `None` and an omitted
+    // key still deserializes. No resolutions means keep every local value, which
+    // is what this command did before it could be told otherwise.
+    let resolutions = params.map(|p| p.resolutions).unwrap_or_default();
     let now = chrono::Utc::now().to_rfc3339();
 
     // Pull new versions for all subscriptions that have updates.
@@ -5830,6 +5875,35 @@ pub fn calp_refresh_apply(
             );
         }
     }
+
+    // NOTHING TO DO IS NOT A MUTATION. `DocumentEffect::mutates` dirties at
+    // construction, and this command used to build it as its first statement —
+    // so clicking "Refresh Subscriptions" on an up-to-date workbook armed the
+    // close-without-saving prompt for a command that then wrote nothing. Moving
+    // the construction alone would not have been enough: the reset-then-apply
+    // blocks below consume `effect` unconditionally, so the early return is the
+    // load-bearing half.
+    //
+    // It also skips the layer-wide `auto_clear_matching` sweep that `rebase`
+    // ends in, the workbook-name restamp, the writeback-index rebuild and the
+    // audit entry. All four are about applying an update; with no update to
+    // apply, none of them has anything to say.
+    if payloads.is_empty() {
+        return Ok(calp::refresh::RefreshResult {
+            subscriptions_refreshed: 0,
+            sheets_added: 0,
+            sheets_removed: 0,
+            sheets_updated: 0,
+            conflicts_created: 0,
+            overrides_auto_cleared: 0,
+            structural_conflicts: Vec::new(),
+        });
+    }
+
+    // ONE effect, constructed after every refusal that precedes a write: the
+    // workspace opened, the pulls verified against their pins, the collision
+    // pass took and released its locks.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Materialize new/updated sheets into grids.
     let active_grid_after_materialize = {
@@ -6756,13 +6830,56 @@ pub fn calp_refresh_apply(
         return Err("Subscriptions changed while the refresh was running — please retry.".to_string());
     }
 
-    let result = calp::refresh::apply_refresh(
+    let mut result = calp::refresh::apply_refresh(
         payloads,
         &mut subs.subscriptions,
         &mut layer,
         &upstream_values,
         &now,
     );
+
+
+    // PER-CELL RESOLUTION, AND IT MUST SIT EXACTLY HERE.
+    //
+    // ABOVE `apply_refresh` there is nothing to resolve: `rebase` is what sets
+    // `conflict` and `upstream_new`, so `keep_override` would find no upstream
+    // value to rebase onto and return false.
+    //
+    // BELOW the `to_overlay` snapshot it is too late, and silently so. That
+    // vector is a CLONE taken here and painted onto the grids 40-odd lines
+    // further down; an override removed from the layer after the clone is still
+    // in the clone. The user would pick "take theirs", watch the count say so,
+    // and get their own value painted back over the publisher's.
+    //
+    // Uses the `layer` guard already held. `Persisted<T>` is a std::sync::Mutex
+    // and is NOT reentrant — re-acquiring `state.override_layer` here would
+    // block this thread forever, which is the rule `apply_override_value_to_grid`
+    // documents for the same reason.
+    let mut conflicts_resolved = 0usize;
+    for r in &resolutions {
+        // Was this actually a conflict? `accept_upstream` is `remove_override`,
+        // which succeeds for ANY override present, including one `rebase`
+        // deliberately left un-conflicted. Counting those would decrement a
+        // figure they were never part of.
+        let was_conflict = layer
+            .get(r.sheet_id, r.cell_id)
+            .map(|o| o.conflict)
+            .unwrap_or(false);
+        let acted = match r.choice {
+            // No grid write: the wholesale replacement already put pristine
+            // upstream content in this cell, so dropping the override is the
+            // entire operation — the re-overlay below simply skips it now.
+            ResolutionChoice::TakeTheirs => layer.accept_upstream(r.sheet_id, r.cell_id),
+            ResolutionChoice::KeepMine => layer.keep_override(r.sheet_id, r.cell_id),
+        };
+        if acted && was_conflict {
+            conflicts_resolved += 1;
+        }
+    }
+    // `conflicts_created` was counted by `rebase`, before any of this. Every
+    // conflict the user just settled is one the Overrides pane will not show,
+    // so reporting it as outstanding would be a lie the dialog then prints.
+    result.conflicts_created = result.conflicts_created.saturating_sub(conflicts_resolved);
 
     // Re-overlay surviving overrides onto the refreshed grids: the wholesale
     // grid replacement above wrote pristine upstream content, which would
@@ -7049,6 +7166,23 @@ pub fn calp_refresh_apply(
             crate::calculation::recalculate_sheet_values(&state, &user_files_state, &pivot_state, idx, Some((&*pane_control_state, &*ribbon_filter_state)));
         }
     }
+
+    // ANNOUNCE THE SHEET COLLECTION. This command APPENDS sheets — `grids.push`
+    // / `sheet_names.push` / `sheet_ids.push` above — and emitted nothing at all
+    // in its whole body except `custom-functions:refresh`. `SheetTabs` reloads
+    // its list on the `sheets` domain, so a refresh that added a sheet reported
+    // "1 added" in the dialog while the tab bar showed nothing, until some
+    // unrelated tab click happened to re-fire SHEET_CHANGED. Its two siblings
+    // both get this right: SubscribeDialog and the reset handler each emit
+    // SHEET_CHANGED; refresh was the only one that did not.
+    //
+    // AFTER the recalculation, never before: the event makes the frontend
+    // re-read the sheet list and refetch the grid, and refetching mid-recalc
+    // shows half-evaluated cells.
+    crate::object_deps::announce_cascade(
+        window_app_handle(&window),
+        crate::object_deps::ObjectKind::Sheet,
+    );
 
     // Audit (B4)
     {

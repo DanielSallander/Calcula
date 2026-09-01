@@ -23,9 +23,19 @@
 
 import { getSheetProvenance, type SheetProvenanceRole } from "@api";
 
-/** Where one sheet came from, and what that means for it. */
+/**
+ * Where one sheet came from, and what that means for it.
+ *
+ * Carries the WORKSPACE and the RESOLVED VERSION as well as the name, because
+ * the two commands a tab menu offers — `detachSheet` and `resetSubscription` —
+ * are keyed differently: detach takes a sheet index, reset takes
+ * (registryUrl, packageName). A menu that had only the name would have to guess
+ * which workspace, and two teams may each publish `sales` to their own share.
+ */
 export interface SheetProvenanceEntry {
   packageName: string;
+  registryUrl: string;
+  resolvedVersion: string;
   role: SheetProvenanceRole;
 }
 
@@ -78,8 +88,42 @@ export function subscriptionForSheetId(sheetId: string | undefined): string | nu
  * refresh — which is why the refresh below also listens for sheet-list changes.
  */
 export function subscriptionForSheetIndex(index: number): string | null {
+  const entry = provenanceForSheetIndex(index);
+  return entry ? entry.packageName : null;
+}
+
+/**
+ * Full SUBSCRIBED provenance by workbook index, for the tab menu items that
+ * need more than a name — `resetSubscription` is keyed by
+ * (registryUrl, packageName), not by sheet.
+ *
+ * Subscribed only, like its sibling: a working-copy sheet has no subscription to
+ * reset or detach.
+ */
+export function provenanceForSheetIndex(index: number): SheetProvenanceEntry | null {
   const entry = byIndex.get(index);
-  return entry?.role === "subscribed" ? entry.packageName : null;
+  return entry?.role === "subscribed" ? entry : null;
+}
+
+/**
+ * How many SUBSCRIBED sheets in this workbook came from one application, so a
+ * confirm can say what a whole-application reset will touch.
+ *
+ * Folded from `byIndex` and filtered on the role: `byIndex` also holds
+ * working-copy rows, and counting those would promise to reset tabs the command
+ * will not touch.
+ */
+export function subscribedSheetCountForApplication(
+  registryUrl: string,
+  packageName: string,
+): number {
+  let n = 0;
+  for (const e of byIndex.values()) {
+    if (e.role === "subscribed" && e.packageName === packageName && e.registryUrl === registryUrl) {
+      n += 1;
+    }
+  }
+  return n;
 }
 
 export function hasSubscribedSheets(): boolean {
@@ -102,6 +146,8 @@ export async function refreshSubscribedSheets(): Promise<boolean> {
     for (const row of rows) {
       const entry: SheetProvenanceEntry = {
         packageName: row.packageName,
+        registryUrl: row.registryUrl,
+        resolvedVersion: row.resolvedVersion,
         role: row.role,
       };
       if (row.sheetId) nextById.set(row.sheetId, entry);

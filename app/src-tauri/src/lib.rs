@@ -257,6 +257,9 @@ mod calp_push_gate_tests;
 mod subscribed_sheet_tests;
 
 #[cfg(test)]
+mod refresh_resolution_tests;
+
+#[cfg(test)]
 mod document_store_census_tests;
 
 #[cfg(test)]
