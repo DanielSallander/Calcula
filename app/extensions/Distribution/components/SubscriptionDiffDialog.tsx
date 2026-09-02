@@ -96,6 +96,31 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
    */
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
+  /**
+   * EVERY SHOW STARTS CLEAN.
+   *
+   * `DialogContainer` keys by dialog id, so re-showing this dialog for a
+   * DIFFERENT application does not remount it. The exclusion set survived: the
+   * second application's diff loaded with every box ticked while the counter
+   * still read "Keeping your version of 3 cell(s)", and confirming sent the
+   * FIRST application's cell refs as the second one's exclusions. The dialog
+   * said it was keeping cells it then destroyed.
+   *
+   * `__openCount` is bumped by `openDialog` on every show, which is the only
+   * signal that distinguishes "shown again" from "same props" — passing no data,
+   * or equal data, is indistinguishable otherwise.
+   */
+  const openCount = data?.__openCount;
+  useEffect(() => {
+    setExcluded(new Set());
+    setResult(null);
+    setError(null);
+    setDiffError(null);
+    setConfirming(false);
+    setDiff(null);
+    setLoading(true);
+  }, [openCount]);
+
   useEffect(() => {
     if (!req) {
       setLoading(false);

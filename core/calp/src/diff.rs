@@ -1497,6 +1497,30 @@ fn unchanged_spill_cells(
             continue;
         }
         let Some((r0, c0, r1, c1)) = calcula_format::cell_ref::range_from_a1(sp) else { continue };
+
+        // BOUNDED, because `sp` is publisher-controlled text.
+        //
+        // `range_from_a1` applies no ceiling — it checks only that end >= start
+        // — and the integrity walk hashes a `data.json` without sanity-checking
+        // what is inside it. A single origin carrying `sp: "A1:XFD1048576"` is
+        // 17 billion iterations, one BTreeSet insert each, inside a function
+        // every diff surface and the refresh preview call. That is a hang
+        // triggered by opening a package.
+        //
+        // Even a LEGITIMATE whole-column dynamic array costs ~1M inserts per
+        // sheet per diff, and the refresh preview walks up to 16 sheets per
+        // subscription. So the cap is not only about hostile input.
+        //
+        // Past the cap the extent is simply not skipped: its cells compare as
+        // ordinary cells, which is the pre-2026-09-01 behaviour — noisier, never
+        // wrong. Failing OPEN is right here because the skip is a noise
+        // reduction, not a correctness guarantee.
+        const MAX_SPILL_CELLS: u64 = 100_000;
+        let area = (r1 as u64 - r0 as u64 + 1).saturating_mul(c1 as u64 - c0 as u64 + 1);
+        if area > MAX_SPILL_CELLS {
+            continue;
+        }
+
         for r in r0..=r1 {
             for c in c0..=c1 {
                 // The ORIGIN itself is not skipped here: it carries the formula,
@@ -1838,12 +1862,56 @@ mod tests {
         assert!(sample.is_empty());
     }
 
-    /// A spill that GREW is a real change, and its new cells must be visible.
-    /// The skip is scoped to an origin whose formula AND extent both held.
+    /// A spill whose extent moved is compared normally. The skip is scoped to an
+    /// origin whose formula AND extent both held.
     ///
-    /// SABOTAGE: compare only the formula in `unchanged_spill_cells`, not `sp`.
+    /// THE SHRINK DIRECTION, and the reason is that this test had NO TEETH in
+    /// the grow direction. It first read: extent `C1:C2` -> `C1:C3`, asserting
+    /// `counts.total() > 0`. Under the named sabotage (compare only the formula,
+    /// not `sp`) the skip set is built from the BEFORE extent, which covers `C2`
+    /// only — `C3` is absent from `before.cells`, so it is counted as `added`,
+    /// the total is 1, and the assertion passed. The session's own adversarial
+    /// review applied that exact sabotage and the test stayed green.
+    ///
+    /// Shrinking is where the defect actually bites: the origin keeps its
+    /// formula, `sp` goes `C1:C3` -> `C1:C2`, and the author types a literal
+    /// into the freed `C3`. Under the sabotage `C3` is still inside the
+    /// before-extent, so an AUTHORED value is skipped and the diff says nothing
+    /// changed.
+    ///
+    /// And it asserts on the IDENTITY of the reported cell, not on a count — a
+    /// count is what let the grow version pass for the wrong reason.
+    ///
+    /// SABOTAGE: in `unchanged_spill_cells`, compare only `a.f != b.f` and drop
+    /// the `a.sp.as_ref() != Some(sp)` term.
     #[test]
-    fn a_spill_whose_extent_moved_is_compared_normally() {
+    fn a_literal_typed_into_a_shrunken_spill_is_a_change() {
+        let before = sheet(&[
+            ("C1", cell_sp("n", serde_json::json!(1.0), Some("SEQUENCE(A1)"), Some("C1:C3"))),
+            ("C2", cell("n", serde_json::json!(2.0), None)),
+            ("C3", cell("n", serde_json::json!(3.0), None)),
+        ]);
+        let after = sheet(&[
+            ("C1", cell_sp("n", serde_json::json!(1.0), Some("SEQUENCE(A1)"), Some("C1:C2"))),
+            ("C2", cell("n", serde_json::json!(2.0), None)),
+            // The array no longer reaches C3; this is something a person typed.
+            ("C3", cell("s", serde_json::json!("typed"), None)),
+        ]);
+
+        let (_, sample) = walk_cells(Some(&before), Some(&after), 10);
+        assert!(
+            sample.iter().any(|c| c.a1 == "C3"),
+            "an authored value in a cell the array released must be reported, \
+             not skipped as spill output: {:?}",
+            sample.iter().map(|c| &c.a1).collect::<Vec<_>>()
+        );
+    }
+
+    /// A spill that GREW: its new cells are authored output of a CHANGED extent,
+    /// so they are compared normally too. Kept as the sibling direction, with an
+    /// identity assertion rather than the count that made it toothless.
+    #[test]
+    fn a_grown_spill_reports_the_cells_it_now_covers() {
         let before = sheet(&[
             ("C1", cell_sp("n", serde_json::json!(1.0), Some("SEQUENCE(A1)"), Some("C1:C2"))),
             ("C2", cell("n", serde_json::json!(2.0), None)),
@@ -1853,10 +1921,34 @@ mod tests {
             ("C2", cell("n", serde_json::json!(2.0), None)),
             ("C3", cell("n", serde_json::json!(3.0), None)),
         ]);
-        let counts = count_sheet_data_changes(&before, &after);
-        assert!(
-            counts.total() > 0,
-            "the array now covers a third row — that is a change, not noise"
+        let (_, sample) = walk_cells(Some(&before), Some(&after), 10);
+        assert!(sample.iter().any(|c| c.a1 == "C3"));
+    }
+
+    /// A publisher-controlled `sp` may not be an unbounded loop.
+    ///
+    /// `range_from_a1` applies no ceiling and the integrity walk does not
+    /// sanity-check artifact contents, so `sp: "A1:XFD1048576"` was 17 billion
+    /// BTreeSet inserts inside a function every diff surface calls. Past the cap
+    /// the extent is not skipped — noisier, never wrong.
+    ///
+    /// SABOTAGE: delete the MAX_SPILL_CELLS guard. This test then hangs rather
+    /// than failing, which is itself the point.
+    #[test]
+    fn an_absurd_spill_extent_is_not_walked() {
+        let before = sheet(&[(
+            "A1",
+            cell_sp("n", serde_json::json!(1.0), Some("SEQUENCE(1)"), Some("A1:XFD1048576")),
+        )]);
+        let mut after_cells = before.clone();
+        after_cells
+            .cells
+            .insert("B2".to_string(), cell("s", serde_json::json!("typed"), None));
+
+        let counts = count_sheet_data_changes(&before, &after_cells);
+        assert_eq!(
+            counts.added, 1,
+            "past the cap the extent is simply not skipped, so B2 is an ordinary added cell"
         );
     }
 

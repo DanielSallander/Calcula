@@ -172,6 +172,7 @@ fn identity_survives_checkout_and_push() {
         &subscriptions,
         &OverrideLayer::new(),
         &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
     )
     .unwrap();
     let sub_preview = &preview.subscription_previews[0];

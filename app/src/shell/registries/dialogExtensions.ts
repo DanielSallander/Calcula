@@ -61,7 +61,29 @@ export const DialogExtensions = {
   openDialog(dialogId: string, data?: Record<string, unknown>): void {
     const definition = registry.dialogs.get(dialogId);
     if (definition) {
-      registry.dialogStates.set(dialogId, { isOpen: true, data });
+      // A SHOW IS AN EVENT, and the component has to be able to see it.
+      //
+      // `DialogContainer` keys by dialog id, so re-showing a dialog that is
+      // already open updates its props WITHOUT remounting — every `useState`
+      // keeps whatever it held. Measured consequences, all of them silent:
+      // a reset dialog re-shown for a DIFFERENT application kept the first
+      // one's unticked cells and reported "keeping 3 cells" over a list where
+      // everything was ticked; a Publish dialog re-opened from a sheet tab
+      // after a successful push kept `pushed = true`, leaving the primary
+      // action permanently disabled with a stale success message and no
+      // explanation.
+      //
+      // A monotonic counter is the smallest thing that makes the event
+      // observable: a component depends on `data.__openCount` and resets what
+      // a fresh open should reset. `data` alone will not do — a caller that
+      // passes none leaves the reference unchanged, and one that passes an
+      // equal literal is indistinguishable from no show at all.
+      const previous = registry.dialogStates.get(dialogId);
+      const openCount = ((previous?.data?.__openCount as number | undefined) ?? 0) + 1;
+      registry.dialogStates.set(dialogId, {
+        isOpen: true,
+        data: { ...(data ?? {}), __openCount: openCount },
+      });
       notifyListeners();
     } else {
       console.warn(`[DialogExtensions] Dialog not found: ${dialogId}`);

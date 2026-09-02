@@ -302,6 +302,7 @@ pub fn calp_diff_working_copy(
         &user_files_state,
         &timeline_slicer_state,
         &memory,
+        &registry_path,
         &package_name,
         working_version.clone(),
         // From the link, so a LIBRARY working copy diffs the same zero sheets a

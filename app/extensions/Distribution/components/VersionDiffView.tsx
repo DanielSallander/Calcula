@@ -16,7 +16,7 @@
 //   * A capability a script GAINED is called out on its own, because it is the
 //     one change to a distributed script a consumer must not miss.
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import type { CellDiff, ObjectChange, SheetDiffSummary, VersionDiff } from "@api";
 
 /**
@@ -209,7 +209,17 @@ function SheetRow({
 }) {
   // OPEN BY DEFAULT when the rows are actionable. A checkbox behind a "show
   // cells" link is a decision most people will never find they had.
+  //
+  // A `useState` INITIALIZER RUNS ONCE, which is not enough here: the same
+  // dialog renders read-only ("View changes") and then actionable ("Reset to
+  // published") without remounting, so a user who looked first got the reset
+  // list collapsed and never saw the checkboxes the feature is about. The
+  // effect below opens it when `selection` ARRIVES.
   const [expanded, setExpanded] = useState(!!selection);
+  const hasSelection = !!selection;
+  useEffect(() => {
+    if (hasSelection) setExpanded(true);
+  }, [hasSelection]);
   const rows = drilled?.rows ?? sheet.sample;
   const showingAll = drilled !== undefined;
 

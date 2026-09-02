@@ -2115,11 +2115,33 @@ pub(crate) fn collect_pivot_definitions(
     for (pivot_id, (def, _cache)) in pivot_tables.iter() {
         let is_bi = bi_metadata.contains_key(pivot_id);
         let source_sheet_index = if !is_bi {
-            // For grid pivots, find the source sheet by the destination_sheet name
-            // (source data is typically on the same or a known sheet)
-            def.destination_sheet.as_ref().and_then(|name|
-                sheet_names.iter().position(|n| n == name)
-            )
+            // THE SOURCE ANCHOR, not the destination one.
+            //
+            // This read `def.destination_sheet` — with a comment saying source
+            // data is "typically on the same" sheet — so a CROSS-SHEET pivot
+            // (reads Data, writes Report) recorded Report's index as its source.
+            // On a subscriber that index is what `restore_pulled_pivots` builds
+            // the cache from, so the pivot was rebuilt from the OUTPUT sheet at
+            // the source's coordinates — and because publish strips pivot output
+            // regions as `excluded_regions`, that area arrives blank, so the
+            // pivot came back empty and was written over the subscriber's copy
+            // of the report.
+            //
+            // `source_sheet` is the field that means it; `destination_sheet`
+            // stays as the fallback so a same-sheet pivot that never recorded a
+            // source behaves exactly as before.
+            //
+            // Case-insensitive, like every sheet-name comparison in the product:
+            // a stored anchor's spelling can drift from its tab (a case-only
+            // rename is legal and updates no pivot), and an exact match then
+            // yields None — which the publish path reads as "BI pivot, no grid
+            // source" and ships a grid pivot with no source at all.
+            def.source_sheet
+                .as_ref()
+                .or(def.destination_sheet.as_ref())
+                .and_then(|name| {
+                    sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
+                })
         } else {
             None
         };

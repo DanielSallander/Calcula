@@ -840,7 +840,15 @@ pub(crate) fn sheet_names_snapshot(state: &AppState) -> Vec<String> {
 /// Pivot definitions anchor both their destination and their source by sheet
 /// name (never a raw index, which a sheet move would silently repoint).
 pub(crate) fn index_of_sheet(sheet_names: &[String], name: &str) -> Option<usize> {
-    sheet_names.iter().position(|n| n == name)
+    // CASE-INSENSITIVE, like every sheet-name comparison in the product: the
+    // lexer uppercases bare identifiers, so `Data` and `data` are one name to a
+    // formula and must be one name here.
+    //
+    // An exact match missed an anchor whose spelling had drifted from its tab —
+    // a case-only rename is legal and updates no pivot definition — and callers
+    // fall back to sheet 0 on a miss, so the pivot silently rebuilt its cache
+    // from an unrelated sheet.
+    sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))
 }
 
 /// Reject a pivot whose output would land on its own source data.

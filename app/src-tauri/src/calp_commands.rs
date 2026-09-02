@@ -278,6 +278,27 @@ struct PublishAssembly {
 /// automatically tracks file fidelity. Core publish writes the subset the
 /// .calp format supports; compute_publish_report tells the author exactly
 /// what shipped and what stayed behind.
+/// Is `local` what `resolve_sheet_name_collisions` would have produced from
+/// `published` — i.e. exactly it, or it with a ` (n)` suffix?
+///
+/// The distinction decides whether a differing name may be restored silently.
+/// A collision rename touches nothing but the sheet's own name, so undoing it
+/// puts every reference back. A deliberate rename has already rewritten every
+/// formula and named range in the workbook, so undoing only the name strands
+/// them — that case is refused instead.
+///
+/// Case-insensitive, like every sheet-name comparison in the product.
+fn is_collision_rename(local: &str, published: &str) -> bool {
+    let (local_l, published_l) = (local.to_ascii_lowercase(), published.to_ascii_lowercase());
+    if local_l == published_l {
+        return true;
+    }
+    let Some(rest) = local_l.strip_prefix(&published_l) else { return false };
+    let Some(rest) = rest.strip_prefix(" (") else { return false };
+    let Some(digits) = rest.strip_suffix(')') else { return false };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 fn assemble_publish_workbook(
     state: &State<AppState>,
     bi_state: &State<BiState>,
@@ -289,6 +310,12 @@ fn assemble_publish_workbook(
     user_files_state: &State<crate::persistence::UserFilesState>,
     timeline_state: &State<crate::timeline_slicer::TimelineSlicerState>,
     sheet_indices: &[usize],
+    // The application THIS assembly is for. The published-name restoration
+    // applies only when the workbook's working-copy link targets it — a link
+    // belongs to one application, and creating a NEW one from the same workbook
+    // must not borrow its names.
+    registry_path: &str,
+    package_name: &str,
 ) -> Result<PublishAssembly, String> {
     // Timelines CARRY into the application. Their EFFECT already travels as the
     // pivot's hidden_items/slicer_filters, so excluding the control while
@@ -348,29 +375,70 @@ fn assemble_publish_workbook(
     // diff all see the same names — `assemble_publish_workbook` is the one door
     // all three go through.
     //
-    // Returns local name -> published name for every sheet it renamed, because
-    // anything else in the workbook that refers to a sheet BY NAME has to follow
-    // it. Today that is the pivot definitions' `destination_sheet`; the map
-    // exists so the next such consumer is a compile-time question rather than a
-    // silent drop.
+    // Returns LOWERCASED local name -> published name for every sheet it
+    // renamed, because anything else that refers to a sheet BY NAME has to
+    // follow it, and every sheet-name comparison in this product is
+    // case-insensitive. A case-sensitive key here silently dropped a pivot whose
+    // stored `destination_sheet` spelling had drifted from its tab.
+    //
+    // ONLY WHEN THIS PUSH TARGETS THE LINKED APPLICATION. The link belongs to
+    // ONE application; publishing a NEW application from the same workbook must
+    // not take its names. Without this check, a working copy of "sales" that
+    // creates "sales-2026" shipped a sheet under a name borrowed from an
+    // unrelated application, and both refusal messages in `calp_publish` route
+    // the author here by name.
     let renamed_for_publish: std::collections::HashMap<String, String> = {
         let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
         let mut renamed = std::collections::HashMap::new();
-        if let Some(link) = link.as_ref() {
+        let applies = link
+            .as_ref()
+            .is_some_and(|l| l.targets(registry_path, package_name));
+        if applies {
+            let link = link.as_ref().expect("checked by `applies`");
             let published_name: std::collections::HashMap<identity::SheetId, String> = link
                 .base_sheets
                 .iter()
                 .map(|s| (s.sheet_id, s.name.clone()))
                 .collect();
             for &idx in sheet_indices {
-                if let Some(sheet) = workbook.sheets.get_mut(idx) {
-                    if let Some(name) = published_name.get(&sheet.id) {
-                        if sheet.name != *name {
-                            renamed.insert(sheet.name.clone(), name.clone());
-                            sheet.name = name.clone();
-                        }
-                    }
+                let Some(sheet) = workbook.sheets.get_mut(idx) else { continue };
+                let Some(published) = published_name.get(&sheet.id) else { continue };
+                if sheet.name == *published {
+                    continue;
                 }
+
+                // A COLLISION RENAME IS SAFE TO UNDO; A DELIBERATE ONE IS NOT.
+                //
+                // `resolve_sheet_name_collisions` renames the incoming sheet and
+                // rewrites NOTHING else — no formula, no named range — so
+                // restoring the published name puts every reference back where
+                // it pointed. `rename_sheet_inner` is the opposite: it repairs
+                // every formula in the workbook (`repair_all_formulas` +
+                // `repair_3d_refs_on_rename`) and every `refers_to`. Restoring
+                // the sheet name after THAT strands them: the package would ship
+                // a sheet called "Data" beside a formula saying
+                // `='Sales Data'!B5`, naming a sheet the package does not
+                // contain — and nothing warns, because publish's only reference
+                // checks cover pane controls and macros, not cells or names.
+                //
+                // The two are told apart by shape: a collision produces exactly
+                // `<published>` or `<published> (n)`. Anything else is the
+                // author's own rename, and a push is refused rather than
+                // half-applied — renames are out of push (2026-09-01), so the
+                // remedy is to put the tab name back.
+                if !is_collision_rename(&sheet.name, published) {
+                    return Err(format!(
+                        "CALP_PUSH_SHEET_RENAMED: the sheet '{}' is published as '{}', and a \
+                         push cannot carry a rename — subscribers hold formulas against that \
+                         name. Rename the tab back to '{}' before pushing. (Renaming a \
+                         published sheet is a breaking change and needs its own gesture; it \
+                         is not something a push should do quietly.)",
+                        sheet.name, published, published
+                    ));
+                }
+
+                renamed.insert(sheet.name.to_ascii_lowercase(), published.clone());
+                sheet.name = published.clone();
             }
         }
         renamed
@@ -411,21 +479,37 @@ fn assemble_publish_workbook(
             .collect();
 
         workbook.pivot_definitions.retain_mut(|def| {
-            // A PIVOT FOLLOWS ITS SHEET. If the sheet was restored to the name
-            // the application publishes it under, the pivot's
-            // `destination_sheet` — which records the LOCAL tab — has to be
-            // rewritten to match, or the published pivot names a sheet the
-            // package does not contain and this retain drops it outright.
-            if let Some(local) = def
-                .definition
-                .get("destination_sheet")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-            {
+            // A PIVOT FOLLOWS ITS SHEET — BOTH ANCHORS. If the sheet was
+            // restored to the name the application publishes it under, the
+            // pivot's stored names have to be rewritten to match, or the
+            // published pivot names a sheet the package does not contain.
+            //
+            // `source_sheet` matters as much as `destination_sheet` and was
+            // missed the first time. The subscriber's `refresh_pivot_cache`
+            // resolves the SOURCE anchor by name and falls back to
+            // `.unwrap_or(0)`, so a stale source rebuilds the pivot's entire
+            // cache from sheet 0 of THEIR workbook at the publisher's
+            // coordinates, and drill-through then lists rows from an unrelated
+            // sheet. The pull side already remaps both
+            // (`restore_pulled_pivots`); the push side remapped one.
+            //
+            // Looked up LOWERCASED: `renamed_for_publish` is keyed that way
+            // because a stored anchor's spelling can drift from its tab, and a
+            // case-sensitive miss here means the anchor is left stale and the
+            // `dest_ok` test three lines down then drops the pivot silently.
+            for anchor in ["destination_sheet", "source_sheet"] {
+                let Some(local) = def
+                    .definition
+                    .get(anchor)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                else {
+                    continue;
+                };
                 if let Some(published) = renamed_for_publish.get(&local) {
                     if let Some(obj) = def.definition.as_object_mut() {
                         obj.insert(
-                            "destination_sheet".to_string(),
+                            anchor.to_string(),
                             serde_json::Value::String(published.clone()),
                         );
                     }
@@ -778,6 +862,10 @@ pub(crate) fn publish_into_for_preview(
     user_files_state: &State<crate::persistence::UserFilesState>,
     timeline_slicer_state: &State<crate::timeline_slicer::TimelineSlicerState>,
     registry: &dyn calp::transport::WorkspaceTransport,
+    // The WORKSPACE the caller is previewing against, beside the transport. The
+    // transport cannot answer "is this the application my link targets", and the
+    // published-name restoration has to ask.
+    registry_path: &str,
     package_name: &str,
     version: SemVer,
     kind: &str,
@@ -796,6 +884,8 @@ pub(crate) fn publish_into_for_preview(
         user_files_state,
         timeline_slicer_state,
         &sheet_indices,
+        registry_path,
+        package_name,
     )?;
 
     let PublishAssembly {
@@ -1064,6 +1154,8 @@ pub fn calp_publish(
         &user_files_state,
         &timeline_slicer_state,
         &sheet_indices,
+        &params.registry_path,
+        &params.package_name,
     )?;
     let report =
         compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
@@ -1151,20 +1243,30 @@ pub fn calp_publish(
     // knows its base — and so a standalone workbook that just created an application
     // becomes that application's working copy without a separate step.
     {
-        let published_sheets: Vec<calp::WorkingCopySheetRef> = {
-            let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
-            let names = state.sheet_names.read().map_err(|e| e.to_string())?;
-            request
-                .sheet_indices
-                .iter()
-                .filter_map(|&i| {
-                    Some(calp::WorkingCopySheetRef {
-                        sheet_id: *ids.get(i)?,
-                        name: names.get(i)?.clone(),
-                    })
+        // THE NAMES THAT WERE ACTUALLY PUBLISHED, read back off the assembled
+        // carrier — never off `state.sheet_names`.
+        //
+        // The link is the record of what the application calls each sheet, and
+        // it is what the next push's name restoration reads. Rebuilding it from
+        // the LIVE tab names overwrote that record with the local ones, so the
+        // restoration worked on the first push and never again: push #2 found
+        // the local name already equal to the "published" name, changed nothing,
+        // and the collision rename shipped after all. The block that restores
+        // the names and this one disagreed about which names were published.
+        //
+        // `request.workbook` is the carrier `assemble_publish_workbook` produced
+        // and `publish()` serialized, so its sheet names ARE the manifest's.
+        let published_sheets: Vec<calp::WorkingCopySheetRef> = request
+            .sheet_indices
+            .iter()
+            .filter_map(|&i| {
+                let sheet = request.workbook.sheets.get(i)?;
+                Some(calp::WorkingCopySheetRef {
+                    sheet_id: sheet.id,
+                    name: sheet.name.clone(),
                 })
-                .collect()
-        };
+            })
+            .collect();
         // A push CHANGES what this workbook is (its base version moved), which
         // is saved state — so this is the command's one `mutates` arm, taken
         // only after the workspace has actually accepted the version.
@@ -1527,6 +1629,14 @@ pub fn calp_publish_preview(
     )?;
     let sheet_indices = selection.indices.clone();
 
+    // The link's own target, for a dry run that names none — see the call below.
+    let link_target: (String, String) = {
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+        link.as_ref()
+            .map(|l| (l.registry_url.clone(), l.package_name.clone()))
+            .unwrap_or_default()
+    };
+
     let assembly = assemble_publish_workbook(
         &state,
         &bi_state,
@@ -1538,6 +1648,10 @@ pub fn calp_publish_preview(
         &user_files_state,
         &timeline_slicer_state,
         &sheet_indices,
+        // A content-only dry run names no target, so fall back to the link's own —
+        // the preview then restores exactly the names its push would.
+        params.registry_path.as_deref().unwrap_or(&link_target.0),
+        params.package_name.as_deref().unwrap_or(&link_target.1),
     )?;
     let report =
         compute_publish_report(&assembly, &state, &sheet_indices, params.include_comments, &selection);
@@ -3200,9 +3314,6 @@ pub fn calp_pull(
         }
     }
 
-    // A pull materializes application content into THIS workbook: it changes what a
-    // save writes, and (unlike open_file) nothing resets the flag afterwards.
-    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
@@ -3238,6 +3349,20 @@ pub fn calp_pull(
         policy,
     )
     .map_err(|e| e.to_string())?;
+
+    // ONE EFFECT, constructed after every refusal that precedes a write.
+    //
+    // It used to be the statement above `open_workspace_scoped`, so a subscribe
+    // that failed on an unreachable workspace, an unparseable version pin, or
+    // any of the pull gates (signature, TOFU, min_app_version, the checksum
+    // walk) left a CLEAN workbook marked modified — arming the
+    // close-without-saving prompt for a command that wrote nothing. `mutates`
+    // dirties at construction, so placement is the whole of the rule.
+    //
+    // A pull materializes application content into THIS workbook: it changes
+    // what a save writes, and (unlike open_file) nothing resets the flag
+    // afterwards.
+    let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
 
     // Materialize into the workbook through the shared materializer — the
     // same code the CHECKOUT path runs, so application fidelity cannot drift
@@ -6026,6 +6151,18 @@ pub fn calp_refresh_preview(
             .collect()
     };
 
+    // The LIVE tab names, so the resolver names the sheet the user is looking
+    // at. `SubscribedSheet.local_name` is stamped at subscribe and never
+    // restamped, and renaming a subscribed sheet is allowed.
+    let local_sheet_names: std::collections::HashMap<SheetId, String> = {
+        let ids = state.sheet_ids.read().map_err(|e| e.to_string())?;
+        let names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        ids.iter()
+            .enumerate()
+            .filter_map(|(i, id)| names.get(i).map(|n| (*id, n.clone())))
+            .collect()
+    };
+
     let mut merged = calp::refresh::RefreshPreview {
         subscription_previews: Vec::new(),
         total_cells_changed: 0,
@@ -6049,8 +6186,14 @@ pub fn calp_refresh_preview(
             .map(|&i| subs.subscriptions[i].clone())
             .collect();
         let preview =
-            calp::refresh::compute_preview(&registry, &group, &layer, &override_positions)
-                .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
+            calp::refresh::compute_preview(
+                &registry,
+                &group,
+                &layer,
+                &override_positions,
+                &local_sheet_names,
+            )
+            .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
 
         merged.subscription_previews.extend(preview.subscription_previews);
         merged.total_cells_changed += preview.total_cells_changed;
@@ -15128,9 +15271,28 @@ fn restore_pulled_pivots(
 
         // Find the destination sheet and write pivot output to grid
         let dest_sheet_name = def.destination_sheet.as_deref().unwrap_or("");
-        let dest_sheet_idx = sheet_names.iter()
-            .position(|n| n == dest_sheet_name)
-            .unwrap_or(0);
+        // CASE-INSENSITIVE, and a miss is a SKIP rather than sheet 0.
+        //
+        // Both halves were wrong in the same direction. An exact match missed a
+        // destination whose spelling had drifted from its tab — a case-only
+        // rename is legal and updates no pivot definition — and the
+        // `.unwrap_or(0)` then wrote the pivot's whole output over the
+        // subscriber's FIRST SHEET, whatever that happened to be. The publish
+        // side compares these names case-insensitively, so the two ends
+        // disagreed about which pivots were even shippable.
+        let Some(dest_sheet_idx) = sheet_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(dest_sheet_name))
+        else {
+            crate::log_warn!(
+                "CALP",
+                "pulled pivot {} names destination sheet '{}', which this workbook does not \
+                 have — skipped rather than written over sheet 0",
+                pivot_id,
+                dest_sheet_name
+            );
+            continue;
+        };
 
         if let Some(dest_grid) = grids.get_mut(dest_sheet_idx) {
             let _merged = write_pivot_to_grid(
@@ -16021,13 +16183,30 @@ pub fn calp_reset_subscription(
         for (idx, local_sid, pulled) in &targets {
             let Some(kept) = excluded_by_sheet.get(local_sid) else { continue };
             for &(r, c) in kept {
+                // ORIGIN *OR* OUTPUT. Checking only origins left the worse half
+                // open: a kept cell INSIDE a published dynamic array is not an
+                // origin, so it passed the guard — and then the reset installed
+                // the published extents over it and the recalculation at the end
+                // wrote the array's own value into it, erasing the value the
+                // author had asked to keep. The dialog reported success.
+                //
+                // Every cell an array owns belongs to that array, so keeping one
+                // of them is not a coherent request in either direction.
                 let local_origin = live_spills.contains_key(&(*idx, r, c));
+                let local_output = live_spills
+                    .iter()
+                    .any(|((s, _, _), cells)| *s == *idx && cells.contains(&(r, c)));
                 let published_origin = pulled
                     .sheet
                     .cells
                     .get(&(r, c))
                     .is_some_and(|sc| sc.spill.is_some());
-                if local_origin || published_origin {
+                let published_output = pulled.sheet.cells.iter().any(|((orow, ocol), sc)| {
+                    sc.spill.is_some_and(|(er, ec)| {
+                        r >= *orow && r <= er && c >= *ocol && c <= ec
+                    })
+                });
+                if local_origin || local_output || published_origin || published_output {
                     offenders.push(format!(
                         "{}!{}",
                         pulled.name,
@@ -16038,10 +16217,11 @@ pub fn calp_reset_subscription(
         }
         if !offenders.is_empty() {
             return Err(format!(
-                "CALP_RESET_SPILL_CELL: {} is the origin of a dynamic array, so it cannot be \
-                 kept while the rest of the sheet is restored — the array's shape and its \
-                 formula have to agree. Either include it in the reset, or reset nothing on \
-                 that sheet and edit it afterwards.",
+                "CALP_RESET_SPILL_CELL: {} belongs to a dynamic array — as its origin or as \
+                 one of the cells it fills — so it cannot be kept while the rest of the sheet \
+                 is restored. An array's shape, its formula and its output are one thing. \
+                 Either include it in the reset, or reset nothing on that sheet and edit it \
+                 afterwards.",
                 offenders.join(", ")
             ));
         }
@@ -16104,7 +16284,14 @@ pub fn calp_reset_subscription(
             overrides,
         }
     };
-    let overrides_cleared = snapshot.overrides.len();
+    // COUNTED AFTER the retain, not from the pre-reset snapshot.
+    //
+    // This was `snapshot.overrides.len()` — every override on the reset sheets,
+    // including the ones a PARTIAL reset deliberately KEPT. The dialog then told
+    // the author it had cleared overrides that are still in the ledger and still
+    // repaint on the next refresh. Set below, once the sweep has run.
+    let overrides_before = snapshot.overrides.len();
+    let mut overrides_cleared = 0usize;
 
     // The reset also restores the APPLICATION's pivot definitions — a subscriber
     // changing "the layout" usually means the pivot layout, and resetting only
@@ -16364,6 +16551,13 @@ pub fn calp_reset_subscription(
                 .get(&o.sheet_id)
                 .is_some_and(|kept| kept.contains(&pos))
         });
+        overrides_cleared = overrides_before.saturating_sub(
+            layer
+                .overrides
+                .iter()
+                .filter(|o| local_sheet_ids.contains(&o.sheet_id))
+                .count(),
+        );
     }
 
     // Restore the published pivot definitions with an EMPTY cache — the

@@ -379,6 +379,7 @@ fn diff_working_copy_against_base(
         user_files_state,
         timeline_slicer_state,
         &memory,
+        &ctx.registry_url,
         &ctx.package_name,
         working_version.clone(),
         &ctx.kind,

@@ -98,7 +98,13 @@ pub struct ConflictPreviewCell {
     /// different uuid on a subscriber.
     pub local_sheet_id: SheetId,
     pub cell_id: CellId,
-    /// The LIVE local sheet name: a subscriber may rename a subscribed sheet.
+    /// The LIVE local sheet name.
+    ///
+    /// From `local_sheet_names`, NOT from `SubscribedSheet.local_name` — that is
+    /// stamped at subscribe and never restamped, and renaming a subscribed sheet
+    /// is allowed, so the ledger's copy names a tab that may not be on screen.
+    /// The resolver puts this in front of a destructive decision, so it has to
+    /// be the tab the user is looking at.
     pub sheet_name: String,
     /// (row, col) as resolved for the refresh — the id registry's answer where
     /// it has one, the override's recorded position otherwise.
@@ -194,6 +200,10 @@ pub fn compute_preview(
     subscriptions: &[Subscription],
     override_layer: &OverrideLayer,
     override_positions: &HashMap<(SheetId, CellId), (u32, u32)>,
+    // LIVE local sheet names by local sheet id. The ledger name is stamped at
+    // subscribe and never restamped, so it goes stale the moment a subscriber
+    // renames the tab.
+    local_sheet_names: &HashMap<SheetId, String>,
 ) -> Result<RefreshPreview, CalpError> {
     let mut sub_previews = Vec::new();
     let mut total_cells = 0;
@@ -229,6 +239,15 @@ pub fn compute_preview(
         let mut sheets_updated = Vec::new();
 
         for new_sheet in &new_manifest.sheets {
+            // A DETACHED SHEET IS NOT AN ADDITION. Detaching drops the sheet
+            // from `sub.sheets` and records its package id in `detached_sheets`
+            // precisely so a later refresh does not re-adopt it — `apply_refresh`
+            // honours that. The PREVIEW did not, so it counted the sheet as
+            // "added" on every refresh, forever, promising to bring back
+            // something the apply would never touch.
+            if sub.detached_sheets.contains(&new_sheet.sheet_id) {
+                continue;
+            }
             if !old_sheet_ids.contains(&new_sheet.sheet_id) {
                 sheets_added.push(SheetChangeInfo {
                     sheet_id: new_sheet.sheet_id,
@@ -281,6 +300,7 @@ pub fn compute_preview(
             &sheets_updated,
             override_layer,
             override_positions,
+            local_sheet_names,
         );
 
         // REAL cell counts, bounded.
@@ -363,6 +383,7 @@ fn collect_conflicts(
     sheets_updated: &[SheetChangeInfo],
     override_layer: &OverrideLayer,
     override_positions: &HashMap<(SheetId, CellId), (u32, u32)>,
+    local_sheet_names: &HashMap<SheetId, String>,
 ) -> (Vec<ConflictPreviewCell>, Vec<UnexaminedSheet>) {
     /// Per-sheet cap on a data artifact, matching `count_upstream_cell_changes`.
     const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -420,7 +441,10 @@ fn collect_conflicts(
             conflicts.push(ConflictPreviewCell {
                 local_sheet_id: local_sid,
                 cell_id: ovr.cell_id,
-                sheet_name: sheet_sub.local_name.clone(),
+                sheet_name: local_sheet_names
+                    .get(&local_sid)
+                    .cloned()
+                    .unwrap_or_else(|| sheet_sub.local_name.clone()),
                 position: pos,
                 a1: calcula_format::cell_ref::to_a1(pos.0, pos.1),
                 baseline: ovr.baseline.clone(),
@@ -765,7 +789,7 @@ mod tests {
         };
 
         let layer = OverrideLayer::new();
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
 
         assert_eq!(preview.subscription_previews.len(), 1);
         assert_eq!(preview.subscription_previews[0].new_version, "1.1.0");
@@ -844,7 +868,7 @@ mod tests {
         };
 
         let preview =
-            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.cells_changed, 2, "one edited cell and one added cell");
         assert!(p.cells_changed_exact, "small package: the count is the whole truth");
@@ -877,7 +901,7 @@ mod tests {
         };
 
         let preview =
-            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.new_version, "1.1.0", "an update IS available");
         assert_eq!(p.cells_changed, 0, "…but the same workbook was republished");
@@ -909,7 +933,7 @@ mod tests {
         };
 
         let layer = OverrideLayer::new();
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(preview.subscription_previews.is_empty());
     }
 
@@ -1313,7 +1337,7 @@ mod tests {
         layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "999"));
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(
             p.conflicts.len(),
@@ -1351,7 +1375,7 @@ mod tests {
         layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "999"));
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.conflicts.len(), 1, "upstream changed a cell the user had edited");
 
@@ -1398,7 +1422,7 @@ mod tests {
         layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "150"));
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(preview.subscription_previews[0].conflicts.len(), 0);
 
         let mut upstream = HashMap::new();
@@ -1436,7 +1460,7 @@ mod tests {
 
         // Without the registry: reads B2, which is empty, so it reports a
         // conflict against the wrong "theirs".
-        let blind = compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new()).unwrap();
+        let blind = compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(
             blind.subscription_previews[0].conflicts[0].upstream_new,
             OverrideValue::Empty,
@@ -1446,7 +1470,7 @@ mod tests {
         // With it: reads A1 and reports the real upstream value.
         let mut positions = HashMap::new();
         positions.insert((local_sheet, cell_id), (0u32, 0u32));
-        let seeing = compute_preview(&reg, &[sub], &layer, &positions).unwrap();
+        let seeing = compute_preview(&reg, &[sub], &layer, &positions, &HashMap::new()).unwrap();
         let c = &seeing.subscription_previews[0].conflicts[0];
         assert_eq!(c.position, (0, 0));
         assert_eq!(c.a1, "A1");
@@ -1494,7 +1518,7 @@ mod tests {
         );
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.unexamined_sheets.len(), 1);
         assert_eq!(p.unexamined_sheets[0].reason, "unreadable");

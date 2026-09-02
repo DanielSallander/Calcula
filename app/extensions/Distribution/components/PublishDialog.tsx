@@ -101,6 +101,29 @@ export function PublishDialog({ onClose, data }: DialogProps) {
    * could not show is pushed, which is exactly what a push has always done.
    */
   const [excludedCells, setExcludedCells] = useState<Set<string>>(new Set());
+
+  /**
+   * EVERY SHOW STARTS CLEAN — see `openDialog`'s `__openCount`.
+   *
+   * This dialog is non-modal and is now re-openable from a sheet tab, so the
+   * "already open, just re-shown" path is ordinary rather than exotic. `pushed`
+   * surviving it left the Push button permanently disabled behind a stale
+   * success message, with `pushBlockingReason` returning null because its first
+   * line is `if (i.pushed) return null` — a dead primary action stating no
+   * reason, which is precisely the failure this file was rewritten to remove.
+   */
+  const openCount = data?.__openCount;
+  useEffect(() => {
+    setPushed(false);
+    setStatus(null);
+    setError(null);
+    setReport(null);
+    setReportFor(null);
+    setWarnings([]);
+    setExcludedCells(new Set());
+    setSelectionTouched(false);
+    selectionTouchedRef.current = false;
+  }, [openCount]);
   /**
    * What the chosen workspace already holds. `null` while unread — which is a
    * different state from "read, and empty", and the two must not look alike:
@@ -121,6 +144,22 @@ export function PublishDialog({ onClose, data }: DialogProps) {
   const [defaultIndices, setDefaultIndices] = useState<number[]>([]);
   /** True once the user has moved a checkbox — before that we mirror the default. */
   const [selectionTouched, setSelectionTouched] = useState(false);
+  /**
+   * The same flag, readable from inside an async callback.
+   *
+   * `selectionTouched` is captured when a preview request is ISSUED, and these
+   * callbacks resolve long after. An author who finished typing the workspace
+   * path (firing request N) and then unticked the sheet holding their private
+   * numbers had that untick undone by N's callback, which still saw the
+   * captured `false` and restored the default selection. If they had scrolled
+   * on to the change summary they never saw the box re-tick, and the sheet
+   * left the machine — on the one surface whose whole job is disclosing what
+   * leaves the machine.
+   *
+   * A ref reads the value AT RESOLUTION rather than at issue, which is the
+   * question being asked: "has the author touched this by now?"
+   */
+  const selectionTouchedRef = React.useRef(false);
 
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -191,7 +230,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         if (result.sheets) setAvailableSheets(result.sheets);
         if (result.defaultSheetIndices) {
           setDefaultIndices(result.defaultSheetIndices);
-          if (!selectionTouched) setSheetSelection(new Set(result.defaultSheetIndices));
+          if (!selectionTouchedRef.current) setSheetSelection(new Set(result.defaultSheetIndices));
         }
         setReportFor(previewSignature());
         setStatus(null);
@@ -223,7 +262,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           setDefaultIndices(result.defaultSheetIndices);
           // Only while the user has not chosen: re-seeding after a checkbox
           // moved would silently undo their choice on every target change.
-          if (!selectionTouched) setSheetSelection(new Set(result.defaultSheetIndices));
+          if (!selectionTouchedRef.current) setSheetSelection(new Set(result.defaultSheetIndices));
         }
         setGates(result.gates ?? null);
       } catch {
@@ -408,8 +447,11 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     // runs, then snaps back. If the app dies in between, the hold-back is in the
     // undo stack and the document is dirty — Ctrl+Z and AutoRecover both
     // recover it.
+    // DISABLED with the checkboxes above — belt and braces, so the unsafe path
+    // cannot be reached even if a stale exclusion set survives somehow.
+    const HOLD_BACK_ENABLED = false;
     let heldBack = false;
-    if (mode === "push" && excludedCells.size > 0 && workspace?.baseVersion) {
+    if (HOLD_BACK_ENABLED && mode === "push" && excludedCells.size > 0 && workspace?.baseVersion) {
       setStatus("Holding back unticked changes…");
       try {
         const r = await holdBackCells({
@@ -872,8 +914,26 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                   // Only a PUSH can hold a change back. A first publish has no
                   // base version to take the held-back value from, so a
                   // checkbox there would be a control with nothing behind it.
+                  // DISABLED 2026-09-01 by the session's own adversarial review,
+                  // which found the un-revert unsafe. `undo()` is a BLIND
+                  // `pop_undo()` — it takes no token — and this dialog is
+                  // deliberately non-modal, so an edit the author makes during
+                  // the seconds a publish spends signing and writing to a share
+                  // is what the `finally` reverses. The hold-back then stays
+                  // applied, permanently and silently: the author's value is
+                  // gone from their own workbook, the dialog reports success,
+                  // and a save persists the base value. AutoRecover does not
+                  // save them either — it snapshots LIVE state, which at that
+                  // moment holds the base values, and the undo stack is never
+                  // serialized.
+                  //
+                  // Re-enable only with an undo that names WHAT it is reversing:
+                  // `calp_hold_back_cells` returns the transaction's seq, and
+                  // the un-revert pops only if the top of the stack still
+                  // matches — refusing loudly when it does not. See the review
+                  // findings in docs/design/open-items.md §2.ab.
                   selection={
-                    mode === "push" && workspace?.baseVersion
+                    false && mode === "push" && workspace?.baseVersion
                       ? {
                           excluded: excludedCells,
                           label: "Push",
@@ -1003,6 +1063,7 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                       checked={sheetSelection.has(sheet.index)}
                       onChange={(e) => {
                         setSelectionTouched(true);
+                        selectionTouchedRef.current = true;
                         setSheetSelection((prev) => {
                           const next = new Set(prev);
                           if (e.target.checked) next.add(sheet.index);
@@ -1039,6 +1100,27 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                         (new — not in v{workspace?.baseVersion})
                       </span>
                     )}
+                    {/* THE NAME IT WILL PUBLISH UNDER, when that differs from
+                        the tab. A local collision rename is not carried
+                        upstream, so the row said "Data (2)" while subscribers
+                        received "Data" — and when the restoration produced a
+                        duplicate, the refusal named a sheet that appeared
+                        nowhere in this list. The component already holds both:
+                        `inBase` two lines up reads the same `baseSheets`. */}
+                    {mode === "push" &&
+                      (() => {
+                        const published = workspace?.baseSheets.find(
+                          (s) => s.sheetId === sheet.sheetId,
+                        )?.name;
+                        return published && published !== name ? (
+                          <span
+                            style={{ fontSize: "11px", color: "var(--text-secondary)" }}
+                            title={`This tab is named "${name}" locally. The application knows it as "${published}", and a push does not carry a rename.`}
+                          >
+                            publishes as &ldquo;{published}&rdquo;
+                          </span>
+                        ) : null;
+                      })()}
                   </label>
                 );
               })}

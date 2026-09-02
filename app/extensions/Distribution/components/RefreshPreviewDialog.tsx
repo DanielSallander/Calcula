@@ -45,7 +45,7 @@ import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
 /** Stable key for one conflicted cell. */
 const cellKey = (c: ConflictPreviewCell) => `${c.localSheetId}:${c.cellId}`;
 
-export function RefreshPreviewDialog({ onClose }: DialogProps) {
+export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
   const win = useDialogWindow({ minWidth: 460, minHeight: 320 });
   const [preview, setPreview] = useState<RefreshPreview | null>(null);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
@@ -76,7 +76,23 @@ export function RefreshPreviewDialog({ onClose }: DialogProps) {
         setLoading(false);
       }
     })();
-  }, []);
+    // RE-READ ON EVERY SHOW. With `[]` this ran once per mount, and the dialog
+    // is non-modal — so choosing "Refresh Subscriptions…" again while it was
+    // still open did nothing at all: no refetch, and `result` still holding the
+    // previous run's "Refresh Complete" sentence. The menu item looked broken
+    // for the same reason the original Push button did.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.__openCount]);
+
+  // Everything a fresh show must forget.
+  const openCount = data?.__openCount;
+  useEffect(() => {
+    setResult(null);
+    setError(null);
+    setConfirming(false);
+    setChoices({});
+    setLoading(true);
+  }, [openCount]);
 
   const conflicts: ConflictPreviewCell[] = useMemo(
     () => (preview?.subscriptionPreviews ?? []).flatMap((sp) => sp.conflicts ?? []),
