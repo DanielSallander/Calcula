@@ -4744,6 +4744,84 @@ pub fn calp_hold_back_cells(
         }
     }
 
+    // A HELD-BACK CELL MAY NOT FEED A CELL THE RECALCULATION CANNOT RE-DERIVE.
+    //
+    // The recalculation below is the whole point of doing this in the live
+    // document: publish an artifact where a rolled-back input still has the
+    // author's numbers hanging off it and every subscriber sees a pair that was
+    // never simultaneously true — silently, because nothing on the receiving
+    // side recalculates and the push diff hides formula cells whose formula did
+    // not change.
+    //
+    // CUBE, GATHER and custom-function cells break that: their value comes from
+    // a model, from the workspace's writeback submissions, or from the script
+    // host, and none of those is available to this synchronous command. What
+    // they do instead is worse than an error — on a non-active sheet
+    // `preserved_cube_value` reads the cell's OLD value straight back out of the
+    // grid and re-writes it, so the stale number is re-committed as though
+    // freshly computed. (`docs/design/open-items.md` §2.aa called for this
+    // refusal whichever route the feature took; the feature shipped without it.)
+    //
+    // Refused by NAME rather than resolved either way, the same shape
+    // `CALP_RESET_SPILL_CELL` uses one command over: this is rare, and the wrong
+    // answer corrupts a published artifact rather than a cell.
+    {
+        let seeds: Vec<crate::non_derivable::Node> = by_sheet
+            .iter()
+            .filter_map(|(sheet_id, positions)| {
+                let idx = sheet_ids.iter().position(|id| id.to_string() == *sheet_id)?;
+                Some(positions.iter().map(move |&(r, c)| (idx, r, c)))
+            })
+            .flatten()
+            .collect();
+
+        // The LIVE grids, not the rolled-back clone: the question is which cells
+        // depend on the held-back ones, and that is a property of the workbook
+        // the author is looking at.
+        let live_grids = state.grids.read().map_err(|e| e.to_string())?;
+        let sheet_names = state.sheet_names.read().map_err(|e| e.to_string())?;
+        let tables = state.tables.read().map_err(|e| e.to_string())?;
+        let table_names = state.table_names.read().map_err(|e| e.to_string())?;
+        let named_ranges = state.named_ranges.read().map_err(|e| e.to_string())?;
+        let offenders = crate::non_derivable::non_derivable_dependents(
+            &live_grids,
+            crate::name_resolution::NameTables {
+                named_ranges: &named_ranges,
+                tables: &tables,
+                table_names: &table_names,
+                sheet_names: &sheet_names,
+                spill_ranges: &state.spill_ranges,
+            },
+            &seeds,
+        );
+        if !offenders.is_empty() {
+            let named: Vec<String> = offenders
+                .iter()
+                .take(5)
+                .map(|((s, r, c), why)| {
+                    format!(
+                        "{}!{} ({})",
+                        sheet_names.get(*s).map(|n| n.as_str()).unwrap_or("?"),
+                        calcula_format::cell_ref::to_a1(*r, *c),
+                        why
+                    )
+                })
+                .collect();
+            let more = offenders.len().saturating_sub(named.len());
+            return Err(format!(
+                "CALP_HOLDBACK_NOT_DERIVABLE: {}{} depend(s) on a change you unticked, and \
+                 this workbook cannot recompute {} without the model, the workspace or the \
+                 script host. Publishing would ship that cell's CURRENT value beside the \
+                 published version's input — two numbers that were never true together, and \
+                 nothing on a subscriber's machine recalculates to correct it. Either tick \
+                 those changes so they publish too, or push everything and hold nothing back.",
+                named.join(", "),
+                if more > 0 { format!(" and {} more", more) } else { String::new() },
+                if offenders.len() == 1 { "it" } else { "them" },
+            ));
+        }
+    }
+
     // OWN THE TRANSACTION, so the id is CLAIMED rather than observed.
     //
     // Opened HERE, after every refusal above — a transaction left open by an

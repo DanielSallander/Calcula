@@ -658,7 +658,44 @@ is the kind of silence this program exists to remove. Decide whether refresh sho
 definitions (matching reset) or keep the subscriber's (matching today), then SAY which in the
 preview.
 
-### 2.aa Per-cell selection on the PUSH side needs a state-agnostic evaluator (2026-09-01)
+### ~~2.aa Per-cell selection on the PUSH side needs a state-agnostic evaluator~~ — **CLOSED 2026-09-02**
+
+**Shipped by the third route, the one this row called the fallback: a real undoable revert,
+publish, then a programmatic undo.** The evaluator refactor was not needed and was not done.
+
+The row's own condition on that route — *"any failure path has to guarantee the un-revert"* — is
+what took the work. A bare `undo()` cannot: it is a blind `pop_undo()`, the dialog is
+deliberately non-modal, and a publish takes seconds during which the author can edit and an MCP
+tool can write (`mcp/tools.rs:336`, genuinely concurrent — sync Tauri commands share the main
+thread, MCP does not). So `calp_hold_back_cells` now OWNS its undo transaction and
+`commit_transaction()` returns the id it stamps, and `undo` takes an `expected_seq` it checks in
+the same critical section as the pop. An intervening write makes the un-revert refuse with a
+sentence rather than reverse somebody else's work.
+
+*A first cut read the top of the stack before and after the write and took the difference. That
+is a second critical section and therefore the same defect one layer down — an entry landing in
+the gap is adopted as the caller's own, and the un-revert then reverses a stranger's write
+confidently. The id is claimed, not observed.*
+
+**And the "also required" clause was real, was missing, and is now enforced.** This row said
+cells that cannot be re-derived locally — CUBE, UDF and GATHER — must REFUSE when one lies in the
+dependency closure of an unticked cell. The feature shipped without it, and the consequence was
+worse than an error: on a non-active sheet `preserved_cube_value` reads the cube cell's OLD value
+straight back out of the grid and re-writes it, so the published artifact carried the base
+version's input beside a number derived from the author's held-back one — a pair that was never
+simultaneously true, silent because nothing on the receiving side recalculates and the push diff
+hides formula cells whose formula did not change. (On the active sheet the same absent prefetch
+gives `#N/A`/`#NAME?` instead; GATHER collapses to `0`, which looks legitimate.) The code comment
+claiming these were "PRESERVED, which is the right answer for them anyway" was true only of the
+one branch and false whenever a cell reference is an ARGUMENT — which all three families accept.
+
+`app/src-tauri/src/non_derivable.rs` walks the workbook dependency closure from the held-back
+cells (edges from `stored_ast_references`, the same primitive `build_workbook_plan` and
+`SheetDependencyIndex` are built from) and refuses by name. Cross-sheet edges are matched
+case-insensitively, whole-column/row reads are followed, and an unrelated cube cell elsewhere in
+the workbook does not block the push.
+
+### 2.aa (original statement, kept for the record)
 
 **Owner decision taken 2026-09-01:** unticking a change in the push diff should mean *publish
 without it, keep it locally* — the git-index model. Not *discard it from my workbook*.

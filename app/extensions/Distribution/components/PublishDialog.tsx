@@ -479,11 +479,19 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         // The canvas is still showing what was there before the hold-back.
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       } catch (e: unknown) {
-        // Nothing was written, so there is nothing to put back. Refuse the push
-        // rather than silently publishing the changes the author unticked.
+        // Nothing was published. The hold-back either refused before writing —
+        // `CALP_HOLDBACK_NOT_DERIVABLE` (a cell downstream of an unticked change
+        // reads a data model, writeback submissions or a custom function, none
+        // of which this workbook can recompute) or `CALP_HOLDBACK_NO_SHEET` —
+        // or it failed partway, in which case the partial write is on the undo
+        // stack and the document is dirty.
         setStatus(null);
+        const message = String(e).replace(/^CALP_HOLDBACK_\w+:\s*/, "");
         setError(
-          `Could not hold back the unticked changes, so nothing was published: ${String(e)}`,
+          `Nothing was published. ${message}` +
+            (String(e).includes("CALP_HOLDBACK_")
+              ? ""
+              : " If your sheet is showing the published version's values, press Ctrl+Z once."),
         );
         return;
       }

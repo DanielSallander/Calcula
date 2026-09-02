@@ -86,6 +86,7 @@ pub mod named_ranges;
 /// Excel-parity named-range resolution: a stored formula keeps its NAME and the
 /// name is expanded at EVALUATION, with a name -> dependents edge of its own.
 pub mod name_resolution;
+mod non_derivable;
 pub mod table_deps;
 pub mod object_deps;
 pub mod data_validation;
