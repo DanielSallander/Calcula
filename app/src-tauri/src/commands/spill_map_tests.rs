@@ -91,6 +91,145 @@ fn spill_hosts_of(wb: &Workbook) -> Vec<((usize, u32, u32), (u32, u32))> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// UNDO OF A `.calp` RESET — the maps the grid swap cannot imply
+// ---------------------------------------------------------------------------
+
+/// Undoing "Reset to published" puts the subscriber's OWNERSHIP back, not just
+/// their cells.
+///
+/// THE DEFECT. `apply_calp_reset_restore` rebuilt `grids[idx]` from its snapshot
+/// and swapped the override layer, and touched neither spill map — `rg spill
+/// undo_commands.rs` returned exactly one hit, an unrelated `NameTables` field.
+/// So after Ctrl+Z the PUBLISHER's extents were still installed over the
+/// subscriber's restored grid:
+///
+/// ```text
+/// published   B1 "=SEQUENCE(4)"  ->  B2:B4 = 2 3 4, owned by B1
+/// subscriber  B1 = 7             ->  B2:B4 erased, claims released
+/// reset                          ->  published grid + published claims back
+/// Ctrl+Z                         ->  B1 = 7 again, claims STILL the publisher's
+/// ```
+///
+/// The user then looks at three visibly EMPTY cells that refuse every edit:
+/// `check_spill_protection` finds the stale `spill_hosts` key and answers "the
+/// value contained in this cell is spilled from the formula in B1" — naming a
+/// formula that no longer exists anywhere in the workbook. Nothing repairs it,
+/// because the restored origin is a LITERAL and `recalculate_sheet_values` only
+/// walks formulas. It lasts the whole session.
+///
+/// Ownership is not derivable from the grid: a spilled `2` and a typed `2` are
+/// the same bytes. So the snapshot has to carry it, and the restore has to swap
+/// it — which is what `swap_sheet_spill_claims` is.
+///
+/// SABOTAGE: delete the `inverse.spills = swap_sheet_spill_claims(...)` line in
+/// `apply_calp_reset_restore`, or the `sheet.spills = sheet_spill_claims(...)`
+/// line that fills the snapshot in `calp_reset_subscription`.
+#[test]
+fn undoing_a_calp_reset_restores_the_spill_maps_it_replaced() {
+    use crate::calp_commands::{CalpResetSheetSnapshot, CalpResetSnapshot};
+
+    let wb = Workbook::new(1);
+    let effect = crate::document_effect::test_seed_effect();
+
+    // The PUBLISHED sheet: an array at B1 covering B2:B4.
+    wb.set(0, 1, "=SEQUENCE(4)");
+    let published_claims = crate::spill_restore::sheet_spill_claims(&wb.state, 0);
+    assert_eq!(
+        published_claims.len(),
+        1,
+        "the array must actually own cells — otherwise this test measures nothing"
+    );
+
+    // The SUBSCRIBER types a literal over the origin. The real edit path
+    // releases the claims and erases the cells the array filled.
+    wb.set(0, 1, "7");
+    assert!(
+        crate::spill_restore::sheet_spill_claims(&wb.state, 0).is_empty(),
+        "typing over the origin releases its claims"
+    );
+
+    // What `calp_reset_subscription` snapshots BEFORE it replaces anything:
+    // the subscriber's cells AND the subscriber's ownership (here, none).
+    let snapshot = {
+        let grids = wb.state.grids.read().unwrap();
+        CalpResetSnapshot {
+            sheets: vec![CalpResetSheetSnapshot {
+                sheet_index: 0,
+                cells: grids[0].cells.iter().map(|(k, c)| (k.0, k.1, c.clone())).collect(),
+                column_widths: Default::default(),
+                row_heights: Default::default(),
+                merges: Vec::new(),
+                spills: crate::spill_restore::sheet_spill_claims(&wb.state, 0),
+            }],
+            override_sheet_ids: Vec::new(),
+            overrides: Vec::new(),
+        }
+    };
+
+    // The reset installs the published extents over the sheet — the step
+    // `restore_spill_extents_for_sheet` performs inside `calp_reset_subscription`.
+    crate::spill_restore::swap_sheet_spill_claims(&wb.state, &effect, 0, &published_claims);
+    assert_eq!(spill_hosts_of(&wb).len(), 3, "B2:B4 are owned again");
+
+    // Ctrl+Z.
+    let mut inverse = engine::undo::Transaction::new("redo");
+    let mut report = crate::undo_commands::RestoreReport::default();
+    crate::undo_commands::apply_calp_reset_restore(
+        &wb.state,
+        &effect,
+        &serde_json::to_vec(&snapshot).unwrap(),
+        &mut inverse,
+        &mut report,
+    );
+
+    assert!(
+        spill_hosts_of(&wb).is_empty(),
+        "the publisher's claims must go with the publisher's cells — otherwise \
+         B2:B4 look empty and refuse every edit, naming a formula the workbook \
+         no longer holds: {:?}",
+        spill_hosts_of(&wb)
+    );
+    assert!(spill_ranges_of(&wb).is_empty());
+
+    // And the edit that used to be impossible now works, through the real path.
+    wb.set(1, 1, "typed");
+    assert_eq!(
+        wb.value(0, 1, 1),
+        engine::CellValue::Text("typed".to_string()),
+        "the cell accepts an edit again"
+    );
+}
+
+/// The swap is SYMMETRIC — the property an undo/redo ping-pong rests on.
+///
+/// SABOTAGE: return `Vec::new()` from `swap_sheet_spill_claims` instead of the
+/// previous claims; the redo then has nothing to put back.
+#[test]
+fn swapping_a_sheets_spill_claims_hands_back_exactly_what_it_replaced() {
+    let wb = Workbook::new(1);
+    let effect = crate::document_effect::test_seed_effect();
+
+    wb.set(0, 1, "=SEQUENCE(4)");
+    let original = crate::spill_restore::sheet_spill_claims(&wb.state, 0);
+    assert_eq!(original.len(), 1);
+
+    let previous = crate::spill_restore::swap_sheet_spill_claims(&wb.state, &effect, 0, &[]);
+    assert_eq!(previous, original, "the swap returns what it replaced");
+    assert!(spill_hosts_of(&wb).is_empty(), "and installs what it was given");
+
+    let back = crate::spill_restore::swap_sheet_spill_claims(&wb.state, &effect, 0, &previous);
+    assert!(back.is_empty(), "and the second swap returns the empty set");
+    assert_eq!(
+        crate::spill_restore::sheet_spill_claims(&wb.state, 0),
+        original,
+        "ping-pong lands exactly where it started"
+    );
+    // The INVERSE index is rebuilt too, not just the origin map — a stale
+    // `spill_hosts` entry is precisely the orphan that refuses an edit.
+    assert_eq!(spill_hosts_of(&wb).len(), 3);
+}
+
 /// EXACTLY what `clear_range` does, phase for phase, on the active sheet.
 ///
 /// `clear_range` is a `#[tauri::command]` taking `State<AppState>` and cannot be
@@ -1212,7 +1351,6 @@ fn every_cell_writing_function_either_maintains_the_spill_map_or_is_exempt_with_
         ("calp_commands.rs", "calp_hold_back_cells", "the same arrangement as overlay_their_cells above: a DETACHED clone of the grids with the base version's cells laid over the unticked positions, handed to apply_script_modified_grids, which owns the spill map for the write. Nothing in AppState is mutated here"),
         ("tables.rs", "write_table_formula_cell", "helper: one totals cell; its two callers seed the shared cascade"),
         ("undo_commands.rs", "apply_changes", "every SetCell restore is a cascade seed, and the cascade's tear-down phase releases whatever the restored cell stopped owning"),
-        ("undo_commands.rs", "apply_calp_reset_restore", "reports its sheet; apply_changes cascades"),
         ("undo_commands.rs", "apply_object_swap_restore", "reports its sheet; apply_changes cascades"),
         ("undo_commands.rs", "apply_pivot_create_restore", "reports its sheet; apply_changes cascades"),
         ("undo_commands.rs", "apply_pivot_definition_restore", "reports its sheet; apply_changes cascades"),
@@ -1658,6 +1796,14 @@ fn spill_relevant_functions(text: &str) -> Vec<(String, bool)> {
         // §3bm: see the note in WRITES.
         "apply_spill_decision(",
         "release_origin_spill(",
+        // The UNDO half. Every entry above maintains the map by re-deriving it
+        // from the grid it just wrote; an undo cannot, because ownership is not
+        // in the grid. It carries the claims in its snapshot and swaps them
+        // back. `apply_calp_reset_restore` was EXEMPT here reading "reports its
+        // sheet; apply_changes cascades" — which was false in the direction
+        // that costs the user: the cascade only walks FORMULAS, so a restored
+        // literal under a stale published extent was never revisited.
+        "swap_sheet_spill_claims(",
     ];
 
     let stripped = strip_test_modules(text);

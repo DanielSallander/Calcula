@@ -2211,7 +2211,10 @@ fn apply_report_restore(
 /// box-scoped report restore) because a reset replaces the entire sheet.
 /// Cells carry their cached values, so no recalc of the restored cells is
 /// needed; dependency maps are rebuilt when the active sheet was swapped.
-fn apply_calp_reset_restore(
+/// `pub(crate)` for `commands::spill_map_tests`, which drives it directly:
+/// `calp_reset_subscription` takes a `tauri::Window` and cannot be called
+/// in-process, but THIS half is where the spill maps were being left behind.
+pub(crate) fn apply_calp_reset_restore(
     state: &AppState,
     effect: &crate::document_effect::DocumentEffect,
     data: &[u8],
@@ -2275,6 +2278,7 @@ fn apply_calp_reset_restore(
                     all_rh.get(idx).cloned().unwrap_or_default()
                 },
                 merges: Vec::new(), // filled in the merge pass below
+                spills: Vec::new(), // filled in the spill pass below
             };
 
             let mut restored = engine::Grid::new();
@@ -2303,6 +2307,20 @@ fn apply_calp_reset_restore(
             *merged = sheet.merges.iter().cloned().collect();
             prev
         });
+
+        // --- Dynamic-array ownership (spill maps are LAST in the lock order,
+        // and this takes them with no grid guard alive) ---
+        //
+        // The grid swap above cannot imply this. A spilled value and a typed
+        // value are identical bytes, so putting the cells back says nothing
+        // about who owns them; the reset installed the PUBLISHER's extents and
+        // they would otherwise stay installed over the subscriber's restored
+        // grid. `check_spill_protection` then refuses every edit to cells that
+        // look empty, naming a formula the workbook no longer holds — and the
+        // post-restore recalculation cannot notice, because a restored literal
+        // is not a formula and `recalculate_sheet_values` only walks formulas.
+        inverse.spills =
+            crate::spill_restore::swap_sheet_spill_claims(state, &effect, idx, &sheet.spills);
 
         inverse_sheets.push(inverse);
     }

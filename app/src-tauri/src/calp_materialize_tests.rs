@@ -67,6 +67,15 @@ fn publish_and_pull(
     prof: &Path,
     wb: &Workbook,
 ) -> calp::pull::PullResult {
+    publish_and_pull_sheets(dir, prof, wb, vec![0])
+}
+
+fn publish_and_pull_sheets(
+    dir: &TempDir,
+    prof: &Path,
+    wb: &Workbook,
+    sheet_indices: Vec<usize>,
+) -> calp::pull::PullResult {
     let reg = calp::workspace::LocalWorkspace::open(dir.path()).unwrap();
     let request = PublishRequest {
         workbook: wb,
@@ -75,7 +84,7 @@ fn publish_and_pull(
         kind: "report".to_string(),
         mode: PushMode::CreateNew,
         change_summary: "first".to_string(),
-        sheet_indices: vec![0],
+        sheet_indices,
         now: "2026-08-30T00:00:00Z".to_string(),
         published_by: "author".to_string(),
         writeback_regions: None,
@@ -374,6 +383,134 @@ fn a_pull_reports_the_true_index_of_the_sheet_to_activate() {
         occupied(&mirror).len(),
         5,
         "the pulled sheet's literals and formula reached the mirror"
+    );
+}
+
+/// An application whose OWN first sheet is hidden lands the user on the next
+/// one, not on a sheet `activate_sheet` refuses.
+///
+/// THE ORDERING DEFECT THIS PINS. The landing computation used to run inside the
+/// grid-lock scope, 30 lines BEFORE `materialize_pulled_sheet_state` — the only
+/// code that extends `sheet_visibility` for the appended sheets. Every probed
+/// index was therefore past the end of that vector; `is_user_sheet` reads a
+/// missing slot as `unwrap_or(true)`, so `find` returned `base_index`
+/// unconditionally and the filter could not skip anything at all.
+///
+/// The user-visible half: `PublishedSheetMetadata` carries visibility and the
+/// pull restores it verbatim, so an application CAN begin with a hidden sheet.
+/// `activate_sheet` refuses one by name, and both call sites swallow that into a
+/// `console.warn` — the dialog closed, the tabs appeared, and the user was left
+/// on their own sheet with nothing said.
+///
+/// SABOTAGE: move the computation back above `materialize_pulled_sheet_state`,
+/// or drop the `sheet_is_visible` half of the predicate.
+#[test]
+fn a_hidden_first_sheet_is_not_the_sheet_the_pull_lands_on() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+
+    // [Raw (hidden), Dashboard] — the shape a publisher gets by hiding their
+    // working data before publishing the report that reads it.
+    let mut wb = mixed_workbook();
+    wb.sheets[0].name = "Raw".to_string();
+    wb.sheets[0].visibility = "hidden".to_string();
+    let mut dashboard = Sheet::new("Dashboard".to_string());
+    dashboard
+        .cells
+        .insert((1, 1), SavedCell::from_cell(&Cell::new_number(42.0)));
+    wb.sheets.push(dashboard);
+
+    let pulled = publish_and_pull_sheets(&dir, &prof.path(), &wb, vec![0, 1]);
+    assert_eq!(pulled.sheets.len(), 2, "both sheets published");
+    assert_eq!(
+        pulled.sheets[0].sheet.visibility, "hidden",
+        "the pull restores the publisher's visibility verbatim — without this \
+         the test is measuring nothing"
+    );
+
+    let h = Harness::new();
+    let response = {
+        let effect = crate::document_effect::DocumentEffect::mutates(
+            &crate::persistence::FileState::default(),
+        );
+        materialize_pull_result(
+            &h.state,
+            &effect,
+            &h.pivot,
+            &h.bi,
+            &h.scripts,
+            &h.ribbon,
+            &h.pane,
+            &h.slicer,
+            pulled,
+            MaterializeMode::Subscribe,
+            None,
+        )
+        .expect("materialization failed")
+    };
+
+    // Workbook is [Sheet1, Raw(hidden), Dashboard]. base_index is 1, and 1 is
+    // the answer the broken ordering gave every time.
+    let reported = response
+        .first_pulled_sheet_index
+        .expect("the application has a landable sheet");
+    assert_eq!(
+        reported, 2,
+        "the hidden first sheet is skipped; landing on it is a refusal the \
+         frontend swallows"
+    );
+
+    // The end-to-end consequence, and the only assertion that could not be
+    // satisfied by arithmetic: activating what was reported must SUCCEED.
+    crate::sheets::activate_sheet(&h.state, reported)
+        .expect("the reported landing sheet must be one activate_sheet accepts");
+    assert!(
+        crate::sheets::activate_sheet(&h.state, 1).is_err(),
+        "and the sheet it skipped must be one activate_sheet refuses — \
+         otherwise this test proves nothing about the skip"
+    );
+}
+
+/// An application with NOTHING landable reports `None` rather than a sheet the
+/// caller cannot activate.
+///
+/// SABOTAGE: `.find(...)` -> `.next()`, i.e. drop the predicate entirely.
+#[test]
+fn an_application_of_only_hidden_sheets_reports_no_landing_at_all() {
+    let dir = TempDir::new().unwrap();
+    let prof = TempDir::new().unwrap();
+
+    let mut wb = mixed_workbook();
+    wb.sheets[0].name = "Raw".to_string();
+    wb.sheets[0].visibility = "hidden".to_string();
+
+    let pulled = publish_and_pull_sheets(&dir, &prof.path(), &wb, vec![0]);
+
+    let h = Harness::new();
+    let response = {
+        let effect = crate::document_effect::DocumentEffect::mutates(
+            &crate::persistence::FileState::default(),
+        );
+        materialize_pull_result(
+            &h.state,
+            &effect,
+            &h.pivot,
+            &h.bi,
+            &h.scripts,
+            &h.ribbon,
+            &h.pane,
+            &h.slicer,
+            pulled,
+            MaterializeMode::Subscribe,
+            None,
+        )
+        .expect("materialization failed")
+    };
+
+    assert_eq!(
+        response.first_pulled_sheet_index, None,
+        "no landable sheet means no landing — reporting one the caller cannot \
+         activate is how the refusal ended up in a console.warn"
     );
 }
 

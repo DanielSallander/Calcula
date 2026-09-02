@@ -14,8 +14,10 @@ import { alertAsync, promptAsync } from "@api/dialogs";
 export interface SheetContext {
   /** The sheet being acted upon */
   sheet: { name: string; index: number };
-  /** Index of the sheet */
+  /** TRUE workbook index — what the backend commands take, and a bad cache key */
   index: number;
+  /** Stable identity, for anything an extension remembers about this sheet */
+  sheetId?: string;
   /** Whether this is the active sheet */
   isActive: boolean;
   /** Total number of sheets */

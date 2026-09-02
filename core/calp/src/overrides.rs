@@ -51,12 +51,26 @@ pub enum OverrideValue {
 /// `CellError`. Both must keep agreeing: letting either side drift to the Rust
 /// variant name would make every error-cell override a permanent spurious
 /// conflict.
+///
+/// THE SAME HAZARD, ONE FIELD OVER, AND IT WAS LIVE. `SavedCell.formula` is the
+/// RAW rendering (`Cell::formula_string_raw`, so the resolved
+/// `__INVOKE__("Name", lambda, …)` marker round-trips into an AST evaluation can
+/// use), while `override_value_from_cell` on the app side records a live cell
+/// through `formula_string()`, which COLLAPSES that marker to `Name(args)`. A
+/// cell holding `=Double(5)`, where `Double` is a named LAMBDA, therefore had a
+/// baseline that could never equal its upstream: a permanent conflict on every
+/// refresh, the internal marker shown to the user as "theirs", and one click on
+/// "Take all theirs" discarding an edit for a cell the publisher never touched.
+/// `collapse_formula_text` brings the stored text to the same spelling; it is a
+/// no-op string clone for any formula without the marker.
 pub fn override_value_from_saved(cell: Option<&persistence::SavedCell>) -> OverrideValue {
     match cell {
         None => OverrideValue::Empty,
         Some(c) => {
             if let Some(ref formula) = c.formula {
-                OverrideValue::Formula { formula: formula.clone() }
+                OverrideValue::Formula {
+                    formula: engine::ast_render::collapse_formula_text(formula),
+                }
             } else {
                 match &c.value {
                     persistence::SavedCellValue::Empty => OverrideValue::Empty,
@@ -415,6 +429,76 @@ mod tests {
             SheetId::from_bytes(identity::generate_uuid_v7()),
             CellId::from_bytes(identity::generate_uuid_v7()),
         )
+    }
+
+    /// A named-LAMBDA call is ONE formula, however the two sides spell it.
+    ///
+    /// The publisher's `SavedCell.formula` is the RAW rendering — persistence
+    /// writes `Cell::formula_string_raw` so the resolved marker re-parses into
+    /// an AST evaluation can use. The subscriber's override baseline is the
+    /// LIVE rendering, `Cell::formula_string()`, which collapses it. Cell A1
+    /// holding `=Double(5)` therefore had a baseline that could never equal its
+    /// upstream: `classify_rebase` returned `Conflict` on every refresh forever,
+    /// even for a version where the publisher had not touched the cell; the
+    /// dialog rendered the internal `__INVOKE__` marker to the user as "theirs";
+    /// and one click on "Take all theirs" — under a strip that says "This is not
+    /// undoable" — discarded the subscriber's own edit for a cell nobody had
+    /// edited. In the other direction a subscriber who typed the publisher's
+    /// exact formula never auto-cleared and stayed conflicted.
+    ///
+    /// SABOTAGE: drop the `collapse_formula_text` call in
+    /// `override_value_from_saved`.
+    #[test]
+    fn a_named_lambda_call_is_not_a_permanent_conflict() {
+        let (sheet_id, cell_id) = make_ids();
+        // What the publisher's package carries for `=Double(D4)`.
+        let published = persistence::SavedCell::from_cell(&engine::cell::Cell::new_formula(
+            "__INVOKE__(\"Double\",LAMBDA(x,x*2),D4)".to_string(),
+        ));
+        assert!(
+            published.formula.as_deref().unwrap().contains("__INVOKE__"),
+            "the published side really does carry the raw marker — without this \
+             the test is measuring nothing"
+        );
+
+        // What the subscriber's ledger records as the baseline: the live cell's
+        // DISPLAY form, which is what `override_value_from_cell` produces.
+        let live = engine::cell::Cell::new_formula(
+            "__INVOKE__(\"Double\",LAMBDA(x,x*2),D4)".to_string(),
+        );
+        let baseline = OverrideValue::Formula { formula: live.formula_string().unwrap() };
+        assert_eq!(baseline, OverrideValue::Formula { formula: "Double(D4)".to_string() });
+
+        let upstream_new = override_value_from_saved(Some(&published));
+        assert_eq!(
+            upstream_new, baseline,
+            "one formula, one spelling in the ledger"
+        );
+
+        // The subscriber typed 42 over it; the publisher republished the cell
+        // UNTOUCHED. That is not a conflict, and the resolver must not ask.
+        let ovr = CellOverride {
+            sheet_id,
+            cell_id,
+            position: (3, 3),
+            baseline,
+            current: OverrideValue::Value { display: "42".to_string() },
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            modified_at: "2026-01-01T00:00:00Z".to_string(),
+            author: String::new(),
+            conflict: false,
+            upstream_new: None,
+            extra: HashMap::new(),
+        };
+        assert_eq!(classify_rebase(&ovr, &upstream_new), RebaseOutcome::Unchanged);
+
+        // And the other direction: a subscriber who typed the publisher's own
+        // formula auto-clears instead of conflicting forever.
+        let agreed = CellOverride {
+            current: OverrideValue::Formula { formula: "Double(D4)".to_string() },
+            ..ovr
+        };
+        assert_eq!(classify_rebase(&agreed, &upstream_new), RebaseOutcome::AutoCleared);
     }
 
     fn make_override(sheet_id: SheetId, cell_id: CellId, baseline: &str, current: &str) -> CellOverride {

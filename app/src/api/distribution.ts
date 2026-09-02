@@ -873,6 +873,14 @@ export interface RefreshPreview {
 
 export interface SubscriptionPreview {
   packageName: string;
+  /**
+   * The workspace this subscription reads, in the user's spelling.
+   *
+   * Part of the subscription's IDENTITY: the merged preview puts every
+   * workspace's rows in one list, and two teams may each publish `sales` to
+   * their own share.
+   */
+  registryUrl: string;
   currentVersion: string;
   newVersion: string;
   sheetsAdded: SheetChangeInfo[];
@@ -940,6 +948,13 @@ export interface CellResolution {
   choice: ResolutionChoice;
 }
 
+/** One row of what a preview showed, echoed back so the apply can verify it. */
+export interface PreviewedSubscriptionVersion {
+  registryUrl: string;
+  packageName: string;
+  newVersion: string;
+}
+
 export interface RefreshApplyParams {
   /**
    * Only the cells the user actually decided on. Anything unlisted keeps the
@@ -947,6 +962,23 @@ export interface RefreshApplyParams {
    * there was anything to decide.
    */
   resolutions?: CellResolution[];
+  /**
+   * EXACTLY the refresh the preview described, so the apply can refuse to be a
+   * different one.
+   *
+   * The dialog computes its preview once and is non-modal by design, and the
+   * two halves resolve the version pin independently. A subscriber who reads
+   * `base=100 / mine=999 / theirs=150` and thinks for two minutes while the
+   * publisher pushes a version where that cell is `7` used to get `7` — their
+   * 999 discarded for a value the dialog never displayed, under a confirm strip
+   * saying the decision is not undoable. Now the apply refuses and says the
+   * workspace moved.
+   *
+   * Omit it only when the caller showed the user nothing. An EMPTY ARRAY is not
+   * the same thing: it says "the preview found no update", and a refresh that
+   * now has one is refused.
+   */
+  previewedVersions?: PreviewedSubscriptionVersion[];
 }
 
 export interface SheetChangeInfo {

@@ -48,6 +48,17 @@ pub enum CalpError {
     #[error("Two sheets in this version would both be called '{name}'. {detail}")]
     DuplicateSheetName { name: String, detail: String },
 
+    /// The workspace moved between a refresh PREVIEW and its APPLY.
+    ///
+    /// The refresh dialog is non-modal by design, and the two halves each
+    /// resolve the version pin independently — so a publisher pushing while the
+    /// user decides would otherwise land a version the dialog never displayed,
+    /// with the user's per-cell "take theirs" decisions applied to values they
+    /// were never shown. Refusing is the only honest answer; pulling the stale
+    /// previewed version instead would be the same lie pointed the other way.
+    #[error("{0}")]
+    RefreshMoved(String),
+
     #[error("Workspace error: {0}")]
     Workspace(String),
 

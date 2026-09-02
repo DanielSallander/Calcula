@@ -3592,8 +3592,7 @@ pub(crate) fn materialize_pull_result(
     // Set inside the grid-lock scope below, consumed after it drops — the
     // mirror write takes its own lock. See the note at the assignment.
     let mut active_grid_after_materialize: Option<engine::grid::Grid> = None;
-    let mut first_pulled_user_sheet: Option<usize> = None;
-    let (chart_sheet_index, pkg_to_index) = {
+    let (chart_sheet_index, pkg_to_index, pulled_index_range) = {
         let mut grids = state.grids.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_names = state.sheet_names.write(&effect).map_err(|e| e.to_string())?;
         let mut sheet_ids = state.sheet_ids.write(&effect).map_err(|e| e.to_string())?;
@@ -3671,30 +3670,9 @@ pub(crate) fn materialize_pull_result(
             active_grid_after_materialize = grids.get(active).cloned();
         }
 
-        // WHICH SHEET THE USER SHOULD LAND ON — answered here, where the true
-        // state-vector indices are known, rather than reconstructed by the
-        // caller from a filtered list.
-        //
-        // `build_sheet_list` OMITS object-backed sheets (a floating range's
-        // backing sheet) and says so in its own doc: "`index` stays the TRUE
-        // position in the state vectors — consumers must match by `s.index`,
-        // never by list position." The subscribe dialog was computing
-        // `sheets.length - sheetsPulled`, which is list arithmetic: with any
-        // object-backed sheet below the pulled ones it names the wrong sheet,
-        // the pulled sheet never becomes active, its content never reaches the
-        // active-sheet mirror, and the next recalculation copies the mirror
-        // back over it. Same lost-literals symptom, different route.
-        //
-        // An application can itself contain backing sheets (publish auto-joins a
-        // floating range's), so this skips them: landing the user on one would
-        // show them a sheet the tab bar deliberately hides.
-        first_pulled_user_sheet = {
-            let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
-            (base_index..grids.len())
-                .find(|&i| crate::sheets::is_user_sheet(&visibility, i))
-        };
-
-        (chart_index_map, pkg_to_index)
+        // The true state-vector span the pulled sheets occupy. The landing
+        // decision needs it, but cannot be made here — see below.
+        (chart_index_map, pkg_to_index, base_index..grids.len())
     };
     if let Some(grid) = active_grid_after_materialize {
         *state.grid.write(effect).map_err(|e| e.to_string())? = grid;
@@ -3724,6 +3702,42 @@ pub(crate) fn materialize_pull_result(
             .collect();
         materialize_pulled_sheet_state(&state, &effect, &pairs, &pkg_to_index, active)?;
     }
+
+    // WHICH SHEET THE USER SHOULD LAND ON — answered here, where the true
+    // state-vector indices are known, rather than reconstructed by the caller
+    // from a filtered list.
+    //
+    // `build_sheet_list` OMITS object-backed sheets (a floating range's backing
+    // sheet) and says so in its own doc: "`index` stays the TRUE position in the
+    // state vectors — consumers must match by `s.index`, never by list
+    // position." The subscribe dialog was computing `sheets.length -
+    // sheetsPulled`, which is list arithmetic: with any object-backed sheet
+    // below the pulled ones it names the wrong sheet, the pulled sheet never
+    // becomes active, its content never reaches the active-sheet mirror, and the
+    // next recalculation copies the mirror back over it.
+    //
+    // AFTER `materialize_pulled_sheet_state`, AND THAT IS THE WHOLE POINT. This
+    // sat 30 lines EARLIER, inside the grid-lock scope — before the only code
+    // that extends `sheet_visibility` for the appended sheets. Every probed
+    // index was past the end of that vector, `is_user_sheet` reads a missing
+    // slot as `unwrap_or(true)`, and `find` therefore returned `base_index`
+    // unconditionally. The filter the comment above describes could not skip
+    // anything, object-backed or otherwise.
+    //
+    // LANDABLE, not merely user-owned: `activate_sheet` refuses an object sheet
+    // AND a hidden one, and an application's first sheet may legitimately be
+    // hidden (`PublishedSheetMetadata` carries visibility and the pull restores
+    // it verbatim). Naming one meant the frontend's `setActiveSheet` came back
+    // "Sheet 'Raw' is hidden and cannot be activated", which both call sites
+    // swallow into a `console.warn` — the dialog closed, the tabs appeared, and
+    // the user was left on their own sheet with nothing said.
+    let first_pulled_user_sheet: Option<usize> = {
+        let visibility = state.sheet_visibility.read().map_err(|e| e.to_string())?;
+        pulled_index_range.clone().find(|&i| {
+            crate::sheets::is_user_sheet(&visibility, i)
+                && crate::sheets::sheet_is_visible(&visibility, i)
+        })
+    };
 
     // Materialize pulled tables. The application carries full table objects
     // (tables/{id}.json); before this they were read, counted, and then
@@ -6362,6 +6376,16 @@ pub struct CellResolution {
     pub choice: ResolutionChoice,
 }
 
+/// One row of what the preview showed, echoed back by the dialog.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewedSubscriptionVersion {
+    pub registry_url: String,
+    pub package_name: String,
+    /// The version the preview said this refresh would install.
+    pub new_version: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshApplyParams {
@@ -6370,6 +6394,23 @@ pub struct RefreshApplyParams {
     /// exactly what a refresh did before there was anything to decide.
     #[serde(default)]
     pub resolutions: Vec<CellResolution>,
+    /// EXACTLY the refresh the preview described, echoed back so this command
+    /// can refuse to be a different one.
+    ///
+    /// The dialog computes its preview once and is non-modal by design, and the
+    /// two halves resolve the version pin independently. A subscriber who reads
+    /// `base=100 / mine=999 / theirs=150` for A1 and thinks for two minutes
+    /// while the publisher pushes a version where A1 is `7` used to get `7` —
+    /// their 999 discarded for a value the dialog never displayed, under a
+    /// confirm strip saying the decision is not undoable.
+    ///
+    /// `None` (an omitted key) means the caller showed the user nothing and the
+    /// gate does not apply: the in-process script gateway calls
+    /// `caps.packages.refresh()` with no preview at all, and there is no stale
+    /// decision to protect there. An empty LIST is not the same thing — it says
+    /// "the preview found no update", and a refresh that now has one is refused.
+    #[serde(default)]
+    pub previewed_versions: Option<Vec<PreviewedSubscriptionVersion>>,
 }
 
 /// Apply the refresh after the user has confirmed the preview.
@@ -6394,7 +6435,9 @@ pub fn calp_refresh_apply(
     // `Option`, so the in-process script gateway can pass `None` and an omitted
     // key still deserializes. No resolutions means keep every local value, which
     // is what this command did before it could be told otherwise.
-    let resolutions = params.map(|p| p.resolutions).unwrap_or_default();
+    let (resolutions, previewed_versions) = params
+        .map(|p| (p.resolutions, p.previewed_versions))
+        .unwrap_or_default();
     let now = chrono::Utc::now().to_rfc3339();
 
     // Pull new versions for all subscriptions that have updates.
@@ -6407,6 +6450,21 @@ pub fn calp_refresh_apply(
             let group: Vec<_> = indices.iter()
                 .map(|&i| subs.subscriptions[i].clone())
                 .collect();
+            // THIS WORKSPACE's slice of what the user was shown. The rows are
+            // matched on (workspace, application) because the merged preview the
+            // dialog receives puts every workspace's rows in one list, and two
+            // teams may each publish `sales` to their own share.
+            let shown = previewed_versions.as_ref().map(|rows| {
+                calp::refresh::PreviewedVersions {
+                    by_package: rows
+                        .iter()
+                        .filter(|r| {
+                            calp::workspace_id::same_workspace(&r.registry_url, &registry_path)
+                        })
+                        .map(|r| (r.package_name.clone(), r.new_version.clone()))
+                        .collect(),
+                }
+            });
             // ALREADY-TRUSTED: "Apply" in the Refresh dialog means "get the
             // newer version of something I subscribed to". It is NOT a first
             // trust decision, so it may not create a pin -- a subscription that
@@ -6419,8 +6477,15 @@ pub fn calp_refresh_apply(
                 &scope,
                 &calcula_profile_dir(),
                 calp::integrity::PinPolicy::RequirePinned,
+                shown.as_ref(),
             )
-            .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
+            .map_err(|e| match e {
+                // The stale-preview refusal already names the workspace's
+                // application and both versions; prefixing it with the raw path
+                // would bury the sentence the user has to read.
+                calp::CalpError::RefreshMoved(m) => m,
+                other => format!("Workspace '{}': {}", registry_path, other),
+            })?;
             for mut payload in group_payloads {
                 // pull_all_updates indexed into the group slice; remap back to
                 // the workbook subscription index.
@@ -7445,6 +7510,25 @@ pub fn calp_refresh_apply(
             .get(r.sheet_id, r.cell_id)
             .map(|o| o.conflict)
             .unwrap_or(false);
+        // A RESOLUTION RESOLVES A CONFLICT, and nothing else.
+        //
+        // `KeepMine` was already inert on a non-conflicted cell —
+        // `keep_override` needs the `upstream_new` only `rebase` sets. `TakeTheirs`
+        // was NOT: `accept_upstream` is `remove_override`, which succeeds for any
+        // override present. So a decision about a cell this refresh never
+        // reached still deleted the subscriber's record of it.
+        //
+        // The way to reach that is not exotic. If the new version DROPS the
+        // sheet, its cells are absent from the payload, `rebase` skips every
+        // override on it (`let Some(new_upstream) = ... else { continue }`) and
+        // the re-overlay below skips it too — so the ledger entry vanished while
+        // the grid, never re-materialized for that sheet, went on showing the
+        // subscriber's own value. A local edit with nothing left to say it is
+        // one: invisible in the Overrides pane, and republished as the
+        // publisher's content by anyone who checks the workbook out.
+        if !was_conflict {
+            continue;
+        }
         let acted = match r.choice {
             // No grid write: the wholesale replacement already put pristine
             // upstream content in this cell, so dropping the override is the
@@ -16191,6 +16275,21 @@ pub struct CalpResetSheetSnapshot {
     pub column_widths: std::collections::HashMap<u32, f64>,
     pub row_heights: std::collections::HashMap<u32, f64>,
     pub merges: Vec<crate::api_types::MergedRegion>,
+    /// The sheet's dynamic-array ownership: `(origin_row, origin_col, the cells
+    /// that origin fills)`.
+    ///
+    /// NOT DERIVABLE FROM `cells`, which is the whole reason it is here. A
+    /// spilled `2` and a typed `2` are the same bytes, so restoring the grid
+    /// says nothing about who owned what. Undo of a reset put the subscriber's
+    /// cells back while leaving the PUBLISHER's extents installed over them:
+    /// the array's cells came back empty and refused every edit, naming a
+    /// formula the workbook no longer contained, for the rest of the session.
+    ///
+    /// `#[serde(default)]` so a snapshot recorded before this field existed
+    /// still deserializes — it restores no claims, which is exactly the old
+    /// behaviour rather than a panic on an undo stack from earlier in the run.
+    #[serde(default)]
+    pub spills: crate::spill_restore::SheetSpillClaims,
 }
 
 /// Reset a subscription's sheets to the pristine published content of the
@@ -16388,6 +16487,7 @@ pub fn calp_reset_subscription(
                     column_widths,
                     row_heights,
                     merges: Vec::new(), // filled below (separate lock scope)
+                    spills: Vec::new(), // filled below (spill maps are last in the lock order)
                 });
             }
         }
@@ -16395,6 +16495,11 @@ pub fn calp_reset_subscription(
             sheet.merges = crate::report::with_sheet_merges(&state, sheet.sheet_index, |m| {
                 m.iter().cloned().collect()
             });
+            // WHO OWNS WHICH CELLS, captured before the published extents
+            // replace it. `restore_spill_extents_for_sheet` below installs the
+            // application's claims over this sheet; without this the undo would
+            // put the subscriber's cells back under the publisher's ownership.
+            sheet.spills = crate::spill_restore::sheet_spill_claims(&state, sheet.sheet_index);
         }
         let overrides = {
             let layer = state.override_layer.read().map_err(|e| e.to_string())?;

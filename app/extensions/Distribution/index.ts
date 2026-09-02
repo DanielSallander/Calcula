@@ -99,9 +99,9 @@ import { DistributionRoleStatusItem } from "./components/DistributionRoleStatusI
 import { SUBSCRIBED_CHIP, WORKING_COPY_CHIP } from "./lib/roleChipColors";
 import {
   provenanceForSheetId,
-  provenanceForSheetIndex,
-  workingCopyForSheetIndex,
-  subscriptionForSheetIndex,
+  subscribedProvenanceForSheetId,
+  workingCopyForSheetId,
+  subscriptionForSheetId,
   refreshSubscribedSheets,
   resetSubscribedSheets,
 } from "./lib/subscribedSheets";
@@ -277,8 +277,17 @@ function activate(context: ExtensionContext): void {
   };
   // These three, and not SHEET_CHANGED: that fires on every tab click, and
   // re-reading the ledger per click buys an answer that cannot have changed.
-  // Nor the sheet add/delete/rename events — the provider keys on `sheetId`, so
-  // none of them alters any answer, and the strip re-renders on them anyway.
+  // Nor the sheet add/delete/move/rename events — EVERY consumer now keys on
+  // `sheetId`, which none of them alters, and the strip re-renders on them
+  // anyway.
+  //
+  // That sentence was here before it was true. A second cache keyed by workbook
+  // INDEX fed the four tab menu items below, and a move or a delete shifted it
+  // under them with no event to notice: the menu offered `Detach from
+  // "vendor-kpis"` on an unrelated sheet and hid all three items on the sheet
+  // that still wore the badge. Adding a fourth event would have been the cheap
+  // fix and the wrong one — the fix is that the answer no longer depends on
+  // position at all.
   cleanupFns.push(context.events.on(AppEvents.AFTER_OPEN, () => void reloadSubscribedSheets()));
   cleanupFns.push(context.events.on(AppEvents.AFTER_NEW, () => void reloadSubscribedSheets()));
   cleanupFns.push(
@@ -295,13 +304,13 @@ function activate(context: ExtensionContext): void {
   sheetExtensions.registerContextMenuItem({
     id: "distribution:detachSheet",
     label: (ctx) => {
-      const app = subscriptionForSheetIndex(ctx.index);
+      const app = subscriptionForSheetId(ctx.sheetId);
       return app ? `Detach from "${app}"` : "Detach from application";
     },
-    visible: (ctx) => subscriptionForSheetIndex(ctx.index) !== null,
+    visible: (ctx) => subscriptionForSheetId(ctx.sheetId) !== null,
     separatorAfter: true,
     onClick: async (ctx) => {
-      const app = subscriptionForSheetIndex(ctx.index);
+      const app = subscriptionForSheetId(ctx.sheetId);
       if (!app) return;
       // `confirmAsync`, never the `confirm` global — under Tauri that returns a
       // Promise, so `if (!confirm(m))` tests `!Promise`, which is always false
@@ -349,12 +358,12 @@ function activate(context: ExtensionContext): void {
   sheetExtensions.registerContextMenuItem({
     id: "distribution:resetSheet",
     label: (ctx) => {
-      const p = provenanceForSheetIndex(ctx.index);
+      const p = subscribedProvenanceForSheetId(ctx.sheetId);
       return p ? `Reset "${p.packageName}" to published...` : "Reset to published...";
     },
-    visible: (ctx) => provenanceForSheetIndex(ctx.index) !== null,
+    visible: (ctx) => subscribedProvenanceForSheetId(ctx.sheetId) !== null,
     onClick: (ctx) => {
-      const p = provenanceForSheetIndex(ctx.index);
+      const p = subscribedProvenanceForSheetId(ctx.sheetId);
       if (!p) return;
       context.ui.dialogs.show(SUBSCRIPTION_DIFF_DIALOG_ID, {
         registryUrl: p.registryUrl,
@@ -373,13 +382,13 @@ function activate(context: ExtensionContext): void {
   sheetExtensions.registerContextMenuItem({
     id: "distribution:viewSheetChanges",
     label: (ctx) => {
-      const p = provenanceForSheetIndex(ctx.index);
+      const p = subscribedProvenanceForSheetId(ctx.sheetId);
       return p ? `View changes vs "${p.packageName}"...` : "View changes vs application...";
     },
-    visible: (ctx) => provenanceForSheetIndex(ctx.index) !== null,
+    visible: (ctx) => subscribedProvenanceForSheetId(ctx.sheetId) !== null,
     separatorAfter: true,
     onClick: (ctx) => {
-      const p = provenanceForSheetIndex(ctx.index);
+      const p = subscribedProvenanceForSheetId(ctx.sheetId);
       if (!p) return;
       context.ui.dialogs.show(SUBSCRIPTION_DIFF_DIALOG_ID, {
         registryUrl: p.registryUrl,
@@ -408,13 +417,13 @@ function activate(context: ExtensionContext): void {
   sheetExtensions.registerContextMenuItem({
     id: "distribution:pushFromTab",
     label: (ctx) => {
-      const p = workingCopyForSheetIndex(ctx.index);
+      const p = workingCopyForSheetId(ctx.sheetId);
       return p ? `Push changes to "${p.packageName}"...` : "Push changes to application...";
     },
-    visible: (ctx) => workingCopyForSheetIndex(ctx.index) !== null,
+    visible: (ctx) => workingCopyForSheetId(ctx.sheetId) !== null,
     separatorAfter: true,
     onClick: (ctx) => {
-      const p = workingCopyForSheetIndex(ctx.index);
+      const p = workingCopyForSheetId(ctx.sheetId);
       if (!p) return;
       // A HINT, never a selection. The dialog highlights the row so the
       // developer can see where the sheet they right-clicked sits in the push,

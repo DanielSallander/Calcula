@@ -154,6 +154,10 @@ impl RenderCtx<'_> {
     }
 }
 
+/// The reserved function name `resolve_names_in_ast` injects for a call to a
+/// user-defined (named `LAMBDA`) function. Not a name a user formula can spell.
+pub const NAMED_INVOKE_MARKER: &str = "__INVOKE__";
+
 /// Render a formula AST to its canonical string representation.
 /// Does NOT include a leading '=' -- the caller adds it if needed for display.
 ///
@@ -172,6 +176,39 @@ pub fn render_formula(expr: &Expression) -> String {
 /// dependency extraction and evaluation rely on.
 pub fn render_formula_raw(expr: &Expression) -> String {
     render_expr(expr, false)
+}
+
+/// Collapse a PERSISTED formula string to the form the user sees.
+///
+/// The one string→string bridge between the two renderings above. Persistence
+/// writes [`render_formula_raw`] (`SavedCell::from_cell` →
+/// `Cell::formula_string_raw`) so the resolved `__INVOKE__("Name", lambda, …)`
+/// marker round-trips into an AST evaluation can use. Anything that compares a
+/// stored formula against a LIVE cell's `formula_string()` is therefore
+/// comparing two spellings of one formula, and finds them different forever.
+///
+/// WHERE THAT BIT. A `.calp` subscriber's override ledger records the baseline
+/// from the live cell (collapsed) and reads upstream from the published payload
+/// (raw). A cell holding `=Double(5)`, where `Double` is a named LAMBDA, was a
+/// PERMANENT conflict: every refresh re-reported it as "changed on both sides"
+/// even when the publisher had not touched it, showed the internal marker to
+/// the user as "theirs", and one click on "Take all theirs" discarded the
+/// subscriber's edit for a cell nobody had edited. In the other direction a
+/// subscriber who typed the publisher's exact formula never auto-cleared.
+///
+/// CHEAP BY CONSTRUCTION: the marker is a reserved name no user formula can
+/// contain, so the substring test below skips the parse for every ordinary
+/// formula. A text this cannot parse comes back UNCHANGED rather than empty —
+/// a comparison against the original spelling is what the caller had before,
+/// which is a worse answer than the collapse and a much better one than "".
+pub fn collapse_formula_text(raw: &str) -> String {
+    if !raw.contains(NAMED_INVOKE_MARKER) {
+        return raw.to_string();
+    }
+    match parser::parse(raw) {
+        Ok(ast) => render_formula(&ast),
+        Err(_) => raw.to_string(),
+    }
 }
 
 /// The canonical text PLUS the byte span of every sub-expression.
@@ -487,7 +524,7 @@ fn render_named_invoke_into(
     out: &mut String,
 ) -> bool {
     let BuiltinFunction::Custom(name) = func else { return false; };
-    if name != "__INVOKE__" || args.len() < 2 {
+    if name != NAMED_INVOKE_MARKER || args.len() < 2 {
         return false;
     }
     // Named form only: args[0] is the display-name string literal, args[1] is
@@ -896,6 +933,51 @@ mod tests {
             ref_site_id: Default::default(),
         };
         assert_eq!(render_formula(&inline), "__INVOKE__(SUM(1),5)");
+    }
+
+    /// The string→string bridge: PERSISTED text in, DISPLAYED text out.
+    ///
+    /// Persistence writes the raw marker so it re-parses to the resolved form;
+    /// anything comparing a stored formula to a live cell's `formula_string()`
+    /// is otherwise comparing two spellings of one formula and finding them
+    /// different forever. That is what made a `.calp` subscriber's `=Double(5)`
+    /// a permanent conflict.
+    ///
+    /// SABOTAGE: `render_formula(&ast)` -> `render_formula_raw(&ast)`.
+    #[test]
+    fn collapse_formula_text_brings_persisted_text_to_the_displayed_form() {
+        // Exactly what `SavedCell.formula` holds for a cell authored as
+        // `=Double(D4)` where `Double` is a named LAMBDA.
+        let persisted = "__INVOKE__(\"Double\",LAMBDA(x,x*2),D4)";
+        assert_eq!(collapse_formula_text(persisted), "Double(D4)");
+
+        // ...and it agrees with what a LIVE cell reports, which is the whole
+        // comparison this function exists to make possible. A `.calp`
+        // subscriber's override records the live side and reads upstream from
+        // the persisted side; without the collapse the two are never equal.
+        let live = crate::cell::Cell::new_formula(persisted.to_string());
+        assert_eq!(live.formula_string().as_deref(), Some("Double(D4)"));
+        assert_eq!(collapse_formula_text(persisted), live.formula_string().unwrap());
+    }
+
+    /// An ordinary formula is returned unchanged and never parsed — the marker
+    /// is a reserved name no user formula can contain, so the substring test is
+    /// the whole cost for every workbook that has no named LAMBDA.
+    ///
+    /// SABOTAGE: drop the `contains(NAMED_INVOKE_MARKER)` early return; the
+    /// second case then comes back re-rendered as `SUM(A1:A3)+1` — a different
+    /// string for the same formula, which is exactly the class of drift this
+    /// function exists to remove.
+    #[test]
+    fn collapse_formula_text_leaves_an_ordinary_formula_byte_identical() {
+        assert_eq!(collapse_formula_text("A1+B2"), "A1+B2");
+        assert_eq!(collapse_formula_text("sum( A1:A3 ) + 1"), "sum( A1:A3 ) + 1");
+        // Unparseable text comes back as itself rather than as an empty string:
+        // the caller's fallback is the original spelling, never nothing.
+        assert_eq!(
+            collapse_formula_text("__INVOKE__(\"Broken\","),
+            "__INVOKE__(\"Broken\","
+        );
     }
 
     // -----------------------------------------------------------------------

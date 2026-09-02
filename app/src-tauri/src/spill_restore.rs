@@ -229,6 +229,96 @@ pub(crate) fn restore_spill_extents_for_sheet(
     report
 }
 
+/// One sheet's spill claims in the shape an undo snapshot carries them:
+/// `(origin_row, origin_col, the cells that origin fills)`.
+pub(crate) type SheetSpillClaims = Vec<(u32, u32, Vec<(u32, u32)>)>;
+
+/// Read one sheet's live spill claims, deterministically ordered.
+///
+/// `spill_ranges` is the authority — `spill_hosts` is its inverse index and is
+/// rebuilt from it — so this reads one map and the swap below writes both.
+pub(crate) fn sheet_spill_claims(state: &AppState, sheet_index: usize) -> SheetSpillClaims {
+    let Ok(ranges) = state.spill_ranges.read() else {
+        return Vec::new();
+    };
+    let mut out: SheetSpillClaims = ranges
+        .iter()
+        .filter(|((s, _, _), _)| *s == sheet_index)
+        .map(|((_, r, c), cells)| (*r, *c, cells.clone()))
+        .collect();
+    out.sort_unstable_by_key(|(r, c, _)| (*r, *c));
+    out
+}
+
+/// Install `claims` as `sheet_index`'s spill claims, returning what it held
+/// before — the symmetric swap an undo needs.
+///
+/// WHY THIS EXISTS. `restore_spill_extents_for_sheet` above reads its claims out
+/// of a `persistence::Sheet`, which is what every FORWARD path has: a pulled
+/// sheet, a file being opened. An UNDO has no such sheet. It has the claims the
+/// grid held a moment ago, and it has to put exactly those back and hand the
+/// current ones to the redo.
+///
+/// The gap this closes: undo of a "Reset to published" rebuilt the grid and the
+/// override layer and touched neither map, so the publisher's extents stayed
+/// installed over the subscriber's restored cells. The cells the array had
+/// covered came back EMPTY and refused every edit — `check_spill_protection`
+/// found the stale `spill_hosts` key and named a formula that no longer existed
+/// anywhere in the workbook. Nothing repaired it, because the restored origin
+/// was a literal and `recalculate_sheet_values` only walks formulas. It lasted
+/// the whole session.
+///
+/// Refuses an overlapping claim for the same reason
+/// `restore_spill_extents_for_sheet` does, and by the same shape: honouring the
+/// second would let one origin's tear-down erase another's output. A refused
+/// claim is simply dropped — the ordinary pre-v7 behaviour, not a corruption.
+pub(crate) fn swap_sheet_spill_claims(
+    state: &AppState,
+    effect: &crate::document_effect::DocumentEffect,
+    sheet_index: usize,
+    claims: &[(u32, u32, Vec<(u32, u32)>)],
+) -> SheetSpillClaims {
+    let (Ok(mut spill_ranges), Ok(mut spill_hosts)) =
+        (state.spill_ranges.write(effect), state.spill_hosts.lock())
+    else {
+        return Vec::new();
+    };
+
+    let mut previous: SheetSpillClaims = spill_ranges
+        .iter()
+        .filter(|((s, _, _), _)| *s == sheet_index)
+        .map(|((_, r, c), cells)| (*r, *c, cells.clone()))
+        .collect();
+    previous.sort_unstable_by_key(|(r, c, _)| (*r, *c));
+
+    spill_ranges.retain(|&(s, _, _), _| s != sheet_index);
+    spill_hosts.retain(|&(s, _, _), _| s != sheet_index);
+
+    // Deterministic, so an overlap in a hand-edited or corrupted snapshot is
+    // resolved the same way every time rather than by iteration order.
+    let mut incoming: Vec<&(u32, u32, Vec<(u32, u32)>)> = claims.iter().collect();
+    incoming.sort_unstable_by_key(|(r, c, _)| (*r, *c));
+
+    for (row, col, cells) in incoming {
+        if (cells.len() as u64) > MAX_RESTORED_SPILL_CELLS {
+            continue;
+        }
+        let overlaps = cells
+            .iter()
+            .any(|&(r, c)| spill_hosts.contains_key(&(sheet_index, r, c)))
+            || spill_hosts.contains_key(&(sheet_index, *row, *col));
+        if overlaps {
+            continue;
+        }
+        for &(r, c) in cells {
+            spill_hosts.insert((sheet_index, r, c), (*row, *col));
+        }
+        spill_ranges.insert((sheet_index, *row, *col), cells.clone());
+    }
+
+    previous
+}
+
 /// Rebuild the spill map for a workbook written BEFORE the extent existed
 /// (`.cala` v1..v6) or by a format that never had one (`.xlsx`).
 ///

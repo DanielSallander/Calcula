@@ -37,6 +37,10 @@ pub struct RefreshPreview {
     pub total_sheets_added: usize,
     pub total_sheets_removed: usize,
     pub total_overrides_conflicted: usize,
+    /// The sum of the per-subscription figures PLUS the layer-wide sweep for
+    /// overrides whose current value equals their own baseline — those clear on
+    /// any refresh, including on subscriptions that had no update at all, so
+    /// they belong to no single subscription's row.
     pub total_overrides_auto_cleared: usize,
     /// False when any subscription's cell count was capped by a budget. The
     /// dialog must then say "at least N" rather than "N".
@@ -52,6 +56,13 @@ pub struct RefreshPreview {
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionPreview {
     pub package_name: String,
+    /// The workspace this subscription reads, in the user's spelling.
+    ///
+    /// Part of the subscription's IDENTITY, not decoration: two teams may each
+    /// publish `sales` to their own share, and the merged preview the frontend
+    /// receives puts both rows in one list. Without this the apply's
+    /// previewed-version gate could match a row to the wrong subscription.
+    pub registry_url: String,
     pub current_version: String,
     pub new_version: String,
     /// Sheets that would be added (new in upstream).
@@ -70,7 +81,18 @@ pub struct SubscriptionPreview {
     pub sheets_with_data_changes: usize,
     /// Overrides that would become conflicts.
     pub overrides_conflicted: usize,
-    /// Overrides that would auto-clear (match new upstream).
+    /// Overrides on THIS subscription's sheets that the apply would delete as
+    /// redundant — the subscriber's value already equals what upstream now
+    /// holds, or they have typed their way back to the baseline.
+    ///
+    /// Computed from the same `classify_rebase` the conflicts are, over the same
+    /// artifact. It was a hardcoded `0` — the identical fabricated-number defect
+    /// this file removed from `overrides_conflicted` — so a subscriber asking
+    /// "how many of my recorded edits does this refresh discard?" was told none,
+    /// and the apply then reported a real number.
+    ///
+    /// Exact whenever `unexamined_sheets` is empty, which is the same condition
+    /// that gates Apply.
     pub overrides_auto_cleared: usize,
     /// EVERY conflict this refresh would create, one row per cell, carrying the
     /// full three-way triple the resolver needs: baseline (base), current
@@ -117,6 +139,23 @@ pub struct ConflictPreviewCell {
     pub current: OverrideValue,
     /// theirs — what upstream holds now.
     pub upstream_new: OverrideValue,
+}
+
+/// What one subscription's conflict scan found.
+///
+/// A struct rather than a tuple because the caller needs FOUR facts out of one
+/// pass and three of them are counts — `(Vec, Vec, usize, HashSet)` at a call
+/// site is a puzzle, and the one that was a bare `0` for as long as it was is
+/// exactly the field that has to be hard to forget.
+struct ConflictScan {
+    conflicts: Vec<ConflictPreviewCell>,
+    unexamined: Vec<UnexaminedSheet>,
+    /// Overrides this scan proved the apply will DELETE — `classify_rebase`
+    /// answering `AutoCleared`.
+    auto_cleared: usize,
+    /// Every override this scan reached a verdict on, so the layer-wide sweep
+    /// below does not count one of them a second time.
+    examined: std::collections::HashSet<(SheetId, CellId)>,
 }
 
 /// A sheet the preview could not read, and why.
@@ -210,9 +249,13 @@ pub fn compute_preview(
     let mut total_added = 0;
     let mut total_removed = 0;
     let mut total_conflicts = 0;
-    let total_cleared = 0;
+    let mut total_cleared = 0;
     let mut total_cells_exact = true;
     let mut conflicts_exact = true;
+    // Every override some subscription's scan reached a verdict on, so the
+    // layer-wide sweep after the loop cannot count one of them twice.
+    let mut examined_anywhere: std::collections::HashSet<(SheetId, CellId)> =
+        std::collections::HashSet::new();
 
     for sub in subscriptions {
         let pin = VersionPin::parse(&sub.version_pin)?;
@@ -292,7 +335,7 @@ pub fn compute_preview(
         // publisher edited one cell and the subscriber had edited twenty
         // others, the dialog reported twenty conflicts and the apply created
         // one. The number was never computed; it was inferred from a proxy.
-        let (conflicts, unexamined_sheets) = collect_conflicts(
+        let scan = collect_conflicts(
             registry,
             &sub.package_name,
             &new_version_str,
@@ -302,6 +345,7 @@ pub fn compute_preview(
             override_positions,
             local_sheet_names,
         );
+        examined_anywhere.extend(scan.examined.iter().copied());
 
         // REAL cell counts, bounded.
         //
@@ -321,18 +365,19 @@ pub fn compute_preview(
 
         let preview = SubscriptionPreview {
             package_name: sub.package_name.clone(),
+            registry_url: sub.registry_url.clone(),
             current_version: sub.resolved_version.clone(),
             new_version: new_version_str,
             cells_changed,
             cells_changed_exact: cells_exact,
             sheets_with_data_changes,
-            overrides_conflicted: conflicts.len(),
-            overrides_auto_cleared: 0,
+            overrides_conflicted: scan.conflicts.len(),
+            overrides_auto_cleared: scan.auto_cleared,
             sheets_added: sheets_added.clone(),
             sheets_removed: sheets_removed.clone(),
             sheets_updated: sheets_updated.clone(),
-            conflicts,
-            unexamined_sheets,
+            conflicts: scan.conflicts,
+            unexamined_sheets: scan.unexamined,
         };
 
         if !cells_exact {
@@ -345,8 +390,29 @@ pub fn compute_preview(
         total_added += sheets_added.len();
         total_removed += sheets_removed.len();
         total_conflicts += preview.overrides_conflicted;
+        total_cleared += preview.overrides_auto_cleared;
 
         sub_previews.push(preview);
+    }
+
+    // THE SWEEP THE PER-SUBSCRIPTION SCANS CANNOT SEE.
+    //
+    // `rebase` ends in `auto_clear_matching`, which runs over the WHOLE layer —
+    // not just the overrides an updating subscription supplied a new upstream
+    // value for. Its second rule, `current == baseline`, therefore deletes a
+    // subscriber's "I typed it back to what it was" record no matter which
+    // application it belongs to, including one with no update available at all
+    // (`continue`d above, so no scan ever looks at it).
+    //
+    // Attributed to the refresh rather than to a subscription, because that is
+    // whose act it is.
+    for ovr in &override_layer.overrides {
+        if examined_anywhere.contains(&(ovr.sheet_id, ovr.cell_id)) {
+            continue;
+        }
+        if ovr.current == ovr.baseline {
+            total_cleared += 1;
+        }
     }
 
     Ok(RefreshPreview {
@@ -384,12 +450,15 @@ fn collect_conflicts(
     override_layer: &OverrideLayer,
     override_positions: &HashMap<(SheetId, CellId), (u32, u32)>,
     local_sheet_names: &HashMap<SheetId, String>,
-) -> (Vec<ConflictPreviewCell>, Vec<UnexaminedSheet>) {
+) -> ConflictScan {
     /// Per-sheet cap on a data artifact, matching `count_upstream_cell_changes`.
     const MAX_BYTES: usize = 4 * 1024 * 1024;
 
     let mut conflicts = Vec::new();
     let mut unexamined = Vec::new();
+    let mut auto_cleared = 0usize;
+    let mut examined: std::collections::HashSet<(SheetId, CellId)> =
+        std::collections::HashSet::new();
 
     for changed in sheets_updated {
         // A sheet with no local edits cannot produce a conflict, and reading its
@@ -433,10 +502,20 @@ fn collect_conflicts(
                 .unwrap_or(ovr.position);
             let upstream_new =
                 crate::overrides::override_value_from_saved(upstream_cells.get(&pos));
-            if crate::overrides::classify_rebase(ovr, &upstream_new)
-                != crate::overrides::RebaseOutcome::Conflict
-            {
-                continue;
+            examined.insert((local_sid, ovr.cell_id));
+            match crate::overrides::classify_rebase(ovr, &upstream_new) {
+                // THE APPLY DELETES THIS OVERRIDE. `rebase` ends in
+                // `auto_clear_matching`, which drops every record whose current
+                // value now equals upstream — or equals its own baseline. That
+                // is the subscriber's recorded edit being discarded, and the
+                // preview reported a hardcoded `0` for it while the apply came
+                // back with a real number two seconds later.
+                crate::overrides::RebaseOutcome::AutoCleared => {
+                    auto_cleared += 1;
+                    continue;
+                }
+                crate::overrides::RebaseOutcome::Unchanged => continue,
+                crate::overrides::RebaseOutcome::Conflict => {}
             }
             conflicts.push(ConflictPreviewCell {
                 local_sheet_id: local_sid,
@@ -454,7 +533,7 @@ fn collect_conflicts(
         }
     }
 
-    (conflicts, unexamined)
+    ConflictScan { conflicts, unexamined, auto_cleared, examined }
 }
 
 /// How many cells actually changed between the version a subscriber is on and
@@ -544,6 +623,56 @@ fn count_upstream_cell_changes(
 // Apply Refresh
 // ============================================================================
 
+/// The versions a refresh PREVIEW put in front of the user, so the apply can
+/// refuse to be a different refresh.
+///
+/// # Why an apply needs this at all
+///
+/// The preview and the apply each resolve the version pin independently, and
+/// the refresh dialog is deliberately non-modal so the user can inspect sheets
+/// while deciding. A subscriber who opens it against v1.1, reads
+/// `base=100 / mine=999 / theirs=150` for A1, and spends two minutes thinking
+/// while the publisher pushes v1.2 where A1 is `7`, then clicks "take theirs" —
+/// and lands `7`. Their 999 is discarded for a value the dialog never displayed,
+/// under a confirm strip that says the decision is not undoable.
+///
+/// Refusing is the only honest answer. Silently pulling the version the user was
+/// shown would be worse: a refresh means "bring me the current one", and quietly
+/// installing a stale version under that label is the same lie pointed the other
+/// way. So the apply stops, says the workspace moved, and the user re-previews
+/// against what is actually there.
+///
+/// Keyed by package name only, which is sufficient BECAUSE the caller batches by
+/// workspace before it gets here — one `pull_all_updates` call sees one
+/// workspace, and a workspace cannot hold two applications of one name.
+#[derive(Debug, Clone, Default)]
+pub struct PreviewedVersions {
+    /// package name -> the version the preview said this refresh would install.
+    /// A subscription with no entry was shown as having no update.
+    pub by_package: HashMap<String, String>,
+}
+
+impl PreviewedVersions {
+    fn check(&self, package: &str, current: &str, would_install: &str) -> Result<(), CalpError> {
+        let shown = self.by_package.get(package).map(String::as_str);
+        let now = if would_install == current { None } else { Some(would_install) };
+        if shown == now {
+            return Ok(());
+        }
+        Err(CalpError::RefreshMoved(format!(
+            "CALP_REFRESH_MOVED: the workspace changed while you were deciding. \
+             '{package}' {}, so the decisions you made no longer describe this \
+             refresh. Close and re-open Refresh to see what it holds now.",
+            match (shown, now) {
+                (Some(a), Some(b)) => format!("now offers {b}, not the {a} you were shown"),
+                (Some(a), None) => format!("no longer offers {a}"),
+                (None, Some(b)) => format!("now offers {b}, which the preview did not show"),
+                (None, None) => unreachable!("equal cases returned above"),
+            }
+        )))
+    }
+}
+
 /// The pulled data for one subscription, ready to be applied.
 pub struct RefreshPayload {
     pub subscription_index: usize,
@@ -572,6 +701,9 @@ pub fn pull_all_updates(
     scope: &WorkspaceScope,
     profile_dir: &Path,
     policy: PinPolicy,
+    // What the user was SHOWN, by package name, or `None` for a caller that
+    // showed them nothing. See `PreviewedVersions`.
+    previewed: Option<&PreviewedVersions>,
 ) -> Result<Vec<RefreshPayload>, CalpError> {
     let mut payloads = Vec::new();
 
@@ -579,6 +711,10 @@ pub fn pull_all_updates(
         let pin = VersionPin::parse(&sub.version_pin)?;
         let resolved = registry.resolve_version(&sub.package_name, &pin)?;
         let new_version_str = resolved.to_string();
+
+        if let Some(shown) = previewed {
+            shown.check(&sub.package_name, &sub.resolved_version, &new_version_str)?;
+        }
 
         if new_version_str == sub.resolved_version {
             continue; // No update
@@ -969,7 +1105,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let payloads = pull_all_updates(&reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let payloads = pull_all_updates(&reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None).unwrap();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].pull_result.resolved_version, SemVer::new(1, 1, 0));
     }
@@ -1003,7 +1139,7 @@ mod tests {
 
         // unwrap_err() requires Debug on the Ok type; RefreshPayload has no
         // Debug derive (wraps PullResult), so match instead.
-        let err = match pull_all_updates(&reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse) {
+        let err = match pull_all_updates(&reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None) {
             Ok(_) => panic!("refresh pull unexpectedly succeeded"),
             Err(e) => e,
         };
@@ -1089,7 +1225,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         };
 
-        let payloads = pull_all_updates(&reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let payloads = pull_all_updates(&reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None).unwrap();
         assert_eq!(payloads.len(), 1);
         let controls = &payloads[0].pull_result.pane_controls;
         assert_eq!(controls.len(), 2, "refresh payload carries the FULL v1.1 set");
@@ -1119,7 +1255,7 @@ mod tests {
             extra: std::collections::HashMap::new(),
         }];
 
-        let payloads = pull_all_updates(&reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let payloads = pull_all_updates(&reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None).unwrap();
         let mut layer = OverrideLayer::new();
 
         let result = apply_refresh(
@@ -1128,6 +1264,102 @@ mod tests {
 
         assert_eq!(result.subscriptions_refreshed, 1);
         assert_eq!(subs[0].resolved_version, "1.1.0");
+    }
+
+    /// A refresh that would install a version the user was not shown is
+    /// REFUSED, not silently applied.
+    ///
+    /// The dialog computes its preview once and is non-modal, and the two halves
+    /// resolve the version pin independently. A subscriber reading
+    /// `base=100 / mine=999 / theirs=150` for a cell, while the publisher pushes
+    /// a version where that cell says something else, used to click "take
+    /// theirs" and land a value the dialog never displayed — their own edit
+    /// discarded, under a strip saying the decision is not undoable.
+    ///
+    /// Pulling the STALE previewed version instead would be the same lie
+    /// pointed the other way: "refresh" means "bring me the current one".
+    ///
+    /// SABOTAGE: drop the `shown.check(...)` call in `pull_all_updates`.
+    #[test]
+    fn a_refresh_refuses_to_install_a_version_the_preview_did_not_show() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+
+        let pull_result = pull::pull(&reg, &PullRequest {
+            package_name: "test-pkg".to_string(),
+            version_pin: VersionPin::parse("^1.0").unwrap(),
+            now: "2026-01-01T00:00:00Z".to_string(),
+        }, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let mut subs = vec![pull_result.subscription.clone()];
+        subs[0].resolved_version = "1.0.0".to_string();
+
+        // The workspace resolves to 1.1.0. The preview showed 1.0.5 — a version
+        // that was head when the dialog opened and is not head now.
+        let stale = PreviewedVersions {
+            by_package: [("test-pkg".to_string(), "1.0.5".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let err = pull_all_updates(
+            &reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, Some(&stale),
+        )
+        .err()
+        .expect("a moved workspace must refuse, not apply stale decisions");
+        let text = err.to_string();
+        assert!(text.contains("CALP_REFRESH_MOVED"), "refusal was: {text}");
+        assert!(text.contains("1.1.0") && text.contains("1.0.5"), "names both versions: {text}");
+
+        // The preview that DID show 1.1.0 goes through.
+        let agreeing = PreviewedVersions {
+            by_package: [("test-pkg".to_string(), "1.1.0".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let payloads = pull_all_updates(
+            &reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, Some(&agreeing),
+        )
+        .expect("the version the user was shown is the version that applies");
+        assert_eq!(payloads.len(), 1);
+    }
+
+    /// The inverse drift, and it is the same defect: a subscription the preview
+    /// showed as having NO update, which now has one.
+    ///
+    /// An empty previewed list is therefore not the same as no list at all — it
+    /// says "there was nothing to bring", and a refresh that now has something
+    /// is one the user has not seen.
+    ///
+    /// SABOTAGE: make `check` return `Ok(())` whenever `shown` is `None`.
+    #[test]
+    fn an_update_that_appeared_after_the_preview_is_refused_too() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+
+        let pull_result = pull::pull(&reg, &PullRequest {
+            package_name: "test-pkg".to_string(),
+            version_pin: VersionPin::parse("^1.0").unwrap(),
+            now: "2026-01-01T00:00:00Z".to_string(),
+        }, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let mut subs = vec![pull_result.subscription.clone()];
+        subs[0].resolved_version = "1.0.0".to_string();
+
+        // "The preview found nothing to bring." It did — 1.1.0 is there now.
+        let nothing = PreviewedVersions::default();
+        let err = pull_all_updates(
+            &reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, Some(&nothing),
+        )
+        .err()
+        .expect("an update the preview never mentioned must refuse");
+        assert!(err.to_string().contains("which the preview did not show"), "{err}");
+
+        // And `None` — the script gateway, which shows the user nothing and has
+        // no stale decision to protect — is unaffected.
+        assert!(pull_all_updates(
+            &reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1164,7 +1396,7 @@ mod tests {
             extra: HashMap::new(),
         });
 
-        let payloads = pull_all_updates(&reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
+        let payloads = pull_all_updates(&reg, &subs, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None).unwrap();
         // New upstream value differs from the override's baseline -> conflict.
         let mut upstream = HashMap::new();
         upstream.insert(
@@ -1436,6 +1668,11 @@ mod tests {
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
         let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(preview.subscription_previews[0].conflicts.len(), 0);
+        // AND THE PREVIEW SAYS SO. This was a hardcoded 0 while the apply four
+        // lines down returned 1 — the subscriber was told the refresh would
+        // discard none of their recorded edits, and it discarded one.
+        assert_eq!(preview.subscription_previews[0].overrides_auto_cleared, 1);
+        assert_eq!(preview.total_overrides_auto_cleared, 1);
 
         let mut upstream = HashMap::new();
         upstream.insert(
@@ -1446,6 +1683,56 @@ mod tests {
         assert_eq!(conflicts, 0, "counted only when it SURVIVES auto-clear");
         assert_eq!(cleared, 1);
         assert_eq!(layer.count(), 0);
+        assert_eq!(
+            preview.total_overrides_auto_cleared, cleared,
+            "the preview and the apply must reach the same number, not two numbers"
+        );
+    }
+
+    /// An override the subscriber has typed back to its own baseline clears on
+    /// ANY refresh — `auto_clear_matching` sweeps the whole layer, including
+    /// sheets no updating subscription supplied an upstream value for. The
+    /// preview has to count those too or it under-reports what it discards.
+    ///
+    /// SABOTAGE: delete the post-loop `if ovr.current == ovr.baseline` sweep in
+    /// `compute_preview`; the preview then reports 1 where the apply clears 2.
+    #[test]
+    fn an_override_typed_back_to_its_baseline_is_counted_even_on_an_untouched_sheet() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let (reg, pkg_sheet) = two_versions(&dir, prof.path(), 100.0, 150.0);
+        let local_sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        let cell_id = CellId::from_bytes(identity::generate_uuid_v7());
+        // A SECOND sheet, on no subscription at all — nothing examines it, and
+        // `rebase` never gets an upstream value for it.
+        let other_sheet = SheetId::from_bytes(identity::generate_uuid_v7());
+        let other_cell = CellId::from_bytes(identity::generate_uuid_v7());
+
+        let mut layer = OverrideLayer::new();
+        layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "150"));
+        // current == baseline: the subscriber undid their own edit.
+        layer.set_override(parity_override(other_sheet, other_cell, (5, 5), "7", "7"));
+
+        let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
+        let preview =
+            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(
+            preview.subscription_previews[0].overrides_auto_cleared, 1,
+            "the subscription's own row counts only its own sheets"
+        );
+        assert_eq!(
+            preview.total_overrides_auto_cleared, 2,
+            "the redundant record on the untouched sheet clears too"
+        );
+
+        let mut upstream = HashMap::new();
+        upstream.insert(
+            (local_sheet, cell_id),
+            OverrideValue::Value { display: "150".to_string() },
+        );
+        let (_, cleared) = layer.rebase(&upstream);
+        assert_eq!(cleared, 2);
+        assert_eq!(preview.total_overrides_auto_cleared, cleared);
     }
 
     /// The preview follows the ID REGISTRY, not the recorded position, exactly

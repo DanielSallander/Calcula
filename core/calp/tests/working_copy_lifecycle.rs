@@ -202,6 +202,7 @@ fn identity_survives_checkout_and_push() {
         &scope,
         subscriber.path(),
         PinPolicy::RequirePinned,
+        None,
     )
     .unwrap();
     let mut layer = OverrideLayer::new();

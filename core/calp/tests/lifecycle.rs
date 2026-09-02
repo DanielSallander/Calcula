@@ -622,6 +622,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
         &scope_of(&reg_dir),
         subp.path(),
         PinPolicy::RequirePinned,
+        None,
     ) {
         Ok(_) => panic!("refresh of an unpinned package unexpectedly succeeded"),
         Err(e) => e,
@@ -664,6 +665,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
         &scope_of(&reg_dir),
         subp.path(),
         PinPolicy::RequirePinned,
+        None,
     )
     .unwrap();
     assert_eq!(payloads.len(), 1);

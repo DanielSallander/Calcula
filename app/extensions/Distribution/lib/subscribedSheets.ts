@@ -8,11 +8,17 @@
 //          the workbook's `user_files/`, reachable only over IPC. So this is a
 //          cache, refreshed on the events that change what the workbook holds.
 //
-//          TWO KEYS FROM ONE SNAPSHOT. The tab strip knows a sheet's `sheetId`;
-//          the sheet context menu knows only its `index`. Fetching those from two
-//          different commands would let them tear while a pull is appending
-//          sheets, so `calp_get_sheet_provenance` returns both and this holds
-//          both — one round trip, one consistent answer.
+//          ONE KEY: THE SHEET ID. This used to hold a second map keyed by
+//          workbook INDEX, because the sheet context menu was handed an index and
+//          nothing else. Its refresh triggers are open / new / package-updated —
+//          none of which a drag, a delete or a copy raises — so a reordered tab
+//          strip left every menu item pointing one sheet over: `Detach from
+//          "vendor-kpis"` offered on a sheet that never came from an application
+//          (and refused by the backend after the confirm), while the sheet still
+//          wearing the badge showed no items at all, because the badge keyed on
+//          the id and was right. The index map is gone rather than more eagerly
+//          refreshed; `SheetContext` now carries `sheetId`, so the menu asks the
+//          same question the badge does.
 //
 //          TWO ROLES, ONE MAP. Since checkout became additive the application's
 //          own sheets sit beside the author's in one workbook, so "which sheets
@@ -41,8 +47,6 @@ export interface SheetProvenanceEntry {
 
 /** localSheetId -> provenance. Stable across insert/delete/move/rename. */
 let byId = new Map<string, SheetProvenanceEntry>();
-/** workbook index -> provenance. Shifts when the sheet list changes. */
-let byIndex = new Map<number, SheetProvenanceEntry>();
 
 /**
  * Full provenance for a sheet — application AND role — or `null`.
@@ -81,40 +85,32 @@ export function subscriptionForSheetId(sheetId: string | undefined): string | nu
 }
 
 /**
- * The application a sheet is subscribed to, by workbook INDEX.
+ * Full SUBSCRIBED provenance for a sheet, for the tab menu items that need more
+ * than a name — `resetSubscription` is keyed by (registryUrl, packageName), not
+ * by sheet.
  *
- * For the sheet context menu, which is handed an index and nothing else. Less
- * stable than the id form — an insert or a move invalidates it until the next
- * refresh — which is why the refresh below also listens for sheet-list changes.
+ * Subscribed only, like `subscriptionForSheetId`: a working-copy sheet has no
+ * subscription to reset or detach.
  */
-export function subscriptionForSheetIndex(index: number): string | null {
-  const entry = provenanceForSheetIndex(index);
-  return entry ? entry.packageName : null;
-}
-
-/**
- * Full SUBSCRIBED provenance by workbook index, for the tab menu items that
- * need more than a name — `resetSubscription` is keyed by
- * (registryUrl, packageName), not by sheet.
- *
- * Subscribed only, like its sibling: a working-copy sheet has no subscription to
- * reset or detach.
- */
-export function provenanceForSheetIndex(index: number): SheetProvenanceEntry | null {
-  const entry = byIndex.get(index);
+export function subscribedProvenanceForSheetId(
+  sheetId: string | undefined,
+): SheetProvenanceEntry | null {
+  const entry = provenanceForSheetId(sheetId);
   return entry?.role === "subscribed" ? entry : null;
 }
 
 /**
- * Full WORKING-COPY provenance by workbook index, for the push tab item.
+ * Full WORKING-COPY provenance, for the push tab item.
  *
- * A SIBLING, not a widening of `provenanceForSheetIndex`, whose subscribed-only
- * contract the detach and reset items rely on. Pushing FROM a subscribed sheet
- * is refused by name in Rust (`CALP_PUSH_IS_SUBSCRIBER`), so an item offered
- * there would be a menu entry whose command cannot run.
+ * A SIBLING, not a widening of `subscribedProvenanceForSheetId`, whose
+ * subscribed-only contract the detach and reset items rely on. Pushing FROM a
+ * subscribed sheet is refused by name in Rust (`CALP_PUSH_IS_SUBSCRIBER`), so an
+ * item offered there would be a menu entry whose command cannot run.
  */
-export function workingCopyForSheetIndex(index: number): SheetProvenanceEntry | null {
-  const entry = byIndex.get(index);
+export function workingCopyForSheetId(
+  sheetId: string | undefined,
+): SheetProvenanceEntry | null {
+  const entry = provenanceForSheetId(sheetId);
   return entry?.role === "workingCopy" ? entry : null;
 }
 
@@ -122,16 +118,15 @@ export function workingCopyForSheetIndex(index: number): SheetProvenanceEntry | 
  * How many SUBSCRIBED sheets in this workbook came from one application, so a
  * confirm can say what a whole-application reset will touch.
  *
- * Folded from `byIndex` and filtered on the role: `byIndex` also holds
- * working-copy rows, and counting those would promise to reset tabs the command
- * will not touch.
+ * Filtered on the role: the map also holds working-copy rows, and counting those
+ * would promise to reset tabs the command will not touch.
  */
 export function subscribedSheetCountForApplication(
   registryUrl: string,
   packageName: string,
 ): number {
   let n = 0;
-  for (const e of byIndex.values()) {
+  for (const e of byId.values()) {
     if (e.role === "subscribed" && e.packageName === packageName && e.registryUrl === registryUrl) {
       n += 1;
     }
@@ -151,11 +146,9 @@ export function hasSubscribedSheets(): boolean {
  */
 export async function refreshSubscribedSheets(): Promise<boolean> {
   let nextById: Map<string, SheetProvenanceEntry>;
-  let nextByIndex: Map<number, SheetProvenanceEntry>;
   try {
     const rows = await getSheetProvenance();
     nextById = new Map();
-    nextByIndex = new Map();
     for (const row of rows) {
       const entry: SheetProvenanceEntry = {
         packageName: row.packageName,
@@ -163,8 +156,11 @@ export async function refreshSubscribedSheets(): Promise<boolean> {
         resolvedVersion: row.resolvedVersion,
         role: row.role,
       };
+      // A ROW WITH NO ID IS DROPPED, not indexed by position instead. Every
+      // consumer keys on the id now, so a row we cannot identify has no answer
+      // to give — and inventing one from the index is the defect this map's
+      // sibling was.
       if (row.sheetId) nextById.set(row.sheetId, entry);
-      nextByIndex.set(row.sheetIndex, entry);
     }
   } catch {
     // A FAILED READ KEEPS THE PREVIOUS ANSWER. Absence means "not subscribed"
@@ -179,19 +175,14 @@ export async function refreshSubscribedSheets(): Promise<boolean> {
   ): boolean => a?.packageName === b?.packageName && a?.role === b?.role;
   const sameById =
     nextById.size === byId.size && [...nextById].every(([k, v]) => same(byId.get(k), v));
-  const sameByIndex =
-    nextByIndex.size === byIndex.size &&
-    [...nextByIndex].every(([k, v]) => same(byIndex.get(k), v));
 
   // ATOMIC REPLACE, never a merge: merging leaves a ghost badge on a sheet whose
   // subscription was detached or removed.
   byId = nextById;
-  byIndex = nextByIndex;
-  return !(sameById && sameByIndex);
+  return !sameById;
 }
 
 /** Drop everything — the document was replaced, or the extension deactivated. */
 export function resetSubscribedSheets(): void {
   byId = new Map();
-  byIndex = new Map();
 }

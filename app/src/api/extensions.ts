@@ -124,7 +124,26 @@ export type GridCommand =
 
 export interface SheetContext {
   sheet: { name: string; index: number };
+  /**
+   * The TRUE workbook index — what every backend sheet command takes. Correct
+   * for the call you are about to make, and wrong as a cache key: an insert, a
+   * delete or a move shifts it and nothing tells you.
+   */
   index: number;
+  /**
+   * The sheet's stable identity, for anything an extension REMEMBERS about a
+   * sheet.
+   *
+   * Distribution cached "which application did this sheet come from?" by index
+   * and refreshed it on open only. Drag a tab and the sheet menu then offered
+   * `Detach from "vendor-kpis"` on a sheet that never came from an application,
+   * while the real one — still wearing the badge, which keys on the id — showed
+   * none of the three items the badge advertises.
+   *
+   * Optional because an older backend may not send it; a consumer that has no
+   * id must show nothing rather than fall back to the index.
+   */
+  sheetId?: string;
   isActive: boolean;
   totalSheets: number;
 }

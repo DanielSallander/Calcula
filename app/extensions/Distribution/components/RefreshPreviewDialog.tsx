@@ -120,7 +120,17 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
         cellId: c.cellId,
         choice: choices[cellKey(c)] ?? "keepMine",
       }));
-      const r = await refreshApply({ resolutions });
+      // EXACTLY WHAT THIS DIALOG SHOWED. The preview is computed once, on
+      // mount, and the dialog is deliberately non-modal so the user can inspect
+      // sheets while deciding — so the workspace can move under them. Echoing
+      // the versions back lets the backend refuse rather than apply their
+      // decisions to values they were never shown.
+      const previewedVersions = (preview?.subscriptionPreviews ?? []).map((sp) => ({
+        registryUrl: sp.registryUrl,
+        packageName: sp.packageName,
+        newVersion: sp.newVersion,
+      }));
+      const r = await refreshApply({ resolutions, previewedVersions });
 
       // Pivots, recalc, sheet list, grid, controls — in the one order that
       // works. This used to be three of those five, and the two it was missing

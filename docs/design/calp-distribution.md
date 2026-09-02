@@ -627,6 +627,125 @@ And a `FastForward` verdict with nothing unmergeable — newly reachable, becaus
 version whose changes are all derived now touches no pieces — rendered *"this
 version cannot bring across ."* with an empty join. It gets its own branch.
 
+#### Four things a refresh knew and did not say (2026-09-02)
+
+**The preview's auto-clear count was a hardcoded `0`** — the same fabricated
+number this file had already removed from `overridesConflicted`. A subscriber who
+had typed 150 before the publisher did was told the refresh would discard none of
+their recorded edits; the apply then returned 1. `collect_conflicts` was already
+calling `classify_rebase` and throwing the `AutoCleared` verdict away. It now
+returns it, plus a layer-wide sweep for overrides whose current value equals
+their own baseline — `auto_clear_matching` deletes those on ANY refresh,
+including on a subscription with no update at all, so they belong to the refresh
+rather than to any one row.
+
+**Nothing pinned the apply to the version the preview described.** The dialog
+computes its preview once, on mount, and is deliberately non-modal so the user
+can inspect sheets while deciding — and the two halves resolve the version pin
+independently. A subscriber reading `base=100 / mine=999 / theirs=150` while the
+publisher pushes a version where that cell is `7` clicked "take theirs" and got
+`7`: their own value discarded for one the dialog never displayed, under a strip
+saying the decision is not undoable. The dialog now echoes back what it showed
+(`previewedVersions`) and `pull_all_updates` refuses with `CALP_REFRESH_MOVED` if
+the workspace has moved either way — a version that is not the one shown, or an
+update that appeared after the preview said there was none. Pulling the stale
+previewed version instead would be the same lie pointed the other way: "refresh"
+means "bring me the current one". An omitted list means the caller showed the
+user nothing (the script gateway); an EMPTY list means "the preview found no
+update", which is a claim the gate checks.
+
+**A resolution could act on a cell the refresh never reached.** `accept_upstream`
+is `remove_override`, which succeeds for any override present. If the new version
+DROPS a sheet, its cells are absent from the payload, `rebase` skips every
+override on it and the re-overlay skips it too — so "take theirs" deleted the
+ledger entry while the grid, never re-materialized for that sheet, went on
+showing the subscriber's own value: a local edit with nothing left to say it is
+one. `KeepMine` was already inert there; `TakeTheirs` is now symmetric.
+
+**A named-LAMBDA call was a permanent conflict.** Persistence writes the RAW
+formula (`Cell::formula_string_raw`, so the resolved `__INVOKE__("Name", lambda,
+…)` marker round-trips into an AST evaluation can use), while the override
+baseline is recorded from the LIVE cell through `formula_string()`, which
+collapses it. A cell holding `=Double(5)` therefore had a baseline that could
+never equal its upstream: every refresh re-reported it as changed on both sides
+even when the publisher had not touched it, the dialog showed the internal marker
+to the user as "theirs", and one click on "Take all theirs" discarded the
+subscriber's edit for a cell nobody had edited. In the other direction a
+subscriber who typed the publisher's exact formula never auto-cleared. One
+choke point, `override_value_from_saved`, now brings the stored text to the same
+spelling through `engine::ast_render::collapse_formula_text` — a substring test
+for a reserved name no user formula can contain, so it costs nothing anywhere
+else. This is the error-literal hazard the same function's header already warned
+about, one field over, and live.
+
+#### Undo of a reset restored the cells and not the ownership (2026-09-02)
+
+A spilled `2` and a typed `2` are the same bytes, so who owns which cells is not
+recoverable from the grid at any price — which is why the extent is persisted
+rather than recomputed (`spill_restore.rs`). `apply_calp_reset_restore` rebuilt
+the grid and swapped the override layer and touched neither spill map, so after
+Ctrl+Z the PUBLISHER's extents were still installed over the subscriber's
+restored cells:
+
+```text
+published   B1 "=SEQUENCE(4)"  ->  B2:B4 = 2 3 4, owned by B1
+subscriber  B1 = 7             ->  B2:B4 erased, claims released
+reset                          ->  published grid + published claims back
+Ctrl+Z                         ->  B1 = 7 again, claims STILL the publisher's
+```
+
+Three visibly empty cells that refused every edit, `check_spill_protection`
+naming a formula the workbook no longer contained, for the rest of the session.
+Nothing repaired it: the restored origin is a literal, and the post-restore
+cascade only walks formulas. The snapshot now carries the claims and the restore
+swaps them (`swap_sheet_spill_claims`, symmetric so undo/redo ping-pongs). The
+function's EXEMPT entry in the spill census read "reports its sheet; apply_changes
+cascades" — true of cells, false of ownership, and exactly the kind of exemption
+that has to be argued; it is gone, and the swap is classified as maintenance.
+
+#### The landing sheet was decided before it could be known (2026-09-02)
+
+`materialize_pull_result` chose which sheet to activate inside the grid-lock
+scope — thirty lines BEFORE `materialize_pulled_sheet_state`, the only code that
+extends `sheet_visibility` for the appended sheets. Every probed index was past
+the end of that vector, `is_user_sheet` reads a missing slot as `unwrap_or(true)`,
+so `find` returned `base_index` unconditionally and the filter the comment
+described could not skip anything. Moved after the materialization, and widened
+to LANDABLE rather than merely user-owned: `activate_sheet` refuses an object
+sheet AND a hidden one, and an application may legitimately begin with a hidden
+sheet (`PublishedSheetMetadata` carries visibility, the pull restores it
+verbatim). Naming one meant `setActiveSheet` came back "Sheet 'Raw' is hidden and
+cannot be activated", which both call sites swallow into a `console.warn` — the
+dialog closed, the tabs appeared, and the user was left on their own sheet with
+nothing said.
+
+#### Provenance is a question about a sheet, not about a position (2026-09-02)
+
+`subscribedSheets.ts` held two maps from one snapshot: one keyed by `sheetId` for
+the tab badge, one keyed by workbook INDEX for the four tab menu items. Its
+refresh triggers are open / new / package-updated — none of which a drag, a
+delete or a copy raises. Drag the subscribed tab and every menu item pointed one
+sheet over: `Detach from "vendor-kpis"` offered on a sheet that had never touched
+an application (and refused by the backend, after the confirm), while the sheet
+still wearing the badge showed none of the three items the badge advertises. The
+justification comment reasoned about the id-keyed provider and was accurate about
+it.
+
+The fix is not a fourth event. `SheetContext` now carries `sheetId`, the index map
+is gone, and every consumer asks the question the badge asks — so the answer
+cannot go stale, and a test proves it by reordering with no refresh at all.
+
+`SheetTabs` had the mirror-image defect underneath it: `getSheets()` omits
+object-backed sheets while keeping true indices, so `sheets[i].index === i` holds
+only while every object sheet sits at the tail — which a `.calp` pull, a
+drill-through sheet and a report-pages sheet all break by appending past it.
+Eleven sites subscripted the list with a true index. Three were the context menu.
+The other eight were worse and nobody had named them: `result.sheets[result.activeIndex]`
+broadcasts `SHEET_CHANGED` and the Redux active sheet with one sheet's index and
+another's NAME, and the shift-click 3D reference built `Sheet1:Detail!` out of two
+positional lookups. One `sheetAt(list, index)` resolver, and a guard asserting the
+file contains no `sheets[...]` subscript at all.
+
 #### A cached result is not an edit (2026-09-01)
 
 `cells_equal` compared every field of a cell entry, including `v`, `t`, `e` and

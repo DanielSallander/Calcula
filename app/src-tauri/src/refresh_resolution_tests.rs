@@ -165,11 +165,56 @@ fn an_empty_refresh_does_not_dirty_the_document() {
     );
 
     // And the effect is constructed after the pull, which is the last thing that
-    // can still refuse.
+    // can still refuse — including the stale-preview refusal the pull now
+    // carries (`CALP_REFRESH_MOVED`), which must not dirty the document either.
     let pull = at(&body, "pull_all_updates", "the pull");
     assert!(
         pull < effect,
         "the effect must be constructed after every refusal that precedes a write"
+    );
+}
+
+/// The apply is PINNED to the refresh the preview described.
+///
+/// The dialog computes its preview once, on mount, and is deliberately non-modal
+/// so the user can inspect sheets while deciding — and the two halves resolve
+/// the version pin independently. A subscriber reading
+/// `base=100 / mine=999 / theirs=150` for a cell, while the publisher pushes a
+/// version where it says `7`, used to click "take theirs" and land `7`: their own
+/// value discarded for one the dialog never displayed, under a confirm strip
+/// saying the decision is not undoable.
+///
+/// SABOTAGE: pass `None` instead of `shown.as_ref()` to `pull_all_updates`, or
+/// drop `previewedVersions` from the dialog's `refreshApply` call.
+#[test]
+fn the_apply_is_pinned_to_the_versions_the_preview_showed() {
+    let body = body_of("pub fn calp_refresh_apply(");
+    assert!(
+        body.contains("previewed_versions"),
+        "the command must read the previewed versions its caller echoes back"
+    );
+    assert!(
+        body.contains("shown.as_ref()"),
+        "and hand them to `pull_all_updates`, which is where the resolved \
+         version is already in hand"
+    );
+    // Matched on the workspace TOO: the merged preview puts every workspace's
+    // rows in one list, and two teams may each publish `sales` to their own
+    // share.
+    assert!(
+        body.contains("same_workspace(&r.registry_url"),
+        "rows must be matched on (workspace, application), not on the \
+         application name alone"
+    );
+
+    // The dialog's half: it has to send them.
+    const DIALOG: &str =
+        include_str!("../../extensions/Distribution/components/RefreshPreviewDialog.tsx");
+    assert!(
+        DIALOG.contains("previewedVersions"),
+        "RefreshPreviewDialog must echo back what it showed; without it the \
+         backend gate has nothing to compare against and the dialog silently \
+         opts out of its own protection"
     );
 }
 
@@ -182,6 +227,37 @@ fn refresh_apply_constructs_exactly_one_document_effect() {
     let body = body_of("pub fn calp_refresh_apply(");
     let n = body.matches("DocumentEffect::mutates(").count();
     assert_eq!(n, 1, "expected exactly one `mutates` arm, found {}", n);
+}
+
+/// A RESOLUTION RESOLVES A CONFLICT, and nothing else.
+///
+/// `accept_upstream` is `remove_override`, which succeeds for ANY override
+/// present — including one `rebase` deliberately left un-conflicted, and one on
+/// a sheet the new version DROPPED. In the dropped case its cells are absent
+/// from the payload, so `rebase` skips the override
+/// (`let Some(new_upstream) = ... else { continue }`) and the re-overlay skips
+/// it too: a "take theirs" then deleted the ledger entry while the grid, never
+/// re-materialized for that sheet, went on showing the subscriber's own value. A
+/// local edit with nothing left to say it is one — invisible in the Overrides
+/// pane, and republished as the publisher's content by anyone who checks the
+/// workbook out.
+///
+/// `KeepMine` was already inert there (`keep_override` needs the `upstream_new`
+/// only `rebase` sets); this makes `TakeTheirs` symmetric.
+///
+/// SABOTAGE: delete the `if !was_conflict { continue; }` guard.
+#[test]
+fn a_resolution_only_acts_on_a_cell_this_refresh_actually_conflicted() {
+    let body = body_of("pub fn calp_refresh_apply(");
+    let was_conflict = at(&body, "let was_conflict", "the conflict probe");
+    let guard = at(&body, "if !was_conflict {", "the not-a-conflict guard");
+    let take_theirs = at(&body, "ResolutionChoice::TakeTheirs =>", "the TakeTheirs arm");
+    assert!(
+        was_conflict < guard && guard < take_theirs,
+        "the guard must sit between the probe and the arms: `accept_upstream` \
+         removes any override present, so a decision about a cell this refresh \
+         never reached would still delete the subscriber's record of it"
+    );
 }
 
 // ---------------------------------------------------------------------------

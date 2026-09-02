@@ -59,6 +59,28 @@ export interface SheetTabsProps {
 // Register core context menu items once
 let coreMenuRegistered = false;
 
+/**
+ * The sheet a TRUE workbook index names — by the `index` FIELD, never by list
+ * position.
+ *
+ * `getSheets()` omits object-backed sheets (a floating range's cell store) from
+ * the list while keeping every row's true state-vector index
+ * (`build_sheet_list`, sheets.rs). `sheets[i].index === i` therefore holds only
+ * while every object sheet sits at the tail — an invariant `add_sheet_inner`
+ * maintains and which a `.calp` pull, a drill-through sheet and a report-pages
+ * sheet all break by appending PAST it.
+ *
+ * Every index this component handles is a true one: `activeIndex` is
+ * `state.active_sheet`, and the tabs pass `sheet.index`. So a subscript here is
+ * wrong the moment a workbook has both a floating range and pulled sheets, and
+ * wrong SILENTLY — it returns a real sheet, just not that one. It named the
+ * wrong tab in the detach confirm while the command detached the right one,
+ * broadcast `SHEET_CHANGED` with one sheet's index and another's name, and
+ * built `Sheet1:Detail!` for a shift-click on KPIs.
+ */
+const sheetAt = (sheets: SheetInfo[], index: number): SheetInfo | undefined =>
+  sheets.find((s) => s.index === index);
+
 export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement {
   const { state, dispatch } = useGridContext();
   const { editing, sheetContext } = state;
@@ -180,7 +202,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         // dispatch sequence below stays free of awaits.
         await primeSheetSwitch(result.activeIndex);
         setActiveIndex(result.activeIndex);
-        const newActive = result.sheets[result.activeIndex];
+        const newActive = sheetAt(result.sheets, result.activeIndex);
         if (newActive) {
           dispatch(setActiveSheet(result.activeIndex, newActive.name));
         }
@@ -200,7 +222,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         await primeSheetSwitch(switchResult.activeIndex);
         setSheets(switchResult.sheets);
         setActiveIndex(switchResult.activeIndex);
-        const newActive = switchResult.sheets[switchResult.activeIndex];
+        const newActive = sheetAt(switchResult.sheets, switchResult.activeIndex);
         if (newActive) {
           dispatch(setActiveSheet(switchResult.activeIndex, newActive.name));
         }
@@ -344,7 +366,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
       // Sync sheet context with state
-      const activeSheet = result.sheets[result.activeIndex];
+      const activeSheet = sheetAt(result.sheets, result.activeIndex);
       if (activeSheet) {
         dispatch(setSheetContext(result.activeIndex, activeSheet.name));
       }
@@ -427,8 +449,8 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       try {
         // Shift+Click in formula mode: insert 3D reference prefix
         if (isCurrentlyFormulaMode && event?.shiftKey) {
-          const startSheet = sheets[activeIndex]?.name;
-          const endSheet = sheets[index]?.name;
+          const startSheet = sheetAt(sheets, activeIndex)?.name;
+          const endSheet = sheetAt(sheets, index)?.name;
           if (startSheet && endSheet) {
             // Build the 3D reference prefix
             const needsQuoting = /[\s'![\]]/.test(startSheet) || /[\s'![\]]/.test(endSheet);
@@ -469,7 +491,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
           setSheets(result.sheets);
           setActiveIndex(result.activeIndex);
           
-          const newActiveSheet = result.sheets[result.activeIndex];
+          const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
           
           // Update the grid state with new sheet context
           // This allows the grid to show the new sheet's cells
@@ -531,7 +553,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);
 
-        const newActiveSheet = result.sheets[result.activeIndex];
+        const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
 
         if (newActiveSheet) {
           dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
@@ -585,7 +607,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       setSheets(result.sheets);
       setActiveIndex(result.activeIndex);
 
-      const newActiveSheet = result.sheets[result.activeIndex];
+      const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
       if (newActiveSheet) {
         dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
       }
@@ -640,7 +662,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         setSheets(result.sheets);
         setActiveIndex(result.activeIndex);
 
-        const newActiveSheet = result.sheets[result.activeIndex];
+        const newActiveSheet = sheetAt(result.sheets, result.activeIndex);
         if (newActiveSheet) {
           dispatch(setActiveSheet(result.activeIndex, newActiveSheet.name));
         }
@@ -694,6 +716,11 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
   const applySheetsResultRef = useRef(applySheetsResult);
   applySheetsResultRef.current = applySheetsResult;
 
+  const sheetByIndex = useCallback(
+    (index: number): SheetInfo | undefined => sheetAt(sheets, index),
+    [sheets]
+  );
+
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, index: number) => {
       e.preventDefault();
@@ -716,7 +743,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       if (isInFormulaMode) {
         return;
       }
-      const currentName = sheets[index]?.name || "";
+      const currentName = sheetByIndex(index)?.name || "";
       // window.prompt is the one dialog global Tauri does NOT replace, so
       // whether it appears at all is up to the WebView2 embedder's script-dialog
       // policy — and a suppressed prompt returns null, which is
@@ -730,39 +757,43 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         handleRenameSheet(index, newName.trim());
       }
     },
-    [sheets, handleRenameSheet, isInFormulaMode]
+    [sheetByIndex, handleRenameSheet, isInFormulaMode]
+  );
+
+  const contextFor = useCallback(
+    (sheetIndex: number): SheetContext | null => {
+      const sheet = sheetByIndex(sheetIndex);
+      if (!sheet) return null;
+      return {
+        sheet,
+        index: sheetIndex,
+        // The STABLE key. An extension that answers "did this sheet come from
+        // an application?" from a cache must key it on identity: the index
+        // shifts under an insert, a delete or a move, and nothing tells the
+        // extension it did.
+        sheetId: sheet.sheetId,
+        isActive: sheetIndex === activeIndex,
+        totalSheets: sheets.length,
+      };
+    },
+    [sheetByIndex, sheets.length, activeIndex]
   );
 
   const getContextMenuItems = useCallback(
     (sheetIndex: number): ResolvedSheetContextMenuItem[] => {
-      const sheet = sheets[sheetIndex];
-      if (!sheet) return [];
-
-      const context: SheetContext = {
-        sheet,
-        index: sheetIndex,
-        isActive: sheetIndex === activeIndex,
-        totalSheets: sheets.length,
-      };
-
+      const context = contextFor(sheetIndex);
+      if (!context) return [];
       return sheetExtensions.getContextMenuItemsForContext(context);
     },
-    [sheets, activeIndex]
+    [contextFor]
   );
 
   const handleContextMenuItemClick = useCallback(
     async (item: ResolvedSheetContextMenuItem) => {
       if (!contextMenu) return;
 
-      const sheet = sheets[contextMenu.sheetIndex];
-      if (!sheet) return;
-
-      const context: SheetContext = {
-        sheet,
-        index: contextMenu.sheetIndex,
-        isActive: contextMenu.sheetIndex === activeIndex,
-        totalSheets: sheets.length,
-      };
+      const context = contextFor(contextMenu.sheetIndex);
+      if (!context) return;
 
       setContextMenu(null);
 
@@ -770,7 +801,7 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
         await item.onClick(context);
       }
     },
-    [contextMenu, sheets, activeIndex]
+    [contextMenu, contextFor]
   );
 
   // Unhide dialog confirm
@@ -1141,9 +1172,9 @@ export function SheetTabs({ onSheetChange }: SheetTabsProps): React.ReactElement
       {/* Formula mode indicator */}
       {isViewingDifferentSheet && (
         <S.FormulaModeIndicator>
-          Selecting from: {sheets[activeIndex]?.name} 
+          Selecting from: {sheetAt(sheets, activeIndex)?.name} 
           {" --> "}
-          {editing?.sourceSheetName || sheets[editing?.sourceSheetIndex ?? 0]?.name}
+          {editing?.sourceSheetName || sheetAt(sheets, editing?.sourceSheetIndex ?? 0)?.name}
         </S.FormulaModeIndicator>
       )}
 

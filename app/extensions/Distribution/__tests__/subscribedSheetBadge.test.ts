@@ -14,7 +14,8 @@ vi.mock("@api", () => ({
 import {
   provenanceForSheetId,
   subscriptionForSheetId,
-  subscriptionForSheetIndex,
+  subscribedProvenanceForSheetId,
+  workingCopyForSheetId,
   refreshSubscribedSheets,
   resetSubscribedSheets,
   hasSubscribedSheets,
@@ -57,11 +58,16 @@ describe("subscribed-sheet provenance cache", () => {
     expect(subscriptionForSheetId("SOMETHING-ELSE")).toBeNull();
   });
 
-  it("answers by workbook index, for the context menu", async () => {
+  it("answers the CONTEXT MENU by id too, not by index", async () => {
+    // The menu items used to read a second map keyed by workbook index. It is
+    // gone: `SheetContext` carries `sheetId`, so the menu asks exactly the
+    // question the badge does.
+    // SABOTAGE: reintroduce a `byIndex` map and have these read it.
     getSheetProvenance.mockResolvedValue([ROW]);
     await refreshSubscribedSheets();
-    expect(subscriptionForSheetIndex(1)).toBe("vendor-kpis");
-    expect(subscriptionForSheetIndex(0)).toBeNull();
+    expect(subscribedProvenanceForSheetId("LOCAL-1")?.packageName).toBe("vendor-kpis");
+    expect(subscribedProvenanceForSheetId("NOT-A-SHEET")).toBeNull();
+    expect(workingCopyForSheetId("LOCAL-1")).toBeNull();
   });
 
   it("never marks a sheet it cannot identify", async () => {
@@ -111,15 +117,26 @@ describe("subscribed-sheet provenance cache", () => {
     expect(await refreshSubscribedSheets()).toBe(true);
   });
 
-  it("notices an index shift even when the ids are unchanged", async () => {
-    // The index map is what the context menu reads, and an insert above the
-    // sheet moves it without changing any id.
-    getSheetProvenance.mockResolvedValue([ROW]);
+  it("SURVIVES A REORDER WITH NO REFRESH AT ALL", async () => {
+    // THE DEFECT THIS CACHE HAD. A second map was keyed by workbook index and
+    // refreshed on open / new / package-updated only — none of which a drag, a
+    // delete or a copy raises. Drag the subscribed tab and every menu item
+    // moved one sheet over: `Detach from "vendor-kpis"` was offered on a sheet
+    // that had never touched an application, and the sheet still wearing the
+    // badge showed none of the three items the badge advertises.
+    //
+    // The fix is not a fourth event. It is that no answer depends on position:
+    // the cache below is never refreshed, and every lookup is still right.
+    // SABOTAGE: key the lookups on `sheetIndex` again.
+    getSheetProvenance.mockResolvedValue([ROW, WORKING_COPY_ROW]);
     await refreshSubscribedSheets();
-    getSheetProvenance.mockResolvedValue([{ ...ROW, sheetIndex: 4 }]);
-    expect(await refreshSubscribedSheets()).toBe(true);
-    expect(subscriptionForSheetIndex(4)).toBe("vendor-kpis");
-    expect(subscriptionForSheetIndex(1)).toBeNull();
+
+    // The user drags tabs around. Nothing re-reads provenance.
+    getSheetProvenance.mockReset();
+
+    expect(subscriptionForSheetId("LOCAL-1")).toBe("vendor-kpis");
+    expect(workingCopyForSheetId("APP-SHEET-1")?.packageName).toBe("sales-report");
+    expect(getSheetProvenance).not.toHaveBeenCalled();
   });
 });
 
@@ -157,7 +174,7 @@ describe("working-copy sheets carry a DIFFERENT mark", () => {
     await refreshSubscribedSheets();
     expect(subscriptionForSheetId("LOCAL-1")).toBe("vendor-kpis");
     expect(subscriptionForSheetId("APP-SHEET-1")).toBeNull();
-    expect(subscriptionForSheetIndex(2)).toBeNull();
+    expect(subscribedProvenanceForSheetId("APP-SHEET-1")).toBeNull();
   });
 
   it("does not count a working copy as having subscribed sheets", async () => {
