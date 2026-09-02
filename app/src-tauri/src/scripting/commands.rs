@@ -763,8 +763,19 @@ pub(crate) fn apply_script_modified_grids_core(
     // Open ONE undo transaction so the non-active CustomRestores and the active-sheet
     // diff (recorded by `update_cells_batch`, which JOINS an already-open transaction
     // and won't commit it) land as a SINGLE undoable action.
+    //
+    // ...UNLESS A CALLER ALREADY OWNS ONE. `begin_transaction` is a no-op while
+    // a transaction is open, so this function used to COMMIT a caller's
+    // transaction as if it were its own — `update_cells_batch` had always
+    // checked for that and this had not, which is the asymmetry that made a
+    // wrapping caller impossible to write. `calp_hold_back_cells` is that
+    // caller: it must be handed the id of the entry its write leaves, and the
+    // only way to get that without a second critical section is to own the
+    // transaction and commit it itself.
+    let mut opened_here = false;
     if has_non_active {
         let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        opened_here = !undo.has_open_transaction();
         undo.begin_transaction(format!("{} edit", surface_label(surface)));
         for w in &non_active_writes {
             undo.record_custom_restore(
@@ -802,9 +813,11 @@ pub(crate) fn apply_script_modified_grids_core(
         return active_result;
     }
 
-    {
+    if opened_here {
         // ALWAYS commit the transaction we opened — even if the active batch errored —
         // so it can never dangle open on the undo stack and bleed into the next edit.
+        // A transaction a CALLER opened is that caller's to close, on the same
+        // rule and for the same reason.
         let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
         undo.commit_transaction();
     }

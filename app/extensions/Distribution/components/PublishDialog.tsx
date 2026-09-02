@@ -447,11 +447,14 @@ export function PublishDialog({ onClose, data }: DialogProps) {
     // runs, then snaps back. If the app dies in between, the hold-back is in the
     // undo stack and the document is dirty — Ctrl+Z and AutoRecover both
     // recover it.
-    // DISABLED with the checkboxes above — belt and braces, so the unsafe path
-    // cannot be reached even if a stale exclusion set survives somehow.
-    const HOLD_BACK_ENABLED = false;
-    let heldBack = false;
-    if (HOLD_BACK_ENABLED && mode === "push" && excludedCells.size > 0 && workspace?.baseVersion) {
+    //
+    // THE ID, NOT A BARE UNDO. The un-revert below names the entry it is
+    // reversing, because this dialog is non-modal and a publish takes seconds:
+    // the author can edit, and an MCP tool or a script can write, while it runs.
+    // A blind `pop_undo()` there reverses whichever of those landed last and
+    // leaves the held-back cells rolled back for good.
+    let holdBackSeq: number | null = null;
+    if (mode === "push" && excludedCells.size > 0 && workspace?.baseVersion) {
       setStatus("Holding back unticked changes…");
       try {
         const r = await holdBackCells({
@@ -460,7 +463,21 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           baseVersion: workspace.baseVersion,
           cells: [...excludedCells].map(parseCellKey),
         });
-        heldBack = r.undoRecorded;
+        holdBackSeq = r.undoSeq ?? null;
+        // A write with no id to scope its reversal to is the unsafe shape this
+        // was disabled for. It should be unreachable — `undoRecorded` is now
+        // derived from the id — so treat the disagreement as the refusal it is
+        // rather than falling back to a bare undo.
+        if (r.undoRecorded && holdBackSeq === null) {
+          setStatus(null);
+          setError(
+            "Could not hold back the unticked changes safely, so nothing was published. " +
+              "Press Ctrl+Z once if your sheet is showing the published version's values.",
+          );
+          return;
+        }
+        // The canvas is still showing what was there before the hold-back.
+        window.dispatchEvent(new CustomEvent("grid:refresh"));
       } catch (e: unknown) {
         // Nothing was written, so there is nothing to put back. Refuse the push
         // rather than silently publishing the changes the author unticked.
@@ -512,12 +529,22 @@ export function PublishDialog({ onClose, data }: DialogProps) {
       // ALWAYS, on both paths. A failed publish must not leave the author's
       // workbook holding the base values, and a SUCCESSFUL one must not either
       // — the whole point is that the held-back edits stay local.
-      if (heldBack) {
+      if (holdBackSeq !== null) {
         try {
-          await undo();
+          // SCOPED to the entry the hold-back left. If anything landed on the
+          // history since — the author's own edit in this non-modal dialog, an
+          // MCP tool, a script — this refuses instead of reversing it, and says
+          // how many Ctrl+Z it now takes to reach the hold-back.
+          const r = await undo(holdBackSeq);
           // The undo restored the cells; the canvas is still showing what the
           // hold-back painted.
           window.dispatchEvent(new CustomEvent("grid:refresh"));
+          if (r.refusal) {
+            setError(
+              `Your unticked changes were rolled back for the push and were NOT ` +
+                `restored automatically. ${r.refusal}`,
+            );
+          }
         } catch (e: unknown) {
           // The one failure this dialog cannot repair, so it must not be quiet:
           // the author's edits are still in the undo stack, and that is the
@@ -914,26 +941,28 @@ export function PublishDialog({ onClose, data }: DialogProps) {
                   // Only a PUSH can hold a change back. A first publish has no
                   // base version to take the held-back value from, so a
                   // checkbox there would be a control with nothing behind it.
-                  // DISABLED 2026-09-01 by the session's own adversarial review,
-                  // which found the un-revert unsafe. `undo()` is a BLIND
-                  // `pop_undo()` — it takes no token — and this dialog is
-                  // deliberately non-modal, so an edit the author makes during
-                  // the seconds a publish spends signing and writing to a share
-                  // is what the `finally` reverses. The hold-back then stays
-                  // applied, permanently and silently: the author's value is
-                  // gone from their own workbook, the dialog reports success,
-                  // and a save persists the base value. AutoRecover does not
-                  // save them either — it snapshots LIVE state, which at that
-                  // moment holds the base values, and the undo stack is never
-                  // serialized.
                   //
-                  // Re-enable only with an undo that names WHAT it is reversing:
-                  // `calp_hold_back_cells` returns the transaction's seq, and
-                  // the un-revert pops only if the top of the stack still
-                  // matches — refusing loudly when it does not. See the review
-                  // findings in docs/design/open-items.md §2.ab.
+                  // DISABLED 2026-09-01 by this session's adversarial review and
+                  // RE-ENABLED 2026-09-02 on the condition that review set. The
+                  // problem was that `undo()` was a BLIND `pop_undo()` taking no
+                  // token, while this dialog is deliberately non-modal — so an
+                  // edit made during the seconds a publish spends signing and
+                  // writing to a share was what the `finally` reversed. The
+                  // hold-back then stayed applied, permanently and silently: the
+                  // author's value gone from their own workbook, the dialog
+                  // reporting success, a save persisting the base value. Nor
+                  // does AutoRecover save them — it snapshots LIVE state, which
+                  // at that moment holds the base values, and the undo stack is
+                  // never serialized.
+                  //
+                  // `calp_hold_back_cells` now returns the id of the entry it
+                  // left, and the un-revert pops ONLY if the top of the history
+                  // is still that entry — refusing with a sentence that says how
+                  // many Ctrl+Z it now takes, rather than reversing somebody
+                  // else's work. The author's own edit is no longer the quiet
+                  // failure; it is a message.
                   selection={
-                    false && mode === "push" && workspace?.baseVersion
+                    mode === "push" && workspace?.baseVersion
                       ? {
                           excluded: excludedCells,
                           label: "Push",

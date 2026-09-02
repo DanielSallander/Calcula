@@ -627,6 +627,56 @@ And a `FastForward` verdict with nothing unmergeable — newly reachable, becaus
 version whose changes are all derived now touches no pieces — rendered *"this
 version cannot bring across ."* with an empty join. It gets its own branch.
 
+#### Per-cell push hold-back: re-enabled on a scoped undo (2026-09-02)
+
+Unticking a change in the push diff means *publish without this, keep it
+locally*. It is implemented as: roll the cell back to its base value in the LIVE
+document, publish, then undo. Rolling back at serialization time instead would be
+simpler and is wrong — nothing on the receiving side ever recalculates, so a
+formula whose inputs did not ship would show a number that was never true, and
+invisibly, because the diff hides formula cells whose formula did not change.
+
+It shipped DISABLED because the un-revert was a bare `undo()` — a blind
+`pop_undo()` taking no token — while the dialog is deliberately non-modal and a
+publish takes seconds. `calp_publish` records nothing on the undo stack itself,
+but three things can land an entry during it: the author's own edit, an MCP tool
+(genuinely concurrent — sync Tauri commands share the main thread, but MCP runs
+off it), and the six `async` pivot/report commands. The bare undo then reversed
+*that* and left the held-back cells rolled back for good — the author's value
+gone from their own workbook, the dialog reporting success, a save persisting the
+base value. AutoRecover does not help: it snapshots LIVE state, and the undo
+stack is never serialized.
+
+**The id is CLAIMED, not observed.** The first cut of the fix read the top of the
+stack before and after the write and took the difference — which is a second
+critical section and therefore the same defect one layer down: an entry landing
+in that gap is adopted as the caller's own, and the un-revert then reverses a
+stranger's write *confidently*, which is worse than the bare undo it replaced.
+So `calp_hold_back_cells` opens the undo transaction itself, and
+`commit_transaction()` — which stamps the id — hands it back. Nothing is
+observed, so nothing can be adopted.
+
+That required fixing an asymmetry in the pipeline underneath:
+`begin_transaction` is a no-op while a transaction is open, so
+`apply_script_modified_grids_core` used to COMMIT a caller's transaction as
+though it were its own. `update_cells_batch` had always checked for that; this
+had not, which is what made a wrapping caller impossible to write.
+
+`undo` now takes an optional `expected_seq`, and checks it in the SAME critical
+section as the pop — deciding under one lock and popping under another is the
+race one layer up. On a mismatch it undoes nothing and returns a sentence, and
+the two cases get different sentences because they have different remedies:
+an entry still in the history can be reached by undoing past what sits above it
+(*"press Ctrl+Z 3 times"*), one the cap has evicted cannot be reached at all.
+`Transaction::seq` and `undo_seqs()` already existed for exactly this — their
+doc says "a caller that wants to return to a remembered point has to remember an
+ID, not a count" — and this is their first production consumer.
+
+**Residual, stated rather than hidden:** when the guard refuses, the author's
+held-back values are still rolled back and reaching them costs N+1 undo steps,
+which also reverses the intervening change. That is recoverable and it is said
+out loud; the alternative was reversing somebody else's work in silence.
+
 #### Four things a refresh knew and did not say (2026-09-02)
 
 **The preview's auto-clear count was a hardcoded `0`** — the same fabricated

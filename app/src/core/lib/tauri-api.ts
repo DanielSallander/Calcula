@@ -1808,6 +1808,10 @@ export interface UndoResult {
    *  shift a structural undo reverses). Re-read getUserHiddenRows/Cols:
    *  nothing in updatedCells reveals that a row's visibility changed. */
   hiddenChanged: boolean;
+  /** Why a SCOPED undo refused, as a sentence to show. Absent on every
+   *  ordinary undo, and on a scoped one that went ahead. Distinct from
+   *  `success: false`, which means "there was nothing to undo". */
+  refusal?: string | null;
   /** Every refresh DOMAIN this undo/redo touched, named exactly as the Shell's
    *  MUTATION_REFRESH translator expects.
    *
@@ -1891,9 +1895,17 @@ export async function getUndoState(): Promise<UndoState> {
 /**
  * Undo the last action.
  */
-export async function undo(): Promise<UndoResult> {
+export async function undo(expectedSeq?: number): Promise<UndoResult> {
   console.log("[tauri-api] undo");
-  const result = await invoke<UndoResult>("undo");
+  // SCOPED UNDO. With `expectedSeq` this takes back entry N and nothing else,
+  // refusing (and saying why, in `refusal`) if the top of the history has moved.
+  //
+  // For the caller that writes, hands control back, and must later reverse its
+  // OWN write — the push hold-back rolls unticked cells back to their base
+  // values, publishes, and restores them, and the publish is long enough for an
+  // MCP tool or a script to record an entry of its own. A bare undo there takes
+  // back that entry and leaves the author's work rolled back.
+  const result = await invoke<UndoResult>("undo", { expectedSeq });
   console.log(`[tauri-api] undo returned ${result.updatedCells.length} updated cells, canUndo=${result.canUndo}, canRedo=${result.canRedo}`);
   return result;
 }

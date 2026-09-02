@@ -55,6 +55,14 @@ pub struct UndoResult {
     /// cell edit, nothing in `updated_cells` reveals that a row's visibility
     /// changed.
     pub hidden_changed: bool,
+    /// Why a SCOPED undo refused, as a sentence the caller can show. `None` on
+    /// every ordinary undo, and on a scoped one that went ahead.
+    ///
+    /// Distinct from `success: false`, which already means "there was nothing
+    /// to undo" — a caller that conflated the two would tell a user their work
+    /// was safely restored when it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
     /// Every frontend refresh DOMAIN this undo/redo touched, as the
     /// `MutationDomain` names the Shell translator already understands.
     ///
@@ -1473,6 +1481,7 @@ pub(crate) fn apply_changes(
         pane_control_changed: domains.contains(MutationDomain::PaneControl),
         objects_changed: domains.contains(MutationDomain::Objects),
         hidden_changed: domains.contains(MutationDomain::Hidden),
+        refusal: None,
         refresh_domains: domains.wire_names(),
         active_sheet_index,
         active_sheet_name,
@@ -2574,8 +2583,78 @@ fn recalc_visibility_after_undo(
     );
 }
 
+/// What a scoped undo should do, decided from the history's ids alone.
+///
+/// EXTRACTED SO IT CAN BE TESTED. The command it lives in needs a
+/// `tauri::AppHandle` and eight `State` handles, so it cannot be called in
+/// process — which left the decision reachable only by source-text placement
+/// guards, and those cannot see a condition someone has neutered. This is pure:
+/// three values in, a verdict out.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ScopedUndoVerdict {
+    /// The entry the caller named is on top. Undo it.
+    Proceed,
+    /// It is not. Undo NOTHING, and say this.
+    Refuse(String),
+}
+
+/// Decide whether a scoped undo may proceed.
+///
+/// `expected` is what the caller recorded, `top` is what a plain undo would
+/// take, `seqs` is the whole history oldest-first.
+///
+/// The two refusals are DIFFERENT SITUATIONS WITH DIFFERENT REMEDIES, which is
+/// why `undo_seqs()` exists at all: an entry still in the history can be reached
+/// by undoing past what sits above it; one that is gone — evicted by the cap, or
+/// already undone — cannot be reached by any number of undo steps, and telling
+/// the user to press Ctrl+Z would send them chasing it.
+pub(crate) fn scoped_undo_verdict(
+    expected: Option<u64>,
+    top: Option<u64>,
+    seqs: &[u64],
+) -> ScopedUndoVerdict {
+    let Some(want) = expected else {
+        return ScopedUndoVerdict::Proceed;
+    };
+    if top == Some(want) {
+        return ScopedUndoVerdict::Proceed;
+    }
+    match seqs.iter().rposition(|s| *s == want).map(|i| seqs.len() - 1 - i) {
+        Some(n) => ScopedUndoVerdict::Refuse(format!(
+            "Something else changed the workbook in the meantime, so this was not \
+             undone — {} later change(s) are on top of it. Press Ctrl+Z {} time(s) \
+             to reach it.",
+            n,
+            n + 1
+        )),
+        None => ScopedUndoVerdict::Refuse(
+            "That change is no longer in the undo history — it was already undone, \
+             or the history has moved past it. Undo cannot reach it."
+                .to_string(),
+        ),
+    }
+}
+
 /// Perform undo operation.
+///
+/// `expected_seq` makes this a SCOPED undo: take back entry `n` and nothing
+/// else, or take back nothing and say why. Omitted (the shortcut, the ribbon,
+/// every ordinary caller) it behaves exactly as it always has.
+///
+/// WHY IT EXISTS. A command that writes to the document, hands control back to
+/// the frontend, and must later reverse its own write cannot use a bare `undo`:
+/// anything that lands on the stack in between is what a bare undo takes. The
+/// push hold-back does exactly that — it rolls unticked cells back to their base
+/// values, publishes, and then restores them — and the publish is a long,
+/// IO-heavy command during which an MCP tool or a sandboxed script can record an
+/// entry of its own (`mcp/tools.rs:336`, `mcp/objects.rs:357`). Without the
+/// guard, "put my changes back" silently took back the AI's edit instead and
+/// left the author's own work rolled back.
+///
+/// The check and the pop happen under ONE lock. Reading the top id, releasing,
+/// and then popping would be the same race one layer up.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn undo(
     app: tauri::AppHandle,
     state: State<AppState>,
@@ -2586,6 +2665,10 @@ pub fn undo(
     ribbon_filter_state: State<'_, RibbonFilterState>,
     pane_control_state: State<'_, PaneControlState>,
     timeline_state: State<'_, crate::timeline_slicer::TimelineSlicerState>,
+    // `Option`, so an omitted key still deserializes and every existing
+    // `invoke("undo")` is unchanged — the same arrangement `calp_refresh_apply`
+    // uses for its params.
+    expected_seq: Option<u64>,
 ) -> UndoResult {
     // Read BEFORE the undo stack is locked: `undo_stack` is taken first
     // everywhere in this crate, and the one lock-order inversion it has ever
@@ -2593,6 +2676,37 @@ pub fn undo(
     let (active_sheet_index, active_sheet_name) = active_sheet_identity(&state);
     let transaction = {
         let mut undo_stack = state.undo_stack.lock().unwrap();
+
+        // THE GUARD, INSIDE THE SAME CRITICAL SECTION AS THE POP. Deciding under
+        // one lock and popping under another is the race it exists to close.
+        if let ScopedUndoVerdict::Refuse(refusal) = scoped_undo_verdict(
+            expected_seq,
+            undo_stack.top_undo_seq(),
+            &undo_stack.undo_seqs(),
+        ) {
+            return UndoResult {
+                    success: false,
+                    description: None,
+                    updated_cells: Vec::new(),
+                    can_undo: undo_stack.can_undo(),
+                    can_redo: undo_stack.can_redo(),
+                    merge_changed: false,
+                    structural_restore: false,
+                    pivot_changed: false,
+                    slicer_changed: false,
+                    ribbon_filter_changed: false,
+                    pane_control_changed: false,
+                    objects_changed: false,
+                    hidden_changed: false,
+                    refusal: Some(refusal),
+                    refresh_domains: Vec::new(),
+                    active_sheet_index,
+                    active_sheet_name,
+                    restored_anchor: None,
+                    restored_range: None,
+                };
+        }
+
         match undo_stack.pop_undo() {
             Some(t) => t,
             None => {
@@ -2610,6 +2724,7 @@ pub fn undo(
                     pane_control_changed: false,
                     objects_changed: false,
                     hidden_changed: false,
+                    refusal: None,
                     refresh_domains: Vec::new(),
                     // Nothing was undone, so nothing moved -- but the field is
                     // still the truth about where the user is, and a frontend
@@ -2663,6 +2778,7 @@ pub fn redo(
                     pane_control_changed: false,
                     objects_changed: false,
                     hidden_changed: false,
+                    refusal: None,
                     refresh_domains: Vec::new(),
                     active_sheet_index,
                     active_sheet_name,

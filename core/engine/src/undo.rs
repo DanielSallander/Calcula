@@ -318,14 +318,24 @@ impl UndoStack {
         }
     }
 
-    /// Commit the current transaction to the undo stack.
-    /// If no transaction is open or it's empty, this is a no-op.
-    pub fn commit_transaction(&mut self) {
+    /// Commit the current transaction to the undo stack, returning the id it
+    /// was stamped with. If no transaction is open or it's empty, this is a
+    /// no-op and returns `None`.
+    ///
+    /// RETURNING THE ID IS WHAT MAKES A SELF-REVERSING COMMAND POSSIBLE. A
+    /// command that writes, hands control back, and must later reverse its OWN
+    /// write has to name the entry it left — and the only way to name it without
+    /// a race is to be handed it by the push itself. Observing the top of the
+    /// stack afterwards is a second critical section, and anything that lands in
+    /// between is then adopted as the caller's own: worse than a bare undo,
+    /// because the caller reverses a stranger's work confidently.
+    pub fn commit_transaction(&mut self) -> Option<u64> {
         if let Some(transaction) = self.current_transaction.take() {
             if !transaction.is_empty() {
-                self.push_transaction(transaction);
+                return Some(self.push_transaction(transaction));
             }
         }
+        None
     }
 
     /// Cancel the current transaction without saving it.
@@ -437,11 +447,11 @@ impl UndoStack {
         // Snapshots should always be within a transaction (caller must begin one)
     }
 
-    /// Push a completed transaction onto the undo stack.
-    fn push_transaction(&mut self, transaction: Transaction) {
+    /// Push a completed transaction onto the undo stack, returning its id.
+    fn push_transaction(&mut self, transaction: Transaction) -> u64 {
         // Clear redo stack when new action is performed
         self.redo_stack.clear();
-        self.push_back_capped(transaction);
+        self.push_back_capped(transaction)
     }
 
     /// Push a transaction to undo stack without clearing redo.
@@ -452,12 +462,14 @@ impl UndoStack {
 
     /// Stamp an id (first push only) and push, dropping the oldest entries
     /// once the cap is reached -- and COUNTING what was dropped, which is the
-    /// only trace an eviction leaves.
-    fn push_back_capped(&mut self, mut transaction: Transaction) {
+    /// only trace an eviction leaves. Returns the id the entry now carries,
+    /// which for a re-push (undo then redo) is the one it already had.
+    fn push_back_capped(&mut self, mut transaction: Transaction) -> u64 {
         if transaction.seq == 0 {
             transaction.seq = self.next_seq;
             self.next_seq += 1;
         }
+        let seq = transaction.seq;
         while self.undo_stack.len() >= self.max_size {
             if self.undo_stack.pop_front().is_none() {
                 break;
@@ -465,6 +477,7 @@ impl UndoStack {
             self.evicted_total += 1;
         }
         self.undo_stack.push_back(transaction);
+        seq
     }
 
     /// Pop the most recent transaction for undo.
@@ -511,6 +524,19 @@ impl UndoStack {
     /// of undo steps restores the state it named.
     pub fn undo_seqs(&self) -> Vec<u64> {
         self.undo_stack.iter().map(|t| t.seq).collect()
+    }
+
+    /// The id of the entry a plain `undo` would take back, or `None` when the
+    /// history is empty.
+    ///
+    /// The narrow question `undo_seqs()` answers broadly, for the caller that
+    /// only needs "is the thing I just pushed still the thing on top?" — a
+    /// command that writes, hands control back, and must later reverse ITS OWN
+    /// write and nothing else. Reading the id and popping under one lock is
+    /// what makes that check meaningful; two calls with the lock released in
+    /// between is the race it exists to close.
+    pub fn top_undo_seq(&self) -> Option<u64> {
+        self.undo_stack.back().map(|t| t.seq)
     }
 
     /// How many transactions the cap has dropped over this stack's lifetime.
@@ -842,6 +868,61 @@ mod history_horizon_tests {
             seqs.len() - 1 - position,
             6,
             "six transactions sit above the remembered point -- the true distance"
+        );
+    }
+
+    /// `top_undo_seq` is the narrow question a self-reversing command asks:
+    /// "is the thing I just pushed still the thing a plain undo would take?"
+    ///
+    /// The push hold-back writes, hands control back to the frontend for the
+    /// length of a publish, and must then reverse ITS OWN write. Anything that
+    /// lands on the stack meanwhile — the author's own edit in a non-modal
+    /// dialog, an MCP tool, a sandboxed script — is what a bare `pop_undo` takes
+    /// instead, leaving the held-back cells rolled back for good.
+    ///
+    /// SABOTAGE: return `self.undo_stack.front().map(|t| t.seq)`; the guard then
+    /// compares against the OLDEST entry and refuses every correct un-revert
+    /// while admitting every wrong one.
+    #[test]
+    fn the_top_id_is_what_a_plain_undo_would_take() {
+        let mut stack = UndoStack::with_max_size(10);
+        assert_eq!(stack.top_undo_seq(), None, "an empty history has no top");
+
+        push(&mut stack, 1);
+        let mine = stack.top_undo_seq().expect("a push leaves a top");
+        assert_eq!(Some(mine), stack.undo_seqs().last().copied());
+
+        // Somebody else writes while my command is between its two halves.
+        push(&mut stack, 1);
+        assert_ne!(
+            stack.top_undo_seq(),
+            Some(mine),
+            "the top moved — a bare undo here would take back the OTHER write"
+        );
+
+        // ...and the entry is still reachable, one step further down. That is
+        // the difference between "press Ctrl+Z twice" and "it is gone", and
+        // it is the difference the refusal has to tell the user about.
+        let seqs = stack.undo_seqs();
+        let above = seqs.iter().rposition(|s| *s == mine).map(|i| seqs.len() - 1 - i);
+        assert_eq!(above, Some(1));
+    }
+
+    /// The same probe, when the remembered entry is gone rather than buried.
+    /// No number of undo steps reaches it, and the caller must say so instead
+    /// of promising a count.
+    #[test]
+    fn a_top_id_that_is_gone_is_distinguishable_from_one_that_is_buried() {
+        let mut stack = UndoStack::with_max_size(4);
+        push(&mut stack, 1);
+        let mine = stack.top_undo_seq().unwrap();
+
+        push(&mut stack, 8); // evicts it
+
+        assert_ne!(stack.top_undo_seq(), Some(mine));
+        assert!(
+            !stack.undo_seqs().contains(&mine),
+            "gone, not buried — the remedy is different and so is the sentence"
         );
     }
 

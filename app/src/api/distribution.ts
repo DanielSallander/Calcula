@@ -1548,6 +1548,16 @@ export interface HoldBackCellsResponse {
    * author's own last edit.
    */
   undoRecorded: boolean;
+  /**
+   * The id of the undo entry this write left, to hand back to `undo()`.
+   *
+   * A BARE UNDO IS NOT SAFE HERE, and it is why this shipped disabled. The
+   * window is: hold back → publish → un-revert, and the publish is long and
+   * IO-heavy. It records nothing itself, but an MCP tool or a sandboxed script
+   * CAN record an entry during it — and a bare undo then takes back that entry
+   * and leaves the author's own changes rolled back, silently.
+   */
+  undoSeq?: number | null;
 }
 
 /**
@@ -1557,10 +1567,16 @@ export interface HoldBackCellsResponse {
  * HALF OF A PAIR, and the caller owns the other half:
  *
  * ```ts
- * const { undoRecorded } = await holdBackCells(...);
+ * const { undoSeq } = await holdBackCells(...);
  * try { await publishApplication(...); }
- * finally { if (undoRecorded) await undo(); }
+ * finally { if (undoSeq != null) await undo(undoSeq); }
  * ```
+ *
+ * `undo(undoSeq)`, never a bare `undo()`. The publish records nothing on the
+ * undo stack itself, but it is long and IO-heavy, and an MCP tool or a
+ * sandboxed script can record an entry while it runs — a bare undo then takes
+ * that back instead and leaves the author's own changes rolled back. The scoped
+ * form refuses and returns a `refusal` sentence to show them.
  *
  * The `finally` is the entire safety property. Substituting values as the
  * artifact is written would be simpler and is wrong: nothing on the receiving

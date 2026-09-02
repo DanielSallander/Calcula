@@ -38,24 +38,61 @@ function handlePublishBody(): string {
 
 describe("a push that holds cells back always puts them back", () => {
   it("undoes in a finally, not on the success path", () => {
-    // SABOTAGE: move the `if (heldBack) await undo()` into the try block after
-    // publishApplication. A FAILED publish then leaves the author's workbook
-    // holding the base values, with no message saying so.
+    // SABOTAGE: move the `if (holdBackSeq !== null) await undo(...)` into the try
+    // block after publishApplication. A FAILED publish then leaves the author's
+    // workbook holding the base values, with no message saying so.
     const body = handlePublishBody();
     const finallyAt = body.indexOf("} finally {");
-    const undoAt = body.indexOf("await undo()");
+    const undoAt = body.indexOf("await undo(");
     expect(finallyAt, "the finally block is gone").toBeGreaterThan(-1);
     expect(undoAt, "the un-revert is gone").toBeGreaterThan(-1);
     expect(undoAt).toBeGreaterThan(finallyAt);
   });
 
-  it("keys the undo on what the backend REPORTED, not on what was asked", () => {
-    // `holdBackCells` returns `undoRecorded`, which is false when nothing was
-    // written. A bare undo with nothing to reverse takes back the author's own
-    // last edit.
-    // SABOTAGE: `heldBack = excludedCells.size > 0`.
+  it("SCOPES the undo to the entry the hold-back left", () => {
+    // THE REASON THIS FEATURE SHIPPED DISABLED. `undo()` was a blind
+    // `pop_undo()`, and this dialog is non-modal while a publish takes seconds
+    // — so an edit the author makes, or a write from an MCP tool or a script,
+    // is what the `finally` reversed. The hold-back then stayed applied
+    // permanently and silently: the author's value gone from their own
+    // workbook, the dialog reporting success, a save persisting the base value.
+    // AutoRecover does not save them either — it snapshots LIVE state.
+    // SABOTAGE: `await undo()` with no argument.
     const body = handlePublishBody();
-    expect(body).toMatch(/heldBack\s*=\s*r\.undoRecorded/);
+    expect(body).toMatch(/await undo\(holdBackSeq\)/);
+  });
+
+  it("keys the undo on the ID the backend REPORTED, not on what was asked", () => {
+    // `holdBackCells` returns the id of the entry it left, and `null` when it
+    // wrote nothing. An undo with nothing to reverse takes back the author's own
+    // last edit.
+    // SABOTAGE: `holdBackSeq = excludedCells.size > 0 ? 1 : null`.
+    const body = handlePublishBody();
+    expect(body).toMatch(/holdBackSeq\s*=\s*r\.undoSeq\s*\?\?\s*null/);
+    expect(body).toMatch(/if \(holdBackSeq !== null\)/);
+  });
+
+  it("refuses rather than falling back to a bare undo when there is no id", () => {
+    // A write the backend recorded but could not identify is the unsafe shape
+    // this was disabled for. It should be unreachable — `undoRecorded` is
+    // derived from the id — so the disagreement is treated as the refusal it is.
+    // SABOTAGE: delete the branch, or make it fall through to the publish.
+    const body = handlePublishBody();
+    const guard = body.indexOf("r.undoRecorded && holdBackSeq === null");
+    const publishAt = body.indexOf("publishApplication(");
+    expect(guard, "the no-id guard is gone").toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(publishAt);
+    expect(body.slice(guard, publishAt)).toMatch(/return;/);
+  });
+
+  it("shows the backend's refusal sentence when the un-revert is declined", () => {
+    // A refusal is not an exception — `undo` returns normally having done
+    // nothing — so a caller that only catches would report success while the
+    // author's changes stayed rolled back.
+    // SABOTAGE: drop the `if (r.refusal)` branch.
+    const body = handlePublishBody();
+    expect(body).toMatch(/if \(r\.refusal\)/);
+    expect(body).toMatch(/were NOT `\s*\+\s*`restored automatically/);
   });
 
   it("refuses the push when the hold-back itself fails", () => {

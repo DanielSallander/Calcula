@@ -4582,6 +4582,22 @@ pub struct HoldBackCellsResponse {
     /// when it is false — a bare `undo` with nothing to reverse would take back
     /// the author's own last edit.
     pub undo_recorded: bool,
+    /// The id of the undo entry this write left on the stack, to be handed back
+    /// to `undo` as `expectedSeq`.
+    ///
+    /// A BARE UNDO IS NOT SAFE HERE, and this is why the feature shipped
+    /// disabled. The caller's window is: hold back → publish → un-revert, and
+    /// the publish is a long, IO-heavy command that records nothing itself but
+    /// during which an MCP tool or a sandboxed script CAN record an entry
+    /// (`mcp/tools.rs:336`, `mcp/objects.rs:357`). A bare `undo` then takes back
+    /// that entry and leaves the author's own changes rolled back — the exact
+    /// inverse of what the caller asked for, silently.
+    ///
+    /// `None` when nothing was written, which is the same condition as
+    /// `undo_recorded == false`; both are reported because a caller that keys
+    /// its `finally` on the wrong one gets the dangerous behaviour, not a
+    /// compile error.
+    pub undo_seq: Option<u64>,
 }
 
 /// Put the BASE version's value back into the cells the author unticked, so the
@@ -4649,8 +4665,13 @@ pub fn calp_hold_back_cells(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
     if params.cells.is_empty() {
-        return Ok(HoldBackCellsResponse { cells_held_back: 0, undo_recorded: false });
+        return Ok(HoldBackCellsResponse {
+            cells_held_back: 0,
+            undo_recorded: false,
+            undo_seq: None,
+        });
     }
+
 
     // The base side, through the same verification every content read uses.
     let (registry, base_version, _manifest) = crate::calp_inspector::open_verified_content(
@@ -4723,11 +4744,45 @@ pub fn calp_hold_back_cells(
         }
     }
 
-    // Through the SAME pipeline a script write and a merge use: one undo
-    // transaction, dependency maps, recalculation, dirty flag, events. The
-    // recalculation is the point — a rolled-back input whose dependents still
-    // showed the author's numbers is exactly the artifact this exists to avoid.
-    crate::scripting::commands::apply_script_modified_grids(
+    // OWN THE TRANSACTION, so the id is CLAIMED rather than observed.
+    //
+    // Opened HERE, after every refusal above — a transaction left open by an
+    // early return bleeds into the next edit the user makes.
+    //
+    // `apply_script_modified_grids` reaches the undo stack by two different
+    // routes — an outer transaction when an off-sheet sheet was touched, or
+    // `update_cells_batch` recording its own when only the active sheet moved —
+    // and neither returns the id. Reading the top of the stack afterwards would
+    // answer for both, and would be a SECOND critical section: an MCP tool
+    // thread, or one of the async pivot/report commands, that records an entry
+    // between the write and the read makes THAT entry the answer. The caller
+    // would then scope its un-revert to a stranger's write and reverse it
+    // confidently — strictly worse than the bare undo this replaces.
+    //
+    // Opening the transaction here closes the window: both inner routes join it
+    // (`update_cells_batch` already checked for an open transaction, and
+    // `apply_script_modified_grids_core` now does too), and the commit below is
+    // what stamps the id and hands it back. Nothing can be adopted, because
+    // nothing is observed.
+    //
+    // The pipeline's recalculation passes now run while this transaction is
+    // open, which changes nothing: `calculation.rs` never touches the undo
+    // stack.
+    {
+        let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo.begin_transaction(format!(
+            "Hold back {} change(s) for the push to {}",
+            held, params.package_name
+        ));
+    }
+
+    // Through the SAME pipeline a script write and a merge use: dependency maps,
+    // recalculation, dirty flag, events. The recalculation is the point — a
+    // rolled-back input whose dependents still showed the author's numbers is
+    // exactly the artifact this exists to avoid.
+    //
+    // NOT `?`. The transaction is open, and a `?` here would leave it that way.
+    let applied = crate::scripting::commands::apply_script_modified_grids(
         &state,
         &file_state,
         &user_files_state,
@@ -4739,15 +4794,29 @@ pub fn calp_hold_back_cells(
         held as u32,
         "calpHoldBack",
         &format!("{}@{}", params.package_name, base_version),
-    )?;
+    );
+
+    // ALWAYS close it, on both paths, and take the id the push stamps. An empty
+    // transaction — the write touched nothing — commits nothing and yields
+    // `None`, which is the honest answer: there is no entry for a caller to
+    // reverse.
+    let undo_seq = {
+        let mut undo = state.undo_stack.lock().map_err(|e| e.to_string())?;
+        undo.commit_transaction()
+    };
+    // Propagated AFTER the commit, so a partial write is on the stack and
+    // recoverable rather than stranded inside an open transaction.
+    applied?;
 
     Ok(HoldBackCellsResponse {
         cells_held_back: held,
         // `apply_script_modified_grids` returns early without recording anything
         // when `cells_modified == 0`, which `held > 0` excludes. The caller keys
         // its `undo` on this, so it must describe what actually happened rather
-        // than what was asked for.
-        undo_recorded: held > 0,
+        // than what was asked for — and it is now `undo_seq.is_some()` rather
+        // than `held > 0`, so the two facts the caller needs cannot disagree.
+        undo_recorded: undo_seq.is_some(),
+        undo_seq,
     })
 }
 
