@@ -5950,6 +5950,9 @@ mod distribution_user_file_restore_tests {
                 sheet_id: identity::SheetId::from_bytes(identity::generate_uuid_v7()),
                 name: "Dashboard".to_string(),
             }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
         );
         *state.working_copy_link.write(&effect).unwrap() = Some(link.clone());
 

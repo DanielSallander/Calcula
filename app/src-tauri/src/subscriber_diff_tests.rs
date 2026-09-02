@@ -486,3 +486,89 @@ fn the_pivot_retention_set_is_case_insensitive_like_every_other_name_compare() {
         "the lookup side is case-sensitive again — both halves have to agree"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F. Additive checkout leaves the author's own content beside the application's
+// ---------------------------------------------------------------------------
+//
+// `publish()` reads an absent script list as "all from the workbook", and a pull
+// is ADDITIVE for named ranges. Both were harmless while checkout REPLACED the
+// document — the workbook then held nothing but the application. Additive
+// checkout ended that, and a push started carrying the author's private content
+// into a shared workspace, checksummed and signed under their key.
+
+/// A PUSH SHIPS THE APPLICATION'S SCRIPTS, NOT THE AUTHOR'S.
+///
+/// The leak: a personal module script holding an API token, published into the
+/// shared workspace and disclosed as a bare count in the report.
+///
+/// SABOTAGE: delete the `workbook.scripts.retain` from
+/// `assemble_publish_workbook`.
+#[test]
+fn a_push_withholds_content_the_application_never_had() {
+    let body = body_of("fn assemble_publish_workbook(");
+    assert!(
+        body.contains("base_script_ids"),
+        "the publish assembly stopped filtering module scripts, so a working \
+         copy publishes every script in the author's workbook"
+    );
+    assert!(
+        body.contains("base_notebook_ids"),
+        "notebooks are filtered by the same record and must not be dropped from it"
+    );
+    assert!(
+        body.contains("base_named_range_keys"),
+        "a workbook-scoped name the application never defined ships as the \
+         application's, pointing at a sheet the package does not contain"
+    );
+}
+
+/// AN UNRECORDED LINK FALLS BACK, rather than publishing nothing.
+///
+/// A link written before the ids existed has empty vectors. Treating that as
+/// "the application had no scripts" would silently DROP the application's own
+/// scripts on the next push — the opposite failure, and just as quiet.
+///
+/// SABOTAGE: remove the `is_empty()` fallback guard.
+#[test]
+fn an_unrecorded_link_publishes_as_before() {
+    let body = body_of("fn assemble_publish_workbook(");
+    assert!(
+        body.contains("base_script_ids.is_empty() && link.base_notebook_ids.is_empty()"),
+        "the fallback for a link written before these ids existed is gone — an \
+         old link would now publish no scripts at all"
+    );
+}
+
+/// THE FILTER IS SCOPED TO THIS APPLICATION. A workbook can be the working copy
+/// of X while creating Y; Y must not be filtered against X's contents.
+///
+/// SABOTAGE: drop the `link.targets(...)` term.
+#[test]
+fn the_content_filter_asks_whether_the_link_targets_this_application() {
+    let body = body_of("fn assemble_publish_workbook(");
+    let filter_at = body
+        .find("base_script_ids")
+        .expect("the content filter is gone");
+    let window = &body[filter_at.saturating_sub(400)..filter_at];
+    assert!(
+        window.contains("link.targets("),
+        "the filter must apply only when the link targets the application being \
+         published — otherwise creating a new application from a working copy \
+         filters it against an unrelated one"
+    );
+}
+
+/// SHEET-SCOPED NAMES RIDE WITH THEIR SHEET. Only workbook-scoped names are
+/// filtered; the sheet selection already decides the rest.
+///
+/// SABOTAGE: drop the `nr.sheet_id.is_some()` early return.
+#[test]
+fn only_workbook_scoped_names_are_filtered() {
+    let body = body_of("fn assemble_publish_workbook(");
+    assert!(
+        body.contains("if nr.sheet_id.is_some()"),
+        "a sheet-scoped name is now filtered against the workbook-scoped record, \
+         so a name belonging to a published sheet is dropped with it"
+    );
+}

@@ -572,6 +572,61 @@ names case-SENSITIVELY while every other sheet-name comparison in the product is
 `data` against a tab spelled `Data` was silently dropped from the application.
 Both halves of that comparison are now lowercased.
 
+#### The link records CONTENT, not just sheets (2026-09-02)
+
+Additive checkout leaves the author's own scripts, notebooks and named ranges
+beside the application's, and two publish paths read "not specified" as "all from
+the workbook":
+
+- `publish()` treats an absent `module_scripts` / `notebooks` list as everything
+  in the carrier, so **a push wrote every private module script and notebook into
+  the shared workspace**, checksummed and Ed25519-signed under the author's key,
+  disclosed only as a bare count in the report. A personal module holding an API
+  token is exactly the shape of thing a personal workbook contains.
+- A pull is ADDITIVE for named ranges, so an application whose `RATE` collides
+  with the author's is silently dropped at checkout — and the author's `RATE`,
+  pointing at a sheet of theirs the package does not contain, then shipped **as
+  the application's**. Every subscriber's next refresh took that definition.
+
+`WorkingCopyLink` now records `base_script_ids`, `base_notebook_ids` and
+`base_named_range_keys` — the same job `base_sheets` does, for content that has
+no tick list. `assemble_publish_workbook` filters against them when the link
+targets the application being published, and logs what it withheld. `record_push`
+updates them from what actually shipped, so a script added to the application by
+one push belongs to it from the next.
+
+An EMPTY record means a link written before these fields existed, and the filter
+falls back to the old behaviour rather than publishing nothing — silently
+dropping the application's own scripts is the opposite failure and just as quiet.
+Sheet-scoped names are never filtered: they ride with their sheet, and the sheet
+selection already decides that.
+
+#### Three facts the diff had collapsed into one (2026-09-02)
+
+Hiding derived values made `walk_cells` returning zero mean something new, and
+three consumers were still reading the old meaning:
+
+1. **A sheet of pure formulas vanished from the diff and was reported as a
+   packaging bug.** Zero authored changes was classified `Outcome::Spurious` —
+   "same content, different bytes" — so no `SheetDiffSummary` was created and the
+   sheet was counted into the determinism figure the UI renders as *"that is a
+   packaging bug, not a change you made"*. It now re-reads with
+   `count_all_cell_differences`: zero there too is a genuine determinism
+   regression; non-zero is a real change reported with zero authored cells.
+2. **The refresh preview counted the wrong thing.** It asks "what will land on my
+   screen", and nothing on the receiving side recalculates — so it now counts
+   every difference. Editing one input that recomputes 500 formula cells said
+   "1 cell(s) changed" before 501 of them moved.
+3. **One side over the parse budget fabricated a whole-sheet diff and marked it
+   exact.** The guard only fired when BOTH sides failed to load, so a 9 MB base
+   sheet past the 8 MiB cap diffed against a small working copy reported "20 cells
+   added, 0 removed" with `countsExact: true` — the author was shown an addition
+   and would have published a deletion of ~100,000 cells.
+
+And a `FastForward` verdict with nothing unmergeable — newly reachable, because a
+version whose changes are all derived now touches no pieces — rendered *"this
+version cannot bring across ."* with an empty join. It gets its own branch.
+
 #### A cached result is not an edit (2026-09-01)
 
 `cells_equal` compared every field of a cell entry, including `v`, `t`, `e` and

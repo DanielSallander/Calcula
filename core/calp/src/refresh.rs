@@ -517,7 +517,19 @@ fn count_upstream_cell_changes(
         };
         match (read(old_version), read(new_version)) {
             (Some(before), Some(after)) => {
-                total += crate::diff::count_sheet_data_changes(&before, &after).total();
+                // EVERY difference, derived values included — a different
+                // question from the one the PUSH diff asks.
+                //
+                // `count_sheet_data_changes` hides formula cells whose formula
+                // did not change, because on a push those are the consequence of
+                // an edit that has its own row. On a REFRESH there is no such
+                // consolation: nothing on the receiving side recalculates, so
+                // the published cached value is what lands on the subscriber's
+                // screen. A publisher who edits one input and recomputes 500
+                // formula cells would have had this dialog say "1 cell(s)
+                // changed" before 501 of them moved — and where the changed
+                // precedent was outside the published set entirely, "0".
+                total += crate::diff::count_all_cell_differences(&before, &after);
             }
             // Too large to parse, or unreadable: the sheet still changed, but
             // by how much is not something to guess at.

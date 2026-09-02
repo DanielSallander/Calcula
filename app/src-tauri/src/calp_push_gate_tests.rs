@@ -115,7 +115,7 @@ fn recording_a_push_moves_the_base_so_the_next_push_is_measured_from_it() {
         "2026-08-29T00:00:00Z",
         Vec::new(),
     );
-    link.record_push("1.1.0", "2026-08-29T10:00:00Z", Vec::new());
+    link.record_push("1.1.0", "2026-08-29T10:00:00Z", Vec::new(), Vec::new(), Vec::new(), Vec::new());
     assert_eq!(
         link.base_version, "1.1.0",
         "after a push, the version just published IS the base — otherwise the \

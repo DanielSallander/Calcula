@@ -450,6 +450,90 @@ fn assemble_publish_workbook(
     workbook.scripts = crate::persistence::collect_scripts_for_save(script_state);
     workbook.notebooks = crate::persistence::collect_notebooks_for_save(script_state);
 
+    // THE APPLICATION'S SCRIPTS, NOT THE AUTHOR'S.
+    //
+    // `publish()` reads an absent script list as "all from the workbook", which
+    // was harmless while checkout REPLACED the document — the workbook then held
+    // nothing but the application. Additive checkout ended that: the author's
+    // own module scripts and notebooks now sit beside the application's, and a
+    // push wrote every one of them into the shared workspace, checksummed and
+    // Ed25519-signed under the author's key, disclosed only as a bare count in
+    // the report. A private module holding an API token is exactly the shape of
+    // thing that lives in somebody's personal workbook.
+    //
+    // The link records what the base version carried, the same job `base_sheets`
+    // does for the tick list. An EMPTY record means a link written before this
+    // existed: fall back to publishing everything rather than silently dropping
+    // the application's own scripts, which is the opposite failure and just as
+    // quiet.
+    let withheld_private_content: Vec<String> = {
+        let link = state.working_copy_link.read().map_err(|e| e.to_string())?;
+        let mut withheld = Vec::new();
+        if let Some(link) = link.as_ref() {
+            if link.targets(registry_path, package_name)
+                && !(link.base_script_ids.is_empty() && link.base_notebook_ids.is_empty())
+            {
+                let keep_scripts: std::collections::HashSet<&str> =
+                    link.base_script_ids.iter().map(|s| s.as_str()).collect();
+                let keep_notebooks: std::collections::HashSet<&str> =
+                    link.base_notebook_ids.iter().map(|s| s.as_str()).collect();
+                workbook.scripts.retain(|s| {
+                    let keep = keep_scripts.contains(s.id.as_str());
+                    if !keep {
+                        withheld.push(format!("script '{}'", s.name));
+                    }
+                    keep
+                });
+                workbook.notebooks.retain(|n| {
+                    let keep = keep_notebooks.contains(n.id.as_str());
+                    if !keep {
+                        withheld.push(format!("notebook '{}'", n.name));
+                    }
+                    keep
+                });
+
+                // NAMED RANGES, the same leak by a different route. A pull is
+                // ADDITIVE for names, so an application whose `RATE` collides
+                // with the author's own is silently DROPPED at checkout — and
+                // then the author's `RATE`, pointing at a sheet of theirs the
+                // package does not contain, shipped as the application's. Every
+                // subscriber's next refresh took that definition and started
+                // computing against a `#REF!`.
+                //
+                // Only workbook-scoped names are filtered here: a SHEET-scoped
+                // name rides with its sheet, and the sheet selection already
+                // decides whether that sheet ships at all.
+                if !link.base_named_range_keys.is_empty() {
+                    let keep_names: std::collections::HashSet<String> = link
+                        .base_named_range_keys
+                        .iter()
+                        .map(|k| k.to_uppercase())
+                        .collect();
+                    workbook.named_ranges.retain(|nr| {
+                        if nr.sheet_id.is_some() {
+                            return true;
+                        }
+                        let keep = keep_names.contains(&nr.name.to_uppercase());
+                        if !keep {
+                            withheld.push(format!("name '{}'", nr.name));
+                        }
+                        keep
+                    });
+                }
+            }
+        }
+        withheld
+    };
+    if !withheld_private_content.is_empty() {
+        crate::log_info!(
+            "CALP",
+            "publish withheld {} item(s) not part of '{}': {}",
+            withheld_private_content.len(),
+            package_name,
+            withheld_private_content.join(", ")
+        );
+    }
+
     // Ship pivot definitions + BI pivot metadata so subscribers can rebuild
     // live pivots; per-pivot data source routing reads the dataSourceId
     // carried in that metadata.
@@ -1254,6 +1338,20 @@ pub fn calp_publish(
         // and the collision rename shipped after all. The block that restores
         // the names and this one disagreed about which names were published.
         //
+        // What actually SHIPPED, for the same reason and off the same carrier:
+        // the next push filters against this, so a script added to the
+        // application by this push belongs to it from now on.
+        let published_script_ids: Vec<String> =
+            request.workbook.scripts.iter().map(|s| s.id.clone()).collect();
+        let published_notebook_ids: Vec<String> =
+            request.workbook.notebooks.iter().map(|n| n.id.clone()).collect();
+        let published_name_keys: Vec<String> = request
+            .workbook
+            .named_ranges
+            .iter()
+            .map(|nr| nr.name.to_uppercase())
+            .collect();
+
         // `request.workbook` is the carrier `assemble_publish_workbook` produced
         // and `publish()` serialized, so its sheet names ARE the manifest's.
         let published_sheets: Vec<calp::WorkingCopySheetRef> = request
@@ -1273,7 +1371,14 @@ pub fn calp_publish(
         let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
         let mut link = state.working_copy_link.write(&effect).map_err(|e| e.to_string())?;
         match link.as_mut() {
-            Some(existing) => existing.record_push(&result.version, &now, published_sheets),
+            Some(existing) => existing.record_push(
+                &result.version,
+                &now,
+                published_sheets,
+                published_script_ids.clone(),
+                published_notebook_ids.clone(),
+                published_name_keys.clone(),
+            ),
             None => {
                 let mut fresh = calp::WorkingCopyLink::new(
                     &params.registry_path,
@@ -1283,7 +1388,14 @@ pub fn calp_publish(
                     &now,
                     published_sheets.clone(),
                 );
-                fresh.record_push(&result.version, &now, published_sheets);
+                fresh.record_push(
+                    &result.version,
+                    &now,
+                    published_sheets,
+                    published_script_ids.clone(),
+                    published_notebook_ids.clone(),
+                published_name_keys.clone(),
+                );
                 *link = Some(fresh);
             }
         }
@@ -4300,6 +4412,16 @@ pub fn calp_checkout(
             name: s.name.clone(),
         })
         .collect();
+    // Captured BEFORE `result` moves into the materializer.
+    let base_script_ids: Vec<String> =
+        result.module_scripts.iter().map(|s| s.id.clone()).collect();
+    let base_notebook_ids: Vec<String> =
+        result.notebooks.iter().map(|n| n.id.clone()).collect();
+    let base_named_range_keys: Vec<String> = result
+        .named_ranges
+        .iter()
+        .map(|nr| nr.name.to_uppercase())
+        .collect();
 
     // ROLE GATES, before anything is written.
     //
@@ -4371,14 +4493,19 @@ pub fn calp_checkout(
     // have an answer to "which application, from which base".
     {
         let mut link = state.working_copy_link.write(&effect).map_err(|e| e.to_string())?;
-        *link = Some(calp::WorkingCopyLink::new(
+        let mut fresh = calp::WorkingCopyLink::new(
             &params.registry_path,
             &params.package_name,
             &kind_for_link,
             &resolved_version,
             &now,
             base_sheets,
-        ));
+        );
+        // WHICH SCRIPTS AND NOTEBOOKS ARE THE APPLICATION'S. Additive checkout
+        // leaves the author's own beside them, and without this record a push
+        // published every one — a private module with an API token included.
+        fresh.record_content(base_script_ids, base_notebook_ids, base_named_range_keys);
+        *link = Some(fresh);
     }
 
     // THE FILE PATH IS LEFT ALONE. It used to be cleared, because a checkout

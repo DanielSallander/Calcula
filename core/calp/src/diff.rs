@@ -465,6 +465,53 @@ pub fn diff_sheet_cells(
     })
 }
 
+/// An empty sheet, for the one-sided comparisons below.
+static EMPTY_SHEET_DATA: std::sync::LazyLock<calcula_format::sheet_data::SheetData> =
+    std::sync::LazyLock::new(|| calcula_format::sheet_data::SheetData {
+        cells: BTreeMap::new(),
+    });
+
+/// How many cells differ AT ALL — derived values included.
+///
+/// The counterpart to [`count_sheet_data_changes`], which answers "what did
+/// somebody AUTHOR" and therefore hides a formula cell whose formula did not
+/// change, and array output under an unchanged extent. Two different questions,
+/// and both are asked:
+///
+/// * A PUSH diff wants the authored answer. A recalculated `=C2*2` beside the
+///   number you edited is that edit's consequence, not a second decision.
+/// * A REFRESH preview wants this one. Nothing on the receiving side
+///   recalculates — neither pull, nor checkout, nor opening the file evaluates a
+///   cell — so a subscriber sees every changed cached value land on their
+///   screen. Telling them "1 cell changed" before 501 of them move is not a
+///   coarser truth, it is a different number from the one that happens.
+/// * The determinism counter wants it too: zero here is what "same content,
+///   different bytes" actually means.
+pub fn count_all_cell_differences(
+    before: &calcula_format::sheet_data::SheetData,
+    after: &calcula_format::sheet_data::SheetData,
+) -> usize {
+    let mut n = 0usize;
+    for (a1, b) in &before.cells {
+        match after.cells.get(a1) {
+            None => n += 1,
+            Some(a) => {
+                // The pre-2026-09-01 comparison, kept whole: every field.
+                if !(a.t == b.t && a.v == b.v && a.f == b.f && a.e == b.e && a.sp == b.sp && a.rt == b.rt)
+                {
+                    n += 1;
+                }
+            }
+        }
+    }
+    for a1 in after.cells.keys() {
+        if !before.cells.contains_key(a1) {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Count cell changes between two parsed sheet payloads. Allocates nothing per
 /// change, so the refresh preview can afford to call it.
 pub fn count_sheet_data_changes(
@@ -697,7 +744,26 @@ impl DiffContext<'_, '_> {
                     let from_rel = format!("sheets/{package_id}/data.json");
                     let before = read_sheet_data_capped(self.from, &from_rel, self.opts)?;
                     let after = read_sheet_data_capped(self.to, &self.to_path(rel), self.opts)?;
-                    if before.is_none() && after.is_none() && presence == Presence::Changed {
+                    // EITHER SIDE MISSING IS INEXACT, not just both.
+                    //
+                    // `read_sheet_data_capped` returns None for three different
+                    // reasons — absent, over the byte cap, unparseable — and the
+                    // guard only fired when BOTH sides failed. A one-sided
+                    // failure fell through to `walk_cells`, which substitutes an
+                    // EMPTY sheet for the missing side: a 9 MB base sheet past
+                    // the 8 MiB cap, diffed against a small working copy,
+                    // reported "20 cells added, 0 removed" with countsExact
+                    // TRUE. The author was shown an addition and published a
+                    // deletion of ~100,000 cells.
+                    //
+                    // Scoped to `Presence::Changed`, because a genuinely added
+                    // or removed sheet legitimately has one side and must keep
+                    // its real counts.
+                    let one_sided_failure = presence == Presence::Changed
+                        && before.is_none() != after.is_none();
+                    if (before.is_none() && after.is_none() && presence == Presence::Changed)
+                        || one_sided_failure
+                    {
                         Outcome::CountsInexact
                     } else {
                         self.parsed_sheet_artifacts += 1;
@@ -707,7 +773,38 @@ impl DiffContext<'_, '_> {
                             self.opts.sample_cells_per_sheet,
                         );
                         if counts.total() == 0 && presence == Presence::Changed {
-                            Outcome::Spurious
+                            // THREE FACTS, NOT TWO. Zero AUTHORED changes no
+                            // longer means "identical content": `cells_equal`
+                            // deliberately hides formula cells whose formula did
+                            // not change, and `unchanged_spill_cells` hides
+                            // array output. A sheet of nothing but formulas over
+                            // an edited input therefore walks to zero while its
+                            // bytes really did change.
+                            //
+                            // Calling that `Spurious` was wrong twice over: the
+                            // sheet vanished from the diff entirely (no summary,
+                            // so no row, so no per-cell tick), AND it was
+                            // counted into the packaging-determinism figure the
+                            // UI renders as "hashed differently but contain the
+                            // same thing — that is a packaging bug, not a change
+                            // you made". The author was told to go and fix a
+                            // serialization defect that did not exist.
+                            //
+                            // So: re-read WITHOUT the derived-value rules. Zero
+                            // there too means the bytes really do carry the same
+                            // content, which is the determinism regression the
+                            // counter exists for. Non-zero means the sheet
+                            // changed in derived values only — a real change,
+                            // reported with zero authored cells.
+                            let raw = count_all_cell_differences(
+                                before.as_ref().unwrap_or(&EMPTY_SHEET_DATA),
+                                after.as_ref().unwrap_or(&EMPTY_SHEET_DATA),
+                            );
+                            if raw == 0 {
+                                Outcome::Spurious
+                            } else {
+                                Outcome::Cells(counts, sample)
+                            }
                         } else {
                             Outcome::Cells(counts, sample)
                         }

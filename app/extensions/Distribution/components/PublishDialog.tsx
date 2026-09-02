@@ -1391,6 +1391,33 @@ function WorkspaceBanner({
       );
     }
 
+    // NOTHING OF THEIRS TO BRING ACROSS. A `FastForward` verdict with an empty
+    // summary and nothing unmergeable means the intervening version changed
+    // nothing this analysis can act on — which became reachable for a whole new
+    // class of version when the diff stopped reporting derived-only changes: a
+    // publisher who edits a sheet outside the published set recomputes formulas
+    // and nothing else, so `pieces_touched(theirs)` is empty.
+    //
+    // Without this branch that fell through to the sentence below and rendered
+    // "this version cannot bring across ." — an empty join, a dangling
+    // sentence, and an instruction to re-do work for no reason.
+    if (
+      merge.analysis.verdict === "fastForward" &&
+      merge.analysis.unmergeable.length === 0
+    ) {
+      return (
+        <div style={boxStyle("warn")}>
+          {landed}
+          <div style={{ marginTop: 6 }}>
+            Nothing in v{head} conflicts with your work — it changed no content
+            this push would touch. Your base is still v{workspace.baseVersion},
+            so the push is refused until you move to v{head}: open it for
+            editing, and your changes come with you.
+          </div>
+        </div>
+      );
+    }
+
     // cannotApply — disjoint, but out of reach for now. Worth distinguishing:
     // "you collided" and "we cannot do this yet" call for different reactions.
     return (

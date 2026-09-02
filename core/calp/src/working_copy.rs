@@ -55,6 +55,33 @@ pub struct WorkingCopyLink {
     /// does so OFFLINE, without a workspace round trip.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_sheets: Vec<WorkingCopySheetRef>,
+    /// Ids of the module scripts and notebooks the base version contained.
+    ///
+    /// THE SAME JOB `base_sheets` DOES, for content that has no tick list.
+    /// Checkout stopped replacing the document, so a working copy now holds the
+    /// author's OWN scripts and notebooks beside the application's — and a push
+    /// published every one of them, because `publish()` reads a `None` script
+    /// list as "all from the workbook". A private module holding an API token
+    /// went into the shared workspace, checksummed and signed under the
+    /// author's key, disclosed only as a bare count.
+    ///
+    /// Empty means "not recorded" (a link written before this existed), and the
+    /// assembly then falls back to the old behaviour rather than publishing
+    /// nothing — a silent drop of the application's own scripts would be the
+    /// opposite failure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_script_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_notebook_ids: Vec<String>,
+    /// UPPERCASED keys of the workbook-scoped named ranges the base version had.
+    ///
+    /// Same job again, and the same leak: a pull is ADDITIVE for names, so an
+    /// application whose `RATE` collides with the author's own is silently
+    /// dropped — and `publish()` then ships the AUTHOR's `RATE` as the
+    /// application's, pointing at a sheet the package does not even contain.
+    /// Every subscriber's next refresh takes that definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_named_range_keys: Vec<String>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -92,8 +119,29 @@ impl WorkingCopyLink {
             last_pushed_version: String::new(),
             last_pushed_at: String::new(),
             base_sheets,
+            // Filled by `record_content` right after construction — the caller
+            // has the pulled result, this constructor does not.
+            base_script_ids: Vec::new(),
+            base_notebook_ids: Vec::new(),
+            base_named_range_keys: Vec::new(),
             extra: HashMap::new(),
         }
+    }
+
+    /// Record which module scripts and notebooks the base version carried.
+    ///
+    /// Separate from `new` because the ids come from the pulled result rather
+    /// than from the link's own identity, and both the checkout and the
+    /// first-publish paths build the link before they have them.
+    pub fn record_content(
+        &mut self,
+        script_ids: Vec<String>,
+        notebook_ids: Vec<String>,
+        named_range_keys: Vec<String>,
+    ) {
+        self.base_script_ids = script_ids;
+        self.base_notebook_ids = notebook_ids;
+        self.base_named_range_keys = named_range_keys;
     }
 
     /// Whether this link targets the given application in the given workspace.
@@ -111,11 +159,25 @@ impl WorkingCopyLink {
     }
 
     /// Record a successful push: the pushed version becomes the new base.
-    pub fn record_push(&mut self, version: &str, now: &str, sheets: Vec<WorkingCopySheetRef>) {
+    pub fn record_push(
+        &mut self,
+        version: &str,
+        now: &str,
+        sheets: Vec<WorkingCopySheetRef>,
+        // What actually shipped, so the NEXT push's filter is measured against
+        // this version rather than against the checkout's. A script added to the
+        // application by this push belongs to it from now on.
+        script_ids: Vec<String>,
+        notebook_ids: Vec<String>,
+        named_range_keys: Vec<String>,
+    ) {
         self.base_version = version.to_string();
         self.last_pushed_version = version.to_string();
         self.last_pushed_at = now.to_string();
         self.base_sheets = sheets;
+        self.base_script_ids = script_ids;
+        self.base_notebook_ids = notebook_ids;
+        self.base_named_range_keys = named_range_keys;
     }
 }
 
@@ -150,7 +212,7 @@ mod tests {
     fn record_push_advances_the_base() {
         let mut l = link();
         assert_eq!(l.last_pushed_version, "");
-        l.record_push("1.3.0", "2026-08-30T00:00:00Z", Vec::new());
+        l.record_push("1.3.0", "2026-08-30T00:00:00Z", Vec::new(), Vec::new(), Vec::new(), Vec::new());
         assert_eq!(l.base_version, "1.3.0");
         assert_eq!(l.last_pushed_version, "1.3.0");
         assert_eq!(l.last_pushed_at, "2026-08-30T00:00:00Z");
