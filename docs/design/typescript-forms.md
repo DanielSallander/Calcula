@@ -540,10 +540,20 @@ Typings: the prose lives in `objectContexts.template.d.ts`; `probeShim.ts` maps
 | `PREFERRED_HOOK_BY_TYPE.form` honest about the live surface | `scriptTemplate.test.ts:55` |
 | Rust `Form` round-trips through the `.cala` def | `core/calcula-format/src/features/object_scripts.rs:224-228` |
 
-**No end-to-end journey exists for forms.** `app/e2e/journeys/script-form.spec.ts` and
-`script-form-distributed.spec.ts` from the plan's S6 were not written, and `script-preview.spec.ts`
-has no form case. Mount-level behaviour (a real worker, the real consent gate, one Ctrl+Z over a
-real transaction) is therefore pinned only by the unit tests above — see `open-items.md` §2.ab.
+### The journeys, RUN (2026-09-03)
+
+Mount-level behaviour is not left to unit tests. Twenty-six journey tests pass against the running
+app — a real Worker realm, the real consent gate, a real undo transaction:
+
+| journey | what it proves |
+|---|---|
+| `app/e2e/journeys/script-form.spec.ts` (9) | Insert > Form mints a UUID `instanceId`; the band names the script and the pinned sheet; a required field blocks Submit and writes nothing; Enter writes the TYPED values of the dirty widgets and ONE undo reverts them all (with a second-edit positive control, so "one undo" is not vacuous); Escape resolves `null` and writes nothing; an `onSubmit` verdict keeps the form open; a cell changed by another script updates the widget while it is open; a second script's `caps.dialog.alert` is refused while the form holds the slot; and a button script's `caps.forms.show` is held open 33 s — past the 30 s relay deadline — and still receives the answers |
+| `script-form-distributed.spec.ts` (2) | a `.calp` carrying a form and a button: DECLINED, nothing is painted, neither script mounts and `ui.dialog` is not in the grant set; then APPROVED, the band names the package and a `Sheet2` binding renders disabled with its reason. The first journey in the tree that publishes a `.calp` containing object scripts |
+| `script-preview.spec.ts` (15, one new) | the editor's Preview form paints the captured layout, Submit lists what WOULD be written, and nothing is mounted, written, dirtied or audited |
+
+Running them found one defect — in the SPEC, not the product: the consent prompt was asserted with
+`capabilities.ts`'s sentence while that surface renders the ScriptableObjects one. There are three
+`ui.dialog` sentences, one per surface, and `formConsentHonesty.test.ts` pins all three.
 
 ## 13. Where the code differs from the plan
 

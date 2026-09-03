@@ -721,9 +721,21 @@ test.describe.serial("a `.calp` form: declined, then approved", () => {
     await expect(page.getByText(`"${PACKAGE}"`, { exact: false }).first()).toBeVisible();
     await expect(page.getByText(FORM_NAME, { exact: false }).first()).toBeVisible();
     await expect(page.getByText(BUTTON_NAME, { exact: false }).first()).toBeVisible();
-    // The capability is named in the words the user reads (CAP_DESCRIPTION).
+    // THE CAPABILITY IS NAMED IN THE WORDS THIS SURFACE READS THEM IN.
+    //
+    // There are three sentences for `ui.dialog`, one per surface, and this
+    // prompt is the ScriptableObjects one: "Interrupt you with a dialog box and
+    // read what you answer" (`extensions/ScriptableObjects/index.ts`). The
+    // other two are `capabilities.ts`'s "show you a dialog and receive what you
+    // enter" (the transparency panel) and SubscribeDialog's "interrupt you with
+    // a dialog and read your answer". Asserting the wrong one here failed with
+    // "element(s) not found" while the prompt was on screen saying the right
+    // thing — so the sentence is quoted with the file that owns it. All three
+    // are pinned verbatim by `formConsentHonesty.test.ts`, which is what stops
+    // any of them drifting into promising less than the form rows do.
     await expect(
-      page.getByText("show you a dialog and receive what you enter").first(),
+      page.getByText("Interrupt you with a dialog box and read what you answer").first(),
+      "the prompt must name the ui.dialog reach in this surface's own words",
     ).toBeVisible();
 
     // ---- DECLINE ----------------------------------------------------------
