@@ -425,12 +425,18 @@ describe("ScriptNotebook store initial state", () => {
       moveCellUp, moveCellDown, runCell, runAll, rewindToCell, runFromCell,
       appendCellWithSource, appendCellsWithSource,
       ...state } = useNotebookStore.getState();
+    // `runRefusal` (2026-09-03): the message shown when a notebook that arrived
+    // in a distributed application is refused for want of that application's
+    // consent. TRANSIENT, and null by default on purpose — it is cleared when a
+    // notebook is opened, closed, or run again, so it can never outlive the
+    // refusal it describes or follow a notebook into another document.
     expect(state).toMatchInlineSnapshot(`
       {
         "activeNotebook": null,
         "executingCellId": null,
         "isExecuting": false,
         "notebooks": [],
+        "runRefusal": null,
       }
     `);
   });

@@ -6226,6 +6226,11 @@ pub fn run() {
             computed_properties::remove_computed_property,
             // Scripting commands
             scripting::run_script,
+            // The gate a MOUNT can answer: the module question PLUS
+            // "has this workbook approved that application's code?", which is
+            // the only half a COMPOSED realm source (prelude + merged bodies)
+            // can be judged on (app/src/api/scriptHost/host.ts).
+            scripting::check_distributed_mount_consent,
             scripting::get_script_security_level,
             scripting::set_script_security_level,
             scripting::get_mcp_access_level,

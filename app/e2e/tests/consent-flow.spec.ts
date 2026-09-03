@@ -1,42 +1,50 @@
 /**
- * Phase 4.4 CONSENT-FLOW gate — distributed-script package consent, end-to-end
- * through the REAL UI path:
+ * A GRANT MUST COME FROM A SCREEN THE EXTENSION ISSUED.
  *
- *   loadAndMountScripts() emits "scriptable-objects:consent-needed"
- *     -> the ScriptableObjects extension queues + SHOWS ScriptConsentDialog
- *       -> the dialog renders the package, its scripts, and the REQUESTED caps
- *         -> user clicks "Allow Scripts"
- *           -> dialog emits "scriptable-objects:consent-granted"
- *             -> index.ts granted-handler GRANTS the declared caps
- *                (applyConsentedCapabilities) + MOUNTS each distributed script
- *                + recordConsent(...)
+ * This spec used to reach a distributed consent prompt by EMITTING
+ * "scriptable-objects:consent-needed" itself — a hand-built payload shaped like
+ * the one `loadAndMountScripts` builds — because `save_object_script`
+ * deliberately refuses to let the renderer mint `provenance: "distributed"`, so
+ * there is no other way to get a distributed prompt without a real `.calp` pull.
+ * It then clicked the real "Allow Scripts" button and asserted the script
+ * mounted with its declared capability working.
  *
- * The test emits the consent-needed event directly (exactly the payload
- * loadAndMountScripts builds), which avoids needing a real .calp pull, then
- * drives the REAL dialog: it asserts the package name + the requested
- * capability's human description are visible (by TEXT — styled-components/inline
- * styles, so never by class), clicks the real "Allow Scripts" button, and proves
- * the grant took effect:
+ * THAT SHORTCUT IS NOW REFUSED, ON PURPOSE, and this spec pins the refusal.
  *
- *   1. ObjectScriptManager.isScriptMounted(scriptId) === true
- *   2. getScriptGrants(scriptId).caps includes "storage"
- *   3. callExposedMethod(...,"rt",...) returns "consented" — a storage set->get
- *      round-trip through the granted+declared capability (the cap actually
- *      works via the consented grant, not a side-channel).
+ * The defect it closes: the prompt listed the workbook once, and the
+ * `consent-granted` handler received only `{ packageName }` and RE-DERIVED the
+ * artifact set from a second, independent listing. The dialog is non-modal and
+ * `AppEvents.PACKAGE_UPDATED` re-runs the whole load, so an update landing while
+ * the user read the screen made Allow record a set the screen never showed —
+ * the transparency requirement exactly inverted. A grant is now tied to the
+ * screen that produced it: `emitPackageConsentPrompt` is the single emitter,
+ * it stamps a `promptId` and holds the artifact set that screen enumerated, and
+ * a grant that names no standing screen is refused and nothing is recorded.
  *
- * Re-prompt coverage: after granting, the test asserts IN-PAGE (via the same
- * isConsentCurrent the loader uses) that a SOURCE change makes the package no
- * longer "current" — i.e. it would re-prompt. (The exhaustive pragma-tamper /
- * cap-expansion matrix lives in the consentStore unit tests; this is the
- * live-wired smoke of the same guard.)
+ * A fabricated event still RENDERS a dialog — the dialog is driven by the event,
+ * and in-page code can dispatch one — but pressing Allow on it now grants
+ * nothing, mounts nothing, and writes no consent record. That is the property
+ * worth having a live test for, and it is what this file asserts.
+ *
+ * WHERE THE OLD COVERAGE WENT, so nothing is silently dropped:
+ *   * grant -> mount -> the capability actually working, over a REAL publish +
+ *     subscribe + pull: `e2e/journeys/script-form-distributed.spec.ts`
+ *     ("a declined package's form never appears…" and "approving the package
+ *     mounts its form…"), which needs ONE click because the extension issued
+ *     the screen.
+ *   * a SOURCE change re-prompting, and the capability-expansion matrix:
+ *     `extensions/ScriptableObjects/__tests__/packageMacroConsent.test.ts` and
+ *     `packageConsentLoadPath.test.ts`, both of which run the REAL consent store
+ *     over an in-memory filesystem and assert on the byte-level JSON Rust reads.
+ *   * the storage capability round-trip: `e2e/tests/capability-storage.spec.ts`.
  *
  * Mirrors the page-evaluate + dynamic-@api-import style of
  * worker-realm-blit.spec.ts and capability-storage.spec.ts.
  */
 import { test, expect } from "../fixtures";
 
-test.describe("Distributed script consent flow (Phase 4.4)", () => {
-  test("granting consent for a distributed package mounts its script with the declared capability working, and a source change re-prompts", async ({
+test.describe("Distributed script consent flow", () => {
+  test("a consent-granted event that names no standing screen grants nothing and mounts nothing", async ({
     appPage: page,
   }) => {
     // Unique ids so reruns / parallel specs never collide on grants or the
@@ -48,14 +56,12 @@ test.describe("Distributed script consent flow (Phase 4.4)", () => {
     const capDescription = "store data on this device"; // CAP_DESCRIPTION.storage
     const scriptName = "Consent Round-trip Test";
 
-    // The script declares ONLY `storage` and exposes "rt": a storage set->get
-    // round-trip that only succeeds if the consented grant admits cap.storage*.
+    // Declares ONLY `storage`. If the refused grant leaked a capability anyway,
+    // the round-trip below would succeed and this test would fail.
     const source =
       "// @capability storage\n" +
       "function setup(shape){ shape.expose('rt', async function(){ await shape.caps.storage.set('ck','consented'); return await shape.caps.storage.get('ck'); }); }";
 
-    // 1. Register the DISTRIBUTED script (NOT mounted, NOT yet granted), then
-    //    emit the consent-needed event exactly as loadAndMountScripts would.
     const setup = await page.evaluate(
       async (a) => {
         const api = await (window as any).__calcImport(
@@ -74,7 +80,7 @@ test.describe("Distributed script consent flow (Phase 4.4)", () => {
           };
         }
 
-        const scriptDef = {
+        ObjectScriptManager.registerScript({
           id: a.scriptId,
           name: a.scriptName,
           objectType: "shape",
@@ -85,232 +91,123 @@ test.describe("Distributed script consent flow (Phase 4.4)", () => {
           packageName: a.packageName,
           declaredCapabilities: ["storage"],
           description: null,
-        };
+        });
 
-        ObjectScriptManager.registerScript(scriptDef);
+        const mountedBefore = ObjectScriptManager.isScriptMounted(a.scriptId);
+        const grantsBefore = getScriptGrants(a.scriptId).caps as string[];
 
-        // Pre-conditions: fresh scriptId -> not mounted, no grants yet.
-        const mountedBefore = ObjectScriptManager.isScriptMounted(scriptDef.id);
-        const grantsBefore = getScriptGrants(scriptDef.id).caps as string[];
-
-        // Emit the consent prompt — the exact payload loadAndMountScripts emits.
+        // The payload `loadAndMountScripts` builds — but emitted by us, so no
+        // `promptId` and no pending grant behind it.
         emitAppEvent("scriptable-objects:consent-needed", {
           packageName: a.packageName,
           scriptCount: 1,
           scriptNames: [a.scriptName],
-          scriptIds: [scriptDef.id],
+          scriptIds: [a.scriptId],
           requestedCapabilities: [
-            {
-              capability: "storage",
-              description: a.capDescription,
-              origins: [],
-            },
+            { capability: "storage", description: a.capDescription, origins: [] },
           ],
         });
 
-        return {
-          mountedBefore,
-          grantsBefore,
-        };
+        return { mountedBefore, grantsBefore };
       },
-      {
-        scriptId,
-        scriptName,
-        instanceId,
-        source,
-        packageName,
-        capDescription,
-      },
+      { scriptId, scriptName, instanceId, source, packageName, capDescription },
     );
 
     expect(setup.error ?? "").toBe("");
-    // Fresh script: not mounted and no granted caps before consent.
     expect(setup.mountedBefore).toBe(false);
     expect(setup.grantsBefore).not.toContain("storage");
 
     try {
-      // 3. Wait for the REAL ScriptConsentDialog and assert by visible TEXT
-      //    (inline styles / hashed class names — locate by content, per the
-      //    project's e2e dialog-selector gotcha).
-      // Package name appears inside a <strong>"e2e-consent-pkg"</strong>.
-      await expect(page.getByText(`"${packageName}"`, { exact: false }))
-        .toBeVisible({ timeout: 10_000 });
-      // The requested capability is shown by its human description.
-      await expect(page.getByText(capDescription, { exact: false }))
-        .toBeVisible({ timeout: 10_000 });
-      // The script name is listed.
-      await expect(page.getByText(scriptName, { exact: false }))
-        .toBeVisible({ timeout: 10_000 });
+      // The dialog IS rendered — it is driven by the event, and that is not the
+      // boundary. Located by visible TEXT: styled-components hash their class
+      // names, so never locate by class (the project's e2e dialog gotcha).
+      await expect(page.getByText(`"${packageName}"`, { exact: false })).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(page.getByText(capDescription, { exact: false })).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(page.getByText(scriptName, { exact: false })).toBeVisible({
+        timeout: 10_000,
+      });
 
-      // 4. Click the REAL "Allow Scripts" button (locate by its text). This
-      //    fires consent-granted; the index.ts handler grants + mounts.
-      await page.getByRole("button", { name: "Allow Scripts" }).click();
+      // Press the REAL Allow button on the fabricated screen.
+      const allow = page.getByRole("button", { name: "Allow Scripts" });
+      await expect(allow).toBeVisible({ timeout: 10_000 });
+      await allow.click();
+      await expect(allow).toBeHidden({ timeout: 10_000 });
 
-      // 5. + 6. Back in the page: poll until mounted + granted, then prove the
-      //    capability actually works through the consented grant.
+      // The handler refuses, and `repromptPackage` finds nothing to ask about:
+      // it reads the STORE (`loadAllObjectScripts`), and this script was only
+      // ever registered in the session's ObjectScriptManager. So no second
+      // screen appears — and, crucially, nothing was granted.
       const result = await page.evaluate(
         async (a) => {
           const api = await (window as any).__calcImport(
             new URL("/src/api/index.ts", document.baseURI).href,
           );
-          const {
-            ObjectScriptManager,
-            getScriptGrants,
-            callExposedMethod,
-            listExposedMethods,
-          } = api;
+          const { ObjectScriptManager, getScriptGrants, callExposedMethod } = api;
 
-          const waitFor = async (
-            pred: () => boolean | Promise<boolean>,
-            ms: number,
-          ): Promise<boolean> => {
-            const t0 = Date.now();
-            while (Date.now() - t0 < ms) {
-              if (await pred()) return true;
-              await new Promise((r) => setTimeout(r, 50));
-            }
-            return false;
-          };
+          // Give any async grant/mount path a real chance to land before
+          // asserting it did NOT: asserting a negative immediately would pass
+          // against an implementation that simply takes one more microtask.
+          const t0 = Date.now();
+          while (Date.now() - t0 < 3000) {
+            if (ObjectScriptManager.isScriptMounted(a.scriptId)) break;
+            await new Promise((r) => setTimeout(r, 100));
+          }
 
-          // The granted-handler mounts asynchronously — poll until mounted.
-          const mountedOk = await waitFor(
-            () => ObjectScriptManager.isScriptMounted(a.scriptId) === true,
-            10_000,
-          );
-
-          const grants = getScriptGrants(a.scriptId).caps as string[];
-          const hasStorageGrant = grants.includes("storage");
-
-          // setup() ran shape.expose("rt") in the worker realm — poll until the
-          // exposed method is registered before calling it.
-          const exposedOk = await waitFor(() => {
-            try {
-              const list = listExposedMethods() as Array<{
-                objectType: string;
-                instanceId: string | null;
-                methodName: string;
-              }>;
-              return list.some(
-                (m) =>
-                  m.objectType === "shape" &&
-                  m.instanceId === a.instanceId &&
-                  m.methodName === "rt",
-              );
-            } catch {
-              return false;
-            }
-          }, 10_000);
-
-          // The cap actually works through the consented grant: storage set->get.
-          let roundtripped: unknown = null;
-          let roundtripError = "";
+          let rt: unknown = null;
+          let rtError: string | null = null;
           try {
-            roundtripped = await callExposedMethod(
-              "shape",
-              a.instanceId,
-              "rt",
-            );
-          } catch (e: any) {
-            roundtripError = e instanceof Error ? e.message : String(e);
+            rt = await callExposedMethod(a.scriptId, "rt", []);
+          } catch (e) {
+            rtError = e instanceof Error ? e.message : String(e);
           }
 
           return {
-            mountedOk,
-            grants,
-            hasStorageGrant,
-            exposedOk,
-            roundtripped,
-            roundtripError,
+            mounted: ObjectScriptManager.isScriptMounted(a.scriptId) as boolean,
+            grants: getScriptGrants(a.scriptId).caps as string[],
+            rt,
+            rtError,
           };
         },
-        { scriptId, instanceId },
+        { scriptId },
       );
 
-      // 5. The script mounted via the real consent-granted handler.
-      expect(result.mountedOk).toBe(true);
-      // ...and the declared cap was GRANTED through the consent path.
-      expect(result.hasStorageGrant).toBe(true);
-      expect(result.grants).toContain("storage");
-      expect(result.exposedOk).toBe(true);
-      // 6. The capability works end-to-end through the consented grant.
-      expect(result.roundtripError).toBe("");
-      expect(result.roundtripped).toBe("consented");
-
-      // Re-prompt smoke (Task 3): the same guard the loader uses
-      // (isConsentCurrent) must report the package as NO LONGER current once a
-      // script's SOURCE changes — i.e. it would re-prompt. The exhaustive
-      // pragma-tamper / cap-expansion matrix is covered by the consentStore
-      // unit tests; this is the live-wired smoke of that guard.
-      const reprompt = await page.evaluate(
-        async (a) => {
-          // The consentStore module lives under the extension tree; import it
-          // by absolute Vite URL the same way we import @api.
-          const cs = await (window as any).__calcImport(
-            new URL(
-              "/extensions/ScriptableObjects/lib/consentStore.ts",
-              document.baseURI,
-            ).href,
-          );
-          const { isConsentCurrent } = cs;
-          if (!isConsentCurrent) {
-            return { error: "missing consentStore.isConsentCurrent export" };
-          }
-
-          // Build a record that matches the ORIGINAL source + the storage grant.
-          const record = {
-            packageName: a.packageName,
-            scripts: [{ id: a.scriptId, sourceHash: await cs.sha256Hex(a.source) }],
-            grantedCapabilities: [{ capability: "storage" }],
-            grantedAt: new Date().toISOString(),
-          };
-
-          // Same source -> current (no re-prompt).
-          const currentUnchanged = await isConsentCurrent(
-            [record],
-            a.packageName,
-            [{ id: a.scriptId, source: a.source }],
-          );
-
-          // Changed source -> NOT current (would re-prompt).
-          const tampered =
-            a.source + "\n// tampered after consent\nvoid 0;";
-          const currentAfterChange = await isConsentCurrent(
-            [record],
-            a.packageName,
-            [{ id: a.scriptId, source: tampered }],
-          );
-
-          return { currentUnchanged, currentAfterChange };
-        },
-        { scriptId, packageName, source },
-      );
-
-      expect(reprompt.error ?? "").toBe("");
-      // Unchanged source stays consented; a source change re-prompts.
-      expect(reprompt.currentUnchanged).toBe(true);
-      expect(reprompt.currentAfterChange).toBe(false);
+      expect(
+        result.mounted,
+        "a grant tied to no screen the extension issued must not mount the script",
+      ).toBe(false);
+      expect(
+        result.grants,
+        "...and must not grant the capability the fabricated screen asked for",
+      ).not.toContain("storage");
+      // The capability genuinely does not work: nothing mounted, so there is no
+      // realm to answer. (A leaked grant would have returned "consented".)
+      expect(result.rt).not.toBe("consented");
     } finally {
-      // Cleanup: unmount + remove the script and close any lingering dialog.
+      // Never leave a registered script or an open modal behind for the next
+      // spec — a stranded modal holds the app-wide slot and the wedge guard
+      // would blame whichever spec runs next.
       await page.evaluate(
         async (a) => {
+          const api = await (window as any).__calcImport(
+            new URL("/src/api/index.ts", document.baseURI).href,
+          );
           try {
-            const api = await (window as any).__calcImport(
-              new URL("/src/api/index.ts", document.baseURI).href,
-            );
-            const { ObjectScriptManager } = api;
-            ObjectScriptManager.unmountScript(a.scriptId);
-            ObjectScriptManager.removeScript(a.scriptId);
+            await api.ObjectScriptManager.unmountScript(a.scriptId);
           } catch {
-            /* best-effort cleanup */
+            /* not mounted, which is the expected state */
+          }
+          try {
+            api.ObjectScriptManager.removeScript(a.scriptId);
+          } catch {
+            /* best effort */
           }
         },
         { scriptId },
       );
-      // Dismiss any dialog that may still be open (e.g. on assertion failure).
-      for (let i = 0; i < 3; i++) {
-        await page.keyboard.press("Escape");
-        await page.waitForTimeout(50);
-      }
     }
   });
 });

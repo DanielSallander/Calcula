@@ -7,8 +7,17 @@
 // SECURITY: script actions run through runWorkbookScript (global script
 //          security gate); failures surface as toasts — a click that silently
 //          does nothing is a transparency failure.
+//
+//          The bound module's stored source is what runs, UNCHANGED, so the
+//          Rust consent gate (require_distributed_module_consent) sees exactly
+//          the record it is being asked to approve. `functionName` appends a
+//          call, which is a composition — allowed for the user's own module,
+//          refused for one that arrived in an application. The rule and the two
+//          defects behind it live in extensions/_shared/lib/buttonScriptRun.ts;
+//          this file must not restate it.
 
 import type { CellTypeDefinition, CellTypeRenderContext } from "@api/cellTypes";
+import { planStoredModuleRun } from "../../_shared/lib/buttonScriptRun";
 
 export const BUTTON_TYPE_ID = "calcula.button";
 
@@ -110,14 +119,24 @@ async function runButtonAction(action: ButtonAction): Promise<void> {
         "../../../src/api/workbookScripts"
       );
       const script = await getWorkbookScript(action.scriptId);
-      if (!script || !script.source) {
+      if (!script) {
         showToast("Button script not found in this workbook", { variant: "error" });
         return;
       }
-      const source = action.functionName
-        ? `${script.source}\n${action.functionName}();`
-        : script.source;
-      const result = await runWorkbookScript(source, `button_${script.name || "script"}.js`);
+      const plan = planStoredModuleRun(
+        {
+          id: script.id,
+          name: script.name,
+          source: script.source,
+          sourcePackage: script.sourcePackage ?? null,
+        },
+        action.functionName,
+      );
+      if (plan.kind === "refuse") {
+        showToast(plan.message, { variant: "error" });
+        return;
+      }
+      const result = await runWorkbookScript(plan.source, plan.filename);
       if (result.type === "success" && result.cellsModified > 0 && result.screenUpdating !== false) {
         window.dispatchEvent(new CustomEvent("grid:refresh"));
       } else if (result.type === "error") {

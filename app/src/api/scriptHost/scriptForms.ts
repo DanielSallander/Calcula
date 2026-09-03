@@ -26,6 +26,9 @@
 // named in it. Two bounds are this module's own: a per-script SHOW bucket, so
 // a form re-shown from its own onClose cannot loop the user, and a per-session
 // UPDATE bucket, so a script cannot repaint the dialog thirty times a frame.
+// Every one of them runs BEFORE the host reads a single bound cell: host.ts
+// hands `showScriptForm` a `resolve` thunk rather than finished seeds, and a
+// refused show never calls it (see the note on `showScriptForm`).
 //
 // DEADLINES. An open form is bounded by an IDLE deadline re-armed by every
 // user interaction and an ABSOLUTE cap; both close it as dismissed (`null`),
@@ -55,6 +58,7 @@ import {
   SCRIPT_FORM_PATCH_EVENT,
   SCRIPT_FORM_REQUEST_EVENT,
   type FormCloseReason,
+  type FormOrigin,
   type FormPatch,
   type FormSeed,
   type FormSpec,
@@ -165,6 +169,31 @@ const sessions = new Map<string, FormSession>();
 const sessionByScript = new Map<string, string>();
 /** scriptId -> timestamps of recent show attempts (the re-show bound). */
 const showAttempts = new Map<string, number[]>();
+/**
+ * A show whose modal slot is claimed while its bound reads are still in flight.
+ *
+ * IT RECORDS BOTH SCRIPTS, NOT ONLY THE OWNER. An open SESSION is closed on the
+ * caller's unmount as well as the owner's (`callerScriptId`), because for
+ * `caps.forms.show` the two are different scripts and the answer is awaited by
+ * the CALLER. A pending show has to answer to both for the same reason: an
+ * entry that named only the owner survived the caller's unmount, painted a form
+ * for a script that no longer existed, and sent its answer nowhere.
+ */
+interface PendingShow {
+  showId: string;
+  /** Set when ANOTHER script asked for this show (caps.forms.show). */
+  callerScriptId?: string;
+}
+
+/**
+ * scriptId (the form's OWNER) -> the pending show whose modal slot is claimed
+ * while its bound reads are still in flight. Between `claimModalSlot` and the
+ * session existing there is nothing in `sessions` for an unmount or a reset to
+ * close, so without this the slot would be held for the rest of the session and
+ * every later dialog refused — the exact wedge `endSession`'s idempotence exists
+ * to prevent.
+ */
+const pendingShows = new Map<string, PendingShow>();
 
 let showSeq = 0;
 let inputListenerInstalled = false;
@@ -302,6 +331,16 @@ function takeUpdateToken(s: FormSession): boolean {
   return true;
 }
 
+/** What a `resolve` thunk hands back once the guards have let the show through. */
+export interface ResolvedFormShowData {
+  /** Seeds the host read from bound cells / control values (host.ts). */
+  seeds?: Record<string, FormSeed>;
+  /** Restricted tier: the sheet the bindings are pinned to, for the band. */
+  pinnedSheetName?: string;
+  /** Bound widgets whose effective writeOn is "change". */
+  writeOnChange?: Iterable<string>;
+}
+
 /**
  * Open a script's form. Rejects (BrokerError) only when a guard refuses to SHOW
  * it — no layout, the show bucket, the shared modal slot — and otherwise
@@ -309,11 +348,36 @@ function takeUpdateToken(s: FormSession): boolean {
  * (three consecutive dismissals) gets `{ showId, closed: true }` at once and
  * its awaited answer is delivered as null, the same definite "no" the dialog
  * registry gives it.
+ *
+ * THE GUARDS COME FIRST, INCLUDING BEFORE THE SHEET IS READ. The bound cells a
+ * form starts from are not read by this module — host.ts does that, as audited
+ * broker calls under the script's own handle — but WHEN they are read is this
+ * module's business, because only this module knows whether the form is going
+ * to open at all. So the reads arrive as a `resolve` thunk, awaited AFTER every
+ * guard has passed and the modal slot is CLAIMED, and never called at all when
+ * a guard refuses. Resolving first meant a muted script calling `show()` in a
+ * loop still performed one audited read per bound cell (plus every `{ range }`
+ * source and an image resolve) for a dialog nobody would ever see, and left an
+ * audit trail saying a form had read the sheet when no form was ever painted.
+ *
+ * Awaiting it AFTER the claim also means the slot cannot be taken by somebody
+ * else while the reads are in flight; a thunk that THROWS gives the slot back
+ * and rejects, with no session ever entered in the maps and no close event for
+ * a session that never existed. An unmount — of the OWNER or, for a
+ * cross-script show, of the CALLER awaiting the answer — or a workbook reset
+ * DURING the reads gives it back too (`pendingShows` / `dropPendingShow`), and
+ * the show then refuses rather than painting for a script that is no longer
+ * there.
+ *
+ * Callers that already hold their seeds pass `seeds` / `pinnedSheetName` /
+ * `writeOnChange` directly; both forms are supported, and a `resolve` result
+ * overrides the direct fields for whichever of the three it supplies.
  */
-export function showScriptForm(args: {
+export async function showScriptForm(args: {
   scriptId: string;
   scriptName: string;
-  scriptOrigin: string;
+  /** Local, or the package it arrived in. Structural — see `FormOrigin`. */
+  origin: FormOrigin;
   initial?: Record<string, unknown>;
   /** Seeds the host read from bound cells / control values (host.ts). */
   seeds?: Record<string, FormSeed>;
@@ -321,6 +385,11 @@ export function showScriptForm(args: {
   pinnedSheetName?: string;
   /** Bound widgets whose effective writeOn is "change". */
   writeOnChange?: Iterable<string>;
+  /**
+   * The bound reads, deferred until the guards have passed. Called at most
+   * once, after the modal slot is claimed and before anything is painted.
+   */
+  resolve?: () => Promise<ResolvedFormShowData>;
   callerName?: string;
   callerScriptId?: string;
   preview?: boolean;
@@ -328,16 +397,12 @@ export function showScriptForm(args: {
 }): Promise<{ showId: string; closed?: true }> {
   const spec = definitions.get(args.scriptId);
   if (!spec) {
-    return Promise.reject(
-      new BrokerError("HostError", "form.show: describe the layout first with form.define(...)"),
-    );
+    throw new BrokerError("HostError", "form.show: describe the layout first with form.define(...)");
   }
   if (!bucketAllowsShow(args.scriptId)) {
-    return Promise.reject(
-      new BrokerError(
-        "HostError",
-        `this script has opened ${FORM_SHOWS_PER_MINUTE} forms in the last minute; it may not open another yet`,
-      ),
+    throw new BrokerError(
+      "HostError",
+      `this script has opened ${FORM_SHOWS_PER_MINUTE} forms in the last minute; it may not open another yet`,
     );
   }
   const showId = `form-${++showSeq}`;
@@ -345,14 +410,45 @@ export function showScriptForm(args: {
     // Definite "no", delivered like every other dismissal — but after the
     // caller has the showId to match it against.
     queueMicrotask(() => args.deps.closed(showId, null));
-    return Promise.resolve({ showId, closed: true });
+    return { showId, closed: true };
   }
   // Guards 1 + 2 (shared with dialogs). Throws a BrokerError the caller
   // surfaces to the script as a rejected show().
-  try {
-    claimModalSlot({ scriptId: args.scriptId, scriptName: args.scriptName, kind: "scriptForm", slotId: showId });
-  } catch (e) {
-    return Promise.reject(e);
+  claimModalSlot({ scriptId: args.scriptId, scriptName: args.scriptName, kind: "scriptForm", slotId: showId });
+
+  // Everything above is synchronous, so a caller with its seeds already in hand
+  // still reaches the renderer in the same turn it called show().
+  let argSeeds = args.seeds;
+  let pinnedSheetName = args.pinnedSheetName;
+  let writeOnChange = args.writeOnChange;
+  if (args.resolve) {
+    pendingShows.set(args.scriptId, {
+      showId,
+      ...(args.callerScriptId ? { callerScriptId: args.callerScriptId } : {}),
+    });
+    let resolved: ResolvedFormShowData;
+    try {
+      resolved = await args.resolve();
+    } catch (e) {
+      // Nothing has been registered yet: give the slot back and let the show
+      // reject with the reason the reads failed. No session, no close event.
+      if (pendingShows.get(args.scriptId)?.showId === showId) {
+        pendingShows.delete(args.scriptId);
+        releaseModalSlot(showId);
+      }
+      throw e;
+    }
+    // EITHER script can have been unmounted, or the workbook reset, while the
+    // owner's cells were being read. That already gave the slot back, and there
+    // is nobody left to receive an answer — for a cross-script show the awaiting
+    // side is the CALLER — so the show must not go on to paint.
+    if (pendingShows.get(args.scriptId)?.showId !== showId) {
+      throw new BrokerError("HostError", "the script was unloaded before its form could open");
+    }
+    pendingShows.delete(args.scriptId);
+    if (resolved.seeds !== undefined) argSeeds = resolved.seeds;
+    if (resolved.pinnedSheetName !== undefined) pinnedSheetName = resolved.pinnedSheetName;
+    if (resolved.writeOnChange !== undefined) writeOnChange = resolved.writeOnChange;
   }
 
   const widgetTypes = indexWidgetTypes(spec);
@@ -362,9 +458,20 @@ export function showScriptForm(args: {
   // Bound reads first, then `initial` on top: an explicit initial value wins
   // over the cell for this show only (and drops the cell's display text, which
   // no longer describes what the widget holds).
-  for (const [name, seed] of Object.entries(args.seeds ?? {})) {
-    if (!FORM_INPUT_TYPE_SET.has(widgetTypes.get(name) ?? "")) continue;
+  for (const [name, seed] of Object.entries(argSeeds ?? {})) {
+    const widgetType = widgetTypes.get(name);
+    // Not a widget in THIS layout: a stale name from a previous `define`, or a
+    // key the caller invented. It has nowhere to land.
+    if (widgetType === undefined) continue;
+    // A SEED IS NOT ONLY A VALUE. Two widget types take CONTENT rather than an
+    // answer — a `table` reads `seed.rows` and an `image` reads the host's
+    // resolved `seed.imageUrl` (FormWidgetTree.tsx) — and neither is an input
+    // type. Filtering the whole seed on FORM_INPUT_TYPE_SET therefore threw
+    // away exactly the content the host had just gone and read: a form with
+    // `rows: { range: "D2:E9" }` resolved that range, dropped the answer here,
+    // and painted an EMPTY table. Only the VALUE is input-only.
     seeds[name] = seed;
+    if (!FORM_INPUT_TYPE_SET.has(widgetType)) continue;
     values[name] = seed.value;
   }
   if (args.initial) {
@@ -388,7 +495,7 @@ export function showScriptForm(args: {
     values,
     seeds,
     touched: new Set<string>(),
-    writeOnChange: new Set(args.writeOnChange ?? []),
+    writeOnChange: new Set(writeOnChange ?? []),
     deps: args.deps,
     shown: false,
     closed: false,
@@ -411,11 +518,11 @@ export function showScriptForm(args: {
     showId,
     scriptId: args.scriptId,
     scriptName: args.scriptName,
-    scriptOrigin: args.scriptOrigin,
+    origin: args.origin,
     ...(args.callerName ? { callerName: args.callerName } : {}),
     spec,
     seeds,
-    ...(args.pinnedSheetName ? { pinnedSheetName: args.pinnedSheetName } : {}),
+    ...(pinnedSheetName ? { pinnedSheetName } : {}),
     ...(args.preview ? { preview: true } : {}),
   };
 
@@ -530,6 +637,7 @@ export function getActiveScriptForm(): { showId: string; scriptId: string; scrip
  * show bucket is reset so a remount starts clean.
  */
 export function revokeScriptForms(scriptId: string): void {
+  dropPendingShow(scriptId);
   const showId = sessionByScript.get(scriptId);
   const s = showId ? sessions.get(showId) : undefined;
   if (s) endSession(s, "unmount", null);
@@ -545,11 +653,29 @@ export function revokeScriptForms(scriptId: string): void {
 
 /** Forget everything (workbook reset / tests). Open forms close as "unmount". */
 export function resetScriptForms(): void {
+  for (const scriptId of [...pendingShows.keys()]) dropPendingShow(scriptId);
   for (const s of [...sessions.values()]) endSession(s, "unmount", null);
   sessions.clear();
   sessionByScript.clear();
   definitions.clear();
   showAttempts.clear();
+}
+
+/**
+ * Give back a slot claimed for a show whose bound reads are still running. The
+ * show itself notices its claim is gone and refuses rather than painting for a
+ * script that is no longer there.
+ *
+ * MATCHES THE OWNER **OR** THE CALLER. `caps.forms.show` opens one script's
+ * form on another script's behalf, and the caller is the one awaiting the
+ * answer, so its unmount must drop the claim exactly as the owner's does.
+ */
+function dropPendingShow(scriptId: string): void {
+  for (const [ownerId, pending] of [...pendingShows.entries()]) {
+    if (ownerId !== scriptId && pending.callerScriptId !== scriptId) continue;
+    pendingShows.delete(ownerId);
+    releaseModalSlot(pending.showId);
+  }
 }
 
 // ============================================================================

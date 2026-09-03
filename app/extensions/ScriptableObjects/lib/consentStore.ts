@@ -18,6 +18,7 @@ export {
   loadConsents,
   recordConsent,
   isConsentCurrent,
+  areScriptsConsented,
   getChangedScripts,
   diffScriptSets,
   declaredCapabilitySet,

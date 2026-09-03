@@ -19,7 +19,45 @@
 import type { PreviewGrid } from "./grid";
 import type { DryRunReport } from "../scriptAuthoring";
 import type { FormSpec } from "../scriptFormSpec";
+import type { PreviewFormSourceSeed } from "./formSources";
 import { unexercisedHookNote } from "./unexercisedHooks";
+
+/**
+ * What this run concluded about a FORM script's layout — the HOST's own words,
+ * as a value rather than as a sentence.
+ *
+ * WHY A FIELD AND NOT A LINE OF `output`. The "why nothing painted" note the
+ * editor and the package inspector show used to be recovered by SCANNING
+ * `output` for the first `[preview]` line mentioning a layout. `output` begins
+ * with the SCRIPT's own console lines, so a draft that printed
+ * `[preview] the layout is fine, click Run` chose the sentence the host then
+ * displayed about it. A script must never author host chrome, so the verdict
+ * leaves as a value and the sentence is picked from the table below.
+ */
+export type PreviewFormLayoutVerdict = "captured" | "missing";
+
+/** The one wording for each verdict, written HERE and nowhere else. */
+export const PREVIEW_FORM_LAYOUT_NOTES: Record<PreviewFormLayoutVerdict, string> = {
+  captured:
+    "the form's layout was captured from form.define; show() is not exercised in a preview",
+  missing: "no layout was captured: the script never called form.define during setup",
+};
+
+/**
+ * The value the run's own copy of the workbook holds for one read-back cell.
+ *
+ * `readBack` carries the INPUT STRING (a formula reads back as "=SUM(B2:B9)");
+ * this carries what that formula EVALUATED TO in the copy, which the rung
+ * recomputes at every settle point. Separate rather than a fourth field on
+ * `readBack`, because `readBack`'s element type mirrors the Rust `CellReadback`
+ * struct field-for-field (`dryRunReportDrift.test.ts`) and the interpreter
+ * realm computes no displays.
+ */
+export interface PreviewCellDisplay {
+  row: number;
+  col: number;
+  display: string;
+}
 
 /**
  * The Worker-realm preview's report: the wire `DryRunReport` plus what ONLY
@@ -38,6 +76,41 @@ export interface WorkerPreviewReport extends DryRunReport {
    * object type and when the script never declared a layout during setup.
    */
   formLayout?: FormSpec;
+  /**
+   * The RANGE-FED content of that layout, resolved against the same grid copy
+   * the run used: a choice list from `options: { range }`, a table's rows, and
+   * the images a preview declines to resolve (each carrying its reason).
+   *
+   * On the report rather than left to the caller because the copy does not
+   * leave the rung: a caller that re-read those ranges would be reading the
+   * LIVE workbook, seeding widgets with data the script never saw. Absent for
+   * every non-form run and for a form that declared no such source.
+   */
+  formSources?: PreviewFormSourceSeed[];
+  /**
+   * Whether this FORM run captured a layout at all. Absent for every non-form
+   * run — "this run did not look" and "it looked and found none" must stay
+   * distinguishable, exactly as for `formSources`.
+   */
+  formLayoutVerdict?: PreviewFormLayoutVerdict;
+  /**
+   * The computed value of each read-back cell that HAS one in the copy.
+   *
+   * Only cells the copy carries a value for appear: a cell the script itself
+   * wrote, and every cell of a truncated copy (where formulas are deliberately
+   * not re-evaluated), have none, and a missing entry is the honest answer.
+   */
+  readBackDisplays?: PreviewCellDisplay[];
+  /**
+   * The name of the ONE sheet the run's copy holds.
+   *
+   * On the report because a caller deciding whether a binding is on that sheet
+   * must not answer the question from the LIVE workbook — the active sheet can
+   * change between the run and the seeding, and the copy is what the script
+   * saw. Absent when the snapshot named no sheet at that index; a caller must
+   * then treat every qualified reference as off-sheet rather than guess.
+   */
+  activeSheetName?: string;
 }
 
 /** How many changed cells a report carries. Mirrors MAX_REPORTED_CHANGES (Rust). */
@@ -98,12 +171,35 @@ export function buildReport(input: {
   note?: string;
   /** A form script's captured `form.define` layout (see backend.ts). */
   formLayout?: FormSpec;
+  /** That layout's range-fed content, resolved against the run's own grid copy. */
+  formSources?: PreviewFormSourceSeed[];
+  /** Whether this FORM run captured a layout. Omitted for a non-form run. */
+  formLayoutVerdict?: PreviewFormLayoutVerdict;
+  /** Computed values for the read-back cells that have one in the copy. */
+  readBackDisplays?: PreviewCellDisplay[];
+  /** The name of the one sheet the run's copy holds. */
+  activeSheetName?: string;
 }): WorkerPreviewReport {
   const changes = [...input.changes].sort((a, b) => a.row - b.row || a.col - b.col);
   const totalChanges = changes.length;
   const truncated = totalChanges > MAX_REPORTED_CHANGES;
   return {
     ...(input.formLayout !== undefined ? { formLayout: input.formLayout } : {}),
+    // Omitted entirely when the layout declared no range-fed source, so
+    // "there were none" and "this run did not look" stay distinguishable.
+    ...(input.formSources !== undefined && input.formSources.length > 0
+      ? { formSources: input.formSources }
+      : {}),
+    ...(input.formLayoutVerdict !== undefined
+      ? { formLayoutVerdict: input.formLayoutVerdict }
+      : {}),
+    // Omitted when the run computed no value for any read-back cell, so a
+    // caller can tell "this cell has no computed value" from "this rung does
+    // not report them" without inspecting an empty array.
+    ...(input.readBackDisplays !== undefined && input.readBackDisplays.length > 0
+      ? { readBackDisplays: input.readBackDisplays }
+      : {}),
+    ...(input.activeSheetName !== undefined ? { activeSheetName: input.activeSheetName } : {}),
     ok: input.ok,
     error: input.error ?? null,
     durationMs: input.durationMs,

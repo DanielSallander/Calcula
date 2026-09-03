@@ -16,11 +16,14 @@ export type ModuleScriptScope =
   | { type: "workbook" }
   | { type: "sheet"; name: string };
 
-/** Lightweight module-script listing row. */
+/** Lightweight module-script listing row. `sourcePackage` is the .calp
+ *  application it arrived in (absent for local), carried so a listing never has
+ *  to guess whose code a row is. */
 export interface ModuleScriptSummary {
   id: string;
   name: string;
   scope: ModuleScriptScope;
+  sourcePackage?: string;
 }
 
 /** A module script with its full source. `sourcePackage` is the .calp it was

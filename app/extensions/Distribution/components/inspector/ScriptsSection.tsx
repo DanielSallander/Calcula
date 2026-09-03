@@ -2,19 +2,33 @@
 // PURPOSE: Full-source transparency for every line of code the application
 //          carries: object scripts (with the SIGNED capability ceiling),
 //          module scripts, notebooks, and the Custom Functions library.
+//          A FORM script additionally offers "Preview layout": the same code,
+//          painted, because a reviewer deciding whether to trust a form is
+//          deciding about a DIALOG and cannot see one in a wall of emitted
+//          JavaScript.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
 import {
   inspectorScripts,
+  type InspectorObjectScriptDetail,
   type InspectorOverview,
   type InspectorScripts,
 } from "@api/distribution";
 import type { CapabilityId } from "@api";
+import {
+  inspectorPreviewKey,
+  inspectorPreviewStateFor,
+  requestInspectorFormPreview,
+  subscribeToInspectorPreviews,
+} from "../../lib/inspectorFormPreview";
 import type { InspectorContext } from "./ApplicationInspectorApp";
 import {
   Badge,
+  ERR_RED,
+  MUTED,
   StatusLine,
   WARN_AMBER,
+  buttonStyle,
   cardHeaderStyle,
   cardStyle,
   mutedStyle,
@@ -109,6 +123,103 @@ function SourceBlock({ source }: { source: string }): React.ReactElement {
   );
 }
 
+// ============================================================================
+// "Preview layout" — for a FORM script only
+// ============================================================================
+
+/**
+ * WHAT THE REVIEWER IS TOLD BEFORE THEY CLICK.
+ *
+ * Three earlier sentences were replaced here, each because it was false or
+ * incomplete in a way that mattered:
+ *
+ *  1. "Nothing is run" was not true. Drawing the layout means EXECUTING this
+ *     application's `setup` — unconsented code — in the preview rung. What is
+ *     true is the surrounding sentence: it runs with an empty capability
+ *     ceiling, nothing is mounted, the backend is a throwaway copy of the
+ *     active sheet, and no grant, write or audit row survives it. A reviewer
+ *     told "nothing is run" would have been consenting to something they were
+ *     told was not happening.
+ *  2. It never said WHERE the dialog appears. It appears in the main Calcula
+ *     window, behind this one — an unexplained form surfacing behind the window
+ *     you are reading is worse than no feature at all.
+ *  3. It let the "form" label carry the safety argument. It does not; see the
+ *     gate's own comment at the call site.
+ */
+const PREVIEW_IDLE_HINT =
+  "Draws the dialog this script would open — in the main Calcula window, behind this one. " +
+  "To draw it, this application's setup code IS RUN, in the sandboxed preview realm: no " +
+  "capabilities, nothing mounted, and a throwaway copy of your active sheet. Nothing is " +
+  "granted, written or saved.";
+
+/**
+ * Ask the MAIN window to paint a distributed form's layout, and report inline.
+ *
+ * THE CALL DOES NOT HAPPEN HERE, AND CANNOT. This component runs in the
+ * standalone Application Inspector window, which mounts no Shell and therefore
+ * activates no extensions — so nothing in it listens for the form-request app
+ * event that `previewFormLayout` ends in. Calling it from this window painted
+ * nothing and then failed on the renderer's ack timeout. The request crosses to
+ * the main window instead (lib/inspectorFormPreview.ts), which runs the preview,
+ * paints it, and sends the outcome back.
+ *
+ * Every refusal lands INLINE beside the action — a held modal slot, a script
+ * that never called `form.define`, a realm that threw, a main window that never
+ * answered. Never a dialog (this window is a reader, and a modal about a modal
+ * is absurd), and never silence.
+ */
+function FormPreviewAction({
+  script,
+  packageName,
+}: {
+  script: InspectorObjectScriptDetail;
+  packageName: string;
+}): React.ReactElement {
+  const key = inspectorPreviewKey(packageName, script.id);
+  // The status lives in the module store, not in this component: the run
+  // outlives a section switch (two passes through a Worker realm in another
+  // window) and the inspector unmounts sections freely.
+  const state = useSyncExternalStore(subscribeToInspectorPreviews, () =>
+    inspectorPreviewStateFor(key),
+  );
+  const busy = state.phase === "running";
+
+  return (
+    <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+      <button
+        type="button"
+        style={busy ? { ...buttonStyle, cursor: "default", opacity: 0.6 } : buttonStyle}
+        disabled={busy}
+        onClick={() => {
+          if (busy) return;
+          requestInspectorFormPreview({
+            packageName,
+            scriptId: script.id,
+            scriptName: script.name,
+            source: script.source,
+          });
+        }}
+      >
+        {busy ? "Previewing…" : "Preview layout"}
+      </button>
+      {state.phase !== "idle" && (
+        <span
+          style={{
+            fontSize: 11,
+            color: state.phase === "failed" ? ERR_RED : MUTED,
+            flex: "1 1 240px",
+          }}
+        >
+          {state.message}
+        </span>
+      )}
+      {state.phase === "idle" && (
+        <span style={{ ...mutedStyle, fontSize: 11, flex: "1 1 240px" }}>{PREVIEW_IDLE_HINT}</span>
+      )}
+    </div>
+  );
+}
+
 export function ScriptsSection({
   ctx,
   overview,
@@ -154,6 +265,8 @@ export function ScriptsSection({
               <div style={{ ...mutedStyle, fontSize: 11, marginBottom: 8 }}>
                 Pulled scripts always run Restricted and consent-gated; their capability
                 ceiling comes from the signed manifest shown here, never from the source.
+                The &ldquo;on &lt;type&gt;&rdquo; label below is the publisher&apos;s own
+                declaration about a script, not a boundary Calcula enforces on it.
               </div>
               {data.objectScripts.map((s) => (
                 <div key={s.id} style={{ marginBottom: 12 }}>
@@ -171,6 +284,32 @@ export function ScriptsSection({
                     <CapabilityBadges capabilities={s.capabilities} />
                   </div>
                   <SourceBlock source={s.source} />
+                  {/*
+                    FORMS ONLY — AND THIS IS A RELEVANCE FILTER, NOT A SECURITY
+                    BOUNDARY. `objectType` is a field the PUBLISHER wrote into
+                    their own manifest; a package that wants its setup code run
+                    in the preview rung need only spell "form" here. So nothing
+                    downstream may rely on this test having been true.
+
+                    What actually bounds the run is the rung itself
+                    (`previewFormLayout` -> `previewObjectScript` ->
+                    `buildPreviewHandle`): an EMPTY declared-capability ceiling
+                    and empty grants, so every capability-bearing call is
+                    refused before the grant check is even reached; no mount, no
+                    registration, no persisted grants inherited from an earlier
+                    "Always"; a throwaway copy of the active sheet as the entire
+                    backend; and no audit rows, because a preview is not
+                    something the workbook had done to it. Those hold for ANY
+                    source, whatever it calls itself.
+
+                    The gate is here because a preview is only WORTH offering
+                    for the one object type whose whole product is a picture the
+                    reviewer cannot otherwise see. Every other type keeps
+                    exactly the source block it has always had.
+                  */}
+                  {s.objectType === "form" && (
+                    <FormPreviewAction script={s} packageName={ctx.packageName} />
+                  )}
                 </div>
               ))}
             </div>

@@ -96,15 +96,27 @@ describe("the debug channel is not a script-reachable surface", () => {
     expect(host).not.toMatch(/export\s+async\s+function\s+startDebugSessionOn\b/);
   });
 
-  it("the MODULE session path still gates on Script Security", () => {
+  it("the MODULE session path still passes BOTH mount gates", () => {
     const host = read("host.ts");
     const fn = host.slice(host.indexOf("export async function hostStartModuleScriptDebugSession"));
     const body = fn.slice(0, fn.indexOf("\n}\n"));
-    // It builds the mount itself now (one inert mount instead of a plain mount
-    // followed by an instrumented remount), so the gate `hostMountScript` used
-    // to apply has to be applied here, explicitly.
-    expect(body).toContain("assertMountAllowed(definition.name)");
+    // It builds the mount itself (one inert mount instead of a plain mount
+    // followed by an instrumented remount), so the gates `hostMountScript`
+    // applies have to be applied here. It no longer calls Script Security
+    // DIRECTLY: it mints a `MountAdmission`, and minting one is what runs both
+    // gates — Script Security AND, for a module that arrived in a distributed
+    // application, that application's consent record. A bare
+    // `assertMountAllowed` here is what this path had before, and it is exactly
+    // half the requirement: it mounted a publisher's macro in a real worker
+    // realm without ever asking whether the user had approved the application.
+    expect(body).toContain("admitMount(definition)");
     expect(body).toContain("startDebugSessionOn(definition");
+
+    // ...and the admission really is both gates, not a rename of one.
+    const admit = host.slice(host.indexOf("async function admitMount("));
+    const admitBody = admit.slice(0, admit.indexOf("\n}\n"));
+    expect(admitBody).toContain("requireDistributedMountConsent(definition)");
+    expect(admitBody).toContain("assertMountAllowed(definition.name)");
   });
 });
 
@@ -116,13 +128,15 @@ describe("the debug channel is not a script-reachable surface", () => {
 describe("inertness is decided by the host, for the module path only", () => {
   it("exactly one call site asks for an inert session, and it is the module one", () => {
     const host = read("host.ts");
-    const inertCalls = [...host.matchAll(/startDebugSessionOn\([^)]*?,\s*false\)/gs)];
+    // `autoInvokeSetup` is the fourth argument; the fifth is the mount
+    // admission, which every call must now present.
+    const inertCalls = [...host.matchAll(/startDebugSessionOn\([^)]*?,\s*false\s*,[^)]*\)/gs)];
     expect(inertCalls.length).toBe(1);
     const moduleFn = host.slice(
       host.indexOf("export async function hostStartModuleScriptDebugSession"),
     );
     expect(moduleFn.slice(0, moduleFn.indexOf("\n}\n"))).toMatch(
-      /startDebugSessionOn\(definition,[\s\S]*?false\)/,
+      /startDebugSessionOn\(definition,[\s\S]*?false,\s*admission\)/,
     );
   });
 

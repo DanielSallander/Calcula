@@ -73,9 +73,19 @@ export async function mountConsentedLibrary(d: LibraryGateDescriptor): Promise<v
  * caps, so an upstream change or capability expansion re-prompts.
  */
 export async function grantLibraryConsent(d: LibraryGateDescriptor): Promise<void> {
-  await mountConsentedLibrary(d);
   const granted: CapabilityGrant[] = d.capabilities.map((c) => ({ capability: c }));
+  // PERSIST BEFORE MOUNTING. The mount boundary asks the backend whether this
+  // workbook has approved the application, and it reads the consent STORE — so a
+  // grant that mounts first is asking about an approval it has not written yet.
+  // The mount is refused, this function rejects, and line 78 never runs: nothing
+  // is persisted, so the same prompt returns on the next open, forever. Recording
+  // first is also what `grantCustomFunctionConsent` and the library installer do.
+  //
+  // A record that outlives a failed mount is the right way round: the user DID
+  // approve this code, the approval is what the next open needs to mount it, and
+  // the failure is surfaced to them by the caller rather than silently retried.
   await recordConsent(d.consentKey, consentView(d), granted);
+  await mountConsentedLibrary(d);
 }
 
 /** Capability descriptors for the consent dialog (id + human description). */

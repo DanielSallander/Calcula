@@ -89,6 +89,32 @@ describe("grantLibraryConsent", () => {
     );
   });
 
+  it("PERSISTS BEFORE IT MOUNTS — the mount gate reads the record it is about to write", async () => {
+    // The mount boundary asks the backend whether this workbook approved the
+    // application, and that question is answered from the consent STORE. Mounting
+    // first asks about an approval that does not exist yet: the mount is refused,
+    // grantLibraryConsent rejects, and the recordConsent line is never reached —
+    // so nothing is persisted and the same prompt returns on every later open.
+    const order: string[] = [];
+    recordConsent.mockImplementation(async () => { order.push("record"); });
+    const d = descriptor();
+    d.install.mockImplementation(async () => { order.push("install"); });
+
+    await grantLibraryConsent(d);
+
+    expect(order).toEqual(["record", "install"]);
+  });
+
+  it("keeps the approval when the mount itself fails, so a later open can mount it", async () => {
+    const d = descriptor();
+    d.install.mockRejectedValue(new Error("realm refused"));
+
+    await expect(grantLibraryConsent(d)).rejects.toThrow("realm refused");
+
+    // The user DID approve this code. Losing the record would re-prompt forever.
+    expect(recordConsent).toHaveBeenCalledTimes(1);
+  });
+
   it("records an empty capability grant for a capability-free (mark) library", async () => {
     const d = descriptor({ scriptId: "__calcula_chart_marks__", consentKey: "chart-marks:Acme", capabilities: [], syntheticSource: "{\"marks\":[]}" });
     await grantLibraryConsent(d);

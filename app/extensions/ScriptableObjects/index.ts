@@ -24,6 +24,8 @@ import {
   applyConsentedCapabilities,
   syncSchedulerPump,
   stopSchedulerPump,
+  scriptOriginForMount,
+  originPackageName,
   IconScript,
   IconTemplate,
   IconMarketplace,
@@ -36,8 +38,15 @@ import type {
   ScriptDialogRequestPayload,
 } from "@api";
 import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateManager";
-import { loadConsents, recordConsent, isConsentCurrent, getChangedScripts } from "./lib/consentStore";
-import type { CapabilityGrant } from "./lib/consentStore";
+import { loadConsents, recordConsent, getChangedScripts } from "./lib/consentStore";
+import type { CapabilityGrant, ConsentRecord } from "./lib/consentStore";
+import {
+  isPackageConsentCurrent,
+  listMacrosByPackage,
+  listPackageMacros,
+  packageConsentPlan,
+} from "./lib/packageConsentSet";
+import type { ConsentArtifact, PackageMacro } from "./lib/packageConsentSet";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import {
   SCRIPT_FORM_CLOSE_EVENT,
@@ -162,6 +171,62 @@ export const ScriptableObjectEvents = {
 /** Track which packages have been consented to run scripts (this session). */
 const consentedPackages = new Set<string>();
 
+/**
+ * THE SET OF ARTIFACTS ONE CONSENT SCREEN PUT IN FRONT OF THE USER, held from
+ * the moment the prompt is emitted until its Allow is answered.
+ *
+ * The prompt and the grant used to come from two INDEPENDENT listings: the load
+ * path listed the workbook once to build `moduleScriptNames`/`moduleScriptIds`,
+ * and the `consent-granted` handler — which received nothing but
+ * `{ packageName }` — re-derived both sets from scratch. Anything that changed
+ * the workbook between the prompt appearing and Allow being pressed wrote a
+ * record for a set the screen never showed. That is not theoretical: the consent
+ * dialog is non-modal, `AppEvents.PACKAGE_UPDATED` re-runs the whole load, and a
+ * Distribution ▸ Update or a gateway pull fires it — so a publisher's refresh
+ * landing while the user reads the screen made Allow approve the NEW code under
+ * the OLD screen's authority. The transparency requirement is the exact
+ * inverse: what is granted must be what was displayed.
+ *
+ * So the prompt now carries a `promptId`, the artifact set it enumerated is
+ * held here, and Allow echoes the id back. The handler grants THIS set — never a
+ * fresh listing.
+ */
+interface PendingConsentGrant {
+  /** Identity of the screen. Allow must echo it or the grant is refused. */
+  promptId: string;
+  /** Exactly what the prompt enumerated, in the order it will be recorded. */
+  artifacts: ConsentArtifact[];
+  /** The capability union the prompt showed, over the OBJECT scripts alone. */
+  granted: CapabilityGrant[];
+}
+
+/** One pending prompt per application; a re-prompt supersedes its predecessor. */
+const pendingGrants = new Map<string, PendingConsentGrant>();
+
+/** Monotonic prompt id source. Session-local; never persisted. */
+let promptSequence = 0;
+
+/**
+ * An order-insensitive fingerprint of an artifact set: id + source for every
+ * artifact, sorted by id.
+ *
+ * ORDER IS DELIBERATELY NOT PART OF IT. The prompt's set comes from
+ * `loadAllObjectScripts()` and the grant's from `ObjectScriptManager`, which are
+ * two different iteration orders over the same data; comparing them positionally
+ * would refuse grants for a difference the user cannot see and that means
+ * nothing. What must match is WHICH artifacts, and WHAT CODE each one is.
+ *
+ * Every part is LENGTH-PREFIXED, so no separator can be forged out of an id or a
+ * source body: a script with id `"a"` and source `"1:b"` must not fingerprint
+ * the same as one with id `"a:1"` and source `"b"`.
+ */
+function artifactFingerprint(artifacts: ConsentArtifact[]): string {
+  return [...artifacts]
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((a) => `${a.id.length}:${a.id}:${a.source.length}:${a.source}`)
+    .join("");
+}
+
 /** Short, user-facing phrase per capability for the consent prompt. */
 const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "net.fetch": "Fetch data from the web (https only, no cookies)",
@@ -201,6 +266,35 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "distribution.subscribe":
     "Bring somebody else's published applications into this workbook, and update the ones you subscribe to (a script that arrived in an application cannot actually do this — Calcula refuses it — but it asked)",
 };
+
+/**
+ * The consent key a DISTRIBUTED OBJECT SCRIPT's application is recorded under —
+ * ASKED OF `scriptOriginForMount`, never re-derived here.
+ *
+ * That function is what the MOUNT GATE uses: `requireDistributedMountConsent`
+ * (app/src/api/scriptHost/host.ts) calls `check_distributed_mount_consent` with
+ * `scriptOriginForMount(definition).name`, and Rust looks the record up under
+ * exactly that string. So the key this path writes and the key that gate asks
+ * for are now the same value by construction, including the placeholder for a
+ * script with no name, and no future edit can drift one from the other.
+ *
+ * IT USED TO BE RE-DERIVED, AND IT DID NOT MATCH: this path spelled the
+ * nameless case `"unknown"` while the origin's placeholder is
+ * `UNKNOWN_PACKAGE_NAME` — `"(unknown package)"`. The prompt was shown, the user
+ * approved, the record was written under `"unknown"`, and every mount was then
+ * refused against a key nothing had ever written. That state is reachable: on
+ * `ObjectScriptDef` (core/calcula-format/src/features/object_scripts.rs) both
+ * `provenance` and `package_name` are `#[serde(default)]`, so a `.cala` carrying
+ * `"provenance": "distributed"` with no `packageName` parses cleanly into it,
+ * and `save_object_script` preserves the stored pair verbatim. (A `.calp` pull
+ * always stamps a name — `pull.rs` sets both fields together — so the ingress is
+ * the workbook file, not the subscription.)
+ *
+ * Returns `""` for a LOCAL script, which can never join a package group.
+ */
+function objectScriptPackageKey(script: { provenance?: string; packageName?: string }): string {
+  return originPackageName(scriptOriginForMount(script)) ?? "";
+}
 
 /** Shape of one requested capability in the consent-needed event payload. */
 interface RequestedCapability {
@@ -245,6 +339,115 @@ function computePackageCapabilities(
     );
   }
   return { requested, granted };
+}
+
+/**
+ * Build ONE application's consent screen, remember exactly what it enumerated,
+ * and emit it.
+ *
+ * This is the single emitter of SCRIPT_CONSENT_NEEDED, and the single writer of
+ * `pendingGrants`, so the set the screen shows and the set Allow records are the
+ * same object rather than two listings that agree by luck.
+ */
+async function emitPackageConsentPrompt(
+  persistedConsents: ConsentRecord[],
+  pkg: string,
+  pkgScripts: ObjectScriptDefinition[],
+  pkgMacros: PackageMacro[],
+): Promise<void> {
+  // The capability union stays over the OBJECT scripts alone. A macro's
+  // `// @capability` pragmas are not folded in: nothing grants a macro
+  // capabilities out of this record (see lib/packageConsentSet.ts), so adding
+  // them would only put a capability the prompt never attributed to the
+  // object-script realm into the application's grant.
+  const { requested, granted } = computePackageCapabilities(pkgScripts);
+
+  // WHAT THIS RECORD CAN AND CANNOT COVER. A macro whose id is already claimed
+  // by an object script cannot go into a flat id-keyed record, so Allow will not
+  // approve it and the prompt must not imply otherwise — it is named separately,
+  // as something that stays refused.
+  const plan = packageConsentPlan(pkgScripts, pkgMacros);
+  const approvableMacros = plan.covered;
+
+  // The DIFF spans both kinds — a macro whose source changed upstream is
+  // exactly what a re-consent prompt must show, and it is why the grant is
+  // re-asked at all. It is taken over the artifacts this grant COVERS: an
+  // id-colliding macro shares an id with an object script's record entry, so
+  // diffing it would compare the macro's source against the object script's
+  // approved source and report a change that is really a collision.
+  const changed = await getChangedScripts(persistedConsents, pkg, [
+    ...pkgScripts,
+    ...approvableMacros,
+  ]);
+  const changedScripts = changed.map((c) => ({
+    id: c.id,
+    name:
+      pkgScripts.find((s) => s.id === c.id)?.name ??
+      approvableMacros.find((m) => m.id === c.id)?.name ??
+      c.id,
+    oldSource: c.oldSource,
+    newSource: c.newSource,
+  }));
+
+  promptSequence += 1;
+  const promptId = `consent-${promptSequence}`;
+  pendingGrants.set(pkg, { promptId, artifacts: plan.artifacts, granted });
+
+  emitAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, {
+    // THE SCREEN'S IDENTITY. Allow echoes it back, and a grant that does not
+    // carry the id of a prompt still standing is refused rather than applied to
+    // whatever the workbook holds by then.
+    promptId,
+    packageName: pkg,
+    scriptCount: pkgScripts.length,
+    scriptNames: pkgScripts.map((s) => s.name),
+    scriptIds: pkgScripts.map((s) => s.id),
+    // WHAT IS GRANTED IS WHAT IS SHOWN. The macros go into the record, so they
+    // are named on the prompt that writes it — and the ids travel with the names
+    // so the prompt's Inspect affordance can open one. An application that
+    // shipped only macros has no object script to inspect, and a button that
+    // silently does nothing on the last screen before a stranger's code runs is
+    // worse than no button.
+    moduleScriptNames: approvableMacros.map((m) => m.name),
+    moduleScriptIds: approvableMacros.map((m) => m.id),
+    // ...and what it CANNOT grant, said out loud. Pressing Allow will not make
+    // these run, so the screen may not leave the user pressing it again.
+    unapprovableMacroNames: plan.unapprovable.map((m) => m.name),
+    requestedCapabilities: requested,
+    changedScripts,
+  });
+}
+
+/**
+ * Re-ask for ONE application, from the workbook as it stands right now.
+ *
+ * Used when a grant arrives that cannot honestly be applied — the screen it came
+ * from is gone, or the workbook moved on underneath it. Nothing is recorded and
+ * nothing is mounted; the user is asked again about the code that is actually
+ * there.
+ */
+async function repromptPackage(packageName: string): Promise<void> {
+  pendingGrants.delete(packageName);
+  consentedPackages.delete(packageName);
+
+  // The STORE, for the same reason the grant handler reads it: the session
+  // registry still holds scripts an update removed, and re-prompting from it
+  // offers to approve code the application no longer ships.
+  const scripts = (await loadAllObjectScripts()).filter(
+    (s) => s.provenance === "distributed" && objectScriptPackageKey(s) === packageName,
+  );
+  let macros: PackageMacro[] = [];
+  try {
+    macros = await listPackageMacros(packageName);
+  } catch (e) {
+    console.warn("[ScriptableObjects] Module-script listing failed:", e);
+  }
+  // The application left the workbook entirely (an unsubscribe landed while the
+  // prompt was open). There is nothing to approve, so there is nothing to ask.
+  if (scripts.length === 0 && macros.length === 0) return;
+
+  const persistedConsents = await loadConsents();
+  await emitPackageConsentPrompt(persistedConsents, packageName, scripts, macros);
 }
 
 /**
@@ -297,36 +500,94 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
     );
   }
 
-  // For distributed scripts, group by package and check consent
-  if (distributedScripts.length > 0) {
+  // ---- Distributed code: group by application, then decide consent ----
+  //
+  // The MACROS these applications shipped, grouped once. They are listed on the
+  // subscribe review as "Module scripts — executable code", and the Rust module
+  // gate asks this workbook's consent record for them by id + source hash — so
+  // they belong in the same grant as the object scripts. Before this they were in
+  // no consent record the app could write, and every one of them was refused
+  // forever with an error naming an approval nothing could give.
+  //
+  // THE LISTING IS TAKEN UNCONDITIONALLY, not only when an object script happens
+  // to exist to trigger it. `core/calp/src/pull.rs` materializes `modules/*.json`
+  // independently of `object_scripts/*.json`, so a `.calp` may ship macros and NO
+  // object scripts at all. While this whole block was gated on
+  // `distributedScripts.length > 0`, such an application emitted no
+  // SCRIPT_CONSENT_NEEDED (this is its single emitter), wrote no bare-name
+  // consent record, and every one of its macros stayed refused forever — the
+  // same dead end, still open for that one shape. It costs one listing on a
+  // workbook that carries no distributed code at all; the alternative is a
+  // publisher's macros being unapprovable, which is not a trade.
+  let macrosByPackage = new Map<string, PackageMacro[]>();
+  try {
+    macrosByPackage = await listMacrosByPackage();
+  } catch (e) {
+    // The listing failed, so this pass cannot honestly cover the macros. The
+    // object scripts still get their normal decision below; a macro run is
+    // refused by Rust with its own message, which the user sees at Run.
+    console.warn("[ScriptableObjects] Module-script listing failed:", e);
+  }
+
+  const byPackage = new Map<string, typeof distributedScripts>();
+  for (const script of distributedScripts) {
+    const pkg = objectScriptPackageKey(script);
+    if (!byPackage.has(pkg)) byPackage.set(pkg, []);
+    byPackage.get(pkg)!.push(script);
+  }
+
+  // THE UNION OF BOTH STORES drives the pass. An application contributes a
+  // package here if it shipped object scripts, or macros, or both — and each is
+  // evaluated with whatever the other store holds for the same key, which is
+  // also what `packageConsentArtifacts` will write into the record.
+  const packageNames = [...new Set([...byPackage.keys(), ...macrosByPackage.keys()])];
+
+  if (packageNames.length > 0) {
     const persistedConsents = await loadConsents();
 
-    const byPackage = new Map<string, typeof distributedScripts>();
-    for (const script of distributedScripts) {
-      const pkg = script.packageName || "unknown";
-      if (!byPackage.has(pkg)) byPackage.set(pkg, []);
-      byPackage.get(pkg)!.push(script);
-    }
+    for (const pkg of packageNames) {
+      const pkgScripts = byPackage.get(pkg) ?? [];
+      const pkgMacros = macrosByPackage.get(pkg) ?? [];
 
-    for (const [pkg, pkgScripts] of byPackage) {
       // Register all distributed scripts (so they appear in the UI)
       for (const script of pkgScripts) {
         ObjectScriptManager.registerScript(script);
       }
 
-      // Hydrate session consent from the persisted record when the package's
-      // current script sources still match what was consented to.
-      if (!consentedPackages.has(pkg)) {
-        try {
-          if (await isConsentCurrent(persistedConsents, pkg, pkgScripts)) {
-            consentedPackages.add(pkg);
-          }
-        } catch (e) {
-          console.warn("[ScriptableObjects] Consent check failed:", e);
-        }
+      // FRESHNESS IS EVALUATED ON EVERY PASS, AND IT MAY REVOKE.
+      //
+      // `isPackageConsentCurrent` is the ONLY place a macro's presence and hash
+      // are ever checked, and it used to run only when the session set did not
+      // already hold the package. That set is cleared on AFTER_OPEN but NOT by
+      // AppEvents.PACKAGE_UPDATED, which re-runs this whole load — so for an
+      // application approved earlier in the session (or hydrated as current when
+      // the workbook opened), a Distribution ▸ Update that brought a NEW or
+      // CHANGED macro was never looked at: nothing was recorded, the macro was
+      // then refused by Rust, and no prompt would ever appear to fix it.
+      //
+      // The check now also REVOKES: a package that no longer matches its record
+      // leaves the session set and is prompted again. Already-mounted object
+      // scripts are deliberately left running — they are individually still
+      // hash-consented (a stale macro alone can fail this check), and Allow
+      // re-records and re-mounts.
+      let current = false;
+      try {
+        current = await isPackageConsentCurrent(persistedConsents, pkg, pkgScripts, pkgMacros);
+      } catch (e) {
+        // FAILS CLOSED. "I could not find out whether you approved this
+        // application's code" is not approval — not even for a package the
+        // session already held, because the thing that threw is the only thing
+        // that can tell us the record still covers what is about to run.
+        console.warn("[ScriptableObjects] Consent check failed:", e);
+        current = false;
+      }
+      if (current) {
+        consentedPackages.add(pkg);
+      } else {
+        consentedPackages.delete(pkg);
       }
 
-      if (consentedPackages.has(pkg)) {
+      if (current) {
         // Hydrate path: consent == "all declared" in 4.2a, so re-derive each
         // script's declared caps/origins from its own source and GRANT them
         // into the live set BEFORE mounting, so buildHandleFromDefinition sees
@@ -346,26 +607,9 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
           }
         }
       } else {
-        // Emit consent request event — the UI will show a prompt. Include the
-        // union of capabilities the package's scripts declare, plus any scripts
-        // whose source CHANGED since last consent (T3) so the prompt can diff
-        // old→new instead of asking for a blind re-approval.
-        const { requested } = computePackageCapabilities(pkgScripts);
-        const changed = await getChangedScripts(persistedConsents, pkg, pkgScripts);
-        const changedScripts = changed.map((c) => ({
-          id: c.id,
-          name: pkgScripts.find((s) => s.id === c.id)?.name ?? c.id,
-          oldSource: c.oldSource,
-          newSource: c.newSource,
-        }));
-        emitAppEvent(ScriptableObjectEvents.SCRIPT_CONSENT_NEEDED, {
-          packageName: pkg,
-          scriptCount: pkgScripts.length,
-          scriptNames: pkgScripts.map((s) => s.name),
-          scriptIds: pkgScripts.map((s) => s.id),
-          requestedCapabilities: requested,
-          changedScripts,
-        });
+        // Ask. The screen is built — and REMEMBERED — by the one emitter, so
+        // the artifact set the user reads is the artifact set Allow records.
+        await emitPackageConsentPrompt(persistedConsents, pkg, pkgScripts, pkgMacros);
       }
     }
   }
@@ -708,6 +952,10 @@ async function activate(context: ExtensionContext): Promise<void> {
       stopSchedulerPump();
       resetObjectScriptManager();
       consentedPackages.clear();
+      // The remembered screens belong to the previous workbook too. A grant
+      // arriving after the swap must not be able to record the OLD workbook's
+      // artifacts into the NEW one.
+      pendingGrants.clear();
       consentQueue.length = 0; // queued prompts belong to the previous workbook
       capabilityQueue.length = 0; // pending JIT prompts belong to the previous workbook
       try {
@@ -736,49 +984,174 @@ async function activate(context: ExtensionContext): Promise<void> {
   // ---- Handle consent responses ----
   cleanupFunctions.push(
     onAppEvent("scriptable-objects:consent-granted", async (detail) => {
-      const { packageName } = detail as { packageName: string };
+      const { packageName, promptId } = detail as {
+        packageName: string;
+        promptId?: string;
+      };
+
+      // ---- THE GRANT BELONGS TO A SCREEN, AND ONLY TO THAT SCREEN ----
+      //
+      // Without this the handler re-derived the artifact set from scratch, so
+      // Allow recorded whatever the workbook happened to hold at that instant —
+      // which a Distribution ▸ Update or a gateway pull landing while the prompt
+      // was open had already changed. The user's yes then covered code they were
+      // never shown.
+      const pending = pendingGrants.get(packageName);
+      if (!pending || pending.promptId !== promptId) {
+        // Superseded (a re-prompt replaced this screen) or unsolicited. REFUSE
+        // and re-ask rather than guess: granting a stale set would approve code
+        // the user never saw, and granting a fresh listing would approve code
+        // the user never saw either. Asking again is the only answer that keeps
+        // "what is granted is what was displayed" true.
+        console.warn(
+          `[ScriptableObjects] Consent for "${packageName}" arrived for a prompt ` +
+            "that is no longer standing; nothing was approved.",
+        );
+        showToast(
+          `Nothing was approved for "${packageName}": the approval screen was ` +
+            "replaced before you answered it. Calcula will ask again about the " +
+            "code this workbook has now.",
+          { type: "error", duration: 0 },
+        );
+        await repromptPackage(packageName);
+        return;
+      }
+      pendingGrants.delete(packageName);
+
+      // ---- ...AND THE WORKBOOK MUST NOT HAVE MOVED ON UNDER IT ----
+      //
+      // The prompt is non-modal and PACKAGE_UPDATED re-runs the load, so the
+      // screen can be answered after its artifacts changed underneath it without
+      // any re-prompt having replaced it (a pull that changes a macro this
+      // package owns, for instance, while the object scripts are untouched).
+      // Matched through the SAME key the prompt was emitted under — provenance
+      // first (that is the authority on "is this a package's code at all"), then
+      // the normalized name. A raw `s.packageName === packageName` comparison
+      // disagreed with the grouping the moment either side was blank or carried
+      // whitespace, and the disagreement is silent.
+      // READ THE STORE, NOT THE SESSION REGISTRY. The prompt's set came from
+      // `loadAllObjectScripts()`; `ObjectScriptManager` is cumulative for the
+      // session and never drops a script an update REMOVED from the application.
+      // Comparing against it made Allow refuse a grant nothing had changed
+      // about, and then — on the re-prompt — offer to approve and re-mount a
+      // script the application no longer ships.
+      const scripts = (await loadAllObjectScripts()).filter(
+        (s) => s.provenance === "distributed" && objectScriptPackageKey(s) === packageName,
+      );
+      let liveArtifacts: ConsentArtifact[] | null = null;
+      try {
+        const macros = await listPackageMacros(packageName);
+        liveArtifacts = packageConsentPlan(scripts, macros).artifacts;
+      } catch (e) {
+        // FAILS CLOSED. "I cannot tell you whether this is still the code you
+        // read" is not a yes.
+        console.warn("[ScriptableObjects] Module-script listing failed:", e);
+        liveArtifacts = null;
+      }
+      if (liveArtifacts === null) {
+        // A LISTING FAILURE IS NOT A CHANGE, AND MUST NOT RE-PROMPT.
+        // The load path degrades this same failure to "no macros" and prompts
+        // anyway, so re-prompting here walks straight back into it: the user
+        // presses Allow, the listing throws again, and the screen returns
+        // forever with no press that can ever satisfy it. Say it once and leave
+        // the application unapproved until the listing recovers.
+        showToast(
+          `Calcula could not read this workbook's macros, so nothing from ` +
+            `"${packageName}" was approved. Try again in a moment.`,
+          { type: "error", duration: 0 },
+        );
+        return;
+      }
+      if (artifactFingerprint(liveArtifacts) !== artifactFingerprint(pending.artifacts)) {
+        showToast(
+          `"${packageName}" changed while its approval screen was open, so ` +
+            "nothing was approved. Calcula will ask again about the code this " +
+            "workbook has now.",
+          { type: "error", duration: 0 },
+        );
+        await repromptPackage(packageName);
+        return;
+      }
+
       consentedPackages.add(packageName);
+
+      // PERSIST THE APPROVAL BEFORE MOUNTING ANYTHING.
+      //
+      // The mount boundary asks the backend whether this workbook has approved
+      // the application, and that question is answered from the consent STORE.
+      // Mounting first therefore asks about an approval that has not been
+      // written yet: every mount in the loop below is refused, the refusals are
+      // swallowed as per-script errors, and the user is told their scripts are
+      // enabled while nothing runs until the workbook is reopened.
+      //
+      // Keyed by source hash + the granted capability union, so changed scripts
+      // OR a capability expansion re-prompt.
+      //
+      // THE RECORD COVERS THE APPLICATION'S MACROS TOO. A `.calp` may ship
+      // module scripts; they are disclosed on the subscribe review and named on
+      // the prompt this handler answers, and the Rust module gate looks for them
+      // in THIS record by id + source hash. Recording only the object scripts is
+      // what refused every distributed macro forever.
+      //
+      // BOTH ARGUMENTS COME FROM THE PROMPT, not from a second listing:
+      // `granted` is the capability union the screen enumerated (over the OBJECT
+      // scripts — no path grants a macro capabilities from this record at all),
+      // and `artifacts` is the artifact list it named.
+      try {
+        await recordConsent(packageName, pending.artifacts, pending.granted);
+      } catch (e) {
+        console.warn("[ScriptableObjects] Failed to persist consent:", e);
+      }
+
       // Mount the distributed scripts for this package. Allowing grants ALL
       // declared capabilities (4.2a). For each script, GRANT its declared
       // caps/origins into the live set BEFORE mounting it, so the broker's
       // handle (built at mount) already carries the consented grants.
-      const scripts = ObjectScriptManager.getAllScripts()
-        .filter((s) => s.provenance === "distributed" && s.packageName === packageName);
+      //
+      // EVERY SCRIPT IS RE-MOUNTED, INCLUDING ONE THAT IS ALREADY RUNNING.
+      // PACKAGE_UPDATED re-runs the load WITHOUT `resetObjectScriptManager`, so
+      // a realm mounted from the OLD source stays live while `registerScript`
+      // swaps the definition underneath it and the hash check revokes the
+      // package. This loop used to skip anything `isScriptMounted` reported —
+      // so the user approved the new code and the OLD code kept running, under
+      // whatever capability set it had already been granted, possibly narrower
+      // than the one the new source declares. Approving changed code has to
+      // START that code.
+      let failedToMount = 0;
       for (const script of scripts) {
-        if (!ObjectScriptManager.isScriptMounted(script.id)) {
-          const declared = parseDeclaredCapabilities(script.source);
-          await applyConsentedCapabilities(script.id, declared.caps, declared.origins);
-          try {
-            await ObjectScriptManager.mountScript(script.id);
-          } catch (e) {
-            // One failure must not strand the rest of a just-consented package.
-            console.error(
-              `[ScriptableObjects] "${script.name}" failed to mount after consent:`,
-              e,
-            );
-          }
+        const declared = parseDeclaredCapabilities(script.source);
+        await applyConsentedCapabilities(script.id, declared.caps, declared.origins);
+        if (ObjectScriptManager.isScriptMounted(script.id)) {
+          ObjectScriptManager.unmountScript(script.id);
+        }
+        try {
+          await ObjectScriptManager.mountScript(script.id);
+        } catch (e) {
+          // One failure must not strand the rest of a just-consented package.
+          failedToMount += 1;
+          console.error(
+            `[ScriptableObjects] "${script.name}" failed to mount after consent:`,
+            e,
+          );
         }
       }
-      // Persist the consent in the workbook (durable once the file is saved),
-      // keyed by source hash + the granted capability union so changed scripts
-      // OR a capability expansion re-prompt.
-      try {
-        const { granted } = computePackageCapabilities(scripts);
-        await recordConsent(
-          packageName,
-          scripts.map((s) => ({ id: s.id, source: s.source })),
-          granted,
+      // Never announce a success the mounts did not deliver.
+      if (failedToMount > 0) {
+        showToast(
+          `Scripts from "${packageName}" approved, but ${failedToMount} did not start.`,
+          { type: "error" },
         );
-      } catch (e) {
-        console.warn("[ScriptableObjects] Failed to persist consent:", e);
+      } else {
+        showToast(`Scripts from "${packageName}" enabled.`, { type: "success" });
       }
-      showToast(`Scripts from "${packageName}" enabled.`, { type: "success" });
     }),
   );
 
   cleanupFunctions.push(
     onAppEvent("scriptable-objects:consent-denied", (detail) => {
       const { packageName } = detail as { packageName: string };
+      // The screen is answered; nothing may grant against it afterwards.
+      pendingGrants.delete(packageName);
       showToast(`Scripts from "${packageName}" blocked. Objects will use default behavior.`, { type: "info" });
     }),
   );
@@ -804,6 +1177,9 @@ async function activate(context: ExtensionContext): Promise<void> {
       // registry); stop the clock rather than paying for an empty tick.
       stopSchedulerPump();
       resetObjectScriptManager();
+      // The previous workbook's screens go with it — see AFTER_OPEN.
+      pendingGrants.clear();
+      consentedPackages.clear();
     }),
   );
 
@@ -1249,6 +1625,11 @@ function deactivate(): void {
 
   // Unmount all scripts
   resetObjectScriptManager();
+
+  // A held consent screen outliving the extension that issued it would let a
+  // later grant record artifacts against a session that no longer exists.
+  pendingGrants.clear();
+  consentedPackages.clear();
 
   // Clean up all registrations
   for (let i = cleanupFunctions.length - 1; i >= 0; i--) {

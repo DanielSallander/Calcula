@@ -3,7 +3,8 @@
 //          replacement) plus its hard size limits and the data-only app events
 //          the host registry and the trusted renderer exchange. Leaf module: it
 //          imports ONLY scriptDialogSpec.ts (the five-field dialog spec this
-//          generalizes), so the validator (validators.ts), the host registry
+//          generalizes) and scriptOrigin.ts (the trust origin, which imports
+//          nothing), so the validator (validators.ts), the host registry
 //          (scriptForms.ts), the worker shim (contextShims.ts) and the trusted
 //          renderer (ScriptableObjects/components/scriptForm/) all agree on one
 //          definition without forming an import cycle.
@@ -30,6 +31,7 @@ import {
   MAX_DIALOG_TITLE,
   RESERVED_DIALOG_FIELD_NAMES,
 } from "./scriptDialogSpec";
+import { scriptOriginForMount, type MountOrigin } from "./scriptOrigin";
 
 // Re-exported so the validator and renderer reach every form limit from ONE
 // module (a widget label is bounded exactly like a dialog field label).
@@ -272,6 +274,50 @@ export interface FormCloseDetail {
 }
 
 // ============================================================================
+// Provenance — STRUCTURAL, never a magic string
+// ============================================================================
+
+/**
+ * Where a form came from, as data the renderer branches on.
+ *
+ * This used to be one string, `scriptOrigin`, in which the value `"local"` meant
+ * "a script in this workbook" and every OTHER value was a package name. So an
+ * application NAMED `local` made the identity band read "A form from a script in
+ * this workbook" — exactly the impersonation the band exists to prevent, reached
+ * by choosing a name. The name was being asked to carry the verdict as well as
+ * the content, and one of those two jobs was always going to win.
+ *
+ * A discriminated union has no such value: `{ kind: "package", name: "local" }`
+ * paints as a package, because `kind` is the only thing the phrasing reads and
+ * nothing a publisher can type ever lands in it.
+ *
+ * THE SAME UNION IS NOW THE TRUST HANDLE'S ORIGIN. The form band was fixed
+ * first, while `ScriptHandle.origin` was still a string carrying the same
+ * collision for the capability gates and the R7 trust predicate. Both now read
+ * ONE definition (`scriptOrigin.ts`), so the band and the gate cannot come to
+ * different conclusions about the same script. A form is always shown for a
+ * MOUNTED script, so its origin is the mount subset — local or package, never
+ * the preview kind a dry-run handle carries.
+ */
+export type FormOrigin = MountOrigin;
+
+/**
+ * The origin of a MOUNTED script, from its authoritative definition.
+ *
+ * An alias for the canonical `scriptOriginForMount` (scriptOrigin.ts), kept
+ * under the form-facing name the renderer and its tests already use. Derived
+ * from `provenance` — the field the pull path stamps (`core/calp/src/pull.rs`) —
+ * and never from the package name, which stays pure content. A distributed
+ * script with no name gets `"(unknown package)"`, the same placeholder
+ * `buildHandleFromDefinition` (broker.ts) puts on the trust handle, so the band
+ * and the cross-script trust predicate spell one publisher one way.
+ */
+export const formOriginForMount: (definition: {
+  provenance?: string;
+  packageName?: string;
+}) => FormOrigin = scriptOriginForMount;
+
+// ============================================================================
 // Host registry <-> trusted renderer (data-only app events, main window)
 // ============================================================================
 
@@ -312,8 +358,11 @@ export interface ScriptFormRequestPayload {
   /** Authoritative identity — from the mount handle, never from the script. */
   scriptId: string;
   scriptName: string;
-  /** "local", or the package name for a distributed script. */
-  scriptOrigin: string;
+  /**
+   * Local, or the package a distributed script arrived in — as a DISCRIMINATED
+   * shape, so no package name can ever select the local phrasing (`FormOrigin`).
+   */
+  origin: FormOrigin;
   /** Set when ANOTHER script opened this form on the owner's behalf. */
   callerName?: string;
   spec: FormSpec;

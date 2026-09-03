@@ -157,6 +157,44 @@ export function recordConsent(
 }
 
 /**
+ * Whether the package's record lists EVERY one of `scripts` under its own id
+ * with its CURRENT source hash — the id+hash question and nothing else.
+ *
+ * This is exactly what Rust asks (`consent_granted_in`,
+ * app/src-tauri/src/calp_commands.rs) before it will run a distributed artifact,
+ * so a TypeScript surface that wants to know "will the backend accept this?"
+ * should ask THIS, not {@link isConsentCurrent}.
+ *
+ * Split out because one package record now covers artifacts of two kinds whose
+ * CAPABILITY accounting differs. A package's object scripts drive
+ * `grantedCapabilities` — the union the consent prompt showed and the
+ * re-prompt-on-expansion key. Its MODULE scripts (macros) do not: nothing grants
+ * a macro capabilities out of this record (both macro run routes derive their
+ * ceiling from the macro's own source at run time, and Rust reads
+ * `grantedCapabilities` nowhere), so folding a macro's pragmas into that union
+ * would put a capability the user was never shown into the application's grant
+ * AND make `isConsentCurrent` unsatisfiable — a package re-prompting on every
+ * open, forever. Macros are therefore held to the hash question only, which is
+ * the whole question the backend asks about them.
+ */
+export async function areScriptsConsented(
+  consents: ConsentRecord[],
+  packageName: string,
+  scripts: Array<{ id: string; source: string }>,
+): Promise<boolean> {
+  const record = consents.find((c) => c.packageName === packageName);
+  if (!record) return false;
+
+  for (const script of scripts) {
+    const consented = record.scripts.find((s) => s.id === script.id);
+    if (!consented) return false;
+    const hash = await sha256Hex(script.source);
+    if (hash !== consented.sourceHash) return false;
+  }
+  return true;
+}
+
+/**
  * Check whether a package's scripts are covered by a persisted consent:
  * the package must have a record, EVERY current script's source hash must
  * match the hash consented to, AND the set of capabilities currently DECLARED
@@ -172,12 +210,7 @@ export async function isConsentCurrent(
   const record = consents.find((c) => c.packageName === packageName);
   if (!record) return false;
 
-  for (const script of scripts) {
-    const consented = record.scripts.find((s) => s.id === script.id);
-    if (!consented) return false;
-    const hash = await sha256Hex(script.source);
-    if (hash !== consented.sourceHash) return false;
-  }
+  if (!(await areScriptsConsented(consents, packageName, scripts))) return false;
 
   // Capability expansion re-prompts: the currently-declared capability set must
   // equal the consented set. (Source changes are already caught by the hash

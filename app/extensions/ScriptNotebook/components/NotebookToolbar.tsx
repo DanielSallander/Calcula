@@ -26,11 +26,27 @@ const NewIcon = () => (
   </svg>
 );
 
+/**
+ * The application a notebook arrived in, or null when it is the user's own.
+ *
+ * Reads the stamp the pull path writes (`source_package`,
+ * core/calp/src/pull.rs) exactly as the Rust run gate does: a blank name is
+ * nothing stamped, never an application called "". Mirrors
+ * `scriptOriginForStoredRecord` (@api/scriptHost/scriptOrigin) — a
+ * publisher-chosen name is CONTENT that is displayed, never a flag that
+ * selects "local".
+ */
+function packageOf(record: { sourcePackage?: string } | null): string | null {
+  const name = record?.sourcePackage?.trim() ?? "";
+  return name === "" ? null : name;
+}
+
 export function NotebookToolbar(): React.ReactElement {
   const {
     activeNotebook,
     notebooks,
     isExecuting,
+    runRefusal,
     runAll,
     addCell,
     appendCellsWithSource,
@@ -62,6 +78,8 @@ export function NotebookToolbar(): React.ReactElement {
     [handleCreate],
   );
 
+  const activePackage = packageOf(activeNotebook);
+
   return (
     <div style={styles.toolbar}>
       {/* Notebook selector */}
@@ -77,11 +95,18 @@ export function NotebookToolbar(): React.ReactElement {
           onFocus={() => refreshNotebookList()}
         >
           <option value="">-- Select Notebook --</option>
-          {notebooks.map((nb) => (
-            <option key={nb.id} value={nb.id}>
-              {nb.name} ({nb.cellCount} cell{nb.cellCount !== 1 ? "s" : ""})
-            </option>
-          ))}
+          {notebooks.map((nb) => {
+            // The row says whose notebook it is BEFORE it is opened: this list
+            // is the only thing the user sees when choosing, and a publisher's
+            // notebook used to be indistinguishable from their own here.
+            const pkg = packageOf(nb);
+            return (
+              <option key={nb.id} value={nb.id}>
+                {nb.name} ({nb.cellCount} cell{nb.cellCount !== 1 ? "s" : ""})
+                {pkg ? ` — from "${pkg}"` : ""}
+              </option>
+            );
+          })}
         </select>
         <button
           style={styles.button}
@@ -117,6 +142,23 @@ export function NotebookToolbar(): React.ReactElement {
           </button>
         </div>
       )}
+
+      {/* Provenance band: whose code is open right now. Shown for the ACTIVE
+          notebook, always, not only when a run is refused — the user must know
+          where the code they are reading came from before they press Run. */}
+      {activePackage && (
+        <div
+          style={styles.provenance}
+          title={`This notebook was distributed inside the application "${activePackage}". Its cells are inert until you approve that application's code.`}
+        >
+          From application &quot;{activePackage}&quot; — not authored in this
+          workbook
+        </div>
+      )}
+
+      {/* A refused run, in words. Without this the backend's refusal is a
+          console line and the Run button just appears to do nothing. */}
+      {runRefusal && <div style={styles.refusal}>{runRefusal}</div>}
 
       {/* Action buttons (only when a notebook is active) */}
       {activeNotebook && (
@@ -199,6 +241,24 @@ const styles: Record<string, React.CSSProperties> = {
     background: "var(--input-bg, #fff)",
     color: "var(--text-primary, #333)",
     minWidth: 0,
+  },
+  provenance: {
+    padding: "3px 6px",
+    fontSize: "11px",
+    lineHeight: "15px",
+    borderRadius: "3px",
+    border: "1px solid var(--warning-border, #e0c07a)",
+    background: "var(--warning-bg, #fdf6e3)",
+    color: "var(--warning-text, #7a5c00)",
+  },
+  refusal: {
+    padding: "4px 6px",
+    fontSize: "11px",
+    lineHeight: "15px",
+    borderRadius: "3px",
+    border: "1px solid var(--error-border, #e0a0a0)",
+    background: "var(--error-bg, #fdeaea)",
+    color: "var(--error-text, #c00)",
   },
   input: {
     flex: 1,

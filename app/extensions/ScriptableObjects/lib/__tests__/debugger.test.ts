@@ -727,11 +727,34 @@ describe("run-at-cursor (local transport)", () => {
 // "fixed" it, because the second Run found an open session and skipped the wait.
 
 describe("run-at-cursor (remote transport — the standalone editor window)", () => {
-  /** Broadcast one host state into a module instance's mirror. */
-  function broadcast(scriptId: string, session: unknown, error?: string): void {
+  /**
+   * A state the HOST itself announced (`emitDebugState`), relayed to this window
+   * verbatim. It carries NO command: it answers no single command, and a start
+   * is legitimately settled by one.
+   */
+  function broadcast(scriptId: string, session: unknown): void {
+    window.dispatchEvent(
+      new CustomEvent("objectscript:debug-state", { detail: { scriptId, session } }),
+    );
+  }
+
+  /**
+   * What the MAIN-WINDOW BRIDGE'S CATCH puts on the wire when a relayed command
+   * REJECTS — the shape `installObjectScriptDebugBridge` builds, command and all.
+   *
+   * The command is the load-bearing field: `{ session: null, error }` is the
+   * shape of a refused mount AND of a `fire` into a session that had already
+   * ended, and without the name they are the same message.
+   */
+  function bridgeRejection(
+    scriptId: string,
+    command: string,
+    session: unknown,
+    error: string,
+  ): void {
     window.dispatchEvent(
       new CustomEvent("objectscript:debug-state", {
-        detail: error === undefined ? { scriptId, session } : { scriptId, session, error },
+        detail: { scriptId, session, error, command },
       }),
     );
   }
@@ -809,7 +832,29 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     expect(commands.map((c) => c.command)).toEqual(["start"]);
   });
 
-  it("stops waiting the moment the bridge reports the session did not open", async () => {
+  /** What the distributed-application consent gate refuses a mount with. */
+  const CONSENT_REFUSAL =
+    "DISTRIBUTED_SCRIPT_NOT_CONSENTED: 'macro1' arrived in the application 'SalesApp' and " +
+    "you have not approved that application's code, so it will not run. Approve the " +
+    "application first — code that arrives in an application stays switched off until you do.";
+
+  /** The commands this window put on the bridge, in order. */
+  function bridgeCommands(): string[] {
+    return (emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
+      Record<string, unknown>
+    >).map((c) => c.command as string);
+  }
+
+  // THE DEFECT (DEFECT B). This test used to assert `{ status: "ran" }` for
+  // exactly this broadcast, which is the bug written down as an expectation: the
+  // mount was REFUSED, the mirror therefore held no session, the trigger check
+  // below refuses only on evidence — so control fell through, fired into a script
+  // that had never mounted, and the editor printed "Running writeB1()…".
+  //
+  // The refusal was already arriving; it was simply thrown away. The bridge's
+  // catch broadcasts `{ session: null, error }` with the gate's own sentence in
+  // it, and `waitForDebugSettled` used it only to stop waiting.
+  it("reports the host's REFUSAL rather than a run that never started", async () => {
     vi.resetModules();
     const fresh = await import("../debugger");
     fresh.setRemoteDebugTransport();
@@ -818,15 +863,467 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
     await tick();
     await tick();
-    broadcast(SCRIPT, null, "Script execution is disabled for this workbook");
+    // The consent gate threw at the mount boundary, so the host never built a
+    // session: the bridge relays its reason beside a null.
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
     const outcome = await pending;
 
-    // No session mirror at all, so the host stays authoritative and is asked.
-    expect(outcome).toEqual({ status: "ran", functionName: "writeB1" });
-    const commands = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
-      Record<string, unknown>
-    >;
-    expect(commands.map((c) => c.command)).toEqual(["start", "fire"]);
+    expect(outcome.status).toBe("startRefused");
+    if (outcome.status === "startRefused") {
+      expect(outcome.functionName).toBe("writeB1");
+      // THE AUTHOR MUST READ THE REASON, not a generic "not ready": which
+      // application, and what to do about it. Both come from the gate verbatim.
+      expect(outcome.message).toContain("SalesApp");
+      expect(outcome.message).toContain("you have not approved that application's code");
+      expect(outcome.message).toContain("Approve the application first");
+      expect(outcome.message).not.toMatch(/in a moment/i);
+      expect(outcome.message).not.toMatch(/not one of the run targets/i);
+    }
+    // ...and nothing was fired into the script that does not exist.
+    expect(bridgeCommands()).toEqual(["start"]);
+  });
+
+  // THE ORDERING THAT MAKES A LISTENER-ONLY FIX WRONG. The bridge can answer
+  // while `startDebugSession` is still awaiting its round trip — before
+  // `waitForDebugSettled` has installed any listener of its own. Reading the
+  // refusal only from that listener would miss it, wait out the 20-second
+  // backstop, and then fire into nothing anyway. The record is written by the
+  // module-level mirror listener, which is always already listening.
+  it("does not miss a refusal that lands while the start is still on the wire", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+    emitTauriEvent.mockImplementationOnce(async () => {
+      bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+      return undefined;
+    });
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    // AND IT MUST BE ANSWERED NOW, not in twenty seconds. An answer that has
+    // already arrived cannot be waited for: a listener-only fix resolves this
+    // case on the backstop timer, which is the same silence in slower form. The
+    // microtask flush lets the whole chain settle without letting ANY timer run.
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(settled, "the refusal was answered without waiting out the backstop").toBe(true);
+
+    const outcome = await pending;
+
+    expect(outcome.status).toBe("startRefused");
+    if (outcome.status === "startRefused") {
+      expect(outcome.message).toContain("SalesApp");
+    }
+    expect(bridgeCommands()).toEqual(["start"]);
+  });
+
+  // THE OTHER HALF OF "ON EVIDENCE". An error broadcast that comes WITH a session
+  // is not a refusal to open one — a fire rejects with whatever the script threw,
+  // and a `setup` that threw keeps its session on purpose. The mirror still
+  // decides those, so the message stays the one that can name the failure.
+  it("an error beside a LIVE session is not a refusal", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    bridgeRejection(
+      SCRIPT,
+      "start",
+      { scriptId: SCRIPT, status: "failed", autoInvokeSetup: true, triggers: [], error: "boom" },
+      "boom",
+    );
+    const outcome = await pending;
+
+    expect(outcome.status).toBe("notReady");
+    if (outcome.status === "notReady") {
+      expect(outcome.message).toMatch(/boom/);
+    }
+    expect(bridgeCommands()).toEqual(["start"]);
+  });
+
+  // A SLOW MIRROR IS STILL NOT A REFUSAL. Nothing was broadcast between the two
+  // Runs, and the second one settles normally: the first Run's refusal answered
+  // the first Run only, and must not be read as this one's.
+  it("a refusal answers ONE start — the next Run is judged on its own broadcast", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const refused = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    expect((await refused).status).toBe("startRefused");
+
+    const allowed = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    broadcast(SCRIPT, SETTLED);
+    expect(await allowed).toEqual({ status: "ran", functionName: "writeB1" });
+    expect(bridgeCommands()).toEqual(["start", "start", "fire"]);
+  });
+
+  // A REFUSAL NOBODY CONSUMED MUST NOT BECOME THE NEXT RUN'S ANSWER. Pressing
+  // Debug records a refusal that no `runAtCursor` was waiting for; the Run after
+  // it is a different question, and here it is one the mirror never answers at
+  // all. That is the "not caught up" case, and it has to keep falling through to
+  // the host — which is authoritative and refuses for itself — instead of being
+  // told no by a reason left over from a different attempt.
+  it("does not answer a Run with a refusal left over from an earlier Debug press", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    await fresh.startDebugSession(SCRIPT);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+
+    vi.useFakeTimers();
+    try {
+      const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+      // Nothing is broadcast for THIS start: the wait ends on its backstop.
+      await vi.advanceTimersByTimeAsync(21000);
+      expect(await pending).toEqual({ status: "ran", functionName: "writeB1" });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(bridgeCommands()).toEqual(["start", "start", "fire"]);
+  });
+
+  // ==========================================================================
+  // THE RECORD NEEDS AN ATTEMPT IDENTITY (defect 1)
+  // ==========================================================================
+  //
+  // A bare `Map<scriptId, reason>` answers exactly one outstanding start. Two
+  // are ordinary: `runFromCursor` had no in-flight guard and F5 is a Monaco
+  // keybinding, which AUTO-REPEATS. The two probes below are the two halves of
+  // the misattribution that shape produces — one Run reading somebody else's
+  // answer, and one Run reading NO answer and inventing "ran" in its place.
+
+  // PROBE 1. Both starts are refused, so there are two answers and two askers.
+  // The single slot could hold only one: the first Run consumed it, the second
+  // read null, found no session in the mirror, fell through the evidence-only
+  // trigger check (an empty mirror is not evidence) and fired into a script that
+  // had never mounted — reporting `{ status: "ran" }`, the exact lie the refusal
+  // record exists to prevent.
+  it("two overlapping Runs each get their OWN answer — neither invents a run", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const first = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    const second = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+
+    // The host refuses both mounts; the bridge relays one error per start, in
+    // the order the starts reached it.
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+
+    const outcomes = await Promise.all([first, second]);
+    expect(outcomes.map((o) => o.status)).toEqual(["startRefused", "startRefused"]);
+    for (const outcome of outcomes) {
+      if (outcome.status === "startRefused") expect(outcome.message).toContain("SalesApp");
+    }
+    // ...and NOTHING was fired into a script that never mounted.
+    expect(bridgeCommands()).toEqual(["start", "start"]);
+  });
+
+  // PROBE 2. The other direction: an answer belonging to an EARLIER gesture must
+  // not be handed to a later one. The Debug press was refused, but the refusal
+  // arrived after the author had already pressed Run — and the record used to be
+  // cleared blind at the top of every start, so whichever answer landed next
+  // became that start's, whoever it was actually addressed to. The Run's own
+  // mount came up perfectly well and the author was told it had been refused.
+  it("does not adopt a Debug press's refusal that lands after a Run has started", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    // The Debug button: its start is on the wire, unanswered.
+    await fresh.startDebugSession(SCRIPT);
+    await tick();
+
+    // The author presses Run before that answer comes back.
+    const run = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+
+    // NOW the Debug press is refused. It answers the DEBUG press.
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    await tick();
+    // ...and the Run's own mount settles.
+    broadcast(SCRIPT, SETTLED);
+
+    expect(await run).toEqual({ status: "ran", functionName: "writeB1" });
+    expect(bridgeCommands()).toEqual(["start", "start", "fire"]);
+  });
+
+  it("records a start REJECTION even when it carries a non-settled session", async () => {
+    // The bridge's catch stamps `session: host.getDebugSession(scriptId)` — and
+    // that is whatever the host happens to hold at that instant, NOT evidence the
+    // mount came up. A refused `start` can therefore arrive carrying a leftover
+    // `detached`/`starting` session.
+    //
+    // Judging a STAMPED broadcast by the settled test dropped it twice over: the
+    // refusal was discarded, and the attempt was never retired — so the queue
+    // desynced permanently and every later refused Run answered the wrong
+    // attempt and reported "ran" while firing into an unmounted script. A stamped
+    // broadcast IS the rejection of that command; the settled test belongs only
+    // to unstamped host progress states.
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const run = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+
+    bridgeRejection(SCRIPT, "start", { scriptId: SCRIPT, status: "detached", triggers: [] }, CONSENT_REFUSAL);
+    await tick();
+
+    const outcome = await run;
+    expect(outcome.status, "a refused mount carrying a stale session is still a refusal").toBe(
+      "startRefused",
+    );
+    expect(outcome.message).toContain("SalesApp");
+    // Nothing was fired into the script that never mounted.
+    expect(bridgeCommands()).toEqual(["start"]);
+  });
+
+  it("keeps the attempt queue in step, so the NEXT Run is answered correctly", async () => {
+    // The second half of the same defect: a dropped rejection leaves its attempt
+    // outstanding, and the next gesture's refusal then answers the STALE attempt
+    // instead of the live one.
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const first = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    bridgeRejection(SCRIPT, "start", { scriptId: SCRIPT, status: "detached", triggers: [] }, CONSENT_REFUSAL);
+    await tick();
+    expect((await first).status).toBe("startRefused");
+    // The host deletes the session it announced and says so, as it does on every
+    // failed mount. Without this the mirror keeps the stale `detached` session
+    // and the NEXT Run stops at the trigger-list check with "not ready" — an
+    // unreachable state on the live wire, but the reason this line is here.
+    broadcast(SCRIPT, null);
+    await tick();
+
+    const second = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    await tick();
+
+    expect((await second).status, "the second Run must get its OWN answer").toBe("startRefused");
+    expect(bridgeCommands()).toEqual(["start", "start"]);
+  });
+
+  // ==========================================================================
+  // ONLY A SETTLED SESSION IS AN ANSWER (the critical defect)
+  // ==========================================================================
+  //
+  // `startDebugSessionOn` (app/src/api/scriptHost/host.ts) publishes the session
+  // with `status: "starting"` and calls `emitDebugState` BEFORE it awaits
+  // `mountWorker`. So a mount the gate refuses puts THREE things on the wire, in
+  // this order:
+  //     { status: "starting", triggers: [] }   the host announcing the attempt
+  //     null                                   the host deleting it again
+  //     { session: null, error, command }      the bridge relaying the throw
+  //
+  // Retiring the outstanding attempt on the FIRST of those consumed it, so the
+  // refusal that followed found nothing outstanding and was dropped — and Run,
+  // which had never seen a settled status either, fell through to
+  // `{ status: "ran" }`. The feature meant to stop a refused mount being reported
+  // as a run reported one itself, on the ONLY sequence the real host emits.
+  it("the host's pre-mount 'starting' state must not consume the attempt the refusal answers", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+
+    // Byte for byte the live sequence, in the live order.
+    broadcast(SCRIPT, { scriptId: SCRIPT, status: "starting", triggers: [] });
+    broadcast(SCRIPT, null);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+
+    const outcome = await pending;
+
+    expect(outcome.status).toBe("startRefused");
+    if (outcome.status === "startRefused") {
+      expect(outcome.message).toContain("SalesApp");
+      expect(outcome.message).toContain("Approve the application first");
+    }
+    // ...and nothing was fired into the script that was never mounted.
+    expect(bridgeCommands()).toEqual(["start"]);
+  });
+
+  // THE PROBE ABOVE IS THE LIVE SEQUENCE, BUT IT DOES NOT ISOLATE THE RULE: with
+  // the settled gate removed it still passes, because the refusal then arrives to
+  // an empty queue and is delivered to the Run still waiting (the other half of
+  // this fix). This one isolates it — a `starting` that retires an attempt does
+  // not merely lose an answer, it MISDELIVERS one.
+  //
+  // A Debug press is outstanding and nobody is waiting on it; a Run follows. The
+  // host announces the Debug mount (`starting`), then refuses it. If `starting`
+  // retires an attempt, the queue is off by one and the DEBUG PRESS'S refusal is
+  // stamped onto the RUN — whose own mount then comes up perfectly well and is
+  // reported to the author as never mounted, in a sentence addressed to somebody
+  // else's gesture.
+  it("a 'starting' state does not shift a refusal onto the NEXT gesture's start", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    // The Debug button: on the wire, unanswered, and nothing is waiting on it.
+    await fresh.startDebugSession(SCRIPT);
+    await tick();
+
+    const run = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+
+    // The host announces the Debug press's mount before awaiting it...
+    broadcast(SCRIPT, { scriptId: SCRIPT, status: "starting", triggers: [] });
+    // ...and then refuses it. This answers the DEBUG press.
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    await tick();
+    // The Run's own mount settles, with its run-target registered.
+    broadcast(SCRIPT, SETTLED);
+
+    expect(await run).toEqual({ status: "ran", functionName: "writeB1" });
+    expect(bridgeCommands()).toEqual(["start", "start", "fire"]);
+  });
+
+  // The same rule from the other side: a progress state must not CLEAR a refusal
+  // either. The host announces `starting` for the NEXT gesture while this Run is
+  // still holding the answer to its own.
+  it("a progress state does not erase a refusal that has already been recorded", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    // Somebody presses Debug; the host announces that mount before awaiting it.
+    broadcast(SCRIPT, { scriptId: SCRIPT, status: "starting", triggers: [] });
+
+    const outcome = await pending;
+
+    expect(outcome.status).toBe("startRefused");
+    if (outcome.status === "startRefused") expect(outcome.message).toContain("SalesApp");
+    expect(bridgeCommands()).toEqual(["start"]);
+  });
+
+  // ==========================================================================
+  // A REJECTION IS ONLY AN ANSWER TO THE COMMAND THAT REJECTED
+  // ==========================================================================
+  //
+  // The bridge's catch answers EVERY relayed command with `{ session, error }`,
+  // and `host.getDebugSession()` is null whenever the session has already ended —
+  // which is exactly when a `fire` or a `stop` rejects. That is byte for byte the
+  // shape of a refused mount, and it was stamped onto whatever start happened to
+  // be outstanding: a Run whose own mount then came up perfectly well was told
+  // the script had never been mounted, in somebody else's words.
+  for (const command of ["fire", "stop", "control", "breakpoints"]) {
+    it(`a rejected "${command}" is not this start's refusal`, async () => {
+      vi.resetModules();
+      const fresh = await import("../debugger");
+      fresh.setRemoteDebugTransport();
+      emitTauriEvent.mockClear();
+
+      const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+      await tick();
+      await tick();
+
+      // The debug panel's own button, on a session that had just auto-ended.
+      bridgeRejection(
+        SCRIPT,
+        command,
+        null,
+        '"method:writeA1" is not a trigger this script has registered',
+      );
+      await tick();
+      // ...and THIS Run's mount settles, with its run-target registered.
+      broadcast(SCRIPT, SETTLED);
+
+      expect(await pending).toEqual({ status: "ran", functionName: "writeB1" });
+      expect(bridgeCommands()).toEqual(["start", "fire"]);
+    });
+  }
+
+  // A REFUSAL WITH NOTHING OUTSTANDING IS STILL AN ANSWER while a Run is waiting.
+  // A settled broadcast for a session this Run did not open (another surface's
+  // Debug press on the same script) retires the oldest outstanding attempt, so
+  // the refusal that really did answer this Run's start arrives to an empty
+  // queue. Dropped there, Run reports a run that never happened — the same
+  // silence, reached by a different route.
+  it("a refusal that finds nothing outstanding still reaches the Run waiting on it", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+
+    // Both land before this Run's continuation can run, so the wait is still
+    // registered when the refusal arrives.
+    broadcast(SCRIPT, SETTLED);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+
+    const outcome = await pending;
+
+    expect(outcome.status).toBe("startRefused");
+    if (outcome.status === "startRefused") expect(outcome.message).toContain("SalesApp");
+    expect(bridgeCommands()).toEqual(["start"]);
+  });
+
+  // THE SLOW MIRROR, UNCHANGED. No broadcast at all is not evidence of anything:
+  // the wait ends on its backstop and the host — which is authoritative and
+  // refuses for itself — gets the fire.
+  it("a mirror that never answers still falls through to the host", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    vi.useFakeTimers();
+    try {
+      const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+      await vi.advanceTimersByTimeAsync(21000);
+      expect(await pending).toEqual({ status: "ran", functionName: "writeB1" });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(bridgeCommands()).toEqual(["start", "fire"]);
   });
 });
 
@@ -916,5 +1413,25 @@ describe("the main-window debug bridge", () => {
     expect(last?.error).toMatch(/not mounted/);
     // Not invented by the catch — the host deleted the session and says so.
     expect(last?.session).toBeNull();
+    // ...and it says WHICH command that is the answer to. Without this the
+    // editor window cannot tell a refused mount from a `fire` that rejected
+    // after the session ended: both are `{ session: null, error }`.
+    expect(last?.command).toBe("start");
+  });
+
+  // THE FIELD THE CATCH USED TO DROP. It has the command in hand — it is
+  // switching on it three lines up — and every rejection went out anonymous, so
+  // the editor window stamped a fire's rejection onto the start it was waiting
+  // for and reported a mount that succeeded as never-mounted.
+  it("names the command that failed, for every command it relays", async () => {
+    hostSession = null;
+    hostDebugFireTrigger.mockRejectedValueOnce(new Error("no session to fire into"));
+    hostStopDebugSession.mockRejectedValueOnce(new Error("nothing to stop"));
+
+    await sendFromEditor({ command: "fire", scriptId: SCRIPT, triggerId: "method:boom" });
+    expect(stateBroadcasts().pop()).toMatchObject({ command: "fire", session: null });
+
+    await sendFromEditor({ command: "stop", scriptId: SCRIPT });
+    expect(stateBroadcasts().pop()).toMatchObject({ command: "stop", session: null });
   });
 });

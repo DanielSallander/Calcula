@@ -20,6 +20,7 @@ import {
   onOpenPackage,
   type InspectorOpenPayload,
 } from "../../lib/inspectorWindowEvents";
+import { installInspectorFormPreviewClient } from "../../lib/inspectorFormPreview";
 import {
   ACCENT,
   BORDER,
@@ -219,6 +220,12 @@ export function ApplicationInspectorApp(): React.ReactElement {
       void openPromise.then((unlisten) => unlisten());
     };
   }, []);
+
+  // The other half of the cross-window wire: this window ASKS the main one to
+  // preview a form's layout (it has no Shell, so no renderer of its own), and
+  // the answer arrives here. Subscribed once for the window's lifetime, before
+  // any section can render a Preview layout button.
+  useEffect(() => installInspectorFormPreviewClient(), []);
 
   const handleBrowse = async () => {
     try {

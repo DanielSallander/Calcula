@@ -17,11 +17,18 @@ export type ScriptScope =
   | { type: "workbook" }
   | { type: "sheet"; name: string };
 
-/** Lightweight script summary (id + name, no source). */
+/** Lightweight script summary (no source, but WITH provenance).
+ *
+ *  `sourcePackage` is the .calp application the module arrived in, absent for
+ *  local ones. It travels on the ROW because every picker that lists modules
+ *  (the button-action dialog, the view-bookmark overlays) chooses from
+ *  summaries and never fetches the record — so a listing without it presents a
+ *  publisher's module as the user's own code. */
 export interface ScriptSummary {
   id: string;
   name: string;
   scope?: ScriptScope;
+  sourcePackage?: string;
 }
 
 /** A saved script module, including its source. */
@@ -489,7 +496,17 @@ export async function listWorkbookScriptRecords(): Promise<WorkbookScriptRecord[
         description: null,
         source: "",
         scope: summary.scope,
-        sourcePackage: null,
+        // THE SUMMARY ALREADY KNEW. `list_scripts` copies `source_package`
+        // verbatim onto every row (script_summary, app/src-tauri/src/scripting/
+        // commands.rs), so the listing is an independent authority on whose
+        // module this is — and it did NOT fail. Writing `null` here threw that
+        // answer away and downgraded a publisher's module to "no package" at the
+        // source, on nothing worse than a transient read error: every consumer
+        // that reads provenance off these records (the editor's badge, the code
+        // inventory, the macro library) then described a stranger's code as the
+        // user's own. The record's own `source_package` is the better answer
+        // when it loads; the summary's is the last known one when it does not.
+        sourcePackage: summary.sourcePackage ?? null,
         loadError: e instanceof Error ? e.message : String(e),
       });
     }

@@ -40,6 +40,10 @@ vi.mock("./scriptLibraries", () => ({
   listLibraryRealms: vi.fn(),
   readLockedSource: vi.fn(),
 }));
+vi.mock("./customFunctions", () => ({
+  loadPersistedLibrary: vi.fn(),
+  CUSTOM_FUNCTIONS_SCRIPT_ID: "__calcula_custom_functions",
+}));
 
 import { loadAllObjectScripts } from "./objectScriptBackend";
 import { listModuleScripts, getModuleScript } from "./moduleScriptBackend";
@@ -53,6 +57,7 @@ import {
   listLibraryRealms,
   readLockedSource,
 } from "./scriptLibraries";
+import { loadPersistedLibrary } from "./customFunctions";
 import {
   getWorkbookCodeUnits,
   summarizeCodeInventory,
@@ -77,6 +82,57 @@ beforeEach(() => {
   (listInstalledLibraries as any).mockResolvedValue([]);
   (listLibraryRealms as any).mockReturnValue([]);
   (readLockedSource as any).mockResolvedValue("");
+  vi.mocked(loadPersistedLibrary).mockResolvedValue(null);
+});
+
+// ---------------------------------------------------------------------------
+// THE CUSTOM FUNCTION LIBRARY IS MERGED, SO ITS PROVENANCE IS PER FUNCTION.
+//
+// The reserved `__calcula_custom_functions` record is ONE blob shared by the
+// subscriber and every application that ships functions:
+// `merge_custom_function_library` (app/src-tauri/src/calp_commands.rs) stamps
+// `sourcePackage` on each function it folds in. The inventory used to report the
+// whole library as `provenance: "local"`, which hid a publisher's UDF inside the
+// user's own code on the one panel a user consults to ask whose code this is.
+// ---------------------------------------------------------------------------
+
+describe("custom-function provenance", () => {
+  beforeEach(() => {
+    vi.mocked(loadPersistedLibrary).mockResolvedValue({
+      capabilities: ["bi.query"],
+      functions: [
+        { name: "MYRATE", params: ["x"], body: "return x * 2;" },
+        {
+          name: "VENDORRATE",
+          params: ["x"],
+          body: "return x * 3;",
+          sourcePackage: "Acme Finance Pack",
+        },
+        { name: "BLANKSTAMP", params: [], body: "return 1;", sourcePackage: "   " },
+      ],
+    });
+  });
+
+  it("reports a merged package function as distributed, and names the application", async () => {
+    const units = await getWorkbookCodeUnits();
+    const vendor = units.find((u) => u.name.startsWith("VENDORRATE"))!;
+    expect(vendor.provenance).toBe("distributed");
+    expect(vendor.sourcePackage).toBe("Acme Finance Pack");
+  });
+
+  it("leaves the subscriber's own function local", async () => {
+    const units = await getWorkbookCodeUnits();
+    const mine = units.find((u) => u.name.startsWith("MYRATE"))!;
+    expect(mine.provenance).toBe("local");
+    expect(mine.sourcePackage).toBeNull();
+  });
+
+  it("a blank stamp is nothing stamped, not an unnamed package", async () => {
+    const units = await getWorkbookCodeUnits();
+    const blank = units.find((u) => u.name.startsWith("BLANKSTAMP"))!;
+    expect(blank.provenance).toBe("local");
+    expect(blank.sourcePackage).toBeNull();
+  });
 });
 
 // ===========================================================================

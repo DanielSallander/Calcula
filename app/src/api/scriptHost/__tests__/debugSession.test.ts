@@ -43,6 +43,8 @@ interface StoredModule {
   name: string;
   description: string | null;
   source: string;
+  /** The `.calp` this module was pulled from; absent for the user's own code. */
+  sourcePackage?: string | null;
 }
 const moduleStore = new Map<string, StoredModule>();
 const getWorkbookScript = vi.fn(async (id: string) => {
@@ -1022,6 +1024,74 @@ describe("debugging a module macro that has never run", () => {
     // ...and a Stop returns it to a normal, uninstrumented mount.
     await host.hostStopDebugSession(DEFINITION.id);
     expect(host.hostIsMounted(DEFINITION.id)).toBe(true);
+  });
+});
+
+// ============================================================================
+// A DEBUG SESSION IS NOT A WAY TO PROMOTE A PUBLISHER'S MODULE.
+//
+// A `.calp` may ship module scripts; `core/calp/src/pull.rs` stamps
+// `source_package` on each one as it materializes them, and the subscriber can
+// open any of them in the Object Script Editor. This path used to hard-code
+// BOTH `accessLevel: "unlocked"` and `provenance: "local"` — a strictly easier
+// escalation than the Run button, because a debug mount is a live realm the
+// user then drives by hand.
+// ============================================================================
+
+/** The same recorded-macro shape, but pulled out of an application. */
+const DISTRIBUTED_MODULE: StoredModule = {
+  ...MACRO_MODULE,
+  id: "macro-vendor-close",
+  name: "Vendor close",
+  sourcePackage: "Acme Finance Pack",
+};
+
+describe("debugging a module that arrived in an application", () => {
+  beforeEach(async () => {
+    resetFakeWorker();
+    globalScope.Worker = FakeWorker as unknown as typeof Worker;
+    moduleStore.clear();
+    moduleStore.set(DISTRIBUTED_MODULE.id, DISTRIBUTED_MODULE);
+    getWorkbookScript.mockClear();
+    vi.resetModules();
+    host = await import("../host");
+  });
+
+  afterEach(() => {
+    host.hostResetAll();
+    resetFakeWorker();
+    globalScope.Worker = originalWorker;
+  });
+
+  function mountSpec(): {
+    tier: string;
+    packageInfo?: { name: string; provenance: string } | undefined;
+  } {
+    const msg = FakeWorker.last!.received.find((m) => m.t === "mount") as unknown as {
+      spec: { tier: string; packageInfo?: { name: string; provenance: string } };
+    };
+    return msg.spec;
+  }
+
+  it("mounts it RESTRICTED — the debugger does not hand out the top tier", async () => {
+    await host.hostStartModuleScriptDebugSession(DISTRIBUTED_MODULE.id, [2]);
+    expect(mountSpec().tier).toBe("restricted");
+  });
+
+  it("mounts it under the PUBLISHER's provenance, not the user's", async () => {
+    await host.hostStartModuleScriptDebugSession(DISTRIBUTED_MODULE.id, [2]);
+    expect(mountSpec().packageInfo).toEqual({
+      name: "Acme Finance Pack",
+      version: null,
+      provenance: "distributed",
+    });
+  });
+
+  it("a LOCAL module in the same store still debugs unlocked and local", async () => {
+    moduleStore.set(MACRO_MODULE.id, MACRO_MODULE);
+    await host.hostStartModuleScriptDebugSession(MACRO_MODULE.id, [2]);
+    expect(mountSpec().tier).toBe("unlocked");
+    expect(mountSpec().packageInfo).toBeUndefined();
   });
 });
 

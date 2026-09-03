@@ -484,9 +484,18 @@ describe("rule 5 — a refresh that changes the calling script cannot run it", (
 
   it("the mount path is the one that re-checks, and the gateway is not in it", () => {
     // Rust returns DATA. The renderer's ScriptableObjects extension is the only
-    // thing that mounts, and it consults isConsentCurrent first.
+    // thing that mounts, and it consults the freshness check first.
+    //
+    // That check is now `isPackageConsentCurrent`, one level of indirection
+    // away: an application's grant covers its object scripts AND the MODULE
+    // scripts (macros) it shipped, which are held to the hash question alone
+    // (lib/packageConsentSet.ts). The property this test defends is unchanged —
+    // the mount path re-checks — so it follows the indirection rather than
+    // relaxing to a name-free assertion, and still ends at `isConsentCurrent`.
     const objectScripts = repoFile("../../../../extensions/ScriptableObjects/index.ts");
-    expect(objectScripts).toContain("isConsentCurrent");
+    const consentSet = repoFile("../../../../extensions/ScriptableObjects/lib/packageConsentSet.ts");
+    expect(objectScripts).toContain("isPackageConsentCurrent");
+    expect(consentSet).toContain("isConsentCurrent");
     expect(objectScripts).toContain("getChangedScripts");
     const production = gatewaySrc.split("#[cfg(test)]")[0];
     expect(production).not.toContain("isConsentCurrent");

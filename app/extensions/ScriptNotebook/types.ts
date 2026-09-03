@@ -45,11 +45,17 @@ export interface NotebookCell {
   executionIndex: number | null;
 }
 
-/** Lightweight notebook summary for listing. */
+/** Lightweight notebook summary for listing.
+ *
+ *  `sourcePackage` mirrors the document's stamp (Rust `NotebookSummary`): the
+ *  notebook picker only ever sees summaries, so without it a notebook that
+ *  arrived inside a distributed application is indistinguishable from one the
+ *  user wrote. */
 export interface NotebookSummary {
   id: string;
   name: string;
   cellCount: number;
+  sourcePackage?: string;
 }
 
 /** Request to run a single notebook cell. */

@@ -1438,6 +1438,29 @@ describe("a library call is capped by the CALLER's grants, not its declarations"
     await expect(consumer.imports.q.runQuery()).resolves.toBe("rows");
     expect(promptLog).toEqual([]);
   });
+
+  it("...and an application NAMED `local` is distributed here too", async () => {
+    // THE ORIGIN-FORGERY REGRESSION, at a live JIT gate. `handle.origin` was a
+    // string in which "local" was the sentinel for workbook-authored code and
+    // every other value was the publisher's chosen application name, so
+    // `handle.origin !== "local"` was FALSE for this handle: the gate fell
+    // through, the user was prompted, and answering "Allow" handed a distributed
+    // script a capability that package consent had never recorded.
+    await installQuery();
+    const consumer = await mountConsumer({
+      id: "named-local",
+      source: USES_QUERY,
+      capabilities: ["bi.query"],
+      provenance: "distributed",
+      packageName: "local",
+    });
+    expect(consumer.handle.origin).toEqual({ kind: "package", name: "local" });
+    await expect(consumer.imports.q.runQuery()).rejects.toMatchObject({
+      code: "CapabilityRequired",
+      capability: "bi.query",
+    });
+    expect(promptLog).toEqual([]);
+  });
 });
 
 describe("net.fetch through a library is capped per ORIGIN", () => {

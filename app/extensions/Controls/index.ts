@@ -9,8 +9,6 @@ import type { DeclaredProperty } from "@api/scriptableObjects";
 import {
   ExtensionRegistry,
   AppEvents,
-  listWorkbookScripts,
-  getWorkbookScript,
   runWorkbookScript,
   IconControls,
   IconButton,
@@ -52,6 +50,10 @@ import {
   overlayGetColHeaderHeight,
   overlaySheetToCanvas,
 } from "@api/gridOverlays";
+import {
+  loadButtonScriptModules,
+  planInlineButtonRun,
+} from "../_shared/lib/buttonScriptRun";
 import { drawButton } from "./Button/rendering";
 import {
   buttonStyleInterceptor,
@@ -60,6 +62,7 @@ import {
   setCurrentSelection,
   getCurrentSelection,
   refreshStyleCache,
+  reportUnavailableButtonModules,
   buttonStyleIndices,
 } from "./Button/interceptors";
 import {
@@ -2525,81 +2528,6 @@ async function updateFloatingBoundsFromMetadata(
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
-/**
- * Sanitize a script module name into a valid JavaScript identifier.
- */
-function sanitizeScriptName(name: string): string {
-  let sanitized = name.replace(/[^a-zA-Z0-9_]/g, "_");
-  if (sanitized && /^[0-9]/.test(sanitized)) {
-    sanitized = "_" + sanitized;
-  }
-  return sanitized || "_unnamed";
-}
-
-/** Module ids already reported as unusable, so a click does not re-toast. */
-const reportedBadModules = new Set<string>();
-
-/**
- * Build a preamble that wraps all script modules as callable functions.
- * Each module's source is wrapped as: function ModuleName() { ...source... }
- *
- * ONE BAD MODULE MUST NOT BREAK EVERY BUTTON. The preamble is CONCATENATED, so
- * a module that does not parse as a function body — a hand-edited script with a
- * top-level `await`, a half-finished edit — turns the whole preamble into a
- * syntax error and every inline button in the workbook stops working with a
- * message about a line the user never wrote. Each module is therefore compiled
- * on its own first; one that cannot be is left out and REPORTED (once), instead
- * of quietly taking the others down with it.
- */
-async function buildScriptPreamble(): Promise<string> {
-  // Script runtime via the @api door — no longer reaches into the ScriptEditor extension.
-  const summaries = await listWorkbookScripts();
-  if (summaries.length === 0) return "";
-
-  const parts: string[] = [];
-  for (const summary of summaries) {
-    let script: { name: string; source: string } | null = null;
-    try {
-      script = await getWorkbookScript(summary.id);
-    } catch (e) {
-      reportBadModule(
-        summary.id,
-        summary.name,
-        `it could not be read (${e instanceof Error ? e.message : String(e)})`,
-      );
-      continue;
-    }
-    if (!script || !script.source) continue;
-
-    const fnName = sanitizeScriptName(script.name);
-    const wrapped = `function ${fnName}() {\n${script.source}\n}`;
-    try {
-      // eslint-disable-next-line no-new-func
-      new Function(wrapped);
-    } catch (e) {
-      reportBadModule(
-        summary.id,
-        script.name,
-        `it is not valid on the workbook script runtime (${e instanceof Error ? e.message : String(e)})`,
-      );
-      continue;
-    }
-    parts.push(wrapped);
-  }
-  return parts.length > 0 ? parts.join("\n") + "\n" : "";
-}
-
-function reportBadModule(id: string, name: string, why: string): void {
-  console.warn(`[Controls] Script module "${name}" excluded from buttons: ${why}`);
-  if (reportedBadModules.has(id)) return;
-  reportedBadModules.add(id);
-  showToast(
-    `The script module "${name}" is not available to buttons because ${why}. ` +
-      "Buttons that call it will report that it is not defined.",
-    { type: "warning" },
-  );
-}
-
 /** Last time the Design-Mode explanation was shown (throttle, ms since epoch). */
 let lastDesignModeNoticeAt = 0;
 
@@ -2654,10 +2582,18 @@ async function executeFloatingButtonAction(
   const onSelect = metadata.properties["onSelect"];
   if (!onSelect || !onSelect.value) return false;
 
-  // Prepend script modules as callable functions, then append the OnSelect code
-  const preamble = await buildScriptPreamble();
-  const fullSource = preamble + onSelect.value;
-  const result = await runWorkbookScript(fullSource, "button_onSelect.js");
+  // ONE RULE, shared with the in-cell button path and the button cell type:
+  // the user's OWN modules are prepended as callable functions; a module that
+  // arrived in an application is never spliced into anything, and an inline
+  // action that is exactly an invocation of one runs that module's stored source
+  // unchanged so the Rust consent gate can rule on it.
+  // See extensions/_shared/lib/buttonScriptRun.ts.
+  const plan = planInlineButtonRun(onSelect.value, await loadButtonScriptModules());
+  if (plan.kind === "refuse") {
+    throw new Error(plan.message);
+  }
+  reportUnavailableButtonModules(plan.unavailable);
+  const result = await runWorkbookScript(plan.source, plan.filename);
   if (result.type === "error") {
     throw new Error(result.message);
   }

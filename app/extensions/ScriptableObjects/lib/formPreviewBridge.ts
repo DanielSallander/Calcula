@@ -1,41 +1,26 @@
 //! FILENAME: app/extensions/ScriptableObjects/lib/formPreviewBridge.ts
 // PURPOSE: "Preview form" — paint a FORM script's layout from the code on
 //          screen without saving, mounting, writing or auditing anything.
-// CONTEXT: 2026-09-03 (TypeScript Forms, release one). Modelled on
-//          aiEditBridge.ts / aiEditClient.ts: the Object Script Editor is a
-//          separate Tauri window that activates no extensions, and both halves
-//          of a preview belong to the MAIN window — the preview realm snapshots
-//          the live workbook there, and the modal slot a form claims is that
-//          window's. So the editor compiles its buffer and sends the JavaScript
-//          over the Tauri event bridge; this, running in the main window, runs
-//          it and paints the result. Results are replayed on EDITOR_READY, the
-//          same "re-delivery is safe" rule the AI-edit bridge follows.
+// CONTEXT: 2026-09-03 (TypeScript Forms, release one; the shared-core split is
+//          the 2026-09-03 follow-up). Modelled on aiEditBridge.ts /
+//          aiEditClient.ts: the Object Script Editor is a separate Tauri window
+//          that activates no extensions, and both halves of a preview belong to
+//          the MAIN window — the preview realm snapshots the live workbook
+//          there, and the modal slot a form claims is that window's. So the
+//          editor compiles its buffer and sends the JavaScript over the Tauri
+//          event bridge; this, running in the main window, runs it and paints
+//          the result. Results are replayed on EDITOR_READY, the same
+//          "re-delivery is safe" rule the AI-edit bridge follows.
 //
-//          WHAT A PREVIEW IS, precisely. The source runs in the real preview
-//          rung (`previewObjectScript`): the real Worker realm, the real
-//          broker policy, a COPY of the active sheet as the backend. Only
-//          `setup` runs — no hook is fired — because the layout is whatever
-//          `form.define` declared during setup, and a handler fired with a
-//          synthesized payload could only add ways for the run to be declined.
-//          `form.show` is refused in that realm by design (it carries
-//          `ui.dialog`, and the preview declares nothing); the rung exempts
-//          that one refusal and hands back the captured layout instead.
-//
-//          BOUND WIDGETS ARE SEEDED FROM THE SAME SNAPSHOT THE RUN USED. The
-//          bindings are not known until the layout has been captured, so the
-//          run happens twice: once to learn the layout, once more asking the
-//          rung to read back exactly the cells the layout binds. A preview
-//          never reads the live grid — every seed is a fact about the copy the
-//          script itself ran against. Only the active sheet is copied, so a
-//          binding to another sheet, a defined name or a control value is shown
-//          unbound, with that reason on the widget.
-//
-//          NOTHING IS WRITTEN. The dialog opens in preview mode (the renderer
-//          turns Submit into "What would be written" and never emits a submit),
-//          the session deps below forward nothing to any worker, and the
-//          preview identity `preview:<scriptId>` is cleaned out of both
-//          registries — layout, show bucket, dismissal streak — the moment the
-//          dialog closes, so three closed previews can never mute the author.
+//          WHAT THIS FILE IS, AND WHAT IT IS NOT. Running the draft, seeding
+//          its widgets and opening the renderer in preview mode is
+//          `previewFormLayout` (`@api`, app/src/api/scriptFormPreview.ts) — the
+//          package inspector needs the identical procedure, and a copy of it
+//          here would be a second set of seeding rules that drifts on the
+//          owner's first change. What is left here is what only this surface
+//          has: the Tauri wire between the editor window and the main one, the
+//          per-script status the editor renders beside the action, and the
+//          English those statuses are written in.
 //
 //          EVERY FAILURE PATH ANSWERS. "No layout defined", a declined run, a
 //          held modal slot and a thrown error all become a RESULT the editor
@@ -44,20 +29,8 @@
 
 import { emitTauriEvent, listenTauriEvent } from "@api/backend";
 import type { UnlistenFn } from "@api/backend";
-import {
-  defineScriptForm,
-  previewObjectScript,
-  revokeScriptDialogs,
-  revokeScriptForms,
-  showScriptForm,
-} from "@api";
-import type { FormSeed, FormSessionDeps, FormSpec, WorkerPreviewReport } from "@api";
-import {
-  collectFormBindings,
-  parseFormBinding,
-  seedFromCell,
-} from "@api/scriptHost/scriptFormBindings";
-import { shapeOf } from "@api/scriptHost/scriptPreview/grid";
+import { previewFormLayout, previewScriptId } from "@api";
+import type { FormLayoutPreviewOutcome, WorkerPreviewReport } from "@api";
 
 // ============================================================================
 // Wire (Editor <-> Main)
@@ -143,117 +116,6 @@ export function onFormPreviewDismiss(
 }
 
 // ============================================================================
-// Seeding (pure): which cells to read back, and what each widget starts with
-// ============================================================================
-
-/** The reason on every widget a preview cannot bind. Tests match on it. */
-export const PREVIEW_UNRESOLVED_REASON = "not resolved in a preview";
-
-export interface FormPreviewSeedPlan {
-  /** Distinct same-sheet cells to ask the rung to read back, in binding order. */
-  cells: Array<{ row: number; col: number }>;
-  /** Widget name -> the copied cell its seed comes from. */
-  resolved: Map<string, { widgetType: string; row: number; col: number }>;
-  /** Widget name -> why it stays unbound in a preview. */
-  unresolved: Map<string, { widgetType: string; reason: string }>;
-}
-
-/**
- * Decide, from a captured layout, which bindings a preview can honour.
- *
- * Only a single cell on the ACTIVE sheet resolves: that is the sheet the rung
- * copies. A cell on another sheet, a defined name (which may land anywhere)
- * and a control value are all outside the copy, so they are declared unbound
- * here rather than answered from the live workbook — a preview must never read
- * what the run did not see.
- */
-export function planFormPreviewSeeds(spec: FormSpec): FormPreviewSeedPlan {
-  const cells: Array<{ row: number; col: number }> = [];
-  const seen = new Set<string>();
-  const resolved = new Map<string, { widgetType: string; row: number; col: number }>();
-  const unresolved = new Map<string, { widgetType: string; reason: string }>();
-  for (const decl of collectFormBindings(spec)) {
-    let parsed: ReturnType<typeof parseFormBinding>;
-    try {
-      parsed = parseFormBinding(decl.bind);
-    } catch (e) {
-      unresolved.set(decl.name, {
-        widgetType: decl.widgetType,
-        reason: `${describeError(e)} — ${PREVIEW_UNRESOLVED_REASON}`,
-      });
-      continue;
-    }
-    // `sheetRef` null means "the sheet the form was shown on" — the only sheet
-    // the rung copies. A NAME and an INDEX are both outside that copy, and a
-    // number here is a real case (`{ cell: "B2", sheet: 1 }`), so neither is
-    // resolved and neither is stringified into a fake sheet name.
-    if (parsed.kind === "cell" && parsed.sheetRef === null) {
-      resolved.set(decl.name, { widgetType: decl.widgetType, row: parsed.row, col: parsed.col });
-      const key = `${parsed.row},${parsed.col}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        cells.push({ row: parsed.row, col: parsed.col });
-      }
-      continue;
-    }
-    const target =
-      parsed.kind === "cell"
-        ? typeof parsed.sheetRef === "number"
-          ? `a cell on sheet index ${parsed.sheetRef}`
-          : `a cell on sheet "${parsed.sheetRef}"`
-        : parsed.kind === "name"
-          ? `the defined name "${parsed.name}"`
-          : `the control "${parsed.name}"`;
-    unresolved.set(decl.name, {
-      widgetType: decl.widgetType,
-      reason: `Bound to ${target}: ${PREVIEW_UNRESOLVED_REASON} (only the active sheet is copied)`,
-    });
-  }
-  return { cells, resolved, unresolved };
-}
-
-/**
- * Turn the rung's read-back (input strings from the copy the run used) into
- * widget seeds. Typed through the same `seedFromCell` the real host uses, so a
- * number widget bound to "42" edits the NUMBER 42. A formula cell is shown
- * read-only with its formula text: nothing here evaluates, and a guessed value
- * would be a lie in the one direction the author cannot check.
- */
-export function buildFormPreviewSeeds(
-  plan: FormPreviewSeedPlan,
-  readBack: ReadonlyArray<{ row: number; col: number; value: string }>,
-): Record<string, FormSeed> {
-  const inputs = new Map<string, string>();
-  for (const cell of readBack) inputs.set(`${cell.row},${cell.col}`, cell.value);
-  const seeds: Record<string, FormSeed> = {};
-  for (const [name, target] of plan.resolved) {
-    const input = inputs.get(`${target.row},${target.col}`);
-    if (input === undefined) {
-      // The layout changed between the two runs and this cell was never asked
-      // for. Unbound, and said so — never a seed from anywhere else.
-      seeds[name] = {
-        value: null,
-        readOnly: true,
-        reason: `Its cell was not read back by this run — ${PREVIEW_UNRESOLVED_REASON}`,
-      };
-      continue;
-    }
-    const shape = shapeOf(input);
-    const seed = seedFromCell(target.widgetType, shape);
-    if (shape.formula !== undefined) {
-      seed.display = shape.formula;
-      seed.readOnly = true;
-      seed.reason = "This cell holds a formula; a preview does not compute its value";
-    }
-    seeds[name] = seed;
-  }
-  for (const [name, entry] of plan.unresolved) {
-    seeds[name] = { value: null, readOnly: true, reason: entry.reason };
-  }
-  return seeds;
-}
-
-// ============================================================================
 // Messages (pure)
 // ============================================================================
 
@@ -261,35 +123,51 @@ function describeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** The rung's own "[preview] ..." line about the layout, without the tag. */
-function layoutNote(report: WorkerPreviewReport): string | undefined {
-  const line = report.output.find((l) => l.startsWith("[preview]") && l.includes("layout"));
-  return line?.replace(/^\[preview\]\s*/, "");
+/** The script's own error, in parentheses, when the run also failed. */
+function alsoFailed(report: WorkerPreviewReport | undefined): string {
+  return report && !report.ok && report.error ? ` (${report.error})` : "";
 }
 
-export function describeNoLayout(report: WorkerPreviewReport): string {
-  const note = layoutNote(report) ?? "the script never called form.define during setup";
-  const failure = !report.ok && report.error ? ` (${report.error})` : "";
-  return `No layout defined — ${note}${failure}.`;
-}
-
-export function describeDeclined(report: WorkerPreviewReport): string {
-  return `No preview: ${report.declinedReason ?? "this script cannot be previewed"}.`;
-}
-
-export function describeShown(plan: FormPreviewSeedPlan, report: WorkerPreviewReport): string {
-  const bound = plan.resolved.size + plan.unresolved.size;
+/**
+ * The status line for one outcome.
+ *
+ * The counts are said out loud because an author looking at an unbound widget
+ * needs to know whether the preview COULD not reach it or the layout never
+ * asked it to: a silent empty dropdown reads as "my range is wrong".
+ */
+export function describeFormPreviewOutcome(outcome: FormLayoutPreviewOutcome): string {
+  if (outcome.status === "declined") {
+    return `No preview: ${outcome.reason ?? "this script cannot be previewed"}.`;
+  }
+  if (outcome.status === "noLayout") {
+    const note = outcome.reason ?? "the script never called form.define during setup";
+    return `No layout defined — ${note}${alsoFailed(outcome.report)}.`;
+  }
+  if (outcome.status === "error") {
+    return `The preview could not run: ${outcome.reason ?? "unknown error"}`;
+  }
+  if (outcome.status === "refused") {
+    return `The preview could not open: ${outcome.reason ?? "the registry refused it"}.`;
+  }
+  const bound = outcome.seeded.length + outcome.controls.length + outcome.unresolved.length;
   const parts = ["Preview open in the main window."];
   if (bound > 0) {
     parts.push(
-      `${plan.resolved.size} of ${bound} bound widget${bound === 1 ? "" : "s"} seeded from a copy of the active sheet.`,
+      `${outcome.seeded.length} of ${bound} bound widget${bound === 1 ? "" : "s"} seeded from a copy of the active sheet.`,
     );
   }
-  if (plan.unresolved.size > 0) {
-    parts.push(`Not resolved in a preview: ${[...plan.unresolved.keys()].join(", ")}.`);
+  if (outcome.controls.length > 0) {
+    parts.push(`Read from live control values: ${outcome.controls.join(", ")}.`);
   }
-  if (!report.ok && report.error) {
-    parts.push(`The script also reported: ${report.error}.`);
+  if (outcome.sources.length > 0) {
+    parts.push(`Filled from a range in that copy: ${outcome.sources.join(", ")}.`);
+  }
+  const stuck = [...outcome.unresolved, ...outcome.unresolvedSources];
+  if (stuck.length > 0) {
+    parts.push(`Not resolved in a preview: ${stuck.join(", ")}.`);
+  }
+  if (outcome.report && !outcome.report.ok && outcome.report.error) {
+    parts.push(`The script also reported: ${outcome.report.error}.`);
   }
   return parts.join(" ");
 }
@@ -297,34 +175,6 @@ export function describeShown(plan: FormPreviewSeedPlan, report: WorkerPreviewRe
 // ============================================================================
 // The run (main window)
 // ============================================================================
-
-/** The preview identity: a script id no real script can have. */
-export function previewScriptId(scriptId: string): string {
-  return `preview:${scriptId}`;
-}
-
-/**
- * Drop everything the preview identity holds.
- *
- * BOTH registries, always. `scriptForms` holds the layout and the show bucket;
- * `scriptDialogs` holds the dismissal streak, and a closed preview counts as a
- * dismissal there — three of them would mute the preview identity for the rest
- * of the session and every later preview would close itself in silence.
- */
-function releasePreviewIdentity(previewId: string): void {
-  revokeScriptForms(previewId);
-  revokeScriptDialogs(previewId);
-}
-
-/**
- * A report that cannot be painted, with the outcome to say so — or null when
- * the report carries a layout.
- */
-function judge(report: WorkerPreviewReport): { outcome: FormPreviewOutcome; message: string } | null {
-  if (!report.applicable) return { outcome: "declined", message: describeDeclined(report) };
-  if (report.formLayout === undefined) return { outcome: "noLayout", message: describeNoLayout(report) };
-  return null;
-}
 
 /**
  * Run one preview to completion, reporting each step through `report`.
@@ -343,113 +193,41 @@ export async function runFormPreview(
   const reply = (outcome: FormPreviewOutcome, message: string): void => {
     report({ requestId: req.requestId, scriptId: req.scriptId, outcome, message });
   };
-  const preview = (readBack?: Array<{ row: number; col: number }>): Promise<WorkerPreviewReport> =>
-    previewObjectScript({
-      source: req.source,
-      objectType: "form",
-      // Setup only: the layout is what `form.define` declared there. A hook
-      // fired with a synthesized payload could only add ways to be declined.
-      event: [],
-      eventOptional: true,
-      ...(readBack ? { readBack } : {}),
-    });
-
-  let first: WorkerPreviewReport;
+  let shownAcked = false;
+  let outcome: FormLayoutPreviewOutcome;
   try {
-    first = await preview();
+    outcome = await previewFormLayout({
+      source: req.source,
+      scriptName: req.scriptName,
+      // The author's own buffer, in the author's own workbook. Structural, so
+      // no name anywhere can select or spoof this phrasing.
+      origin: { kind: "local" },
+      // The author is previewing their OWN draft in their own editor, so a
+      // `{ control }` binding is read from the live Controls pane rather than
+      // shown unbound. It is a read-only seed either way — see readControlSeeds
+      // for why this is the trusted path and not the audited one.
+      readControls: true,
+      // A stable identity per script, so a second preview REPLACES the first
+      // instead of colliding with it in the shared modal slot.
+      previewId: previewScriptId(req.scriptId),
+      onClosed: () => {
+        // A close before "shown" is a refusal `previewFormLayout` reports itself.
+        if (shownAcked) reply("closed", "");
+      },
+    });
   } catch (e) {
     reply("error", `The preview could not run: ${describeError(e)}`);
     return;
   }
-  const firstVerdict = judge(first);
-  if (firstVerdict) {
-    reply(firstVerdict.outcome, firstVerdict.message);
+  const message = describeFormPreviewOutcome(outcome);
+  if (!outcome.shown) {
+    // Every core status is also a wire outcome; only "closed" is this file's
+    // own, and it is reported from `onClosed` above.
+    reply(outcome.status, message);
     return;
   }
-
-  // PASS TWO. The bindings were unknown before the layout existed, so the run
-  // repeats with a read-back of exactly the cells the layout binds. Every seed
-  // then comes from the copy THAT run used — the layout is taken from the same
-  // run for the same reason.
-  let layout = first.formLayout as FormSpec;
-  let plan = planFormPreviewSeeds(layout);
-  let last = first;
-  let readBack: Array<{ row: number; col: number; value: string }> = [];
-  if (plan.cells.length > 0) {
-    let second: WorkerPreviewReport;
-    try {
-      second = await preview(plan.cells);
-    } catch (e) {
-      reply("error", `The preview could not run: ${describeError(e)}`);
-      return;
-    }
-    const secondVerdict = judge(second);
-    if (secondVerdict) {
-      reply(secondVerdict.outcome, secondVerdict.message);
-      return;
-    }
-    layout = second.formLayout as FormSpec;
-    plan = planFormPreviewSeeds(layout);
-    last = second;
-    readBack = second.readBack;
-  }
-  const seeds = buildFormPreviewSeeds(plan, readBack);
-
-  // SHOW, under the preview identity. The registry claims the shared modal
-  // slot (so a preview cannot coexist with a real script's dialog), keeps no
-  // audit row, and the renderer paints it labelled as a preview. The deps
-  // reach no worker: there is none.
-  const previewId = previewScriptId(req.scriptId);
-  // A SECOND preview REPLACES the first rather than being refused by it. The
-  // modal slot is one per script, so an already-open preview of this same
-  // script makes the show below throw "this script already has a dialog open"
-  // — and the cleanup for that refusal revokes the identity anyway, so the
-  // author would lose the open form AND be told the preview failed. Pressing
-  // "Preview form" means "show me the code as it is now", so the previous one
-  // is closed deliberately, before the slot is claimed. The stale "closed"
-  // that produces carries the SUPERSEDED request id, which both editors'
-  // state machines drop.
-  releasePreviewIdentity(previewId);
-  defineScriptForm(previewId, layout);
-  let shownAcked = false;
-  let released = false;
-  const release = (): void => {
-    if (released) return;
-    released = true;
-    releasePreviewIdentity(previewId);
-  };
-  const deps: FormSessionDeps = {
-    forward: () => {},
-    mirror: () => {},
-    relaySubmit: () => Promise.resolve(null),
-    closed: () => {
-      release();
-      // A close before "shown" is a refusal the show() below reports itself.
-      if (shownAcked) reply("closed", "");
-    },
-    suspendDeadlines: () => {},
-    resumeDeadlines: () => {},
-  };
-  try {
-    const shown = await showScriptForm({
-      scriptId: previewId,
-      scriptName: req.scriptName,
-      scriptOrigin: "local",
-      seeds,
-      preview: true,
-      deps,
-    });
-    if (shown.closed) {
-      release();
-      reply("refused", "The preview was refused: this preview's dialogs are muted after repeated dismissals.");
-      return;
-    }
-    shownAcked = true;
-    reply("shown", describeShown(plan, last));
-  } catch (e) {
-    release();
-    reply("refused", `The preview could not open: ${describeError(e)}`);
-  }
+  shownAcked = true;
+  reply("shown", message);
 }
 
 // ============================================================================

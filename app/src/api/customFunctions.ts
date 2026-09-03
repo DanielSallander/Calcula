@@ -17,10 +17,31 @@
 // `sourceDigest` on. Those functions are somebody else's CODE, so they are
 // consent-gated here before anything mounts — see the "distributed-package
 // consent gate" section below.
+//
+// ...AND THEY DO NOT MOUNT AS YOURS. The record is one merged blob, but a REALM
+// is not: each trust origin present in the library gets its own worker realm,
+// mounted with the provenance its functions' `sourcePackage` stamp derives
+// (`planCustomFunctionRealms` / `mountRealm`). Until that split existed, an
+// approved publisher function was mounted at LOCAL provenance under the
+// subscriber's own broker script id, which meant it was same-trust-origin with
+// the user's own scripts, it took the LOCAL just-in-time capability prompt
+// instead of application consent, and it borrowed whatever the user had already
+// granted their own functions — the confused deputy the consent gate below
+// exists to refuse, re-entered one layer down. The sibling libraries that ship
+// distributed code already had this right (chartTransformScripts.rawInstall and
+// chartMarkScripts.rawInstall both mount `provenance: "distributed"` with the
+// package name); this one is per-FUNCTION because its record is merged per
+// function.
 
 import { invoke } from "@tauri-apps/api/core";
 import { registerFunction, UDF_ERROR_KEY } from "./formulaFunctions";
 import { hostMountScript, hostUnmountScript } from "./scriptHost/host";
+import { applyConsentedCapabilities, revokeScriptGrants } from "./scriptHost/capabilities";
+import {
+  mountProvenanceForOrigin,
+  scriptOriginForStoredRecord,
+  type MountOrigin,
+} from "./scriptHost/scriptOrigin";
 import { callExposedMethod } from "./scriptableObjects";
 import type { CapabilityId } from "./scriptHost/capabilityIds";
 import { linkScript, type LibraryUseDeclaration } from "./scriptLibraries";
@@ -73,23 +94,42 @@ export interface CustomFunctionLibrary {
 }
 
 const LIB_SCRIPT_ID = "__calcula_custom_functions__";
-/** The broker scriptId the custom-function library mounts under — exported so the
- *  code inventory (transparency panel) can join live tier/grant state for the
- *  formula-udf surface. */
+/** The broker scriptId the SUBSCRIBER'S OWN custom functions mount under —
+ *  exported so the code inventory (transparency panel) can join live tier/grant
+ *  state for the formula-udf surface. Functions that arrived in an application
+ *  mount under `customFunctionScriptId(theirPackage)` instead, which is the
+ *  whole point: their grants are not this id's grants. */
 export const CUSTOM_FUNCTIONS_SCRIPT_ID = LIB_SCRIPT_ID;
+
+/**
+ * The broker script id the functions from `sourcePackage` mount under — the
+ * library's own id for the subscriber's code, a per-application id for anybody
+ * else's.
+ *
+ * A distinct id is not cosmetic. `getGrantSet` (capabilities.ts) is keyed by it,
+ * so it is what decides whose capability grants a body runs with; the persisted
+ * grant store and the audit ring are keyed by it too. Sharing one id is exactly
+ * how a publisher's function came to run on the subscriber's grants.
+ */
+export function customFunctionScriptId(sourcePackage?: string | null): string {
+  const name = typeof sourcePackage === "string" ? sourcePackage.trim() : "";
+  return name === "" ? LIB_SCRIPT_ID : `${LIB_SCRIPT_ID}pkg:${name}`;
+}
+
 // Reuse the workbook object-type with a reserved instance so the library never
 // collides with a user's own workbook script (keyed by type + instanceId).
 const LIB_OBJECT_TYPE = "workbook";
 /**
- * The instance the library exposes its UDFs under — RANDOM per install, not the
+ * The instance a realm exposes its UDFs under — RANDOM per install, not the
  * old fixed "__custom_functions__".
  *
  * SECURITY (pre-existing hole, closed here): the UDFs are exposed
  * `{ public: false }`, which the broker's `callExposed` enforces only for
- * CROSS-tier/CROSS-origin callers. This library mounts as a LOCAL, RESTRICTED
- * script, and so does every user object script — same tier, same origin — so
- * the `sameTrust` branch let any local object script invoke any custom function
- * with `context.callMethod("workbook", "__custom_functions__", "MYFN", …)` while
+ * CROSS-tier/CROSS-origin callers. The subscriber's own realm mounts as a LOCAL,
+ * RESTRICTED script, and so does every user object script — same tier, same
+ * origin — so the `sameTrust` branch let any local object script invoke any
+ * custom function with
+ * `context.callMethod("workbook", "__custom_functions__", "MYFN", …)` while
  * the fixed instance id was guessable. A UDF body may hold `bi.query` (or any
  * capability the user granted this library), so that was a confused deputy: a
  * script that declared nothing could drive the library's reach.
@@ -99,8 +139,6 @@ const LIB_OBJECT_TYPE = "workbook";
  * rather than on knowledge of the address — belongs in the broker; see
  * docs/design/script-package-manager.md §5.3.
  */
-let libInstanceId = randomInstanceId();
-
 function randomInstanceId(): string {
   const buf = new Uint8Array(16);
   crypto.getRandomValues(buf);
@@ -234,64 +272,154 @@ export function generateLibrarySource(
   );
 }
 
+/**
+ * One realm the library mounts: the functions that share ONE trust origin, and
+ * the source generated for exactly those.
+ *
+ * The library record is merged (subscriber + every application that shipped
+ * functions), but a realm is the unit of TRUST — script id, provenance, grant
+ * set and same-origin peers all follow it — so the merge has to be undone before
+ * anything mounts.
+ */
+export interface CustomFunctionRealm {
+  /** The application these functions arrived in; "" for the subscriber's own. */
+  packageName: string;
+  /** DERIVED from that stamp (scriptOriginForStoredRecord), never asserted. */
+  origin: MountOrigin;
+  /** The broker script id this realm mounts under. */
+  scriptId: string;
+  /** Display name — the Script Security prompt, the audit ring, the panel. */
+  name: string;
+  /** Its functions, in the library's own order. */
+  functions: CustomFunctionUdf[];
+  /** The generated library source for exactly those functions. */
+  source: string;
+}
+
+/** A realm that is (or was about to be) mounted, for teardown. */
+interface MountedRealm {
+  scriptId: string;
+  isPackage: boolean;
+  /** Drops this realm's library-import tokens (and unmounts imported realms
+   *  that lose their last consumer). */
+  release: () => void;
+  /** False when the mount itself threw — there is nothing to unmount. */
+  mounted: boolean;
+}
+
 let registeredCleanups: Array<() => void> = [];
-let mounted = false;
-/** Drops this install's library-import tokens (and unmounts realms that lose
- *  their last consumer). Null when nothing is linked. */
-let releaseLink: (() => void) | null = null;
+/** Every realm this install mounted — one per trust origin in the library. */
+let realms: MountedRealm[] = [];
 // Serialize install/uninstall so a startup install + AFTER_OPEN reload can't
 // interleave and corrupt the module-level mount/cleanup state.
 let installQueue: Promise<unknown> = Promise.resolve();
 // The last library that mounted+registered cleanly, for rollback on a failed edit.
-let lastGood: { lib: CustomFunctionLibrary; source: string } | null = null;
+let lastGood: { lib: CustomFunctionLibrary; plan: CustomFunctionRealm[] } | null = null;
 
 /** Currently-installed status (for the manager UI). */
 export function customFunctionsInstalled(): boolean {
-  return mounted;
+  return realms.length > 0;
 }
 
-/** Mount `source` and register `defs` as UDFs (no rollback/queue). */
-async function rawInstall(lib: CustomFunctionLibrary, source: string): Promise<void> {
-  uninstallCustomFunctions();
-  const defs = lib.functions.filter((d) => d.name.trim() && d.body.trim());
-  if (defs.length === 0 || !source) return;
+/**
+ * Split a library into one realm per trust origin, generating each realm's
+ * source. Pure (and exported for tests); THROWS on an invalid name/param, which
+ * is why `doInstall` calls it BEFORE any teardown.
+ *
+ * The subscriber's realm comes first and applications follow in name order, so
+ * the mount order — and therefore the audit ring — is deterministic.
+ *
+ * SIBLING CALLS DO NOT CROSS A REALM. `fns.OTHER(...)` reaches the functions of
+ * the SAME origin only. That is the honest consequence of the split: a
+ * publisher's body calling the subscriber's function (or the reverse) is a
+ * cross-trust call, and those go through the broker's own rules or not at all.
+ */
+export function planCustomFunctionRealms(lib: CustomFunctionLibrary): CustomFunctionRealm[] {
+  const uses = lib.uses ?? [];
+  const byPackage = new Map<string, CustomFunctionUdf[]>();
+  for (const d of lib.functions ?? []) {
+    if (!d.name.trim() || !d.body.trim()) continue;
+    const pkg = typeof d.sourcePackage === "string" ? d.sourcePackage.trim() : "";
+    const list = byPackage.get(pkg);
+    if (list) list.push(d);
+    else byPackage.set(pkg, [d]);
+  }
+  // Plain lexicographic order: "" is smaller than every package name, so the
+  // subscriber's realm sorts first without a special case.
+  return [...byPackage.keys()]
+    .sort()
+    .map((pkg) => {
+      const functions = byPackage.get(pkg) as CustomFunctionUdf[];
+      return {
+        packageName: pkg,
+        origin: scriptOriginForStoredRecord({ sourcePackage: pkg }),
+        scriptId: customFunctionScriptId(pkg),
+        name: pkg === "" ? "Custom Functions" : `Custom Functions (${pkg})`,
+        functions,
+        source: generateLibrarySource(functions, uses),
+      };
+    });
+}
 
+/** Mount one realm and register its functions as UDFs. */
+async function mountRealm(
+  plan: CustomFunctionRealm,
+  capabilities: CapabilityId[],
+): Promise<void> {
   // Link declared library imports BEFORE mounting. Each imported library gets a
-  // realm at `declared(library) INTERSECT (lib.capabilities ?? [])` — so a
-  // library this UDF set imports can never reach further than the UDF set
-  // itself was consented for. An unresolved alias throws here and the install
-  // fails (the caller restores the previous good library), which is the point:
-  // a UDF must not start with a dangling import.
+  // realm at `declared(library) INTERSECT capabilities` — so a library this UDF
+  // set imports can never reach further than the UDF set itself was consented
+  // for. An unresolved alias throws here and the install fails (the caller
+  // restores the previous good library), which is the point: a UDF must not
+  // start with a dangling import.
   const link = await linkScript({
-    scriptId: LIB_SCRIPT_ID,
-    scriptName: "Custom Functions",
-    source,
-    declaredCapabilities: lib.capabilities ?? [],
+    scriptId: plan.scriptId,
+    scriptName: plan.name,
+    source: plan.source,
+    declaredCapabilities: capabilities,
     accessLevel: "restricted",
   });
-  releaseLink = link.release;
+  const realm: MountedRealm = {
+    scriptId: plan.scriptId,
+    isPackage: plan.origin.kind === "package",
+    release: link.release,
+    mounted: false,
+  };
+  // Recorded BEFORE the mount, so a mount that throws still has its import
+  // tokens dropped by the teardown the caller runs.
+  realms.push(realm);
 
-  // A fresh unguessable instance per install (see libInstanceId's SECURITY note).
-  libInstanceId = randomInstanceId();
-  const instanceId = libInstanceId;
-  try {
-    await hostMountScript({
-      id: LIB_SCRIPT_ID,
-      name: "Custom Functions",
-      objectType: LIB_OBJECT_TYPE,
-      instanceId,
-      source: link.prelude + source,
-      accessLevel: "restricted",
-      declaredCapabilities: lib.capabilities ?? [],
-      apiVersion: "1.0.0",
-    });
-  } catch (e) {
-    link.release();
-    releaseLink = null;
-    throw e;
+  if (realm.isPackage) {
+    // A distributed realm gets NO just-in-time prompt (mayJitPromptForCapability
+    // refuses a package origin), so if its capabilities did not come from the
+    // application's consent record they would not come at all. This is that
+    // record: `gateCustomFunctionLibrary` above admitted these functions only
+    // while a persisted consent covered this exact code AND this exact
+    // capability set, and a widening of the set re-prompts. Same chokepoint the
+    // script-library linker uses for a package realm.
+    await applyConsentedCapabilities(plan.scriptId, [...capabilities], []);
   }
-  mounted = true;
-  for (const d of defs) {
+
+  // A fresh unguessable instance per realm (see randomInstanceId's SECURITY note).
+  const instanceId = randomInstanceId();
+  await hostMountScript({
+    id: plan.scriptId,
+    name: plan.name,
+    objectType: LIB_OBJECT_TYPE,
+    instanceId,
+    source: link.prelude + plan.source,
+    accessLevel: "restricted",
+    // ONE spelling of "distributed", derived from the stamp the backend merge
+    // wrote on these functions. Omitting this field is not neutral: the handle
+    // builder reads a missing `provenance` as LOCAL, which is how a publisher's
+    // body came to sit inside the subscriber's own trust origin.
+    ...mountProvenanceForOrigin(plan.origin),
+    declaredCapabilities: capabilities,
+    apiVersion: "1.0.0",
+  });
+  realm.mounted = true;
+
+  for (const d of plan.functions) {
     const upper = normalizeName(d.name);
     const arity = d.params.map((p) => p.trim()).filter(Boolean).length;
     const cleanup = registerFunction({
@@ -302,12 +430,33 @@ async function rawInstall(lib: CustomFunctionLibrary, source: string): Promise<v
       minArgs: arity,
       maxArgs: arity,
       volatile: d.volatile === true,
-      // Bound to THIS install's instance so a later re-install cannot leave a
-      // registered UDF pointing at a torn-down realm's address.
+      // Bound to THIS realm's instance so a later re-install cannot leave a
+      // registered UDF pointing at a torn-down realm's address — and so a
+      // formula never reaches a body through another origin's realm.
       implementation: (...args: unknown[]) =>
         callExposedMethod(LIB_OBJECT_TYPE, instanceId, upper, ...args),
     });
     registeredCleanups.push(cleanup);
+  }
+}
+
+/** Mount every realm in `plan` and register its UDFs (no rollback/queue). */
+async function rawInstall(
+  lib: CustomFunctionLibrary,
+  plan: CustomFunctionRealm[],
+): Promise<void> {
+  uninstallCustomFunctions();
+  if (plan.length === 0) return;
+  const capabilities = lib.capabilities ?? [];
+  try {
+    for (const realm of plan) {
+      await mountRealm(realm, capabilities);
+    }
+  } catch (e) {
+    // All or nothing: a half-mounted library would register some functions and
+    // silently drop the rest.
+    uninstallCustomFunctions();
+    throw e;
   }
 }
 
@@ -324,11 +473,15 @@ async function rawInstall(lib: CustomFunctionLibrary, source: string): Promise<v
 // three consent strings the user had just read promised the opposite ("any code
 // that arrives stays switched off until you approve it").
 //
-// Worse than "unprompted": the merged record shares the SUBSCRIBER'S script id
+// Worse than "unprompted": the merged record shared the SUBSCRIBER'S script id
 // and therefore the subscriber's live capability grants. A subscriber who had
 // granted their own functions bi.query was, without being asked, running a
 // stranger's code with it. That is the confused deputy this project exists to
-// refuse.
+// refuse. The GRANT half of that is now closed one layer down as well — a
+// package's functions mount in their own realm under their own script id
+// (`planCustomFunctionRealms`), so they hold what THEIR consent record granted
+// and nothing the subscriber granted their own code. The gate below is still
+// what decides whether that realm is allowed to exist at all.
 //
 // SHAPE. Identical to the chart-transform / chart-mark gate
 // (Charts/lib/distributedLibraryGate.ts) and stored in the SAME shared consent
@@ -469,20 +622,19 @@ async function doInstall(lib: CustomFunctionLibrary): Promise<void> {
     // CustomFunctions extension) turns this into the prompt.
     emitAppEvent(CUSTOM_FUNCTIONS_CONSENT_NEEDED, { pending });
   }
-  const defs = gated.functions.filter((d) => d.name.trim() && d.body.trim());
-  // Generate (and VALIDATE) first — a bad name/param throws here, BEFORE any
-  // teardown, so an invalid edit never tears down a working library.
-  const source = defs.length ? generateLibrarySource(defs, gated.uses ?? []) : "";
+  // Plan + generate (and VALIDATE) first — a bad name/param throws here, BEFORE
+  // any teardown, so an invalid edit never tears down a working library.
+  const plan = planCustomFunctionRealms(gated);
   const prev = lastGood;
   try {
-    await rawInstall(gated, source);
-    lastGood = { lib: gated, source };
+    await rawInstall(gated, plan);
+    lastGood = { lib: gated, plan };
   } catch (e) {
     // Mount/compile failed — restore the previous good library rather than
     // leaving the user with NO functions.
     if (prev) {
       try {
-        await rawInstall(prev.lib, prev.source);
+        await rawInstall(prev.lib, prev.plan);
       } catch {
         uninstallCustomFunctions();
       }
@@ -558,7 +710,7 @@ export async function loadAndInstallCustomFunctions(): Promise<void> {
   }
 }
 
-/** Unregister all custom-function UDFs and tear down the sandbox. */
+/** Unregister all custom-function UDFs and tear down every mounted realm. */
 export function uninstallCustomFunctions(): void {
   for (const fn of registeredCleanups) {
     try {
@@ -568,20 +720,26 @@ export function uninstallCustomFunctions(): void {
     }
   }
   registeredCleanups = [];
-  if (releaseLink) {
+  for (const realm of realms) {
     try {
-      releaseLink();
+      realm.release();
     } catch {
       /* best-effort */
     }
-    releaseLink = null;
-  }
-  if (mounted) {
-    try {
-      hostUnmountScript(LIB_SCRIPT_ID);
-    } catch {
-      /* best-effort */
+    if (realm.mounted) {
+      try {
+        hostUnmountScript(realm.scriptId);
+      } catch {
+        /* best-effort */
+      }
     }
-    mounted = false;
+    // A distributed realm's grants were derived from the application's consent
+    // record and are re-derived from it on every install, so dropping them here
+    // loses nothing — and a package whose consent the user later withdraws must
+    // not leave its capabilities sitting in the live set for the next mount to
+    // find. The SUBSCRIBER's realm keeps its grants, which are the user's own
+    // "Always" answers and must survive an ordinary edit-and-reinstall.
+    if (realm.isPackage) revokeScriptGrants(realm.scriptId);
   }
+  realms = [];
 }

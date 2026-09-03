@@ -29,6 +29,7 @@
 
 import type { CapabilityId } from "./allowlist";
 import { CAPABILITY_ID_SET } from "./capabilityIds";
+import { isLocalOrigin, type ScriptOrigin } from "./scriptOrigin";
 import { invokeBackend } from "../backend";
 import { confirmAsync } from "../dialogs";
 import { emitAppEvent } from "../events";
@@ -301,9 +302,11 @@ export interface GrantRestoreTarget {
   scriptId: string;
   scriptName: string;
   source: string;
-  /** `handle.origin`: "local" for workbook-authored code, the package name for
-   *  distributed code (which never JIT-prompts and never persists here). */
-  origin: string;
+  /** `handle.origin` — the STRUCTURAL trust origin (`ScriptOrigin`). Only
+   *  `{ kind: "local" }` restores persisted grants; distributed code never
+   *  JIT-prompts and never persists here. It was a bare string, which made an
+   *  application NAMED `local` eligible for a local script's persisted grants. */
+  origin: ScriptOrigin;
   /** `handle.declaredCapabilities` — the ceiling a restored id must still fit. */
   declaredCapabilities: Iterable<CapabilityId>;
 }
@@ -322,7 +325,7 @@ export interface GrantRestoreTarget {
  * copy) and applied before mount by `applyConsentedCapabilities`.
  */
 export async function restoreAndSyncGrants(target: GrantRestoreTarget): Promise<void> {
-  if (target.origin === "local") {
+  if (isLocalOrigin(target.origin)) {
     try {
       const { restorePersistedScriptCapabilityGrant } = await import("../scriptSecurity");
       const restored = await restorePersistedScriptCapabilityGrant({
@@ -356,12 +359,13 @@ export async function persistAlwaysGrant(args: {
   scriptId: string;
   scriptName: string;
   source: string;
-  /** `handle.origin`; anything but "local" is ignored (package consent path). */
-  origin: string;
+  /** `handle.origin`; any kind but `local` is ignored (package consent path).
+   *  Structural, so a package NAMED `local` cannot reach this store. */
+  origin: ScriptOrigin;
   capability: CapabilityId;
   netOrigin?: string | null;
 }): Promise<void> {
-  if (args.origin !== "local") return;
+  if (!isLocalOrigin(args.origin)) return;
   try {
     const { persistScriptCapabilityGrant } = await import("../scriptSecurity");
     await persistScriptCapabilityGrant({

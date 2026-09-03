@@ -48,8 +48,9 @@ import type { ClearApplyTo, Table } from "@api/backend";
 import type { CellData, UsedRangeResult } from "@api/types";
 import { navigateToRange } from "@api/grid";
 import { CommandRegistry, CoreCommands } from "@api/commands";
-import { listWorkbookScripts } from "@api/workbookScripts";
-import type { ScriptSummary } from "@api/workbookScripts";
+import { listWorkbookScriptRecords } from "@api/workbookScripts";
+import { macroEntriesFrom } from "./macroProvenance";
+import type { MacroEntry } from "./macroProvenance";
 import { hasMacroRunProvider, requireMacroRunProvider } from "@api/macroRunService";
 import type { MacroRunOutcome } from "@api/macroRunService";
 import type { PivotTableInfo } from "@api/pivotTypes";
@@ -129,7 +130,16 @@ export interface AppCliGateway {
   listCommands(): string[];
 
   // --- Macros (workbook module scripts, run through the macroRunService seam) -
-  listWorkbookScripts(): Promise<ScriptSummary[]>;
+  /**
+   * Every module script, WITH the origin derived from its own record.
+   *
+   * There is deliberately no origin-less listing on this interface. The summary
+   * call `list_scripts` drops `source_package`, so a gateway method returning
+   * summaries is a door through which a surface can list a publisher's module as
+   * if it were the user's own — which is exactly what `ls macros` and `run` did.
+   * One door, and it always carries provenance.
+   */
+  listMacros(): Promise<MacroEntry[]>;
   hasMacroRunProvider(): boolean;
   runMacroByRef(macroId: string): Promise<MacroRunOutcome>;
 }
@@ -245,7 +255,10 @@ export function createLiveAppGateway(): AppCliGateway {
     hasCommand: (commandId: string) => CommandRegistry.has(commandId),
     listCommands: () => CommandRegistry.getAll(),
 
-    listWorkbookScripts: () => listWorkbookScripts(),
+    // Through the RECORD inventory, not the summary list: `get_script` is the
+    // only backend read that returns `sourcePackage`, and the origin is derived
+    // from that field alone (macroEntriesFrom -> scriptOriginForStoredRecord).
+    listMacros: async () => macroEntriesFrom(await listWorkbookScriptRecords()),
     hasMacroRunProvider: () => hasMacroRunProvider(),
     runMacroByRef: (macroId: string) => requireMacroRunProvider().runMacroByRef(macroId),
   };

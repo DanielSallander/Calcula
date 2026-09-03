@@ -46,7 +46,16 @@ import { createPreviewBackend, createPreviewState, type PreviewStubs } from "./b
 import { PreviewGrid } from "./grid";
 import { objectHooksFor } from "./objectHooks";
 import { backendEvaluator, recalculatePreviewGrid, type FormulaEvaluator } from "./formulaEval";
-import { buildReport, declined, diffGrid, type WorkerPreviewReport } from "./report";
+import {
+  buildReport,
+  declined,
+  diffGrid,
+  PREVIEW_FORM_LAYOUT_NOTES,
+  type PreviewCellDisplay,
+  type PreviewFormLayoutVerdict,
+  type WorkerPreviewReport,
+} from "./report";
+import { resolveFormSourcesFromPreviewGrid, type PreviewFormSourceSeed } from "./formSources";
 import { previewSkipLine } from "./unexercisedHooks";
 import { MAX_SNAPSHOT_CELLS, snapshotActiveSheet, type SnapshotResult, type SnapshotSource } from "./snapshot";
 
@@ -263,12 +272,28 @@ export async function previewObjectScript(req: PreviewRequest): Promise<WorkerPr
   const refusalNotes = run.refusals
     .filter((r) => !isExpectedFormRefusal(r.method))
     .map((r) => `[preview] ${r.method} was refused: ${r.message}`);
+  // A form's RANGE-FED content is resolved here, while the run's own copy of
+  // the workbook is still in hand. A caller cannot do this for itself without
+  // reading the LIVE grid — which would seed a dropdown from cells the script
+  // never saw, the very thing the read-back discipline exists to prevent.
+  let formSources: PreviewFormSourceSeed[] | undefined;
+  // The verdict LEAVES AS A VALUE. The same sentence still goes into `output`
+  // for a human reading the transcript, but a consumer that had to find it
+  // there was reading one of our own strings back out of a list the SCRIPT
+  // writes into first — so a draft could print the line the host then showed
+  // about it. `PREVIEW_FORM_LAYOUT_NOTES` is the one place either is worded.
+  let formLayoutVerdict: PreviewFormLayoutVerdict | undefined;
   if (req.objectType === "form") {
-    refusalNotes.push(
-      state.formLayout !== undefined
-        ? "[preview] the form's layout was captured from form.define; show() is not exercised in a preview"
-        : "[preview] no layout was captured: the script never called form.define during setup",
-    );
+    formLayoutVerdict = state.formLayout !== undefined ? "captured" : "missing";
+    refusalNotes.push(`[preview] ${PREVIEW_FORM_LAYOUT_NOTES[formLayoutVerdict]}`);
+    if (state.formLayout !== undefined) {
+      formSources = resolveFormSourcesFromPreviewGrid({
+        spec: state.formLayout,
+        grid: snapshot.grid,
+        sheetNames: snapshot.sheetNames,
+        activeSheet: snapshot.activeSheet,
+      });
+    }
   }
 
   // A registered handler the preview chose not to fire is REPORTED, so an
@@ -295,6 +320,26 @@ export async function previewObjectScript(req: PreviewRequest): Promise<WorkerPr
     previewSkipLine(hook, offeredHooks.has(hook)),
   );
 
+  // READ-BACK, BOTH HALVES. `readBack` carries the INPUT STRING, so a formula
+  // cell reads back "=SUM(B2:B9)" and nothing in that string says what it came
+  // to. The value the copy computed for it — this rung recalculates at every
+  // settle point — travels beside it, so a caller seeding a widget from a
+  // formula-bound cell can show the number instead of declaring the widget
+  // read-only with a reason that is not true. A cell with NO computed value
+  // (one the script itself overwrote, or any cell of a truncated copy, where
+  // formulas are deliberately not re-evaluated) contributes no entry at all,
+  // which is the honest answer rather than an invented digit.
+  const readBack = (req.readBack ?? []).map((r) => ({
+    row: r.row,
+    col: r.col,
+    value: snapshot.grid.input(r.row, r.col),
+  }));
+  const readBackDisplays: PreviewCellDisplay[] = [];
+  for (const cell of readBack) {
+    const display = snapshot.grid.cachedDisplay(cell.row, cell.col);
+    if (display !== undefined) readBackDisplays.push({ row: cell.row, col: cell.col, display });
+  }
+
   return buildReport({
     ok: run.ran,
     error: run.error,
@@ -303,11 +348,17 @@ export async function previewObjectScript(req: PreviewRequest): Promise<WorkerPr
     output: [...state.output, ...refusalNotes, ...skippedNotes],
     unexercisedHooks: run.unexercisedHooks,
     formLayout: state.formLayout,
-    readBack: (req.readBack ?? []).map((r) => ({
-      row: r.row,
-      col: r.col,
-      value: snapshot.grid.input(r.row, r.col),
-    })),
+    formSources,
+    formLayoutVerdict,
+    readBack,
+    readBackDisplays,
+    // The ONE sheet the copy holds, named from the snapshot rather than from a
+    // second live read: the active sheet can change between the run and the
+    // seeding, and what the script saw is this one. Left undefined when the
+    // snapshot named no sheet at that index — never defaulted to "Sheet1",
+    // which would make a caller resolve "Sheet1!B2" against a copy of some
+    // other sheet.
+    activeSheetName: snapshot.sheetNames[snapshot.activeSheet],
     // A capped copy still produces a REAL verdict — the script ran against real
     // data, just not all of it — so this is a note rather than a decline. It is
     // said out loud because a reviewer who cannot see the bound would read
@@ -354,6 +405,19 @@ async function liveSnapshotSource(): Promise<SnapshotSource> {
 export { MAX_SNAPSHOT_CELLS } from "./snapshot";
 export { objectHooksFor } from "./objectHooks";
 export { recalculatePreviewGrid, backendEvaluator, type FormulaEvaluator } from "./formulaEval";
-export { MAX_REPORTED_CHANGES, summarize } from "./report";
+export {
+  MAX_REPORTED_CHANGES,
+  summarize,
+  PREVIEW_FORM_LAYOUT_NOTES,
+  type PreviewCellDisplay,
+  type PreviewFormLayoutVerdict,
+} from "./report";
+export {
+  resolveFormSourcesFromPreviewGrid,
+  offSheetSourceReason,
+  namesTheActiveSheet,
+  PREVIEW_IMAGE_REASON,
+  type PreviewFormSourceSeed,
+} from "./formSources";
 export type { PreviewStubs } from "./backend";
 export { PreviewGapError } from "./backend";

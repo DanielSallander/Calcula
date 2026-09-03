@@ -110,7 +110,7 @@ function request(over: Partial<ScriptFormRequestPayload> = {}): ScriptFormReques
     showId: SHOW_ID,
     scriptId: "script-1",
     scriptName: "Order entry",
-    scriptOrigin: "local",
+    origin: { kind: "local" },
     spec: fullSpec(),
     seeds: { amount: { value: 1234.5, display: "£1,234.50" } },
     ...over,
@@ -274,8 +274,21 @@ describe("the identity band", () => {
   });
 
   it("names the package for a distributed script", async () => {
-    await mount(request({ scriptOrigin: "Sales Pack" }));
+    await mount(request({ origin: { kind: "package", name: "Sales Pack" } }));
     expect(q("[data-script-form-band]").textContent).toBe('Order entryA form from the package "Sales Pack"');
+  });
+
+  it("still says PACKAGE for an application literally named \"local\"", async () => {
+    // THE IMPERSONATION THE BAND EXISTS TO PREVENT. Provenance used to be one
+    // string in which "local" was the sentinel for "a script in this workbook"
+    // and every other value was an application name — so a publisher who named
+    // their application `local` got the local phrasing on the one line of this
+    // dialog the user is meant to be able to trust. The branch reads `kind` now,
+    // and no name can reach it.
+    await mount(request({ origin: { kind: "package", name: "local" } }));
+    const text = q("[data-script-form-band]").textContent ?? "";
+    expect(text).toBe('Order entryA form from the package "local"');
+    expect(text).not.toContain("a script in this workbook");
   });
 
   it("says who opened a proxied form, and which sheet the bindings are pinned to", async () => {

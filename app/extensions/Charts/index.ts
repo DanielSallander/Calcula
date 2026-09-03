@@ -45,6 +45,7 @@ import {
   type OverlayRenderContext,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
+import { showToast } from "@api/notifications";
 import { showOverlay, hideOverlay } from "@api/ui";
 
 import {
@@ -1464,7 +1465,15 @@ function activate(context: ExtensionContext): void {
         await grantLibraryConsent(pending.d);
         refreshAfterLibraryChange();
       } catch (e) {
+        // The approval IS persisted by now (grantLibraryConsent records before it
+        // mounts), so this is a mount that failed, not a lost consent. Say so:
+        // a console line is invisible, and the user just clicked Allow and would
+        // otherwise see charts silently keep their built-in behaviour.
         console.error("[Charts] failed to grant chart-library consent", e);
+        showToast(
+          `Approved, but the chart library did not start: ${e instanceof Error ? e.message : String(e)}`,
+          { type: "error" },
+        );
       }
     }),
   );

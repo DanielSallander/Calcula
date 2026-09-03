@@ -95,6 +95,32 @@ function batchNeedsBiConsent(responses: NotebookCellResponse[]): string | null {
   return null;
 }
 
+/**
+ * The Rust sentinel for code refused because it arrived inside a distributed
+ * application the user has not approved (`DISTRIBUTED_SCRIPT_NOT_CONSENTED`,
+ * app/src-tauri/src/scripting/commands.rs). The notebook gate
+ * (`require_distributed_notebook_consent`) answers with it too, so one spelling
+ * covers both surfaces.
+ */
+const DISTRIBUTED_NOT_CONSENTED = "DISTRIBUTED_SCRIPT_NOT_CONSENTED";
+
+/**
+ * The refusal to SHOW for a failed run, or null when the failure is not a
+ * provenance refusal.
+ *
+ * A run command rejects, so without this the whole path is a `console.error`
+ * and the user sees a Run button that does nothing — which is exactly the kind
+ * of silent gate the transparency rule forbids. The backend's own message is
+ * surfaced (minus the machine sentinel): it names the application, the
+ * notebook, and what to do instead.
+ */
+function provenanceRefusal(err: unknown): string | null {
+  const message = err instanceof Error ? err.message : String(err);
+  const at = message.indexOf(DISTRIBUTED_NOT_CONSENTED);
+  if (at < 0) return null;
+  return message.slice(at + DISTRIBUTED_NOT_CONSENTED.length).replace(/^[:\s]+/, "");
+}
+
 /** Hand a cell's queued side effects to the extensions that own them. */
 function dispatchCellSideEffects(response: NotebookCellResponse): void {
   if (response.type !== "success") return;
@@ -116,6 +142,13 @@ interface NotebookState {
   isExecuting: boolean;
   /** ID of the cell currently being executed. */
   executingCellId: string | null;
+  /**
+   * The standing refusal to show above the cells: the backend declined to run
+   * this notebook because it arrived in an application whose code the user has
+   * not approved. Cleared when a run starts and when a notebook is opened,
+   * created or closed.
+   */
+  runRefusal: string | null;
 
   // Actions
   refreshNotebookList: () => Promise<void>;
@@ -174,6 +207,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   activeNotebook: null,
   isExecuting: false,
   executingCellId: null,
+  runRefusal: null,
 
   refreshNotebookList: async () => {
     const notebooks = await api.listNotebooks();
@@ -183,7 +217,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   createNotebook: async (name: string) => {
     const id = `nb-${Date.now()}`;
     const notebook = await api.createNotebook(id, name);
-    set({ activeNotebook: notebook });
+    set({ activeNotebook: notebook, runRefusal: null });
     await get().refreshNotebookList();
   },
 
@@ -191,7 +225,9 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     // Reset runtime when switching notebooks
     await api.resetNotebookRuntime();
     const notebook = await api.loadNotebook(id);
-    set({ activeNotebook: notebook });
+    // A refusal belongs to the notebook it refused; it must not follow the
+    // user to the next one.
+    set({ activeNotebook: notebook, runRefusal: null });
   },
 
   closeNotebook: async () => {
@@ -201,7 +237,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       await api.saveNotebook(activeNotebook);
       await api.resetNotebookRuntime();
     }
-    set({ activeNotebook: null });
+    set({ activeNotebook: null, runRefusal: null });
   },
 
   deleteNotebook: async (id: string) => {
@@ -334,7 +370,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     // same rule, so a stray keyboard shortcut cannot hand markdown to QuickJS.
     if (cellKindOf(cell.source) === "markdown") return;
 
-    set({ isExecuting: true, executingCellId: cellId });
+    set({ isExecuting: true, executingCellId: cellId, runRefusal: null });
 
     try {
       // Save first so backend has latest sources
@@ -396,6 +432,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       dispatchCellSideEffects(response);
     } catch (err) {
       console.error("[ScriptNotebook] Run cell error:", err);
+      set({ runRefusal: provenanceRefusal(err) });
     } finally {
       set({ isExecuting: false, executingCellId: null });
     }
@@ -405,7 +442,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     const { activeNotebook } = get();
     if (!activeNotebook || get().isExecuting) return;
 
-    set({ isExecuting: true });
+    set({ isExecuting: true, runRefusal: null });
 
     try {
       await api.saveNotebook(activeNotebook);
@@ -428,6 +465,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       dispatchBatchSideEffects(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Run all error:", err);
+      set({ runRefusal: provenanceRefusal(err) });
     } finally {
       set({ isExecuting: false, executingCellId: null });
     }
@@ -437,7 +475,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     const { activeNotebook } = get();
     if (!activeNotebook || get().isExecuting) return;
 
-    set({ isExecuting: true });
+    set({ isExecuting: true, runRefusal: null });
 
     try {
       let responses = await api.rewindNotebook({
@@ -465,6 +503,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       dispatchBatchSideEffects(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Rewind error:", err);
+      set({ runRefusal: provenanceRefusal(err) });
     } finally {
       set({ isExecuting: false, executingCellId: null });
     }
@@ -474,7 +513,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     const { activeNotebook } = get();
     if (!activeNotebook || get().isExecuting) return;
 
-    set({ isExecuting: true });
+    set({ isExecuting: true, runRefusal: null });
 
     try {
       await api.saveNotebook(activeNotebook);
@@ -500,6 +539,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       dispatchBatchSideEffects(responses);
     } catch (err) {
       console.error("[ScriptNotebook] Run from error:", err);
+      set({ runRefusal: provenanceRefusal(err) });
     } finally {
       set({ isExecuting: false, executingCellId: null });
     }

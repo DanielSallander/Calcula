@@ -1,6 +1,9 @@
 //! FILENAME: app/extensions/ScriptableObjects/__tests__/permissionsPanelDebuggerMount.test.tsx
-// PURPOSE: A mount the DEBUGGER owns is labelled as such in the script
-//          transparency panel, and the label tracks the session live.
+// PURPOSE: The transparency panel's per-mount LABELS, which are the whole
+//          reason the panel exists and must therefore never be able to lie: a
+//          mount the DEBUGGER owns is labelled as such and the label tracks the
+//          session live, and the ORIGIN chip names a package as a package even
+//          when the publisher named their application `local`.
 // CONTEXT: Debugging a recorded macro mounts it at the UNLOCKED tier for the
 //          length of the session — a whole-workbook realm the workbook itself
 //          does not keep. Untagged it is indistinguishable in this list from a
@@ -41,7 +44,7 @@ interface FakeHandle {
   scriptId: string;
   scriptName: string;
   tier: string;
-  origin: string;
+  origin: { kind: string; name?: string };
   objectType: string;
   instanceId: string | null;
   grants: Set<string>;
@@ -49,7 +52,13 @@ interface FakeHandle {
 let handles: FakeHandle[] = [];
 let scriptChangeListeners: Array<() => void> = [];
 
-vi.mock("@api", () => ({
+vi.mock("@api", async () => ({
+  // The panel branches on the origin KIND and renders its chip through the
+  // scriptOrigin helpers. Spread the REAL module (a leaf that imports nothing,
+  // so there is no cycle) rather than hand-copying them: a doubled `isLocalOrigin`
+  // is a second policy, and this file's whole subject is a label that must not be
+  // able to lie.
+  ...(await vi.importActual<Record<string, unknown>>("@api/scriptHost/scriptOrigin")),
   ALLOWLIST: {},
   SCRIPT_SUBSCRIBABLE_APP_EVENTS: [],
   getAuditTail: () => [],
@@ -76,7 +85,7 @@ function handle(overrides: Partial<FakeHandle> = {}): FakeHandle {
     scriptId: "macro-monthly-close",
     scriptName: "Monthly Close",
     tier: "unlocked",
-    origin: "local",
+    origin: { kind: "local" },
     objectType: "workbook",
     instanceId: null,
     grants: new Set<string>(),
@@ -189,5 +198,80 @@ describe("PermissionsPanel — debugger-owned mounts are named", () => {
     expect(debugListeners.length).toBe(0);
     // Re-created so afterEach's unmount is harmless.
     root = createRoot(container);
+  });
+});
+
+// ===========================================================================
+// The origin chip — the panel's other label that must not be able to lie
+// ===========================================================================
+//
+// Beside the tier tag, each card carries a chip saying where the code came from:
+// "local" for workbook-authored scripts, the package name otherwise, with a
+// matching tooltip. It branched on `h.origin === "local"` against a string that
+// carried EITHER that sentinel OR the publisher's chosen application name — so
+// an application named `local` wore the local chip AND the "Authored in this
+// workbook" tooltip, in the panel whose entire job is to say where code resides.
+// `ScriptHandle.origin` is now a discriminated `ScriptOrigin`: the chip branches
+// on `kind` and DISPLAYS `name`.
+
+describe("PermissionsPanel — the origin chip", () => {
+  beforeEach(() => {
+    transientIds = [];
+    handles = [];
+    debugListeners = [];
+    scriptChangeListeners = [];
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  /** The chip's tooltip for the card carrying `scriptName`. */
+  function chipTitle(scriptName: string): string {
+    const card = [...container.querySelectorAll("div")]
+      .filter((d) => d.textContent?.includes(scriptName))
+      .pop();
+    const chip = [...(card?.querySelectorAll("span") ?? [])].find((s) =>
+      (s.getAttribute("title") ?? "").length > 0,
+    );
+    return chip?.getAttribute("title") ?? "";
+  }
+
+  it("says the workbook for workbook-authored code", () => {
+    handles = [handle()];
+    render();
+    expect(chipTitle("Monthly Close")).toBe("Authored in this workbook");
+  });
+
+  it("names the package for distributed code", () => {
+    handles = [
+      handle({
+        scriptId: "acme-1",
+        scriptName: "Acme Sync",
+        origin: { kind: "package", name: "Acme Reports" },
+      }),
+    ];
+    render();
+    expect(chipTitle("Acme Sync")).toBe('From package "Acme Reports"');
+    expect(container.textContent).toContain("Acme Reports");
+  });
+
+  it("does not let an application NAMED `local` wear the workbook's chip", () => {
+    // THE REGRESSION. Under the old bare-string origin this tooltip read
+    // "Authored in this workbook" for somebody else's distributed code.
+    handles = [
+      handle({
+        scriptId: "pkg-local-1",
+        scriptName: "Quarterly Report",
+        origin: { kind: "package", name: "local" },
+      }),
+    ];
+    render();
+    expect(chipTitle("Quarterly Report")).toBe('From package "local"');
+    expect(chipTitle("Quarterly Report")).not.toBe("Authored in this workbook");
   });
 });

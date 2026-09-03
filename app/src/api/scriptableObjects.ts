@@ -1859,6 +1859,19 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         packageName: definition.packageName,
         packageVersion: definition.packageVersion,
         declaredCapabilities: definition.declaredCapabilities,
+        // THE ARTIFACT THE CONSENT RECORD NAMES. An object script that arrived
+        // in an application is stored under its own id, and the consent record
+        // written when the user approved that application lists exactly
+        // `{ id, source }` — the source WITHOUT the import prelude, which the
+        // host generates and which no record has ever seen. Naming it here is
+        // what lets the mount gate hold this script to its own hash instead of
+        // to the weaker "some code from this application was approved".
+        //
+        // It is passed for local scripts too, and is simply not consulted for
+        // them: the gate is reached only for distributed provenance, and
+        // deciding here which mounts "need" it would be a second copy of that
+        // rule.
+        consentArtifact: { id: definition.id, source: definition.source },
         apiVersion: SCRIPT_API_VERSION,
         mountCause: options?.cause,
       });

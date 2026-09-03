@@ -166,7 +166,7 @@ describe("getWorkbookScheduledJobs", () => {
     // fire — reporting "the owner is gone" would understate what runs, which is
     // the one direction a transparency surface must never be wrong in.
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "ext-1", scriptName: "Acme Sync", origin: "acme-tools" },
+      { scriptId: "ext-1", scriptName: "Acme Sync", origin: { kind: "package", name: "acme-tools" } },
     ]);
     (listAllScheduledJobs as any).mockResolvedValue([
       job({ scriptId: "ext-1", surface: "extension-worker" }),
@@ -179,9 +179,27 @@ describe("getWorkbookScheduledJobs", () => {
     expect(j.ownerPackage).toBe("acme-tools");
   });
 
+  it("an application NAMED `local` is still reported as distributed, by that name", async () => {
+    // The transparency column read `handle.origin === "local"` against a string
+    // that carried EITHER the sentinel OR the publisher's application name, so a
+    // job owned by an application called `local` was listed as the user's own
+    // workbook code with no package at all. The origin is now structural: `kind`
+    // decides the provenance, `name` is what gets displayed.
+    (listMountedHandles as any).mockReturnValue([
+      { scriptId: "ext-2", scriptName: "Quarterly Report", origin: { kind: "package", name: "local" } },
+    ]);
+    (listAllScheduledJobs as any).mockResolvedValue([
+      job({ scriptId: "ext-2", surface: "extension-worker" }),
+    ]);
+
+    const [j] = await getWorkbookScheduledJobs();
+    expect(j.ownerProvenance).toBe("distributed");
+    expect(j.ownerPackage).toBe("local");
+  });
+
   it("a mounted LOCAL owner that is not a code unit reports no package", async () => {
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "x1", scriptName: "Helper", origin: "local" },
+      { scriptId: "x1", scriptName: "Helper", origin: { kind: "local" } },
     ]);
     (listAllScheduledJobs as any).mockResolvedValue([job({ scriptId: "x1" })]);
 
@@ -199,7 +217,7 @@ describe("getWorkbookScheduledJobs", () => {
       {
         scriptId: "os1",
         scriptName: "WRONG",
-        origin: "somepkg",
+        origin: { kind: "package", name: "somepkg" },
         tier: "restricted",
         grants: new Set<string>(),
         declaredCapabilities: new Set<string>(),

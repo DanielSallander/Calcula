@@ -44,7 +44,7 @@ function captureRequests(): { seen: ScriptDialogRequestPayload[]; stop: () => vo
 const ASK = {
   scriptId: "s1",
   scriptName: "Month-end close",
-  scriptOrigin: "local",
+  scriptOrigin: { kind: "local" as const },
   kind: "confirm" as const,
   message: "Delete 40 rows?",
 };
@@ -66,7 +66,7 @@ describe("scriptDialogs — request/answer round trip", () => {
     expect(capture.seen).toHaveLength(1);
     const request = capture.seen[0];
     expect(request.scriptName).toBe("Month-end close");
-    expect(request.scriptOrigin).toBe("local");
+    expect(request.scriptOrigin).toEqual({ kind: "local" });
     expect(request.kind).toBe("confirm");
     expect(request.message).toBe("Delete 40 rows?");
     expect(request.requestId).toBeTruthy();

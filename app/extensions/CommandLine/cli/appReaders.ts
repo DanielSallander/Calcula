@@ -12,6 +12,7 @@ import { detailBlock, textTable, yesNo } from "../../_shared/cli/format";
 import type { CliIo } from "../../_shared/cli/registry";
 import type { TypedCellData } from "@api/lib";
 import { formatRange, indexToColLetter, tryParseQualified } from "./a1";
+import { macroOriginLabel } from "./macroProvenance";
 import type { AppCliSession } from "./appSession";
 import { sheetNameOf } from "./appSession";
 
@@ -99,8 +100,17 @@ async function runLs(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promise<
       return;
     }
     case "macro": {
-      const rows = matchNamed(s.macros, (m) => m.name, pat).map((m) => [m.name, m.id]);
-      printTable(io, ["macro", "id"], rows, `No macros match '${pat}'`);
+      // The `from` column is not decoration. A module that arrived inside a
+      // distributed application was listed here identically to the user's own
+      // code; `macroOriginLabel` derives the answer from the record's own
+      // `sourcePackage` and says "(unreadable)" rather than "local" when the
+      // record could not be read at all.
+      const rows = matchNamed(s.macros, (m) => m.name, pat).map((m) => [
+        m.name,
+        m.id,
+        macroOriginLabel(m),
+      ]);
+      printTable(io, ["macro", "id", "from"], rows, `No macros match '${pat}'`);
       return;
     }
     case "command": {
@@ -233,6 +243,10 @@ async function runShow(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promis
           ["macro", macro.name],
           ["id", macro.id],
           ["scope", scope],
+          ["from", macroOriginLabel(macro)],
+          // Only present when the record could not be read — detailBlock drops
+          // empty values, so a healthy macro shows no such row.
+          ["read error", macro.loadError ?? ""],
         ]),
       );
       return;

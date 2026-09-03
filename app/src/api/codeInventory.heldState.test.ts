@@ -169,7 +169,7 @@ describe("getScriptHeldState — keyboard shortcuts", () => {
       },
     ]);
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "ext1", scriptName: "Tax Tools", origin: "tax-tools", tier: "restricted", grants: [] },
+      { scriptId: "ext1", scriptName: "Tax Tools", origin: { kind: "package", name: "tax-tools" }, tier: "restricted", grants: [] },
     ]);
 
     const state = await getScriptHeldState();
@@ -199,7 +199,7 @@ describe("getScriptHeldState — keyboard shortcuts", () => {
 describe("getScriptHeldState — private clipboards", () => {
   it("reports the size of a held buffer, never its contents", async () => {
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "os1", scriptName: "Sales refresher", origin: "local", tier: "restricted", grants: [] },
+      { scriptId: "os1", scriptName: "Sales refresher", origin: { kind: "local" }, tier: "restricted", grants: [] },
     ]);
     (scriptClipboardSize as any).mockImplementation((id: string) =>
       id === "os1" ? { rows: 4, cols: 3 } : null,
@@ -225,7 +225,7 @@ describe("getScriptHeldState — private clipboards", () => {
     // A distributed extension worker holds the user's cells exactly like a local
     // object script does; reporting only workbook units would under-report.
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "ext1", scriptName: "Tax Tools", origin: "tax-tools", tier: "restricted", grants: [] },
+      { scriptId: "ext1", scriptName: "Tax Tools", origin: { kind: "package", name: "tax-tools" }, tier: "restricted", grants: [] },
     ]);
     (scriptClipboardSize as any).mockReturnValue({ rows: 2, cols: 2 });
     const state = await getScriptHeldState();
@@ -235,7 +235,7 @@ describe("getScriptHeldState — private clipboards", () => {
 
   it("ignores an empty buffer", async () => {
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "os1", scriptName: "S", origin: "local", tier: "restricted", grants: [] },
+      { scriptId: "os1", scriptName: "S", origin: { kind: "local" }, tier: "restricted", grants: [] },
     ]);
     (scriptClipboardSize as any).mockReturnValue({ rows: 0, cols: 0 });
     expect((await getScriptHeldState()).clipboards).toEqual([]);
@@ -298,7 +298,7 @@ describe("getScriptHeldState — degradation must never read as 'nothing held'",
       throw new Error("registry unavailable");
     });
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "os1", scriptName: "S", origin: "local", tier: "restricted", grants: [] },
+      { scriptId: "os1", scriptName: "S", origin: { kind: "local" }, tier: "restricted", grants: [] },
     ]);
     (scriptClipboardSize as any).mockReturnValue({ rows: 1, cols: 5 });
 
@@ -319,7 +319,7 @@ describe("getScriptHeldState — degradation must never read as 'nothing held'",
       },
     ]);
     (listMountedHandles as any).mockReturnValue([
-      { scriptId: "os1", scriptName: "Sales refresher", origin: "local", tier: "restricted", grants: [] },
+      { scriptId: "os1", scriptName: "Sales refresher", origin: { kind: "local" }, tier: "restricted", grants: [] },
     ]);
     (scriptClipboardSize as any).mockImplementation(() => {
       throw new Error("host not wired");

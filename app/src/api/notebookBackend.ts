@@ -42,11 +42,14 @@ export interface NotebookDocumentData {
   sourcePackage?: string;
 }
 
-/** Lightweight notebook listing row. */
+/** Lightweight notebook listing row. `sourcePackage` is the .calp application
+ *  the notebook arrived in (absent for local ones) — carried on the ROW because
+ *  a picker lists summaries and never loads the document. */
 export interface NotebookSummaryData {
   id: string;
   name: string;
   cellCount: number;
+  sourcePackage?: string;
 }
 
 /** List all notebooks in the open workbook (lightweight summaries). */

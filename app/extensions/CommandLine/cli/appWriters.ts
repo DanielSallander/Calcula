@@ -29,6 +29,7 @@ import {
 } from "./a1";
 import type { RangeRef } from "./a1";
 import type { AppCliSession } from "./appSession";
+import { macroOriginPhrase, macroProvenanceNotice } from "./macroProvenance";
 
 // ---------------------------------------------------------------------------
 // Option schemas (one table per kind + one per kindless verb) — these drive
@@ -608,7 +609,7 @@ async function runMacro(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promi
   const query = cmd.pos.map((t) => t.text).join(" ").trim();
   if (query === "") fail("Usage: run <macro name or id>", cmd.line);
 
-  const macros = await s.gateway.listWorkbookScripts();
+  const macros = await s.gateway.listMacros();
   s.macros = macros;
   const lower = query.toLowerCase();
   const match =
@@ -627,16 +628,28 @@ async function runMacro(cmd: GenericCommand, s: AppCliSession, io: CliIo): Promi
   if (!s.gateway.hasMacroRunProvider()) {
     fail("The Macro Recorder extension is not loaded, so macros cannot run", cmd.line);
   }
+
+  // SAY WHOSE CODE THIS IS, BEFORE IT RUNS. Printed after the resolution gates
+  // (so a typo does not warn about a macro the user was not asking for) and
+  // before the seam call, because a notice that only appears in the outcome
+  // tells the user about the publisher's code once it has already executed.
+  // Disclosure only — the consent gate is Rust-side, under the run itself.
+  const notice = macroProvenanceNotice(match);
+  if (notice) io.print(notice, "info");
+
+  const origin = macroOriginPhrase(match);
   const outcome = await s.gateway.runMacroByRef(match.id);
   switch (outcome.status) {
     case "ran":
-      io.print(`Macro '${outcome.name}' ran.`, "info");
+      io.print(`Macro '${outcome.name}' ran (${origin}).`, "info");
       return;
     case "notFound":
       fail(`Macro '${query}' no longer exists (id ${outcome.macroId})`, cmd.line);
       break;
     case "failed":
-      fail(`Macro '${outcome.name}' failed: ${outcome.message}`, cmd.line);
+      // The origin travels on the FAILURE too: "somebody else's code just threw
+      // in my workbook" is a different fact from "my macro has a bug".
+      fail(`Macro '${outcome.name}' (${origin}) failed: ${outcome.message}`, cmd.line);
       break;
   }
 }

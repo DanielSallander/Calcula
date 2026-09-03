@@ -58,6 +58,7 @@ import {
   getRegionForCell,
 } from "./lib/writebackStore";
 import { openApplicationInspectorWindow } from "./lib/openApplicationInspectorWindow";
+import { installInspectorFormPreviewBridge } from "./lib/inspectorFormPreview";
 import {
   syncWritebackValidators,
   resetWritebackValidators,
@@ -882,6 +883,12 @@ function activate(context: ExtensionContext): void {
 
   // Tear down every mounted advisory validator worker on deactivate.
   cleanupFns.push(() => resetWritebackValidators());
+
+  // The Application Inspector runs in its OWN Tauri window with no Shell and no
+  // extensions, so the form renderer it needs lives only HERE. It sends the
+  // source; this listener runs the preview, paints it in this window, and
+  // sends the outcome back for the inspector to render inline.
+  cleanupFns.push(installInspectorFormPreviewBridge());
 
   // Initial snapshot load (in case subscriptions already exist at startup)
   refreshAndUpdateInterceptor();

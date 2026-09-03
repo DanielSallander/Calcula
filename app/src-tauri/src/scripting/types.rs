@@ -289,6 +289,12 @@ pub struct WorkbookScript {
 }
 
 /// Lightweight summary of a script (for listing without source code).
+///
+/// PROVENANCE TRAVELS WITH THE ROW. The summary is what every PICKER shows —
+/// the button-action dialog, the view-bookmark overlays, the CLI's macro list —
+/// and none of them fetch the full record. Dropping `source_package` here made
+/// a publisher's module look exactly like the user's own code in the one place
+/// the user chooses which code to attach to a button.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptSummary {
@@ -296,6 +302,11 @@ pub struct ScriptSummary {
     pub name: String,
     #[serde(default)]
     pub scope: ScriptScope,
+    /// The .calp application this module arrived in; `None` for local scripts.
+    /// Copied verbatim from `WorkbookScript::source_package` — a listing never
+    /// derives provenance, it carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 /// The view state the BACKEND does not own.
@@ -442,12 +453,19 @@ pub struct NotebookCell {
 }
 
 /// Lightweight notebook summary for listing.
+///
+/// Carries provenance for the same reason `ScriptSummary` does: the notebook
+/// PICKER is a list of summaries, so without this field a notebook that arrived
+/// inside somebody's `.calp` is indistinguishable from one the user wrote.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotebookSummary {
     pub id: String,
     pub name: String,
     pub cell_count: usize,
+    /// The .calp application this notebook arrived in; `None` for local ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package: Option<String>,
 }
 
 /// A grid checkpoint captured before a notebook cell execution.

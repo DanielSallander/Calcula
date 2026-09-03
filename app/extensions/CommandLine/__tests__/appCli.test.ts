@@ -12,6 +12,7 @@ import type { CliIo } from "../../_shared/cli/registry";
 import { createAppDomain } from "../cli/appDomain";
 import { createAppCliSession } from "../cli/appSession";
 import type { AppCliGateway } from "../cli/appGateway";
+import { macroEntriesFrom } from "../cli/macroProvenance";
 
 // ---------------------------------------------------------------------------
 // Mock gateway
@@ -69,10 +70,18 @@ const ASYNC_RESULTS: Record<string, unknown> = {
   redo: UNDO_RESULT,
   beginUndoTransaction: undefined,
   commitUndoTransaction: undefined,
-  listWorkbookScripts: [
-    { id: "macro-hello", name: "Hello" },
-    { id: "macro-cleanup", name: "Monthly Cleanup" },
-  ],
+  // Entries as the gateway now hands them over: origin DERIVED, never asserted.
+  listMacros: macroEntriesFrom([
+    { id: "macro-hello", name: "Hello", description: null, source: "", loadError: null },
+    {
+      id: "macro-cleanup",
+      name: "Monthly Cleanup",
+      description: null,
+      source: "",
+      sourcePackage: null,
+      loadError: null,
+    },
+  ]),
   runMacroByRef: { status: "ran", name: "Hello" },
   executeCommand: undefined,
 };
@@ -436,6 +445,106 @@ describe("run <macro>", () => {
     });
     expect(ok).toBe(false);
     expect(lines.some((l) => l.cls === "err" && l.text.includes("script threw"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Macro PROVENANCE — whose code the CLI is listing and running.
+//
+// `core/calp/src/pull.rs` stamps `source_package` on every module it
+// materializes out of a distributed application. The CLI listed macros through
+// `list_scripts`, which DROPS that field, so a publisher's module and the user's
+// own rendered identically and `run` executed one saying nothing at all. These
+// pin the stamp all the way to the panel text.
+// ---------------------------------------------------------------------------
+
+/** Gateway entries for a workbook holding one local and one distributed macro. */
+const MIXED_MACROS = macroEntriesFrom([
+  { id: "macro-hello", name: "Hello", description: null, source: "", loadError: null },
+  {
+    id: "macro-remit",
+    name: "Remit",
+    description: null,
+    source: "",
+    sourcePackage: "Q3 Report",
+    loadError: null,
+  },
+]);
+
+const mixed = { listMacros: () => Promise.resolve(MIXED_MACROS) };
+
+describe("macro provenance in the listing", () => {
+  it("gives `ls macros` a 'from' column naming the application", async () => {
+    const { lines } = await runApp("ls macros", mixed);
+    const text = allText(lines);
+    expect(text).toContain("from");
+    expect(text).toMatch(/Hello\s+macro-hello\s+local/);
+    expect(text).toMatch(/Remit\s+macro-remit\s+Q3 Report/);
+  });
+
+  it("shows the origin in `show macro`", async () => {
+    const { lines } = await runApp("show macro Remit", mixed);
+    expect(allText(lines)).toMatch(/from:\s+Q3 Report/);
+  });
+
+  it("labels an UNREADABLE record as unknown, never as local", async () => {
+    const { lines } = await runApp("ls macros", {
+      listMacros: () =>
+        Promise.resolve(
+          macroEntriesFrom([
+            {
+              id: "macro-broken",
+              name: "Broken",
+              description: null,
+              source: "",
+              // What listWorkbookScriptRecords returns when get_script failed:
+              // sourcePackage null, which on its own reads as "local".
+              sourcePackage: null,
+              loadError: "record corrupt",
+            },
+          ]),
+        ),
+    });
+    const text = allText(lines);
+    expect(text).toContain("(unreadable)");
+    expect(text).not.toMatch(/Broken\s+macro-broken\s+local/);
+  });
+});
+
+describe("macro provenance on the run path", () => {
+  it("announces a distributed macro BEFORE running it, and names it after", async () => {
+    const { lines, calls } = await runApp("run Remit", {
+      ...mixed,
+      runMacroByRef: () => Promise.resolve({ status: "ran" as const, name: "Remit" }),
+    });
+    expect(calls.runMacroByRef).toEqual([["macro-remit"]]);
+    const notice = lines.findIndex((l) => l.text.includes('arrived in the application "Q3 Report"'));
+    const outcome = lines.findIndex((l) => l.text.includes("ran (from application"));
+    expect(notice).toBeGreaterThanOrEqual(0);
+    expect(outcome).toBeGreaterThan(notice); // disclosure precedes execution
+    expect(allText(lines)).toContain("publisher's code, not yours");
+  });
+
+  it("does not manufacture a publisher for a LOCAL macro", async () => {
+    const { lines } = await runApp("run Hello", {
+      ...mixed,
+      runMacroByRef: () => Promise.resolve({ status: "ran" as const, name: "Hello" }),
+    });
+    const text = allText(lines);
+    expect(text).toContain("Macro 'Hello' ran (local).");
+    expect(text).not.toContain("arrived in the application");
+  });
+
+  it("keeps the origin on a FAILED distributed run", async () => {
+    const { ok, lines } = await runApp("run Remit", {
+      ...mixed,
+      runMacroByRef: () =>
+        Promise.resolve({ status: "failed" as const, name: "Remit", message: "boom" }),
+    });
+    expect(ok).toBe(false);
+    const err = lines.find((l) => l.cls === "err");
+    expect(err?.text).toContain('from application "Q3 Report"');
+    expect(err?.text).toContain("boom");
   });
 });
 

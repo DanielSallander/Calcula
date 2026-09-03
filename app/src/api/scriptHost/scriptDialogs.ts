@@ -36,6 +36,7 @@
 import { BrokerError } from "./broker";
 import { emitAppEvent } from "../events";
 import { UI_DIALOG_DEADLINE_MS } from "./protocol";
+import type { ScriptOrigin } from "./scriptOrigin";
 import type {
   ScriptDialogFormSpec,
   ScriptDialogPromptOptions,
@@ -54,8 +55,15 @@ export interface ScriptDialogRequestPayload {
   /** Authoritative identity — from the mount handle, never from the script. */
   scriptId: string;
   scriptName: string;
-  /** "local", or the package name for a distributed script. */
-  scriptOrigin: string;
+  /**
+   * Local, or the package a distributed script arrived in — as a DISCRIMINATED
+   * shape (`ScriptOrigin`), so no package NAME can ever select the local
+   * phrasing in the identity band. It was a bare string in which `"local"` was
+   * the sentinel and everything else was the publisher's chosen application
+   * name, so an application named `local` made the band say the dialog came
+   * from a script in this workbook.
+   */
+  scriptOrigin: ScriptOrigin;
   kind: ScriptDialogKind;
   /** alert / confirm / prompt: the question. Absent for a form. */
   message?: string;
@@ -227,7 +235,8 @@ export function getActiveScriptDialog(): ScriptDialogRequestPayload | null {
 export function requestScriptDialog(args: {
   scriptId: string;
   scriptName: string;
-  scriptOrigin: string;
+  /** Structural (`ScriptOrigin`) — from the mount handle, never from the script. */
+  scriptOrigin: ScriptOrigin;
   kind: ScriptDialogKind;
   message?: string;
   textOptions?: ScriptDialogTextOptions;

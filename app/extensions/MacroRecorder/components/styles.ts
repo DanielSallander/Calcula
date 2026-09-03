@@ -213,6 +213,26 @@ export const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
   },
 
+  /**
+   * "This macro came from an application, not from you." Same geometry as
+   * `badge` so the row still reads as one line, but in the warning colour and
+   * WITHOUT the uppercase transform — the text is a publisher's chosen name and
+   * shouting it would misrepresent it. Only distributed modules carry one;
+   * local is the baseline and needs no badge.
+   */
+  provenanceBadge: {
+    fontSize: 10,
+    letterSpacing: 0.2,
+    borderRadius: 3,
+    padding: "1px 6px",
+    border: "1px solid rgba(201, 130, 26, 0.55)",
+    color: "#c9821a",
+    maxWidth: 96,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+
   output: {
     fontFamily: 'Consolas, "Cascadia Mono", monospace',
     fontSize: 11,

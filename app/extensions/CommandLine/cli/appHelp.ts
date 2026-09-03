@@ -70,9 +70,11 @@ const TOPICS: Record<string, string> = {
   show pivot <name>               (source, destination)
   Pivot tables are created from Insert > PivotTable, not from the command line.`,
   macro: `Macros (workbook module scripts):
-  ls macros [pattern]
+  ls macros [pattern]             the 'from' column says whose code it is
   show macro <name>
-  run <macro name or id>          (resolved by exact id, then by name)`,
+  run <macro name or id>          (resolved by exact id, then by name)
+  from = 'local' (authored here), an application name (it arrived inside that
+  .calp), or '(unreadable)' when the record could not be read at all.`,
   command: `Registry commands:
   ls commands [pattern]
   show command <id>
@@ -92,7 +94,10 @@ const TOPICS: Record<string, string> = {
   run: `run:
   run <macro name or id>   runs a workbook macro through the Macro Recorder.
   Unknown names list close matches. The macro's own edits are undoable the
-  same way they would be from a button.`,
+  same way they would be from a button.
+  A macro that arrived inside a distributed application is announced BEFORE it
+  runs, and the outcome names its origin. Such code runs sandboxed at the
+  restricted tier, and only if you approved that application's code.`,
   recalc: `recalc:
   recalc                   recalculate the WHOLE workbook (Excel's F9).`,
   ls: `ls:

@@ -212,6 +212,7 @@ describe("an object-script recording is a runnable module", () => {
       name: script.name,
       source: script.source,
       description: script.description ?? null,
+      storedSource: script.source,
     });
 
     expect(runWorkbookScript).not.toHaveBeenCalled();
@@ -235,6 +236,7 @@ describe("an object-script recording is a runnable module", () => {
       name: script.name,
       source: script.source,
       description: script.description ?? null,
+      storedSource: script.source,
     });
 
     expect(result.type).toBe("error");
@@ -319,6 +321,7 @@ describe("a notebook recording is runnable by the module runtime itself", () => 
       name: script.name,
       source: script.source,
       description: script.description ?? null,
+      storedSource: script.source,
     });
 
     expect(runObjectScriptOnce).not.toHaveBeenCalled();

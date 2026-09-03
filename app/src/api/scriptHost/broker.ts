@@ -12,6 +12,12 @@
 
 import { ALLOWLIST, SCRIPT_SUBSCRIBABLE_APP_EVENTS, type CapabilityId, type MethodPolicy } from "./allowlist";
 import { decidePolicy } from "./brokerPolicy";
+import {
+  PREVIEW_ORIGIN,
+  sameScriptOrigin,
+  scriptOriginForMount,
+  type ScriptOrigin,
+} from "./scriptOrigin";
 import { CAPABILITY_ID_SET } from "./capabilityIds";
 import { appendAudit } from "./auditRing";
 import { getGrantSet } from "./capabilities";
@@ -36,10 +42,18 @@ export interface ScriptHandle {
   objectType: string;
   instanceId: string | null;
   /**
-   * Trust origin for cross-script policy: "local" for locally authored
-   * scripts, the package name for distributed ones.
+   * Trust origin for cross-script policy — STRUCTURAL, never a string.
+   *
+   * `{ kind: "local" }` for workbook-authored code, `{ kind: "package", name }`
+   * for a distributed one, `{ kind: "preview" }` for a dry run. It used to be a
+   * bare string in which `"local"` was the sentinel and every other value was
+   * the PUBLISHER-CHOSEN application name, so an application named `local` was
+   * indistinguishable from the user's own code at four gates and two provenance
+   * bands. See `scriptOrigin.ts` for the full account; the short version is that
+   * `kind` is a closed set no manifest field feeds, and the name survives only
+   * as content on the variant already known not to be local.
    */
-  origin: string;
+  origin: ScriptOrigin;
   /** Granted capabilities (Phase 4 wires consent/JIT grants; ui.html is auto for local). */
   grants: ReadonlySet<CapabilityId>;
   /**
@@ -144,7 +158,10 @@ export function buildHandleFromDefinition(definition: {
     tier: definition.accessLevel === "unlocked" ? "unlocked" : "restricted",
     objectType: definition.objectType,
     instanceId: definition.instanceId,
-    origin: isDistributed ? (definition.packageName || "(unknown package)") : "local",
+    // Derived from `provenance` alone (scriptOriginForMount). The package NAME
+    // is content that lands inside the package variant; it can never select the
+    // local one.
+    origin: scriptOriginForMount(definition),
     grants,
     declaredCapabilities,
   };
@@ -186,9 +203,11 @@ export function buildPreviewHandle(opts: {
     tier: opts.tier,
     objectType: opts.objectType,
     instanceId: opts.instanceId,
-    // Never "local": origin drives cross-script trust, and a preview must not
-    // be same-origin with anything the workbook actually mounted.
-    origin: "(preview)",
+    // Its own KIND, not a reserved name: origin drives cross-script trust, and a
+    // preview must not be same-origin with anything the workbook mounted — nor
+    // with another preview, which the old `"(preview)"` string quietly allowed.
+    // `sameScriptOrigin` refuses the preview kind on either side.
+    origin: PREVIEW_ORIGIN,
     grants: new Set<CapabilityId>(),
     declaredCapabilities: new Set<CapabilityId>(),
     preview: true,
@@ -522,16 +541,23 @@ export function unregisterExposed(owner: ScriptHandle, methodName: string): bool
 
 /**
  * The R7 trust predicate, in ONE place: two scripts share a trust origin when
- * they are at the same TIER and from the same ORIGIN ("local", or the same
- * package name). `callExposed` uses it for non-public methods, and the form
+ * they are at the same TIER and from the same ORIGIN (both local, or the same
+ * package). `callExposed` uses it for non-public methods, and the form
  * registry's cross-script show uses it as its only admission rule — a copy in
  * either place would be a second policy free to drift from the first.
+ *
+ * The origin half is `sameScriptOrigin` (scriptOrigin.ts): structural equality
+ * over a discriminated union, so a package NAMED `local` compares as a package
+ * and is cross-origin with every workbook-authored script. It was `a.origin ===
+ * b.origin` over a string, which made that name same-trust with the user's own
+ * code — reach to their non-public exposed methods and their forms, for the
+ * price of choosing a name.
  */
 export function sameTrustOrigin(
   a: Pick<ScriptHandle, "tier" | "origin">,
   b: Pick<ScriptHandle, "tier" | "origin">,
 ): boolean {
-  return a.tier === b.tier && a.origin === b.origin;
+  return a.tier === b.tier && sameScriptOrigin(a.origin, b.origin);
 }
 
 /**

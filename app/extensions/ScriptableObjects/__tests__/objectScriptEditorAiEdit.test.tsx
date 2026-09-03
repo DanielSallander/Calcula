@@ -211,6 +211,22 @@ vi.mock("@api", () => ({
   hostValidateScript: async () => ({ ok: true }),
   showToast: vi.fn(),
   saveObjectScript: (...a: unknown[]) => saveObjectScript(...(a as [])),
+  // The REAL trust-origin derivations (app/src/api/scriptHost/scriptOrigin.ts) —
+  // the editor derives a module's tier and publisher from the record rather than
+  // asserting either.
+  scriptOriginForStoredRecord: (record: { sourcePackage?: string | null }) => {
+    const name =
+      typeof record.sourcePackage === "string" ? record.sourcePackage.trim() : "";
+    return name === "" ? { kind: "local" } : { kind: "package", name };
+  },
+  accessLevelForOrigin: (origin: { kind: string }, requested: string) =>
+    origin.kind === "package" ? "restricted" : requested,
+  originPackageName: (origin: { kind: string; name?: string }) =>
+    origin.kind === "package" ? origin.name ?? null : null,
+  mountProvenanceForOrigin: (origin: { kind: string; name?: string }) =>
+    origin.kind === "package"
+      ? { provenance: "distributed", packageName: origin.name }
+      : { provenance: "local" },
 }));
 vi.mock("@api/scriptTranspile", () => ({ prefetchScriptTranspiler: () => {} }));
 vi.mock("../lib/templateManager", () => ({

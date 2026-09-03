@@ -23,7 +23,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { brokerCall, buildPreviewHandle, BrokerError } from "../../broker";
+import { brokerCall, buildPreviewHandle, BrokerError, sameTrustOrigin } from "../../broker";
 import { clearAudit, getAuditTail, getAuditTotal } from "../../auditRing";
 
 const HOST = resolve(__dirname, "../../host.ts");
@@ -135,9 +135,19 @@ describe("the preview identity", () => {
     expect(handle.grants.size).toBe(0);
     expect(handle.declaredCapabilities.size).toBe(0);
     expect(handle.preview).toBe(true);
-    // Not "local": origin drives cross-script trust, and a preview must not be
-    // same-origin with anything the workbook actually mounted.
-    expect(handle.origin).not.toBe("local");
+    // Its own KIND: origin drives cross-script trust, and a preview must not be
+    // same-origin with anything the workbook actually mounted — nor with another
+    // preview, which the old `"(preview)"` string quietly allowed.
+    expect(handle.origin).toEqual({ kind: "preview" });
+    expect(handle.origin.kind).not.toBe("local");
+    const other = buildPreviewHandle({
+      scriptId: "preview:test:1b",
+      scriptName: "(preview)",
+      objectType: "button",
+      instanceId: null,
+      tier: "unlocked",
+    });
+    expect(sameTrustOrigin(handle, other)).toBe(false);
   });
 
   it("is refused every capability-bearing method, by the CEILING and not by a grant", () => {

@@ -24,6 +24,7 @@ import {
   runAppWrite,
 } from "./appWriters";
 import { appHelpText } from "./appHelp";
+import { macroSuggestionDetail } from "./macroProvenance";
 
 /** The verbs the app domain answers as reads (everything else it owns
  *  routes to runWrite — including the navigation-style verbs, whose
@@ -80,7 +81,10 @@ export function createAppDomain(): CliDomain<AppCliSession> {
       {
         kind: "macro",
         listable: true,
-        nameSuggestions: (s) => s.macros.map((m) => suggestion(m.name, m.id)),
+        // The detail carries the origin whenever it is NOT the user's own code,
+        // so completion — the surface that offers a macro name before the user
+        // has typed `ls` — cannot present a publisher's module unmarked.
+        nameSuggestions: (s) => s.macros.map((m) => suggestion(m.name, macroSuggestionDetail(m))),
       },
       {
         kind: "command",

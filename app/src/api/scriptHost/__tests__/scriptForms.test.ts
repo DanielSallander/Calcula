@@ -126,7 +126,7 @@ function renderer() {
   };
 }
 
-const OWNER = { scriptId: "form-1", scriptName: "Order entry", scriptOrigin: "local" };
+const OWNER = { scriptId: "form-1", scriptName: "Order entry", origin: { kind: "local" } as const };
 
 /** Define + show + acknowledge, the happy start every session shares. */
 async function open(
@@ -181,7 +181,7 @@ describe("scriptForms — sessions", () => {
     expect(r.requests).toHaveLength(1);
     const req = r.last();
     expect(req.scriptName).toBe("Order entry");
-    expect(req.scriptOrigin).toBe("local");
+    expect(req.origin).toEqual({ kind: "local" });
     expect(req.spec).toBe(SPEC);
     // Only INPUT widgets are seeded — a button and an unknown name are dropped.
     expect(Object.keys(req.seeds)).toEqual(["customer"]);
@@ -298,6 +298,46 @@ describe("scriptForms — sessions", () => {
       one: "b",
     });
     void showId;
+  });
+
+  it("carries CONTENT seeds for the widgets that take content, not only answers", async () => {
+    // A `table` reads `seed.rows` and an `image` reads the host-resolved
+    // `seed.imageUrl`; neither is an INPUT type. Filtering the whole seed on
+    // FORM_INPUT_TYPE_SET threw away exactly what the host had just read: a
+    // form with `rows: { range: "D2:E9" }` resolved that range and then painted
+    // an EMPTY table, and an image resolved from a media handle painted
+    // nothing. Only the VALUE half is input-only.
+    defineScriptForm(OWNER.scriptId, {
+      children: [
+        { type: "textbox", name: "customer", label: "Customer" },
+        { type: "table", name: "lines", columns: ["Item", "Qty"], rows: { range: "D2:E9" } },
+        { type: "image", name: "logo", src: `media:${"a".repeat(64)}` },
+      ],
+    });
+    const promise = showScriptForm({
+      ...OWNER,
+      seeds: {
+        customer: { value: "Ada" },
+        lines: { value: null, rows: [["Widget", 2]] },
+        logo: { value: null, imageUrl: "blob:resolved-by-the-host" },
+      },
+      deps,
+    });
+    const req = r.last();
+
+    // The content reaches the renderer...
+    expect(req.seeds.lines?.rows).toEqual([["Widget", 2]]);
+    expect(req.seeds.logo?.imageUrl).toBe("blob:resolved-by-the-host");
+    expect(req.seeds.customer?.value).toBe("Ada");
+    r.shown(req.showId, { customer: "Ada" });
+    await promise;
+
+    // ...while only INPUT widgets contribute an answer: a table and an image
+    // have no value to submit, and `form.values` must not invent one.
+    expect(deps.mirrors.find((m) => m.path === "form.values")?.value).toEqual({ customer: "Ada" });
+    r.submit(req.showId, { customer: "Ada" });
+    await vi.waitFor(() => expect(deps.closedWith).toHaveLength(1));
+    expect(deps.closedWith[0].result).toEqual({ customer: "Ada" });
   });
 
   it("the script can close its own form and choose the answer", async () => {
@@ -526,11 +566,11 @@ describe("scriptForms — guards shared with dialogs", () => {
     // Another script's form.
     defineScriptForm("form-2", SPEC);
     await expect(
-      showScriptForm({ scriptId: "form-2", scriptName: "Other", scriptOrigin: "local", deps: recordingDeps() }),
+      showScriptForm({ scriptId: "form-2", scriptName: "Other", origin: { kind: "local" }, deps: recordingDeps() }),
     ).rejects.toThrow(/Order entry/);
     // Another script's DIALOG is refused by the same slot...
     await expect(
-      requestScriptDialog({ scriptId: "s9", scriptName: "Alert", scriptOrigin: "local", kind: "alert", message: "hi" }),
+      requestScriptDialog({ scriptId: "s9", scriptName: "Alert", scriptOrigin: { kind: "local" }, kind: "alert", message: "hi" }),
     ).rejects.toBeInstanceOf(BrokerError);
     // ...and so is the owner's own dialog (no stacking in release one).
     await expect(
@@ -540,7 +580,7 @@ describe("scriptForms — guards shared with dialogs", () => {
   });
 
   it("a form is refused while a DIALOG holds the slot", async () => {
-    const dialog = requestScriptDialog({ scriptId: "s9", scriptName: "Alert", scriptOrigin: "local", kind: "alert", message: "hi" });
+    const dialog = requestScriptDialog({ scriptId: "s9", scriptName: "Alert", scriptOrigin: { kind: "local" }, kind: "alert", message: "hi" });
     defineScriptForm(OWNER.scriptId, SPEC);
     await expect(showScriptForm({ ...OWNER, deps })).rejects.toThrow(/Alert/);
     resetScriptDialogs();
@@ -618,6 +658,315 @@ describe("scriptForms — guards shared with dialogs", () => {
     }
     await expect(showScriptForm({ ...OWNER, deps })).rejects.toThrow(/last minute/);
     expect(r.requests).toHaveLength(FORM_SHOWS_PER_MINUTE);
+  });
+});
+
+describe("scriptForms — a refused show reads nothing", () => {
+  // The bound cells a form starts from are read by host.ts as audited broker
+  // calls under the script's own handle. WHEN they are read is this module's
+  // business: they arrive as a `resolve` thunk, and a show the guards refuse
+  // must never call it. Reading first meant a muted script looping on show()
+  // still performed one read per bound cell for a form nobody would ever see —
+  // wasted IPC, and an audit trail claiming a form had read the sheet when the
+  // user was shown nothing at all.
+  let r: ReturnType<typeof renderer>;
+  let deps: RecordingDeps;
+
+  beforeEach(() => {
+    resetScriptDialogs();
+    resetScriptForms();
+    r = renderer();
+    deps = recordingDeps();
+  });
+  afterEach(() => {
+    r.stop();
+    resetScriptForms();
+    resetScriptDialogs();
+    vi.useRealTimers();
+  });
+
+  it("no layout: the thunk is never called", async () => {
+    const resolve = vi.fn(async () => ({ seeds: { customer: { value: "From cell" } } }));
+    await expect(showScriptForm({ ...OWNER, resolve, deps })).rejects.toThrow(/form.define/);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(r.requests).toHaveLength(0);
+  });
+
+  it("the show bucket is exhausted: the thunk is never called", async () => {
+    // Every session is SUBMITTED so the dismissal mute never enters the picture.
+    for (let i = 0; i < FORM_SHOWS_PER_MINUTE; i++) {
+      const showId = await open(r, deps);
+      r.submit(showId, { customer: `c${i}` });
+      await vi.waitFor(() => expect(deps.closedWith).toHaveLength(i + 1));
+    }
+    const resolve = vi.fn(async () => ({ seeds: {} }));
+    await expect(showScriptForm({ ...OWNER, resolve, deps })).rejects.toThrow(/last minute/);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("a MUTED script: the thunk is never called, and the answer is still a definite null", async () => {
+    for (let i = 0; i < 3; i++) {
+      const showId = await open(r, deps);
+      r.cancel(showId);
+    }
+    const resolve = vi.fn(async () => ({ seeds: { customer: { value: "From cell" } } }));
+    const muted = await showScriptForm({ ...OWNER, resolve, deps });
+    expect(muted).toEqual({ showId: expect.any(String), closed: true });
+    await vi.waitFor(() => expect(deps.closedWith).toHaveLength(4));
+    expect(deps.closedWith[3]).toEqual({ showId: muted.showId, result: null });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(r.requests).toHaveLength(3);
+  });
+
+  it("the modal slot is held by somebody else: the thunk is never called", async () => {
+    await open(r, deps);
+    defineScriptForm("form-2", SPEC);
+    const resolve = vi.fn(async () => ({ seeds: {} }));
+    await expect(
+      showScriptForm({
+        scriptId: "form-2",
+        scriptName: "Other",
+        origin: { kind: "local" },
+        resolve,
+        deps: recordingDeps(),
+      }),
+    ).rejects.toThrow(/Order entry/);
+    expect(resolve).not.toHaveBeenCalled();
+    // ...and the same for the script's OWN second show.
+    const again = vi.fn(async () => ({ seeds: {} }));
+    await expect(
+      showScriptForm({ ...OWNER, resolve: again, deps: recordingDeps() }),
+    ).rejects.toBeInstanceOf(BrokerError);
+    expect(again).not.toHaveBeenCalled();
+    expect(r.requests).toHaveLength(1);
+  });
+
+  it("the thunk runs AFTER the slot is claimed and BEFORE anything is painted", async () => {
+    defineScriptForm(OWNER.scriptId, SPEC);
+    let slotAtResolve: string | null = null;
+    let paintedAtResolve = -1;
+    const promise = showScriptForm({
+      ...OWNER,
+      resolve: async () => {
+        // The slot is already ours, so nothing can take it out from under the
+        // reads and leave us resolving for a form that cannot open.
+        slotAtResolve = getActiveModal()?.scriptName ?? null;
+        paintedAtResolve = r.requests.length;
+        return { seeds: { customer: { value: "From cell", display: "From cell" } } };
+      },
+      deps,
+    });
+    await vi.waitFor(() => expect(r.requests).toHaveLength(1));
+    r.shown(r.last().showId, { customer: "From cell", rush: false });
+    await promise;
+    expect(slotAtResolve).toBe("Order entry");
+    expect(paintedAtResolve).toBe(0);
+    // What the thunk returned is what the renderer was given.
+    expect(r.last().seeds).toEqual({ customer: { value: "From cell", display: "From cell" } });
+  });
+
+  it("the thunk's answer supplies the seeds, the pinned sheet and the writeOn:change set", async () => {
+    const writeBindings = vi.fn(async () => ["customer"]);
+    deps.writeBindings = writeBindings;
+    defineScriptForm(OWNER.scriptId, SPEC);
+    const promise = showScriptForm({
+      ...OWNER,
+      resolve: async () => ({
+        seeds: { customer: { value: "From cell", display: "From cell" } },
+        pinnedSheetName: "Sheet1",
+        writeOnChange: ["customer"],
+      }),
+      deps,
+    });
+    await vi.waitFor(() => expect(r.requests).toHaveLength(1));
+    const req = r.last();
+    expect(req.seeds).toEqual({ customer: { value: "From cell", display: "From cell" } });
+    expect(req.pinnedSheetName).toBe("Sheet1");
+    r.shown(req.showId, { customer: "From cell", rush: false });
+    await promise;
+    // Only the debounce needs a fake clock; the show above ran on the real one.
+    vi.useFakeTimers();
+    r.change(req.showId, "customer", "Ada", { customer: "Ada", rush: false });
+    vi.advanceTimersByTime(FORM_TEXT_CHANGE_DEBOUNCE_MS + 1);
+    expect(writeBindings).toHaveBeenCalledWith(req.showId, { customer: "Ada", rush: false }, ["customer"]);
+  });
+
+  it("a THROWING thunk gives the slot back and leaves no session behind", async () => {
+    defineScriptForm(OWNER.scriptId, SPEC);
+    const failure = new Error('sheet.getCellData: "Sheet2" is not the sheet on screen');
+    await expect(
+      showScriptForm({
+        ...OWNER,
+        resolve: async () => {
+          throw failure;
+        },
+        deps,
+      }),
+    ).rejects.toBe(failure);
+    // Nothing was registered: no paint, no session, and above all no CLOSE
+    // event or relayed answer for a session that never existed.
+    expect(r.requests).toHaveLength(0);
+    expect(r.closes).toHaveLength(0);
+    expect(deps.closedWith).toHaveLength(0);
+    expect(deps.forwarded).toHaveLength(0);
+    expect(getActiveScriptForm()).toBeNull();
+    // The slot is really free — proved by taking it, not by reading a flag.
+    expect(getActiveModal()).toBeNull();
+    const dialog = requestScriptDialog({
+      scriptId: "s9",
+      scriptName: "Alert",
+      scriptOrigin: { kind: "local" },
+      kind: "alert",
+      message: "hi",
+    });
+    expect(getActiveModal()?.scriptName).toBe("Alert");
+    resetScriptDialogs();
+    await dialog;
+  });
+
+  it("an unmount WHILE the reads are running gives the slot back and refuses the show", async () => {
+    // The slot is held across the reads, and between claiming it and the
+    // session existing there is nothing in the registry for an unmount to
+    // close. A slot left held would refuse every later dialog in the session.
+    defineScriptForm(OWNER.scriptId, SPEC);
+    let unblock: (() => void) | null = null;
+    const reading = new Promise<void>((r) => {
+      unblock = r;
+    });
+    let entered = false;
+    const promise = showScriptForm({
+      ...OWNER,
+      resolve: async () => {
+        entered = true;
+        await reading;
+        return { seeds: { customer: { value: "From cell" } } };
+      },
+      deps,
+    });
+    await vi.waitFor(() => expect(entered).toBe(true));
+    expect(getActiveModal()?.scriptName).toBe("Order entry");
+    revokeScriptForms(OWNER.scriptId);
+    expect(getActiveModal()).toBeNull();
+    unblock?.();
+    await expect(promise).rejects.toThrow(/unloaded before its form could open/);
+    // Nothing painted for a script that is gone, and no answer relayed.
+    expect(r.requests).toHaveLength(0);
+    expect(deps.closedWith).toHaveLength(0);
+    expect(getActiveScriptForm()).toBeNull();
+    // The slot really is usable again.
+    const dialog = requestScriptDialog({
+      scriptId: "s9",
+      scriptName: "Alert",
+      scriptOrigin: { kind: "local" },
+      kind: "alert",
+      message: "hi",
+    });
+    expect(getActiveModal()?.scriptName).toBe("Alert");
+    resetScriptDialogs();
+    await dialog;
+  });
+
+  /**
+   * A CROSS-SCRIPT show has TWO scripts that can go away mid-read.
+   *
+   * `caps.forms.show` paints the OWNER's form on the CALLER's behalf, and the
+   * caller is the one awaiting the answer. A pending claim that recorded only
+   * the owner therefore survived the caller's unmount: the reads finished, the
+   * form painted for a script that no longer existed, and its answer was
+   * relayed to nobody. Both unmounts have to reach the same claim.
+   */
+  function pendingCrossScriptShow(): {
+    promise: Promise<{ showId: string; closed?: true }>;
+    entered: () => boolean;
+    finishReads: () => void;
+  } {
+    defineScriptForm(OWNER.scriptId, SPEC);
+    let unblock: (() => void) | null = null;
+    const reading = new Promise<void>((res) => {
+      unblock = res;
+    });
+    let entered = false;
+    const promise = showScriptForm({
+      ...OWNER,
+      callerName: "Button",
+      callerScriptId: "btn-1",
+      resolve: async () => {
+        entered = true;
+        await reading;
+        return { seeds: { customer: { value: "From cell" } } };
+      },
+      deps,
+    });
+    return { promise, entered: () => entered, finishReads: () => unblock?.() };
+  }
+
+  /** The slot really is free — proved by TAKING it, not by reading a flag. */
+  async function proveSlotIsFree(): Promise<void> {
+    expect(getActiveModal()).toBeNull();
+    const dialog = requestScriptDialog({
+      scriptId: "s9",
+      scriptName: "Alert",
+      scriptOrigin: { kind: "local" },
+      kind: "alert",
+      message: "hi",
+    });
+    expect(getActiveModal()?.scriptName).toBe("Alert");
+    resetScriptDialogs();
+    await dialog;
+  }
+
+  it("the OWNER's unmount during a cross-script show's reads gives the slot back and refuses", async () => {
+    const show = pendingCrossScriptShow();
+    await vi.waitFor(() => expect(show.entered()).toBe(true));
+    expect(getActiveModal()?.scriptName).toBe("Order entry");
+    revokeScriptForms(OWNER.scriptId);
+    expect(getActiveModal()).toBeNull();
+    show.finishReads();
+    await expect(show.promise).rejects.toThrow(/unloaded before its form could open/);
+    expect(r.requests).toHaveLength(0);
+    expect(deps.closedWith).toHaveLength(0);
+    expect(getActiveScriptForm()).toBeNull();
+    await proveSlotIsFree();
+  });
+
+  it("the CALLER's unmount during the OWNER's reads gives the slot back and refuses", async () => {
+    // Nothing is in `sessions` yet, so the caller-unmount sweep that closes an
+    // OPEN cross-script form finds nothing: the pending claim is the only place
+    // the caller is recorded, and it is the caller who is awaiting the answer.
+    const show = pendingCrossScriptShow();
+    await vi.waitFor(() => expect(show.entered()).toBe(true));
+    expect(getActiveModal()?.scriptName).toBe("Order entry");
+    revokeScriptForms("btn-1");
+    expect(getActiveModal()).toBeNull();
+    show.finishReads();
+    await expect(show.promise).rejects.toThrow(/unloaded before its form could open/);
+    // Nothing painted for a caller that is gone, and no answer relayed.
+    expect(r.requests).toHaveLength(0);
+    expect(r.closes).toHaveLength(0);
+    expect(deps.closedWith).toHaveLength(0);
+    expect(deps.forwarded).toHaveLength(0);
+    expect(getActiveScriptForm()).toBeNull();
+    // The OWNER only lost its claim, not its layout — the caller went away.
+    expect(getScriptFormSpec(OWNER.scriptId)).toBe(SPEC);
+    await proveSlotIsFree();
+  });
+
+  it("a caller that already holds its seeds still passes them directly", async () => {
+    // Both shapes are supported: the editor preview resolves its seeds from a
+    // snapshot before it ever calls in, and has no reads to defer.
+    defineScriptForm(OWNER.scriptId, SPEC);
+    const promise = showScriptForm({
+      ...OWNER,
+      seeds: { customer: { value: "From a snapshot" } },
+      preview: true,
+      deps,
+    });
+    // Synchronous, in the same turn: no thunk, no await before the paint.
+    expect(r.requests).toHaveLength(1);
+    expect(r.last().seeds).toEqual({ customer: { value: "From a snapshot" } });
+    expect(r.last().preview).toBe(true);
+    r.shown(r.last().showId, { customer: "From a snapshot", rush: false });
+    await promise;
   });
 });
 

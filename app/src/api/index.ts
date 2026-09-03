@@ -2332,8 +2332,10 @@ export {
   SCRIPT_FORM_INPUT_EVENT,
   normalizeFormOption,
   isValidFormName,
+  formOriginForMount,
 } from "./scriptHost/scriptFormSpec";
 export type {
+  FormOrigin,
   FormSpec,
   FormWidget,
   FormWidgetType,
@@ -2354,6 +2356,32 @@ export type {
   ScriptFormInputPayload,
   ScriptFormInputKind,
 } from "./scriptHost/scriptFormSpec";
+// The trust ORIGIN of a script, as a discriminated union rather than a string —
+// the one definition the capability gates, the R7 trust predicate and every
+// provenance band read. A publisher-chosen application name lands in `.name` on
+// the `package` variant and can never select the `local` kind.
+export {
+  LOCAL_ORIGIN,
+  PREVIEW_ORIGIN,
+  UNKNOWN_PACKAGE_NAME,
+  packageOrigin,
+  scriptOriginForMount,
+  scriptOriginForStoredRecord,
+  accessLevelForOrigin,
+  mountProvenanceForOrigin,
+  isLocalOrigin,
+  originPackageName,
+  sameScriptOrigin,
+  originTagLabel,
+  originTagTitle,
+} from "./scriptHost/scriptOrigin";
+export type {
+  ScriptOrigin,
+  MountOrigin,
+  LocalOrigin,
+  PackageOrigin,
+  PreviewOrigin,
+} from "./scriptHost/scriptOrigin";
 export {
   defineScriptForm,
   getScriptFormSpec,
@@ -2372,7 +2400,28 @@ export type { FormSessionDeps, FormSubmitDecision } from "./scriptHost/scriptFor
 // The editor's "Preview form" paints the layout it captures; the AI author
 // runner grades drafts with it.
 export { previewObjectScript } from "./scriptHost/scriptPreview";
-export type { PreviewRequest, WorkerPreviewReport } from "./scriptHost/scriptPreview";
+export type { PreviewRequest, WorkerPreviewReport, PreviewFormSourceSeed } from "./scriptHost/scriptPreview";
+// One procedure, two surfaces: run a FORM draft in that rung, seed its widgets
+// from the copy the run used (plus the live control values, for a trusted
+// caller), and open the renderer in preview mode. The editor's "Preview form"
+// and the package inspector share it rather than each keeping seeding rules.
+export {
+  previewFormLayout,
+  planFormPreviewSeeds,
+  buildFormPreviewSeeds,
+  readControlSeeds,
+  formLayoutNote,
+  previewScriptId,
+  releasePreviewIdentity,
+  PREVIEW_SCRIPT_ID_PREFIX,
+  PREVIEW_UNRESOLVED_REASON,
+} from "./scriptFormPreview";
+export type {
+  FormLayoutPreviewRequest,
+  FormLayoutPreviewOutcome,
+  FormLayoutPreviewStatus,
+  FormPreviewSeedPlan,
+} from "./scriptFormPreview";
 export { DIALOG_FIELD_TYPES, MAX_DIALOG_FIELDS, normalizeDialogOption } from "./scriptHost/scriptDialogSpec";
 export type {
   ScriptDialogField,
@@ -2389,6 +2438,7 @@ export {
   loadConsents,
   recordConsent,
   isConsentCurrent,
+  areScriptsConsented,
   getChangedScripts,
 } from "./distributedConsent";
 export type {

@@ -172,6 +172,23 @@ vi.mock("@api", () => ({
   hostValidateScript: async () => ({ valid: true }),
   showToast: vi.fn(),
   saveObjectScript: (...a: unknown[]) => saveObjectScript(...(a as [])),
+  // The REAL trust-origin derivations (app/src/api/scriptHost/scriptOrigin.ts).
+  // The editor DERIVES a module's tier and its publisher from the record now
+  // instead of asserting them, so these have to behave like the originals — a
+  // stub that always answered "local" would quietly re-hide the defect.
+  scriptOriginForStoredRecord: (record: { sourcePackage?: string | null }) => {
+    const name =
+      typeof record.sourcePackage === "string" ? record.sourcePackage.trim() : "";
+    return name === "" ? { kind: "local" } : { kind: "package", name };
+  },
+  accessLevelForOrigin: (origin: { kind: string }, requested: string) =>
+    origin.kind === "package" ? "restricted" : requested,
+  originPackageName: (origin: { kind: string; name?: string }) =>
+    origin.kind === "package" ? origin.name ?? null : null,
+  mountProvenanceForOrigin: (origin: { kind: string; name?: string }) =>
+    origin.kind === "package"
+      ? { provenance: "distributed", packageName: origin.name }
+      : { provenance: "local" },
 }));
 vi.mock("@api/scriptTranspile", () => ({ prefetchScriptTranspiler: () => {} }));
 vi.mock("../lib/templateManager", () => ({
@@ -472,6 +489,42 @@ describe("Object Script Editor — a macro edit is live", () => {
     expect(store.get(MACRO.id)!.source).toBe("function macro1(api) { /* v2 */ }");
     expect(runAtCursor).toHaveBeenCalledTimes(1);
     expect(runAtCursor.mock.calls[0][1]).toBe("function macro1(api) { /* v2 */ }");
+  });
+
+  // F5 IS A MONACO KEYBINDING, AND KEYBINDINGS AUTO-REPEAT. A Run is not
+  // instantaneous — it flushes the buffer, may stop a stale session, and over the
+  // cross-window bridge waits out a remount — so a held key stacked two
+  // `runAtCursor` calls on ONE script. Two starts then competed for one session
+  // and for one start-refusal record, and the loser reported a run that never
+  // happened. The debugger's record now carries an attempt id so it cannot
+  // misattribute an answer; this flag is the half that stops the second Run
+  // existing at all. It must REFUSE the repeat out loud, not queue it, and it
+  // must release when the first Run reports.
+  it("ignores a repeated Run while the first is still in flight, and says so", async () => {
+    await mountApp();
+    await deliverMacro();
+
+    let release: (() => void) | null = null;
+    runAtCursor.mockImplementationOnce(
+      () =>
+        new Promise<{ status: "ran"; functionName: string }>((resolve) => {
+          release = () => resolve({ status: "ran", functionName: "macro1" });
+        }),
+    );
+
+    await clickRun(); // parked inside runAtCursor
+    await clickRun(); // the auto-repeat
+
+    expect(runAtCursor).toHaveBeenCalledTimes(1);
+    expect(consoleText()).toContain("A Run is already starting for this script");
+
+    // The first Run reports; the flag is released and Run works again.
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+    await clickRun();
+    expect(runAtCursor).toHaveBeenCalledTimes(2);
   });
 
   // ---- 3. Source that does not compile -------------------------------------

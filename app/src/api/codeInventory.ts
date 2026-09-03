@@ -57,6 +57,7 @@ import {
 } from "./moduleScriptBackend";
 import { listNotebooks, loadNotebook } from "./notebookBackend";
 import { listMountedHandles } from "./scriptHost/broker";
+import { isLocalOrigin, originPackageName, type ScriptOrigin } from "./scriptHost/scriptOrigin";
 import { listBackendCapabilityGrants } from "./scriptHost/capabilities";
 import { loadPersistedLibrary, CUSTOM_FUNCTIONS_SCRIPT_ID } from "./customFunctions";
 import { loadPersistedTransformLibraryWithProvenance, CHART_TRANSFORMS_SCRIPT_ID } from "./chartTransformScripts";
@@ -523,13 +524,25 @@ export async function getWorkbookCodeUnits(): Promise<CodeUnit[]> {
       const params = fn.params.map((p) => p.trim()).filter(Boolean);
       // Show the code as a readable function rather than the raw stored body.
       const source = `function ${name.toUpperCase()}(${params.join(", ")}) {\n${fn.body}\n}`;
+      // PER-FUNCTION PROVENANCE, because the library is MERGED. The reserved
+      // record is one blob shared by the subscriber and every application that
+      // ships functions: `merge_custom_function_library`
+      // (app/src-tauri/src/calp_commands.rs) stamps `sourcePackage` on each
+      // function it folds in, precisely so they stay attributable. Reporting the
+      // whole library as "local" hid a publisher's UDF inside the user's own —
+      // the transparency panel is where a user goes to answer "whose code is
+      // this?", so it is the last place to answer it by assumption.
+      const udfPackage =
+        typeof fn.sourcePackage === "string" && fn.sourcePackage.trim() !== ""
+          ? fn.sourcePackage.trim()
+          : null;
       units.push({
         surfaceId: "formula-udf",
         id: `${CUSTOM_FUNCTIONS_SCRIPT_ID}::${name.toUpperCase()}`,
         name: `${name.toUpperCase()}(${params.join(", ")})`,
         residence: "Custom Function — worker-realm sandbox",
-        provenance: "local",
-        sourcePackage: null,
+        provenance: udfPackage ? "distributed" : "local",
+        sourcePackage: udfPackage,
         declaredCapabilities: declared,
         liveGrants: libHandle ? ([...libHandle.grants] as CapabilityId[]) : null,
         tier: libHandle ? libHandle.tier : "restricted",
@@ -885,15 +898,17 @@ export async function getWorkbookScheduledJobs(
       scriptId: job.scriptId,
       ownerName: owner?.name ?? handle?.scriptName ?? job.scriptId,
       ownerMissing: owner === null && handle === null,
+      // Branch on the origin's KIND; DISPLAY its name. `originPackageName`
+      // returns the publisher's name for a package origin and null otherwise, so
+      // this column keeps showing "Acme Reports" and never an internal encoding.
       ownerProvenance: owner
         ? owner.provenance
         : handle
-          ? handle.origin === "local"
+          ? isLocalOrigin(handle.origin)
             ? "local"
             : "distributed"
           : "unknown",
-      ownerPackage:
-        owner?.sourcePackage ?? (handle && handle.origin !== "local" ? handle.origin : null),
+      ownerPackage: owner?.sourcePackage ?? (handle ? originPackageName(handle.origin) : null),
       surface: job.surface,
       objectType: job.objectType,
       instanceId: job.instanceId,
@@ -1062,7 +1077,7 @@ function joinOwner(
   scriptId: string,
   fallbackName: string,
   ownerById: Map<string, CodeUnit>,
-  handleById: Map<string, { scriptName: string; origin: string }>,
+  handleById: Map<string, { scriptName: string; origin: ScriptOrigin }>,
 ): {
   ownerName: string;
   ownerMissing: boolean;
@@ -1077,12 +1092,11 @@ function joinOwner(
     ownerProvenance: owner
       ? owner.provenance
       : handle
-        ? handle.origin === "local"
+        ? isLocalOrigin(handle.origin)
           ? "local"
           : "distributed"
         : "unknown",
-    ownerPackage:
-      owner?.sourcePackage ?? (handle && handle.origin !== "local" ? handle.origin : null),
+    ownerPackage: owner?.sourcePackage ?? (handle ? originPackageName(handle.origin) : null),
   };
 }
 

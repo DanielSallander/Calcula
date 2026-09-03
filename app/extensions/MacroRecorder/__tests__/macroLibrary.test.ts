@@ -346,6 +346,8 @@ describe("editing and deleting a saved macro", () => {
       name: "Renamed",
       source: "two",
       description: store.get("macro-m")!.description,
+      sourcePackage: null,
+      scope: store.get("macro-m")!.scope,
     });
     const readBack = await loadMacroModule("macro-m");
     expect(readBack.name).toBe("Renamed");
@@ -414,6 +416,8 @@ describe("runMacroByRef (the button-link run path)", () => {
       name: "V2",
       source: "two",
       description: store.get("macro-live")!.description,
+      sourcePackage: null,
+      scope: store.get("macro-live")!.scope,
     });
     // The link resolves the module fresh — it sees the edited record, no re-save.
     const outcome = await runMacroByRef("macro-live");

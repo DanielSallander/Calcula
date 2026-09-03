@@ -37,6 +37,7 @@ import {
   MAX_FORM_VALUE_CHARS,
   MAX_FORM_WIDTH,
   MIN_FORM_WIDTH,
+  formOriginForMount,
 } from "../scriptFormSpec";
 
 /** A syntactically valid media handle: "media:" + 64 lowercase hex. */
@@ -558,5 +559,44 @@ describe("vFormClose", () => {
     expect(vFormClose([{ a: "x".repeat(MAX_FORM_VALUE_CHARS + 1) }])).not.toBe(true);
     expect(vFormClose(["done"])).not.toBe(true);
     expect(vFormClose([["a"]])).not.toBe(true);
+  });
+});
+
+// ============================================================================
+// Provenance
+// ============================================================================
+
+describe("formOriginForMount", () => {
+  it("reads provenance, never the package NAME — an application called \"local\" is a package", () => {
+    // THE BUG THIS SHAPE REMOVES. The identity band used to branch on a single
+    // string in which "local" meant "a script in this workbook" and everything
+    // else was an application name, so a publisher could buy the local phrasing
+    // by choosing a name. `kind` is derived from `provenance`, which the pull
+    // path stamps and no publisher writes.
+    expect(
+      formOriginForMount({ provenance: "distributed", packageName: "local" }),
+    ).toEqual({ kind: "package", name: "local" });
+  });
+
+  it("calls a locally authored script local, whatever it is otherwise carrying", () => {
+    expect(formOriginForMount({ provenance: "local" })).toEqual({ kind: "local" });
+    expect(formOriginForMount({})).toEqual({ kind: "local" });
+    // A stale packageName on a local script does not make it a package.
+    expect(formOriginForMount({ provenance: "local", packageName: "Sales Pack" })).toEqual({
+      kind: "local",
+    });
+  });
+
+  it("uses the same nameless-package placeholder the trust handle uses", () => {
+    // broker.ts's buildHandleFromDefinition spells it "(unknown package)"; the
+    // band and the cross-script trust predicate must name one publisher one way.
+    expect(formOriginForMount({ provenance: "distributed" })).toEqual({
+      kind: "package",
+      name: "(unknown package)",
+    });
+    expect(formOriginForMount({ provenance: "distributed", packageName: "" })).toEqual({
+      kind: "package",
+      name: "(unknown package)",
+    });
   });
 });

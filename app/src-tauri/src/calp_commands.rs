@@ -1928,6 +1928,14 @@ fn materialize_distributed_scripts(
 ) -> Result<(Vec<(String, String)>, Vec<(String, String)>, bool), String> {
     use std::collections::HashSet;
 
+    // THE ENFORCEMENT DOOR for the host's reserved id namespace. Every path that
+    // materializes distributed modules/notebooks converges here, and this runs
+    // before the first lock is taken, so a refusal writes nothing. The callers
+    // gate again EARLIER, before their `DocumentEffect`, so a refused
+    // subscribe/checkout/refresh also leaves the document CLEAN — two checks,
+    // two jobs: theirs is about the dirty flag, this one is the invariant.
+    refuse_reserved_distributed_script_ids(package_name, modules, notebooks)?;
+
     // (id, name) of the modules/notebooks ACTUALLY inserted — conflict-skipped
     // ones excluded, so the provenance ledger never attributes a preserved
     // local (or other-application) document to this application.
@@ -2058,6 +2066,84 @@ fn materialize_distributed_scripts(
 /// Reserved module-script id under which the Custom Functions (JS UDF) library
 /// is persisted as JSON data (mirrors PERSIST_SCRIPT_ID in @api/customFunctions.ts).
 const CUSTOM_FUNCTIONS_LIB_ID: &str = "__calcula_custom_functions__";
+
+/// Refuse a published module or notebook that claims an id in the HOST's
+/// reserved `__calcula_` namespace.
+///
+/// THE DEFECT THIS CLOSES. `materialize_distributed_scripts` inserted whatever
+/// id an application shipped straight into the workbook's module map.
+/// `list_scripts` HIDES reserved ids (they are internal data records, not user
+/// code) and `delete_script` REFUSES them (deleting one would destroy the owning
+/// feature's state) — so a publisher who named a module `__calcula_anything`
+/// landed code in the subscriber's workbook that appears in NO listing and
+/// CANNOT be removed. Invisible and undeletable is not a cosmetic pair; it is
+/// the precise inverse of the Transparency pillar's "the user must always know
+/// where code resides and what it can touch".
+///
+/// WHY REFUSE RATHER THAN RENAME. A rename would break the application's own
+/// references to its module, and — worse — it would hide the attempt: the
+/// subscriber would never learn that an application tried to write into the
+/// host's namespace. A refusal is loud, names the id and the application, and is
+/// fixable by the party that actually caused it.
+///
+/// WHY THE WHOLE OPERATION AND NOT JUST THAT ONE MODULE. The same reasoning as
+/// `crate::media::enforce_distributed_control_budget`: skipping the offending id
+/// and applying the rest is a half-applied application that nobody can reason
+/// about, and "some of it landed" is exactly what a report consumer cannot see.
+/// Every caller runs this BEFORE its `DocumentEffect`, so the refusal leaves the
+/// workbook untouched and, unlike a mid-materialization failure, not even
+/// marked modified.
+///
+/// ONE EXEMPTION, BY DESIGN: `__calcula_custom_functions__`. That id collides
+/// across every workbook deliberately and has its own merge path
+/// (`merge_custom_function_library`), which validates each incoming function
+/// name, keeps the merged record SUBSCRIBER-owned, and never widens the
+/// subscriber's declared capability ceiling. It is a shipped feature, not a
+/// namespace grab. Notebooks get no exemption — nothing merges a notebook, and
+/// the prefix belongs to the host on both maps regardless of which one happens
+/// to hide and protect its ids today.
+fn refuse_reserved_distributed_script_ids(
+    package_name: &str,
+    modules: &[persistence::SavedScript],
+    notebooks: &[persistence::SavedNotebook],
+) -> Result<(), String> {
+    let mut claimed: Vec<&str> = modules
+        .iter()
+        .map(|m| m.id.as_str())
+        .filter(|id| {
+            crate::scripting::commands::is_reserved_script_id(id) && *id != CUSTOM_FUNCTIONS_LIB_ID
+        })
+        .chain(
+            notebooks
+                .iter()
+                .map(|n| n.id.as_str())
+                .filter(|id| crate::scripting::commands::is_reserved_script_id(id)),
+        )
+        .collect();
+    if claimed.is_empty() {
+        return Ok(());
+    }
+    // Deterministic and de-duplicated: the same application must produce the
+    // same sentence every time it is refused, or two reports of the same
+    // refusal cannot be compared.
+    claimed.sort_unstable();
+    claimed.dedup();
+    let one = claimed.len() == 1;
+    Err(format!(
+        "CALP_RESERVED_SCRIPT_ID: The application '{}' ships {} whose id starts with '{}': \
+         {}. That namespace is reserved for Calcula's own internal records — ids in it are \
+         hidden from the Script Editor and cannot be deleted, so anything landing there \
+         would sit in your workbook invisible and permanent. Nothing was imported. Ask the \
+         publisher to rename {}; renaming {} here instead would break the application's own \
+         references and hide the fact that it tried.",
+        package_name,
+        if one { "a script" } else { "scripts" },
+        crate::scripting::commands::RESERVED_SCRIPT_PREFIX,
+        summarize_ids(claimed.iter().copied()),
+        if one { "it" } else { "them" },
+        if one { "it" } else { "them" },
+    ))
+}
 
 /// Merge an application's custom-function library into the subscriber's reserved
 /// library record, PER FUNCTION:
@@ -3462,6 +3548,15 @@ pub fn calp_pull(
     )
     .map_err(|e| e.to_string())?;
 
+    // A publisher may not write into the host's reserved `__calcula_` id
+    // namespace. HERE, before the effect below dirties the document at
+    // construction: a refused subscribe must leave a clean workbook clean.
+    refuse_reserved_distributed_script_ids(
+        &result.package_name,
+        &result.module_scripts,
+        &result.notebooks,
+    )?;
+
     // ONE EFFECT, constructed after every refusal that precedes a write.
     //
     // It used to be the statement above `open_workspace_scoped`, so a subscribe
@@ -4482,6 +4577,16 @@ pub fn calp_checkout(
             ));
         }
     }
+
+    // ...and neither role may write into the host's reserved `__calcula_` id
+    // namespace. A working copy is where an author's next PUSH comes from, so a
+    // reserved id admitted here would be republished to every subscriber.
+    // Before the effect, for the same reason as the gates above.
+    refuse_reserved_distributed_script_ids(
+        &params.package_name,
+        &result.module_scripts,
+        &result.notebooks,
+    )?;
 
     // ONE effect for the whole command. Unlike `new_file`/`open_file` — which
     // tear down under `deliberately_clean` because they END clean — a checkout
@@ -6666,6 +6771,18 @@ pub fn calp_refresh_apply(
                 &skip,
             );
         }
+    }
+
+    // An UPDATE may not write into the host's reserved `__calcula_` id
+    // namespace either — a publisher who could not claim one at subscribe must
+    // not be able to claim one at v2, which is the version nobody re-reads.
+    // Before the effect, so a refused refresh leaves the workbook clean.
+    for payload in &payloads {
+        refuse_reserved_distributed_script_ids(
+            &payload.pull_result.package_name,
+            &payload.pull_result.module_scripts,
+            &payload.pull_result.notebooks,
+        )?;
     }
 
     // NOTHING TO DO IS NOT A MUTATION. `DocumentEffect::mutates` dirties at
@@ -10003,6 +10120,35 @@ pub(crate) fn consent_granted_in(
                             && s.get("sourceHash").and_then(|v| v.as_str()) == Some(source_hash)
                     })
                 })
+                .unwrap_or(false)
+    })
+}
+
+/// Whether a parsed consent file carries ANY approval under `package_key`.
+///
+/// The question a MOUNT can answer when the realm's source was COMPOSED by the
+/// host — a generated import prelude plus merged bodies — and therefore hashes
+/// to something no stored artifact has ever matched. Deliberately weaker than
+/// {@link consent_granted_in}, and used only as the floor in
+/// `distributed_mount_refusal` (app/src-tauri/src/scripting/commands.rs), never
+/// as a substitute for it: where a mount CAN name its artifact, that gate goes
+/// on to require `consent_granted_in` for it.
+///
+/// A record with an EMPTY script list is not an approval: it names an
+/// application without approving any of its code.
+pub(crate) fn consent_record_exists_in(
+    consent_file: &serde_json::Value,
+    package_key: &str,
+) -> bool {
+    let Some(consents) = consent_file.get("consents").and_then(|c| c.as_array()) else {
+        return false;
+    };
+    consents.iter().any(|record| {
+        record.get("packageName").and_then(|v| v.as_str()) == Some(package_key)
+            && record
+                .get("scripts")
+                .and_then(|s| s.as_array())
+                .map(|scripts| !scripts.is_empty())
                 .unwrap_or(false)
     })
 }
@@ -17384,6 +17530,154 @@ mod c8_materialize_tests {
         let scripts = st.workbook_scripts.read().unwrap();
         assert_eq!(scripts.get("m1").unwrap().source, "from-a");
         assert_eq!(scripts.get("m1").unwrap().source_package.as_deref(), Some("pkg-a"));
+    }
+
+    // -----------------------------------------------------------------------
+    // The host's reserved `__calcula_` id namespace is not the publisher's
+    // -----------------------------------------------------------------------
+
+    fn effect() -> crate::document_effect::DocumentEffect {
+        crate::document_effect::DocumentEffect::mutates(&crate::persistence::FileState::default())
+    }
+
+    /// THE DEFECT, restated. A module id starting with `__calcula_` is HIDDEN by
+    /// `list_scripts` and REFUSED by `delete_script`, so a published module that
+    /// claimed one landed in the subscriber's workbook invisible AND undeletable
+    /// — code sitting in the user's document that the user cannot see or remove,
+    /// which is the exact inverse of the Transparency pillar.
+    #[test]
+    fn a_published_module_cannot_claim_the_hosts_reserved_id_namespace() {
+        let st = ScriptState::new();
+        let res = materialize_distributed_scripts(
+            &effect(),
+            &st,
+            "pkg",
+            &[mk_module("pkg", "__calcula_stowaway", "hidden();")],
+            &[],
+        );
+        assert!(
+            res.is_err(),
+            "a module claiming the reserved namespace must be REFUSED; it was applied and \
+             the workbook now holds {:?}",
+            st.workbook_scripts.read().unwrap().keys().collect::<Vec<_>>()
+        );
+        let err = res.unwrap_err();
+
+        assert!(err.contains("__calcula_stowaway"), "must name the id: {err}");
+        assert!(err.contains("__calcula_"), "must name the reserved prefix: {err}");
+        assert!(err.contains("'pkg'"), "must name the application: {err}");
+        // The refusal is loud about not renaming — a rename would break the
+        // application's own references AND hide that it tried.
+        assert!(err.contains("rename"), "must say why it is not renamed: {err}");
+
+        // NOTHING landed. The gate runs before the first lock is taken, so a
+        // refusal is not a partial materialization.
+        assert!(
+            st.workbook_scripts.read().unwrap().is_empty(),
+            "a refused pull must write no module at all"
+        );
+    }
+
+    /// Same rule on the notebook map. Nothing merges a notebook, and the prefix
+    /// belongs to the host on both maps regardless of which one hides its ids.
+    #[test]
+    fn a_published_notebook_cannot_claim_it_either() {
+        let st = ScriptState::new();
+        let res = materialize_distributed_scripts(
+            &effect(),
+            &st,
+            "pkg",
+            &[],
+            &[mk_notebook("pkg", "__calcula_notes", "x")],
+        );
+        assert!(
+            res.is_err(),
+            "a notebook claiming the reserved namespace must be REFUSED; it was applied and \
+             the workbook now holds {:?}",
+            st.workbook_notebooks.read().unwrap().keys().collect::<Vec<_>>()
+        );
+        let err = res.unwrap_err();
+        assert!(err.contains("__calcula_notes"), "must name the id: {err}");
+        assert!(
+            st.workbook_notebooks.read().unwrap().is_empty(),
+            "a refused pull must write no notebook at all"
+        );
+    }
+
+    /// A refusal takes the WHOLE application with it, rather than skipping the
+    /// one id and applying the rest: a half-applied application is a state the
+    /// subscriber cannot see, and this publisher is doing something pointed.
+    #[test]
+    fn one_reserved_id_refuses_the_whole_application() {
+        let st = ScriptState::new();
+        let res = materialize_distributed_scripts(
+            &effect(),
+            &st,
+            "pkg",
+            &[
+                mk_module("pkg", "ordinary", "fine();"),
+                mk_module("pkg", "__calcula_stowaway", "hidden();"),
+            ],
+            &[],
+        );
+        assert!(
+            res.is_err(),
+            "one reserved id must refuse the whole application; the workbook now holds {:?}",
+            st.workbook_scripts.read().unwrap().keys().collect::<Vec<_>>()
+        );
+        let err = res.unwrap_err();
+        assert!(err.contains("Nothing was imported"), "{err}");
+        assert!(
+            st.workbook_scripts.read().unwrap().get("ordinary").is_none(),
+            "the innocent module from the same application must not land either"
+        );
+    }
+
+    /// THE ONE EXEMPTION, and it must keep working. `__calcula_custom_functions__`
+    /// collides across every workbook by design and has its own per-function
+    /// merge (validated names, subscriber-owned record, no capability widening).
+    /// Refusing it would break a shipped feature — publishing a custom-function
+    /// library — for every application that carries one.
+    #[test]
+    fn the_custom_functions_library_is_still_admitted() {
+        let st = ScriptState::new();
+        let lib = r#"{"functions":[{"name":"DOUBLEIT","body":"return x*2;"}]}"#;
+        let (_, _, changed) = materialize_distributed_scripts(
+            &effect(),
+            &st,
+            "pkg",
+            &[mk_module("pkg", "__calcula_custom_functions__", lib)],
+            &[],
+        )
+        .expect("the custom-functions library has a merge path and must not be refused");
+        assert!(changed, "the merged library record changed");
+        let scripts = st.workbook_scripts.read().unwrap();
+        let merged = scripts
+            .get("__calcula_custom_functions__")
+            .expect("the library record is merged in");
+        assert!(merged.source.contains("DOUBLEIT"), "{}", merged.source);
+        assert_eq!(
+            merged.source_package, None,
+            "the merged record stays subscriber-owned"
+        );
+    }
+
+    /// An ordinary id is untouched by the gate — the refusal is about one
+    /// namespace, not about distributed modules in general.
+    #[test]
+    fn an_ordinary_id_is_unaffected_by_the_reserved_namespace_gate() {
+        let st = ScriptState::new();
+        materialize_distributed_scripts(
+            &effect(),
+            &st,
+            "pkg",
+            // Deliberately close to the prefix without being in it — the check
+            // is a prefix test, not a substring test.
+            &[mk_module("pkg", "calcula_helper", "ok();")],
+            &[],
+        )
+        .expect("an ordinary id must still materialize");
+        assert!(st.workbook_scripts.read().unwrap().contains_key("calcula_helper"));
     }
 }
 

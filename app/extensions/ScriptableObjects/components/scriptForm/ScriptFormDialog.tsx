@@ -537,13 +537,21 @@ function FormSession({ request, onClose }: SessionProps): React.ReactElement {
     requestFocus(autoFocusName);
   }, [autoFocusName, requestFocus]);
 
+  // THE ONE LINE A FORM MUST NOT BE ABLE TO CHOOSE.
+  //
+  // The branch is on `kind`, never on a name. It used to test
+  // `scriptOrigin === "local"` against a field that carried EITHER the sentinel
+  // OR the application name — so publishing an application called `local` made
+  // this band tell the reviewer the form came from their own workbook. The
+  // discriminated `FormOrigin` removes the value that did it: a package named
+  // "local" is `{ kind: "package", name: "local" }` and paints as a package.
   const provenance = useMemo(() => {
     const origin =
-      request.scriptOrigin === "local"
+      request.origin.kind === "local"
         ? "A form from a script in this workbook"
-        : `A form from the package "${request.scriptOrigin}"`;
+        : `A form from the package "${request.origin.name}"`;
     return request.callerName ? `${origin} — opened by ${request.callerName}` : origin;
-  }, [request.scriptOrigin, request.callerName]);
+  }, [request.origin, request.callerName]);
 
   const hasSubmitWidget = buttonWidgets.some(
     (b) => b.role === "submit" && !b.hidden && !controls[b.name]?.hidden,

@@ -9,7 +9,7 @@
 import type { NamedRange, SheetInfo } from "@api/lib";
 import type { Table } from "@api/backend";
 import type { PivotTableInfo } from "@api/pivotTypes";
-import type { ScriptSummary } from "@api/workbookScripts";
+import type { MacroEntry } from "./macroProvenance";
 import type { AppCliGateway } from "./appGateway";
 
 export interface AppCliSession {
@@ -20,7 +20,10 @@ export interface AppCliSession {
   names: NamedRange[];
   tables: Table[];
   pivots: PivotTableInfo[];
-  macros: ScriptSummary[];
+  /** Module scripts, each carrying the origin derived from its own record —
+   *  the cache `ls macros` and completion render, so provenance is present in
+   *  the CACHE and cannot be lost between the read and the display. */
+  macros: MacroEntry[];
   /** Best-effort re-read of every cache; a failed read keeps the old value. */
   refresh(): Promise<void>;
 }
@@ -40,7 +43,7 @@ export function createAppCliSession(gateway: AppCliGateway): AppCliSession {
         gateway.getAllNamedRanges(),
         gateway.getAllTables(),
         gateway.getAllPivotTables(),
-        gateway.listWorkbookScripts(),
+        gateway.listMacros(),
       ]);
       if (sheets.status === "fulfilled") {
         session.sheets = sheets.value.sheets;

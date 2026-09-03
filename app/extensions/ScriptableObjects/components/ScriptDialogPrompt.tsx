@@ -252,11 +252,26 @@ export default function ScriptDialogPrompt({ onClose, data }: DialogProps): Reac
     });
   }, []);
 
+  // THE ONE LINE A DIALOG MUST NOT BE ABLE TO CHOOSE.
+  //
+  // The branch is on `kind`, never on a name. It used to test
+  // `scriptOrigin === "local"` against a field that carried EITHER the sentinel
+  // OR the publisher's chosen application name — so an application called
+  // `local` made this band tell the user the question came from their own
+  // workbook. The discriminated `ScriptOrigin` removes the value that did it: a
+  // package named "local" is `{ kind: "package", name: "local" }` and is named
+  // as a package. Same fix, same reason, as the form band in ScriptFormDialog.
   const provenance = useMemo(() => {
     if (!request) return "";
-    return request.scriptOrigin === "local"
-      ? "A script in this workbook is asking you a question"
-      : `A script from the package "${request.scriptOrigin}" is asking you a question`;
+    const origin = request.scriptOrigin;
+    if (origin.kind === "local") return "A script in this workbook is asking you a question";
+    if (origin.kind === "package") {
+      return `A script from the package "${origin.name}" is asking you a question`;
+    }
+    // A dry-run handle declares no capabilities, so ui.dialog is refused before
+    // it reaches here. Named anyway: an unhandled kind must not fall back to the
+    // most trusting phrasing.
+    return "A script being previewed is asking you a question";
   }, [request]);
 
   if (!request) return null;
@@ -295,7 +310,9 @@ export default function ScriptDialogPrompt({ onClose, data }: DialogProps): Reac
           <S.ScriptGlyph>{ScriptGlyphSvg}</S.ScriptGlyph>
           <S.HeaderText>
             <S.AskedBy>{request.scriptName}</S.AskedBy>
-            <S.Provenance>{provenance}</S.Provenance>
+            {/* Addressable so the provenance wording can be pinned by a test,
+                exactly as `data-script-form-band` pins the form band. */}
+            <S.Provenance data-script-dialog-band="">{provenance}</S.Provenance>
           </S.HeaderText>
           <S.CloseButton onClick={dismiss} title="Close (Esc)">
             X

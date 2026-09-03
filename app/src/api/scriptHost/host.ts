@@ -115,12 +115,19 @@ import {
 } from "./scriptForms";
 import {
   MAX_FORM_ERROR_CHARS,
+  formOriginForMount,
   isValidFormName,
   type FormPatch,
   type FormSeed,
   type FormSpec,
   type FormValue,
 } from "./scriptFormSpec";
+import {
+  isLocalOrigin,
+  mountProvenanceForOrigin,
+  scriptOriginForMount,
+  scriptOriginForStoredRecord,
+} from "./scriptOrigin";
 import {
   cellWriteFor,
   collectFormBindings,
@@ -553,6 +560,23 @@ export interface HostMountDefinition {
   /** The R19 declared-capability ceiling (authoritative). Passed to
    *  buildHandleFromDefinition; the broker denies any cap not in this set. */
   declaredCapabilities?: string[];
+  /**
+   * The ARTIFACT this mount is, when the workbook's consent record names one.
+   *
+   * `source` here is the exact source the user APPROVED — never `definition.source`,
+   * which is the composed realm source (a host-generated import prelude, then the
+   * body) and hashes to something no consent record has ever seen. Supplying it
+   * tightens the mount gate from "this application is approved" to "this artifact
+   * is covered by that approval, at this hash".
+   *
+   * Only a mount that can name its artifact honestly sets this. A composed realm
+   * — a UDF library, a shared-library realm, a chart mark/transform library —
+   * mounts code merged from many artifacts under a synthetic consent identity its
+   * own surface computes; re-deriving that identity here would be a second copy of
+   * the decision, which is precisely how the run routes came to differ. Those get
+   * the application-level floor, and their surface keeps its artifact check.
+   */
+  consentArtifact?: { id: string; source: string };
   apiVersion: string;
   /**
    * Why this mount is happening. `"open"` marks the workbook-open mount path
@@ -580,6 +604,13 @@ interface MountedWorker {
   terminated?: boolean;
   handle: ScriptHandle;
   definition: HostMountDefinition;
+  /**
+   * The proof this mount's definition passed Script Security and distributed
+   * consent. Kept so a REMOUNT of the same code (crash respawn, a debug session
+   * opening or closing) can re-present it instead of re-gating — and so it can
+   * never be re-presented for anything else (see `assertAdmissionCovers`).
+   */
+  admission: MountAdmission;
   cleanupFns: CleanupFn[];
   /** Wired app-event forwarders, keyed by hook. */
   forwarders: Map<string, CleanupFn>;
@@ -689,6 +720,30 @@ export function mountedScriptHasHook(scriptId: string, hook: string): boolean {
 // Spawn / terminate
 // ============================================================================
 
+/**
+ * THE ONLY PLACE A SCRIPT REALM IS CREATED — and there are exactly three call
+ * sites, which is a fact `distributedMountConsent.test.ts` pins so a fourth
+ * cannot appear unclassified:
+ *
+ *   1. `mountWorker`        — a MOUNT. Gated: it cannot be called without a
+ *                             `MountAdmission` (Script Security + distributed
+ *                             consent).
+ *   2. `hostValidateScript` — a SYNTAX CHECK. Ungated by design: the source is
+ *                             wrapped as blob-ESM and PARSED, never executed,
+ *                             the realm gets no mount spec, no tier, no grants
+ *                             and no broker handle, and it is terminated on
+ *                             every path. There is nothing here for consent to
+ *                             protect, and gating it would make the editor
+ *                             unable to tell a publisher's macro it has a typo.
+ *   3. `hostPreviewScript`  — a DRY RUN over a substituted backend. Ungated by
+ *                             design, and the reasoning is in its own header:
+ *                             safety is proved by the calls it does NOT make
+ *                             (no `assertMountAllowed`, no live handle, no
+ *                             grants, no `mounted.set`, no `executeImpl`), so
+ *                             no call can reach a Tauri command and nothing is
+ *                             registered anywhere. Its handle is a
+ *                             `PreviewOrigin`, same-origin with nothing.
+ */
 function spawnWorker(): Worker {
   return new Worker(new URL("./worker/bootstrap.ts", import.meta.url), { type: "module" });
 }
@@ -698,26 +753,255 @@ export function workerRealmAvailable(): boolean {
   return typeof Worker !== "undefined" && typeof window !== "undefined";
 }
 
+// ============================================================================
+// MOUNT ADMISSION — the gates live at the boundary, not at the callers
+// ============================================================================
+//
+// WHY THIS EXISTS. Creating a realm for code that arrived inside a distributed
+// application (`.calp`) requires TWO decisions, and they are not the same one:
+//
+//   * SCRIPT SECURITY — may this workbook run scripts at all right now?
+//     (`assertMountAllowed`, the global setting.)
+//   * DISTRIBUTED CONSENT — has the user approved THIS application's code?
+//     (`require_distributed_module_consent`, Rust-authoritative.)
+//
+// The second one was asked at CALLERS. Every review round found another caller
+// that had not been taught to ask: the macro library, then macro buttons, then
+// the one-off runner, then the Object Script Editor's Run and Debug — which
+// mounted a publisher's macro in a REAL worker realm, correctly capped at the
+// restricted tier, with no consent anywhere in the path. RESTRICTED IS NOT
+// CONSENTED: the tier bounds what the code may REACH; consent is the user
+// agreeing to run it AT ALL.
+//
+// So the requirement moved to the boundary where a realm is created. There is
+// exactly one producer of a `MountAdmission` (`admitMount`) and exactly one
+// consumer (`mountWorker`, which cannot be called without one). A new mount
+// route therefore gets both gates by construction: it either goes through
+// `hostMountScript` — which is the only exported way to obtain an admission —
+// or it does not compile.
+//
+// AN ADMISSION IS NOT A BEARER TOKEN. It names the script id, the EXACT source
+// and the origin it was granted for, and `mountWorker` re-checks all three. A
+// remount (crash respawn, debugger Save & Apply, Stop returning a script to its
+// production mount) re-presents the admission the mount already held, which is
+// honest — it is the same code, already admitted. Swapping in different source
+// under an old admission is refused.
+
 /**
- * PUBLIC mount entry — the universal Script-Security chokepoint. EVERY worker-realm
- * mount goes through here (object scripts, custom chart marks, custom chart
- * transforms, JS UDF libraries), so the global "Script Security" setting governs
- * them all: assertMountAllowed throws ScriptSecurityBlockedError BEFORE any worker
- * is spawned when the setting is "disabled" or a "prompt" is declined. On allow it
- * delegates to mountWorker. NOTE: the crash-respawn path below calls mountWorker
- * directly — a respawn re-launches already-consented code and must not re-gate (it
- * would risk prompting mid-session or blocking automatic crash recovery).
+ * The brand. Module-private and never exported, so no value of this type can be
+ * constructed outside this file — the point of the shape.
  */
-export async function hostMountScript(definition: HostMountDefinition): Promise<void> {
-  await assertMountAllowed(definition.name);
-  return mountWorker(definition);
+const MOUNT_ADMISSION_BRAND = Symbol("calcula.mountAdmission");
+
+/**
+ * Proof that a specific mount passed Script Security AND distributed consent.
+ * Deliberately not exported: a caller cannot hold one, only obtain a mount.
+ */
+interface MountAdmission {
+  readonly [MOUNT_ADMISSION_BRAND]: true;
+  /** The script id it was granted for. */
+  readonly scriptId: string;
+  /** The exact source it was granted for. */
+  readonly source: string;
+  /** `"local"` or `"package:<name>"` — the origin the gates judged. */
+  readonly originKey: string;
+  /**
+   * The artifact identity the consent gate was asked about (`""` when the mount
+   * named none). Recorded so an admission is a COMPLETE statement of what was
+   * judged rather than three quarters of one — the same reason it carries the
+   * source and the origin.
+   */
+  readonly artifactKey: string;
+}
+
+/** The artifact identity a definition presents to the consent gate, flattened. */
+function mountArtifactKey(definition: HostMountDefinition): string {
+  const artifact = definition.consentArtifact;
+  return artifact ? JSON.stringify([artifact.id, artifact.source]) : "";
 }
 
 /**
- * Mount a script in its own worker realm (ungated internal). Resolves when the
- * worker reports mounted (or rejects with the script's setup error).
+ * The origin a definition mounts under, flattened to a comparable key.
+ *
+ * `scriptOriginForMount` is the ONE derivation (provenance, never the package
+ * name); this only makes its answer storable on an admission so a definition
+ * cannot be laundered from `distributed` to `local` between admission and mount.
  */
-async function mountWorker(definition: HostMountDefinition): Promise<void> {
+function mountOriginKey(definition: HostMountDefinition): string {
+  const origin = scriptOriginForMount(definition);
+  return origin.kind === "package" ? `package:${origin.name}` : "local";
+}
+
+/**
+ * The sentinel `distributed_module_refusal` prefixes its message with
+ * (app/src-tauri/src/scripting/commands.rs). Recognised, never re-decided: it
+ * only distinguishes "the gate said no" from "the gate could not be reached",
+ * which are two different sentences for the user.
+ */
+const DISTRIBUTED_SCRIPT_NOT_CONSENTED = "DISTRIBUTED_SCRIPT_NOT_CONSENTED";
+
+/**
+ * Put a DISTRIBUTED mount past the workbook's consent record, through the
+ * execution-free `check_distributed_mount_consent` command.
+ *
+ * WHY NOT `check_distributed_module_consent`, WHICH THIS USED TO CALL. That
+ * command asks the MODULE-runtime question, and its Rust decision
+ * (`distributed_module_refusal`) resolves ownership by EXACT SOURCE EQUALITY
+ * against stored module records — with an explicit "not a stored module at all,
+ * allow" early return. Five of the six mount routes COMPOSE their realm source
+ * (chart marks, chart transforms, the UDF library, a shared-library realm, and
+ * an object script mounted behind its import prelude), so they matched no stored
+ * record and the gate answered ALLOW every single time. The provenance was
+ * right; the question was not.
+ *
+ * `check_distributed_mount_consent` asks BOTH: the module question exactly as
+ * `run_script` applies it (so a stored module a `.calp` shipped is still refused
+ * unless the record names it), AND the question a mount can answer — "has this
+ * workbook approved that APPLICATION's code?", over the same consent file, the
+ * same records and the same helpers the subscribe flow writes.
+ *
+ * WHERE THE ARTIFACT IS NAMEABLE, IT IS NAMED. `definition.consentArtifact`
+ * carries the stored id and the pre-prelude source for the one route that
+ * honestly knows them (a standing object-script mount), which tightens the check
+ * to that artifact's hash. A composed realm has no such identity to offer and
+ * gets the application-level floor.
+ *
+ * THE CALL IS MADE HERE AND THE DECISION IS NOT. The mount happens in the
+ * renderer, so the renderer is the only place that can ASK. It is not a place
+ * that may ANSWER: the consent record lives in the workbook, the renderer is
+ * assumed hostile, and a second implementation of "has this application been
+ * approved?" is exactly what let the run routes drift apart. This function
+ * contains no policy.
+ *
+ * FAILS CLOSED ON EVERY OUTCOME THAT IS NOT A CLEAN "YES" — a refusal, an IPC
+ * error, a missing backend, a command that is not there. "I could not find out
+ * whether you approved this publisher's code" is not approval, and this is the
+ * path that spawns a real worker realm for a stranger's JavaScript.
+ *
+ * LOCAL MOUNTS ARE NOT ASKED ABOUT. There is no application to have consented
+ * to — `scriptOriginForMount` derives that from the pull-time provenance stamp,
+ * never from the package name — so asking would spend an IPC round trip on every
+ * mount of the user's own code to be told what the origin already said.
+ */
+async function requireDistributedMountConsent(definition: HostMountDefinition): Promise<void> {
+  const origin = scriptOriginForMount(definition);
+  if (origin.kind !== "package") return;
+  const describeFailure = (message: string): Error =>
+    new Error(
+      `"${definition.name}" was not mounted: it arrived inside the application ` +
+        `"${origin.name}", and whether you have approved that application's code could ` +
+        `not be established. ${message}`,
+    );
+  let invoke: typeof import("../backend").invokeBackend;
+  try {
+    // Dynamically imported like every other backend reach in this file: a static
+    // value import would drag the Tauri door into every consumer of the host.
+    ({ invokeBackend: invoke } = await import("../backend"));
+  } catch (err) {
+    throw describeFailure(err instanceof Error ? err.message : String(err));
+  }
+  try {
+    await invoke<void>("check_distributed_mount_consent", {
+      // `origin.name`, never `definition.packageName`: a definition that names a
+      // package without carrying distributed provenance never reaches this line,
+      // and one that carries the provenance with no name asks about the
+      // placeholder — which no consent record can satisfy, so it is refused.
+      packageName: origin.name,
+      source: definition.source,
+      artifact: definition.consentArtifact ?? null,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // The gate spoke: pass its own words through, so the user reads the same
+    // refusal here as on the module-runtime route.
+    if (message.includes(DISTRIBUTED_SCRIPT_NOT_CONSENTED)) throw new Error(message);
+    throw describeFailure(message);
+  }
+}
+
+/**
+ * Run BOTH mount gates and mint the proof. The only producer of a
+ * `MountAdmission` in the codebase.
+ *
+ * CONSENT IS ASKED FIRST, and the order is deliberate. `assertMountAllowed` can
+ * show a modal whose "yes" grants script execution for the whole SESSION; asking
+ * for that on behalf of code we are about to refuse would mint a session-wide
+ * approval for a run that never happens, and make the user answer twice to be
+ * told no. A refusal that no prompt can fix comes first.
+ */
+async function admitMount(definition: HostMountDefinition): Promise<MountAdmission> {
+  await requireDistributedMountConsent(definition);
+  await assertMountAllowed(definition.name);
+  return Object.freeze({
+    [MOUNT_ADMISSION_BRAND]: true as const,
+    scriptId: definition.id,
+    source: definition.source,
+    originKey: mountOriginKey(definition),
+    artifactKey: mountArtifactKey(definition),
+  });
+}
+
+/**
+ * An admission covers ONE script id, ONE exact source, ONE origin and ONE
+ * consented artifact.
+ *
+ * Without this an admission would be a bearer token: the remount paths hold one
+ * for as long as the mount lives, and handing `mountWorker` a different
+ * definition alongside it would be a consent bypass wearing a proof.
+ */
+function assertAdmissionCovers(
+  definition: HostMountDefinition,
+  admission: MountAdmission,
+): void {
+  if (
+    admission.scriptId === definition.id &&
+    admission.source === definition.source &&
+    admission.originKey === mountOriginKey(definition) &&
+    admission.artifactKey === mountArtifactKey(definition)
+  ) {
+    return;
+  }
+  throw new Error(
+    `Refusing to mount "${definition.name}": the mount admission presented was granted ` +
+      "for different code. An admission covers one script id, one exact source, one " +
+      "origin and one consented artifact — obtain a new one through hostMountScript " +
+      "rather than reusing one.",
+  );
+}
+
+/**
+ * PUBLIC mount entry — the universal chokepoint. EVERY worker-realm mount goes
+ * through here (object scripts, custom chart marks, custom chart transforms, JS
+ * UDF libraries, shared script libraries, the one-off runner), so BOTH gates
+ * govern them all: the global "Script Security" setting, and — for anything that
+ * arrived in a distributed application — that application's consent record.
+ * Neither can be skipped by a new caller, because `mountWorker` will not mount
+ * without the admission only `admitMount` can mint, and this is the only
+ * exported route to it.
+ *
+ * NOTE: the remount paths (crash respawn, debugger) call `mountWorker` directly
+ * with the admission the mount ALREADY holds — a respawn re-launches
+ * already-admitted code and must not re-gate, which would risk prompting
+ * mid-session or blocking automatic crash recovery.
+ */
+export async function hostMountScript(definition: HostMountDefinition): Promise<void> {
+  const admission = await admitMount(definition);
+  return mountWorker(definition, admission);
+}
+
+/**
+ * Mount a script in its own worker realm. Resolves when the worker reports
+ * mounted (or rejects with the script's setup error).
+ *
+ * The `admission` parameter is the structural half of the fix above: this is the
+ * only function that spawns a mounted realm, and it cannot be called without
+ * proof that the gates ran for THIS definition.
+ */
+async function mountWorker(
+  definition: HostMountDefinition,
+  admission: MountAdmission,
+): Promise<void> {
+  assertAdmissionCovers(definition, admission);
   wireActiveSheet();
   if (mounted.has(definition.id)) {
     // OWNERSHIP SURVIVES A REMOUNT. `hostUnmountScript` clears the transient
@@ -757,6 +1041,7 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
     worker,
     handle,
     definition,
+    admission,
     cleanupFns: [],
     forwarders: new Map(),
     pendingRenderCells: new Map(),
@@ -2290,7 +2575,16 @@ export async function hostStartDebugSession(
   // mount". That marker is the only authority on the question, so it is read
   // here rather than inferred from whatever session happens to be open.
   const autoInvokeSetup = !transientDebugMounts.has(scriptId);
-  return startDebugSessionOn(mw.definition, breakpoints, options, autoInvokeSetup);
+  // The standing mount's own admission: this is a REMOUNT of code already
+  // admitted (same id, same source, same origin), so the gates do not run again
+  // and the user is not re-prompted mid-session.
+  return startDebugSessionOn(
+    mw.definition,
+    breakpoints,
+    options,
+    autoInvokeSetup,
+    mw.admission,
+  );
 }
 
 /**
@@ -2299,12 +2593,17 @@ export async function hostStartDebugSession(
  * `autoInvokeSetup` is the one thing the two entry points disagree about, and it
  * is decided by the CALLER because only the caller knows what kind of script
  * this is — see DebugSessionState.autoInvokeSetup.
+ *
+ * `admission` is the other: `hostStartDebugSession` re-presents the standing
+ * mount's (a remount of admitted code), while the MODULE path mints a fresh one,
+ * because that mount is brand new and nothing has gated it yet.
  */
 async function startDebugSessionOn(
   definition: HostMountDefinition,
   breakpoints: number[],
   options: { pauseOnEntry?: boolean },
   autoInvokeSetup: boolean,
+  admission: MountAdmission,
 ): Promise<DebugSessionState> {
   const scriptId = definition.id;
   // A fresh session replaces whatever the previous one was about to do.
@@ -2328,11 +2627,12 @@ async function startDebugSessionOn(
   pauseOnEntryOnce.set(scriptId, options.pauseOnEntry === true);
   emitDebugState(session, scriptId);
   try {
-    // Ungated remount on purpose: this is already-consented code being
-    // relaunched, exactly like the crash-respawn path. Re-gating here would
-    // prompt mid-session for a script the user is already running. (The MODULE
-    // path below gates before it ever gets here — that mount is brand new.)
-    await mountWorker(definition);
+    // Re-presenting an existing admission on purpose: this is already-admitted
+    // code being relaunched, exactly like the crash-respawn path. Re-gating here
+    // would prompt mid-session for a script the user is already running. (The
+    // MODULE path below mints its admission before it ever gets here — that
+    // mount is brand new, so both gates run for it.)
+    await mountWorker(definition, admission);
   } catch (err) {
     // A `setup` that threw is a debugging RESULT, not a failure to start a
     // session: noteDebugMountSettled has already recorded what it threw, and
@@ -2419,24 +2719,38 @@ export async function hostStartModuleScriptDebugSession(
     );
   }
 
+  // THE RECORD'S OWN PROVENANCE, NEVER A CONSTANT. `source_package` is stamped
+  // by `core/calp/src/pull.rs` on every module a `.calp` ships and survives into
+  // the workbook script map, so a module the user "opened in the editor" may be
+  // a publisher's. This used to hard-code BOTH `accessLevel: "unlocked"` and
+  // `provenance: "local"`, which meant opening a debug session on a distributed
+  // module handed it the top tier under the user's own identity — a strictly
+  // easier escalation than the Run button, because a debug mount is a real
+  // realm with live handlers that the user then drives by hand.
+  const origin = scriptOriginForStoredRecord(record);
   const definition: HostMountDefinition = {
     id: scriptId,
     name: record.name || scriptId,
     objectType: "workbook",
     instanceId: null,
     source: record.source,
-    accessLevel: "unlocked",
-    provenance: "local",
+    // Distributed code is capped at `restricted`; local code keeps the unlocked
+    // tier a button click runs it under, so what you step through is what runs.
+    accessLevel: origin.kind === "package" ? "restricted" : "unlocked",
+    ...mountProvenanceForOrigin(origin),
     apiVersion: SCRIPT_API_VERSION,
   };
 
-  // Script Security gates this mount exactly as `hostMountScript` would; the
-  // mount itself then goes through the session path, so there is only ever ONE
-  // mount and it is the instrumented, inert one.
-  await assertMountAllowed(definition.name);
+  // BOTH mount gates run here, exactly as `hostMountScript` would run them —
+  // Script Security AND, for a module that arrived in an application, that
+  // application's consent record. This is a BRAND NEW realm for a publisher's
+  // code, driven by hand afterwards, so "the debugger only inspects" is not a
+  // reason to skip either. The mount itself then goes through the session path,
+  // so there is only ever ONE mount and it is the instrumented, inert one.
+  const admission = await admitMount(definition);
   transientDebugMounts.add(scriptId);
   try {
-    return await startDebugSessionOn(definition, breakpoints, options, false);
+    return await startDebugSessionOn(definition, breakpoints, options, false, admission);
   } catch (err) {
     // The session did not open, so the mount the debugger made FOR it must not
     // outlive the attempt: there is no production mount here to fall back to,
@@ -2566,7 +2880,9 @@ export async function hostStopDebugSession(scriptId: string): Promise<void> {
       transientDebugMounts.delete(scriptId);
       hostUnmountScript(scriptId);
     } else {
-      await mountWorker(mw.definition);
+      // Back to the production mount: the same definition under the same
+      // admission it was mounted with, so ending a session never re-prompts.
+      await mountWorker(mw.definition, mw.admission);
     }
   } else {
     transientDebugMounts.delete(scriptId);
@@ -2803,10 +3119,13 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
     mw.lastCrashAt = now;
     mw.respawned = true;
     const definition = mw.definition;
+    // Captured BEFORE the unmount drops the record that holds it.
+    const admission = mw.admission;
     hostUnmountScript(definition.id);
-    // Respawn already-consented code after a crash — bypass the Script-Security
-    // gate (mountWorker, not hostMountScript) so recovery never re-prompts.
-    void mountWorker(definition).then(() => {
+    // Respawn already-admitted code after a crash by re-presenting its own
+    // admission (mountWorker, not hostMountScript), so recovery never re-prompts
+    // and never re-asks the publisher-consent gate for code already running.
+    void mountWorker(definition, admission).then(() => {
       const remounted = mounted.get(definition.id);
       if (remounted) {
         remounted.lastCrashAt = now;
@@ -3033,6 +3352,26 @@ async function requireCallerCoversLibrary(
 }
 
 /**
+ * MAY this script be asked, in the moment, for a capability it does not hold?
+ *
+ * The one predicate behind BOTH JIT-prompt gates (`requestLibraryCapability`
+ * below and `maybeRequestCapabilityGrant`). Only workbook-authored code may:
+ * distributed code holds exactly what package consent recorded, and neither of
+ * these paths may become a second way to acquire capabilities after install —
+ * a prompt in the moment is a deliberately LOWER bar than package consent.
+ *
+ * It reads the origin's KIND. While `handle.origin` was a bare string this was
+ * `handle.origin !== "local"`, so an application whose publisher NAMED it
+ * `local` was routed down the local path and could be granted net.fetch,
+ * storage, schedule or bi.query by a single prompt the user answered about what
+ * they took to be their own script. Exported so that gate is testable on its own
+ * (it is otherwise reachable only through a live Worker realm).
+ */
+export function mayJitPromptForCapability(handle: Pick<ScriptHandle, "origin">): boolean {
+  return isLocalOrigin(handle.origin);
+}
+
+/**
  * JIT-prompt the CONSUMER for a capability its library holds. Mirrors
  * maybeRequestCapabilityGrant's policy exactly — local scripts only, one prompt
  * per session per (capability, origin), "always" persisted against the
@@ -3048,8 +3387,8 @@ async function requestLibraryCapability(
 ): Promise<void> {
   // A distributed consumer is never JIT-prompted (Phase 4.2): it holds exactly
   // what package consent recorded, and this path must not become a second way to
-  // acquire capabilities after install.
-  if (handle.origin !== "local") return;
+  // acquire capabilities after install. One predicate for both JIT gates.
+  if (!mayJitPromptForCapability(handle)) return;
   if (wasDeniedThisSession(handle.scriptId, cap, origin)) return;
   const decision = await requestCapabilityGrant({
     scriptId: handle.scriptId,
@@ -3120,7 +3459,11 @@ async function maybeRequestCapabilityGrant(
   const cap = ALLOWLIST[method]?.capability;
   if (!cap) return;
   const { handle } = mw;
-  if (handle.origin !== "local" || cap === "ui.html") return;
+  // KIND, not a name. This is gate (1) of the origin-forgery defect: as a bare
+  // string, an application NAMED `local` took the local JIT-prompt path and could
+  // be granted capabilities by a prompt in the moment, instead of only through
+  // package consent — a deliberately higher bar. See scriptOrigin.ts.
+  if (!mayJitPromptForCapability(handle) || cap === "ui.html") return;
   // R19: only JIT-prompt for capabilities the script actually DECLARED. An
   // undeclared cap is above the ceiling — the broker denies it (PermissionDenied)
   // and the user is never asked to grant something the script never declared.
@@ -5288,22 +5631,40 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
     }
     case "form.show": {
       const [options] = args as [{ initial?: Record<string, unknown> } | undefined];
-      // Bindings are resolved and READ here, before anything is painted, as
-      // broker calls under this script's own handle — so a restricted form
-      // naming another sheet is refused (and audited) exactly as its own
+      // Bindings are resolved and READ before anything is painted, as broker
+      // calls under this script's own handle — so a restricted form naming
+      // another sheet is refused (and audited) exactly as its own
       // sheet.getCellData call would be, and the refusal shows up as a
       // disabled widget with the reason rather than as nothing.
+      //
+      // They are handed to the registry as a THUNK, not as finished seeds,
+      // because the registry owns the guards: no layout, the 20-per-minute show
+      // bucket, the dismissal mute and the app-wide modal slot. Reading first
+      // meant a muted script looping on show() still performed one audited read
+      // per bound cell for a form that never opened — wasted IPC, and an audit
+      // trail claiming a form had read the sheet when the user saw nothing.
       const spec = getScriptFormSpec(definition.id);
-      const bound = spec ? await resolveFormBindings(mw, spec) : null;
+      const holder: { bound: ResolvedFormBindings | null } = { bound: null };
       return showScriptForm({
         scriptId: definition.id,
         scriptName: definition.name,
-        scriptOrigin: handle.origin,
+        // Derived from `provenance`, the same way `handle.origin` now is —
+        // `formOriginForMount` IS `scriptOriginForMount` (scriptFormSpec.ts),
+        // so the identity band and the trust handle read one derivation. Passing
+        // `handle.origin` here would work; going through the definition keeps
+        // this call independent of whether a handle is in scope.
+        origin: formOriginForMount(definition),
         initial: options?.initial,
-        seeds: bound?.seeds,
-        pinnedSheetName: bound?.pinnedSheetName,
-        writeOnChange: bound?.writeOnChange,
-        deps: formSessionDeps(mw, bound),
+        resolve: async () => {
+          const bound = spec ? await resolveFormBindings(mw, spec) : null;
+          holder.bound = bound;
+          return {
+            seeds: bound?.seeds,
+            pinnedSheetName: bound?.pinnedSheetName,
+            writeOnChange: bound?.writeOnChange,
+          };
+        },
+        deps: formSessionDeps(mw, () => holder.bound),
       });
     }
     case "form.update": {
@@ -5326,22 +5687,33 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       // declared ui.dialog is refused with the owner's error, never opened by
       // proxy. Both scripts wait: the caller's method-call clock is held with
       // the owner's, and the answer is relayed to both.
+      // The TARGET's bound cells are read the same way they are for its own
+      // form.show: as a thunk the registry calls only once its guards have let
+      // this show through, so a target that is muted or already has a form up
+      // costs no reads at all.
       const [name, options] = args as [string, { initial?: Record<string, unknown> } | undefined];
       const target = findMountedFormByName(name, mw);
       const spec = getScriptFormSpec(target.definition.id);
-      const bound = spec ? await resolveFormBindings(target, spec) : null;
+      const holder: { bound: ResolvedFormBindings | null } = { bound: null };
       return brokerCall(target.handle, "form.show", [options], () =>
         showScriptForm({
           scriptId: target.definition.id,
           scriptName: target.definition.name,
-          scriptOrigin: target.handle.origin,
+          // The TARGET's provenance, structurally (see form.show above).
+          origin: formOriginForMount(target.definition),
           initial: options?.initial,
-          seeds: bound?.seeds,
-          pinnedSheetName: bound?.pinnedSheetName,
-          writeOnChange: bound?.writeOnChange,
+          resolve: async () => {
+            const bound = spec ? await resolveFormBindings(target, spec) : null;
+            holder.bound = bound;
+            return {
+              seeds: bound?.seeds,
+              pinnedSheetName: bound?.pinnedSheetName,
+              writeOnChange: bound?.writeOnChange,
+            };
+          },
           callerName: definition.name,
           callerScriptId: definition.id,
-          deps: formSessionDeps(target, bound, mw),
+          deps: formSessionDeps(target, () => holder.bound, mw),
         }),
       );
     }
@@ -12044,10 +12416,18 @@ function relayFormClosed(mw: MountedWorker, showId: string, result: unknown): vo
  * the CALLER too: it awaits the same answer and its clock is held the same
  * way). The registry (scriptForms.ts) never sees a MountedWorker; it gets
  * these callbacks and nothing else.
+ *
+ * `getBound` is a GETTER, not a value: the bindings are resolved inside the
+ * registry's own `resolve` thunk, which runs after its guards pass and so
+ * after these deps have been built. Every callback here fires later still —
+ * `opened` on the renderer's acknowledgement, `writeBindings` on a change or a
+ * submit — so each reads the holder when it runs. A null answer means the show
+ * never got as far as resolving anything, and there is nothing to watch or
+ * write.
  */
 function formSessionDeps(
   mw: MountedWorker,
-  bound: ResolvedFormBindings | null,
+  getBound: () => ResolvedFormBindings | null,
   caller?: MountedWorker,
 ): FormSessionDeps {
   let liveWatch: CleanupFn | null = null;
@@ -12056,14 +12436,16 @@ function formSessionDeps(
     mirror: (path, value) => post(mw, { t: "mirror", path, value }),
     relaySubmit: (values) => raceFormSubmitVerdict(mw, values),
     opened: (showId) => {
+      const bound = getBound();
       if (bound && (bound.cells.length > 0 || bound.controls.length > 0)) {
         liveWatch = installFormLiveWatch(mw, showId, bound);
       }
     },
-    ...(bound && bound.cells.length > 0
-      ? { writeBindings: (showId: string, values: Record<string, FormValue | string[]>, names: string[] | null) =>
-          writeFormBindings(mw, showId, bound, values, names) }
-      : {}),
+    writeBindings: (showId: string, values: Record<string, FormValue | string[]>, names: string[] | null) => {
+      const bound = getBound();
+      if (!bound || bound.cells.length === 0) return Promise.resolve([]);
+      return writeFormBindings(mw, showId, bound, values, names);
+    },
     closed: (showId, result) => {
       liveWatch?.();
       liveWatch = null;
@@ -12353,8 +12735,11 @@ async function writeFormBindings(
  * widget. The PINNED-SHEET filter runs before anything else: a restricted
  * form must never be shown a change from a sheet the user switched to, even
  * though the tier clamp would admit that sheet now that it is active.
+ *
+ * Exported for tests (formLiveWatchDisposal.test.ts drives the Controls-pane
+ * subscription's import ordering, which no public entry point can reach).
  */
-function installFormLiveWatch(mw: MountedWorker, showId: string, bound: ResolvedFormBindings): CleanupFn {
+export function installFormLiveWatch(mw: MountedWorker, showId: string, bound: ResolvedFormBindings): CleanupFn {
   const { definition, handle } = mw;
   const restricted = handle.tier !== "unlocked";
   let pending = new Set<string>();
@@ -12390,9 +12775,19 @@ function installFormLiveWatch(mw: MountedWorker, showId: string, bound: Resolved
   if (bound.controls.length === 0) return unsub;
   // Controls-pane values: committed changes only (a mid-drag slider frame is
   // transient and must not re-seed the form on every pixel).
+  //
+  // THE SUBSCRIPTION CAN OUTRUN THE FORM. `onControlValueChange` is reached
+  // through a dynamic import, so a form the user (or a deadline) closes in the
+  // same turn it opened runs this cleanup FIRST, against a still-empty
+  // `unsubControls`, and the `.then` below then installs a live listener with
+  // nobody left to remove it — one that fires for the rest of the session,
+  // re-seeding a session that is gone. `disposed` is the fact the `.then` has
+  // to ask about, because "was I cleaned up?" cannot be read off a closure
+  // variable that is assigned after the fact.
   let unsubControls: CleanupFn = () => {};
+  let disposed = false;
   void import("../controlValues").then((cv) => {
-    unsubControls = cv.onControlValueChange((change) => {
+    const off = cv.onControlValueChange((change) => {
       if (change.transient) return;
       const watching = bound.controls.filter(
         (c) => c.controlName.toLowerCase() === change.name.toLowerCase(),
@@ -12416,8 +12811,16 @@ function installFormLiveWatch(mw: MountedWorker, showId: string, bound: Resolved
           /* refused: the widget keeps what it had, and the refusal is audited */
         });
     });
+    // The form closed while the import was in flight: tear this down now, or
+    // nothing ever will.
+    if (disposed) {
+      off();
+      return;
+    }
+    unsubControls = off;
   });
   return () => {
+    disposed = true;
     unsub();
     unsubControls();
   };

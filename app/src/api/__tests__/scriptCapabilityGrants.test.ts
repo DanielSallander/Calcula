@@ -79,6 +79,7 @@ import {
   consumeLapsedGrantNotice,
 } from "../scriptHost/capabilities";
 import type { CapabilityId } from "../scriptHost/capabilityIds";
+import { LOCAL_ORIGIN, packageOrigin, type ScriptOrigin } from "../scriptHost/scriptOrigin";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -114,7 +115,7 @@ function simulateRelaunch(): void {
 async function mountRestore(
   source: string,
   ceiling: CapabilityId[] = CEILING,
-  origin = "local",
+  origin: ScriptOrigin = LOCAL_ORIGIN,
 ): Promise<void> {
   await restoreAndSyncGrants({
     scriptId: SCRIPT_ID,
@@ -147,7 +148,7 @@ describe("a grant survives a restart", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
 
@@ -171,7 +172,7 @@ describe("a grant survives a restart", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "net.fetch",
       netOrigin: "https://api.example.com",
     });
@@ -196,7 +197,7 @@ describe("a grant survives a restart", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
     simulateRelaunch();
@@ -219,7 +220,7 @@ describe("a grant survives a restart", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
     expect(createVirtualFileMock).not.toHaveBeenCalled();
@@ -249,7 +250,7 @@ describe("a source change LAPSES the grant", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
       netOrigin: null,
     });
@@ -336,7 +337,7 @@ describe("escalation always re-prompts", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
     simulateRelaunch();
@@ -354,7 +355,7 @@ describe("escalation always re-prompts", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "net.fetch",
       netOrigin: "https://api.example.com",
     });
@@ -370,7 +371,7 @@ describe("escalation always re-prompts", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
     simulateRelaunch();
@@ -409,7 +410,7 @@ describe("run-trust is NOT a capability grant", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
 
@@ -426,7 +427,7 @@ describe("distributed code keeps its own consent path", () => {
       scriptId: "pkg-script",
       scriptName: "Vendor Script",
       source: SRC,
-      origin: "Acme Reports", // handle.origin = the package name
+      origin: packageOrigin("Acme Reports"), // handle.origin = a package origin
       capability: "schedule",
     });
     expect(listWorkbookTrust()).toEqual([]);
@@ -437,11 +438,11 @@ describe("distributed code keeps its own consent path", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
     simulateRelaunch();
-    await mountRestore(SRC, CEILING, "Acme Reports");
+    await mountRestore(SRC, CEILING, packageOrigin("Acme Reports"));
     expect(getGrantSet(SCRIPT_ID).has("schedule")).toBe(false);
   });
 });
@@ -453,14 +454,14 @@ describe("revoke", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
     await persistAlwaysGrant({
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "net.fetch",
       netOrigin: "https://api.example.com",
     });
@@ -544,7 +545,7 @@ describe("store robustness", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "net.fetch",
       netOrigin: "https://api.example.com",
     });
@@ -553,7 +554,7 @@ describe("store robustness", () => {
       scriptId: SCRIPT_ID,
       scriptName: SCRIPT_NAME,
       source: SRC_EDITED,
-      origin: "local",
+      origin: LOCAL_ORIGIN,
       capability: "schedule",
     });
     const grant = await getScriptCapabilityGrant(SCRIPT_ID);

@@ -18,6 +18,14 @@ import objectContextsDts from "../objectContexts.d.ts?raw";
 import {
   getScaffoldTemplate,
   getContextDocumentation,
+  // TRUST ORIGIN, ONE DEFINITION. A module's `sourcePackage` is the only
+  // authority on whether it is the user's or a publisher's, and the tier it may
+  // run at is DERIVED from that — never written by this window. See
+  // app/src/api/scriptHost/scriptOrigin.ts.
+  accessLevelForOrigin,
+  mountProvenanceForOrigin,
+  originPackageName,
+  scriptOriginForStoredRecord,
 } from "@api";
 import {
   loadAllObjectScripts,
@@ -39,7 +47,11 @@ import {
   parseModuleScriptRuntime,
   saveWorkbookScript,
 } from "@api/workbookScripts";
-import type { ModuleScriptRuntime, WorkbookScriptRecord } from "@api/workbookScripts";
+import type {
+  ModuleScriptRuntime,
+  ScriptScope,
+  WorkbookScriptRecord,
+} from "@api/workbookScripts";
 import {
   listTemplates,
   saveTemplate,
@@ -343,9 +355,66 @@ interface MacroDoc {
   loadError: string | null;
   /** Recorder marker: a marked module is a MACRO, an unmarked one a plain module. */
   runtime: ModuleScriptRuntime | null;
+  /**
+   * The application this module arrived in, or null for the user's own code.
+   *
+   * CARRIED, NOT RE-DERIVED AND NEVER DROPPED. `core/calp/src/pull.rs` stamps
+   * `source_package` on every module a `.calp` ships, and every later decision
+   * about the module — the tier a debug session mounts it at, whether this
+   * window will let the buffer be edited at all, what it tells the user about
+   * where the code came from — is derived from that one field.
+   *
+   * Read it together with `sourcePackageKnown`: `null` alone cannot say whether
+   * the record is the user's or merely unread.
+   */
+  sourcePackage: string | null;
+  /**
+   * Whether `sourcePackage` is an ANSWER or an absence of one.
+   *
+   * `listWorkbookScriptRecords` fills in `sourcePackage: null` for a record it
+   * could not read — not because the record is local, but because there was no
+   * record to ask. Rendering that as "a macro you wrote" is the safe answer
+   * asserted from no evidence, which is the one thing this window may never do
+   * about provenance. False means: nothing about this module's origin has been
+   * established since this window opened.
+   */
+  sourcePackageKnown: boolean;
+  /**
+   * The module's stored SCOPE — workbook-wide, or attached to one sheet.
+   *
+   * CARRIED, NEVER RE-ASSERTED. Every write from this window used to send
+   * `{ type: "workbook" }` unconditionally, so an idle auto-persist of a
+   * sheet-scoped module widened it to the whole workbook — invisibly, with no
+   * gesture, from nothing but a pause in typing. `undefined` means the record
+   * did not state one and the store's own default stands.
+   */
+  scope: ScriptScope | undefined;
 }
 
-function macroDocFromRecord(record: WorkbookScriptRecord): MacroDoc {
+/**
+ * Build the editor's document for one module record.
+ *
+ * `lastKnown` is what THIS WINDOW already established about the module, and it
+ * is consulted for one reason only: a record that failed to read states nothing
+ * about its provenance, and a failed read must never be allowed to demote a
+ * publisher's macro to local code on screen (or in the write below it).
+ */
+function macroDocFromRecord(
+  record: WorkbookScriptRecord,
+  lastKnown?: {
+    sourcePackage: string | null;
+    sourcePackageKnown: boolean;
+    scope?: ScriptScope | undefined;
+  },
+): MacroDoc {
+  const provenance =
+    record.loadError === null
+      ? { sourcePackage: record.sourcePackage ?? null, known: true }
+      : {
+          sourcePackage: lastKnown?.sourcePackage ?? null,
+          known: lastKnown?.sourcePackageKnown ?? false,
+        };
+  const origin = scriptOriginForStoredRecord({ sourcePackage: provenance.sourcePackage });
   return {
     macroId: record.id,
     script: {
@@ -354,20 +423,164 @@ function macroDocFromRecord(record: WorkbookScriptRecord): MacroDoc {
       objectType: "workbook",
       instanceId: null,
       source: record.source,
-      accessLevel: "unlocked",
+      // DERIVED FROM THE RECORD, NOT ASSERTED. This was hard-coded "unlocked",
+      // which made the toolbar tell the user a publisher's macro runs at the
+      // top tier while `hostStartModuleScriptDebugSession` (app/src/api/
+      // scriptHost/host.ts) mounts exactly that module RESTRICTED. A window
+      // that names a tier the runtime will not give it is worse than one that
+      // names none: the user reads the promise and reasons from it.
+      accessLevel: accessLevelForOrigin(origin, "unlocked"),
+      // ...and the SAME origin, in the shape the rest of this window already
+      // reads (`isReadOnly`, the status bar). `mountProvenanceForOrigin` is the
+      // sanctioned inverse of the derivation above, so "distributed" is spelled
+      // in exactly one place for object scripts and modules alike. Its
+      // `provenance` is typed as a plain `string` because its other callers put
+      // it into a mount definition; the stored-definition type spells the same
+      // two values as the `ScriptProvenance` union, so the assertion narrows a
+      // type, never a value.
+      ...(mountProvenanceForOrigin(origin) as Pick<
+        ObjectScriptDefinition,
+        "provenance" | "packageName"
+      >),
     },
     description: record.description,
     savedSource: record.source,
     dirty: false,
     loadError: record.loadError,
     runtime: parseModuleScriptRuntime(record.description),
+    sourcePackage: originPackageName(origin),
+    sourcePackageKnown: provenance.known,
+    // The stored scope, verbatim. A read that failed reports none, so the last
+    // known one stands rather than being replaced by the store's default.
+    scope: record.loadError === null ? record.scope : lastKnown?.scope,
   };
+}
+
+/**
+ * What this window has ESTABLISHED about where a module document came from.
+ *
+ * Three answers, and "unknown" is one of them. The tier chip used to have two —
+ * a package name, or "A macro you wrote" — so a module whose record could not be
+ * read (`sourcePackage: null` because nothing answered) rendered as the user's
+ * own work. Unknown provenance rendered as the safe answer is how a publisher's
+ * macro comes to look like yours on the one screen that exists to tell them
+ * apart.
+ */
+type MacroProvenanceKnowledge =
+  | { kind: "package"; name: string }
+  | { kind: "local" }
+  | { kind: "unknown" };
+
+function macroProvenanceKnowledge(doc: {
+  sourcePackage: string | null;
+  sourcePackageKnown: boolean;
+}): MacroProvenanceKnowledge {
+  if (doc.sourcePackage !== null) return { kind: "package", name: doc.sourcePackage };
+  return doc.sourcePackageKnown ? { kind: "local" } : { kind: "unknown" };
+}
+
+/**
+ * WHY THIS WINDOW MUST NOT WRITE A MODULE DOCUMENT — or null when it may.
+ *
+ * ONE PREDICATE, CONSULTED BY EVERY DOOR. There are five ways a module's buffer
+ * reaches the store from here — the idle auto-persist, the flush on switching
+ * document, the flush on window close/blur, Ctrl+S, and an accepted AI edit —
+ * and they all funnel through `LiveModulePersister`. This function decides, once,
+ * whether the document may be TRACKED by it at all; not tracking is what disarms
+ * every one of those doors together, rather than each of them separately (which
+ * is how the previous rounds of this defect kept producing a new caller).
+ *
+ * Two refusals, and the SECOND one is the fix this round.
+ *
+ *   1. A module that arrived in an application. `save_script` makes the package
+ *      stamp sticky, so an edit written back here would store the user's bytes
+ *      under the publisher's name; the Rust consent gate matches (package, id,
+ *      source) and would then recognise nothing, bricking a consented macro.
+ *
+ *   2. A module whose RECORD COULD NOT BE READ. The previous round taught the
+ *      tier chip to say "origin unknown" for exactly this case, and stopped
+ *      there: the buffer stayed editable and tracked, so the first keystroke
+ *      auto-persisted the preview text over whatever is really stored under that
+ *      id. UNKNOWN PROVENANCE IS NOT PERMISSION. We do not know whether that
+ *      record is the user's own, or a publisher's — and writing it would either
+ *      destroy the user's real macro or brick a distributed one, from a failed
+ *      read plus a pause. The safe act, and the only honest one, is to write
+ *      nothing until a read succeeds.
+ */
+export function macroWriteRefusal(doc: {
+  name: string;
+  sourcePackage: string | null;
+  sourcePackageKnown: boolean;
+}): string | null {
+  if (doc.sourcePackage !== null) {
+    return (
+      `"${doc.name}" arrived in the application "${doc.sourcePackage}", so this window does ` +
+      'not edit it. Developer ▸ Macros… ▸ "Save as my copy" makes a local macro of your ' +
+      "own from it, which you can then edit here freely."
+    );
+  }
+  if (!doc.sourcePackageKnown) {
+    return (
+      `"${doc.name}" could not be read from this workbook, so this window cannot say what is ` +
+      "stored under that id — it may be yours, or it may have arrived in an application. " +
+      "Writing this buffer back would overwrite a record nobody has read, so it is " +
+      "read-only until a read succeeds. Reopen the workbook to try again, or use " +
+      "Developer ▸ Macros… to save this text as a new macro of your own."
+    );
+  }
+  return null;
+}
+
+/** The hover text on the tier chip — one sentence per state of knowledge. */
+function macroTierChipTitle(knowledge: MacroProvenanceKnowledge): string {
+  switch (knowledge.kind) {
+    case "package":
+      return (
+        `This macro arrived in the application "${knowledge.name}". Run and Debug in ` +
+        "this window mount it from the module store at the restricted tier — " +
+        "context.api is null — and it receives capabilities only through that " +
+        "application's consent record. You cannot raise it, and you cannot edit it " +
+        "here."
+      );
+    case "local":
+      return "A macro you wrote runs at the unlocked tier, where context.api is available.";
+    default:
+      return (
+        "This module's record could not be read, so this window cannot say where it " +
+        "came from — it may be yours or it may have arrived in an application. The " +
+        "tier shown is what the last successful read implied, not a fact established " +
+        "now."
+      );
+  }
+}
+
+/** The chip's own caption. Never states a tier it has not established. */
+function macroTierChipLabel(
+  knowledge: MacroProvenanceKnowledge,
+  accessLevel: ScriptAccessLevel,
+): string {
+  if (knowledge.kind === "unknown") return " Macro (origin unknown)";
+  return accessLevel === "restricted" ? " Macro (restricted)" : " Macro";
 }
 
 /** The dropdown prefix. A recorder-marked module is a MACRO; an unmarked one is
  *  a hand-authored module — both live in the same store and both belong here. */
 function macroDocKindLabel(doc: MacroDoc): string {
   return doc.runtime ? "MACRO" : "MODULE";
+}
+
+/**
+ * The list entry for one module document — the surface's existing
+ * "KIND — name" idiom, with the publisher named in it.
+ *
+ * WHY IT IS IN THE LABEL AND NOT A BADGE. This list is an `<option>` inside a
+ * `<select>`: it can hold text and nothing else. A publisher's macro that reads
+ * identically to the user's own is a decision the user cannot make, and the one
+ * place they make it is here, when they choose what to open.
+ */
+function macroDocOptionLabel(doc: MacroDoc): string {
+  const origin = doc.sourcePackage === null ? "" : ` — from "${doc.sourcePackage}"`;
+  return `${macroDocKindLabel(doc)} — ${doc.script.name}${origin}`;
 }
 
 /**
@@ -382,6 +595,9 @@ export type LiveDocState =
   | { state: "live" }
   /** Typed within the last few hundred ms, or a write is on its way. */
   | { state: "saving" }
+  /** A module that arrived in an application. Nothing here writes it, ever —
+   *  so "Live" would be true by accident and misleading on purpose. */
+  | { state: "readOnly" }
   /** TypeScript: storing it means compiling it, which rewrites the buffer, and
    *  only an explicit gesture may do that. */
   | { state: "deferred"; message: string }
@@ -394,6 +610,8 @@ export function liveStateLabel(live: LiveDocState | undefined): string {
   switch (live?.state) {
     case "saving":
       return "Saving…";
+    case "readOnly":
+      return "Read-only";
     case "deferred":
       return "Compile to store";
     case "error":
@@ -456,7 +674,12 @@ export function mergeMacroDocs(
   const next: MacroDoc[] = records.map((record) => {
     const existing = stale.get(record.id);
     stale.delete(record.id);
-    const fresh = macroDocFromRecord(record);
+    // A listing whose per-record read FAILED reports `sourcePackage: null`
+    // because it had nothing to ask, so a transient read failure must not turn
+    // a publisher's macro into local code in the list, the chip or the buffer's
+    // editability. What was established stands until a successful read replaces
+    // it.
+    const fresh = macroDocFromRecord(record, existing);
     if (!existing || !existing.dirty) return fresh;
     return {
       ...fresh,
@@ -510,7 +733,9 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   // are real, saved records — but in the MODULE store (`save_script`), not the
   // object-script store — so they need their own doc-kind: Save routes to
   // `saveWorkbookScript`, and debug/run mount them transiently under a synthetic
-  // unlocked `workbook` definition the HOST builds from the store.
+  // `workbook` definition the HOST builds from the store — at the tier the
+  // record's own provenance allows (unlocked for the user's own, restricted for
+  // a module that arrived in an application).
   const [macroDocs, setMacroDocs] = useState<MacroDoc[]>([]);
   const macroDocsRef = useRef<MacroDoc[]>([]);
   macroDocsRef.current = macroDocs;
@@ -735,6 +960,21 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       gate: (src, name) => gateObjectScriptSave(src, name, hostValidateScript),
       write: async (docId, javascript) => {
         const doc = macroDocsRef.current.find((d) => d.macroId === docId);
+        // THE LAST LINE OF THE READ-ONLY RULE. A document `macroWriteRefusal`
+        // names is never TRACKED by this persister (see the effect that calls
+        // `track`), so nothing should ever reach here for one — and if a future
+        // edit to this window arms one anyway, the write must not be the thing
+        // that discovers it. The refusal is asked here in the SAME words the
+        // tracking effect asks it, so a door added later cannot answer
+        // differently from the one that guards the store.
+        const refusal = doc
+          ? macroWriteRefusal({
+              name: doc.script.name,
+              sourcePackage: doc.sourcePackage,
+              sourcePackageKnown: doc.sourcePackageKnown,
+            })
+          : null;
+        if (refusal !== null) throw new Error(refusal);
         await saveWorkbookScript({
           id: docId,
           name: doc?.script.name ?? docId,
@@ -742,7 +982,22 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           // macro is executed — preserved verbatim on every write.
           description: doc?.description ?? null,
           source: javascript,
-          scope: { type: "workbook" },
+          // THE RECORD'S OWN SCOPE, NOT A CONSTANT. This was a hard-coded
+          // `{ type: "workbook" }`, so an idle auto-persist of a sheet-scoped
+          // module silently widened it to the whole workbook — the module then
+          // resolves from every sheet, which is a visibility change the author
+          // never asked for and is not told about. `undefined` when the record
+          // stated none, which leaves the store's own default alone.
+          scope: doc?.scope,
+          // AND THE PACKAGE STAMP, ON EVERY WRITE — which, after the guard
+          // above, is always `null`: only the user's own modules are written
+          // from here. It is sent explicitly all the same, as a positive
+          // statement that this record is local rather than a field the write
+          // happened not to mention. (An omitted stamp is carried forward by
+          // `sticky_source_package` in `save_script`, so "omitted" and "local"
+          // are NOT the same thing to the store, and a writer that leaves the
+          // difference to the backend is asserting a fact it never established.)
+          sourcePackage: doc?.sourcePackage ?? null,
         });
       },
       onOutcome: (docId, outcome) => applyLiveOutcomeRef.current(docId, outcome),
@@ -858,18 +1113,38 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   // and let go of documents that are gone. `track` never touches a buffer, so a
   // refresh landing mid-edit cannot take the author's text — and it never lowers
   // the stored baseline underneath a write that is already in flight.
+  //
+  // A DOCUMENT `macroWriteRefusal` NAMES IS NEVER TRACKED — a module that
+  // arrived in an application, and a module whose record could not be read.
+  //
+  // Tracking is what arms the idle timer, and this ONE line is what disarms
+  // every write door at once: `handleChange` short-circuits on
+  // `persister.tracks`, `flush`/`flushAll` return "unchanged", so switching
+  // document, Ctrl+S, the flush in front of Run and the window close/blur flush
+  // all write nothing, and an accepted AI edit reaches the store only through
+  // the same `handleChange`. The buffer itself is read-only (Monaco `readOnly`),
+  // so this is the structural half of the same rule; adding a sixth door and
+  // forgetting to guard it is the failure this shape exists to make impossible.
   useEffect(() => {
-    const live = new Set<string>();
+    const known = new Set<string>();
+    const editable = new Set<string>();
     for (const doc of macroDocs) {
-      live.add(doc.macroId);
+      known.add(doc.macroId);
+      const refusal = macroWriteRefusal({
+        name: doc.script.name,
+        sourcePackage: doc.sourcePackage,
+        sourcePackageKnown: doc.sourcePackageKnown,
+      });
+      if (refusal !== null) continue;
+      editable.add(doc.macroId);
       persister.track(doc.macroId, doc.script.name, doc.savedSource);
     }
-    persister.retain(live);
+    persister.retain(editable);
     setLiveStates((prev) => {
       const next: Record<string, LiveDocState> = {};
       let changed = false;
       for (const [id, state] of Object.entries(prev)) {
-        if (live.has(id)) next[id] = state;
+        if (known.has(id)) next[id] = state;
         else changed = true;
       }
       return changed ? next : prev;
@@ -1028,7 +1303,13 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             `"${payload.name}" could not be read from the workbook (${readError}). ` +
               (existing
                 ? "Showing the copy already open here."
-                : "Showing the preview the caller sent; saving will write it back."),
+                : "Showing the preview the caller sent.") +
+              // NOT "saving will write it back", which is what this line used to
+              // promise. Nothing here writes a record that could not be read —
+              // we do not know whose it is, and the write would be over bytes
+              // nobody has seen.
+              " It is READ-ONLY until a read succeeds: this window will not write " +
+              "over a record it could not read.",
             payload.macroId,
           );
           record = {
@@ -1036,12 +1317,20 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             name: payload.name,
             description: payload.description,
             source: existing ? existing.source : payload.source,
-            sourcePackage: null,
+            // The record could not be read, so this window knows nothing NEW
+            // about its provenance. `macroDocFromRecord` is handed `listed` as
+            // the last-known answer below and decides from there; the open
+            // payload carries no provenance at all, so it cannot be asked, and
+            // "I could not read it" is never rendered as "it is yours".
+            sourcePackage: listed?.sourcePackage ?? null,
+            // Nor does it know the scope — same reason, same answer: the last
+            // established one, never the store's default asserted as a fact.
+            scope: listed?.scope,
             loadError: readError,
           };
         }
 
-        const fresh = macroDocFromRecord(record);
+        const fresh = macroDocFromRecord(record, listed);
         const keepBuffer = existing?.dirty === true;
         const doc: MacroDoc = keepBuffer
           ? {
@@ -1248,7 +1537,64 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   const isMacro = macroDoc !== null;
   const activeScript =
     savedScript ?? (isDraft ? draftDoc!.script : macroDoc ? macroDoc.script : null);
-  const isReadOnly = activeScript?.provenance === "distributed";
+  /**
+   * READ-ONLY, FOR EITHER KIND OF DISTRIBUTED CODE.
+   *
+   * For an object script this was always true. For a MODULE it is the fix to a
+   * regression the sticky-stamp rule created: this editor writes a module back
+   * on an idle debounce, `save_script` now carries the package stamp forward,
+   * and the Rust consent gate matches (package, id, source) — so an edit here
+   * left a record that matches no consent record, and a consented macro the user
+   * was happily running was refused FOREVER, from nothing more than opening it
+   * and pausing. Before the stamp became sticky the same edit LAUNDERED the
+   * macro into local code instead, which was the security hole. Neither is
+   * acceptable, so this window does the third thing: it does not edit a
+   * publisher's macro at all. The publisher's record stays byte-for-byte as it
+   * arrived, which is exactly what keeps the escape hatch armed — Developer ▸
+   * Macros… compares the buffer with the STORED source and offers "Save as my
+   * copy" when they differ, and an in-place write from here would have made them
+   * equal and disarmed it. (Forking from this window instead was the other
+   * honest option; it is not taken here because the fork — id minting, unique
+   * naming, lineage in the description — already exists in the Macro Recorder,
+   * and a second copy of it in this extension would be a second source of truth
+   * that drifts on the owner's first change.)
+   */
+  /**
+   * The module refusal, if the open document is a module and is refused.
+   *
+   * Derived from `macroWriteRefusal`, which is the SAME call the persister's
+   * tracking effect and its `write` make. The chrome and the store therefore
+   * cannot disagree about whether this document is writable — a mismatch between
+   * them is exactly how an "origin unknown" chip came to sit above a buffer that
+   * was quietly persisting itself.
+   */
+  const macroRefusal = macroDoc
+    ? macroWriteRefusal({
+        name: macroDoc.script.name,
+        sourcePackage: macroDoc.sourcePackage,
+        sourcePackageKnown: macroDoc.sourcePackageKnown,
+      })
+    : null;
+  const isReadOnly = activeScript?.provenance === "distributed" || macroRefusal !== null;
+  /** Why the buffer refuses edits, in the words the user is owed. Null when it does not. */
+  const readOnlyReason =
+    macroRefusal ??
+    (isReadOnly ? "Distributed scripts are read-only in this window." : null);
+  /**
+   * Why Run/Debug refuse, or null when they do not.
+   *
+   * READ-ONLY IS NOT UNRUNNABLE, and conflating them would be a fresh untruth.
+   * A distributed MODULE is mounted BY ID from the module store
+   * (`hostStartModuleScriptDebugSession`), at the restricted tier, from the
+   * publisher's own stored bytes — exactly what a button on the grid runs — so
+   * reading and stepping through it is both safe and the whole point of a
+   * transparency surface. A distributed OBJECT SCRIPT has no such path here and
+   * keeps its refusal.
+   */
+  const runBlockedReason =
+    isReadOnly && !isMacro
+      ? "Distributed scripts are read-only and cannot be run from here."
+      : null;
   const docs = activeScript ? getContextDocumentation(activeScript.objectType) : [];
 
   /** What kind of document is open, and therefore what live editing may do to it. */
@@ -1258,9 +1604,21 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   livePolicyRef.current = livePolicy;
   const activeNameRef = useRef<string>(activeScript?.name ?? "");
   activeNameRef.current = activeScript?.name ?? "";
-  /** The live state of the module in front of the author (modules only). */
+  /**
+   * The live state of the module in front of the author (modules only).
+   *
+   * A refused module is never tracked by the persister and so can never reach
+   * any of the written states: it reports READ-ONLY, which is the true answer to
+   * "does the store hold what I am looking at, and will it keep holding it" —
+   * "Live" would be accidentally true and would invite the author to type. For
+   * an unreadable record it would be worse than accidental: "Live" asserts that
+   * the store holds this text, which is the one thing that read failed to
+   * establish.
+   */
   const activeLive: LiveDocState | undefined = isMacro && activeScriptId
-    ? liveStates[activeScriptId] ?? (isDirty ? { state: "saving" } : { state: "live" })
+    ? macroRefusal !== null
+      ? { state: "readOnly" }
+      : liveStates[activeScriptId] ?? (isDirty ? { state: "saving" } : { state: "live" })
     : undefined;
   /** True when the open document's debug session is running pre-edit code. */
   const activeSessionStale = !!activeScriptId && staleSessionDocs.includes(activeScriptId);
@@ -1601,6 +1959,18 @@ export function ObjectScriptEditorApp(): React.ReactElement {
    */
   const flushActiveDocument = useCallback(async (): Promise<{ ok: boolean; source: string }> => {
     if (!activeScript) return { ok: false, source: sourceRef.current };
+    // A REFUSED MODULE HAS NOTHING TO FLUSH — a publisher's, or one whose record
+    // could not be read. It is read-only here and the persister does not track
+    // it, so there is no write to make and none is attempted. `ok` is true so
+    // Run and Debug may proceed: both mount the stored record BY ID, which is
+    // the publisher's own bytes in the first case and, in the second, whatever
+    // is really under that id — the store answers for itself and reports its own
+    // read failure rather than this window inventing one. The source reported is
+    // always the stored source, never the buffer, so no caller can be told a
+    // write happened.
+    if (isMacro && macroDoc && macroRefusal !== null) {
+      return { ok: true, source: macroDoc.savedSource };
+    }
     // A macro routes to the MODULE store, never the object-script store.
     if (isMacro) {
       return flushMacro(activeScript.id);
@@ -1713,6 +2083,8 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     isDirty,
     isDraft,
     isMacro,
+    macroDoc,
+    macroRefusal,
     flushMacro,
     source,
     reportToConsole,
@@ -1728,6 +2100,15 @@ export function ObjectScriptEditorApp(): React.ReactElement {
    */
   const handleSave = useCallback(async (): Promise<{ ok: boolean; source: string }> => {
     if (!activeScript) return { ok: false, source: sourceRef.current };
+    // CTRL+S ON A PUBLISHER'S MACRO SAVES NOTHING, AND SAYS SO. The flush below
+    // is a no-op for it, but a gesture that answers "stored" — the message this
+    // branch used to reach, because the persister has no baseline to compare —
+    // would tell the user their edit is now what every button runs. It is not,
+    // and there is no edit: the buffer is read-only.
+    if (isMacro && readOnlyReason !== null) {
+      reportToConsole(readOnlyReason, activeScript.id, "info");
+      return flushActiveDocument();
+    }
     const before = isMacro ? persister.storedSource(activeScript.id) : null;
     const flushed = await flushActiveDocument();
     if (isMacro && flushed.ok) {
@@ -1741,7 +2122,14 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       );
     }
     return flushed;
-  }, [activeScript, isMacro, persister, flushActiveDocument, reportToConsole]);
+  }, [
+    activeScript,
+    isMacro,
+    readOnlyReason,
+    persister,
+    flushActiveDocument,
+    reportToConsole,
+  ]);
   const flushActiveDocumentRef = useRef(flushActiveDocument);
   flushActiveDocumentRef.current = flushActiveDocument;
 
@@ -1751,10 +2139,14 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   // would still mount with the unlocked API for the session.
   const handleToggleAccess = useCallback(async () => {
     if (!activeScript) return;
-    // A macro is always run at the unlocked tier (that is the only tier where
-    // `context.api` is non-null). There is no per-tier flag in the module store,
-    // and routing this through the object-script save path would fabricate an
-    // object script. The access control is simply hidden for a macro.
+    // A MODULE HAS NO TIER SETTING — its tier is a FACT, derived from whether
+    // the record carries a package stamp (unlocked for the user's own code,
+    // restricted for a module that arrived in an application). There is no
+    // per-tier flag in the module store, routing this through the object-script
+    // save path would fabricate an object script, and a toggle that appeared to
+    // raise a publisher's macro would be a control that lies twice: once when
+    // pressed, and again every time the mount ignores it. The chip states the
+    // derived tier instead of offering to change it.
     if (isMacro) return;
     // A draft has no backend record, so there is nothing to persist yet —
     // and persisting it HERE would write AI-authored code into the workbook
@@ -1911,74 +2303,124 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     [activeScript, reportToConsole],
   );
 
+  /**
+   * Runs this window has STARTED and not yet finished, keyed by script id.
+   *
+   * F5 IS A MONACO KEYBINDING, AND KEYBINDINGS AUTO-REPEAT. Holding the key —
+   * or pressing it twice while the first Run is still flushing the buffer and
+   * waiting out a cross-window remount — used to stack two `runAtCursor` calls
+   * on one script. Two starts then raced for one session and, worse, for one
+   * answer: the debugger's start-refusal record could answer only one of them,
+   * and the other reported a run that never happened. The record now carries an
+   * attempt id so it can never misattribute an answer; this flag is the other
+   * half, and it is the half that stops the second Run from existing at all.
+   *
+   * `announced` keeps the refusal from becoming its own noise: an auto-repeating
+   * key would otherwise print a console line per repeat, so the first suppressed
+   * press speaks and the rest of that burst is silent — the run they are asking
+   * for is already on its way.
+   */
+  const runInFlightRef = useRef<Map<string, { announced: boolean }>>(new Map());
+
   // Run-at-cursor (VBA F5): run the top-level function the cursor is in, through
   // the same fire/exposed-method door the Fire buttons use. Never a wrong-arity
   // call and never a silent no-op — an unresolvable cursor speaks in the console.
   const runFromCursor = useCallback(async () => {
     const ed = editorRef.current;
-    if (!ed || !activeScript || isDraft || isReadOnly) return;
-    const line = ed.getPosition()?.lineNumber ?? 1;
-
-    // 1. WHAT YOU SEE IS WHAT RUNS. The buffer goes to the store before anything
-    //    is mounted; a compile failure stops here rather than running the older
-    //    stored copy behind the author's back.
-    const flushed = await flushBeforeRunning("Run");
-    if (!flushed.ok) return;
-
-    // 2. An open session was instrumented from the source as it was when the
-    //    session opened, and it OWNS that snapshot. If edits have been stored
-    //    since, this Run would fire into the old code.
-    if (staleSessionDocsRef.current.includes(activeScript.id)) {
-      if (debugRef.current.isPaused) {
-        // NEVER remount underneath a paused author: their locals, call stack and
-        // position would vanish mid-inspection. Say what is true and let them
-        // choose.
-        reportToConsole(
-          `The debug session is paused at line ${debugRef.current.session?.paused?.line ?? "?"} in the code as it was ` +
-            "when the session started, so Run cannot use your newer edits. Your edits ARE stored — " +
-            "press Stop (or continue to the end) and Run again to step through them.",
-          activeScript.id,
-        );
-        return;
-      }
-      reportToConsole(
-        "Restarting the debug session so it runs the code you are looking at…",
-        activeScript.id,
-        "info",
-      );
-      await stopDebugSessionAndWait(activeScript.id);
-      clearSessionStale(activeScript.id);
+    if (!ed || !activeScript || isDraft) return;
+    if (runBlockedReason) {
+      // NEVER SILENTLY. The button is disabled, but F5 is bound in Monaco and
+      // reaches here anyway — and a Run key that does nothing at all is the
+      // exact silence this window keeps regressing into.
+      reportToConsole(runBlockedReason, activeScript.id);
+      return;
     }
 
-    // 3. A module macro is mounted from the STORE, by id — the host must never be
-    //    handed a body by a caller — which is exactly why step 1 exists.
-    //    The cursor is resolved against the text that was stored (identical to
-    //    the buffer unless a TypeScript compile rewrote it, in which case the
-    //    editor is already showing the stored JavaScript).
-    // A throw here is the host refusing (no session, no such trigger, a mount
-    // that Script Security blocked). Unhandled it would be an unhandled promise
-    // rejection and, on screen, a Run button that did nothing at all — the exact
-    // silence this whole feature keeps regressing into. It goes in the console.
-    try {
-      const outcome = await runAtCursor(activeScript.id, flushed.source, line, {
-        mountFromModuleStore: isMacro,
-      });
-      if (outcome.status === "ran") {
-        reportToConsole(`Running ${outcome.functionName}()…`, activeScript.id, "info");
-      } else {
-        reportToConsole(outcome.message, activeScript.id, "error");
+    // ONE RUN PER SCRIPT AT A TIME. Held for the WHOLE gesture — flush, stale
+    // session restart, mount and fire — because every one of those steps is a
+    // point where a second press could overtake the first.
+    const inFlight = runInFlightRef.current;
+    const already = inFlight.get(activeScript.id);
+    if (already) {
+      if (!already.announced) {
+        already.announced = true;
+        reportToConsole(
+          "A Run is already starting for this script, so this one was ignored rather than " +
+            "queued behind it. Wait for it to report, then press Run again.",
+          activeScript.id,
+          "info",
+        );
       }
-    } catch (e) {
-      reportToConsole(
-        `Run failed: ${e instanceof Error ? e.message : String(e)}`,
-        activeScript.id,
-        "error",
-      );
+      return;
+    }
+    inFlight.set(activeScript.id, { announced: false });
+
+    try {
+      const line = ed.getPosition()?.lineNumber ?? 1;
+
+      // 1. WHAT YOU SEE IS WHAT RUNS. The buffer goes to the store before anything
+      //    is mounted; a compile failure stops here rather than running the older
+      //    stored copy behind the author's back.
+      const flushed = await flushBeforeRunning("Run");
+      if (!flushed.ok) return;
+
+      // 2. An open session was instrumented from the source as it was when the
+      //    session opened, and it OWNS that snapshot. If edits have been stored
+      //    since, this Run would fire into the old code.
+      if (staleSessionDocsRef.current.includes(activeScript.id)) {
+        if (debugRef.current.isPaused) {
+          // NEVER remount underneath a paused author: their locals, call stack and
+          // position would vanish mid-inspection. Say what is true and let them
+          // choose.
+          reportToConsole(
+            `The debug session is paused at line ${debugRef.current.session?.paused?.line ?? "?"} in the code as it was ` +
+              "when the session started, so Run cannot use your newer edits. Your edits ARE stored — " +
+              "press Stop (or continue to the end) and Run again to step through them.",
+            activeScript.id,
+          );
+          return;
+        }
+        reportToConsole(
+          "Restarting the debug session so it runs the code you are looking at…",
+          activeScript.id,
+          "info",
+        );
+        await stopDebugSessionAndWait(activeScript.id);
+        clearSessionStale(activeScript.id);
+      }
+
+      // 3. A module macro is mounted from the STORE, by id — the host must never be
+      //    handed a body by a caller — which is exactly why step 1 exists.
+      //    The cursor is resolved against the text that was stored (identical to
+      //    the buffer unless a TypeScript compile rewrote it, in which case the
+      //    editor is already showing the stored JavaScript).
+      // A throw here is the host refusing (no session, no such trigger, a mount
+      // that Script Security blocked). Unhandled it would be an unhandled promise
+      // rejection and, on screen, a Run button that did nothing at all — the exact
+      // silence this whole feature keeps regressing into. It goes in the console.
+      try {
+        const outcome = await runAtCursor(activeScript.id, flushed.source, line, {
+          mountFromModuleStore: isMacro,
+        });
+        if (outcome.status === "ran") {
+          reportToConsole(`Running ${outcome.functionName}()…`, activeScript.id, "info");
+        } else {
+          reportToConsole(outcome.message, activeScript.id, "error");
+        }
+      } catch (e) {
+        reportToConsole(
+          `Run failed: ${e instanceof Error ? e.message : String(e)}`,
+          activeScript.id,
+          "error",
+        );
+      }
+    } finally {
+      inFlight.delete(activeScript.id);
     }
   }, [
     activeScript,
     isDraft,
-    isReadOnly,
+    runBlockedReason,
     isMacro,
     reportToConsole,
     flushBeforeRunning,
@@ -2286,7 +2728,7 @@ export function ObjectScriptEditorApp(): React.ReactElement {
                 const notStored = live?.state === "error" || live?.state === "deferred";
                 return (
                   <option key={d.macroId} value={d.macroId}>
-                    {macroDocKindLabel(d)} — {d.script.name}
+                    {macroDocOptionLabel(d)}
                     {notStored ? " •" : ""}
                     {d.loadError ? " (unreadable)" : ""}
                   </option>
@@ -2396,10 +2838,29 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             {activeScript.accessLevel === "restricted" ? <><IconLock /> Restricted</> : <><IconUnlock /> Unlocked</>}
           </button>
         )}
-        {activeScript && isMacro && (
-          <span className="ose-btn" style={{ cursor: "default", opacity: 0.85 }}
-            title="A recorded macro always runs at the unlocked tier (where context.api is available).">
-            <IconUnlock /> Macro
+        {/* THE TIER THE RUNTIME WILL ACTUALLY GIVE IT. Derived in
+            `macroDocFromRecord` from the record's own package stamp, not
+            written here: a distributed module is mounted RESTRICTED by
+            `hostStartModuleScriptDebugSession` and by `runObjectScriptOnce`,
+            and this window used to say "unlocked" for every macro regardless —
+            a promise the runtime refuses to keep. There is no toggle: for a
+            module the tier is a fact about the record, not a setting. */}
+        {activeScript && isMacro && macroDoc && (
+          <span
+            className="ose-btn"
+            data-testid="macro-tier-chip"
+            data-macro-tier={activeScript.accessLevel}
+            // WHAT THIS WINDOW HAS ESTABLISHED — three answers, not two. An
+            // unreadable record answers nothing about its origin, and the chip
+            // used to render that silence as "A macro you wrote": the safe
+            // answer, asserted from no evidence, on the one control whose job is
+            // to say whose code this is.
+            data-macro-provenance={macroProvenanceKnowledge(macroDoc).kind}
+            style={{ cursor: "default", opacity: 0.85 }}
+            title={macroTierChipTitle(macroProvenanceKnowledge(macroDoc))}
+          >
+            {activeScript.accessLevel === "restricted" ? <IconLock /> : <IconUnlock />}
+            {macroTierChipLabel(macroProvenanceKnowledge(macroDoc), activeScript.accessLevel)}
           </span>
         )}
 
@@ -2526,9 +2987,11 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             // flush first and then run what the author is looking at, which is
             // the whole point of the change: in the VBE you never press Save
             // before you press F5. The only thing that still disables Run is a
-            // distributed script, which cannot be run from here at all.
-            runDisabled={isReadOnly}
-            runDisabledTitle="Distributed scripts are read-only and cannot be run from here."
+            // distributed OBJECT SCRIPT — a distributed module is mounted from
+            // the store at the restricted tier and reads/steps exactly as a
+            // button click runs it, so read-only does not mean unrunnable.
+            runDisabled={runBlockedReason !== null}
+            runDisabledTitle={runBlockedReason ?? undefined}
           />
         )}
 
@@ -2569,14 +3032,18 @@ export function ObjectScriptEditorApp(): React.ReactElement {
                     ? "#CCA700"
                     : activeLive?.state === "saving"
                       ? "#CCC"
-                      : "#89D185",
+                      : activeLive?.state === "readOnly"
+                        ? "#CCC"
+                        : "#89D185",
             }}
             title={
               activeLive?.state === "error"
                 ? `${activeLive.message}\nThe stored module is unchanged — anything that runs this macro still runs the last version that compiled.`
                 : activeLive?.state === "deferred"
                   ? activeLive.message
-                  : `${livePolicy.rationale}\nCtrl+S stores it immediately; Run and Debug store it before they run.`
+                  : activeLive?.state === "readOnly"
+                    ? (readOnlyReason ?? "")
+                    : `${livePolicy.rationale}\nCtrl+S stores it immediately; Run and Debug store it before they run.`
             }
           >
             <IconSave />
@@ -2778,9 +3245,64 @@ export function ObjectScriptEditorApp(): React.ReactElement {
         />
       )}
 
+      {/* WHOSE CODE IS ON SCREEN. A `.calp` may ship module scripts, and they
+          list in this window beside the user's own; until this banner, a
+          publisher's macro was indistinguishable from one the user recorded
+          themselves — which is the decision the whole consent model rests on.
+          It states the three facts this window can establish and the user
+          cannot: where it came from, the tier it will actually be mounted at,
+          and what an edit here does and does not change. */}
+      {macroDoc && macroDoc.sourcePackage && (
+        <div
+          data-testid="macro-provenance-banner"
+          data-macro-source-package={macroDoc.sourcePackage}
+          style={{
+            padding: "8px 12px",
+            backgroundColor: "#3A3320",
+            borderBottom: "1px solid #6A5A2A",
+            color: "#FFD666",
+            fontSize: 11,
+            lineHeight: "1.5",
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+            From the application "{macroDoc.sourcePackage}" — you did not write this
+          </div>
+          <div>
+            Run and Debug here mount it <strong>from the module store, by id</strong> — the
+            publisher's stored code, never the buffer — at the <strong>restricted</strong>{" "}
+            tier: <code>context.api</code> is null, and it can use a capability only through
+            that application's consent record, never the local prompt. That is the same mount
+            a button on the grid uses, so what you step through is what runs.
+          </div>
+          {/* EVERY SENTENCE TRUE OF WHAT THE CODE DOES. This paragraph used to
+              say editing here kept the stamp and that the runtime would then
+              refuse the macro — a refusal this window's Run route does not
+              perform, describing an edit that (because `save_script` makes the
+              stamp sticky) actually BRICKED the macro against the Rust consent
+              gate. The window no longer makes that edit at all, so the paragraph
+              says what it does instead, and names a remedy that is still armed
+              because the stored record was never touched. */}
+          <div style={{ marginTop: 2, opacity: 0.9 }}>
+            The editor is <strong>read-only</strong> for it: nothing you do here can change
+            the publisher's macro, and nothing is written back. That is deliberate — an edit
+            stored under the application's name would no longer match the code you consented
+            to, and the macro could never run again. To adapt it, open Developer ▸ Macros…,
+            edit the text there and press <strong>"Save as my copy"</strong>: you get a local
+            macro of your own, which this window edits freely, and the application's macro is
+            left exactly as it arrived.
+          </div>
+        </div>
+      )}
+
       {/* A module the store could not give us. The editor still opens ON it —
-          hiding it would leave a blank window with no explanation — but it says
-          what is wrong and what saving will do. */}
+          hiding it would leave a blank window with no explanation — but it is
+          READ-ONLY, and this says so. It used to say "they will fail until this
+          is saved", which invited the user to press Ctrl+S on a record nobody
+          had read: the buffer would have been written over a stored module of
+          unknown ownership, destroying the user's real macro if it was theirs
+          and bricking a consented one if it was a publisher's. */}
       {macroDoc && macroDoc.loadError && (
         <div
           data-testid="macro-load-error-banner"
@@ -2799,7 +3321,12 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           </div>
           <div>{macroDoc.loadError}</div>
           <div style={{ marginTop: 2, opacity: 0.85 }}>
-            Debugging and Run need the stored module, so they will fail until this is saved.
+            This document is <strong>read-only</strong> while that is true: nothing here —
+            not typing, not Ctrl+S, not closing the window — writes over a record this
+            window could not read, because it cannot tell whether that record is yours or
+            arrived in an application. Run and Debug still mount whatever the store holds
+            under this id, and will report the same failure. Reopen the workbook to try the
+            read again, or use Developer ▸ Macros… to save this text as a macro of your own.
           </div>
         </div>
       )}
@@ -3000,7 +3527,9 @@ export function ObjectScriptEditorApp(): React.ReactElement {
                     ? "Not stored — Ctrl+S to compile"
                     : activeLive?.state === "saving"
                       ? "Saving…"
-                      : "Live"
+                      : activeLive?.state === "readOnly"
+                        ? "Read-only — the application's macro"
+                        : "Live"
                 : isDirty
                   ? "Modified"
                   : "Saved"}

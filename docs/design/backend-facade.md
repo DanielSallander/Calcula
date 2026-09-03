@@ -9,14 +9,14 @@ Design spike for the architecture audit's deepest seam: the Rust backend is a
 Re-audited against source. The **design is intact and shipped**; the counts had drifted and one
 resolved-asymmetry paragraph named two symbols that no longer exist.
 
-| Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | Recounted (2026-09-01) | How counted |
-|---|---:|---:|---:|---:|---|
-| Commands in `generate_handler!` | 761 | 773 | 783 | **786** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
-| `#[tauri::command]` attributes | 798 | 815 | 822 | **824** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
-| Privileged (denylisted) commands | ~30 | 94 | 100 | **101** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
-| Feature-open commands | 667 | 673 | 683 | **685** | 786 − 101 |
-| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | **338** | exported functions/consts in `backend.ts` |
-| Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | 109,188 / 906 files | current suite |
+| Figure | Actual (2026-08-16) | Recounted (2026-08-27) | Recounted (2026-08-29) | Recounted (2026-09-01) | Recounted (2026-09-03) | How counted |
+|---|---:|---:|---:|---:|---:|---|
+| Commands in `generate_handler!` | 761 | 773 | 783 | 788 | **787** | bracket-matched parse of `lib.rs`, comments stripped LINE-WISE (all unique) |
+| `#[tauri::command]` attributes | 798 | 815 | 822 | 827 | **826** | `#[tauri::command]` occurrences under `app/src-tauri/src` |
+| Privileged (denylisted) commands | ~30 | 94 | 100 | 101 | **101** | unique names in `PRIVILEGED_BACKEND_COMMANDS` |
+| Feature-open commands | 667 | 673 | 683 | 687 | **686** | 787 − 101 |
+| Typed wrappers in `backend.ts` | ~229 | 327 | 338 | 338 | **338** | exported functions/consts in `backend.ts` |
+| Vitest at the time of the DONE claim | 102k | ~107,155 / 808 files | *not re-measured* | 109,188 / 906 files | 109,429 / 901 files | current suite |
 
 **The 2026-08-27 recount is the point of the row, not the numbers.** CLAUDE.md and this file
 are supposed to be two INDEPENDENT counts of the same thing, which only works if both are

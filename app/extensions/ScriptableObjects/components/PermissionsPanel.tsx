@@ -19,6 +19,9 @@ import {
   ObjectScriptManager,
   getGrantedOrigins,
   revokeCapability,
+  isLocalOrigin,
+  originTagLabel,
+  originTagTitle,
 } from "@api";
 import type { AuditEntry, ScriptHandle, MethodPolicy, CapabilityId } from "@api";
 import type { PanelSectionProps } from "@api/uiTypes";
@@ -272,11 +275,14 @@ export function MountedScriptsSection({ placement }: PanelSectionProps): React.R
                 <span style={h.tier === "unlocked" ? unlockedTagStyle : restrictedTagStyle}>
                   {h.tier}
                 </span>
+                {/* Branch on the origin's KIND, display its NAME. A bare-string
+                    origin let an application named `local` wear the "local" chip
+                    and the "Authored in this workbook" tooltip. */}
                 <span
-                  style={h.origin === "local" ? localTagStyle : packageTagStyle}
-                  title={h.origin === "local" ? "Authored in this workbook" : `From package "${h.origin}"`}
+                  style={isLocalOrigin(h.origin) ? localTagStyle : packageTagStyle}
+                  title={originTagTitle(h.origin)}
                 >
-                  {h.origin === "local" ? "local" : h.origin}
+                  {originTagLabel(h.origin)}
                 </span>
                 {debuggerOwned.has(h.scriptId) && (
                   <span

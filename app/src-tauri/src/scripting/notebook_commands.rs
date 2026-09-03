@@ -24,7 +24,7 @@ pub fn notebook_create(
     id: String,
     name: String,
 ) -> Result<NotebookDocument, String> {
-    let notebook = NotebookDocument {
+    let mut notebook = NotebookDocument {
         id: id.clone(),
         name,
         cells: vec![NotebookCell {
@@ -43,12 +43,29 @@ pub fn notebook_create(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut notebooks = script_state.workbook_notebooks.write(&effect)
         .map_err(|e| e.to_string())?;
+    // Creating OVER an existing id keeps that id's provenance (see
+    // `notebook_save`): "create" is an insert the renderer chooses the id for,
+    // so without this a caller could mint a local notebook on top of a
+    // publisher's one and launder the stamp the run gate reads.
+    notebook.source_package = super::commands::sticky_source_package(
+        notebook.source_package.take(),
+        notebooks.get(&id).and_then(|nb| nb.source_package.as_deref()),
+    );
     notebooks.insert(id, notebook.clone());
 
     Ok(notebook)
 }
 
 /// Save (create or update) a notebook document.
+///
+/// PROVENANCE IS STICKY HERE TOO, for the reason it is sticky in `save_script`:
+/// `source_package` is the only authority on whose code a notebook is, the
+/// field is optional on the wire, and this command is called on EVERY run —
+/// `useNotebookStore.runCell` / `runAll` / `runFromCell` all save the in-memory
+/// document immediately before executing it. A writer that omitted the stamp
+/// (or a hostile renderer that dropped it) would therefore turn a publisher's
+/// notebook into local code one keystroke before the gate below reads it.
+/// Omission means "leave it alone", never "make this mine".
 #[tauri::command]
 pub fn notebook_save(
     file_state: State<'_, crate::persistence::FileState>,
@@ -59,6 +76,13 @@ pub fn notebook_save(
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let mut notebooks = script_state.workbook_notebooks.write(&effect)
         .map_err(|e| e.to_string())?;
+    let mut notebook = notebook;
+    notebook.source_package = super::commands::sticky_source_package(
+        notebook.source_package.take(),
+        notebooks
+            .get(&notebook.id)
+            .and_then(|nb| nb.source_package.as_deref()),
+    );
     notebooks.insert(notebook.id.clone(), notebook);
     Ok(())
 }
@@ -79,7 +103,20 @@ pub fn notebook_load(
         .ok_or_else(|| format!("Notebook '{}' not found", id))
 }
 
-/// List all notebooks (lightweight summaries).
+/// The listing row for one notebook — the ONE place a `NotebookDocument`
+/// becomes a `NotebookSummary`. Provenance is COPIED from the record, never
+/// derived: the notebook picker is a list of these rows, so a row that drops
+/// `source_package` shows a publisher's notebook as one of the user's own.
+fn notebook_summary(notebook: &NotebookDocument) -> NotebookSummary {
+    NotebookSummary {
+        id: notebook.id.clone(),
+        name: notebook.name.clone(),
+        cell_count: notebook.cells.len(),
+        source_package: notebook.source_package.clone(),
+    }
+}
+
+/// List all notebooks (lightweight summaries, WITH provenance).
 #[tauri::command]
 pub fn notebook_list(
     script_state: State<ScriptState>,
@@ -91,11 +128,7 @@ pub fn notebook_list(
 
     let mut summaries: Vec<NotebookSummary> = notebooks
         .values()
-        .map(|nb| NotebookSummary {
-            id: nb.id.clone(),
-            name: nb.name.clone(),
-            cell_count: nb.cells.len(),
-        })
+        .map(notebook_summary)
         .collect();
 
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -130,6 +163,142 @@ pub async fn notebook_delete(
 // ============================================================================
 // Internal Helpers
 // ============================================================================
+
+/// The consent-store script id for one cell of a distributed notebook.
+///
+/// The consent store is keyed `(packageName, scriptId, sourceHash)` and is
+/// SHARED by every distributed-code surface (object scripts, chart libraries,
+/// writeback validators, module scripts). A notebook joins it rather than
+/// growing a second store: the package key is the application name the pull
+/// stamped, and the unit of consent is one CELL, because one cell's source is
+/// exactly what `run_cell_internal` hands to QuickJS. The `notebook:{id}`
+/// prefix matches the surface id the capability store already uses for
+/// notebooks (`grantNotebookBiCapability`), so one notebook reads as one
+/// subject everywhere.
+pub(crate) fn notebook_consent_script_id(notebook_id: &str, cell_id: &str) -> String {
+    format!("notebook:{}:{}", notebook_id, cell_id)
+}
+
+/// Refuse to run a CELL OF A NOTEBOOK THAT ARRIVED IN A .calp APPLICATION.
+///
+/// THE HOLE. `core/calp/src/pull.rs` materializes a published application's
+/// notebooks into the subscriber's workbook, stamps each with
+/// `source_package`, and STRIPS their execution metadata on the delivered bytes
+/// — explicitly because a notebook from a stranger is inert data the user has
+/// not agreed to run. Module scripts from the very same application are gated
+/// by `require_distributed_module_consent`; notebooks had NOTHING. Opening the
+/// notebook panel, picking the publisher's notebook out of the list (which,
+/// before this change, did not say it was theirs) and pressing Run All
+/// executed a stranger's JavaScript against the workbook with no package
+/// consent anywhere in the path.
+///
+/// FAILS CLOSED, and is RUST-AUTHORITATIVE: the renderer is assumed hostile, so
+/// the check cannot live in the notebook store that builds the call — and
+/// `notebook_save`, which the store calls immediately before every run, now
+/// refuses to let an omitted stamp erase the record this reads.
+///
+/// The evidence is the SAME consent store the object-script, chart-library,
+/// validator and module gates read: a record under the application name naming
+/// this cell and this EXACT source hash. So an upstream refresh that changes a
+/// cell re-asks (the hash moves), one application's consent never covers
+/// another's, and editing a publisher's cell does not inherit approval for what
+/// it used to say.
+///
+/// The sanctioned way to RUN a publisher's analysis is to copy its cells into a
+/// notebook of your own — a local notebook carries no stamp, so it is not
+/// gated, and the refusal message says so.
+fn distributed_notebook_refusal(
+    source_package: Option<&str>,
+    notebook_id: &str,
+    notebook_name: &str,
+    cell_id: &str,
+    source: &str,
+    consent_file: Option<&serde_json::Value>,
+) -> Option<String> {
+    // An absent — or blank — stamp is not an application: it is a record with
+    // nothing stamped on it, i.e. the user's own notebook. Same rule as
+    // `scriptOriginForStoredRecord` (app/src/api/scriptHost/scriptOrigin.ts):
+    // a publisher-chosen name can never select the LOCAL kind, and whitespace
+    // can never select the PACKAGE kind.
+    let package = source_package.map(str::trim).filter(|p| !p.is_empty())?;
+
+    let source_hash = calp::integrity::sha256_hex(source.as_bytes());
+    let consent_id = notebook_consent_script_id(notebook_id, cell_id);
+    if let Some(file) = consent_file {
+        if crate::calp_commands::consent_granted_in(file, package, &consent_id, &source_hash) {
+            return None;
+        }
+    }
+    // THE WORDS STATE THE REAL RULE, WHICH IS NOT "NOT YET APPROVED".
+    //
+    // This message used to read "you have not approved that application's code",
+    // which describes a pending decision — and every other surface's refusal
+    // means exactly that, because a consent screen exists that can settle it. No
+    // such screen exists for a notebook, and that is deliberate: the consent
+    // record is written by the object-script prompt over object scripts and
+    // module scripts only (extensions/ScriptableObjects/lib/packageConsentSet.ts),
+    // nothing anywhere writes a `notebook:{id}:{cell}` id into it, and a
+    // distributed notebook is meant to arrive as readable analysis rather than as
+    // something to switch on. So the sentence promised an approval the product
+    // has no way to give, and sent the user hunting for a button that is not
+    // there.
+    //
+    // The consent BRANCH above is kept, and is not dead: a `.calp` that a future
+    // surface consents cell-by-cell would be admitted by it unchanged. What
+    // changes here is only the claim made to the user when the answer is no.
+    Some(format!(
+        "{}: The notebook '{}' arrived in the application '{}'. Notebooks from an \
+         application are delivered to be read, not run — Calcula has no way to approve \
+         one, so its cells stay inert here. You can read every cell, and copy the \
+         ones you want into a notebook of your own to run them.",
+        super::commands::DISTRIBUTED_SCRIPT_NOT_CONSENTED,
+        notebook_name,
+        package
+    ))
+}
+
+/// The stateful half of {@link distributed_notebook_refusal}: read the stored
+/// notebook's provenance and the workbook's consent file, then decide.
+///
+/// Provenance comes from the STORED record, never from the request — the run
+/// request carries only ids and a source string, and a caller that could assert
+/// its own provenance would be asserting the thing being checked.
+///
+/// A notebook id that is not in the store is not a stored notebook (a cell run
+/// against a document that was just deleted); there is nothing whose provenance
+/// could be read, and the run has no package to be refused for.
+fn require_distributed_notebook_consent(
+    app: &tauri::AppHandle,
+    script_state: &ScriptState,
+    notebook_id: &str,
+    cell_id: &str,
+    source: &str,
+) -> Result<(), String> {
+    let record: Option<(Option<String>, String)> = {
+        let notebooks = script_state
+            .workbook_notebooks
+            .read()
+            .map_err(|e| e.to_string())?;
+        notebooks
+            .get(notebook_id)
+            .map(|nb| (nb.source_package.clone(), nb.name.clone()))
+    }; // guard dropped: nothing below may hold it, and no await follows it
+    let Some((source_package, name)) = record else {
+        return Ok(());
+    };
+    let consent_file = crate::calp_commands::read_script_consent_file(app);
+    match distributed_notebook_refusal(
+        source_package.as_deref(),
+        notebook_id,
+        &name,
+        cell_id,
+        source,
+        consent_file.as_ref(),
+    ) {
+        Some(message) => Err(message),
+        None => Ok(()),
+    }
+}
 
 /// True when a cell holds PROSE, not JavaScript.
 ///
@@ -191,6 +360,12 @@ async fn run_cell_internal(
 
     // Notebook cells are script execution — same security gate as run_script.
     super::commands::check_script_security(script_state)?;
+
+    // ...and the same PROVENANCE gate as a module script: a notebook that
+    // arrived inside somebody's .calp does not run on the strength of the
+    // user's trust in their OWN code. Checked on every path, because run /
+    // run-all / rewind / run-from all funnel through here.
+    require_distributed_notebook_consent(app, script_state, notebook_id, cell_id, source)?;
 
     // Phase 1 (sync): clone AppState data + checkpoint bookkeeping
     let grids = app_state.grids.read().map_err(|e| e.to_string())?.clone();
@@ -694,6 +869,192 @@ pub async fn notebook_reset_runtime(
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod notebook_provenance_tests {
+    use super::{
+        distributed_notebook_refusal, notebook_consent_script_id, notebook_summary,
+    };
+    use crate::scripting::commands::{sticky_source_package, DISTRIBUTED_SCRIPT_NOT_CONSENTED};
+    use crate::scripting::types::{NotebookCell, NotebookDocument};
+
+    fn notebook(id: &str, package: Option<&str>, cells: &[(&str, &str)]) -> NotebookDocument {
+        NotebookDocument {
+            id: id.to_string(),
+            name: format!("{} (display name)", id),
+            cells: cells
+                .iter()
+                .map(|(cell_id, source)| NotebookCell {
+                    id: cell_id.to_string(),
+                    source: source.to_string(),
+                    last_output: Vec::new(),
+                    last_error: None,
+                    cells_modified: 0,
+                    duration_ms: 0,
+                    execution_index: None,
+                })
+                .collect(),
+            source_package: package.map(str::to_string),
+        }
+    }
+
+    fn consent_file_for(package: &str, consent_id: &str, source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "consents": [{
+                "packageName": package,
+                "scripts": [{
+                    "id": consent_id,
+                    "sourceHash": calp::integrity::sha256_hex(source.as_bytes()),
+                    "source": source,
+                }],
+                "grantedCapabilities": [],
+                "grantedAt": "2026-01-01T00:00:00Z",
+            }],
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // notebook_list: a listing row must say whose notebook it is
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_notebook_listing_row_carries_the_package_stamp() {
+        let row = notebook_summary(&notebook("nb-1", Some("Quarterly Reports"), &[("c1", "1")]));
+        assert_eq!(
+            row.source_package.as_deref(),
+            Some("Quarterly Reports"),
+            "the notebook picker is a list of these rows; dropping the stamp \
+             shows a publisher's notebook as one of the user's own"
+        );
+        assert_eq!(row.cell_count, 1);
+    }
+
+    #[test]
+    fn a_local_notebook_listing_row_claims_no_package() {
+        let row = notebook_summary(&notebook("nb-2", None, &[("c1", "1"), ("c2", "2")]));
+        assert_eq!(row.source_package, None);
+        assert_eq!(row.cell_count, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // notebook_save: an omitted stamp must not launder a publisher's notebook
+    // -----------------------------------------------------------------------
+
+    /// `useNotebookStore` saves the in-memory document immediately before every
+    /// run, so a save that dropped the stamp would disarm the run gate one
+    /// keystroke before it fires. `notebook_save`/`notebook_create` apply the
+    /// same stickiness `save_script` does.
+    #[test]
+    fn a_notebook_save_that_omits_the_stamp_does_not_erase_it() {
+        assert_eq!(
+            sticky_source_package(None, Some("Quarterly Reports")),
+            Some("Quarterly Reports".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The run gate: a distributed notebook must not run unconsented
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_distributed_notebook_cell_is_refused_with_no_consent_record() {
+        let src = "Calcula.setCellValue(0, 0, 'pwned');";
+        let refusal = distributed_notebook_refusal(
+            Some("evil-app"),
+            "nb-1",
+            "Sales Analysis",
+            "c1",
+            src,
+            None,
+        )
+        .expect("a notebook from an unapproved application must not run");
+        assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+        assert!(refusal.contains("evil-app"), "{}", refusal);
+        assert!(refusal.contains("Sales Analysis"), "{}", refusal);
+        // The refusal names the sanctioned alternative, so the user is not left
+        // hunting for a way to switch the check off.
+        assert!(refusal.contains("notebook of your own"), "{}", refusal);
+    }
+
+    #[test]
+    fn a_consent_record_for_that_exact_cell_source_admits_it() {
+        let src = "Calcula.setCellValue(0, 0, 1);";
+        let file = consent_file_for("good-app", &notebook_consent_script_id("nb-1", "c1"), src);
+        assert!(distributed_notebook_refusal(
+            Some("good-app"),
+            "nb-1",
+            "Sales Analysis",
+            "c1",
+            src,
+            Some(&file),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn consent_does_not_survive_the_cell_changing() {
+        // An upstream refresh — or an edit in the notebook panel — moves the
+        // hash, so yesterday's approval cannot cover today's code.
+        let approved = "Calcula.setCellValue(0, 0, 1);";
+        let changed = "Calcula.setCellValue(0, 0, 999);";
+        let file =
+            consent_file_for("good-app", &notebook_consent_script_id("nb-1", "c1"), approved);
+        assert!(distributed_notebook_refusal(
+            Some("good-app"),
+            "nb-1",
+            "Sales Analysis",
+            "c1",
+            changed,
+            Some(&file),
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn consent_for_one_cell_does_not_cover_another() {
+        let src = "Calcula.setCellValue(0, 0, 1);";
+        let file = consent_file_for("good-app", &notebook_consent_script_id("nb-1", "c1"), src);
+        assert!(distributed_notebook_refusal(
+            Some("good-app"),
+            "nb-1",
+            "Sales Analysis",
+            "c2",
+            src,
+            Some(&file),
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn one_applications_consent_never_covers_anothers_notebook() {
+        let src = "Calcula.setCellValue(0, 0, 1);";
+        let file = consent_file_for("good-app", &notebook_consent_script_id("nb-1", "c1"), src);
+        assert!(distributed_notebook_refusal(
+            Some("evil-app"),
+            "nb-1",
+            "Sales Analysis",
+            "c1",
+            src,
+            Some(&file),
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn a_local_notebook_is_not_gated() {
+        let src = "Calcula.setCellValue(0, 0, 1);";
+        // No stamp at all...
+        assert!(
+            distributed_notebook_refusal(None, "nb-9", "My Notebook", "c1", src, None).is_none()
+        );
+        // ...and a blank stamp is nothing stamped, not an application named "".
+        assert!(
+            distributed_notebook_refusal(Some("   "), "nb-9", "My Notebook", "c1", src, None)
+                .is_none()
+        );
+    }
+}
 
 #[cfg(test)]
 mod markdown_cell_tests {

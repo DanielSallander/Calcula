@@ -406,6 +406,213 @@ fn distributed_module_refusal(
     ))
 }
 
+// ===========================================================================
+// THE MOUNT GATE — a question a MOUNT can actually answer
+// ===========================================================================
+//
+// WHY THE MODULE QUESTION IS NOT ENOUGH ON ITS OWN.
+// `distributed_module_refusal` resolves ownership by EXACT SOURCE EQUALITY
+// against stored MODULE records, and returns `None` — allow — the moment no
+// stored module carries that source ("not a stored module at all"). That is
+// exactly right for the module-runtime route, where the source handed to
+// `run_script` IS a stored module's source.
+//
+// It is blind on a MOUNT. Six of the seven mount routes COMPOSE the realm's
+// source and therefore match no stored record byte-for-byte:
+//
+//   * a chart mark script from an application  (app/src/api/chartMarkScripts.ts)
+//   * a chart transform from an application    (app/src/api/chartTransformScripts.ts)
+//   * the UDF library realm                    (app/src/api/customFunctions.ts:
+//                                               prelude + publisher-merged bodies)
+//   * a shared library realm                   (app/src/api/scriptLibraries/linker.ts:
+//                                               prelude + merged modules)
+//   * a standing object-script mount           (app/src/api/scriptableObjects.ts:
+//                                               prelude + the script's source)
+//   * a writeback validator realm              (app/src/api/writebackValidators.ts:
+//                                               one body inside a generated wrapper)
+//
+// That last one is invisible to `rg`: the file carries deliberate NUL bytes in
+// template literals, so ripgrep classifies it as binary and skips it. A
+// text-search census of the mount routes reports five and is wrong; enumerate
+// them with `fs`.
+//
+// All six stamp `provenance: "distributed"` correctly, so the ORIGIN was never
+// the problem — the QUESTION was. Asked about a composed source, the module gate
+// answers "not a stored module, allow" every single time, and the boundary that
+// cannot be skipped was gating nothing for them.
+//
+// SO THE MOUNT ASKS ABOUT THE APPLICATION. A mount always knows which
+// application its code arrived in (`packageName`, derived from the pull-time
+// provenance stamp), and the workbook's consent store is keyed by application.
+// "Has this workbook approved code from application X?" is answerable for a
+// composed realm, and it is the floor distribution requires: nothing from an
+// application the user never said yes to may create a realm.
+//
+// THE FLOOR IS DELIBERATELY COARSE, and the coarseness is bounded. Every consent
+// record for one application lives under one of a small, closed set of keys —
+// the bare name for object scripts plus the namespaces each surface adds so two
+// writers of one file cannot clobber each other. A mount cannot prove WHICH
+// surface it is (the renderer composes the source and names the package), so the
+// strongest true statement Rust can make is "this workbook holds an approval for
+// an application by this name". Where the mount CAN name its artifact — a stored
+// object script, whose id and pre-prelude source are exactly what the consent
+// record lists — the check tightens to that artifact and its hash, which is the
+// same standard `consent_granted_in` applies everywhere else.
+//
+// AND THIS RUNS ALONGSIDE THE MODULE GATE, NOT INSTEAD OF IT. A module macro
+// that a `.calp` shipped is still refused by exact-source ownership even when
+// the application's OBJECT scripts were approved, because the record under that
+// application does not list the macro. Replacing the module question with the
+// application question would have let that macro through.
+
+/// Consent-store key namespaces, as PREFIXES (`"<ns>:<application>"`).
+///
+/// One consent file has many writers, and each namespaces its records so
+/// approving an application's chart marks neither clobbers nor inherits the
+/// approval of its object scripts. This list is the Rust side of that vocabulary
+/// and is pinned against every TypeScript key-former by
+/// `app/src/api/__tests__/mountConsentKeyDrift.test.ts` — Rust is the source of
+/// truth, because the renderer is the part that can be compromised.
+///
+/// A namespace that exists in TypeScript and is missing here fails CLOSED: that
+/// surface's consented mounts are refused (visible breakage), never admitted.
+pub(crate) const CONSENT_KEY_PREFIXES: &[&str] = &[
+    // app/extensions/Charts/index.ts
+    "chart-marks:",
+    "chart-transforms:",
+    // app/src/api/customFunctions.ts (customFunctionConsentKey)
+    "custom-functions:",
+    // app/src/api/scriptLibraries/consentKey.ts (consentKeyFor)
+    "lib:",
+];
+
+/// Consent-store key namespaces, as SUFFIXES (`"<application><suffix>"`).
+pub(crate) const CONSENT_KEY_SUFFIXES: &[&str] = &[
+    // app/src/api/writebackValidators.ts (writebackValidatorConsentKey)
+    // and validator_consent_key in app/src-tauri/src/calp_commands.rs.
+    "::writeback-validators",
+];
+
+/// Every consent-store key under which application `application`'s code can have
+/// been approved: the bare name (object scripts) plus one per namespace.
+pub(crate) fn consent_keys_for_application(application: &str) -> Vec<String> {
+    let mut keys = Vec::with_capacity(1 + CONSENT_KEY_PREFIXES.len() + CONSENT_KEY_SUFFIXES.len());
+    keys.push(application.to_string());
+    for prefix in CONSENT_KEY_PREFIXES {
+        keys.push(format!("{}{}", prefix, application));
+    }
+    for suffix in CONSENT_KEY_SUFFIXES {
+        keys.push(format!("{}{}", application, suffix));
+    }
+    keys
+}
+
+/// The artifact a mount IS, when the workbook's consent record names one.
+///
+/// `source` is the EXACT source the user approved — never the composed realm
+/// source, which carries a host-generated import prelude and would hash to
+/// something no record has ever seen.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MountConsentArtifact {
+    pub id: String,
+    pub source: String,
+}
+
+/// The decision half of {@link check_distributed_mount_consent}: `Some(msg)` to
+/// refuse, `None` to allow. Pure over the parsed consent file, so every branch is
+/// unit-testable without a Tauri window or a workbook.
+///
+/// FAILS CLOSED on every uncertainty. No application name, no consent file, no
+/// record for the application, or a record that does not cover the named artifact
+/// are all refusals — "I could not establish that you approved this publisher's
+/// code" is not approval, and this is the path that spawns a real worker realm
+/// for a stranger's JavaScript.
+fn distributed_mount_refusal(
+    consent_file: Option<&serde_json::Value>,
+    application: &str,
+    artifact: Option<&MountConsentArtifact>,
+) -> Option<String> {
+    let application = application.trim();
+    if application.is_empty() {
+        return Some(format!(
+            "{}: this code arrived inside a distributed application, but the mount named no \
+             application, so there is no approval to check it against. It will not run.",
+            DISTRIBUTED_SCRIPT_NOT_CONSENTED
+        ));
+    }
+    let Some(file) = consent_file else {
+        return Some(format!(
+            "{}: '{}' arrived in a distributed application and this workbook records no \
+             approval for any application's code, so it will not run. Approve the application \
+             first — code that arrives in an application stays switched off until you do.",
+            DISTRIBUTED_SCRIPT_NOT_CONSENTED, application
+        ));
+    };
+    let keys = consent_keys_for_application(application);
+    if !keys
+        .iter()
+        .any(|key| crate::calp_commands::consent_record_exists_in(file, key))
+    {
+        return Some(format!(
+            "{}: '{}' arrived in the application '{}' and you have not approved that \
+             application's code, so it will not run. Approve the application first — code that \
+             arrives in an application stays switched off until you do.",
+            DISTRIBUTED_SCRIPT_NOT_CONSENTED, application, application
+        ));
+    }
+    // The application is approved. If this mount can name the artifact the record
+    // lists, hold it to that artifact and its hash too.
+    let Some(artifact) = artifact else { return None };
+    let source_hash = calp::integrity::sha256_hex(artifact.source.as_bytes());
+    if keys.iter().any(|key| {
+        crate::calp_commands::consent_granted_in(file, key, &artifact.id, &source_hash)
+    }) {
+        return None;
+    }
+    Some(format!(
+        "{}: '{}' from the application '{}' is not covered by the approval this workbook \
+         records for it — its code has changed since it was approved, or it was never part of \
+         what you approved. Review and re-approve '{}' before it runs.",
+        DISTRIBUTED_SCRIPT_NOT_CONSENTED, artifact.id, application, application
+    ))
+}
+
+/// Ask BOTH consent gates about a MOUNT, without executing anything.
+///
+/// This is what `hostMountScript` (app/src/api/scriptHost/host.ts) calls before
+/// it will mint a `MountAdmission`, and therefore what every worker-realm mount
+/// of distributed code passes through:
+///
+///   1. `require_distributed_module_consent` — UNCHANGED, exactly as the
+///      module-runtime route (`run_script`) applies it, local-source escape
+///      hatch included. A stored module a `.calp` shipped is still refused
+///      unless the record names that module and its hash.
+///   2. `distributed_mount_refusal` — the application-level floor above, which
+///      is the half a composed realm source can answer.
+///
+/// It reads state and executes nothing, so it takes no `DocumentEffect` and no
+/// window-label guard: the standalone Object Script Editor is its own webview and
+/// must be able to ask the same question the main window asks.
+#[tauri::command]
+pub fn check_distributed_mount_consent(
+    script_state: State<ScriptState>,
+    window: tauri::Window,
+    package_name: String,
+    source: String,
+    artifact: Option<MountConsentArtifact>,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    require_distributed_module_consent(&script_state, &window, &source)?;
+    let consent_file =
+        crate::calp_commands::read_script_consent_file(Manager::app_handle(&window));
+    match distributed_mount_refusal(consent_file.as_ref(), &package_name, artifact.as_ref()) {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
 /// Error sentinel for an AI tool call blocked by the MCP access ceiling.
 pub const MCP_ACCESS_RESTRICTED: &str = "MCP_ACCESS_RESTRICTED";
 
@@ -1420,14 +1627,39 @@ pub fn script_execution_status(script_state: State<ScriptState>) -> Result<Strin
 /// the persisted-with-the-workbook script map for storage convenience, but they
 /// must never surface in the Script Editor / code inventory, and the user must
 /// not be able to delete or rename them out from under the owning feature.
-const RESERVED_SCRIPT_PREFIX: &str = "__calcula_";
+///
+/// `pub(crate)` so the `.calp` pull path can REFUSE a published module that
+/// claims an id in this namespace rather than re-typing the prefix
+/// (`refuse_reserved_distributed_script_ids`, calp_commands.rs). One spelling of
+/// "reserved", or the hide/protect rules below and the admission rule there
+/// drift apart and the gap is exactly a hidden, undeletable module.
+pub(crate) const RESERVED_SCRIPT_PREFIX: &str = "__calcula_";
 
 /// True for reserved internal records (see `RESERVED_SCRIPT_PREFIX`).
-fn is_reserved_script_id(id: &str) -> bool {
+pub(crate) fn is_reserved_script_id(id: &str) -> bool {
     id.starts_with(RESERVED_SCRIPT_PREFIX)
 }
 
-/// List all saved script modules (lightweight: id + name only).
+/// The listing row for one stored module — the ONE place a `WorkbookScript`
+/// becomes a `ScriptSummary`.
+///
+/// PROVENANCE IS CARRIED, NEVER DERIVED. `source_package` is the only authority
+/// on whose code a module is (see `scriptOriginForStoredRecord`,
+/// app/src/api/scriptHost/scriptOrigin.ts), and this row used to drop it. Every
+/// picker that lists modules — the button-action dialog and both view-bookmark
+/// overlays, i.e. exactly the surfaces where a user decides which code a click
+/// will run — reads summaries and never fetches the full record, so a
+/// publisher's module was presented as the user's own, by name alone.
+fn script_summary(script: &WorkbookScript) -> ScriptSummary {
+    ScriptSummary {
+        id: script.id.clone(),
+        name: script.name.clone(),
+        scope: script.scope.clone(),
+        source_package: script.source_package.clone(),
+    }
+}
+
+/// List all saved script modules (lightweight: no source, but WITH provenance).
 #[tauri::command]
 pub fn list_scripts(
     script_state: State<ScriptState>,
@@ -1442,11 +1674,7 @@ pub fn list_scripts(
         // Hide reserved internal data records (e.g. the Custom Functions JSON
         // store) from the Script Editor / code inventory — they are not code.
         .filter(|s| !is_reserved_script_id(&s.id))
-        .map(|s| ScriptSummary {
-            id: s.id.clone(),
-            name: s.name.clone(),
-            scope: s.scope.clone(),
-        })
+        .map(script_summary)
         .collect();
 
     // Sort by name for consistent ordering
@@ -1472,6 +1700,28 @@ pub fn get_script(
 }
 
 /// Save (create or update) a script module.
+///
+/// PROVENANCE IS STICKY, AND THIS IS THE PLACE THAT MAKES IT SO.
+///
+/// `source_package` says the module arrived inside a distributed application,
+/// and the whole trust decision rests on it: `runObjectScriptOnce` and the
+/// module debug session derive the tier and the trust origin from this record,
+/// so a module that loses its stamp runs UNLOCKED with LOCAL provenance — the
+/// full cross-sheet surface, the local just-in-time capability prompt instead
+/// of application consent, and same-trust-origin with the user's own scripts.
+///
+/// This used to be a blind `insert`, so ANY writer that omitted the field
+/// erased it. The Object Script Editor's idle auto-persist is exactly such a
+/// writer: opening a publisher's macro and pausing was enough to launder it
+/// into local code, with no gesture from the user and nothing shown to them.
+/// Carrying the stored stamp forward here fixes every writer at once, which is
+/// the only way this stays fixed — the field is optional on the wire, so the
+/// next writer to omit it would otherwise reintroduce the same defect.
+///
+/// An edit does not change where code CAME FROM. A user who wants their own
+/// copy of a publisher's macro makes a separate record (that is what
+/// `require_distributed_module_consent`'s local-source escape hatch is about);
+/// they do not mutate the publisher's one into theirs.
 #[tauri::command]
 pub fn save_script(
     file_state: State<'_, crate::persistence::FileState>,
@@ -1483,8 +1733,31 @@ pub fn save_script(
     let mut scripts = script_state.workbook_scripts.write(&effect)
         .map_err(|e| e.to_string())?;
 
+    let mut script = script;
+    script.source_package = sticky_source_package(
+        script.source_package.take(),
+        scripts.get(&script.id).and_then(|s| s.source_package.as_deref()),
+    );
     scripts.insert(script.id.clone(), script);
     Ok(())
+}
+
+/// The `source_package` an update must end up with — see `save_script`.
+///
+/// OMISSION IS NOT ERASURE. The field is optional on the wire, so a writer that
+/// simply does not know about provenance (the editor's idle auto-persist, a
+/// rename, the Macros dialog's Save) sends `None` — and that must mean "leave it
+/// alone", never "make this mine". A writer that DOES supply a package is
+/// authoritative (the pull and refresh paths restamp deliberately), so an
+/// explicit value still wins.
+pub(crate) fn sticky_source_package(
+    incoming: Option<String>,
+    existing: Option<&str>,
+) -> Option<String> {
+    match incoming {
+        Some(package) => Some(package),
+        None => existing.map(str::to_string),
+    }
 }
 
 /// Delete a script module by ID.
@@ -1562,6 +1835,79 @@ mod tests {
     /// Reserved internal records (the Custom Functions JSON store and any other
     /// `__calcula_`-prefixed data record) are recognized so they can be hidden
     /// from the Script Editor and protected from user delete/rename.
+    // -----------------------------------------------------------------------
+    // save_script: an edit must not launder a publisher's module into local code
+    // -----------------------------------------------------------------------
+
+    /// A module that arrived in a `.calp` carries `source_package`, and the
+    /// TIER and TRUST ORIGIN of every later run are derived from it
+    /// (`runObjectScriptOnce`, the module debug session). `save_script` used to
+    /// blind-insert whatever the caller sent, so any writer that omitted the
+    /// field erased it — and the Object Script Editor's IDLE AUTO-PERSIST is
+    /// such a writer. Opening a publisher's macro and pausing was enough to
+    /// turn it into local code that then ran UNLOCKED, with no gesture from the
+    /// user and nothing shown to them.
+    #[test]
+    fn an_update_that_omits_the_package_stamp_does_not_erase_it() {
+        // The auto-persist case: same id, new source, no provenance field.
+        assert_eq!(
+            sticky_source_package(None, Some("Quarterly Reports")),
+            Some("Quarterly Reports".to_string()),
+            "an omitted stamp must mean 'leave it alone', never 'make this mine'"
+        );
+    }
+
+    #[test]
+    fn an_explicit_package_still_wins_and_a_local_record_stays_local() {
+        // The pull/refresh paths restamp deliberately and must keep working.
+        assert_eq!(
+            sticky_source_package(Some("Other App".to_string()), Some("Quarterly Reports")),
+            Some("Other App".to_string())
+        );
+        // A record that never had a stamp does not grow one.
+        assert_eq!(sticky_source_package(None, None), None);
+        // ...and a brand-new local script stays local.
+        assert_eq!(sticky_source_package(None, None), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // list_scripts: a listing row must say whose code it is
+    // -----------------------------------------------------------------------
+
+    fn stored_module(id: &str, package: Option<&str>) -> WorkbookScript {
+        WorkbookScript {
+            id: id.to_string(),
+            name: format!("{} (display name)", id),
+            description: None,
+            source: "Calcula.setCellValue(0, 0, 1);".to_string(),
+            scope: crate::scripting::types::ScriptScope::Workbook,
+            source_package: package.map(str::to_string),
+        }
+    }
+
+    /// The button-action dialog and both view-bookmark overlays pick a script
+    /// out of `list_scripts` and never fetch the record, so a summary that
+    /// drops `source_package` presents a publisher's module as the user's own.
+    #[test]
+    fn a_listing_row_carries_the_package_stamp() {
+        let row = script_summary(&stored_module("helper", Some("Quarterly Reports")));
+        assert_eq!(
+            row.source_package.as_deref(),
+            Some("Quarterly Reports"),
+            "a listing row must carry the provenance the record holds"
+        );
+    }
+
+    /// ...and a local module keeps saying it is local: the row copies the
+    /// record, so provenance can be neither invented nor lost here.
+    #[test]
+    fn a_local_listing_row_claims_no_package() {
+        let row = script_summary(&stored_module("mine", None));
+        assert_eq!(row.source_package, None);
+        assert_eq!(row.id, "mine");
+        assert_eq!(row.name, "mine (display name)");
+    }
+
     #[test]
     fn test_reserved_script_id_detection() {
         assert!(is_reserved_script_id("__calcula_custom_functions__"));
@@ -1661,6 +2007,150 @@ mod tests {
         )];
         assert!(distributed_module_refusal(&scripts, None, "return 2;").is_none());
         assert!(distributed_module_refusal(&[], None, "return 2;").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // THE MOUNT GATE. The module gate above answers "allow" for every COMPOSED
+    // realm source, which is what five of the six mount routes hand it. These
+    // pin the question a mount can answer instead.
+    // -----------------------------------------------------------------------
+
+    /// A consent file holding one record under `key` naming `script_id`/`source`.
+    fn consent_file_under_key(key: &str, script_id: &str, source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "consents": [{
+                "packageName": key,
+                "scripts": [{
+                    "id": script_id,
+                    "sourceHash": calp::integrity::sha256_hex(source.as_bytes()),
+                    "source": source,
+                }],
+                "grantedCapabilities": [],
+                "grantedAt": "2026-01-01T00:00:00Z",
+            }],
+        })
+    }
+
+    #[test]
+    fn a_composed_realm_source_defeats_the_module_gate_but_not_the_mount_gate() {
+        // THE DEFECT, in one test. A chart mark / UDF / library realm source is
+        // built by the host, so it equals no stored module and the module gate
+        // returns None — allow — every time.
+        let composed = "imports = {};\nfunction setup(c) { return c; }";
+        assert!(
+            distributed_module_refusal(
+                &[(
+                    Some("Acme Finance Pack".to_string()),
+                    "mark".to_string(),
+                    "function draw() {}".to_string(),
+                )],
+                None,
+                composed,
+            )
+            .is_none(),
+            "the module gate is BLIND to a composed realm source — that is why the mount \
+             gate exists",
+        );
+        // The mount gate refuses it, because nothing from that application is approved.
+        let refusal = distributed_mount_refusal(None, "Acme Finance Pack", None)
+            .expect("an unapproved application must not mount");
+        assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+        assert!(refusal.contains("Acme Finance Pack"), "{}", refusal);
+    }
+
+    #[test]
+    fn an_application_with_no_record_at_all_is_refused() {
+        let file = consent_file_under_key("Other Pack", "s1", "code");
+        let refusal = distributed_mount_refusal(Some(&file), "Acme Finance Pack", None)
+            .expect("one application's approval never covers another's");
+        assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+    }
+
+    #[test]
+    fn a_record_that_approves_no_code_is_not_an_approval() {
+        // A record naming an application with an EMPTY script list would satisfy
+        // a naive "is there a record?" check while approving nothing.
+        let file = serde_json::json!({
+            "version": 1,
+            "consents": [{ "packageName": "Acme", "scripts": [], "grantedCapabilities": [] }],
+        });
+        assert!(distributed_mount_refusal(Some(&file), "Acme", None).is_some());
+    }
+
+    #[test]
+    fn an_unnamed_application_is_refused_rather_than_waved_through() {
+        assert!(distributed_mount_refusal(None, "", None).is_some());
+        assert!(distributed_mount_refusal(None, "   ", None).is_some());
+        let file = consent_file_under_key("Acme", "s1", "code");
+        assert!(distributed_mount_refusal(Some(&file), "", None).is_some());
+    }
+
+    // ---- THE POSITIVE CONTROLS. A consented application must keep working. ----
+
+    #[test]
+    fn every_surfaces_consent_key_admits_that_applications_mount() {
+        // One application, six spellings of its approval — the bare name (object
+        // scripts) plus one per surface namespace. A mount presents only the
+        // application name, so each spelling on its own must admit it; a
+        // namespace missing from CONSENT_KEY_PREFIXES/SUFFIXES would fail CLOSED
+        // and break that surface for a consented publisher.
+        for key in consent_keys_for_application("Acme Finance Pack") {
+            let file = consent_file_under_key(&key, "s1", "code");
+            assert!(
+                distributed_mount_refusal(Some(&file), "Acme Finance Pack", None).is_none(),
+                "an approval recorded under '{}' must admit a mount from that application",
+                key,
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_list_covers_every_surface_that_writes_the_consent_file() {
+        let keys = consent_keys_for_application("app");
+        for expected in [
+            "app",
+            "chart-marks:app",
+            "chart-transforms:app",
+            "custom-functions:app",
+            "lib:app",
+            "app::writeback-validators",
+        ] {
+            assert!(keys.contains(&expected.to_string()), "missing key '{}'", expected);
+        }
+        assert_eq!(keys.len(), 6, "{:?}", keys);
+    }
+
+    // ---- The artifact half: tighter where the mount CAN name its artifact ----
+
+    #[test]
+    fn a_named_artifact_must_be_covered_by_the_approval_it_claims() {
+        let approved = "function setup(c) { return 1; }";
+        let file = consent_file_under_key("Acme", "obj-1", approved);
+        let artifact = MountConsentArtifact {
+            id: "obj-1".to_string(),
+            source: approved.to_string(),
+        };
+        assert!(distributed_mount_refusal(Some(&file), "Acme", Some(&artifact)).is_none());
+
+        // Same id, edited body: the hash no longer matches, so an upstream
+        // refresh cannot inherit yesterday's approval even though the
+        // APPLICATION is still approved.
+        let changed = MountConsentArtifact {
+            id: "obj-1".to_string(),
+            source: "function setup(c) { return 999; }".to_string(),
+        };
+        let refusal = distributed_mount_refusal(Some(&file), "Acme", Some(&changed))
+            .expect("a changed artifact must not inherit the approval");
+        assert!(refusal.contains("obj-1"), "{}", refusal);
+
+        // An artifact the record never listed — a script the publisher added
+        // after the user approved the application — is refused too.
+        let added = MountConsentArtifact {
+            id: "obj-2".to_string(),
+            source: approved.to_string(),
+        };
+        assert!(distributed_mount_refusal(Some(&file), "Acme", Some(&added)).is_some());
     }
 
     /// A changed literal value produces an update carrying the new literal,

@@ -179,14 +179,23 @@ async function doInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar,
     await rawInstall(lib, registrar, sourcePackage);
     lastGood = { lib, sourcePackage: sourcePackage ?? null };
   } catch (e) {
+    // TEAR DOWN SYNCHRONOUSLY — NEVER `queuedTeardown()` FROM IN HERE. This
+    // function IS the queue's current slot: `installChartMarkLibrary` publishes
+    // `installQueue = next.catch(...)` where `next` is this very call, so a
+    // `queuedTeardown()` awaited here waits for a promise that cannot settle
+    // until this call returns. That is a deadlock, and the install never
+    // rejects — the caller hangs forever instead of being told what went wrong.
+    // It was latent while the first install could only fail on a compile error;
+    // a mount refused because the application is not approved made it the
+    // ORDINARY path for distributed marks.
     if (prev) {
       try {
         await rawInstall(prev.lib, registrar, prev.sourcePackage);
       } catch {
-        await queuedTeardown();
+        teardownAll();
       }
     } else {
-      await queuedTeardown();
+      teardownAll();
     }
     throw e;
   }

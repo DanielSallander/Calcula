@@ -5,12 +5,18 @@
 //          and changes cursor on hover.
 
 import type { Selection, StyleData } from "@api";
-import { listWorkbookScripts, getWorkbookScript, runWorkbookScript } from "@api";
+import { runWorkbookScript } from "@api";
 import type {
   IStyleOverride,
   BaseStyleInfo,
   CellCoords,
 } from "@api/styleInterceptors";
+import type { UnavailableModule } from "../../_shared/lib/buttonScriptRun";
+import {
+  loadButtonScriptModules,
+  planInlineButtonRun,
+} from "../../_shared/lib/buttonScriptRun";
+import { showToast } from "@api/notifications";
 import { getDesignMode } from "../lib/designMode";
 
 // ============================================================================
@@ -110,45 +116,43 @@ export async function buttonClickInterceptor(
 }
 
 /**
- * Sanitize a script module name into a valid JavaScript identifier.
+ * Module ids already reported as uncallable, so repeated clicking does not
+ * re-toast the same explanation. Shared with the floating-button path in
+ * ../index.ts — one notice per module per session, not one per surface.
  */
-function sanitizeScriptName(name: string): string {
-  let sanitized = name.replace(/[^a-zA-Z0-9_]/g, "_");
-  if (sanitized && /^[0-9]/.test(sanitized)) {
-    sanitized = "_" + sanitized;
-  }
-  return sanitized || "_unnamed";
-}
+const reportedUnavailableModules = new Set<string>();
 
 /**
- * Build a preamble that wraps all script modules as callable functions.
- * Each module's source is wrapped as: function ModuleName() { ...source... }
+ * Tell the user, once per module, why a module a button expected is not
+ * callable — including the case that matters most here: it belongs to an
+ * application, so it is not spliced into anything.
+ *
+ * Silence is the failure mode this replaces. A click that finds `X()` undefined
+ * and says nothing is indistinguishable from a broken button.
  */
-async function buildScriptPreamble(): Promise<string> {
-  // Script runtime via the @api door (works in the main window regardless of which
-  // extensions are active) — no longer reaches into the ScriptEditor extension.
-  const summaries = await listWorkbookScripts();
-  if (summaries.length === 0) return "";
-
-  const parts: string[] = [];
-  for (const summary of summaries) {
-    try {
-      const script = await getWorkbookScript(summary.id);
-      if (script && script.source) {
-        const fnName = sanitizeScriptName(script.name);
-        parts.push(`function ${fnName}() {\n${script.source}\n}`);
-      }
-    } catch {
-      // Skip modules that fail to load
-    }
+export function reportUnavailableButtonModules(
+  unavailable: readonly UnavailableModule[],
+): void {
+  for (const entry of unavailable) {
+    console.warn(`[Controls] Script module "${entry.name}" not callable: ${entry.message}`);
+    if (reportedUnavailableModules.has(entry.id)) continue;
+    reportedUnavailableModules.add(entry.id);
+    showToast(entry.message, { type: entry.reason === "distributed" ? "info" : "warning" });
   }
-  return parts.length > 0 ? parts.join("\n") + "\n" : "";
+}
+
+/** Test seam: forget which notices have already been shown. */
+export function resetButtonModuleNoticesForTest(): void {
+  reportedUnavailableModules.clear();
 }
 
 /**
  * Execute the button's associated OnSelect action.
- * The onSelect value is inline code that runs directly in the script engine.
- * Custom script modules from the Script Editor are available as callable functions.
+ *
+ * The onSelect value is inline code. The user's OWN modules are prepended as
+ * callable functions exactly as before; a module that arrived in an application
+ * is never spliced in — see extensions/_shared/lib/buttonScriptRun.ts for the
+ * rule and the two defects that made it necessary.
  */
 async function executeButtonAction(row: number, col: number): Promise<void> {
   const { getControlMetadata } = await import("../lib/controlApi");
@@ -165,10 +169,13 @@ async function executeButtonAction(row: number, col: number): Promise<void> {
   if (!onSelect || !onSelect.value) return;
 
   try {
-    // Prepend script modules as callable functions, then append the OnSelect code
-    const preamble = await buildScriptPreamble();
-    const fullSource = preamble + onSelect.value;
-    const result = await runWorkbookScript(fullSource, "button_onSelect.js");
+    const plan = planInlineButtonRun(onSelect.value, await loadButtonScriptModules());
+    if (plan.kind === "refuse") {
+      showToast(plan.message, { variant: "error" });
+      return;
+    }
+    reportUnavailableButtonModules(plan.unavailable);
+    const result = await runWorkbookScript(plan.source, plan.filename);
 
     if (result.type === "success" && result.cellsModified > 0 && result.screenUpdating !== false) {
       // Refresh grid if cells were modified and screenUpdating is on
@@ -178,12 +185,10 @@ async function executeButtonAction(row: number, col: number): Promise<void> {
       // errored must SHOW it, not silently do nothing (a click that quietly
       // produces nothing is itself a transparency failure).
       console.error(`[Controls] Button OnSelect error: ${result.message}`);
-      const { showToast } = await import("../../../src/api/notifications");
       showToast(`Button script couldn't run: ${result.message}`, { variant: "error" });
     }
   } catch (err) {
     console.error("[Controls] Failed to execute button OnSelect:", err);
-    const { showToast } = await import("../../../src/api/notifications");
     const msg = err instanceof Error ? err.message : String(err);
     showToast(`Button script couldn't run: ${msg}`, { variant: "error" });
   }

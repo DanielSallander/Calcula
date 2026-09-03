@@ -138,15 +138,54 @@ pub fn collect_controls_for_save(
     saved
 }
 
+/// The `onSelect` control property: INLINE SCRIPT SOURCE. The click path feeds
+/// it straight to `runWorkbookScript` (the QuickJS module runtime), so its value
+/// IS code. Mirror of the key read in `app/extensions/Controls/index.ts` and
+/// `app/extensions/Controls/Button/interceptors.ts`.
+pub const ON_SELECT_PROPERTY: &str = "onSelect";
+
+/// The `macroRef` control property: the module id of the recorded macro a button
+/// LINKS. A button carrying this runs the CURRENT macro of that id (resolved
+/// front-end through @api/macroRunService) — no copied body lives on the button.
+/// Mirror of MACRO_REF_PROPERTY in app/src/api/buttonControlService.ts.
+pub const MACRO_REF_PROPERTY: &str = "macroRef";
+
+/// EVERY control property whose value can cause CODE TO RUN when the control is
+/// clicked. The list is the policy; the checks below only consult it.
+///
+/// WHY A LIST AND NOT A CHECK. `sanitize_distributed_controls` used to name
+/// `onSelect` inline and nothing else, and that was not a smaller version of the
+/// same rule — it was a HOLE. `runFloatingButtonClick`
+/// (`app/extensions/Controls/index.ts`) checks `macroRef` FIRST and returns, so a
+/// pulled button whose `onSelect` had been stripped still ran a macro by id on a
+/// single click, through a door the sanitizer had never heard of. The sanitizer
+/// exists precisely so a control arriving inside an application cannot act on
+/// click; one open door defeats it as completely as two.
+///
+/// So the executable slots live in ONE place, and the day somebody adds a third
+/// way for a control to run code, the pull-side strip, the script-write refusal
+/// (`SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS`, app/src/api/scriptHost/validators.ts)
+/// and this doc comment are all one edit rather than three that drift.
+///
+/// NOTE what is NOT here: a `formula`-typed property is evaluated, not executed
+/// (`resolve_control_properties` runs it through the sheet evaluator, which has
+/// no reach outside the grid), and geometry/paint keys cannot run anything at
+/// all. This is the EXECUTION list, not the "publisher-authored" list.
+pub const EXECUTABLE_CONTROL_PROPERTIES: &[&str] = &[ON_SELECT_PROPERTY, MACRO_REF_PROPERTY];
+
 /// Strip executable wiring from DISTRIBUTED control payloads before
 /// materialization. A control's `onSelect` value is INLINE SCRIPT SOURCE the
-/// Controls extension hands to the workbook-script runner — carrying it live
-/// from a package would execute publisher code under the subscriber's global
+/// Controls extension hands to the workbook-script runner, and its `macroRef`
+/// re-points the click at any recorded macro by module id — carrying either live
+/// from a package would run publisher-chosen code under the subscriber's global
 /// script-security gate, bypassing the per-package, hash-keyed consent model
 /// that governs every other distributed script. Packaged buttons therefore
 /// arrive visually intact but DISARMED; publisher-shipped interactivity flows
 /// through consent-gated object scripts instead. (.cala load of the user's own
 /// workbook is NOT sanitized — local wiring is the user's own code.)
+///
+/// The set of slots stripped is `EXECUTABLE_CONTROL_PROPERTIES` and is never
+/// re-typed here: see that constant for why.
 pub fn sanitize_distributed_controls(
     saved: &[persistence::SavedSheetControls],
 ) -> Vec<persistence::SavedSheetControls> {
@@ -160,7 +199,9 @@ pub fn sanitize_distributed_controls(
                         .get_mut("properties")
                         .and_then(|p| p.as_object_mut())
                     {
-                        props.remove("onSelect");
+                        for key in EXECUTABLE_CONTROL_PROPERTIES {
+                            props.remove(*key);
+                        }
                     }
                 }
             }
@@ -460,12 +501,6 @@ pub fn remove_control_metadata(
     removed
 }
 
-/// The `macroRef` control property: the module id of the recorded macro a button
-/// LINKS. A button carrying this runs the CURRENT macro of that id (resolved
-/// front-end through @api/macroRunService) — no copied body lives on the button.
-/// Mirror of MACRO_REF_PROPERTY in app/src/api/buttonControlService.ts.
-pub const MACRO_REF_PROPERTY: &str = "macroRef";
-
 /// A button that links a macro, located for a human-readable deletion warning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -544,10 +579,17 @@ mod persistence_tests {
             ControlPropertyValue { value_type: "static".to_string(), value: "Run".to_string() },
         );
         props.insert(
-            "onSelect".to_string(),
+            ON_SELECT_PROPERTY.to_string(),
             ControlPropertyValue {
                 value_type: "static".to_string(),
                 value: "MyScript();".to_string(),
+            },
+        );
+        props.insert(
+            MACRO_REF_PROPERTY.to_string(),
+            ControlPropertyValue {
+                value_type: "static".to_string(),
+                value: "macro-do-thing".to_string(),
             },
         );
         controls.insert(
@@ -573,6 +615,12 @@ mod persistence_tests {
         let meta = restored.get(&(5, 2, 3)).expect("control restored at remapped sheet");
         assert_eq!(meta.control_type, "button");
         assert_eq!(meta.properties.get("onSelect").map(|p| p.value.as_str()), Some("MyScript();"));
+        // A LOCAL round trip keeps executable wiring: it is the user's own code.
+        // Only the DISTRIBUTED path sanitizes (see the tests below).
+        assert_eq!(
+            meta.properties.get(MACRO_REF_PROPERTY).map(|p| p.value.as_str()),
+            Some("macro-do-thing")
+        );
     }
 
     #[test]
@@ -683,11 +731,10 @@ mod persistence_tests {
         assert!(check_property_value("text", &text).is_ok());
     }
 
-    #[test]
-    fn sanitize_strips_onselect_but_keeps_presentation() {
-        // Distributed onSelect is inline script source — it must never
-        // materialize from a package (consent-model bypass); the button's
-        // visual properties survive.
+    /// Materialize `sample_storage()` the way a PULL does and hand back the one
+    /// control, so each sanitizer test asserts on the properties that would
+    /// actually land in the subscriber's workbook.
+    fn pulled_control() -> ControlMetadata {
         let controls = sample_storage();
         let sheet_ids = vec![identity::SheetId::from_bytes(identity::generate_uuid_v7())];
         let saved = collect_controls_for_save(&controls, &sheet_ids);
@@ -695,9 +742,88 @@ mod persistence_tests {
 
         let mut restored: ControlStorage = HashMap::new();
         materialize_saved_controls(&sanitized, &mut restored, |_| Some(0));
-        let meta = restored.get(&(0, 2, 3)).expect("control materialized");
-        assert!(meta.properties.get("onSelect").is_none(), "onSelect must be stripped");
+        restored.get(&(0, 2, 3)).expect("control materialized").clone()
+    }
+
+    #[test]
+    fn sanitize_strips_every_executable_property_but_keeps_presentation() {
+        // Distributed executable wiring must never materialize from a package
+        // (consent-model bypass); the button's visual properties survive.
+        //
+        // Driven off the LIST rather than off two hand-named keys: that is the
+        // whole point of having one, and it means a third executable slot added
+        // to `EXECUTABLE_CONTROL_PROPERTIES` is covered here on the same commit.
+        let meta = pulled_control();
+        for key in EXECUTABLE_CONTROL_PROPERTIES {
+            assert!(
+                meta.properties.get(*key).is_none(),
+                "'{}' can cause code to run on a click and must be stripped from a \
+                 distributed control; it materialized as {:?}",
+                key,
+                meta.properties.get(*key).map(|p| p.value.as_str())
+            );
+        }
         assert_eq!(meta.properties.get("text").map(|p| p.value.as_str()), Some("Run"));
+        // Precondition, so the loop above can never pass by being empty.
+        assert!(EXECUTABLE_CONTROL_PROPERTIES.len() >= 2);
+    }
+
+    #[test]
+    fn a_pulled_button_cannot_fire_a_macro_on_a_single_click() {
+        // THE DEFECT, restated. The sanitizer named `onSelect` and nothing else,
+        // so `macroRef` rode through a pull intact — and `runFloatingButtonClick`
+        // checks `macroRef` FIRST and RETURNS, so the disarmed button ran a
+        // recorded macro by id on one click anyway. Stripping one door while
+        // leaving the other open is not a partial defence; it is none.
+        let meta = pulled_control();
+        assert!(
+            meta.properties.get(MACRO_REF_PROPERTY).is_none(),
+            "a distributed button must carry no macro link; it carried {:?}",
+            meta.properties.get(MACRO_REF_PROPERTY).map(|p| p.value.as_str())
+        );
+    }
+
+    #[test]
+    fn the_executable_property_list_matches_the_script_write_refusal_list() {
+        // TWO LISTS, ONE POLICY. The sandbox refuses to WRITE these slots
+        // (SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS, app/src/api/scriptHost/validators.ts)
+        // for exactly the reason a pull refuses to MATERIALIZE them: both would
+        // let code the user never consented to run on a click. A slot added to
+        // one side and not the other reopens this defect from the opposite
+        // direction, and nothing but this test would notice.
+        let ts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src/api/scriptHost/validators.ts");
+        let src = std::fs::read_to_string(&ts)
+            .unwrap_or_else(|e| panic!("cannot read {}: {}", ts.display(), e));
+
+        const NEEDLE: &str = "export const SCRIPT_REFUSED_SHAPE_PROPERTY_KEYS";
+        let at = src
+            .find(NEEDLE)
+            .unwrap_or_else(|| panic!("{} no longer declares {}", ts.display(), NEEDLE));
+        let tail = &src[at..];
+        // The ASSIGNMENT's bracket, not the type annotation's: the declaration
+        // reads `…KEYS: readonly string[] = ["onSelect", …]`, so the first `[`
+        // after the needle belongs to `string[]` and would yield an empty list
+        // that silently "agrees" with nothing.
+        let eq = tail.find('=').expect("the refusal list is assigned a value");
+        let open = tail[eq..].find('[').expect("the refusal list is an array literal") + eq;
+        let close = tail[open..].find(']').expect("unterminated array literal") + open;
+        let mut ts_keys: Vec<String> = tail[open + 1..close]
+            .split(',')
+            .map(|k| k.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+        ts_keys.sort();
+
+        let mut rust_keys: Vec<String> =
+            EXECUTABLE_CONTROL_PROPERTIES.iter().map(|k| k.to_string()).collect();
+        rust_keys.sort();
+
+        assert_eq!(
+            rust_keys, ts_keys,
+            "the pull-side strip and the script-write refusal must name the same \
+             executable control properties"
+        );
     }
 }
 

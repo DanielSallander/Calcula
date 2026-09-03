@@ -65,6 +65,7 @@ describe("useNotebookStore", () => {
       activeNotebook: null,
       isExecuting: false,
       executingCellId: null,
+      runRefusal: null,
     });
   });
 
@@ -455,6 +456,83 @@ describe("useNotebookStore", () => {
         targetCellId: "c1",
       });
       expect(useNotebookStore.getState().activeNotebook).toEqual(reloadedNb);
+    });
+  });
+
+  // =========================================================================
+  // The distributed-notebook refusal must be VISIBLE
+  // =========================================================================
+  //
+  // The backend gate (require_distributed_notebook_consent) rejects the invoke,
+  // so every run path lands in a catch. Before this, the catch was a
+  // console.error: the Run button did nothing at all and the user was never
+  // told that the notebook belongs to an application they have not approved.
+
+  describe("a refused distributed notebook", () => {
+    const REFUSAL =
+      "DISTRIBUTED_SCRIPT_NOT_CONSENTED: The notebook 'Sales Analysis' arrived in the " +
+      "application 'Quarterly Reports'. Notebooks from an application are delivered to " +
+      "be read, not run — Calcula has no way to approve one, so its cells stay inert here.";
+
+    it("surfaces the refusal from runCell, without the machine sentinel", async () => {
+      const nb = makeNotebook({
+        cells: [makeCell({ id: "c1", source: "console.log(1)" })],
+        sourcePackage: "Quarterly Reports",
+      });
+      useNotebookStore.setState({ activeNotebook: nb });
+      mockSaveNotebook.mockResolvedValue(undefined);
+      mockRunNotebookCell.mockRejectedValue(new Error(REFUSAL));
+
+      await useNotebookStore.getState().runCell("c1");
+
+      const refusal = useNotebookStore.getState().runRefusal;
+      expect(refusal).toContain("Quarterly Reports");
+      expect(refusal).toContain("Sales Analysis");
+      expect(refusal).not.toContain("DISTRIBUTED_SCRIPT_NOT_CONSENTED");
+      expect(useNotebookStore.getState().isExecuting).toBe(false);
+    });
+
+    it("surfaces it from runAll, runFromCell and rewindToCell too", async () => {
+      const nb = makeNotebook({ id: "nb-1", sourcePackage: "Quarterly Reports" });
+      mockSaveNotebook.mockResolvedValue(undefined);
+
+      for (const [mock, run] of [
+        [mockRunAllCells, () => useNotebookStore.getState().runAll()],
+        [mockRunFromCell, () => useNotebookStore.getState().runFromCell("c1")],
+        [mockRewindNotebook, () => useNotebookStore.getState().rewindToCell("c1")],
+      ] as const) {
+        useNotebookStore.setState({
+          activeNotebook: nb,
+          isExecuting: false,
+          runRefusal: null,
+        });
+        mock.mockRejectedValue(new Error(REFUSAL));
+
+        await run();
+
+        expect(useNotebookStore.getState().runRefusal).toContain("Quarterly Reports");
+      }
+    });
+
+    it("does not mistake an ordinary failure for a provenance refusal", async () => {
+      const nb = makeNotebook({ cells: [makeCell({ id: "c1", source: "x" })] });
+      useNotebookStore.setState({ activeNotebook: nb });
+      mockSaveNotebook.mockResolvedValue(undefined);
+      mockRunNotebookCell.mockRejectedValue(new Error("the backend fell over"));
+
+      await useNotebookStore.getState().runCell("c1");
+
+      expect(useNotebookStore.getState().runRefusal).toBeNull();
+    });
+
+    it("clears the refusal when another notebook is opened", async () => {
+      useNotebookStore.setState({ runRefusal: "an earlier refusal" });
+      mockResetNotebookRuntime.mockResolvedValue(undefined);
+      mockLoadNotebook.mockResolvedValue(makeNotebook({ id: "nb-2" }));
+
+      await useNotebookStore.getState().openNotebook("nb-2");
+
+      expect(useNotebookStore.getState().runRefusal).toBeNull();
     });
   });
 });
