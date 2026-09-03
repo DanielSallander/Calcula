@@ -1658,6 +1658,11 @@ pub enum ScriptableObjectType {
     /// A cell-behavior binding target (granular bricks phase 2): the script's
     /// instanceId is the binding id in the cell-behaviors store.
     Range,
+    /// A host-painted modal form (VBA UserForm): the script's instanceId is a
+    /// UUID minted by the command that created the form — never anchor-derived,
+    /// so structural edits and copies never lose it. Other scripts address a
+    /// form by its NAME, host-resolved among mounted forms.
+    Form,
 }
 
 /// Access level for object scripts.

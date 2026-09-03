@@ -770,6 +770,51 @@ export function registerRunTargetHandler(
   callFire(rt, "base.expose", [exposedName, false]);
 }
 
+// ---- Forms: the awaited answer channel ----
+//
+// `form.show` / `cap.formsShow` resolve the moment the form is ON SCREEN
+// (`{ showId }`); the answer arrives later as a host relay into the
+// worker-local `__form_closed` entry below, which settles the promise the
+// script is awaiting. Installed on EVERY realm (a button script may open
+// another script's form) through `rt.exposed` directly — never through
+// `context.expose`, so it is not script-callable and not a debugger trigger.
+
+type FormAnswer = Record<string, unknown> | null;
+const FORM_WAITERS = new WeakMap<WorkerRuntime, Map<string, (answer: FormAnswer) => void>>();
+
+function formWaiters(rt: WorkerRuntime): Map<string, (answer: FormAnswer) => void> {
+  let waiters = FORM_WAITERS.get(rt);
+  if (!waiters) {
+    waiters = new Map();
+    FORM_WAITERS.set(rt, waiters);
+    const map = waiters;
+    rt.exposed.set("__form_closed", (payload: unknown) => {
+      const p = (payload ?? {}) as { showId?: string; result?: unknown };
+      const waiter = typeof p.showId === "string" ? map.get(p.showId) : undefined;
+      if (!waiter) return undefined;
+      map.delete(p.showId as string);
+      waiter(p.result && typeof p.result === "object" ? (p.result as Record<string, unknown>) : null);
+      return undefined;
+    });
+  }
+  return waiters;
+}
+
+/**
+ * Turn the broker's "the form is on screen" answer into the promise of the
+ * user's answer; null = dismissed. The `call(rt, "form.show" | "cap.formsShow")`
+ * that produced `opened` stays LITERAL at each call site, because the
+ * allowlist coverage guard scans the shim source for the method names.
+ */
+function awaitFormAnswer(rt: WorkerRuntime, opened: unknown): Promise<FormAnswer> {
+  const waiters = formWaiters(rt);
+  const o = opened as { showId: string; closed?: true };
+  if (o.closed) return Promise.resolve(null);
+  return new Promise<FormAnswer>((resolve) => {
+    waiters.set(o.showId, resolve);
+  });
+}
+
 function mirror<T>(rt: WorkerRuntime, path: string, fallback: T): T {
   const v = rt.mirrors.get(path);
   if (v !== undefined) return v as T;
@@ -1142,6 +1187,9 @@ function buildCapsShim(rt: WorkerRuntime): {
     list(): Promise<unknown[]>;
     cancel(jobId: string): Promise<boolean>;
   };
+  forms: {
+    show(name: string, options?: { initial?: Record<string, unknown> }): Promise<Record<string, unknown> | null>;
+  };
   dialog: {
     alert(message: string, options?: ScriptDialogTextOptions): Promise<void>;
     confirm(message: string, options?: ScriptDialogTextOptions): Promise<boolean>;
@@ -1374,6 +1422,16 @@ function buildCapsShim(rt: WorkerRuntime): {
     // (protocol.ts METHOD_DEADLINES_MS). Dismissal is never an error: confirm
     // resolves false, prompt and form resolve null, so `if (!answer) return;`
     // is the whole cancel path a script has to write.
+    // Another script's FORM, by name (VBA's `UserForm1.Show` from any module).
+    // Resolved host-side among mounted forms of the same tier and origin; the
+    // target's own form.show policy runs under ITS handle, so this can never
+    // open a form its owner was not allowed to show. Resolves the answers on
+    // submit, or null when closed without saving — never rejects for a "no".
+    forms: {
+      async show(name: string, options?: { initial?: Record<string, unknown> }) {
+        return awaitFormAnswer(rt, await call(rt, "cap.formsShow", [name, options]));
+      },
+    },
     dialog: {
       async alert(message: string, options?: ScriptDialogTextOptions) {
         await call(rt, "cap.dialogAlert", [message, options]);
@@ -3465,6 +3523,105 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
           get movable() { return mirror(rt, "panel.movable", true); },
         },
       };
+
+    case "form": {
+      // A host-painted modal form (the VBA UserForm). The script describes a
+      // DATA-ONLY widget tree; trusted host code paints it. Nothing here holds
+      // authority: define/show/update/close are ordinary broker calls, events
+      // arrive through the same hook channel as every other object, and the
+      // form's current values are a host-pushed mirror.
+      //
+      // `show()` is NOT a long pending RPC — see awaitFormShow above: the call
+      // resolves once the form is on screen and the answer is relayed later.
+      formWaiters(rt);
+      const formValues = (): Record<string, unknown> =>
+        mirror<Record<string, unknown>>(rt, "form.values", {});
+      // Per-widget handlers dispatched from ONE registered hook per kind — one
+      // hookRegistered crosses per hook name, never one per widget.
+      const widgetHandlers = new Map<string, Map<string, Handler[]>>();
+      const widgetHook = (hook: "onChange" | "onClick", name: string, h: Handler): CleanupFn => {
+        let byName = widgetHandlers.get(hook);
+        if (!byName) {
+          byName = new Map();
+          widgetHandlers.set(hook, byName);
+          const dispatcher: Handler = (payload) => {
+            const target = (payload as { name?: string } | undefined)?.name;
+            if (typeof target !== "string") return;
+            for (const handler of [...(widgetHandlers.get(hook)?.get(target) ?? [])]) handler(payload);
+          };
+          registerHook(rt, hook, dispatcher);
+        }
+        const list = byName.get(name) ?? [];
+        list.push(h);
+        byName.set(name, list);
+        return () => {
+          const l = byName?.get(name);
+          if (!l) return;
+          const i = l.indexOf(h);
+          if (i >= 0) l.splice(i, 1);
+        };
+      };
+      const update = (patch: Record<string, unknown>): void => callFire(rt, "form.update", [patch]);
+      return {
+        ...base,
+        instanceId,
+        define(spec: Record<string, unknown>): void {
+          callFire(rt, "form.define", [spec]);
+        },
+        async show(options?: { initial?: Record<string, unknown> }): Promise<Record<string, unknown> | null> {
+          return awaitFormAnswer(rt, await call(rt, "form.show", [options]));
+        },
+        close(result?: Record<string, unknown> | null): void {
+          callFire(rt, "form.close", [result ?? null]);
+        },
+        update,
+        control(name: string) {
+          const key = String(name);
+          return {
+            get value(): unknown {
+              return formValues()[key];
+            },
+            set(value: unknown): void {
+              update({ values: { [key]: value } });
+            },
+            setText(text: string): void {
+              update({ controls: { [key]: { text } } });
+            },
+            enable(enabled: boolean): void {
+              update({ controls: { [key]: { disabled: !enabled } } });
+            },
+            show(visible: boolean): void {
+              update({ controls: { [key]: { hidden: !visible } } });
+            },
+            setOptions(options: unknown): void {
+              update({ controls: { [key]: { options } } });
+            },
+            setError(message: string | null): void {
+              update({ controls: { [key]: { error: message } } });
+            },
+            focus(): void {
+              update({ focus: key });
+            },
+            onChange: (h: Handler) => widgetHook("onChange", key, h),
+            onClick: (h: Handler) => widgetHook("onClick", key, h),
+          };
+        },
+        get values(): Record<string, unknown> {
+          return { ...formValues() };
+        },
+        get isOpen(): boolean {
+          return mirror<boolean>(rt, "form.isOpen", false);
+        },
+        onShow: (h: Handler) => registerHook(rt, "onShow", h),
+        onChange: (h: Handler) => registerHook(rt, "onChange", h),
+        onClick: (h: Handler) => registerHook(rt, "onClick", h),
+        onClose: (h: Handler) => registerHook(rt, "onClose", h),
+        // REPLYING: the host awaits the verdict under a short deadline and
+        // accepts on timeout — a stuck script never traps the user in a form.
+        onSubmit: (h: (payload: unknown) => unknown) =>
+          registerReplyingHook(rt, "onSubmit", "__form_onSubmit", h),
+      };
+    }
 
     case "button":
       return {

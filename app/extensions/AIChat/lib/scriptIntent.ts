@@ -93,6 +93,8 @@ const TYPE_HINTS: ReadonlyArray<[string, string]> = [
   ["slicer", "slicer"],
   ["timeline", "timeline"],
   ["shape", "shape"],
+  // "form" as a WORD, so "format" and "formula" do not match (isWord below).
+  ["form", "form"],
   ["text box", "textbox"],
   ["textbox", "textbox"],
   ["table", "table"],

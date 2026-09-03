@@ -95,6 +95,12 @@ const ROWS_WITH_NO_SHIM_CALLER: Record<string, string> = {
   // something a script asks for — so there is no worker shim and no host
   // switch case; the executor is inline at the call site.
   "formula.udf.invoke": "invoked host-side by api/formulaUdf.ts with an inline executor",
+  // Same shape: a form widget bound to a Controls-pane value is read by the
+  // HOST while it resolves the form's bindings (and again when the control
+  // changes), through brokerCall with an inline executor. The worker never
+  // names it — a script asks for the binding in its layout, not for the read —
+  // but the row is what decides the read and puts it in the audit ring.
+  "form.readControl": "read host-side while resolving a form's { control } bindings, with an inline executor",
   // Reserved for sandboxed extensions. Their console is mirrored by the
   // {t:"console"} worker message (extensionBootstrap.ts forwardConsole), NOT by
   // the broker, so nothing calls this today. It stays because the host executor
@@ -107,6 +113,7 @@ const ROWS_WITH_NO_HOST_CASE = new Set([
   "object.declareProperties",
   "api.onEvent",
   "formula.udf.invoke",
+  "form.readControl",
 ]);
 
 describe("broker method coverage (the 5-file pattern)", () => {

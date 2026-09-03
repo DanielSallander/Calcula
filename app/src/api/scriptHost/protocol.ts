@@ -381,6 +381,15 @@ export const METHOD_DEADLINES_MS: Record<string, number> = {
   "cap.dialogConfirm": UI_DIALOG_DEADLINE_MS,
   "cap.dialogPrompt": UI_DIALOG_DEADLINE_MS,
   "cap.dialogForm": UI_DIALOG_DEADLINE_MS,
+  // Another script's form by name: same shape as form.show — resolves once the
+  // form is ON SCREEN, the answer arrives later as an event (scriptForms.ts).
+  "cap.formsShow": UI_DIALOG_DEADLINE_MS,
+  // form.show is class "ui" (it interrupts the user), but it resolves as soon
+  // as the trusted renderer acknowledges the form is ON SCREEN — the answer
+  // arrives later as an event. The open form is bounded by the host-side
+  // idle/absolute deadlines in scriptForms.ts, not by this timer; this row only
+  // keeps the show from being abandoned while the renderer is still mounting.
+  "form.show": UI_DIALOG_DEADLINE_MS,
   // The file.picker family and workbook Save As (class "file"): a native
   // save/open dialog is bounded by the same person a modal is. On the 30s
   // default the worker would abandon the call while the picker was still open,

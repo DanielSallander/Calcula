@@ -3337,10 +3337,22 @@ the code.
 
 ### Where Calcula still TRAILS VBA
 
-1. **The UI object model.** VBA can build UserForms, custom task panes and command bars. Calcula
-   scripts get a declarative dialog spec painted by trusted host code, and sandboxed extensions get
-   no component surface at all. This is a deliberate trade (pixels are authority), but it is a real
-   capability VBA has and Calcula does not.
+1. **The UI object model — PARTLY CLOSED 2026-09-02 (modal forms); task panes and command bars
+   still trail.** VBA can build UserForms, custom task panes and command bars. Calcula now has the
+   UserForm half: a `form` object script declares a data-only widget tree (nineteen widget types
+   mirroring MSForms — label, textbox, number, date, checkbox, toggle, radio, dropdown, listbox,
+   button, group/frame, tabs/MultiPage, row/column/grid, spacer, image, read-only table, progress),
+   trusted host code paints it as a modal under the existing `ui.dialog` consent, widgets bind to
+   cells / defined names / control values and write back on Submit as one undo step, `onSubmit` is a
+   replying hook with a 3 s default-accept, and another script shows it by name with
+   `caps.forms.show("Form1")` (VBA's `UserForm1.Show`). Full design, limits and the tests that pin
+   each rule: `docs/design/typescript-forms.md`. **What VBA still has and Calcula does not:** a
+   MODELESS form, a custom task pane, and a command bar (release one is modal only — a modeless
+   surface needs its own capability id because "a dialog you must answer or close before continuing"
+   would be false, `open-items.md` §2.ab); a visual form designer (code-first with a scaffolded
+   `#region` block today); on-grid embedded forms; and any component surface for sandboxed
+   third-party extensions. The trade is unchanged and deliberate (pixels are authority): the script
+   supplies data, never markup, and the dialog's identity band is chrome it cannot address.
 2. **The machine.** No filesystem, no shell, no COM, no arbitrary process. `file.picker` is a
    *human* choosing one file. A VBA macro that post-processes a folder of exports has no Calcula
    port, and by design never will.
@@ -3360,7 +3372,9 @@ filtering, modelling, scheduling, prompting, packaging, publishing and debugging
 better* on containment, transparency, audit, consent and distribution. It remains behind on
 everything that reaches **outside** the one open document: the machine, other workbooks, custom UI
 surfaces, and headless operation. Three of those four are refusals with reasons rather than gaps;
-custom UI surfaces are the one genuinely unfinished frontier. The 2026-08-04/05 idiom waves (items
+custom UI surfaces were the one genuinely unfinished frontier — and as of 2026-09-02 the modal half
+of it (UserForms) is built (`docs/design/typescript-forms.md`), leaving modeless panes, command bars,
+on-grid embedding and a designer as the remaining trail (TRAILS item 1). The 2026-08-04/05 idiom waves (items
 26–29) then closed the SIGNATURE gap on top of the feature gap, and the 2026-08-06/08 wiring batch
 (items 30–32) took six of the eleven items item 29 had deferred: protection now has a RECOURSE
 (`api.withUnprotected` — VBA's `UserInterfaceOnly` was rejected, not deferred), scenarios and

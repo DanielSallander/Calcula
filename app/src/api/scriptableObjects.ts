@@ -52,7 +52,11 @@ export type ScriptableObjectType =
   // is the binding id in the cell-behaviors store.
   | "range"
   // UI objects (per-instance scripts, keyed by panel ID)
-  | "panel";
+  | "panel"
+  // A host-painted modal form (VBA UserForm). Per-instance; the instanceId is
+  // a UUID minted by whichever command CREATES the form (never anchor-derived,
+  // re-minted on template import), so copying or moving cells never loses it.
+  | "form";
 
 /**
  * The same set as a runtime value, for code that has to ENUMERATE object types
@@ -82,6 +86,7 @@ export const SCRIPTABLE_OBJECT_TYPES = [
   "namedRange",
   "range",
   "panel",
+  "form",
 ] as const satisfies readonly ScriptableObjectType[];
 
 /** `never` when the list above is complete; the missing members otherwise. */
@@ -1597,6 +1602,23 @@ export interface RangeContext extends BaseObjectContext {
 // Context Type Map (for generic access)
 // ============================================================================
 
+// ============================================================================
+// Form Context (host-painted modal forms — VBA UserForm)
+// ============================================================================
+
+/**
+ * Context for Form instances. A form is an object script whose layout is a
+ * DATA-ONLY widget tree that TRUSTED host code paints as a modal dialog; the
+ * script never supplies pixels. Slice 1 carries the identity only — define /
+ * show / update / close arrive with the scriptForms registry.
+ */
+export interface FormContext extends BaseObjectContext {
+  readonly objectType: "form";
+
+  /** The form's minted UUID (see the `"form"` member of ScriptableObjectType). */
+  readonly instanceId: string;
+}
+
 /** Maps object types to their context interfaces. */
 export interface ObjectContextMap {
   workbook: WorkbookContext;
@@ -1615,6 +1637,7 @@ export interface ObjectContextMap {
   namedRange: NamedRangeContext;
   range: RangeContext;
   panel: PanelContext;
+  form: FormContext;
 }
 
 // ============================================================================

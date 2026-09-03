@@ -18,7 +18,27 @@
 
 import type { PreviewGrid } from "./grid";
 import type { DryRunReport } from "../scriptAuthoring";
+import type { FormSpec } from "../scriptFormSpec";
 import { unexercisedHookNote } from "./unexercisedHooks";
+
+/**
+ * The Worker-realm preview's report: the wire `DryRunReport` plus what ONLY
+ * this realm can capture.
+ *
+ * `formLayout` is deliberately NOT on `DryRunReport`. That interface is pinned
+ * field-for-field to the Rust struct (`dryRunReportDrift.test.ts`), and the
+ * interpreter realm has no `form.define` to capture — for it, "no layout" is
+ * the true answer, not a padded field that is always empty. A form script is
+ * an OBJECT script, so it never reaches that realm anyway (it declines).
+ */
+export interface WorkerPreviewReport extends DryRunReport {
+  /**
+   * A FORM script's layout, captured from its `form.define` call during setup.
+   * The editor paints it in a preview-mode dialog; absent for every other
+   * object type and when the script never declared a layout during setup.
+   */
+  formLayout?: FormSpec;
+}
 
 /** How many changed cells a report carries. Mirrors MAX_REPORTED_CHANGES (Rust). */
 export const MAX_REPORTED_CHANGES = 200;
@@ -76,11 +96,14 @@ export function buildReport(input: {
   unexercisedHooks: string[];
   /** Appended to the output when the workbook copy was capped. */
   note?: string;
-}): DryRunReport {
+  /** A form script's captured `form.define` layout (see backend.ts). */
+  formLayout?: FormSpec;
+}): WorkerPreviewReport {
   const changes = [...input.changes].sort((a, b) => a.row - b.row || a.col - b.col);
   const totalChanges = changes.length;
   const truncated = totalChanges > MAX_REPORTED_CHANGES;
   return {
+    ...(input.formLayout !== undefined ? { formLayout: input.formLayout } : {}),
     ok: input.ok,
     error: input.error ?? null,
     durationMs: input.durationMs,

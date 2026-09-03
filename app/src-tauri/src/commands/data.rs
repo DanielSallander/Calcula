@@ -7480,6 +7480,28 @@ pub(crate) fn update_cell_on_sheets_inner(
         let mut undo_stack = state.undo_stack.lock().unwrap();
         let mut wrote: Vec<usize> = Vec::new();
 
+        // ONE UNDO ENTRY FOR THE WHOLE WRITE, AND NEVER SOMEONE ELSE'S.
+        //
+        // This used to open and commit a transaction around EACH sheet, with
+        // no nesting guard — the guard every other mutator in this file takes
+        // (see `update_cells_batch` and the fill command). Two things followed.
+        // Called on its own, a group write left one undo entry per sheet, so
+        // undoing a single user action took N presses. Called INSIDE a caller's
+        // transaction — a script's `withScriptUndoBatch`, a form submit writing
+        // several bound cells — it was worse than that: `begin_transaction` is
+        // a no-op while one is open, but `commit_transaction` is not, so the
+        // FIRST off-sheet cell PUSHED THE CALLER'S STILL-OPEN TRANSACTION to
+        // the stack early, and everything the caller wrote after that landed in
+        // entries of its own.
+        let opened_transaction = !undo_stack.has_open_transaction();
+        if opened_transaction {
+            undo_stack.begin_transaction(if value.trim().is_empty() {
+                format!("Clear cell on {} sheet(s)", sheet_indices.len())
+            } else {
+                format!("Update cell on {} sheet(s)", sheet_indices.len())
+            });
+        }
+
         // SPILL TEAR-DOWN, off-sheet single-cell half (§2y). Whether the cell
         // is cleared or overwritten, a spill it USED to own dies with the
         // formula. `recalc_after_off_sheet_write` is whole-sheet and not
@@ -7506,10 +7528,8 @@ pub(crate) fn update_cell_on_sheets_inner(
                 }
                 let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
                 if previous_cell.is_some() {
-                    undo_stack.begin_transaction(format!("Clear cell on sheet {}", sheet_idx));
                     undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
                     grids[sheet_idx].clear_cell(row, col);
-                    undo_stack.commit_transaction();
                     // GAP A (cross-sheet edges, clear half): a cleared formula's
                     // registered cross-sheet edges must go with it, or the
                     // cascade keeps re-evaluating a cell that no longer exists.
@@ -7526,6 +7546,9 @@ pub(crate) fn update_cell_on_sheets_inner(
                 // it must NOT be reported as skipped (that would make the host
                 // re-issue it against the active sheet).
                 wrote.push(sheet_idx);
+            }
+            if opened_transaction {
+                undo_stack.commit_transaction();
             }
             wrote
         } else {
@@ -7556,7 +7579,6 @@ pub(crate) fn update_cell_on_sheets_inner(
                     continue;
                 }
 
-                undo_stack.begin_transaction(format!("Update cell on sheet {}", sheet_idx));
                 let previous_cell = grids[sheet_idx].get_cell(row, col).cloned();
 
                 // THE TEXT FORMAT DECIDES THE VALUE, AND IT DECIDES IT PER
@@ -7604,7 +7626,6 @@ pub(crate) fn update_cell_on_sheets_inner(
 
                 grids[sheet_idx].set_cell(row, col, cell);
                 undo_stack.record_cell_change(sheet_idx, row, col, previous_cell);
-                undo_stack.commit_transaction();
 
                 // GAP A: this command stored formulas for years WITHOUT
                 // registering their cross-sheet dependency edges, so an
@@ -7631,6 +7652,9 @@ pub(crate) fn update_cell_on_sheets_inner(
                 };
                 register_off_sheet_cell_edges(&state, sheet_idx, row, col, new_refs);
                 wrote.push(sheet_idx);
+            }
+            if opened_transaction {
+                undo_stack.commit_transaction();
             }
             wrote
         }

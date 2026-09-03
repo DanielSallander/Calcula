@@ -125,9 +125,14 @@ describe("priority decides what survives", () => {
     // enough to push this one marginal member out of the hinted fill, so the
     // test failed for a reason that had nothing to do with hinting. The fill is
     // greedy, so inclusion is NOT monotonic in the budget: measured across
-    // 1,900-2,400, the property holds in narrow bands. 2,223-2,261 is the widest
-    // contiguous one, so this sits in the middle of it rather than on an edge.
-    const tight = 2_240;
+    // 1,900-2,400, the property holds in narrow bands. 2,223-2,261 was the
+    // widest contiguous one, so this sat in the middle of it rather than on an
+    // edge. Re-measured 2026-09-02 after `caps.forms.show` joined every type's
+    // capability index (one more always-present entry shifts the greedy fill):
+    // over 1,800-2,800 the bands are now 1,841-1,852, 1,911-1,922, 1,968-1,979,
+    // 2,026-2,037, 2,083-2,094, 2,132-2,143, 2,177-2,215, 2,249-2,308 and
+    // 2,342-2,800+, so this sits well inside the last one.
+    const tight = 2_400;
     const without = buildSurfacePrompt({ objectType: "button", budgetTokens: tight });
     const withHint = buildSurfacePrompt({ objectType: "button", budgetTokens: tight, hints: ["storage"] });
     expect(without.includedChains).not.toContain("caps.storage.set");
@@ -241,7 +246,8 @@ describe("resolving per object type stays sound", () => {
 
   it("covers every object type the probe produced", () => {
     // Non-vacuity for the three loops below, which are all it.each over TYPES.
-    expect(TYPES.length).toBe(17);
+    // 2026-09-02: 17 -> 18 with the `form` object type.
+    expect(TYPES.length).toBe(18);
   });
 
   it.each([...TYPES, "spaceship"])("renders no chain twice for %s", (objectType) => {

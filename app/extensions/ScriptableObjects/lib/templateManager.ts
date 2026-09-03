@@ -155,6 +155,7 @@ const VALID_OBJECT_TYPES: Record<ScriptableObjectType, true> = {
   namedRange: true,
   range: true,
   panel: true,
+  form: true,
 };
 
 /** A `.calcula-template` file that is not a template. */

@@ -268,7 +268,14 @@ describe("ui method class", () => {
     .sort();
 
   it("is exactly the ui.dialog family", () => {
-    expect(uiMethods).toEqual(["cap.dialogAlert", "cap.dialogConfirm", "cap.dialogForm", "cap.dialogPrompt"]);
+    expect(uiMethods).toEqual([
+      "cap.dialogAlert", "cap.dialogConfirm", "cap.dialogForm", "cap.dialogPrompt",
+      // Forms: the two methods that interrupt the user — a script's own form
+      // and another script's form by name. Both resolve once the form is ON
+      // SCREEN; the answer arrives later as a relay (scriptForms.ts).
+      "cap.formsShow",
+      "form.show",
+    ]);
   });
 
   it("every ui method is restricted-tier and gated by the ui.dialog capability", () => {

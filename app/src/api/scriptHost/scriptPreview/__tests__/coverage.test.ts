@@ -36,6 +36,8 @@ import { analyzeScript } from "../../scriptValidation/analyze";
 import { referenceSource, type EvalCorpus } from "../../scriptEval";
 
 const BACKEND = resolve(__dirname, "../backend.ts");
+/** The rung itself — where a refusal is decided to be expected or a decline. */
+const RUNG = resolve(__dirname, "../index.ts");
 const CORPUS = resolve(__dirname, "../../../../../../tests/eval/tasks.json");
 
 /**
@@ -106,6 +108,33 @@ function classify(chains: Iterable<string>, served: Set<string>) {
 }
 
 const served = servedMethods();
+
+/**
+ * Broker methods a preview answers by REFUSING them — on purpose, and served
+ * by that refusal rather than by a `case` in respond().
+ *
+ * `form.show` carries the `ui.dialog` capability and the preview handle
+ * declares none, so the broker's R19 ceiling refuses it. THAT REFUSAL IS THE
+ * DESIGN, not a gap: `scriptPreview/index.ts` (`isExpectedFormRefusal`) exempts
+ * exactly this method on an `objectType: "form"` run, so the run is neither
+ * declined nor given a refusal finding, and the editor paints the layout the
+ * capability-free `form.define` captured instead. The form canary — whose
+ * reference calls `context.show()`, as every real form script must — therefore
+ * comes back with a REAL verdict, which is exactly what this file measures.
+ *
+ * A `case "form.show"` in respond() would be the wrong fix twice over: it would
+ * be a fake (the preview must not open the modal it is describing), and the
+ * layout it would have to invent is the rung's, not the backend's.
+ *
+ * Narrow ON PURPOSE — one named method, never "any capability-bearing chain".
+ * Every other capability a corpus reference reaches still declines the run and
+ * still reds the assertion below; that is the tooth being kept.
+ */
+const SERVED_BY_REFUSAL = new Set(["form.show"]);
+
+/** What a corpus reference can reach and still get a verdict from. */
+const servedOrRefused = new Set([...served, ...SERVED_BY_REFUSAL]);
+
 const corpus = JSON.parse(readFileSync(CORPUS, "utf8")) as EvalCorpus;
 
 describe("the preview serves what the model is actually taught", () => {
@@ -149,7 +178,10 @@ describe("the preview serves what the model is actually taught", () => {
    */
   it("serves every chain the corpus references reach", () => {
     const chains = corpus.tasks.flatMap((t) => analyzeScript(referenceSource(t)).calls.map((c) => c.chain));
-    const { ok, gapped, unknown } = classify(chains, served);
+    // `servedOrRefused`, not `served`: the form canary's `context.show()` is
+    // served BY BEING REFUSED (see SERVED_BY_REFUSAL above). Everything else
+    // still has to be answered by a real case in respond().
+    const { ok, gapped, unknown } = classify(chains, servedOrRefused);
 
     // Reported rather than asserted away: a reference calling something the
     // generated surface does not know would be a corpus defect, and Layer A
@@ -163,6 +195,44 @@ describe("the preview serves what the model is actually taught", () => {
         "would come back `applicable: false` — the run would say nothing about the script",
     ).toEqual([]);
     expect(ok.length).toBeGreaterThan(20);
+  });
+
+  /**
+   * The exemption above cannot outlive the design it describes.
+   *
+   * "Served by refusal" is only true while the RUNG actually exempts the
+   * refusal. If `isExpectedFormRefusal` is dropped from scriptPreview/index.ts,
+   * `form.show` goes back to declining the whole run — the canary would then be
+   * `applicable: false` while this file still called it served, which is the
+   * one way an exemption turns into a blindfold. So the claim is checked
+   * against that file, in both directions: the method must carry a capability
+   * (that is WHY it is refused) and must NOT have a case in respond() (a real
+   * case would mean the preview opens the modal it is meant to describe).
+   */
+  it("claims form.show is served-by-refusal only while the rung exempts it", () => {
+    const rung = readFileSync(RUNG, "utf8");
+    expect(
+      rung.includes("isExpectedFormRefusal"),
+      "the rung no longer has an expected-refusal exemption at all — this guard is reading the wrong file",
+    ).toBe(true);
+    for (const method of SERVED_BY_REFUSAL) {
+      expect(
+        ALLOWLIST[method]?.capability,
+        `${method} is exempted here as a capability refusal, but the ALLOWLIST gives it no capability`,
+      ).toBeTruthy();
+      expect(
+        rung.includes(`method === "${method}"`),
+        `${method} is counted as served-by-refusal, but scriptPreview/index.ts no longer treats ` +
+          `its refusal as expected. Restore the exemption there, or drop it from SERVED_BY_REFUSAL ` +
+          `here — because without it the corpus task calling ${method} comes back \`applicable: false\` ` +
+          `and this file would keep reporting it as served.`,
+      ).toBe(true);
+      expect(
+        served.has(method),
+        `${method} now has a case in respond(). A preview must not OPEN the modal it is ` +
+          `describing — if that case is deliberate, remove ${method} from SERVED_BY_REFUSAL.`,
+      ).toBe(false);
+    }
   });
 
   /**

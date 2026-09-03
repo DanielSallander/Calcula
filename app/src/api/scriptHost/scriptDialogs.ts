@@ -95,10 +95,85 @@ interface PendingScriptDialog {
   timer: ReturnType<typeof setTimeout>;
 }
 
-/** requestId -> pending. At most one entry (guard 2) but keyed for clarity. */
+// ----------------------------------------------------------------------------
+// The MODAL SLOT — guards 1 and 2, shared with script-defined forms
+// ----------------------------------------------------------------------------
+//
+// A form (scriptForms.ts) is a second kind of modal a script can put on
+// screen. It has its own registry (a form stays open for a data-entry session
+// under its own idle deadline, not this module's five-minute dismiss), but it
+// must obey THE SAME two guards, or "the dialog on screen unambiguously belongs
+// to the script named in it" would stop being true the moment two modal kinds
+// existed. So the guards live here as one slot both registries claim, and the
+// dismissal streak (guard 3) counts both kinds too.
+
+/** What may hold the slot: a ui.dialog modal, or a script-defined form. */
+export type ModalKind = ScriptDialogKind | "scriptForm";
+
+export interface ModalSlot {
+  slotId: string;
+  scriptId: string;
+  scriptName: string;
+  kind: ModalKind;
+}
+
+/** slotId -> holder. At most one entry (guard 2) but keyed for clarity. */
+const slots = new Map<string, ModalSlot>();
+/** scriptId -> slotId, so guard 1 is a lookup rather than a scan. */
+const slotByScript = new Map<string, string>();
+
+/** The modal on screen, whichever kind it is (transparency / tests). */
+export function getActiveModal(): ModalSlot | null {
+  for (const slot of slots.values()) return slot;
+  return null;
+}
+
+/**
+ * Take the slot for `scriptId`, or throw the BrokerError the caller surfaces
+ * to the script. Guard 1: one modal per script — a script with a dialog OR a
+ * form up may not open another of either kind. Guard 2: one app-wide,
+ * rejected not queued.
+ */
+export function claimModalSlot(args: {
+  scriptId: string;
+  scriptName: string;
+  kind: ModalKind;
+  /** The registry's own id for the modal (a dialog requestId, a form showId). */
+  slotId: string;
+}): string {
+  if (slotByScript.has(args.scriptId)) {
+    throw new BrokerError(
+      "HostError",
+      "this script already has a dialog open; await the first one before opening another",
+    );
+  }
+  const active = getActiveModal();
+  if (active) {
+    throw new BrokerError(
+      "HostError",
+      `another script ("${active.scriptName}") is showing a dialog; try again once the user has answered it`,
+    );
+  }
+  slots.set(args.slotId, {
+    slotId: args.slotId,
+    scriptId: args.scriptId,
+    scriptName: args.scriptName,
+    kind: args.kind,
+  });
+  slotByScript.set(args.scriptId, args.slotId);
+  return args.slotId;
+}
+
+/** Give the slot back. Idempotent. */
+export function releaseModalSlot(slotId: string): void {
+  const slot = slots.get(slotId);
+  if (!slot) return;
+  slots.delete(slotId);
+  if (slotByScript.get(slot.scriptId) === slotId) slotByScript.delete(slot.scriptId);
+}
+
+/** requestId -> pending dialog. */
 const pending = new Map<string, PendingScriptDialog>();
-/** scriptId -> requestId, so guard 1 is a lookup rather than a scan. */
-const pendingByScript = new Map<string, string>();
 /** scriptId -> consecutive refusals (guard 3). */
 const dismissStreak = new Map<string, number>();
 /** Scripts muted for the rest of the session (guard 3 tripped). */
@@ -112,20 +187,26 @@ const DISMISSED: ScriptDialogAnswer = { dismissed: true };
 function clearPending(entry: PendingScriptDialog): void {
   clearTimeout(entry.timer);
   pending.delete(entry.request.requestId);
-  if (pendingByScript.get(entry.request.scriptId) === entry.request.requestId) {
-    pendingByScript.delete(entry.request.scriptId);
-  }
+  releaseModalSlot(entry.request.requestId);
 }
 
-/** Record whether the user engaged or refused, and trip the mute at the limit. */
-function recordOutcome(scriptId: string, answer: ScriptDialogAnswer): void {
-  if (answer.dismissed) {
+/**
+ * Record whether the user engaged or refused, and trip the mute at the limit.
+ * Exported for the form registry: a form the user cancels counts toward the
+ * same streak as a dialog they dismiss, and a submitted form resets it.
+ */
+export function recordModalOutcome(scriptId: string, dismissed: boolean): void {
+  if (dismissed) {
     const streak = (dismissStreak.get(scriptId) ?? 0) + 1;
     dismissStreak.set(scriptId, streak);
     if (streak >= MAX_CONSECUTIVE_DISMISSALS) muted.add(scriptId);
     return;
   }
   dismissStreak.set(scriptId, 0);
+}
+
+function recordOutcome(scriptId: string, answer: ScriptDialogAnswer): void {
+  recordModalOutcome(scriptId, answer.dismissed);
 }
 
 /** True while `scriptId` is muted (its dialogs auto-dismiss). */
@@ -158,27 +239,14 @@ export function requestScriptDialog(args: {
   if (muted.has(args.scriptId)) {
     return Promise.resolve(DISMISSED);
   }
-  // Guard 1 — one per script.
-  if (pendingByScript.has(args.scriptId)) {
-    return Promise.reject(
-      new BrokerError(
-        "HostError",
-        "this script already has a dialog open; await the first one before opening another",
-      ),
-    );
-  }
-  // Guard 2 — one app-wide.
-  const active = getActiveScriptDialog();
-  if (active) {
-    return Promise.reject(
-      new BrokerError(
-        "HostError",
-        `another script ("${active.scriptName}") is showing a dialog; try again once the user has answered it`,
-      ),
-    );
+  const requestId = `scriptdlg-${++requestSeq}`;
+  // Guards 1 + 2 — one per script, one app-wide (shared with forms).
+  try {
+    claimModalSlot({ scriptId: args.scriptId, scriptName: args.scriptName, kind: args.kind, slotId: requestId });
+  } catch (e) {
+    return Promise.reject(e);
   }
 
-  const requestId = `scriptdlg-${++requestSeq}`;
   const request: ScriptDialogRequestPayload = {
     requestId,
     scriptId: args.scriptId,
@@ -212,7 +280,6 @@ export function requestScriptDialog(args: {
     }, UI_DIALOG_DEADLINE_MS);
 
     pending.set(requestId, { request, settle, timer });
-    pendingByScript.set(args.scriptId, requestId);
     emitAppEvent(SCRIPT_DIALOG_REQUEST_EVENT, request);
   });
 }
@@ -233,23 +300,29 @@ export function dismissScriptDialog(requestId: string): void {
  * streak are forgotten — a remounted script starts clean.
  */
 export function revokeScriptDialogs(scriptId: string): void {
-  const requestId = pendingByScript.get(scriptId);
-  if (requestId !== undefined) {
-    emitAppEvent(SCRIPT_DIALOG_CANCELLED_EVENT, { requestId });
-    dismissScriptDialog(requestId);
+  for (const entry of [...pending.values()]) {
+    if (entry.request.scriptId !== scriptId) continue;
+    emitAppEvent(SCRIPT_DIALOG_CANCELLED_EVENT, { requestId: entry.request.requestId });
+    dismissScriptDialog(entry.request.requestId);
   }
   dismissStreak.delete(scriptId);
   muted.delete(scriptId);
 }
 
-/** Forget everything (workbook reset / tests). Pending dialogs are dismissed. */
+/**
+ * Forget everything (workbook reset / tests). Pending dialogs are dismissed.
+ * Form sessions release their own slot through scriptForms.ts's reset; the
+ * slot table is cleared here too so a slot orphaned by a registry that never
+ * ran cannot block the next workbook's first dialog.
+ */
 export function resetScriptDialogs(): void {
   for (const requestId of [...pending.keys()]) {
     emitAppEvent(SCRIPT_DIALOG_CANCELLED_EVENT, { requestId });
     dismissScriptDialog(requestId);
   }
   pending.clear();
-  pendingByScript.clear();
+  slots.clear();
+  slotByScript.clear();
   dismissStreak.clear();
   muted.clear();
 }

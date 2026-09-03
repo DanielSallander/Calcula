@@ -25,6 +25,27 @@ import {
   MAX_DIALOG_TITLE,
   RESERVED_DIALOG_FIELD_NAMES,
 } from "./scriptDialogSpec";
+import {
+  FORM_CONTAINER_TYPE_SET,
+  FORM_INPUT_TYPE_SET,
+  FORM_WIDGET_TYPES,
+  FORM_WIDGET_TYPE_SET,
+  MAX_FORM_BIND_CHARS,
+  MAX_FORM_DEPTH,
+  MAX_FORM_ERROR_CHARS,
+  MAX_FORM_GRID_COLUMNS,
+  MAX_FORM_INITIAL_KEYS,
+  MAX_FORM_INPUTS,
+  MAX_FORM_NODES,
+  MAX_FORM_OPTIONS,
+  MAX_FORM_PATCH_CONTROLS,
+  MAX_FORM_TABLE_CELLS,
+  MAX_FORM_TABS,
+  MAX_FORM_VALUE_CHARS,
+  MAX_FORM_WIDTH,
+  MIN_FORM_WIDTH,
+  isValidFormName,
+} from "./scriptFormSpec";
 
 export type Validator = (args: unknown[]) => true | string;
 
@@ -3893,6 +3914,643 @@ export const vDialogForm: Validator = ([spec]) => {
     if (result !== true) return result;
   }
   return true;
+};
+
+// ============================================================================
+// Script FORMS (form.define / form.show / form.update / form.close)
+// ============================================================================
+//
+// The dialog spec above, generalized to a live widget TREE: containers nest,
+// widgets bind to cells, and the form stays open while the script patches it.
+// Same construction as the dialog family — a tree of plain data crosses, TRUSTED
+// host code paints it, and no markup, no handler and no regex ever leaves the
+// worker. What this section bounds is therefore not the host (structured clone
+// would survive any of it) but the USER and the renderer: a person reads the
+// labels, so they are bounded like dialog text; the renderer walks the tree, so
+// its node count, depth and input count are bounded before it ever sees it.
+//
+// THE WALK IS ITERATIVE ON PURPOSE. A recursive validator over a script-supplied
+// tree is a host stack overflow waiting for a 10k-deep `children` chain — and
+// the validator runs on the MAIN thread, before the tier check. The explicit
+// stack below never holds more than MAX_FORM_NODES frames: a children array is
+// counted BEFORE it is pushed, so a hostile top-level array of 10k widgets is
+// refused at the length check, not after 10k iterations.
+//
+// Every refusal names the widget by INDEX PATH (`children[2].children[0].name`)
+// the way checkDialogField's `where` does, because the same message is what
+// the script author reads in the console and what the audit ring records.
+
+/** A plain (non-array, non-null) object — the only shape a widget may be. */
+function isFormRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Echo a script-supplied string in a message without letting it be the message. */
+function shownName(v: unknown): string {
+  const s = typeof v === "string" ? v : String(v);
+  return s.length > 64 ? `${s.slice(0, 61)}...` : s;
+}
+
+/** Members every widget may carry (FormWidgetBase). */
+const FORM_WIDGET_BASE_KEYS = ["type", "name", "label", "help", "hidden", "disabled", "width"] as const;
+/** Members every INPUT widget may carry in addition (FormInputBase). */
+const FORM_INPUT_BASE_KEYS = [...FORM_WIDGET_BASE_KEYS, "bind", "required", "writeOn"] as const;
+
+/**
+ * Per-type key allowlist. An unknown key is refused BY NAME — a silently
+ * ignored typo is a support ticket, and `pattern` in particular must never be
+ * accepted anywhere (a script-supplied regex run against keystrokes in the
+ * trusted main thread is a ReDoS surface with no sandbox around it).
+ */
+const FORM_WIDGET_KEYS: Readonly<Record<string, readonly string[]>> = {
+  label:    [...FORM_WIDGET_BASE_KEYS, "text", "style"],
+  textbox:  [...FORM_INPUT_BASE_KEYS, "default", "placeholder", "multiline", "maxLength"],
+  number:   [...FORM_INPUT_BASE_KEYS, "default", "min", "max", "step"],
+  date:     [...FORM_INPUT_BASE_KEYS, "default", "min", "max"],
+  checkbox: [...FORM_INPUT_BASE_KEYS, "default"],
+  toggle:   [...FORM_INPUT_BASE_KEYS, "default"],
+  radio:    [...FORM_INPUT_BASE_KEYS, "options", "default", "layout"],
+  dropdown: [...FORM_INPUT_BASE_KEYS, "options", "default", "allowEmpty"],
+  listbox:  [...FORM_INPUT_BASE_KEYS, "options", "multi", "default", "rows"],
+  button:   [...FORM_WIDGET_BASE_KEYS, "text", "role", "danger"],
+  group:    [...FORM_WIDGET_BASE_KEYS, "title", "children"],
+  tabs:     [...FORM_WIDGET_BASE_KEYS, "pages"],
+  row:      [...FORM_WIDGET_BASE_KEYS, "children", "gap"],
+  column:   [...FORM_WIDGET_BASE_KEYS, "children", "gap"],
+  grid:     [...FORM_WIDGET_BASE_KEYS, "columns", "children"],
+  spacer:   [...FORM_WIDGET_BASE_KEYS, "size"],
+  image:    [...FORM_WIDGET_BASE_KEYS, "src", "alt", "height"],
+  table:    [...FORM_WIDGET_BASE_KEYS, "columns", "rows", "maxRows"],
+  progress: [...FORM_WIDGET_BASE_KEYS, "value", "max", "text"],
+};
+
+/** Widgets that MUST carry a name: inputs (result keys), buttons (click
+ *  events) and progress bars (patch targets). Everything else may. */
+function formWidgetNeedsName(type: string): boolean {
+  return FORM_INPUT_TYPE_SET.has(type) || type === "button" || type === "progress";
+}
+
+const FORM_WRITE_ON = ["submit", "change"] as const;
+const FORM_LABEL_STYLES = ["normal", "heading", "muted"] as const;
+const FORM_BUTTON_ROLES = ["default", "submit", "cancel"] as const;
+const FORM_RADIO_LAYOUTS = ["row", "column"] as const;
+const FORM_MESSAGE_KINDS = ["info", "warning", "error"] as const;
+/** Longest date string a widget accepts ("2026-09-02", an ISO datetime, a serial). */
+const MAX_FORM_DATE_CHARS = 32;
+/** Most columns a read-only table may declare. */
+const MAX_FORM_TABLE_COLUMNS = 20;
+/** Most rows a `{ range }`-fed table may ask the host to read. */
+const MAX_FORM_TABLE_MAX_ROWS = 500;
+/** Listbox visible rows. */
+const MAX_FORM_LISTBOX_ROWS = 50;
+/** Gap / spacer / image-height pixel ceilings. */
+const MAX_FORM_GAP = 64;
+const MAX_FORM_SPACER = 400;
+const MAX_FORM_IMAGE_HEIGHT = 2_000;
+
+function isOneOf(v: unknown, allowed: readonly string[]): v is string {
+  return typeof v === "string" && allowed.includes(v);
+}
+
+/** A form name in a message-producing position: identifier, bounded, not reserved. */
+function checkFormName(v: unknown, where: string): true | string {
+  if (typeof v === "string" && RESERVED_DIALOG_FIELD_NAMES.has(v)) return `${where} "${v}" is reserved`;
+  if (!isValidFormName(v)) {
+    return `${where} must be an identifier (letters, digits, underscore; max ${MAX_DIALOG_FIELD_NAME} chars)`;
+  }
+  return true;
+}
+
+/** `options`: an inline choice list, or `{ range }` the host reads at show time. */
+function checkFormOptions(o: unknown, where: string): true | string {
+  if (Array.isArray(o)) {
+    if (o.length === 0) return `${where} must be a non-empty array of choices`;
+    if (o.length > MAX_FORM_OPTIONS) return `${where} has ${o.length} entries (max ${MAX_FORM_OPTIONS})`;
+    for (let i = 0; i < o.length; i++) {
+      const opt: unknown = o[i];
+      if (isBoundedString(opt, MAX_DIALOG_OPTION_TEXT)) continue;
+      if (!isFormRecord(opt)) return `${where}[${i}] must be a string or { value, label }`;
+      const known = checkKnownKeys(opt, ["value", "label"], `${where}[${i}] property`);
+      if (known !== true) return known;
+      if (!isBoundedString(opt.value, MAX_DIALOG_OPTION_TEXT)) {
+        return `${where}[${i}].value must be a string (max ${MAX_DIALOG_OPTION_TEXT} chars)`;
+      }
+      if (opt.label !== undefined && !isBoundedString(opt.label, MAX_DIALOG_OPTION_TEXT)) {
+        return `${where}[${i}].label must be a string (max ${MAX_DIALOG_OPTION_TEXT} chars)`;
+      }
+    }
+    return true;
+  }
+  if (!isFormRecord(o)) return `${where} must be an array of choices or { range }`;
+  const known = checkKnownKeys(o, ["range"], `${where} property`);
+  if (known !== true) return known;
+  if (!isBoundedString(o.range, MAX_FORM_BIND_CHARS) || o.range.length === 0) {
+    return `${where}.range must be a non-empty range reference (max ${MAX_FORM_BIND_CHARS} chars)`;
+  }
+  return true;
+}
+
+/** `bind`: "B2" / "Sheet1!B2" / a name, or EXACTLY ONE of { cell } / { name } / { control }. */
+function checkFormBinding(b: unknown, where: string): true | string {
+  if (typeof b === "string") {
+    if (b.length === 0 || b.length > MAX_FORM_BIND_CHARS) {
+      return `${where} must be a non-empty cell reference or defined name (max ${MAX_FORM_BIND_CHARS} chars)`;
+    }
+    return true;
+  }
+  if (!isFormRecord(b)) return `${where} must be a string, { cell }, { name } or { control }`;
+  const known = checkKnownKeys(b, ["cell", "name", "control", "sheet"], `${where} property`);
+  if (known !== true) return known;
+  const targets = (["cell", "name", "control"] as const).filter((k) => b[k] !== undefined);
+  if (targets.length !== 1) return `${where} must name exactly one of cell, name or control`;
+  const target = targets[0];
+  if (!isBoundedString(b[target], MAX_FORM_BIND_CHARS) || (b[target] as string).length === 0) {
+    return `${where}.${target} must be a non-empty string (max ${MAX_FORM_BIND_CHARS} chars)`;
+  }
+  if (b.sheet !== undefined) {
+    if (target !== "cell") return `${where}.sheet is only valid alongside ${where}.cell`;
+    const okName = isBoundedString(b.sheet, 64) && b.sheet.length > 0;
+    if (!okName && !isFiniteNumber(b.sheet)) {
+      return `${where}.sheet must be a sheet name (max 64 chars) or a sheet index`;
+    }
+  }
+  return true;
+}
+
+/** A value a widget may hold: primitive, or string[] for a multi listbox. */
+function checkFormValue(v: unknown, where: string): true | string {
+  if (v === null || typeof v === "boolean") return true;
+  if (typeof v === "number") return Number.isFinite(v) ? true : `${where} must be a finite number`;
+  if (typeof v === "string") {
+    return v.length <= MAX_FORM_VALUE_CHARS ? true : `${where} is too long (max ${MAX_FORM_VALUE_CHARS} chars)`;
+  }
+  if (Array.isArray(v)) {
+    if (v.length > MAX_FORM_OPTIONS) return `${where} has ${v.length} entries (max ${MAX_FORM_OPTIONS})`;
+    for (let i = 0; i < v.length; i++) {
+      if (!isBoundedString(v[i], MAX_DIALOG_OPTION_TEXT)) {
+        return `${where}[${i}] must be a string (max ${MAX_DIALOG_OPTION_TEXT} chars)`;
+      }
+    }
+    return true;
+  }
+  return `${where} must be a string, number, boolean, null or an array of strings`;
+}
+
+/** A name -> value map (`show({ initial })`, a patch's `values`, a close result). */
+function checkFormValues(o: unknown, where: string, maxKeys: number): true | string {
+  if (!isFormRecord(o)) return `${where} must be an object of widget name -> value`;
+  const keys = Object.keys(o);
+  if (keys.length > maxKeys) return `${where} has ${keys.length} entries (max ${maxKeys})`;
+  for (const k of keys) {
+    const name = checkFormName(k, `${where} key "${shownName(k)}"`);
+    if (name !== true) return name;
+    const value = checkFormValue(o[k], `${where}.${k}`);
+    if (value !== true) return value;
+  }
+  return true;
+}
+
+/** Optional finite number in [lo, hi]. */
+function checkFormNumberIn(v: unknown, where: string, lo: number, hi: number, integer = false): true | string {
+  if (v === undefined) return true;
+  if (!isFiniteNumber(v) || v < lo || v > hi || (integer && !Number.isInteger(v))) {
+    return `${where} must be ${integer ? "an integer" : "a number"} between ${lo} and ${hi}`;
+  }
+  return true;
+}
+
+/** Optional bounded string. */
+function checkFormText(v: unknown, where: string, max: number): true | string {
+  if (v !== undefined && !isBoundedString(v, max)) return `${where} must be a string (max ${max} chars)`;
+  return true;
+}
+
+/** Optional boolean. */
+function checkFormBool(v: unknown, where: string): true | string {
+  if (v !== undefined && typeof v !== "boolean") return `${where} must be a boolean`;
+  return true;
+}
+
+/** The `columns` / `rows` / `maxRows` of a read-only table. */
+function checkFormTable(w: Record<string, unknown>, where: string): true | string {
+  if (!Array.isArray(w.columns) || w.columns.length === 0) return `${where}.columns must be a non-empty array of headings`;
+  if (w.columns.length > MAX_FORM_TABLE_COLUMNS) {
+    return `${where}.columns has ${w.columns.length} entries (max ${MAX_FORM_TABLE_COLUMNS})`;
+  }
+  for (let i = 0; i < w.columns.length; i++) {
+    if (!isBoundedString(w.columns[i], MAX_DIALOG_FIELD_LABEL)) {
+      return `${where}.columns[${i}] must be a string (max ${MAX_DIALOG_FIELD_LABEL} chars)`;
+    }
+  }
+  const cols = w.columns.length;
+  if (Array.isArray(w.rows)) {
+    if (w.rows.length * cols > MAX_FORM_TABLE_CELLS) {
+      return `${where}.rows carries ${w.rows.length * cols} cells (max ${MAX_FORM_TABLE_CELLS})`;
+    }
+    for (let r = 0; r < w.rows.length; r++) {
+      const row: unknown = w.rows[r];
+      if (!Array.isArray(row)) return `${where}.rows[${r}] must be an array of cells`;
+      if (row.length > cols) return `${where}.rows[${r}] has ${row.length} cells but there are ${cols} columns`;
+      for (let c = 0; c < row.length; c++) {
+        const cell: unknown = row[c];
+        const ok =
+          cell === null ||
+          typeof cell === "boolean" ||
+          isFiniteNumber(cell) ||
+          isBoundedString(cell, MAX_DIALOG_MESSAGE);
+        if (!ok) return `${where}.rows[${r}][${c}] must be a string (max ${MAX_DIALOG_MESSAGE} chars), number, boolean or null`;
+      }
+    }
+  } else {
+    if (!isFormRecord(w.rows)) return `${where}.rows must be an array of rows or { range }`;
+    const known = checkKnownKeys(w.rows, ["range"], `${where}.rows property`);
+    if (known !== true) return known;
+    if (!isBoundedString(w.rows.range, MAX_FORM_BIND_CHARS) || w.rows.range.length === 0) {
+      return `${where}.rows.range must be a non-empty range reference (max ${MAX_FORM_BIND_CHARS} chars)`;
+    }
+  }
+  return checkFormNumberIn(w.maxRows, `${where}.maxRows`, 1, MAX_FORM_TABLE_MAX_ROWS, true);
+}
+
+/** The `pages` of a tabs widget — shape only; the walker pushes their children. */
+function checkFormTabPages(pages: unknown, where: string): true | string {
+  if (!Array.isArray(pages) || pages.length === 0) return `${where}.pages must be a non-empty array`;
+  if (pages.length > MAX_FORM_TABS) return `${where}.pages has ${pages.length} entries (max ${MAX_FORM_TABS})`;
+  for (let p = 0; p < pages.length; p++) {
+    const page: unknown = pages[p];
+    if (!isFormRecord(page)) return `${where}.pages[${p}] must be an object`;
+    const known = checkKnownKeys(page, ["title", "children"], `${where}.pages[${p}] property`);
+    if (known !== true) return known;
+    if (!isBoundedString(page.title, MAX_DIALOG_FIELD_LABEL) || page.title.length === 0) {
+      return `${where}.pages[${p}].title must be a non-empty string (max ${MAX_DIALOG_FIELD_LABEL} chars)`;
+    }
+    if (!Array.isArray(page.children)) return `${where}.pages[${p}].children must be an array`;
+  }
+  return true;
+}
+
+/**
+ * One widget's OWN members. Children are not descended here — the walker in
+ * vFormDefine does that with an explicit stack — but their container-level
+ * shape (array / pages) is checked so the walker can push them blindly.
+ * `seen` carries every name used so far (uniqueness across the whole tree).
+ */
+function checkFormWidget(node: unknown, where: string, seen: Set<string>): true | string {
+  if (!isFormRecord(node)) return `${where} must be an object`;
+  const w = node;
+  if (typeof w.type !== "string") return `${where}.type must be a string`;
+  if (w.type === "html") return `${where}.type "html" is reserved and not available to scripts`;
+  if (!FORM_WIDGET_TYPE_SET.has(w.type)) {
+    return `${where}.type "${shownName(w.type)}" is not a form widget type (allowed: ${FORM_WIDGET_TYPES.join(", ")})`;
+  }
+  const type = w.type;
+  const known = checkKnownKeys(w, FORM_WIDGET_KEYS[type], `${where} property`);
+  if (known !== true) return known;
+
+  // name: a KEY on the result object, so an identifier and unique — that is
+  // what keeps `result.__proto__` from being a thing.
+  if (w.name !== undefined || formWidgetNeedsName(type)) {
+    const name = checkFormName(w.name, `${where}.name`);
+    if (name !== true) return name;
+    if (seen.has(w.name as string)) return `${where}.name "${w.name as string}" is used more than once`;
+    seen.add(w.name as string);
+  }
+
+  // -- FormWidgetBase --
+  for (const k of ["label", "help"] as const) {
+    const r = checkFormText(w[k], `${where}.${k}`, MAX_DIALOG_FIELD_LABEL);
+    if (r !== true) return r;
+  }
+  for (const k of ["hidden", "disabled"] as const) {
+    const r = checkFormBool(w[k], `${where}.${k}`);
+    if (r !== true) return r;
+  }
+  if (w.width !== undefined && w.width !== "fill") {
+    if (!isFiniteNumber(w.width) || w.width < 1 || w.width > MAX_FORM_WIDTH) {
+      return `${where}.width must be a number of pixels between 1 and ${MAX_FORM_WIDTH}, or "fill"`;
+    }
+  }
+
+  // -- FormInputBase --
+  if (FORM_INPUT_TYPE_SET.has(type)) {
+    if (w.bind !== undefined) {
+      const r = checkFormBinding(w.bind, `${where}.bind`);
+      if (r !== true) return r;
+    }
+    const req = checkFormBool(w.required, `${where}.required`);
+    if (req !== true) return req;
+    if (w.writeOn !== undefined && !isOneOf(w.writeOn, FORM_WRITE_ON)) {
+      return `${where}.writeOn must be one of: ${FORM_WRITE_ON.join(", ")}`;
+    }
+  }
+
+  // -- per type --
+  switch (type) {
+    case "label": {
+      if (!isBoundedString(w.text, MAX_DIALOG_MESSAGE)) return `${where}.text must be a string (max ${MAX_DIALOG_MESSAGE} chars)`;
+      if (w.style !== undefined && !isOneOf(w.style, FORM_LABEL_STYLES)) {
+        return `${where}.style must be one of: ${FORM_LABEL_STYLES.join(", ")}`;
+      }
+      return true;
+    }
+    case "textbox": {
+      const d = checkFormText(w.default, `${where}.default`, MAX_FORM_VALUE_CHARS);
+      if (d !== true) return d;
+      const p = checkFormText(w.placeholder, `${where}.placeholder`, MAX_DIALOG_FIELD_LABEL);
+      if (p !== true) return p;
+      const m = checkFormBool(w.multiline, `${where}.multiline`);
+      if (m !== true) return m;
+      return checkFormNumberIn(w.maxLength, `${where}.maxLength`, 1, MAX_DIALOG_MESSAGE);
+    }
+    case "number": {
+      for (const k of ["default", "min", "max", "step"] as const) {
+        if (w[k] !== undefined && !isFiniteNumber(w[k])) return `${where}.${k} must be a finite number`;
+      }
+      if (isFiniteNumber(w.min) && isFiniteNumber(w.max) && w.min > w.max) {
+        return `${where}.min must not be greater than ${where}.max`;
+      }
+      if (w.step !== undefined && (w.step as number) <= 0) return `${where}.step must be greater than 0`;
+      return true;
+    }
+    case "date": {
+      for (const k of ["default", "min", "max"] as const) {
+        const r = checkFormText(w[k], `${where}.${k}`, MAX_FORM_DATE_CHARS);
+        if (r !== true) return r;
+      }
+      return true;
+    }
+    case "checkbox":
+    case "toggle": {
+      if (w.default !== undefined && typeof w.default !== "boolean") return `${where}.default must be a boolean for a ${type}`;
+      return true;
+    }
+    case "radio":
+    case "dropdown":
+    case "listbox": {
+      const o = checkFormOptions(w.options, `${where}.options`);
+      if (o !== true) return o;
+      if (type === "listbox" && Array.isArray(w.default)) {
+        const d = checkFormValue(w.default, `${where}.default`);
+        if (d !== true) return d;
+      } else {
+        const d = checkFormText(w.default, `${where}.default`, MAX_DIALOG_OPTION_TEXT);
+        if (d !== true) return d;
+      }
+      if (type === "radio" && w.layout !== undefined && !isOneOf(w.layout, FORM_RADIO_LAYOUTS)) {
+        return `${where}.layout must be one of: ${FORM_RADIO_LAYOUTS.join(", ")}`;
+      }
+      if (type === "dropdown") return checkFormBool(w.allowEmpty, `${where}.allowEmpty`);
+      if (type === "listbox") {
+        const m = checkFormBool(w.multi, `${where}.multi`);
+        if (m !== true) return m;
+        return checkFormNumberIn(w.rows, `${where}.rows`, 1, MAX_FORM_LISTBOX_ROWS, true);
+      }
+      return true;
+    }
+    case "button": {
+      if (!isBoundedString(w.text, MAX_DIALOG_LABEL) || w.text.length === 0) {
+        return `${where}.text must be a non-empty string (max ${MAX_DIALOG_LABEL} chars)`;
+      }
+      if (w.role !== undefined && !isOneOf(w.role, FORM_BUTTON_ROLES)) {
+        return `${where}.role must be one of: ${FORM_BUTTON_ROLES.join(", ")}`;
+      }
+      return checkFormBool(w.danger, `${where}.danger`);
+    }
+    case "group": {
+      const t = checkFormText(w.title, `${where}.title`, MAX_DIALOG_FIELD_LABEL);
+      if (t !== true) return t;
+      if (!Array.isArray(w.children)) return `${where}.children must be an array`;
+      return true;
+    }
+    case "tabs":
+      return checkFormTabPages(w.pages, where);
+    case "row":
+    case "column": {
+      if (!Array.isArray(w.children)) return `${where}.children must be an array`;
+      return checkFormNumberIn(w.gap, `${where}.gap`, 0, MAX_FORM_GAP);
+    }
+    case "grid": {
+      if (!isFiniteNumber(w.columns) || !Number.isInteger(w.columns) || w.columns < 1 || w.columns > MAX_FORM_GRID_COLUMNS) {
+        return `${where}.columns must be an integer between 1 and ${MAX_FORM_GRID_COLUMNS}`;
+      }
+      if (!Array.isArray(w.children)) return `${where}.children must be an array`;
+      return true;
+    }
+    case "spacer":
+      return checkFormNumberIn(w.size, `${where}.size`, 0, MAX_FORM_SPACER);
+    case "image": {
+      // BUG-0086's rule, mechanical: a script may REFERENCE media already in
+      // the workbook, never INTRODUCE bytes — so no data: URI, no path, no URL.
+      if (w.src !== "" && !isMediaRef(w.src)) {
+        return `${where}.src must be a media:{sha256} handle of an image already in this workbook, or "" (never a data: URI, a path or a URL)`;
+      }
+      const a = checkFormText(w.alt, `${where}.alt`, MAX_DIALOG_FIELD_LABEL);
+      if (a !== true) return a;
+      return checkFormNumberIn(w.height, `${where}.height`, 1, MAX_FORM_IMAGE_HEIGHT);
+    }
+    case "table":
+      return checkFormTable(w, where);
+    case "progress": {
+      if (!isFiniteNumber(w.value)) return `${where}.value must be a finite number`;
+      if (w.max !== undefined && (!isFiniteNumber(w.max) || w.max <= 0)) return `${where}.max must be a number greater than 0`;
+      return checkFormText(w.text, `${where}.text`, MAX_DIALOG_FIELD_LABEL);
+    }
+    default:
+      return `${where}.type "${shownName(type)}" is not a form widget type`;
+  }
+}
+
+/** form.define args: [spec]. */
+export const vFormDefine: Validator = ([spec]) => {
+  if (!isFormRecord(spec)) return "spec must be an object";
+  const s = spec;
+  const known = checkKnownKeys(
+    s,
+    ["title", "description", "submitLabel", "cancelLabel", "width", "writeOn", "submitOnEnter", "focus", "children"],
+    "form property",
+  );
+  if (known !== true) return known;
+  if (s.title !== undefined && !isBoundedString(s.title, MAX_DIALOG_TITLE)) {
+    return `title must be a string (max ${MAX_DIALOG_TITLE} chars)`;
+  }
+  if (s.description !== undefined && !isBoundedString(s.description, MAX_DIALOG_MESSAGE)) {
+    return `description must be a string (max ${MAX_DIALOG_MESSAGE} chars)`;
+  }
+  for (const k of ["submitLabel", "cancelLabel"] as const) {
+    if (s[k] !== undefined && (!isBoundedString(s[k], MAX_DIALOG_LABEL) || (s[k] as string).length === 0)) {
+      return `${k} must be a non-empty string (max ${MAX_DIALOG_LABEL} chars)`;
+    }
+  }
+  if (s.width !== undefined && (!isFiniteNumber(s.width) || s.width < MIN_FORM_WIDTH || s.width > MAX_FORM_WIDTH)) {
+    return `width must be a number between ${MIN_FORM_WIDTH} and ${MAX_FORM_WIDTH}`;
+  }
+  if (s.writeOn !== undefined && !isOneOf(s.writeOn, FORM_WRITE_ON)) {
+    return `writeOn must be one of: ${FORM_WRITE_ON.join(", ")}`;
+  }
+  const soe = checkFormBool(s.submitOnEnter, "submitOnEnter");
+  if (soe !== true) return soe;
+  if (s.focus !== undefined) {
+    const f = checkFormName(s.focus, "focus");
+    if (f !== true) return f;
+  }
+  if (!Array.isArray(s.children) || s.children.length === 0) return "children must be a non-empty array";
+
+  // The walk. `depth` is the number of container ancestors: a top-level widget
+  // is at depth 0, so a widget inside eight nested groups sits at depth 8 and
+  // is allowed; the ninth level is refused. A children array is COUNTED before
+  // it is pushed, so the stack never grows past MAX_FORM_NODES frames.
+  interface Frame { node: unknown; where: string; depth: number }
+  const stack: Frame[] = [];
+  let total = 0;
+  let inputs = 0;
+  const seen = new Set<string>();
+  const pushChildren = (arr: unknown[], where: string, depth: number): true | string => {
+    if (depth > MAX_FORM_DEPTH) return `${where} is nested too deeply (max ${MAX_FORM_DEPTH} levels of containers)`;
+    total += arr.length;
+    if (total > MAX_FORM_NODES) return `the form declares more than ${MAX_FORM_NODES} widgets (max ${MAX_FORM_NODES}, containers included)`;
+    for (let i = arr.length - 1; i >= 0; i--) stack.push({ node: arr[i], where: `${where}[${i}]`, depth });
+    return true;
+  };
+  const seeded = pushChildren(s.children, "children", 0);
+  if (seeded !== true) return seeded;
+
+  while (stack.length > 0) {
+    const frame = stack.pop() as Frame;
+    const verdict = checkFormWidget(frame.node, frame.where, seen);
+    if (verdict !== true) return verdict;
+    const w = frame.node as Record<string, unknown>;
+    const type = w.type as string;
+    if (FORM_INPUT_TYPE_SET.has(type)) {
+      inputs++;
+      if (inputs > MAX_FORM_INPUTS) return `the form declares more than ${MAX_FORM_INPUTS} input widgets (max ${MAX_FORM_INPUTS})`;
+    }
+    if (type === "tabs") {
+      const pages = w.pages as Array<Record<string, unknown>>;
+      for (let p = pages.length - 1; p >= 0; p--) {
+        const pushed = pushChildren(pages[p].children as unknown[], `${frame.where}.pages[${p}].children`, frame.depth + 1);
+        if (pushed !== true) return pushed;
+      }
+    } else if (FORM_CONTAINER_TYPE_SET.has(type)) {
+      const pushed = pushChildren(w.children as unknown[], `${frame.where}.children`, frame.depth + 1);
+      if (pushed !== true) return pushed;
+    }
+  }
+  return true;
+};
+
+/** form.show args: [options?] — `{ initial }` only. */
+export const vFormShow: Validator = ([options]) => {
+  if (options === undefined || options === null) return true;
+  if (!isFormRecord(options)) return "options must be an object";
+  const known = checkKnownKeys(options, ["initial"], "show option");
+  if (known !== true) return known;
+  if (options.initial === undefined) return true;
+  return checkFormValues(options.initial, "initial", MAX_FORM_INITIAL_KEYS);
+};
+
+const FORM_PATCH_CONTROL_KEYS = ["disabled", "hidden", "label", "text", "options", "error", "value", "max"] as const;
+
+/** form.update args: [patch]. */
+export const vFormUpdate: Validator = ([patch]) => {
+  if (!isFormRecord(patch)) return "patch must be an object";
+  const known = checkKnownKeys(patch, ["values", "controls", "focus", "message"], "patch property");
+  if (known !== true) return known;
+  if (patch.values !== undefined) {
+    const v = checkFormValues(patch.values, "values", MAX_FORM_INITIAL_KEYS);
+    if (v !== true) return v;
+  }
+  if (patch.controls !== undefined) {
+    if (!isFormRecord(patch.controls)) return "controls must be an object of widget name -> changes";
+    const names = Object.keys(patch.controls);
+    if (names.length > MAX_FORM_PATCH_CONTROLS) {
+      return `controls has ${names.length} entries (max ${MAX_FORM_PATCH_CONTROLS})`;
+    }
+    for (const name of names) {
+      const n = checkFormName(name, `controls key "${shownName(name)}"`);
+      if (n !== true) return n;
+      const where = `controls.${name}`;
+      const c: unknown = patch.controls[name];
+      if (!isFormRecord(c)) return `${where} must be an object`;
+      const ck = checkKnownKeys(c, FORM_PATCH_CONTROL_KEYS, `${where} property`);
+      if (ck !== true) return ck;
+      for (const k of ["disabled", "hidden"] as const) {
+        const r = checkFormBool(c[k], `${where}.${k}`);
+        if (r !== true) return r;
+      }
+      const label = checkFormText(c.label, `${where}.label`, MAX_DIALOG_FIELD_LABEL);
+      if (label !== true) return label;
+      const text = checkFormText(c.text, `${where}.text`, MAX_DIALOG_MESSAGE);
+      if (text !== true) return text;
+      if (c.options !== undefined) {
+        // A `{ range }` choice list is resolved ONCE, when the form opens, by
+        // the host's own audited range read. A patch has no such read, so
+        // accepting one here handed the renderer an object it cannot paint and
+        // the control silently kept its old list — a call the script had no
+        // way to discover was a no-op. Refused BY NAME instead, with the thing
+        // to do about it.
+        if (isFormRecord(c.options) && !Array.isArray(c.options)) {
+          return (
+            `${where}.options: a { range } list is read from the sheet when the form opens and ` +
+            `cannot be changed by a patch — pass the choices themselves (an array)`
+          );
+        }
+        const o = checkFormOptions(c.options, `${where}.options`);
+        if (o !== true) return o;
+      }
+      if (c.error !== undefined && c.error !== null && !isBoundedString(c.error, MAX_FORM_ERROR_CHARS)) {
+        return `${where}.error must be a string (max ${MAX_FORM_ERROR_CHARS} chars) or null`;
+      }
+      if (c.value !== undefined && !isFiniteNumber(c.value)) return `${where}.value must be a finite number`;
+      if (c.max !== undefined && (!isFiniteNumber(c.max) || c.max <= 0)) return `${where}.max must be a number greater than 0`;
+    }
+  }
+  if (patch.focus !== undefined) {
+    const f = checkFormName(patch.focus, "focus");
+    if (f !== true) return f;
+  }
+  if (patch.message !== undefined && patch.message !== null) {
+    if (!isFormRecord(patch.message)) return "message must be null or { text, kind }";
+    const mk = checkKnownKeys(patch.message, ["text", "kind"], "message property");
+    if (mk !== true) return mk;
+    if (!isBoundedString(patch.message.text, MAX_DIALOG_MESSAGE)) {
+      return `message.text must be a string (max ${MAX_DIALOG_MESSAGE} chars)`;
+    }
+    if (patch.message.kind !== undefined && !isOneOf(patch.message.kind, FORM_MESSAGE_KINDS)) {
+      return `message.kind must be one of: ${FORM_MESSAGE_KINDS.join(", ")}`;
+    }
+  }
+  return true;
+};
+
+/** form.close args: [result?] — what the form reports as its answer. */
+export const vFormClose: Validator = ([result]) => {
+  if (result === undefined || result === null) return true;
+  return checkFormValues(result, "result", MAX_FORM_INITIAL_KEYS);
+};
+
+/**
+ * form.readControl args: [name]. The name came from a `bind: { control }` the
+ * spec validator already bounded; this row exists so the read goes through the
+ * broker like every other read the form performs — policy decided, audit row
+ * written — rather than reaching the Controls store directly.
+ */
+export const vFormReadControl: Validator = ([name]) => {
+  if (!isBoundedString(name, MAX_FORM_BIND_CHARS) || (name as string).trim().length === 0) {
+    return `name must be a non-empty string (max ${MAX_FORM_BIND_CHARS} chars)`;
+  }
+  return true;
+};
+
+/**
+ * cap.formsShow args: [name, options?]. The NAME is resolved host-side among
+ * MOUNTED form scripts (never an id the caller could forge), so all that is
+ * checked here is that it is a bounded string; the options are form.show's.
+ */
+export const vFormsShowNamed: Validator = ([name, options]) => {
+  if (!isBoundedString(name, MAX_DIALOG_TITLE) || (name as string).trim().length === 0) {
+    return `name must be a non-empty string (max ${MAX_DIALOG_TITLE} chars)`;
+  }
+  return vFormShow([options]);
 };
 
 export const vKey: Validator = ([key]) =>

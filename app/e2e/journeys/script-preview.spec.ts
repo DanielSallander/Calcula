@@ -518,3 +518,359 @@ export function setup(context) {
     expect(await grid.getCellDisplayValue(TARGET_REF)).toBe(SEED);
   });
 });
+
+// ===========================================================================
+// "Preview form" — the same dry run, PAINTED
+// ===========================================================================
+/**
+ * WHAT THIS ADDS. Everything above judges a preview by its REPORT. A `form`
+ * script's report is a layout, and a layout is only checkable by drawing it:
+ * the editor's "Preview form" action runs the code ON SCREEN through the same
+ * `previewObjectScript` rung and paints the captured `form.define` layout in
+ * the real trusted renderer — labelled as a preview, seeded from the copy the
+ * run used, and with Submit turned into a "what would be written" list instead
+ * of a write.
+ *
+ * WHY THE IN-APP EDITOR AND NOT THE EDITOR WINDOW. There are two hosts for the
+ * same action and they share the same testid: `CodeEditorDialog` (main window,
+ * dialog id `scriptable-objects.code-editor`) calls `runFormPreview` directly,
+ * and `ObjectScriptEditorApp` (a separate Tauri window) sends the compiled
+ * buffer over `formPreviewBridge`'s Tauri event channel to the SAME function in
+ * the main window. Both ends of that bridge are covered by unit tests; what
+ * only a journey can prove is that the run really produces a painted, inert
+ * form. The main-window host is therefore the one driven here — it exercises
+ * the identical `runFormPreview`, with one window instead of two.
+ *
+ * THE FOUR THINGS A PREVIEW MUST NOT DO, asserted rather than assumed: it must
+ * not mount the script, must not write the cell it is bound to, must not dirty
+ * the document, and must not put a row in the audit ring (the preview handle is
+ * `preview: true`, and `broker.ts`'s `audit()` returns early for it). A
+ * "preview" that failed any of those would be an edit wearing a label.
+ *
+ * GRID REAL ESTATE. DR123 (0-based row 122, col 121) — inside the DP..DR /
+ * rows 122..128 band the Forms feature owns, and distinct from DP1..DP4 above
+ * and from every cell script-form.spec.ts / script-form-distributed.spec.ts use.
+ */
+
+/** The `@api` facade — the same module every extension imports. */
+const FORM_API = "/src/api/index.ts";
+/** The in-app Object Script Editor. */
+const EDITOR_DIALOG_ID = "scriptable-objects.code-editor";
+
+const FORM_CELL_REF = "DR123";
+/** 0-based, and the number the snapshot-bound precondition below is checked against. */
+const FORM_CELL_ROW = 122;
+const FORM_CELL_SEED = "Seeded Co";
+const FORM_SCRIPT_ID = `preview-form-${Date.now().toString(36)}`;
+const FORM_SCRIPT_NAME = "Preview Form Under Test";
+
+/* eslint-disable @typescript-eslint/naming-convention --
+ * `__calcImport` is installed by main.tsx and `__formAppImport` is this block's
+ * own page-side global; the double-underscore is the harness convention. */
+type FormAppWindow = Window & {
+  __calcImport: (url: string) => Promise<unknown>;
+  __formAppImport?: (modulePath: string) => Promise<unknown>;
+};
+/* eslint-enable @typescript-eslint/naming-convention */
+
+/**
+ * Import `@api` at the URL the RUNNING app loaded it from.
+ *
+ * Vite's dev server versions a module's URL (`?t=...`) after any edit in its
+ * import graph, and two URLs are two module records with two copies of the
+ * module-level state — here the form registry, the mount table and the audit
+ * ring. A test that imported the unversioned path would read a PHANTOM whose
+ * registries are always empty, and every "nothing was mounted / nothing was
+ * audited" assertion below would pass against it no matter what happened.
+ */
+async function installFormAppImport(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as FormAppWindow;
+    if (w.__formAppImport) return;
+    w.__formAppImport = async (modulePath: string) => {
+      const entries = performance
+        .getEntriesByType("resource")
+        .map((e) => e.name)
+        .filter((n) => {
+          try {
+            return new URL(n).pathname === modulePath;
+          } catch {
+            return false;
+          }
+        });
+      entries.sort();
+      const url =
+        entries.length > 0 ? entries[entries.length - 1] : new URL(modulePath, document.baseURI).href;
+      return w.__calcImport(url);
+    };
+  });
+}
+
+async function apiCall<T = unknown>(page: Page, fn: string, args: unknown[] = []): Promise<T> {
+  return page.evaluate(
+    async ({ fn, args, api }) => {
+      const w = window as unknown as FormAppWindow;
+      const m = (await w.__formAppImport!(api)) as Record<string, (...a: unknown[]) => unknown>;
+      if (typeof m[fn] !== "function") throw new Error(`@api exports no function "${fn}"`);
+      return (await m[fn](...args)) as unknown;
+    },
+    { fn, args, api: FORM_API },
+  ) as Promise<T>;
+}
+
+async function formScriptSourceRegistered(page: Page): Promise<void> {
+  const source = [
+    "// @capability ui.dialog",
+    "function setup(form) {",
+    "  form.define({",
+    '    title: "Preview order", submitLabel: "Save", width: 420,',
+    "    children: [",
+    `      { type: "textbox",  name: "customer", label: "Customer", bind: "${FORM_CELL_REF}", maxLength: 40 },`,
+    '      { type: "checkbox", name: "rush",     label: "Rush order" },',
+    "    ],",
+    "  });",
+    "}",
+    "",
+  ].join("\n");
+  await page.evaluate(
+    async ({ api, id, name, source }) => {
+      const w = window as unknown as FormAppWindow;
+      const m = (await w.__formAppImport!(api)) as {
+        // eslint-disable-next-line @typescript-eslint/naming-convention -- an exported identifier, not a name this file picks
+        ObjectScriptManager: { registerScript: (d: unknown) => void };
+      };
+      // REGISTERED ONLY. Not saved to the backend and never mounted: the whole
+      // claim is that previewing unsaved code runs nothing in the workbook.
+      m.ObjectScriptManager.registerScript({
+        id,
+        name,
+        objectType: "form",
+        instanceId: `${id}-instance`,
+        source,
+        accessLevel: "restricted",
+        description: null,
+      });
+    },
+    { api: FORM_API, id: FORM_SCRIPT_ID, name: FORM_SCRIPT_NAME, source },
+  );
+}
+
+async function isFormScriptMounted(page: Page): Promise<boolean> {
+  return page.evaluate(
+    async ({ api, id }) => {
+      const w = window as unknown as FormAppWindow;
+      const m = (await w.__formAppImport!(api)) as {
+        // eslint-disable-next-line @typescript-eslint/naming-convention -- an exported identifier, not a name this file picks
+        ObjectScriptManager: { isScriptMounted: (id: string) => boolean };
+      };
+      return m.ObjectScriptManager.isScriptMounted(id);
+    },
+    { api: FORM_API, id: FORM_SCRIPT_ID },
+  );
+}
+
+async function isDocumentDirty(page: Page): Promise<boolean> {
+  return page.evaluate(async () => {
+    const mod = (await (window as unknown as FormAppWindow).__calcImport(
+      new URL("/src/api/backend.ts", document.baseURI).href,
+    )) as {
+      invokeBackend: <T>(c: string, a?: unknown) => Promise<T>;
+    };
+    return mod.invokeBackend<boolean>("is_file_modified");
+  });
+}
+
+/**
+ * PRECONDITION, NOT DECORATION. A preview copies at most `MAX_SNAPSHOT_CELLS`
+ * (20 000) cells of the active sheet, clamped ROWS-FIRST over the used range
+ * (`scriptPreview/snapshot.ts`), so on a very WIDE sheet the copy can stop
+ * short of the row a binding names. One app instance serves every spec in this
+ * suite, and each of them widens the used range a little, so "the widget opened
+ * empty" is a failure two different causes can produce. This states which one
+ * up front, in the snapshot's own arithmetic, so the seed assertion below can
+ * only fail for the reason it is about.
+ */
+async function assertRowIsInsideTheSnapshot(page: Page, row: number): Promise<void> {
+  const used = await page.evaluate(async () => {
+    const mod = (await (window as unknown as FormAppWindow).__calcImport(
+      new URL("/src/api/backend.ts", document.baseURI).href,
+    )) as {
+      invokeBackend: <T>(c: string, a?: unknown) => Promise<T>;
+    };
+    return mod.invokeBackend<{
+      startRow: number;
+      startCol: number;
+      endRow: number;
+      endCol: number;
+      empty: boolean;
+    }>("get_used_range", { sheetIndex: null });
+  });
+  if (used.empty) return;
+  const width = Math.max(1, used.endCol - used.startCol + 1);
+  const maxRows = Math.max(1, Math.floor(20_000 / width));
+  const lastCopiedRow = Math.min(used.endRow, used.startRow + maxRows - 1);
+  expect(
+    lastCopiedRow,
+    `the active sheet's used range is ${width} columns wide, so a preview copies only ` +
+      `rows ${used.startRow}..${lastCopiedRow} of it — row ${row} is outside the copy and ` +
+      `this test's bound widget would open empty for a reason that has nothing to do ` +
+      `with forms. Move this spec's cell to a lower row, or narrow what earlier specs ` +
+      `leave on this sheet.`,
+  ).toBeGreaterThanOrEqual(row);
+}
+
+test.describe("the editor's Preview form — a layout painted from unsaved code", () => {
+  test.afterEach(async ({ sharedPage: page }) => {
+    await installFormAppImport(page);
+    // The modal slot first: a preview left open would refuse the next spec's
+    // dialog, and the wedge guard would blame that spec.
+    await apiCall(page, "resetScriptForms").catch(() => undefined);
+    await apiCall(page, "resetScriptDialogs").catch(() => undefined);
+    await apiCall(page, "hideDialog", [EDITOR_DIALOG_ID]).catch(() => undefined);
+    await page
+      .evaluate(
+        async ({ api, id }) => {
+          const w = window as unknown as FormAppWindow;
+          const m = (await w.__formAppImport!(api)) as {
+            // eslint-disable-next-line @typescript-eslint/naming-convention -- an exported identifier, not a name this file picks
+            ObjectScriptManager: { removeScript: (id: string) => void };
+          };
+          try {
+            m.ObjectScriptManager.removeScript(id);
+          } catch {
+            /* already gone */
+          }
+        },
+        { api: FORM_API, id: FORM_SCRIPT_ID },
+      )
+      .catch(() => undefined);
+    for (let i = 0; i < 3; i++) {
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(50);
+    }
+  });
+
+  test("Preview form paints the layout, Submit lists what WOULD be written, and nothing is mounted, written, dirtied or audited", async ({
+    appPage: page,
+    grid,
+  }) => {
+    // A cold Monaco load plus two Worker-realm preview passes; keep the
+    // journey project's full budget rather than shrinking it.
+    test.setTimeout(300_000);
+    await installFormAppImport(page);
+    await grid.setCellValue(FORM_CELL_REF, FORM_CELL_SEED);
+    await expect
+      .poll(() => grid.getCellDisplayValue(FORM_CELL_REF), { timeout: 10_000 })
+      .toBe(FORM_CELL_SEED);
+    await assertRowIsInsideTheSnapshot(page, FORM_CELL_ROW);
+
+    await formScriptSourceRegistered(page);
+    await apiCall(page, "showDialog", [EDITOR_DIALOG_ID, { scriptId: FORM_SCRIPT_ID }]);
+
+    // The action exists ONLY for a form script (CodeEditorDialog gates it on
+    // `activeScript.objectType === "form"`), so its presence is already an
+    // assertion that the editor recognised the object type.
+    const action = page.locator('[data-testid="script-form-preview-action"]');
+    await expect(action, "the editor offers no Preview form action for a form script").toBeVisible({
+      timeout: 60_000,
+    });
+
+    // The two invariants are measured from HERE — after the editor is up, so
+    // Monaco's own loading cannot be mistaken for the preview's doing.
+    const dirtyBefore = await isDocumentDirty(page);
+    // Through `@api`, not through auditRing.ts directly: this block's other
+    // reads all go through that one resolved module, and a ring read from a
+    // SECOND instance would report 0 both times and agree with itself.
+    const auditBefore = await apiCall<number>(page, "getAuditTotal");
+    expect(await isFormScriptMounted(page), "precondition: the script must not be mounted").toBe(false);
+
+    await action.click();
+
+    // A failed preview reports WHY on the status strip; read it into the
+    // failure rather than timing out on an invisible dialog.
+    const status = page.locator('[data-testid="script-form-preview-status"]');
+    await expect(status).toBeVisible({ timeout: 60_000 });
+    await expect
+      .poll(async () => (await status.getAttribute("data-phase")) ?? "", { timeout: 90_000 })
+      .not.toBe("running");
+    expect(
+      await status.getAttribute("data-phase"),
+      `the preview did not open. The editor said: ${await status.innerText()}`,
+    ).toBe("shown");
+
+    // ---- THE PAINTED FORM -------------------------------------------------
+    const dialog = page.locator("[data-script-form]");
+    await expect(dialog).toBeVisible({ timeout: 20_000 });
+    const band = page.locator("[data-script-form-band]");
+    await expect(band).toContainText(FORM_SCRIPT_NAME);
+    // THE PREVIEW MARKER, in host chrome the script cannot address or remove.
+    await expect(band, "a preview must say so where the user is looking").toContainText(
+      "nothing will be written",
+    );
+    await expect(page.locator("[data-script-form-title]")).toHaveText("Preview order");
+
+    // The session belongs to the PREVIEW identity (`preview:<scriptId>`), not
+    // to a mount — the registry's own answer to "whose dialog is this".
+    expect(
+      (await apiCall<{ scriptId: string } | null>(page, "getActiveScriptForm"))?.scriptId,
+    ).toBe(`preview:${FORM_SCRIPT_ID}`);
+    expect(await isFormScriptMounted(page), "a preview must not mount the script").toBe(false);
+
+    // Seeded from the COPY the run read, not from an empty grid.
+    const customer = page.locator('[data-form-widget="customer"]');
+    await expect(customer).toHaveValue(FORM_CELL_SEED);
+
+    // ---- SUBMIT SHOWS THE WOULD-WRITE LIST --------------------------------
+    await customer.click();
+    await customer.fill("Typed In Preview");
+    await page.locator('[data-form-widget="rush"]').check();
+    await page.locator("[data-script-form-submit]").first().click();
+
+    const wouldWrite = page.locator("[data-script-form-preview]");
+    await expect(
+      wouldWrite,
+      "Submit in a preview must answer with what WOULD be written, never with a write",
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(wouldWrite).toContainText("customer");
+    // The binding is named in the script's own words, so the author can see
+    // which cell each answer is aimed at.
+    await expect(wouldWrite).toContainText(FORM_CELL_REF);
+    await expect(wouldWrite).toContainText("Typed In Preview");
+    // ...alongside what the cell holds NOW, which is what makes it a diff.
+    await expect(wouldWrite).toContainText(FORM_CELL_SEED);
+
+    // THE CELL ITSELF NEVER MOVED.
+    expect(
+      await grid.getCellDisplayValue(FORM_CELL_REF),
+      "a preview wrote the bound cell — that is an edit, not a preview",
+    ).toBe(FORM_CELL_SEED);
+
+    // ---- CLOSE, AND THE INVARIANTS ---------------------------------------
+    await page.locator("[data-script-form-close]").first().click();
+    await expect(dialog).toBeHidden({ timeout: 15_000 });
+
+    expect(
+      await grid.getCellDisplayValue(FORM_CELL_REF),
+      "closing the preview wrote the bound cell",
+    ).toBe(FORM_CELL_SEED);
+    expect(await isFormScriptMounted(page), "the preview left the script mounted").toBe(false);
+    expect(
+      await apiCall(page, "getActiveScriptForm"),
+      "the preview identity kept the app-wide modal slot after closing",
+    ).toBeNull();
+    expect(
+      await isDocumentDirty(page),
+      "the preview dirtied the document — is_modified gates BOTH the " +
+        "close-without-saving prompt and AutoRecover",
+    ).toBe(dirtyBefore);
+    expect(
+      await apiCall<number>(page, "getAuditTotal"),
+      "the preview put a row in the audit ring: a dry run is not an event in " +
+        "this workbook's history, and the transparency panel renders that ring",
+    ).toBe(auditBefore);
+
+    // The editor's status strip clears itself once the form is gone, so the
+    // author is not left reading a note about a dialog that closed.
+    await expect(status).toBeHidden({ timeout: 15_000 });
+  });
+});

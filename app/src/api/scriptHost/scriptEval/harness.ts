@@ -232,7 +232,7 @@ export async function runTaskOutcome(task: EvalTask, source: string): Promise<Ou
   // hook the table cannot synthesize is a HARNESS GAP: the task is ungradable
   // for this candidate, never a model failure. (Every current outcome event is
   // onClick, so today this arms a tripwire rather than changing a grade.)
-  const synthesized = synthesizableHookPayload(outcome.event);
+  const synthesized = synthesizableHookPayload(outcome.event, task.objectType);
   if (synthesized === null) {
     state.gap ??= `a synthesizable payload for the "${outcome.event}" hook`;
     return finish(false);

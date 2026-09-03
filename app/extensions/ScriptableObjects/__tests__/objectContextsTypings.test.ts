@@ -148,8 +148,12 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // throws declarations away) and one row per (chain, iface) pair (which
     // repeats an inherited declaration 176 times for no gain).
     const chains = new Set(entries.map((e) => e.chain));
-    expect(chains.size).toBe(667);
-    expect(entries.length).toBe(718);
+    // 2026-09-02: 667 -> 686 chains and 718 -> 743 entries with the `form`
+    // object type (FormContext: define/show/close/update/control()/values/
+    // isOpen + five hooks, the FormControlHandle sub-object, and the
+    // caps.forms.show door every script gets).
+    expect(chains.size).toBe(686);
+    expect(entries.length).toBe(743);
     expect(entries.length).toBeGreaterThan(chains.size);
 
     const policyPairs = new Set(
@@ -159,7 +163,10 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
         ),
       ].map((m) => `${JSON.parse(m[1])}|${JSON.parse(m[2])}`),
     );
-    expect(policyPairs.size).toBe(894);
+    // 2026-09-02: 894 -> 930 with the `form` object type (the base surface
+    // re-probed under one more context interface, plus its own members and
+    // caps.forms.show).
+    expect(policyPairs.size).toBe(930);
     expect(entries.length).toBeLessThan(policyPairs.size);
 
     // TOTALITY, which is what makes `entryFor`'s exact match total: every

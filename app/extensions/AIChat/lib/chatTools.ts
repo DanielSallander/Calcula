@@ -55,6 +55,7 @@ export const DRAFT_OBJECT_TYPES = [
   "namedRange",
   "panel",
   "range",
+  "form",
 ] as const;
 
 export const TOOLS: ChatToolDef[] = [

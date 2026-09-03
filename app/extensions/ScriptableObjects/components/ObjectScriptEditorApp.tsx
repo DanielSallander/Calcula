@@ -77,6 +77,14 @@ import {
   subscribeToAiEdits,
 } from "../lib/aiEditClient";
 import AiEditStrip from "./AiEditStrip";
+import {
+  dismissFormPreviewStatus,
+  formPreviewStateFor,
+  installFormPreviewClient,
+  reportFormPreviewFailure,
+  requestFormPreview,
+  subscribeToFormPreviews,
+} from "../lib/formPreviewBridge";
 import { ActivityDot } from "../../_shared/components/ActivityDot";
 import AiEditDiff from "./AiEditDiff";
 import ScriptHistoryPanel from "./ScriptHistoryPanel";
@@ -1273,6 +1281,38 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   useEffect(() => installAiEditClient(), []);
 
   // ==========================================================================
+  // Preview form
+  // ==========================================================================
+  // Offered ONLY for a `form` script. The text on screen is compiled through
+  // the same gate a save uses — but NOT stored — and the JavaScript goes to
+  // the MAIN window, where the preview realm runs it against a copy of the
+  // active sheet and paints the captured layout in a labelled preview dialog.
+  // Nothing is saved, mounted or written; what comes back is a status line.
+  useEffect(() => installFormPreviewClient(), []);
+  const formPreview = useSyncExternalStore(
+    subscribeToFormPreviews,
+    // The shared idle object when there is nothing — see aiEditStateFor.
+    () => formPreviewStateFor(activeScriptId),
+  );
+  const isFormScript = activeScript?.objectType === "form";
+
+  const handlePreviewForm = useCallback(async () => {
+    if (!activeScript || !activeScriptId || activeScript.objectType !== "form") return;
+    // The buffer ON SCREEN, unsaved edits included — the whole point of a
+    // preview is to look before saving.
+    const text = editorRef.current?.getValue() ?? sourceRef.current;
+    const gate = await gateObjectScriptSave(text, activeScript.name, hostValidateScript);
+    if (!gate.ok) {
+      // The compiler's message lands here, in the window the author is typing
+      // in — and nothing was sent, so nothing can come back.
+      reportToConsole(gate.detail, activeScript.id);
+      reportFormPreviewFailure(activeScriptId, `The preview did not start: ${gate.message}`);
+      return;
+    }
+    requestFormPreview({ scriptId: activeScriptId, scriptName: activeScript.name, source: gate.javascript });
+  }, [activeScript, activeScriptId, reportToConsole]);
+
+  // ==========================================================================
   // How this script was written
   // ==========================================================================
   // READ ON OPEN, never on load. An ordinary editing session never asks for the
@@ -2374,6 +2414,36 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           }}>{errorCount}</span>}
         </button>
 
+        {/* Preview form. ONLY for a form script: the code on screen is run in
+            the main window's preview realm against a copy of the active sheet
+            and its layout painted in a preview dialog there. Nothing is saved
+            or written, so it is offered for a draft and a distributed script
+            too — looking is always allowed. */}
+        {activeScript && isFormScript && (
+          <button
+            className="ose-btn"
+            data-testid="script-form-preview-action"
+            onClick={() => void handlePreviewForm()}
+            disabled={formPreview.phase === "running"}
+            style={formPreview.phase === "shown" ? { color: "#9CDCFE" } : undefined}
+            title="Show this form as it would look, from the code on screen. Nothing is saved or written."
+          >
+            <ActivityDot
+              status={
+                formPreview.phase === "running"
+                  ? "running"
+                  : formPreview.phase === "shown"
+                    ? "done"
+                    : formPreview.phase === "failed"
+                      ? "failed"
+                      : "idle"
+              }
+              size={6}
+            />
+            Preview form
+          </button>
+        )}
+
         {/* Edit with AI. Offered for every document kind INCLUDING a recorded
             macro — a macro is the case where hand-editing is most tedious and
             AI help is worth the most. Never for a distributed script, which is
@@ -2530,6 +2600,41 @@ export function ObjectScriptEditorApp(): React.ReactElement {
           </button>
         )}
       </div>
+
+      {/* Preview form status. Inline beside the action, never a dialog: "no
+          layout defined", a declined run, a held modal slot and a compile
+          error are notes the author reads while they keep editing. */}
+      {activeScript && isFormScript && formPreview.phase !== "idle" && (
+        <div
+          data-testid="script-form-preview-status"
+          data-phase={formPreview.phase}
+          role="status"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "4px 12px",
+            backgroundColor: formPreview.phase === "failed" ? "#4A2B2B" : "#2B3A4A",
+            borderBottom: "1px solid #444",
+            color: formPreview.phase === "failed" ? "#F48771" : "#9CDCFE",
+            fontSize: 11,
+            lineHeight: "1.5",
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ flex: 1 }}>{formPreview.message}</span>
+          {formPreview.phase !== "running" && (
+            <button
+              className="ose-btn"
+              data-testid="script-form-preview-dismiss"
+              onClick={() => activeScriptId && dismissFormPreviewStatus(activeScriptId)}
+              title="Hide this note"
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
 
       {/* AN OPEN DEBUG SESSION IS NOT HOT-SWAPPED BY AN EDIT.
           The realm was instrumented from the source as it stood when the session

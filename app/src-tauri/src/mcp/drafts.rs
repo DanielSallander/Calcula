@@ -107,6 +107,7 @@ const VALID_OBJECT_TYPES: &[&str] = &[
     "namedRange",
     "panel",
     "range",
+    "form",
 ];
 
 /// Validate the draft's arguments. Pure — unit-tested.

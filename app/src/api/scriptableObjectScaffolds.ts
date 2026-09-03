@@ -644,6 +644,72 @@ function setup(shape) {
 }
 `;
 
+    case "form":
+      return `// @capability ui.dialog
+// Form: "${name}"
+// Access level: restricted (unlock full API via access level setting)
+//
+// A form is a modal dialog Calcula PAINTS for you from a data-only layout:
+// the script describes labels, inputs, choices and buttons; it never supplies
+// pixels, and the dialog always names this script in its header. Bind a
+// widget to a cell ("B2") and Calcula fills it from that cell and writes your
+// answer back when you press Save — as ONE undo step.
+//
+// Show it with Run (F5), or from any other script:
+//   const answers = await context.caps.forms.show("${name}");
+
+function setup(form) {
+  // #region Form layout (designer-owned — a future visual designer rewrites only this block)
+  form.define({
+    title: "${name}",
+    submitLabel: "Save",
+    width: 460,
+    children: [
+      { type: "textbox",  name: "customer", label: "Customer",   bind: "B2", required: true, maxLength: 80 },
+      { type: "dropdown", name: "region",   label: "Region",     bind: "B3", options: ["EMEA", "APAC", "AMER"] },
+      { type: "row", children: [
+        { type: "number", name: "qty",   label: "Quantity",   bind: "B4", min: 1, required: true },
+        { type: "number", name: "price", label: "Unit price", bind: "B5", min: 0 },
+      ] },
+      { type: "date",     name: "shipDate", label: "Ship date", bind: "B6" },
+      { type: "checkbox", name: "rush",     label: "Rush order" },
+      { type: "label",    name: "total",    text: "Total: -", style: "muted" },
+    ],
+  });
+  // #endregion
+
+  // == Live updates while the form is open ==
+  form.onChange(({ name, values }) => {
+    if (name === "qty" || name === "price") {
+      const total = Number(values.qty ?? 0) * Number(values.price ?? 0);
+      form.control("total").setText("Total: " + total.toFixed(2));
+    }
+  });
+
+  // == Validation that can BLOCK the submit ==
+  // Declarative rules (required / min / max / choices) are enforced by Calcula
+  // before this is asked. Return nothing to accept; { cancel: true, errors }
+  // keeps the form open with the errors shown. Answer within 3 seconds.
+  form.onSubmit(({ values }) => {
+    if (values.rush === true && values.region === "APAC") {
+      return { cancel: true, errors: { region: "Rush orders are not available in APAC" } };
+    }
+  });
+
+  // form.onClose(({ reason }) => form.log("Form closed:", reason));
+}
+
+/** Run (F5) target: show the form and read the answers (null = cancelled). */
+async function run() {
+  const answers = await context.show();
+  if (!answers) {
+    context.log("Cancelled");
+    return;
+  }
+  context.notify(answers.rush ? "Rush order saved" : "Order saved", "success");
+}
+`;
+
     default:
       return `// ${name} Script
 // Access level: restricted
@@ -904,6 +970,34 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
             { name: "properties.title", signature: "properties.title", description: "Panel title" },
             { name: "properties.placement", signature: "properties.placement", description: "Current placement (ribbon or sidebar)" },
             { name: "properties.movable", signature: "properties.movable", description: "Whether the panel can be moved" },
+          ],
+        },
+      ];
+
+    case "form":
+      return [
+        common,
+        dialogs,
+        {
+          category: "Layout",
+          methods: [
+            { name: "define", signature: "define(spec)", description: "Describe the widget tree (labels, inputs, choices, buttons, groups, tabs); nothing is shown yet" },
+            { name: "show", signature: "show(options?)", description: "Show the form modally; resolves the answers on Submit, or null when closed without saving (needs ui.dialog)" },
+            { name: "close", signature: "close(result?)", description: "Close the open form from code; result becomes show()'s answer" },
+            { name: "update", signature: "update(patch)", description: "Change values, enabled/hidden widgets, choices, errors or the banner while the form is open" },
+            { name: "control", signature: "control(name)", description: "A handle on one widget: value, set, setText, enable, show, setOptions, setError, focus, onChange, onClick" },
+            { name: "values", signature: "values", description: "Every input's current value (sync)" },
+            { name: "isOpen", signature: "isOpen", description: "Whether the form is on screen (sync)" },
+          ],
+        },
+        {
+          category: "Events",
+          methods: [
+            { name: "onShow", signature: "onShow(handler)", description: "Called when the form is on screen" },
+            { name: "onChange", signature: "onChange(handler)", description: "Called when a widget's value changes ({ name, value, values, source })" },
+            { name: "onClick", signature: "onClick(handler)", description: "Called when a button widget is clicked ({ name, values })" },
+            { name: "onSubmit", signature: "onSubmit(handler)", description: "Asked before the submit completes; return { cancel: true, errors } to keep the form open (3 s deadline, default accept)" },
+            { name: "onClose", signature: "onClose(handler)", description: "Called when the form leaves the screen ({ reason, values })" },
           ],
         },
       ];

@@ -44,6 +44,9 @@ export const PREFERRED_HOOK_BY_TYPE: Readonly<Record<string, string | null>> = {
   namedRange: "onChange",
   timeline: "onChange",
   pivot: "onRefresh",
+  // A form's default reaction is the user SUBMITTING it: the assisted template
+  // wires onSubmit (the replying verdict hook) and shows the form from run().
+  form: "onSubmit",
   workbook: null,
   sheet: null,
   textbox: null,

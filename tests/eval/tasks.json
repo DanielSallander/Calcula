@@ -489,6 +489,38 @@
       }
     },
     {
+      "id": "cap-form-customer-quantity",
+      "canary": true,
+      "objectType": "form",
+      "intent": "Make a form with a Customer text box bound to B2 and a Quantity number bound to B3, and show it when the script is run.",
+      "hints": [
+        "form",
+        "textbox",
+        "number",
+        "bind",
+        "show"
+      ],
+      "expectCapabilities": ["ui.dialog"],
+      "mustCall": ["define", "show"],
+      "reference": [
+        "// @capability ui.dialog",
+        "export function setup(form) {",
+        "  form.define({",
+        "    title: 'Order',",
+        "    submitLabel: 'Save',",
+        "    children: [",
+        "      { type: 'textbox', name: 'customer', label: 'Customer', bind: 'B2', required: true },",
+        "      { type: 'number', name: 'qty', label: 'Quantity', bind: 'B3', min: 1, required: true },",
+        "    ],",
+        "  });",
+        "}",
+        "export async function run() {",
+        "  const answers = await context.show();",
+        "  if (!answers) context.log('Cancelled');",
+        "}"
+      ]
+    },
+    {
       "id": "obj-sheet-context",
       "canary": false,
       "objectType": "sheet",

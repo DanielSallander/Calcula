@@ -44,6 +44,7 @@ export const OBJECT_TYPE_INTERFACES: ReadonlyArray<readonly [objectType: string,
   ["namedRange", "NamedRangeContext"],
   ["range", "RangeContext"],
   ["timeline", "TimelineContext"],
+  ["form", "FormContext"],
   ["chartMark", "ChartMarkContext"],
   // The `default` branch of buildTyped: no typed members beyond the base.
   ["textbox", "BaseObjectContext"],
@@ -60,6 +61,8 @@ export const OBJECT_TYPE_INTERFACES: ReadonlyArray<readonly [objectType: string,
  */
 export const NAMED_SUBTREES: ReadonlyArray<readonly [path: string, iface: string]> = [
   ["package", "ScriptPackageInfo"],
+  // A form's per-widget handle (form.control("qty") -> value/set/enable/...).
+  ["control()", "FormControlHandle"],
   ["caps", "ScriptCapabilities"],
   ["caps.storage", "ScriptStorageApi"],
   ["caps.cube", "ScriptCubeApi"],
@@ -68,6 +71,7 @@ export const NAMED_SUBTREES: ReadonlyArray<readonly [path: string, iface: string
   ["caps.connector", "ScriptConnectorApi"],
   ["caps.schedule", "ScriptScheduleApi"],
   ["caps.dialog", "ScriptDialogApi"],
+  ["caps.forms", "ScriptFormsApi"],
   ["caps.file", "ScriptFileApi"],
   ["caps.shortcut", "ScriptShortcutApi"],
   ["caps.packages", "ScriptPackagesApi"],

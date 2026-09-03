@@ -55,6 +55,7 @@ const DRAFTABLE_OBJECT_TYPES: readonly ScriptableObjectType[] = [
   "namedRange",
   "panel",
   "range",
+  "form",
 ];
 
 /**
@@ -93,11 +94,15 @@ export function isScriptDraft(value: unknown): value is ScriptDraft {
  * deliberate human action in the editor.
  */
 export function draftToScriptDefinition(draft: ScriptDraft): ObjectScriptDefinition {
+  const objectType = draft.objectType as ScriptableObjectType;
   return {
     id: crypto.randomUUID(),
     name: draft.name,
-    objectType: draft.objectType as ScriptableObjectType,
-    instanceId: draft.instanceId,
+    objectType,
+    // A form's instanceId is its own minted identity (there is no backing
+    // workbook object an AI could name), so a drafted form is minted HERE, the
+    // same rule as its `id`: the AI never chooses the identity a grant is keyed to.
+    instanceId: objectType === "form" ? crypto.randomUUID() : draft.instanceId,
     source: draft.source,
     accessLevel: "restricted",
     ...(draft.description ? { description: draft.description } : {}),

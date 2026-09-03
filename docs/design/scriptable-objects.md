@@ -149,5 +149,5 @@ export default function setup(slicer: SlicerContext) {
 | `Worksheet_Change` | Cell or Sheet script |
 | `Workbook_Open` | Workbook object script |
 | Custom ribbon buttons | Extension system (existing) |
-| UserForms | Component objects with custom scripts |
+| UserForms | ~~Component objects with custom scripts~~ **Superseded 2026-09-02:** a dedicated `form` object type — a host-painted modal widget tree with cell bindings, shown by its own script or by any other script through `caps.forms.show(name)`. See `docs/design/typescript-forms.md`. |
 | Per-object macros | Component instance scripts |

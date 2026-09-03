@@ -2299,6 +2299,7 @@ export {
   dismissScriptDialog,
   getActiveScriptDialog,
   isScriptDialogMuted,
+  revokeScriptDialogs,
   resetScriptDialogs,
   MAX_CONSECUTIVE_DISMISSALS,
   SCRIPT_DIALOG_REQUEST_EVENT,
@@ -2309,6 +2310,69 @@ export type {
   ScriptDialogAnswer,
   ScriptDialogKind,
 } from "./scriptHost/scriptDialogs";
+// Script-defined FORMS (the VBA UserForm): the data-only spec + limits the
+// validator, the host registry and the trusted renderer share, and the host
+// registry itself (sessions, guards, deadlines).
+export {
+  FORM_WIDGET_TYPES,
+  FORM_INPUT_TYPES,
+  FORM_CONTAINER_TYPES,
+  MAX_FORM_NODES,
+  MAX_FORM_DEPTH,
+  MAX_FORM_INPUTS,
+  MAX_FORM_OPTIONS,
+  MAX_FORM_TABLE_CELLS,
+  MAX_FORM_TABS,
+  MIN_FORM_WIDTH,
+  MAX_FORM_WIDTH,
+  MAX_FORM_ERROR_CHARS,
+  SCRIPT_FORM_REQUEST_EVENT,
+  SCRIPT_FORM_PATCH_EVENT,
+  SCRIPT_FORM_CLOSE_EVENT,
+  SCRIPT_FORM_INPUT_EVENT,
+  normalizeFormOption,
+  isValidFormName,
+} from "./scriptHost/scriptFormSpec";
+export type {
+  FormSpec,
+  FormWidget,
+  FormWidgetType,
+  FormPatch,
+  FormBinding,
+  FormOptions,
+  FormOption,
+  FormValue,
+  FormSeed,
+  FormSubmitVerdict,
+  FormCloseReason,
+  FormChangeDetail,
+  FormClickDetail,
+  FormCloseDetail,
+  ScriptFormRequestPayload,
+  ScriptFormPatchPayload,
+  ScriptFormClosePayload,
+  ScriptFormInputPayload,
+  ScriptFormInputKind,
+} from "./scriptHost/scriptFormSpec";
+export {
+  defineScriptForm,
+  getScriptFormSpec,
+  showScriptForm,
+  updateScriptForm,
+  closeScriptForm,
+  revokeScriptForms,
+  resetScriptForms,
+  getActiveScriptForm,
+  FORM_IDLE_DEADLINE_MS,
+  FORM_MAX_OPEN_MS,
+} from "./scriptHost/scriptForms";
+export type { FormSessionDeps, FormSubmitDecision } from "./scriptHost/scriptForms";
+// The Worker-realm preview rung: run a draft in the realm it actually runs in,
+// against a COPY of the workbook, and report what it would do. Applies nothing.
+// The editor's "Preview form" paints the layout it captures; the AI author
+// runner grades drafts with it.
+export { previewObjectScript } from "./scriptHost/scriptPreview";
+export type { PreviewRequest, WorkerPreviewReport } from "./scriptHost/scriptPreview";
 export { DIALOG_FIELD_TYPES, MAX_DIALOG_FIELDS, normalizeDialogOption } from "./scriptHost/scriptDialogSpec";
 export type {
   ScriptDialogField,

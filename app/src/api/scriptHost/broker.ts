@@ -301,6 +301,10 @@ const BROKER_AUDITED_CAPABILITY_METHODS: ReadonlyMap<string, string> = new Map([
   ["cap.dialogConfirm", "host-window dialog; no backend call"],
   ["cap.dialogPrompt", "host-window dialog; no backend call"],
   ["cap.dialogForm", "host-window dialog; no backend call"],
+  ["cap.formsShow", "host-window form shown on another script's behalf; no script-driven backend call"],
+  ["form.show", "host-window form; no script-driven backend call"],
+  ["form.update", "host-window form; no script-driven backend call"],
+  ["form.close", "host-window form; no script-driven backend call"],
   ["cap.fileExportText", "native picker + write, driven from the host; not a gated command"],
   ["cap.fileImportText", "native picker + read, driven from the host; not a gated command"],
   // read_media_file IS privileged and MAIN-window gated, but it is not
@@ -517,6 +521,20 @@ export function unregisterExposed(owner: ScriptHandle, methodName: string): bool
 }
 
 /**
+ * The R7 trust predicate, in ONE place: two scripts share a trust origin when
+ * they are at the same TIER and from the same ORIGIN ("local", or the same
+ * package name). `callExposed` uses it for non-public methods, and the form
+ * registry's cross-script show uses it as its only admission rule — a copy in
+ * either place would be a second policy free to drift from the first.
+ */
+export function sameTrustOrigin(
+  a: Pick<ScriptHandle, "tier" | "origin">,
+  b: Pick<ScriptHandle, "tier" | "origin">,
+): boolean {
+  return a.tier === b.tier && a.origin === b.origin;
+}
+
+/**
  * Call a method exposed by another script, enforcing R7: cross-tier or
  * cross-origin calls require the target to have opted in with {public: true}.
  * Returns a Promise (RESHAPE — already-awaiting scripts are unaffected).
@@ -543,7 +561,7 @@ export async function callExposed(
   if (!target) {
     return undefined; // preserved semantics: missing method -> undefined
   }
-  const sameTrust = target.owner.tier === caller.tier && target.owner.origin === caller.origin;
+  const sameTrust = sameTrustOrigin(caller, target.owner);
   if (!sameTrust && !target.isPublic) {
     throw new BrokerError(
       "PermissionDenied",

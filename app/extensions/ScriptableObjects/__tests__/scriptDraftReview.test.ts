@@ -190,6 +190,7 @@ describe("draft payload validation", () => {
     const rustTypes = [
       "workbook", "sheet", "cell", "row", "column", "slicer", "chart", "pivot",
       "button", "textbox", "timeline", "shape", "table", "namedRange", "panel", "range",
+      "form",
     ];
     for (const t of rustTypes) {
       expect(isScriptDraft(makeDraft({ objectType: t })), t).toBe(true);

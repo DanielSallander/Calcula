@@ -21,6 +21,7 @@ import {
   registerMountedHandle,
   scriptEmitEventName,
   scriptSubscribeEventName,
+  sameTrustOrigin,
   type ScriptHandle,
 } from "./broker";
 import { assertMountAllowed } from "./mountGate";
@@ -63,6 +64,7 @@ import { appendAudit } from "./auditRing";
 import type { CapabilityId } from "./capabilityIds";
 import { MAX_RANGE_CELLS, MAX_FILE_TEXT_CHARS, checkCellWriteValue } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
+import type { ControlValue } from "../controlValues";
 import type { AutoFilterColumnCriteria } from "../autoFilterService";
 import type { ScriptCell } from "../scriptableObjects";
 import type {
@@ -99,6 +101,40 @@ import {
   workbookHasWritebackRegions,
 } from "./writebackWriteGuard";
 import { requestScriptDialog, resetScriptDialogs, revokeScriptDialogs } from "./scriptDialogs";
+import {
+  closeScriptForm,
+  defineScriptForm,
+  getScriptFormSpec,
+  refreshScriptFormSeeds,
+  resetScriptForms,
+  revokeScriptForms,
+  showScriptForm,
+  updateScriptForm,
+  type FormSessionDeps,
+  type FormSubmitDecision,
+} from "./scriptForms";
+import {
+  MAX_FORM_ERROR_CHARS,
+  isValidFormName,
+  type FormPatch,
+  type FormSeed,
+  type FormSpec,
+  type FormValue,
+} from "./scriptFormSpec";
+import {
+  cellWriteFor,
+  collectFormBindings,
+  collectFormSources,
+  dirtyNames,
+  optionsFromCells,
+  parseFormBinding,
+  parseFormRange,
+  rowsFromCells,
+  seedFromCell,
+  seedFromControlValue,
+  sheetIdentityRefusal,
+  type FormBindingDecl,
+} from "./scriptFormBindings";
 import type {
   ScriptDialogFormSpec,
   ScriptDialogPromptOptions,
@@ -532,6 +568,16 @@ export interface HostMountDefinition {
 
 interface MountedWorker {
   worker: Worker;
+  /**
+   * The realm has been terminated: nothing may be relayed into it any more.
+   *
+   * Set by `hostUnmountScript` the moment it calls `worker.terminate()`, and
+   * NOT derived from the `mounted` map — that map is cleared at the END of the
+   * unmount, long after the sweeps that close this script's forms and dialogs
+   * run, so a "is it still mounted?" check reads TRUE while the realm is
+   * already dead.
+   */
+  terminated?: boolean;
   handle: ScriptHandle;
   definition: HostMountDefinition;
   cleanupFns: CleanupFn[];
@@ -590,6 +636,14 @@ interface MountedWorker {
    * membership) without an IPC refetch per change event.
    */
   hostMirror: Map<string, unknown>;
+  /**
+   * Open FORM sessions this worker is waiting on (its own, or one it opened
+   * on another script's behalf). While > 0 the relayed method-call deadlines
+   * stay suspended: a `run()` or a button handler awaiting `form.show()` is
+   * carried by that relay, and its 30 s timer would otherwise abandon the
+   * call while the user was still typing into the form.
+   */
+  formHolds: number;
   /**
    * Debug sessions only: suspends/restarts the 10s mount deadline. A breakpoint
    * inside `setup` legitimately stops the mount for as long as the user is
@@ -719,6 +773,7 @@ async function mountWorker(definition: HostMountDefinition): Promise<void> {
     declaredRenderHooks: new Set(),
     declaredHooks: [],
     hostMirror: new Map(),
+    formHolds: 0,
   };
   mounted.set(definition.id, mw);
   // CONSUME the mount cause. The crash-respawn path re-calls mountWorker with
@@ -848,6 +903,7 @@ export function hostUnmountScript(scriptId: string): void {
   // There is no realm left to end a session against.
   cancelDebugAutoEnd(scriptId);
   activityStartedAt.delete(scriptId);
+  mw.terminated = true;
   mw.worker.terminate();
   for (const pending of mw.pendingRenderCells.values()) {
     clearTimeout(pending.timer);
@@ -885,6 +941,10 @@ export function hostUnmountScript(scriptId: string): void {
   // nothing is waiting on the answer — but the DIALOG would otherwise stay up,
   // asking on behalf of code that no longer exists.
   revokeScriptDialogs(scriptId);
+  // ...and any FORM it had open, for the same reason — plus its layout and its
+  // show bucket, so a remount starts clean. A caller awaiting that form's
+  // answer (the cross-script show) is told null by the registry.
+  revokeScriptForms(scriptId);
   // Take back every keyboard shortcut it held. The per-binding cleanups above
   // already do this; this sweep is by scriptId and is the one that must not be
   // forgettable — a shortcut that outlives its script is a key the user can
@@ -968,6 +1028,8 @@ export function hostResetAll(): void {
   // ...and every dialog mute / dismissal streak, so the next workbook's scripts
   // are not judged by the previous one's behavior.
   resetScriptDialogs();
+  // ...and every form layout, session, deadline and show bucket.
+  resetScriptForms();
   // ...and the save rate buckets: a new workbook is a new file, and the old
   // one's timings say nothing about it.
   resetScriptSaveLimits();
@@ -1578,7 +1640,7 @@ export async function hostPreviewScript(req: PreviewRunRequest): Promise<Preview
       // and the whole run is unsupported when the caller named it — an
       // explicit event is an assertion the hook must be EXERCISED, and a
       // preview that cannot do that faithfully has nothing to say.
-      const synthesized = synthesizableHookPayload(event);
+      const synthesized = synthesizableHookPayload(event, req.objectType);
       if (synthesized === null) {
         if (req.eventOptional) {
           // Nothing to record: `finish` derives the list from registered-minus-
@@ -1884,7 +1946,19 @@ const HOOK_GESTURES: Record<string, string> = {
 const SIMULATED_HOOK_PAYLOADS: Record<string, () => unknown> = {
   onClick: () => ({ x: 0, y: 0 }),
   onDoubleClick: () => ({ x: 0, y: 0 }),
+  // Form hooks carry WIDGET payloads (scriptForms.ts), not a click position;
+  // keyed by `objectType.hook` and consulted first, so a form's onClick is
+  // never fired with a button's `{ x, y }`.
+  "form.onShow": () => ({ values: {} }),
+  "form.onClick": () => ({ name: "", values: {} }),
+  "form.onChange": () => ({ name: "", value: null, values: {}, source: "user" }),
+  "form.onClose": () => ({ reason: "cancel", values: {} }),
 };
+
+/** The synthetic payload for a debugger-fired hook, type-specific first. */
+function simulatedHookPayload(objectType: string, hook: string): unknown {
+  return (SIMULATED_HOOK_PAYLOADS[`${objectType}.${hook}`] ?? SIMULATED_HOOK_PAYLOADS[hook])?.();
+}
 
 function describeHookTrigger(objectType: string, hook: string): string {
   if (hook.startsWith("event:")) {
@@ -2452,7 +2526,7 @@ export async function hostDebugFireTrigger(scriptId: string, triggerId: string):
   post(mw, {
     t: "event",
     hook: trigger.name,
-    payload: SIMULATED_HOOK_PAYLOADS[trigger.name]?.(),
+    payload: simulatedHookPayload(mw.definition.objectType, trigger.name),
   });
 }
 
@@ -5201,6 +5275,75 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       });
       if (answer.dismissed) return null;
       return answer.value !== null && typeof answer.value === "object" ? answer.value : null;
+    }
+    // ---- forms (the VBA UserForm): trusted host code paints a DATA-ONLY
+    //      widget tree; the script never supplies pixels. Identity is
+    //      HOST-supplied exactly as for ui.dialog. `form.show` resolves once
+    //      the renderer acknowledges the form is on screen; the answer is
+    //      relayed into the worker later as `__form_closed` (scriptForms.ts). ----
+    case "form.define": {
+      const [spec] = args as [FormSpec];
+      defineScriptForm(definition.id, spec);
+      return undefined;
+    }
+    case "form.show": {
+      const [options] = args as [{ initial?: Record<string, unknown> } | undefined];
+      // Bindings are resolved and READ here, before anything is painted, as
+      // broker calls under this script's own handle — so a restricted form
+      // naming another sheet is refused (and audited) exactly as its own
+      // sheet.getCellData call would be, and the refusal shows up as a
+      // disabled widget with the reason rather than as nothing.
+      const spec = getScriptFormSpec(definition.id);
+      const bound = spec ? await resolveFormBindings(mw, spec) : null;
+      return showScriptForm({
+        scriptId: definition.id,
+        scriptName: definition.name,
+        scriptOrigin: handle.origin,
+        initial: options?.initial,
+        seeds: bound?.seeds,
+        pinnedSheetName: bound?.pinnedSheetName,
+        writeOnChange: bound?.writeOnChange,
+        deps: formSessionDeps(mw, bound),
+      });
+    }
+    case "form.update": {
+      const [patch] = args as [FormPatch];
+      updateScriptForm(definition.id, patch);
+      return undefined;
+    }
+    case "form.close": {
+      const [result] = args as [Record<string, FormValue | string[]> | null | undefined];
+      closeScriptForm(definition.id, result ?? null);
+      return undefined;
+    }
+    case "cap.formsShow": {
+      // Another script's form, by NAME. The caller's own row was admitted and
+      // audited by the broker call that brought us here; what follows is the
+      // TARGET's admission — resolved among mounted forms (an unconsented
+      // distributed form is not mounted, so it is not found), same tier AND
+      // origin as the caller (the R7 predicate), and then the target's own
+      // form.show policy under the target's handle, so a form whose owner never
+      // declared ui.dialog is refused with the owner's error, never opened by
+      // proxy. Both scripts wait: the caller's method-call clock is held with
+      // the owner's, and the answer is relayed to both.
+      const [name, options] = args as [string, { initial?: Record<string, unknown> } | undefined];
+      const target = findMountedFormByName(name, mw);
+      const spec = getScriptFormSpec(target.definition.id);
+      const bound = spec ? await resolveFormBindings(target, spec) : null;
+      return brokerCall(target.handle, "form.show", [options], () =>
+        showScriptForm({
+          scriptId: target.definition.id,
+          scriptName: target.definition.name,
+          scriptOrigin: target.handle.origin,
+          initial: options?.initial,
+          seeds: bound?.seeds,
+          pinnedSheetName: bound?.pinnedSheetName,
+          writeOnChange: bound?.writeOnChange,
+          callerName: definition.name,
+          callerScriptId: definition.id,
+          deps: formSessionDeps(target, bound, mw),
+        }),
+      );
     }
     // ---- file.picker: the user picks the file, the host does the I/O ----
     //
@@ -11837,6 +11980,523 @@ function parseCellRef(ref: string): { row: number; col: number } | null {
 // Range onBeforeCommit (granular bricks phase 3): sandboxed commit verdicts
 // ============================================================================
 
+// ============================================================================
+// Forms — the host callbacks a form session drives, and the submit verdict
+// ============================================================================
+
+/**
+ * The mounted FORM script called `name` (case-insensitive) that `caller` may
+ * reach: same tier and origin, exactly one match. Ambiguity is a loud refusal
+ * rather than a first-wins guess, and an unmounted form (a distributed one the
+ * user has not approved) is simply not found — nothing paints before consent.
+ */
+function findMountedFormByName(name: string, caller: MountedWorker): MountedWorker {
+  const wanted = name.trim().toLowerCase();
+  const matches: MountedWorker[] = [];
+  for (const mw of mounted.values()) {
+    if (mw.definition.objectType !== "form") continue;
+    if (mw.definition.name.trim().toLowerCase() !== wanted) continue;
+    if (!sameTrustOrigin(caller.handle, mw.handle)) continue;
+    matches.push(mw);
+  }
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) {
+    throw new BrokerError(
+      "HostError",
+      `no form named "${name}" is running (it may not exist, or its package has not been approved)`,
+    );
+  }
+  throw new BrokerError(
+    "HostError",
+    `${matches.length} running forms are named "${name}"; rename one so the name is unique`,
+  );
+}
+
+/** Hold / release one worker's relayed-method-call clock for an open form. */
+function holdFormDeadlines(mw: MountedWorker): void {
+  mw.formHolds += 1;
+  suspendMethodCallDeadlines(mw);
+}
+function releaseFormDeadlines(mw: MountedWorker): void {
+  mw.formHolds = Math.max(0, mw.formHolds - 1);
+  // The debugger owns the clock while the realm is paused (its resume
+  // re-arms); otherwise the last hold going away restarts it.
+  if (mw.formHolds === 0 && !isScriptDebugPaused(mw.definition.id)) resumeMethodCallDeadlines(mw);
+}
+
+/** Deliver a form's answer into a worker, unless that worker is already gone. */
+function relayFormClosed(mw: MountedWorker, showId: string, result: unknown): void {
+  // The worker may already be gone: the unmount sweep terminates the realm and
+  // THEN closes this script's forms. Asking the `mounted` map was the wrong
+  // question — it is cleared at the very end of the unmount, so it still
+  // answered "mounted" here and the relay went into a dead realm to park a
+  // pending call its own 30 s timer later rejected. The realm's own flag is
+  // the fact; the map is the bookkeeping.
+  if (mw.terminated || mounted.get(mw.definition.id) !== mw) return;
+  void relayMethodCall(mw, "__form_closed", [{ showId, result }]).catch(() => {
+    // The shim's handler cannot throw; a rejection here is only the deadline
+    // of a realm that stopped reading messages.
+  });
+}
+
+/**
+ * Bind a form session to the OWNING worker (and, for a cross-script show, to
+ * the CALLER too: it awaits the same answer and its clock is held the same
+ * way). The registry (scriptForms.ts) never sees a MountedWorker; it gets
+ * these callbacks and nothing else.
+ */
+function formSessionDeps(
+  mw: MountedWorker,
+  bound: ResolvedFormBindings | null,
+  caller?: MountedWorker,
+): FormSessionDeps {
+  let liveWatch: CleanupFn | null = null;
+  return {
+    forward: (hook, payload) => forwardEvent(mw, hook, payload),
+    mirror: (path, value) => post(mw, { t: "mirror", path, value }),
+    relaySubmit: (values) => raceFormSubmitVerdict(mw, values),
+    opened: (showId) => {
+      if (bound && (bound.cells.length > 0 || bound.controls.length > 0)) {
+        liveWatch = installFormLiveWatch(mw, showId, bound);
+      }
+    },
+    ...(bound && bound.cells.length > 0
+      ? { writeBindings: (showId: string, values: Record<string, FormValue | string[]>, names: string[] | null) =>
+          writeFormBindings(mw, showId, bound, values, names) }
+      : {}),
+    closed: (showId, result) => {
+      liveWatch?.();
+      liveWatch = null;
+      if (caller) relayFormClosed(caller, showId, result);
+      relayFormClosed(mw, showId, result);
+    },
+    suspendDeadlines: () => {
+      holdFormDeadlines(mw);
+      if (caller) holdFormDeadlines(caller);
+    },
+    resumeDeadlines: () => {
+      releaseFormDeadlines(mw);
+      if (caller) releaseFormDeadlines(caller);
+    },
+  };
+}
+
+/** One bound widget whose cell the host reads and writes for it. */
+interface ResolvedFormCell {
+  decl: FormBindingDecl;
+  sheetIndex: number;
+  /**
+   * The name that index carried when the form opened, re-checked before the
+   * write. An index is not a stable identity while a modal is up: another
+   * script (a scheduled job, an MCP tool) can delete or move a sheet, after
+   * which the same index names a DIFFERENT sheet and the submit would write
+   * the form's answers into it.
+   */
+  sheetName: string | undefined;
+  row: number;
+  col: number;
+}
+
+/** The name a sheet index carries in a sheet list, or undefined if it has none. */
+function nameOfSheet(sheets: Array<{ index: number; name: string }>, index: number): string | undefined {
+  return sheets.find((s) => s.index === index)?.name;
+}
+
+/** What one show() resolved its `bind` declarations to. */
+interface ResolvedFormBindings {
+  /** Seeds per widget name, including the read-only ones that carry a reason. */
+  seeds: Record<string, FormSeed>;
+  /** The cell-backed widgets (control bindings are read-only and never listed). */
+  cells: ResolvedFormCell[];
+  /** Widgets bound to a Controls-pane value (read-only; refreshed live). */
+  controls: Array<{ decl: FormBindingDecl; controlName: string }>;
+  /** Restricted tier: the sheet every cell binding was pinned to at show. */
+  pinnedSheet: number | null;
+  pinnedSheetName?: string;
+  writeOnChange: string[];
+}
+
+/**
+ * Content a widget takes from the workbook rather than as a value: a choice
+ * list or a table read from a range (through the script's own range rows, so
+ * the tier clamp and the audit apply), and an image resolved ONCE here from
+ * its `media:` handle (an IPC, so never per paint).
+ */
+async function resolveFormSources(
+  mw: MountedWorker,
+  spec: FormSpec,
+  sheets: Parameters<typeof resolveSheetRefIn>[0],
+  activeIndex: number,
+  seeds: Record<string, FormSeed>,
+): Promise<void> {
+  const { handle } = mw;
+  const restricted = handle.tier !== "unlocked";
+  for (const src of collectFormSources(spec)) {
+    const seed: FormSeed = seeds[src.name] ?? { value: null };
+    if (src.source.kind === "image") {
+      try {
+        const fs = await import("../filesystem");
+        seed.imageUrl = await fs.resolveMediaRef(src.source.src);
+      } catch (e) {
+        seed.reason = e instanceof Error ? e.message : String(e);
+      }
+      seeds[src.name] = seed;
+      continue;
+    }
+    try {
+      const box = parseFormRange(src.source.range);
+      const sheetIndex =
+        box.sheetName === null ? activeIndex : resolveSheetRefIn(sheets, box.sheetName, "form.show");
+      const method = restricted ? "sheet.getRangeValues" : "api.getRangeValues";
+      const args: unknown[] = [box.startRow, box.startCol, box.endRow, box.endCol, sheetIndex];
+      const cells = (await brokerCall(handle, method, args, () => executeImpl(mw, method, args))) as ScriptCell[][];
+      if (src.source.kind === "options") seed.options = optionsFromCells(cells);
+      else seed.rows = rowsFromCells(cells);
+    } catch (e) {
+      seed.reason = e instanceof Error ? e.message : String(e);
+      if (src.source.kind === "options") seed.options = [];
+      else seed.rows = [];
+    }
+    seeds[src.name] = seed;
+  }
+}
+
+/**
+ * The READ every bound widget starts from. A real broker call on the same row
+ * the script would use by hand — `sheet.getCellData` at restricted tier with
+ * an EXPLICIT sheet argument, so the tier clamp (and its audit row) bites when
+ * the binding names another sheet — under the script's own handle.
+ */
+async function readFormCell(mw: MountedWorker, cell: ResolvedFormCell): Promise<FormSeed> {
+  const method = mw.handle.tier === "unlocked" ? "api.getCellData" : "sheet.getCellData";
+  const args: unknown[] = [cell.row, cell.col, cell.sheetIndex];
+  try {
+    const read = (await brokerCall(mw.handle, method, args, () => executeImpl(mw, method, args))) as ScriptCell;
+    return seedFromCell(cell.decl.widgetType, read, cell.decl.multi);
+  } catch (e) {
+    return { value: null, readOnly: true, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Resolve every `bind` of a form to a cell (or a control value) and read it.
+ * Nothing is refused wholesale: a binding this script cannot reach becomes a
+ * DISABLED widget carrying the reason, so the user sees why rather than
+ * nothing, and the refusal is in the audit ring like any other.
+ */
+async function resolveFormBindings(mw: MountedWorker, spec: FormSpec): Promise<ResolvedFormBindings> {
+  const { handle } = mw;
+  const decls = collectFormBindings(spec);
+  const out: ResolvedFormBindings = { seeds: {}, cells: [], controls: [], pinnedSheet: null, writeOnChange: [] };
+  const sources = collectFormSources(spec);
+  if (decls.length === 0 && sources.length === 0) return out;
+  const lib = await getLib();
+  const { sheets, activeIndex } = await lib.getSheets();
+  const restricted = handle.tier !== "unlocked";
+  await resolveFormSources(mw, spec, sheets, activeIndex, out.seeds);
+  for (const decl of decls) {
+    let parsed;
+    try {
+      parsed = parseFormBinding(decl.bind);
+    } catch (e) {
+      out.seeds[decl.name] = { value: null, readOnly: true, reason: e instanceof Error ? e.message : String(e) };
+      continue;
+    }
+    if (parsed.kind === "control") {
+      // Through the broker like every other read this form performs, so the
+      // policy decides it and the audit ring records it under this script.
+      // The executor is inline (host-driven row, no worker shim) — the same
+      // shape as formula.udf.invoke.
+      const controlArgs: unknown[] = [parsed.name];
+      try {
+        const value = await brokerCall(mw.handle, "form.readControl", controlArgs, async () => {
+          const { getControlValue } = await import("../controlValues");
+          return getControlValue(parsed.name) ?? null;
+        });
+        out.seeds[decl.name] = seedFromControlValue(decl.widgetType, value as ControlValue | null, decl.multi);
+        out.controls.push({ decl, controlName: parsed.name });
+      } catch (e) {
+        out.seeds[decl.name] = { value: null, readOnly: true, reason: e instanceof Error ? e.message : String(e) };
+      }
+      continue;
+    }
+    let cell: ResolvedFormCell;
+    if (parsed.kind === "cell") {
+      let sheetIndex = activeIndex;
+      if (parsed.sheetRef !== null) {
+        try {
+          sheetIndex = resolveSheetRefIn(sheets, parsed.sheetRef, "form.show");
+        } catch (e) {
+          out.seeds[decl.name] = { value: null, readOnly: true, reason: e instanceof Error ? e.message : String(e) };
+          continue;
+        }
+      }
+      cell = { decl, sheetIndex, sheetName: nameOfSheet(sheets, sheetIndex), row: parsed.row, col: parsed.col };
+    } else {
+      let coords: NamedRangeCoordsLike;
+      try {
+        coords = (await lib.resolveNamedRangeCoords(parsed.name)) as NamedRangeCoordsLike;
+      } catch {
+        out.seeds[decl.name] = { value: null, readOnly: true, reason: `the defined name "${parsed.name}" was not found` };
+        continue;
+      }
+      if (!coords || coords.startRow !== coords.endRow || coords.startCol !== coords.endCol) {
+        out.seeds[decl.name] = {
+          value: null,
+          readOnly: true,
+          reason: `the defined name "${parsed.name}" must name ONE cell to bind an input`,
+        };
+        continue;
+      }
+      cell = {
+        decl,
+        sheetIndex: coords.sheetIndex,
+        sheetName: nameOfSheet(sheets, coords.sheetIndex),
+        row: coords.startRow,
+        col: coords.startCol,
+      };
+    }
+    const seed = await readFormCell(mw, cell);
+    // A choice list read for the same widget (options: { range }) lives on
+    // the seed too; keep it when the value read replaces the entry.
+    const prior = out.seeds[decl.name];
+    out.seeds[decl.name] = prior?.options ? { ...seed, options: prior.options } : seed;
+    if (seed.readOnly) continue;
+    out.cells.push(cell);
+    if (decl.writeOn === "change") out.writeOnChange.push(decl.name);
+  }
+  if (restricted && out.cells.length > 0) {
+    out.pinnedSheet = activeIndex;
+    out.pinnedSheetName = sheets[activeIndex]?.name;
+  }
+  return out;
+}
+
+/**
+ * Write bound widgets back — every DIRTY one on Submit (`names` null), or
+ * exactly `names` for a writeOn:"change" widget — as broker calls under the
+ * script's own handle inside ONE undo transaction. The typed value or the
+ * user's formula text goes out, never the display string.
+ *
+ * Restricted tier writes the sheet on screen, checked at call time by the
+ * executor; the form's cells were pinned to the sheet it OPENED on, so if the
+ * user has since switched sheets the submit is refused with the fix, rather
+ * than writing the same (row, col) on whatever sheet is showing.
+ */
+async function writeFormBindings(
+  mw: MountedWorker,
+  showId: string,
+  bound: ResolvedFormBindings,
+  values: Record<string, FormValue | string[]>,
+  names: string[] | null,
+): Promise<string[]> {
+  const { handle, definition } = mw;
+  const restricted = handle.tier !== "unlocked";
+  const lib = await getLib();
+  if (restricted && bound.pinnedSheet !== null) {
+    const active = await lib.getActiveSheet();
+    if (active !== bound.pinnedSheet) {
+      throw new BrokerError(
+        "HostError",
+        `switch back to "${bound.pinnedSheetName ?? "the sheet this form opened on"}" to save this form`,
+      );
+    }
+  }
+  const candidates = bound.cells.filter((c) => names === null || names.includes(c.decl.name));
+  // The sheet list can move under an open form (another script, an MCP tool),
+  // and every binding holds an INDEX. `sheetIdentityRefusal` states the rule.
+  if (candidates.length > 0) {
+    const { sheets } = await lib.getSheets();
+    const refusal = sheetIdentityRefusal(
+      candidates.map((c) => ({ name: c.decl.name, sheetIndex: c.sheetIndex, sheetName: c.sheetName })),
+      bound.pinnedSheet !== null && bound.pinnedSheetName !== undefined
+        ? { index: bound.pinnedSheet, name: bound.pinnedSheetName }
+        : null,
+      sheets,
+    );
+    if (refusal !== null) throw new BrokerError("HostError", refusal);
+  }
+  const toWrite =
+    names === null
+      ? new Set(dirtyNames(values, bound.seeds, candidates.map((c) => c.decl.name)))
+      : new Set(candidates.map((c) => c.decl.name));
+  const cells = candidates.filter((c) => toWrite.has(c.decl.name));
+  if (cells.length === 0) return [];
+  await withScriptUndoBatch(lib, `Form: ${definition.name}`, async () => {
+    for (const cell of cells) {
+      const write = cellWriteFor(cell.decl.widgetType, values[cell.decl.name]);
+      const method = restricted ? "sheet.setCellValue" : "api.setCellValue";
+      const args: unknown[] = restricted ? [cell.row, cell.col, write] : [cell.row, cell.col, write, cell.sheetIndex];
+      await brokerCall(handle, method, args, () => executeImpl(mw, method, args));
+    }
+  });
+  // Re-read what was written so the widgets show the cells' formatted text
+  // and an unchanged resubmit is not rewritten. Own writes never reach the
+  // live watch (isOwnScriptWrite), so this is the refresh.
+  //
+  // `echo: false`: this is the form's OWN write coming back. Forwarding it as
+  // `onChange { source: "cell" }` told a `writeOn: "change"` script that an
+  // outside edit had landed on the value it had just written — the same echo
+  // `isOwnScriptWrite` exists to suppress on the watch.
+  const fresh: Record<string, FormSeed> = {};
+  for (const cell of cells) {
+    const seed = await readFormCell(mw, cell);
+    bound.seeds[cell.decl.name] = seed;
+    fresh[cell.decl.name] = seed;
+  }
+  refreshScriptFormSeeds(showId, fresh, { echo: false });
+  return cells.map((c) => c.decl.name);
+}
+
+/**
+ * While a form is open, a change to a cell it is bound to refreshes the
+ * widget. The PINNED-SHEET filter runs before anything else: a restricted
+ * form must never be shown a change from a sheet the user switched to, even
+ * though the tier clamp would admit that sheet now that it is active.
+ */
+function installFormLiveWatch(mw: MountedWorker, showId: string, bound: ResolvedFormBindings): CleanupFn {
+  const { definition, handle } = mw;
+  const restricted = handle.tier !== "unlocked";
+  let pending = new Set<string>();
+  let scheduled = false;
+  const unsub = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
+    const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number }> };
+    for (const c of d.changes ?? []) {
+      const sheet = c.sheetIndex ?? activeSheetIndexForEvents;
+      if (restricted && bound.pinnedSheet !== null && sheet !== bound.pinnedSheet) continue;
+      if (isOwnScriptWrite(definition.id, sheet, c.row, c.col)) continue;
+      for (const cell of bound.cells) {
+        if (cell.sheetIndex === sheet && cell.row === c.row && cell.col === c.col) pending.add(cell.decl.name);
+      }
+    }
+    if (pending.size === 0 || scheduled) return;
+    scheduled = true;
+    setTimeout(() => {
+      scheduled = false;
+      const names = pending;
+      pending = new Set();
+      void (async () => {
+        const fresh: Record<string, FormSeed> = {};
+        for (const cell of bound.cells) {
+          if (!names.has(cell.decl.name)) continue;
+          const seed = await readFormCell(mw, cell);
+          bound.seeds[cell.decl.name] = seed;
+          fresh[cell.decl.name] = seed;
+        }
+        refreshScriptFormSeeds(showId, fresh);
+      })();
+    }, 16);
+  });
+  if (bound.controls.length === 0) return unsub;
+  // Controls-pane values: committed changes only (a mid-drag slider frame is
+  // transient and must not re-seed the form on every pixel).
+  let unsubControls: CleanupFn = () => {};
+  void import("../controlValues").then((cv) => {
+    unsubControls = cv.onControlValueChange((change) => {
+      if (change.transient) return;
+      const watching = bound.controls.filter(
+        (c) => c.controlName.toLowerCase() === change.name.toLowerCase(),
+      );
+      if (watching.length === 0) return;
+      // Each delivery is a READ of that control by this script, so it goes
+      // through the same audited row the resolve did — a form left open
+      // receives every committed change, and the trail has to show that.
+      const args: unknown[] = [change.name];
+      void brokerCall(mw.handle, "form.readControl", args, async () => change.value ?? null)
+        .then((value) => {
+          const fresh: Record<string, FormSeed> = {};
+          for (const c of watching) {
+            const seed = seedFromControlValue(c.decl.widgetType, value as ControlValue | null, c.decl.multi);
+            bound.seeds[c.decl.name] = seed;
+            fresh[c.decl.name] = seed;
+          }
+          if (Object.keys(fresh).length > 0) refreshScriptFormSeeds(showId, fresh);
+        })
+        .catch(() => {
+          /* refused: the widget keeps what it had, and the refusal is audited */
+        });
+    });
+  });
+  return () => {
+    unsub();
+    unsubControls();
+  };
+}
+
+const FORM_SUBMIT_TIMEOUT = Symbol("formSubmitTimeout");
+
+/**
+ * Normalize whatever a form's onSubmit handler returned into a decision.
+ *
+ * Accepted cancel forms: `false`, `"cancel"`, `{ cancel: true, errors?, message? }`.
+ * EVERYTHING ELSE — including `undefined` from a handler that just did some
+ * work — accepts the submit. Unlike the workbook lifecycle normalizer this one
+ * KEEPS `errors` and `message`: they are what the renderer paints under the
+ * widgets, clamped here so a script cannot push an unbounded string at it.
+ * Exported for tests.
+ */
+export function normalizeFormSubmitVerdict(result: unknown): FormSubmitDecision | null {
+  if (result === false || result === "cancel") return { cancel: true };
+  if (!result || typeof result !== "object") return null;
+  const v = result as { cancel?: unknown; errors?: unknown; message?: unknown };
+  if (v.cancel !== true) return null;
+  const decision: FormSubmitDecision = { cancel: true };
+  if (v.errors && typeof v.errors === "object" && !Array.isArray(v.errors)) {
+    const errors: Record<string, string> = {};
+    for (const [name, text] of Object.entries(v.errors as Record<string, unknown>)) {
+      if (!isValidFormName(name) || typeof text !== "string") continue;
+      errors[name] = text.slice(0, MAX_FORM_ERROR_CHARS);
+    }
+    if (Object.keys(errors).length > 0) decision.errors = errors;
+  }
+  if (typeof v.message === "string" && v.message.length > 0) {
+    decision.message = v.message.slice(0, MAX_FORM_ERROR_CHARS);
+  }
+  return decision;
+}
+
+/**
+ * Ask a form script's onSubmit for a verdict, bounded by the lifecycle
+ * deadline. DEFAULT-ACCEPT on timeout, on a thrown handler, and while the
+ * script is paused in the debugger — the same policy as onBeforeSave and
+ * range.onBeforeCommit, for the same reason: a hung or crashed script must
+ * never trap the user inside a modal. The host's own declarative checks
+ * (required / min / max / options) ran before this was asked and apply
+ * regardless. A script that registered no onSubmit is not asked at all.
+ */
+async function raceFormSubmitVerdict(
+  mw: MountedWorker,
+  values: Record<string, FormValue | string[]>,
+): Promise<FormSubmitDecision | null> {
+  if (!mw.declaredHooks.includes("onSubmit")) return null;
+  if (isScriptDebugPaused(mw.definition.id)) {
+    console.warn(
+      `[ScriptHost] "${mw.definition.name}" is paused in the debugger — its onSubmit verdict is skipped (accepting the submit).`,
+    );
+    return null;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      relayMethodCall(mw, "__form_onSubmit", [{ values }]),
+      new Promise<typeof FORM_SUBMIT_TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(FORM_SUBMIT_TIMEOUT), BEFORE_LIFECYCLE_DEADLINE_MS);
+      }),
+    ]);
+    if (result === FORM_SUBMIT_TIMEOUT) {
+      console.warn(
+        `[ScriptHost] onSubmit of "${mw.definition.name}" exceeded ${BEFORE_LIFECYCLE_DEADLINE_MS}ms — accepting the submit`,
+      );
+      return null;
+    }
+    return normalizeFormSubmitVerdict(result);
+  } catch {
+    return null; // handler threw — accept (the error already surfaced on the console)
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Hard deadline for a script's commit verdict. A slow or hung handler must
  *  never hold the user's Enter keypress hostage — timeout = allow. */
 const BEFORE_COMMIT_DEADLINE_MS = 1500;
@@ -12190,6 +12850,10 @@ function suspendMethodCallDeadlines(mw: MountedWorker): void {
 
 /** Re-arm those deadlines, in full, from the moment the script resumes. */
 function resumeMethodCallDeadlines(mw: MountedWorker): void {
+  // A form the script is waiting on is the other reason the clock is stopped;
+  // the debugger resuming must not restart it under an open form. The form's
+  // own close re-arms once the last hold is released.
+  if (mw.formHolds > 0) return;
   for (const pending of mw.pendingMethodCalls.values()) {
     pending.arm();
   }
@@ -12949,6 +13613,18 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       }));
       break;
     }
+
+    // ---- form ----
+    // Nothing to WIRE: the scriptForms registry delivers these directly through
+    // the session's `forward`/`mirror` callbacks while a form is open, and
+    // onSubmit is a replying relay the registry pulls. The cases exist so the
+    // hooks read as known rather than as a pruned surface.
+    case "form.onShow":
+    case "form.onChange":
+    case "form.onClick":
+    case "form.onClose":
+    case "form.onSubmit":
+      break;
 
     default:
       // Unknown hook: nothing to wire (pruned/dead surface).

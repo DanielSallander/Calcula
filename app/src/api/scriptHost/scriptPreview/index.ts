@@ -46,10 +46,11 @@ import { createPreviewBackend, createPreviewState, type PreviewStubs } from "./b
 import { PreviewGrid } from "./grid";
 import { objectHooksFor } from "./objectHooks";
 import { backendEvaluator, recalculatePreviewGrid, type FormulaEvaluator } from "./formulaEval";
-import { buildReport, declined, diffGrid } from "./report";
+import { buildReport, declined, diffGrid, type WorkerPreviewReport } from "./report";
 import { previewSkipLine } from "./unexercisedHooks";
 import { MAX_SNAPSHOT_CELLS, snapshotActiveSheet, type SnapshotResult, type SnapshotSource } from "./snapshot";
-import type { DryRunReport } from "../scriptAuthoring";
+
+export type { WorkerPreviewReport } from "./report";
 
 export interface PreviewRequest {
   source: string;
@@ -84,12 +85,12 @@ export interface PreviewRequest {
 /**
  * Run a draft against a copy of the workbook in its real realm.
  *
- * Returns the SAME `DryRunReport` shape `ai_dry_run_script` returns, so every
- * existing consumer — the draft gate, the authoring loop's repair prompt, the
- * transcript note — works unchanged and keeps branching on `applicable` before
- * drawing any conclusion.
+ * Returns the SAME `DryRunReport` shape `ai_dry_run_script` returns (plus the
+ * Worker-only `formLayout`, see report.ts), so every existing consumer — the
+ * draft gate, the authoring loop's repair prompt, the transcript note — works
+ * unchanged and keeps branching on `applicable` before drawing any conclusion.
  */
-export async function previewObjectScript(req: PreviewRequest): Promise<DryRunReport> {
+export async function previewObjectScript(req: PreviewRequest): Promise<WorkerPreviewReport> {
   const startedAt = Date.now();
 
   let snapshot: SnapshotResult;
@@ -236,7 +237,16 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
   // Answering from a canned stub would be worse than declining — a script that
   // parsed `{}` as an exchange rate would fail, and the preview would report
   // ITS OWN stub as the draft's runtime error.
-  const capabilityRefusal = run.refusals.find((r) => ALLOWLIST[r.method]?.capability);
+  //
+  // ONE expected exception: a FORM script's `form.show`. The preview captures
+  // the layout from the capability-free `form.define` and paints it in a
+  // labelled preview dialog instead; refusing the show is the whole point,
+  // not a gap, so it neither declines the run nor reads as a finding.
+  const isExpectedFormRefusal = (method: string): boolean =>
+    req.objectType === "form" && method === "form.show";
+  const capabilityRefusal = run.refusals.find(
+    (r) => ALLOWLIST[r.method]?.capability && !isExpectedFormRefusal(r.method),
+  );
   if (capabilityRefusal) {
     const cap = ALLOWLIST[capabilityRefusal.method]?.capability;
     return declined(
@@ -250,9 +260,16 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
   // would refuse these identically — a bad argument is a bad argument in either
   // realm — and a refusal the script never awaited neither throws nor changes a
   // cell, so without this it reads as a clean run that happened to do nothing.
-  const refusalNotes = run.refusals.map(
-    (r) => `[preview] ${r.method} was refused: ${r.message}`,
-  );
+  const refusalNotes = run.refusals
+    .filter((r) => !isExpectedFormRefusal(r.method))
+    .map((r) => `[preview] ${r.method} was refused: ${r.message}`);
+  if (req.objectType === "form") {
+    refusalNotes.push(
+      state.formLayout !== undefined
+        ? "[preview] the form's layout was captured from form.define; show() is not exercised in a preview"
+        : "[preview] no layout was captured: the script never called form.define during setup",
+    );
+  }
 
   // A registered handler the preview chose not to fire is REPORTED, so an
   // unexercised branch can never read as an exercised-and-clean one. This is a
@@ -285,6 +302,7 @@ export async function previewObjectScript(req: PreviewRequest): Promise<DryRunRe
     changes: diffGrid(before, snapshot.grid),
     output: [...state.output, ...refusalNotes, ...skippedNotes],
     unexercisedHooks: run.unexercisedHooks,
+    formLayout: state.formLayout,
     readBack: (req.readBack ?? []).map((r) => ({
       row: r.row,
       col: r.col,

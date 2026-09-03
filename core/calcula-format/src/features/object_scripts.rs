@@ -55,6 +55,7 @@ pub enum ObjectScriptObjectTypeDef {
     NamedRange,
     Panel,
     Range,
+    Form,
 }
 
 /// Access level in the .cala JSON format.
@@ -108,6 +109,7 @@ impl From<&ScriptableObjectType> for ObjectScriptObjectTypeDef {
             ScriptableObjectType::NamedRange => ObjectScriptObjectTypeDef::NamedRange,
             ScriptableObjectType::Panel => ObjectScriptObjectTypeDef::Panel,
             ScriptableObjectType::Range => ObjectScriptObjectTypeDef::Range,
+            ScriptableObjectType::Form => ObjectScriptObjectTypeDef::Form,
         }
     }
 }
@@ -131,6 +133,7 @@ impl From<&ObjectScriptObjectTypeDef> for ScriptableObjectType {
             ObjectScriptObjectTypeDef::NamedRange => ScriptableObjectType::NamedRange,
             ObjectScriptObjectTypeDef::Panel => ScriptableObjectType::Panel,
             ObjectScriptObjectTypeDef::Range => ScriptableObjectType::Range,
+            ObjectScriptObjectTypeDef::Form => ScriptableObjectType::Form,
         }
     }
 }
@@ -204,5 +207,24 @@ impl From<&ObjectScriptDef> for SavedObjectScript {
             package_version: d.package_version.clone(),
             declared_capabilities: d.declared_capabilities.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A form is an object script; its type must survive the .cala wire form
+    /// in BOTH directions with the camelCase spelling the frontend saves. A
+    /// missing arm would either refuse the save or turn the script into a
+    /// different kind on reload — and the frontend's `string_to_object_type`
+    /// mirror accepts exactly this spelling.
+    #[test]
+    fn form_object_type_round_trips_through_the_cala_def() {
+        let def = ObjectScriptObjectTypeDef::from(&ScriptableObjectType::Form);
+        let json = serde_json::to_string(&def).unwrap();
+        assert_eq!(json, "\"form\"");
+        let back: ObjectScriptObjectTypeDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(ScriptableObjectType::from(&back), ScriptableObjectType::Form);
     }
 }

@@ -58,10 +58,35 @@ const SYNTHESIZABLE_HOOK_PAYLOADS: Record<string, () => unknown> = {
 };
 
 /**
- * The payload to fire `event` with, or null when the preview cannot produce
- * the shape the product's forwarder would deliver.
+ * Payloads that depend on the OBJECT TYPE. A form's `onClick` is a WIDGET
+ * click (`{ name, values }`, from the scriptForms registry), not the `{ x, y }`
+ * a button delivers — so the bare-name table above must never answer for it,
+ * or a correct `({ name }) => ...` handler would throw against `undefined`
+ * (the exact failure the bare table was introduced to stop). Keyed by
+ * `objectType.hook`, consulted FIRST, and mirroring the real forwarder shapes.
  */
-export function synthesizableHookPayload(event: string): { payload: unknown } | null {
+const SYNTHESIZABLE_HOOK_PAYLOADS_BY_TYPE: Record<string, () => unknown> = {
+  "form.onShow": () => ({ values: {} }),
+  "form.onClick": () => ({ name: "", values: {} }),
+  "form.onChange": () => ({ name: "", value: null, values: {}, source: "user" }),
+  "form.onClose": () => ({ reason: "cancel", values: {} }),
+};
+
+/**
+ * The payload to fire `event` with, or null when the preview cannot produce
+ * the shape the product's forwarder would deliver. `objectType` picks the
+ * type-specific shape where one exists; a type that has its OWN entry for a
+ * hook name never falls back to the bare table for that hook.
+ */
+export function synthesizableHookPayload(event: string, objectType?: string): { payload: unknown } | null {
+  if (objectType) {
+    const typed = SYNTHESIZABLE_HOOK_PAYLOADS_BY_TYPE[`${objectType}.${event}`];
+    if (typed) return { payload: typed() };
+    // A type with type-specific payloads is never served the bare shapes.
+    if (Object.keys(SYNTHESIZABLE_HOOK_PAYLOADS_BY_TYPE).some((k) => k.startsWith(`${objectType}.`))) {
+      return null;
+    }
+  }
   const make = SYNTHESIZABLE_HOOK_PAYLOADS[event];
   return make ? { payload: make() } : null;
 }

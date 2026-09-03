@@ -32,6 +32,7 @@ import {
   vSetNote, vAddComment, vCommentReply, vResolveComment, vListComments,
   vCFSpec, vCFUpdate, vCFRuleId, vCFList, vCFClear, MAX_CF_RANGES,
   vDialogMessage, vDialogPrompt, vDialogForm,
+  vFormDefine, vFormShow, vFormUpdate, vFormClose, vFormsShowNamed, vFormReadControl,
   vFileExport, vFileImport, MAX_FILE_TEXT_CHARS, MAX_FILE_NAME,
   vCreatePicture, MAX_MEDIA_BYTES, MAX_MEDIA_PIXELS,
   vCreateShape,
@@ -52,6 +53,9 @@ import {
   type Validator,
 } from "./validators";
 import { MAX_DIALOG_FIELDS, MAX_DIALOG_MESSAGE } from "./scriptDialogSpec";
+import {
+  FORM_UPDATE_PER_SECOND, MAX_FORM_DEPTH, MAX_FORM_INPUTS, MAX_FORM_NODES,
+} from "./scriptFormSpec";
 import { AppEvents } from "../events";
 import { fileNameOf } from "../../core/lib/fileNames";
 import type { CapabilityId } from "./capabilityIds";
@@ -1026,6 +1030,57 @@ export const ALLOWLIST: Record<string, MethodPolicy> = {
   "cap.dialogForm":        { tier: "restricted", capability: "ui.dialog", class: "ui",
                              validate: vDialogForm, limits: { maxFields: MAX_DIALOG_FIELDS },
                              desc: "Ask you to fill in a small form (text, numbers, dates, choices, checkboxes) and read your answers" },
+  // ---- forms: the VBA UserForm replacement. cap.dialogForm generalized from a
+  //      flat list of five field kinds to a live widget TREE — containers,
+  //      cell bindings, buttons, a read-only table, a progress bar — that the
+  //      script can patch while it is open. Same construction as the dialog
+  //      family: the script describes, TRUSTED host code paints, and nothing
+  //      but plain data crosses (no markup, no handler, no regex), so the form
+  //      cannot imitate the application and the header always names the
+  //      asking script. Same capability, because the reach is the same reach
+  //      (a modal that collects keystrokes), and a user who consented to
+  //      "ask you a question" has consented to this.
+  //
+  //      Only form.show is class "ui", and it RESOLVES WHEN THE FORM IS ON
+  //      SCREEN — the renderer acknowledges the mount, and the user's answer
+  //      arrives LATER as an event the host relays to the script's handlers.
+  //      So the person-length deadline bounds only the show; the open form is
+  //      bounded by the host-side idle/absolute deadlines in scriptForms.ts.
+  //      form.define / form.update / form.close never wait on a person and stay
+  //      on the ordinary timeout. form.update's perSecond is enforced by the
+  //      host's per-form token bucket, not by this table. ----
+  "form.define":           { tier: "restricted", class: "emit",
+                             validate: vFormDefine,
+                             limits: { maxNodes: MAX_FORM_NODES, maxDepth: MAX_FORM_DEPTH, maxInputs: MAX_FORM_INPUTS },
+                             desc: "Describe the layout of its own form (labels, inputs, choices, buttons) so Calcula can draw it — nothing is shown until it asks to show it" },
+  "form.show":             { tier: "restricted", capability: "ui.dialog", class: "ui",
+                             validate: vFormShow,
+                             desc: "Open its form as a dialog you must answer or close before continuing, and read what you entered; a field it bound to a cell shows that cell and writes it back when you submit — or as soon as you change it, if the form asked for that, in which case closing the form does not undo it (on the sheet you were looking at when it opened, for a restricted script)" },
+  "form.update":           { tier: "restricted", capability: "ui.dialog", class: "emit",
+                             validate: vFormUpdate, limits: { perSecond: FORM_UPDATE_PER_SECOND },
+                             desc: "Change what its open form shows (values, enabled or hidden fields, choices, a message)" },
+  "form.close":            { tier: "restricted", capability: "ui.dialog", class: "emit",
+                             validate: vFormClose,
+                             desc: "Close its own form from code and decide what answer it reports" },
+  // A widget bound to a Controls-pane value (`bind: { control: "Region" }`).
+  // HOST-DRIVEN, like formula.udf.invoke: the worker never names this method —
+  // the host reads the control while resolving the form's bindings and again
+  // when the value changes — but it goes through the broker anyway, so the
+  // read is decided by policy and lands in the audit ring under the form's own
+  // script. Reaching the Controls store directly (as this first did) was the
+  // one read a form could perform that the transparency trail never saw.
+  "form.readControl":      { tier: "restricted", class: "read",
+                             validate: vFormReadControl,
+                             desc: "Read the current value of a control on this workbook's Controls pane, to show it in its form" },
+  // Another script's form, by NAME (VBA's `UserForm1.Show` from any module).
+  // The host resolves the name among MOUNTED forms of the SAME tier and origin
+  // as the caller, then runs the target's OWN form.show policy under the
+  // target's handle — so a form that never declared ui.dialog can never be
+  // popped by proxy, and both scripts get an audit row. The caller's deadline
+  // clock is held while the form is open, exactly as the owner's is.
+  "cap.formsShow":         { tier: "restricted", capability: "ui.dialog", class: "ui",
+                             validate: vFormsShowNamed,
+                             desc: "Open another script's form in this workbook as a dialog, on that script's behalf, and read your answer" },
   // ---- file.picker (G1): the sanctioned tail of "export a CSV" / "read the
   //      config the user picks". Excel's answer was FileSystemObject — a path
   //      string and unbounded reach. This is the opposite construction: the

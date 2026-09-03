@@ -15,6 +15,7 @@ import {
 import { emitAppEvent } from "@api/events";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 import { ScriptableObjectEvents } from "../index";
+import { createFormScript } from "../lib/createForm";
 
 // ============================================================================
 // Styles
@@ -131,9 +132,30 @@ export default function ObjectScriptManagerPane(_props: TaskPaneViewProps): Reac
     return unsub;
   }, [refresh]);
 
-  // Group scripts by category
+  // Group scripts by category. A form has an instanceId (its own minted
+  // UUID) but no backing workbook object, so it is its OWN group rather than a
+  // "component instance" of something.
   const primitives = scripts.filter((s) => !s.instanceId);
-  const components = scripts.filter((s) => !!s.instanceId);
+  const forms = scripts.filter((s) => s.objectType === "form");
+  const components = scripts.filter((s) => !!s.instanceId && s.objectType !== "form");
+
+  // Add a new form. NOT handleAdd: that path is primitive-shaped (one script
+  // per type, instanceId null), and a form must be minted per instance.
+  const handleAddForm = useCallback(async () => {
+    try {
+      const script = await createFormScript();
+      emitAppEvent(ScriptableObjectEvents.EDIT_SCRIPT, {
+        objectType: script.objectType,
+        instanceId: script.instanceId,
+        objectName: script.name,
+        scriptId: script.id,
+      });
+    } catch (e) {
+      showToast(`Could not create the form: ${e instanceof Error ? e.message : String(e)}`, {
+        type: "error",
+      });
+    }
+  }, []);
 
   // Add a new primitive script
   const handleAdd = useCallback((objectType: ScriptableObjectType) => {
@@ -275,6 +297,9 @@ export default function ObjectScriptManagerPane(_props: TaskPaneViewProps): Reac
             </option>
           ))}
         </select>
+        <button style={btnSmallStyle} onClick={() => void handleAddForm()} title="Create a new form script">
+          + Form
+        </button>
       </div>
 
       <div style={listStyle}>
@@ -289,6 +314,13 @@ export default function ObjectScriptManagerPane(_props: TaskPaneViewProps): Reac
           <>
             <div style={groupHeaderStyle}>Primitive Objects</div>
             {primitives.map(renderItem)}
+          </>
+        )}
+
+        {forms.length > 0 && (
+          <>
+            <div style={groupHeaderStyle}>Forms</div>
+            {forms.map(renderItem)}
           </>
         )}
 

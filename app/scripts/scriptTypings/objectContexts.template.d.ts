@@ -1042,6 +1042,13 @@ declare interface ScriptCapabilities {
    */
   dialog: ScriptDialogApi;
   /**
+   * Open another script's FORM by name (VBA's `UserForm1.Show` from any
+   * module) and read the answer. Needs `// @capability ui.dialog` on THIS
+   * script too; the form's owner must be running and at the same access level
+   * and origin, and its own permission to show is checked as well.
+   */
+  forms: ScriptFormsApi;
+  /**
    * Fill in and send the input cells of a subscribed .calp package — the
    * data-collection loop, automated. Requires the `distribution.writeback`
    * capability (`// @capability distribution.writeback`).
@@ -5372,6 +5379,253 @@ declare interface PanelContext extends BaseObjectContext {
     /** Whether the panel can be moved between locations. */
     readonly movable: boolean;
   };
+}
+
+// ============================================================================
+// Form Context (host-painted modal forms — the VBA UserForm)
+// ============================================================================
+
+/** A value a form widget holds. A multi-select listbox yields string[]. */
+declare type FormValue = string | number | boolean | null;
+
+/** One choice in a radio / dropdown / listbox. A bare string is value and label at once. */
+declare interface FormOption {
+  value: string;
+  label?: string;
+}
+
+/**
+ * Where a choice list comes from: inline choices, or `{ range: "A2:A20" }` —
+ * cells the HOST reads at show time under this script's own access level (an
+ * audited read like any other), so a list can never show cells the script
+ * could not read itself.
+ */
+declare type FormOptions = Array<string | FormOption> | { range: string };
+
+/**
+ * What a widget reads its starting value from and writes its answer to. A bare
+ * string is an A1 cell ("B2", "Sheet1!B2") or a defined name. `{ control }`
+ * names a Controls-pane value (GET.CONTROLVALUE) and is read-only. A restricted
+ * script may bind only the sheet on screen when the form opens.
+ */
+declare type FormBinding =
+  | string
+  | { cell: string; sheet?: string | number }
+  | { name: string }
+  | { control: string };
+
+declare interface FormWidgetBase {
+  /** Result key for inputs; an addressable id for everything else. */
+  name?: string;
+  label?: string;
+  /** Secondary line under the control. */
+  help?: string;
+  hidden?: boolean;
+  disabled?: boolean;
+  /** Fixed width in px, or "fill" to stretch. */
+  width?: number | "fill";
+}
+
+declare interface FormInputBase extends FormWidgetBase {
+  name: string;
+  bind?: FormBinding;
+  required?: boolean;
+  /** When this widget writes its cell: on Submit (default) or on each committed change. */
+  writeOn?: "submit" | "change";
+}
+
+/**
+ * One widget of a form. The vocabulary mirrors VBA's MSForms controls: Label,
+ * TextBox (textbox / number / date), CheckBox, ToggleButton, OptionButton
+ * (radio), ComboBox (dropdown), ListBox, CommandButton (button), Frame (group),
+ * MultiPage (tabs), plus row / column / grid containers, a spacer, an image
+ * (a `media:` handle already in this workbook, never bytes), a read-only table
+ * and a progress bar.
+ */
+declare type FormWidget =
+  | ({ type: "label"; text: string; style?: "normal" | "heading" | "muted" } & FormWidgetBase)
+  | ({ type: "textbox"; default?: string; placeholder?: string; multiline?: boolean; maxLength?: number } & FormInputBase)
+  | ({ type: "number"; default?: number; min?: number; max?: number; step?: number } & FormInputBase)
+  | ({ type: "date"; default?: string; min?: string; max?: string } & FormInputBase)
+  | ({ type: "checkbox"; default?: boolean } & FormInputBase)
+  | ({ type: "toggle"; default?: boolean } & FormInputBase)
+  | ({ type: "radio"; options: FormOptions; default?: string; layout?: "row" | "column" } & FormInputBase)
+  | ({ type: "dropdown"; options: FormOptions; default?: string; allowEmpty?: boolean } & FormInputBase)
+  | ({ type: "listbox"; options: FormOptions; multi?: boolean; default?: string | string[]; rows?: number } & FormInputBase)
+  | ({ type: "button"; name: string; text: string; role?: "default" | "submit" | "cancel"; danger?: boolean } & FormWidgetBase)
+  | ({ type: "group"; title?: string; children: FormWidget[] } & FormWidgetBase)
+  | ({ type: "tabs"; pages: Array<{ title: string; children: FormWidget[] }> } & FormWidgetBase)
+  | ({ type: "row"; children: FormWidget[]; gap?: number } & FormWidgetBase)
+  | ({ type: "column"; children: FormWidget[]; gap?: number } & FormWidgetBase)
+  | ({ type: "grid"; columns: number; children: FormWidget[] } & FormWidgetBase)
+  | ({ type: "spacer"; size?: number } & FormWidgetBase)
+  | ({ type: "image"; src: string; alt?: string; height?: number } & FormWidgetBase)
+  | ({ type: "table"; columns: string[]; rows: FormValue[][] | { range: string }; maxRows?: number } & FormWidgetBase)
+  | ({ type: "progress"; name: string; value: number; max?: number; text?: string } & FormWidgetBase);
+
+/** The whole form: what `form.define(spec)` takes. */
+declare interface FormSpec {
+  /** Heading rendered as BODY content — the dialog's identity band always names this script and is not addressable. */
+  title?: string;
+  /** Optional paragraph above the widgets. */
+  description?: string;
+  submitLabel?: string;
+  cancelLabel?: string;
+  /** Dialog width in px (320..1200, clamped to the window). */
+  width?: number;
+  /** When bound widgets write their cells: on Submit (default) or on each committed change. */
+  writeOn?: "submit" | "change";
+  /** Enter in a single-line input submits (default true). */
+  submitOnEnter?: boolean;
+  /** Widget to focus when the form opens (default: the first enabled input). */
+  focus?: string;
+  children: FormWidget[];
+}
+
+/** What `form.update(patch)` may change while the form is open. */
+declare interface FormPatch {
+  values?: Record<string, FormValue | string[]>;
+  controls?: Record<
+    string,
+    {
+      disabled?: boolean;
+      hidden?: boolean;
+      label?: string;
+      /** label / button / progress caption. */
+      text?: string;
+      options?: FormOptions;
+      /** Error text under the control; null clears it. */
+      error?: string | null;
+      /** progress: current value / max. */
+      value?: number;
+      max?: number;
+    }
+  >;
+  focus?: string;
+  /** Banner above the widgets; null clears it. */
+  message?: { text: string; kind?: "info" | "warning" | "error" } | null;
+}
+
+/**
+ * What `onSubmit` may return. Return nothing to accept; `false`, `"cancel"` or
+ * `{ cancel: true, errors, message }` keeps the form open and shows the errors
+ * under the named widgets.
+ */
+declare type FormSubmitVerdict =
+  | void
+  | undefined
+  | false
+  | "cancel"
+  | { cancel: true; errors?: Record<string, string>; message?: string };
+
+declare interface FormChangeDetail {
+  name: string;
+  value: FormValue | string[];
+  values: Record<string, FormValue | string[]>;
+  /** "user" for a keystroke or click; "cell" when a bound cell changed underneath. */
+  source: "user" | "cell";
+}
+declare interface FormClickDetail {
+  name: string;
+  values: Record<string, FormValue | string[]>;
+}
+declare interface FormCloseDetail {
+  reason: "submit" | "cancel" | "script" | "deadline" | "unmount";
+  values: Record<string, FormValue | string[]>;
+}
+
+/**
+ * `context.caps.forms` — on EVERY script: open another script's form by name.
+ */
+declare interface ScriptFormsApi {
+  /**
+   * Show the form script named `name` (case-insensitive) modally and resolve
+   * its answers on Submit, or null when it was closed without saving. The
+   * form must be running, at this script's access level and from the same
+   * origin; a form whose owner may not show dialogs is refused with that
+   * reason. `initial` overrides its widget defaults for this show only.
+   */
+  show(name: string, options?: { initial?: Record<string, FormValue | string[]> }): Promise<Record<string, unknown> | null>;
+}
+
+/**
+ * A handle on one widget of this script's form (`form.control("qty")`) — the
+ * VBA `Me.TextBox1` shape. Setters are sugar over `form.update`; `value` reads
+ * the host-pushed mirror synchronously.
+ */
+declare interface FormControlHandle {
+  /** The widget's current value (sync; read from the host-pushed mirror). */
+  readonly value: unknown;
+  set(value: unknown): void;
+  /** label / button / progress caption. */
+  setText(text: string): void;
+  enable(enabled: boolean): void;
+  show(visible: boolean): void;
+  /**
+   * Replace this control's choices. The choices THEMSELVES — a `{ range }` is
+   * read from the sheet once, when the form opens, and cannot be changed from
+   * here (the host refuses it rather than ignoring it).
+   */
+  setOptions(options: Array<string | FormOption>): void;
+  /** Error text under the control; null clears it. */
+  setError(message: string | null): void;
+  focus(): void;
+  onChange(handler: (detail: FormChangeDetail) => void): () => void;
+  /** Buttons only. */
+  onClick(handler: (detail: FormClickDetail) => void): () => void;
+}
+
+/**
+ * Context for Form instances — the VBA UserForm. A form is an object script
+ * whose layout is a DATA-ONLY widget tree that TRUSTED Calcula code paints as
+ * a modal dialog: the script never supplies pixels, and the dialog's identity
+ * band always names the script that asked. Showing it needs
+ * `// @capability ui.dialog`; describing it does not.
+ */
+declare interface FormContext extends BaseObjectContext {
+  /** The form's minted UUID. Other scripts address a form by NAME, never by this id. */
+  readonly instanceId: string;
+
+  /** Describe (or re-describe, for the next show) the layout. Nothing is shown. */
+  define(spec: FormSpec): void;
+  /**
+   * Show the form MODALLY (VBA `UserForm.Show`). Resolves the answers on
+   * Submit, or null on Cancel / Escape / close / deadline / unmount — a form
+   * never leaves a script hanging. `initial` overrides widget defaults for
+   * this show only.
+   */
+  show(options?: { initial?: Record<string, FormValue | string[]> }): Promise<Record<string, unknown> | null>;
+  /** Close the open form from code (VBA `Hide`); `result` becomes show()'s answer, omit for null. */
+  close(result?: Record<string, FormValue | string[]> | null): void;
+  /** Change what the open form shows. */
+  update(patch: FormPatch): void;
+  /** A handle on one widget, by name. */
+  control(name: string): FormControlHandle;
+  /** Every input's current value (sync mirror). */
+  readonly values: Record<string, unknown>;
+  /** Whether the form is on screen right now (sync mirror). */
+  readonly isOpen: boolean;
+
+  // -- Events --
+
+  /** The form is on screen. */
+  onShow(handler: (detail: { values: Record<string, FormValue | string[]> }) => void): () => void;
+  /** A widget's value changed (text widgets are delivered a moment after the last keystroke). */
+  onChange(handler: (detail: FormChangeDetail) => void): () => void;
+  /** A `button` widget with role "default" was clicked. */
+  onClick(handler: (detail: FormClickDetail) => void): () => void;
+  /**
+   * REPLYING hook, asked when the user submits and every declarative rule
+   * (required / min / max / choices) already passed. Return nothing to accept;
+   * `false`, `"cancel"` or `{ cancel: true, errors, message }` to keep the form
+   * open with those errors shown. Answer within 3 seconds — a late verdict is
+   * ignored and the submit proceeds, so a stuck script never traps the user.
+   */
+  onSubmit(
+    handler: (detail: { values: Record<string, FormValue | string[]> }) => FormSubmitVerdict | Promise<FormSubmitVerdict>,
+  ): () => void;
+  /** The form left the screen, and why. */
+  onClose(handler: (detail: FormCloseDetail) => void): () => void;
 }
 
 // ============================================================================

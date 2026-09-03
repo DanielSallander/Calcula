@@ -39,6 +39,16 @@ import { listTemplates, stampFromTemplate, loadTemplate } from "./lib/templateMa
 import { loadConsents, recordConsent, isConsentCurrent, getChangedScripts } from "./lib/consentStore";
 import type { CapabilityGrant } from "./lib/consentStore";
 import { emitAppEvent, onAppEvent } from "@api/events";
+import {
+  SCRIPT_FORM_CLOSE_EVENT,
+  SCRIPT_FORM_INPUT_EVENT,
+  SCRIPT_FORM_REQUEST_EVENT,
+} from "@api/scriptHost/scriptFormSpec";
+import type {
+  ScriptFormClosePayload,
+  ScriptFormInputPayload,
+  ScriptFormRequestPayload,
+} from "@api/scriptHost/scriptFormSpec";
 import { hostStopTransientDebugSessions } from "@api/scriptHost/host";
 import type { ObjectScriptDefinition, ScriptableObjectType } from "@api/scriptableObjects";
 import React, { Suspense } from "react";
@@ -54,6 +64,7 @@ import CapabilityRequestDialog from "./components/CapabilityRequestDialog";
 import ScriptDialogPrompt, {
   SCRIPT_DIALOG_ANSWERED_EVENT,
 } from "./components/ScriptDialogPrompt";
+import { ScriptFormDialog } from "./components/scriptForm";
 import TemplateManagerDialog from "./components/TemplateManagerDialog";
 import ScriptMarketplace from "./components/ScriptMarketplace";
 import { installObjectScriptDebugBridge, reloadPersistedBreakpoints } from "./lib/debugger";
@@ -62,7 +73,9 @@ import { openObjectScriptEditor, openMacroInEditor } from "./lib/openObjectScrip
 import { registerScriptEditorProvider } from "@api/scriptEditorService";
 import { installScriptDraftReview, openRememberedDraft } from "./lib/scriptDrafts";
 import { installAiEditBridge, replayAiEditResults } from "./lib/aiEditBridge";
+import { installFormPreviewBridge, replayFormPreviewResults } from "./lib/formPreviewBridge";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
+import { createFormScript } from "./lib/createForm";
 import {
   onSaveAndApply,
   onRegisterScript,
@@ -586,6 +599,96 @@ async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
+  // ---- TypeScript Forms: the script-defined form modal ----
+  // The host registry (scriptHost/scriptForms.ts) emits SCRIPT_FORM_REQUEST_EVENT
+  // and then listens for SCRIPT_FORM_INPUT_EVENT; it owns the guards (one form
+  // per script, one app-wide, the deadlines) and closes the form by emitting
+  // SCRIPT_FORM_CLOSE_EVENT. As with ui.dialog there is no queue here: a second
+  // request while one shows was already refused host-side, and if one ever
+  // arrives anyway it is answered "cancel" rather than dropped — dropping it
+  // would hang the awaiting script.
+  //
+  // The invariant this wiring keeps: EVERY close reaches the host. The
+  // component emits submit/cancel itself; if the dialog closes having emitted
+  // neither (the dialog manager closed it, the window went away), the close
+  // watcher emits the cancel. A host that has already CLOSED the form ignores
+  // a late cancel for a showId it no longer tracks.
+  const SCRIPT_FORM_DIALOG_ID = "scriptable-objects.scriptForm";
+  context.ui.dialogs.register({
+    id: SCRIPT_FORM_DIALOG_ID,
+    title: "Script form",
+    component: ScriptFormDialog,
+    width: 460,
+    height: 360,
+  });
+  cleanupFunctions.push(() => context.ui.dialogs.unregister(SCRIPT_FORM_DIALOG_ID));
+
+  // The session the dialog on screen belongs to, or null when the HOST has
+  // settled it. Nothing else is tracked here: whether the renderer has sent a
+  // terminal event is the host's business, and this extension guessing at it
+  // is what left a session open after an Escape during a pending submit.
+  let activeScriptForm: ScriptFormRequestPayload | null = null;
+
+  cleanupFunctions.push(
+    onAppEvent(SCRIPT_FORM_REQUEST_EVENT, (detail) => {
+      const request = detail as ScriptFormRequestPayload;
+      if (activeScriptForm !== null) {
+        // Unreachable while the host's one-at-a-time guard runs first; if it
+        // ever happens, refuse by name rather than silently drop the request.
+        const refusal: ScriptFormInputPayload = { showId: request.showId, kind: "cancel", values: {} };
+        emitAppEvent(SCRIPT_FORM_INPUT_EVENT, refusal);
+        return;
+      }
+      activeScriptForm = request;
+      context.ui.dialogs.show(SCRIPT_FORM_DIALOG_ID, request as unknown as Record<string, unknown>);
+    }),
+  );
+
+  cleanupFunctions.push(
+    onAppEvent(SCRIPT_FORM_CLOSE_EVENT, (detail) => {
+      const close = detail as ScriptFormClosePayload;
+      if (activeScriptForm?.showId !== close.showId) return;
+      // The HOST closed the session, so nothing is owed back to it. Forgetting
+      // the form here is also what stops the close watcher below sending a
+      // cancel for a session that is already settled.
+      activeScriptForm = null;
+      // Take the dialog down from HERE as well as in the component. The
+      // component closes itself on this event, but only if it is mounted and
+      // subscribed: a show that is closed immediately (a deadline, a revoke,
+      // an unmount landing in the same tick) would otherwise leave an empty
+      // modal on screen belonging to a session that no longer exists. Hiding a
+      // dialog that has already closed itself is a no-op.
+      context.ui.dialogs.hide(SCRIPT_FORM_DIALOG_ID);
+    }),
+  );
+
+  cleanupFunctions.push(
+    DialogExtensions.onChange(() => {
+      if (activeScriptForm === null) return;
+      const stillOpen = DialogExtensions.getVisibleDialogs()
+        .some((d) => d.definition.id === SCRIPT_FORM_DIALOG_ID);
+      if (stillOpen) return;
+      const closedForm = activeScriptForm;
+      activeScriptForm = null;
+      // THE DIALOG IS GONE AND THE HOST STILL HAS THE SESSION OPEN, so it is
+      // told — unconditionally. A form the host has already closed cleared
+      // `activeScriptForm` on SCRIPT_FORM_CLOSE_EVENT above, so this cannot
+      // fire for a settled session; anything still tracked here is a session
+      // waiting for an answer that can no longer arrive from a dialog nobody
+      // can see. Cancel is the only safe reading of that.
+      //
+      // This used to be skipped whenever a terminal event had left the
+      // renderer, which was exactly wrong for the one case that mattered:
+      // Submit sends "submit", the host is awaiting the script's onSubmit
+      // verdict, the user presses Escape, and the dialog manager takes the
+      // dialog down. Nothing was sent, the session stayed open holding the
+      // app-wide modal slot until the 30-minute idle deadline, and every other
+      // script dialog was refused for that whole time.
+      const cancelled: ScriptFormInputPayload = { showId: closedForm.showId, kind: "cancel", values: {} };
+      emitAppEvent(SCRIPT_FORM_INPUT_EVENT, cancelled);
+    }),
+  );
+
   // ---- Load object scripts from backend on startup ----
   // The startup load IS a workbook open (the app just loaded whatever workbook
   // it starts with — including a .cala launched by double-click), so it carries
@@ -760,6 +863,32 @@ async function activate(context: ExtensionContext): Promise<void> {
     },
   });
 
+  // ---- Insert > Form... : a new host-painted form script ----
+  // The identity (a minted instanceId) and the auto-numbered name come from
+  // ONE helper shared with the manager pane, so no second path can mint a form
+  // differently. The editor opens through the same EDIT_SCRIPT route every
+  // other script uses, targeted by scriptId so it never scaffolds a second one.
+  context.ui.menus.registerItem("insert", {
+    id: "insert.form",
+    label: "Form...",
+    icon: IconScript,
+    action: async () => {
+      try {
+        const script = await createFormScript();
+        emitAppEvent(ScriptableObjectEvents.EDIT_SCRIPT, {
+          objectType: script.objectType,
+          instanceId: script.instanceId,
+          objectName: script.name,
+          scriptId: script.id,
+        });
+      } catch (e) {
+        showToast(`Could not create the form: ${e instanceof Error ? e.message : String(e)}`, {
+          type: "error",
+        });
+      }
+    },
+  });
+
   // ---- Register task pane for script management ----
   context.ui.taskPanes.register({
     id: "scriptable-objects.manager",
@@ -892,6 +1021,24 @@ async function activate(context: ExtensionContext): Promise<void> {
       return () => { off?.(); };
     })(),
   );
+
+  // ---- "Preview form" (the editor window asks; this window paints) ----
+  // BEGIN form-preview bridge. A FORM script's layout is captured by running
+  // the code on screen in the preview realm against a COPY of the active
+  // sheet, then painted in the labelled preview dialog registered above. Both
+  // halves belong to this window: the preview snapshots the live workbook
+  // here, and the modal slot a form claims is this window's. Nothing is saved,
+  // mounted, written or audited — see lib/formPreviewBridge.ts. Results are
+  // replayed on READY exactly as AI-edit results are.
+  cleanupFunctions.push(installFormPreviewBridge());
+  cleanupFunctions.push(
+    (() => {
+      let off: (() => void) | null = null;
+      void onEditorReady(() => replayFormPreviewResults()).then((fn) => { off = fn; });
+      return () => { off?.(); };
+    })(),
+  );
+  // END form-preview bridge.
 
   // Breakpoints are workbook state (extension-data key calcula.objectScripts.debug).
   // Load this workbook's set now, and re-load whenever the open workbook changes,

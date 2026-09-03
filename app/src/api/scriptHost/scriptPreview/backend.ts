@@ -52,6 +52,7 @@ import {
   type CellShape,
   type PreviewCell,
 } from "./grid";
+import type { FormSpec } from "../scriptFormSpec";
 
 /** A member the real surface has but this backend does not serve. */
 export class PreviewGapError extends Error {
@@ -183,6 +184,14 @@ export interface PreviewBackendState {
   clipboard?: PreviewClipboard;
   /** Named ranges, name -> refersTo. Seeded empty; a preview names its own. */
   namedRanges: Map<string, string>;
+  /**
+   * The layout a FORM script declared with `form.define` — captured rather
+   * than served, so the editor can paint it in a preview-mode dialog. The
+   * row carries no capability, so the empty preview ceiling admits it; the
+   * capability-bearing `form.show` is refused by that ceiling, and the
+   * preview driver treats that one refusal as expected.
+   */
+  formLayout?: FormSpec;
 }
 
 /** Build the state a backend closure operates over. */
@@ -753,6 +762,14 @@ export function respond(state: PreviewBackendState, method: string, args: unknow
     }
     case "cap.dialogAlert":
       return undefined;
+    // ---- forms: the layout is CAPTURED, never painted, in a preview ----
+    case "form.define": {
+      // Already shaped by `vFormDefine`: the preview handle runs the same
+      // policy as production before this backend ever sees the call.
+      const [spec] = args as [FormSpec];
+      state.formLayout = spec;
+      return undefined;
+    }
     case "cap.dialogConfirm":
       // Default false: dismissal is the canned answer unless the caller says
       // yes, matching the product where Cancel/Escape/close all resolve false.

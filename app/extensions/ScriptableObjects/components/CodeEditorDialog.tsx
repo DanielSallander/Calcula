@@ -37,6 +37,13 @@ import { hostValidateScript } from "@api";
 import { prefetchScriptTranspiler } from "@api/scriptTranspile";
 import { clearBreakpoints, shiftBreakpoints } from "../lib/debugger";
 import {
+  IDLE_FORM_PREVIEW,
+  reduceFormPreviewState,
+  runFormPreview,
+  type FormPreviewState,
+} from "../lib/formPreviewBridge";
+import { ActivityDot } from "../../_shared/components/ActivityDot";
+import {
   breakpointShift,
   DebugPanel,
   DebugToolbar,
@@ -570,6 +577,33 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
     setShowConsole(true);
   }, []);
 
+  // Preview form. This dialog lives in the MAIN window, so there is no bridge
+  // to cross: the same run the editor window asks for over the wire is called
+  // directly, and its results land in local state. Offered ONLY for a form
+  // script; nothing is saved, mounted or written.
+  const isFormScript = activeScript?.objectType === "form";
+  const [formPreview, setFormPreview] = useState<FormPreviewState>(IDLE_FORM_PREVIEW);
+  const formPreviewSeq = useRef(0);
+  const handlePreviewForm = useCallback(async () => {
+    if (!activeScript || activeScript.objectType !== "form") return;
+    const text = editorRef.current?.getValue() ?? source;
+    // Compiled through the save gate (TypeScript in, JavaScript out) but NOT
+    // stored: the preview realm runs JavaScript, and a compile error belongs
+    // in this console, not in a preview that never started.
+    const gate = await gateObjectScriptSave(text, activeScript.name, hostValidateScript);
+    const requestId = `dialog-${++formPreviewSeq.current}`;
+    if (!gate.ok) {
+      reportToConsole(gate.detail, activeScript.id);
+      setFormPreview({ phase: "failed", message: `The preview did not start: ${gate.message}`, requestId });
+      return;
+    }
+    setFormPreview({ phase: "running", message: "Previewing the form…", requestId });
+    await runFormPreview(
+      { requestId, scriptId: activeScript.id, scriptName: activeScript.name, source: gate.javascript },
+      (result) => setFormPreview((prev) => reduceFormPreviewState(prev, result)),
+    );
+  }, [activeScript, source, reportToConsole]);
+
   // Switch active script
   const handleSelectScript = useCallback(async (scriptId: string) => {
     // Auto-save current. The same gate as the Save button: an auto-save is
@@ -1093,6 +1127,34 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
             </button>
           )}
 
+          {/* Preview form. ONLY for a form script: the code on screen is run
+              in the preview realm against a copy of the active sheet and its
+              layout painted in a preview dialog. Nothing is saved or written. */}
+          {activeScript && isFormScript && (
+            <button
+              className="ose-toolbar-btn"
+              data-testid="script-form-preview-action"
+              onClick={() => void handlePreviewForm()}
+              disabled={formPreview.phase === "running"}
+              style={formPreview.phase === "shown" ? { color: "#9CDCFE" } : undefined}
+              title="Show this form as it would look, from the code on screen. Nothing is saved or written."
+            >
+              <ActivityDot
+                status={
+                  formPreview.phase === "running"
+                    ? "running"
+                    : formPreview.phase === "shown"
+                      ? "done"
+                      : formPreview.phase === "failed"
+                        ? "failed"
+                        : "idle"
+                }
+                size={6}
+              />
+              Preview form
+            </button>
+          )}
+
           <div style={{ flex: 1 }} />
 
           {/* Right side controls */}
@@ -1178,6 +1240,39 @@ export default function CodeEditorDialog({ onClose, data }: DialogProps): React.
             {isReadOnly ? "Read Only" : "Save & Apply"}
           </button>
         </div>
+
+        {/* Preview form status. Inline beside the action, never a dialog. */}
+        {activeScript && isFormScript && formPreview.phase !== "idle" && (
+          <div
+            data-testid="script-form-preview-status"
+            data-phase={formPreview.phase}
+            role="status"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "4px 12px",
+              backgroundColor: formPreview.phase === "failed" ? "#4A2B2B" : "#2B3A4A",
+              borderBottom: "1px solid #444",
+              color: formPreview.phase === "failed" ? "#F48771" : "#9CDCFE",
+              fontSize: 11,
+              lineHeight: "1.5",
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ flex: 1 }}>{formPreview.message}</span>
+            {formPreview.phase !== "running" && (
+              <button
+                className="ose-toolbar-btn"
+                data-testid="script-form-preview-dismiss"
+                onClick={() => setFormPreview(IDLE_FORM_PREVIEW)}
+                title="Hide this note"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Main area: editor + sidebar */}
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
