@@ -161,8 +161,17 @@ interface FormSession {
   rejectShown: ((e: Error) => void) | null;
 }
 
-/** scriptId -> the layout its last form.define declared. */
-const definitions = new Map<string, FormSpec>();
+/**
+ * The layouts one script may describe. A script has ONE modal form ("form",
+ * `form.define`) and may ALSO dock the same kind of tree as a task pane ("pane",
+ * `pane.dock`, scriptPanes.ts). They are kept per KIND so that describing one
+ * never overwrites the other — a form script that docks a status pane still
+ * has its form the next time it calls `show()`.
+ */
+export type ScriptLayoutKind = "form" | "pane";
+
+/** scriptId -> layout kind -> the spec its last define/dock declared. */
+const definitions = new Map<string, Map<ScriptLayoutKind, FormSpec>>();
 /** showId -> session. At most one entry (the modal slot), keyed for clarity. */
 const sessions = new Map<string, FormSession>();
 /** scriptId -> showId, so the per-script lookups are not scans. */
@@ -211,11 +220,38 @@ const now = (): number => Date.now();
  * show, so a debug remount that re-runs `setup` never throws here.
  */
 export function defineScriptForm(scriptId: string, spec: FormSpec): void {
-  definitions.set(scriptId, spec);
+  defineScriptLayout(scriptId, "form", spec);
 }
 
 export function getScriptFormSpec(scriptId: string): FormSpec | null {
-  return definitions.get(scriptId) ?? null;
+  return getScriptLayoutSpec(scriptId, "form");
+}
+
+/** Remember one of a script's layouts without touching the others. */
+export function defineScriptLayout(scriptId: string, layout: ScriptLayoutKind, spec: FormSpec): void {
+  let byKind = definitions.get(scriptId);
+  if (!byKind) {
+    byKind = new Map();
+    definitions.set(scriptId, byKind);
+  }
+  byKind.set(layout, spec);
+}
+
+export function getScriptLayoutSpec(scriptId: string, layout: ScriptLayoutKind): FormSpec | null {
+  return definitions.get(scriptId)?.get(layout) ?? null;
+}
+
+/** Forget one layout kind for one script (its unmount), leaving the other kind alone. */
+export function forgetScriptLayout(scriptId: string, layout: ScriptLayoutKind): void {
+  const byKind = definitions.get(scriptId);
+  if (!byKind) return;
+  byKind.delete(layout);
+  if (byKind.size === 0) definitions.delete(scriptId);
+}
+
+/** Forget one layout kind for EVERY script (a workbook reset). */
+export function forgetAllScriptLayouts(layout: ScriptLayoutKind): void {
+  for (const scriptId of [...definitions.keys()]) forgetScriptLayout(scriptId, layout);
 }
 
 function indexWidgetTypes(spec: FormSpec): Map<string, string> {
@@ -395,7 +431,7 @@ export async function showScriptForm(args: {
   preview?: boolean;
   deps: FormSessionDeps;
 }): Promise<{ showId: string; closed?: true }> {
-  const spec = definitions.get(args.scriptId);
+  const spec = getScriptLayoutSpec(args.scriptId, "form");
   if (!spec) {
     throw new BrokerError("HostError", "form.show: describe the layout first with form.define(...)");
   }
@@ -457,7 +493,8 @@ export async function showScriptForm(args: {
   const values: Record<string, FormValue | string[]> = {};
   // Bound reads first, then `initial` on top: an explicit initial value wins
   // over the cell for this show only (and drops the cell's display text, which
-  // no longer describes what the widget holds).
+  // no longer describes what the widget holds) — EXCEPT over a seed the host
+  // marked read-only, which owns its value outright (see the loop below).
   for (const [name, seed] of Object.entries(argSeeds ?? {})) {
     const widgetType = widgetTypes.get(name);
     // Not a widget in THIS layout: a stale name from a previous `define`, or a
@@ -479,6 +516,25 @@ export async function showScriptForm(args: {
       if (!FORM_INPUT_TYPE_SET.has(widgetTypes.get(name) ?? "")) continue;
       const v = value as FormValue | string[];
       const prior = seeds[name];
+      // A SEED THE HOST MARKED READ-ONLY OWNS ITS VALUE, AND `initial` LOSES.
+      // `readOnly` is never something the calling code sets: the host stamps it
+      // on a seed it read for the user — or refused to read — together with a
+      // `reason` the renderer paints as its OWN help line under the field
+      // (FormWidgetTree.tsx). Merging `initial` on top kept the marking, kept
+      // that sentence and kept the cell's `formula`, and replaced only the
+      // number. On an add-in's form every bound seed is read-only and the
+      // sentence is "an add-in's form can show you this cell; it can never
+      // change it" (extensionFormBindings.ts), so an add-in could put a figure
+      // it invented inside a switched-off box that Calcula was captioning as
+      // the user's own cell — with the genuine formula still appearing on
+      // focus, which made the fabrication read MORE authentic, not less. That
+      // falsifies `CONTRIBUTION_REACH_NOTE.form` ("Calcula then shows you that
+      // cell's contents in it") at the point of use. Provenance and value are
+      // one indivisible thing; a caller's default is what gives way. Silent on
+      // purpose: the field already says what it holds and why, and there is no
+      // sensible answer to give a script that asked for a default on a box the
+      // user cannot type into.
+      if (prior?.readOnly) continue;
       seeds[name] = prior ? { ...prior, value: v, display: undefined } : { value: v };
       values[name] = v;
     }
@@ -550,8 +606,24 @@ export function updateScriptForm(scriptId: string, patch: FormPatch): void {
     }
     return;
   }
+  // THE SAME RULE `initial` MEETS AT SHOW TIME, and it has to be here too: a
+  // patch is the second way to put a value in a field, so guarding only the
+  // show would let the identical substitution land a tick later, under the
+  // identical host-authored read-only sentence. The name is stripped from the
+  // PAYLOAD as well as from `s.values`, because the renderer's `landFormPatch`
+  // (scriptFormState.ts) applies `patch.values` on its own and consults no
+  // seed; leaving it in would paint the caller's value while the host believed
+  // it had refused it — and dirty the widget, which is what stops the cell's
+  // display text from masking the substitution.
+  let outgoing = patch;
   if (patch.values) {
-    for (const [name, value] of Object.entries(patch.values)) {
+    const sealed = Object.keys(patch.values).filter((name) => s.seeds[name]?.readOnly === true);
+    if (sealed.length > 0) {
+      const values = { ...patch.values };
+      for (const name of sealed) delete values[name];
+      outgoing = { ...patch, values };
+    }
+    for (const [name, value] of Object.entries(outgoing.values ?? {})) {
       const type = s.widgetTypes.get(name) ?? "";
       if (!FORM_INPUT_TYPE_SET.has(type)) continue;
       // THE SAME COERCION THE RENDERER APPLIES. `form.control("qty").set("7")`
@@ -562,7 +634,7 @@ export function updateScriptForm(scriptId: string, patch: FormPatch): void {
     }
     s.deps.mirror("form.values", { ...s.values });
   }
-  const payload: ScriptFormPatchPayload = { showId: s.showId, patch };
+  const payload: ScriptFormPatchPayload = { showId: s.showId, patch: outgoing };
   emitAppEvent(SCRIPT_FORM_PATCH_EVENT, payload);
 }
 
@@ -594,6 +666,14 @@ export function closeScriptForm(
  * new cell value into `form.values` would report a number the user cannot see
  * — and an onChange handler computing a total from it would be wrong.
  */
+/**
+ * How many DISCRETE `onChange{source:"cell"}` events one seed refresh forwards
+ * to the script. The mirror (`form.values`) is always updated in full; this
+ * bounds only the per-name fan-out, which a large paste otherwise turned into
+ * hundreds of events each carrying a full copy of the same values.
+ */
+export const MAX_FORM_CHANGE_FANOUT = 32;
+
 export function refreshScriptFormSeeds(
   showId: string,
   seeds: Record<string, FormSeed>,
@@ -619,12 +699,30 @@ export function refreshScriptFormSeeds(
   if (adopted.length === 0) return;
   s.deps.mirror("form.values", { ...s.values });
   if (opts?.echo === false) return;
-  for (const name of adopted) {
+  // FAN-OUT CAP. Every adopted seed is already in `s.values` (the mirror is
+  // updated in full above); what is capped is the number of DISCRETE onChange
+  // events one refresh forwards. A paste touching 200 bound cells used to send
+  // 200 events with 200 full-values copies — each carrying the same picture.
+  // Past the cap the script still sees every value through `form.values` and
+  // through the events it does get; it just is not told 200 times.
+  const forwarded = Array.from(adopted).slice(0, MAX_FORM_CHANGE_FANOUT);
+  for (const name of forwarded) {
     s.deps.forward("onChange", { name, value: seeds[name].value, values: { ...s.values }, source: "cell" });
   }
 }
 
-/** The session on screen, if any (transparency / tests). */
+/**
+ * The MODAL form session on screen, if any (transparency / tests).
+ *
+ * WHAT "ACTIVE" MEANS NOW THAT A SECOND SURFACE EXISTS. This answers "which
+ * form is blocking the user right now" and nothing else: it reads the modal
+ * `sessions` of THIS registry, of which there is at most one (the app-wide
+ * modal slot). A docked task pane (scriptPanes.ts) is never "active" in that
+ * sense — it blocks nobody and several may be open at once — so it never
+ * appears here, and its counterpart is `listScriptPanes()`, which is a LIST
+ * because the question it answers ("what is holding a surface?") has several
+ * answers. A caller that wants "any script surface on screen" asks both.
+ */
 export function getActiveScriptForm(): { showId: string; scriptId: string; scriptName: string } | null {
   for (const s of sessions.values()) return { showId: s.showId, scriptId: s.scriptId, scriptName: s.scriptName };
   return null;
@@ -647,7 +745,9 @@ export function revokeScriptForms(scriptId: string): void {
   for (const other of [...sessions.values()]) {
     if (other.callerScriptId === scriptId) endSession(other, "unmount", null);
   }
-  definitions.delete(scriptId);
+  // Only the FORM layout: the pane layout is scriptPanes.ts's to forget, and
+  // hostUnmountScript asks both registries.
+  forgetScriptLayout(scriptId, "form");
   showAttempts.delete(scriptId);
 }
 
@@ -657,7 +757,7 @@ export function resetScriptForms(): void {
   for (const s of [...sessions.values()]) endSession(s, "unmount", null);
   sessions.clear();
   sessionByScript.clear();
-  definitions.clear();
+  forgetAllScriptLayouts("form");
   showAttempts.clear();
 }
 
@@ -841,7 +941,8 @@ async function submit(s: FormSession, values: Record<string, FormValue | string[
 }
 
 /** A write failure as one bounded line for the banner. */
-function describeFormError(e: unknown): string {
+/** The text a refused write shows in the band, bounded. Shared with the pane registry. */
+export function describeFormError(e: unknown): string {
   const text = e instanceof Error ? e.message : String(e);
   return text.length > MAX_FORM_ERROR_CHARS ? text.slice(0, MAX_FORM_ERROR_CHARS) : text;
 }

@@ -126,6 +126,7 @@ import {
   CONTRIBUTION_DECLARATION_KEY,
   CONTRIBUTION_KIND_LABEL,
   CONTRIBUTION_REACH_NOTE,
+  EXTENSION_BUILTIN_ACTION_REACH_NOTE,
   EXTENSION_CONTRIBUTION_KINDS,
   type ExtContributionDeclaration,
   type WorkerExtensionManifest,
@@ -1005,7 +1006,15 @@ class ExtensionManagerImpl implements ExtensionManagerApi {
             `private storage lives inside this workbook file and travels with it. ` +
             `Being shown your cells and running as a worksheet function are granted ` +
             `by allowing it here — they take effect as soon as it loads, with no ` +
-            `further prompt. Only allow extensions you trust.\n\n` +
+            `further prompt. ` +
+            // THE DOOR NO CONTRIBUTION DECLARES. `reachClause` above is driven
+            // by the DECLARED kinds, so an add-in that declares nothing gets no
+            // reach paragraph at all — while still holding `ext.executeCommand`,
+            // which costs no capability and runs Calcula's script-safe commands
+            // (several of which write cells). Disclosed unconditionally, from
+            // the same constant the install screen renders.
+            `\n\n${EXTENSION_BUILTIN_ACTION_REACH_NOTE}\n\n` +
+            `Only allow extensions you trust.\n\n` +
             `Allow "${name}" to load? (You can change this later in Extensions.)`,
         );
       } catch {

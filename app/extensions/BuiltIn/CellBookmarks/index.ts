@@ -32,6 +32,7 @@ import {
   showOverlay,
   // Double-click interceptor
   registerCellDoubleClickInterceptor,
+  isKeyClaimed,
 } from "@api";
 import { getGridStateSnapshot } from "@api/grid";
 import {
@@ -330,6 +331,14 @@ function activate(context: ExtensionContext): void {
 
   // ---- 12. Keyboard shortcuts ----
   const handleKeyDown = (e: KeyboardEvent) => {
+    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+    // field, a shape's declared hit rectangle -- is not this extension's.
+    // This handler had no focus guard at all, and a longer tag list would only
+    // be a census of the widget types that exist today.
+    // See core/lib/pointerClaims.ts, and the census in
+    // core/lib/globalInputListeners.ts (a new global listener adds a row).
+    if (isKeyClaimed(e)) return;
+
     // Ctrl+Shift+B: Toggle add/remove bookmark
     if (e.ctrlKey && e.shiftKey && e.key === "B") {
       e.preventDefault();

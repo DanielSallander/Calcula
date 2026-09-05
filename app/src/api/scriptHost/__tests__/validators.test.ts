@@ -24,7 +24,10 @@ import {
   vCreateChart, vCreateTable, vCreateNamedRange, vNamedRangeName, vCreatePivot,
   checkPivotLayoutAspect, PIVOT_LAYOUT_ASPECTS,
   vDialogMessage, vDialogPrompt, vDialogForm,
+  vHtml, normalizeForSchemeScan,
 } from "../validators";
+import { decidePolicy, type PolicyIdentity } from "../brokerPolicy";
+import type { CapabilityId } from "../capabilityIds";
 
 describe("vSetState chart spec pre-filter", () => {
   it("passes a well-formed chart.updateSpec patch", () => {
@@ -872,5 +875,291 @@ describe("vDialogForm", () => {
     const verdict = vDialogForm([{ fields: [field({ pattern: "^(a+)+$" })] }]);
     expect(verdict).not.toBe(true);
     expect(String(verdict)).toContain("pattern");
+  });
+});
+
+// ============================================================================
+// vHtml — the media rule inside a script's own frame (M6b)
+// ============================================================================
+//
+// WHY THE RULE REACHES HERE AT ALL. The HTML is written BY the script, so it
+// lives in the script's SOURCE — and a script's source is persisted in the
+// workbook and shipped inside a signed `.calp`. A `data:` URI in a script's
+// HTML is therefore bytes INTRODUCED by code into a signed application, riding
+// out to every subscriber unreviewed under someone else's signature. That is
+// exactly the door `shape.setProperty` was closed on (BUG-0086).
+
+describe("vHtml: a script may reference media, never introduce bytes", () => {
+  it("accepts ordinary HTML", () => {
+    expect(vHtml(["<div class='kpi'>42</div>"])).toBe(true);
+    // A `media:` handle is the sanctioned way to show a picture the document
+    // already holds, so it must pass unchanged.
+    expect(vHtml([`<img src="media:${"a".repeat(64)}">`])).toBe(true);
+  });
+
+  it("refuses a data: URI and names the rule and the way out", () => {
+    const verdict = vHtml(['<img src="data:image/png;base64,iVBORw0KGgo=">']);
+    expect(verdict).not.toBe(true);
+    expect(String(verdict)).toContain("media:{sha256}");
+    expect(String(verdict)).toContain("never INTRODUCE bytes");
+  });
+
+  it("is not spelling-specific — the BUG-0099 bypass shape", () => {
+    // The fix for BUG-0099 keyed on the literal string ";base64," and `;BASE64,`
+    // walked past it. This check keys on the SCHEME, so case, whitespace, the
+    // untyped form and a non-image type are all the same refusal.
+    for (const html of [
+      '<img SRC="DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=">',
+      "<img src='data:image/svg+xml,<svg/>'>",
+      '<a href="data:,hello">x</a>',
+      '<div style="background: url(data:image/gif;base64,R0lGOD)"></div>',
+      '<img src="data:image/png ; base64,AAA">',
+    ]) {
+      expect(vHtml([html]), html).not.toBe(true);
+    }
+  });
+
+  it("does not refuse prose that merely contains the word", () => {
+    // A refusal nobody can predict is a refusal authors route around. The
+    // scheme is only recognised in a URL shape (`type/subtype` then `;` or `,`,
+    // or the untyped `data:,`), so ordinary text survives.
+    expect(vHtml(["<p>Paste the data: prefix into the box</p>"])).toBe(true);
+    expect(vHtml(["<p>metadata: none</p>"])).toBe(true);
+  });
+
+  it("does not refuse prose that merely contains the word \"media:\"", () => {
+    // THE DEFECT THIS PINS. The reference pattern was unanchored and was run
+    // over the WHOLE document, so a dashboard tile's own label matched — the
+    // bare "media:", because the tail was optional — and refused the entire
+    // `render.setHtml` call. The frame then never painted and the author was
+    // told their HTML contained a malformed handle they had never written.
+    // There was no way to write that label short of avoiding the word.
+    expect(vHtml(['<div class="kpi"><span>Social media: 42%</span></div>'])).toBe(true);
+    expect(vHtml(["<p>media:strategy</p>"])).toBe(true);
+    expect(vHtml(["<h3>Paid media: Q3</h3>"])).toBe(true);
+    // An object key in inline script is not a URL position either.
+    expect(vHtml(['<script>const cfg = {media:"screen"};</script>'])).toBe(true);
+  });
+
+  it("admits the KPI tile from the report, verbatim", () => {
+    // The three strings the review reproduced against the shipped validator,
+    // character for character. The first is the tile a script assembles by
+    // concatenation, and it is the one that matters most: its label sits
+    // between tags on a line that ALSO carries `class="tile"`, so an anchor
+    // keyed on a nearby `=` — rather than on `media:` being what FOLLOWS the
+    // delimiter — would put the refusal straight back. Capitalisation is part
+    // of the case too: the scan is case-insensitive but a handle is lowercase
+    // hex, so "Media:" could never have satisfied it.
+    expect(vHtml(['<div class="tile"><span>Media: </span><b>4200</b></div>'])).toBe(true);
+    expect(vHtml(["<div>Media: 1,234 impressions</div>"])).toBe(true);
+    expect(vHtml(["<p>Social media: @acme</p>"])).toBe(true);
+  });
+
+  it("refuses a malformed media handle rather than silently ignoring it", () => {
+    const verdict = vHtml(['<img src="media:../../etc/passwd">']);
+    expect(verdict).not.toBe(true);
+    expect(String(verdict)).toContain("64 hex characters");
+    // Every shape a URL position takes. The empty tail — the one prose used to
+    // match — is still a refusal HERE, where it is a broken reference and not
+    // an English colon.
+    for (const html of [
+      "<img src='media:nope'>",
+      "<img src=media:nope>",
+      '<div style="background: url(media:nope)"></div>',
+      '<img src="media:">',
+      `<img src="media:${"A".repeat(64)}">`, // handles are lowercase hex
+    ]) {
+      expect(vHtml([html]), html).not.toBe(true);
+    }
+    // The refusal quotes the REFERENCE, not the `="` that proved its position:
+    // echoing the delimiter would quote the author a string they did not write.
+    expect(String(vHtml(['<img src="media:nope">']))).toContain('"media:nope"');
+    expect(String(vHtml(['<div style="background:url(media:nope)"></div>']))).toContain(
+      '"media:nope"',
+    );
+  });
+
+  it("still enforces the 5 MB bound", () => {
+    expect(vHtml([123])).not.toBe(true);
+    expect(vHtml(["x".repeat(5_000_001)])).not.toBe(true);
+  });
+});
+
+// ============================================================================
+// vHtml: the scan must see what the FRAME'S PARSERS see, not the raw argument
+// ============================================================================
+//
+// THE DEFECT THIS PINS. `INLINE_DATA_URI_RE` was keyed on the scheme rather
+// than on the word "base64" exactly so a re-spelling could not walk past it —
+// BUG-0099, where `;BASE64,` sailed through a check written for `;base64,`.
+// The pattern was fine. The INPUT was not: it was tested against the string the
+// script passed, while the string that resolves is the one an HTML parser has
+// entity-decoded, a CSS parser has unescaped, and the URL parser has stripped
+// tabs and newlines out of. Every spelling below was ALLOWED by the shipped
+// validator and every one of them renders, which is the whole failure: the
+// author gets a painted image and positive feedback that the route works, and
+// the megabytes ride into the signed .calp inside the script's source.
+//
+// This is not the runtime-concatenation case the design already answers.
+// Concatenation is resolved BEFORE vHtml sees the string; these are resolved
+// AFTER, by the frame.
+
+describe("vHtml: escaped spellings of data: are the same refusal", () => {
+  /** The seven spellings, each measured against a real DOM below. */
+  const escapedSpellings: Array<[string, string]> = [
+    ["numeric decimal", '<img src="&#100;ata:image/png;base64,AAAA">'],
+    ["numeric hex", '<img src="&#x64;ata:image/png;base64,AAAA">'],
+    // Parsers accept a numeric reference with no trailing `;` (a parse error,
+    // but they still emit the character), so `&#100ata:` is `data:`.
+    ["no trailing semicolon", '<img src="&#100ata:image/png;base64,AAAA">'],
+    // The encoded character can be ANY of the five, not just the first — a
+    // decoder that only looked at a leading reference would be a second
+    // spelling-specific check and would repeat BUG-0099 outright.
+    ["a later character", '<img src="dat&#97;:image/png;base64,AAAA">'],
+    ["a named reference", '<img src="data&colon;image/png;base64,AAAA">'],
+    // No encoding at all: the WHATWG URL parser removes ASCII tab/LF/CR from
+    // anywhere in a URL before it reads the scheme.
+    ["a raw tab inside the scheme", '<img src="da\tta:image/png;base64,AAAA">'],
+    ["a raw newline inside the scheme", '<img src="da\nta:image/png;base64,AAAA">'],
+  ];
+
+  it.each(escapedSpellings)("refuses %s", (_label, html) => {
+    expect(vHtml([html])).not.toBe(true);
+  });
+
+  it.each(escapedSpellings)("%s is what a real parser resolves to data:", (_label, html) => {
+    // The guard is only correct if it matches the renderer, so the renderer is
+    // asked rather than reasoned about: jsdom's own tokenizer and URL parser.
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    const img = host.querySelector("img");
+    expect(img?.src).toBe("data:image/png;base64,AAAA");
+    // ...and the normalized copy the scan runs over carries that same string.
+    expect(normalizeForSchemeScan(html)).toContain("data:image/png;base64,AAAA");
+  });
+
+  it("refuses a CSS escape, in a style attribute and inside <style> alike", () => {
+    // `<style>` is raw text, so character references do NOT decode there — CSS
+    // escapes are the only spelling that reaches a URL inside it. Both forms of
+    // the escape (terminated by a space, and zero-padded to six digits) are the
+    // same character to a CSS parser.
+    for (const html of [
+      '<div style="background:url(\\64 ata:image/gif;base64,R0lGOD)"></div>',
+      '<div style="background:url(\\000064ata:image/gif;base64,R0lGOD)"></div>',
+      "<style>.a{background:url(\\64 ata:image/gif;base64,R0lGOD)}</style>",
+    ]) {
+      expect(vHtml([html]), html).not.toBe(true);
+    }
+  });
+
+  it("names the escaping in the refusal, and still names the way out", () => {
+    // A refusal an author cannot connect to their own string is a refusal they
+    // route around. They wrote no literal `data:`, so the message has to say
+    // why one is being reported.
+    const verdict = String(vHtml(['<img src="&#100;ata:image/png;base64,AAAA">']));
+    expect(verdict).toContain("escaping it does not help");
+    expect(verdict).toContain("media:{sha256}");
+    expect(verdict).toContain("never INTRODUCE bytes");
+  });
+
+  it("reproduces the reported scenario: three megabytes behind one entity", () => {
+    // `render.setHtmlContent('<img src="&#x64;ata:image/png;base64,' + BIG + '">')`
+    // — comfortably under the 5 MB argument bound, under the frame budget, and
+    // it painted. That is the BUG-0086 door: bytes INTRODUCED by code into a
+    // signed application rather than REFERENCED from the document.
+    const html = `<img src="&#x64;ata:image/png;base64,${"A".repeat(3_000_000)}">`;
+    expect(html.length).toBeLessThan(5_000_000);
+    expect(vHtml([html])).not.toBe(true);
+  });
+
+  it("does not decode twice — `&amp;#100;ata:` is text, not a URL", () => {
+    // A browser makes ONE pass, so this renders the literal characters
+    // `&#100;ata:` and resolves as a relative URL. Refusing it would be the
+    // over-approximation that teaches authors the guard is unpredictable.
+    const html = '<img src="&amp;#100;ata:image/png;base64,AAAA">';
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    expect(host.querySelector("img")?.getAttribute("src")).toBe(
+      "&#100;ata:image/png;base64,AAAA",
+    );
+    expect(vHtml([html])).toBe(true);
+  });
+
+  it("still lets ordinary prose and ordinary entities through", () => {
+    // The normalization is an over-approximation and the cost of one is a
+    // SILENTLY BLANK SHAPE, so the prose cases are pinned here too. Line breaks
+    // only close up between two URL characters, which is why a paragraph that
+    // ends a line with "data:" is not joined to a comma on the next one.
+    for (const html of [
+      "<p>Paste the data:\nprefix into the box</p>",
+      "<p>Export the raw data:\n, or as JSON</p>",
+      '<div class="kpi"><span>Social&nbsp;media: 42%</span></div>',
+      "<p>Tom &amp; Jerry &mdash; Q3 data</p>",
+      "<p>AT&T revenue</p>",
+      `<img src="media:${"a".repeat(64)}">`,
+      "<style>.a{content:'\\201C'}</style>",
+    ]) {
+      expect(vHtml([html]), html).toBe(true);
+    }
+  });
+
+  it("leaves the `media:` courtesy scan on the RAW string only", () => {
+    // DELIBERATE ASYMMETRY, and a departure from the fix as first suggested.
+    // The normalized copy deletes character references this table does not
+    // carry, which is the safe direction for a SCHEME scan and the wrong one
+    // for the handle scan: deleting `&hellip;` here would glue `="` to
+    // `media:` and refuse a tooltip, and that refusal is a blank shape. The
+    // `data:` scan is the byte gate; the handle scan is a courtesy, and a
+    // missed malformed handle costs a broken <img>, never bytes.
+    expect(vHtml(['<div data-note="&hellip;media: 42%"></div>'])).toBe(true);
+    // The courtesy scan is still live on what the author actually typed.
+    expect(vHtml(['<img src="media:nope">'])).not.toBe(true);
+  });
+});
+
+// ============================================================================
+// vHtml at the broker — why a false positive here is not a warning
+// ============================================================================
+//
+// A validator verdict IS the decision for `render.setHtml`: `decidePolicy` runs
+// `validate` BEFORE the tier and capability checks and returns a terminal
+// `ValidationError`, so a correctly declared, correctly granted script is
+// refused all the same. And the refusal is never seen: the worker shim reaches
+// the broker through `callFire`, which swallows the rejection into a
+// `console.warn`, so `setHtmlContent` returns void and the shape simply never
+// paints. That is why the prose cases above are pinned at THIS level too — a
+// false positive in that scan is a silently blank shape, while a false negative
+// costs a broken `<img>`.
+
+describe("render.setHtml: the validator verdict is the whole decision", () => {
+  /** A restricted script that declared AND was granted exactly `ui.html`. */
+  const author: PolicyIdentity = {
+    tier: "restricted",
+    grants: new Set<CapabilityId>(["ui.html"]),
+    declaredCapabilities: new Set<CapabilityId>(["ui.html"]),
+  };
+
+  it("admits the KPI tile that used to be refused for the word in its label", () => {
+    const html = '<div class="tile"><span>Media: </span><b>4200</b></div>';
+    expect(decidePolicy(author, "render.setHtml", [html]).admitted).toBe(true);
+  });
+
+  it("still refuses introduced bytes, terminally and before the tier check", () => {
+    const verdict = decidePolicy(author, "render.setHtml", [
+      '<img src="data:image/png;base64,iVBORw0KGgo=">',
+    ]);
+    expect(verdict.admitted).toBe(false);
+    if (verdict.admitted) return; // narrowing; the assertion above already failed
+    expect(verdict.code).toBe("ValidationError");
+    expect(verdict.message).toContain("never INTRODUCE bytes");
+  });
+
+  it("still refuses a malformed handle in a URL position", () => {
+    const verdict = decidePolicy(author, "render.setHtml", [
+      '<img src="media:../../etc/passwd">',
+    ]);
+    expect(verdict.admitted).toBe(false);
+    if (verdict.admitted) return;
+    expect(verdict.code).toBe("ValidationError");
   });
 });

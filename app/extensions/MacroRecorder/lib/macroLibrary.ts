@@ -182,7 +182,13 @@ export function describeRunRoute(
 
 /** Whether a stored module arrived inside a distributed application. */
 export function isDistributedMacro(sourcePackage: string | null | undefined): boolean {
-  return typeof sourcePackage === "string" && sourcePackage.trim() !== "";
+  // THE SHARED RULE, not a local trim. Every GATE (the Rust module gate, the
+  // mount gate, the consent set) reads ANY stamp — blank included — as a
+  // distributed record, because a publisher-chosen name can never select the
+  // LOCAL kind. This file used to trim and read "   " as local, and three
+  // decisions hung off it: the run tier (unlocked!), the edit disposition
+  // (in place, not fork) and the run route's consent refusal text.
+  return scriptOriginForStoredRecord({ sourcePackage }).kind !== "local";
 }
 
 /**
@@ -192,7 +198,10 @@ export function isDistributedMacro(sourcePackage: string | null | undefined): bo
 export function macroProvenanceTag(
   sourcePackage: string | null | undefined,
 ): string | null {
-  return isDistributedMacro(sourcePackage) ? (sourcePackage as string).trim() : null;
+  const origin = scriptOriginForStoredRecord({ sourcePackage });
+  // The placeholder for a blank stamp, verbatim otherwise — the same string the
+  // mount gate is asked about, so the chip and the gate name one application.
+  return origin.kind === "package" ? origin.name : null;
 }
 
 /**

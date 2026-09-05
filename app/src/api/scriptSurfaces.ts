@@ -80,7 +80,13 @@ export interface ScriptSurface {
  * "declares nothing" mount is still not a zero-capability mount. Pinned against
  * the broker by the taxonomy tests.
  */
-export const BROKER_AUTO_LOCAL_CAPABILITIES: readonly CapabilityId[] = ["ui.html"];
+export const BROKER_AUTO_LOCAL_CAPABILITIES: readonly CapabilityId[] = [
+  "ui.html",
+  // The input half, split out in M6b. Auto for LOCAL scripts too: the split
+  // exists to make the DISTRIBUTED consent honest, not to re-ask the user about
+  // code they wrote themselves.
+  "ui.htmlInput",
+];
 
 export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
   {
@@ -101,10 +107,21 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "bi.sql",
       "storage",
       "ui.html",
+      // The input half of ui.html (M6b): claiming rectangles of the script's own
+      // HTML frame so clicks land there instead of on the grid. Broker-gated
+      // (render.setHitRegions), so part of any author-declared ceiling; absent
+      // from the sandboxed-extension row, whose door has no render.* method.
+      "ui.htmlInput",
       "formula.udf",
       "bi.model",
       "bi.connector",
       "ui.dialog",
+      // A task pane (M2) is the same widget tree behind a SECOND capability,
+      // because ui.dialog promises a dialog you must answer and a pane stays
+      // open while you work. Broker-gated (pane.*), so part of any
+      // author-declared ceiling; absent from the sandboxed-extension row,
+      // whose door (EXTENSION_BROKER_METHODS) has no pane.* method.
+      "ui.pane",
       "distribution.writeback",
       "schedule",
       "file.picker",
@@ -138,10 +155,21 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "bi.sql",
       "storage",
       "ui.html",
+      // The input half of ui.html (M6b): claiming rectangles of the script's own
+      // HTML frame so clicks land there instead of on the grid. Broker-gated
+      // (render.setHitRegions), so part of any author-declared ceiling; absent
+      // from the sandboxed-extension row, whose door has no render.* method.
+      "ui.htmlInput",
       "formula.udf",
       "bi.model",
       "bi.connector",
       "ui.dialog",
+      // A task pane (M2) is the same widget tree behind a SECOND capability,
+      // because ui.dialog promises a dialog you must answer and a pane stays
+      // open while you work. Broker-gated (pane.*), so part of any
+      // author-declared ceiling; absent from the sandboxed-extension row,
+      // whose door (EXTENSION_BROKER_METHODS) has no pane.* method.
+      "ui.pane",
       "distribution.writeback",
       "schedule",
       "file.picker",
@@ -182,12 +210,22 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     //
     // `grid.read` is on this row and on NO other, because this is the one
     // surface where the HOST PUSHES workbook data into code the user did not
-    // write: a cellStyle contributor is handed the displayed value of every
-    // visible cell, and a subscriber to the cell-change events is handed each
-    // change's old value, new value and formula. Both are now gated on it
-    // (CONTRIBUTION_REQUIRED_CAPABILITY + EXTENSION_PUSHED_DATA_CAPABILITIES),
-    // and both are derived into `enforceableCapabilities`, so this row cannot
-    // go quietly stale if either gate is removed.
+    // write. THREE paths now, and the count is the thing to keep honest:
+    // a cellStyle contributor is handed the displayed value of every visible
+    // cell; a subscriber to the cell-change events is handed each change's old
+    // value, new value and formula; and a field of a declared FORM (M4) that
+    // names a cell is shown that cell's contents. All three are gated on it
+    // (CONTRIBUTION_REQUIRED_CAPABILITY + EXTENSION_PUSHED_DATA_CAPABILITIES +
+    // resolveExtensionFormBindings), and derived into
+    // `enforceableCapabilities`, so this row cannot go quietly stale if a gate
+    // is removed.
+    //
+    // NOTHING ON THIS ROW LETS AN ADD-IN WRITE A CELL. The form is the closest
+    // it comes, and its bound fields are display-only by construction — no
+    // `writeBindings` dep is ever supplied, every seed is readOnly, and
+    // `writeOn` is refused at the wire. `distribution.writeback` is the one
+    // document write this surface has, and it is a .calp submission the user
+    // fills in, not the grid.
     //
     // `enforceableCapabilities` derives this exact set for this surface id, so
     // the audit below compares the row against the code rather than against a
@@ -205,7 +243,7 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "file.picker",
       "grid.read",
     ],
-    gate: "Ed25519-signed sidecar manifest verified at scan (the manifest, not the bundle's self-report, is authoritative for id + ceiling; the signature must also cover the BUNDLE via codeHash, re-checked on every scan) + per-package consent; net.fetch / bi.query / bi.sql / bi.model / distribution.writeback / schedule re-checked authoritatively in Rust (schedule on every firing); file.picker is host-mediated (native picker, user chooses the file, no path crosses). grid.read is host-mediated too and gates the two paths by which the host hands this surface the user's cell contents: a cellStyle contribution is REFUSED outright without it (loudly — console, toast, manager row, audit), and a subscription to the cell-change events is delivered redacted to coordinates. Because an unsigned or tampered sidecar arrives with its capability list zeroed, an add-in nobody signed is never shown a single cell value. ui.shortcut is NOT reachable here: an extension's keyboard path is the declarative keybinding contribution, held to the same Ctrl+Shift+<letter> rule",
+    gate: "Ed25519-signed sidecar manifest verified at scan (the manifest, not the bundle's self-report, is authoritative for id + ceiling; the signature must also cover the BUNDLE via codeHash, re-checked on every scan) + per-package consent; net.fetch / bi.query / bi.sql / bi.model / distribution.writeback / schedule re-checked authoritatively in Rust (schedule on every firing); file.picker is host-mediated (native picker, user chooses the file, no path crosses). grid.read is host-mediated too and gates the three paths by which the host hands this surface the user's cell contents: a cellStyle contribution is REFUSED outright without it (loudly — console, toast, manager row, audit), a subscription to the cell-change events is delivered redacted to coordinates, and a bound field of a declared FORM is painted switched off carrying the reason instead of the value (the question is re-asked at every show, so a revoke bites the next one). A form itself needs ui.dialog — it takes the app-wide modal slot — and its bound fields are DISPLAY ONLY: this surface has no path from a form to a cell write at all. Because an unsigned or tampered sidecar arrives with its capability list zeroed, an add-in nobody signed is never shown a single cell value. ui.shortcut is NOT reachable here: an extension's keyboard path is the declarative keybinding contribution, held to the same Ctrl+Shift+<letter> rule",
     executesUserCode: true,
   },
   {
@@ -224,10 +262,21 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "bi.sql",
       "storage",
       "ui.html",
+      // The input half of ui.html (M6b): claiming rectangles of the script's own
+      // HTML frame so clicks land there instead of on the grid. Broker-gated
+      // (render.setHitRegions), so part of any author-declared ceiling; absent
+      // from the sandboxed-extension row, whose door has no render.* method.
+      "ui.htmlInput",
       "formula.udf",
       "bi.model",
       "bi.connector",
       "ui.dialog",
+      // A task pane (M2) is the same widget tree behind a SECOND capability,
+      // because ui.dialog promises a dialog you must answer and a pane stays
+      // open while you work. Broker-gated (pane.*), so part of any
+      // author-declared ceiling; absent from the sandboxed-extension row,
+      // whose door (EXTENSION_BROKER_METHODS) has no pane.* method.
+      "ui.pane",
       "distribution.writeback",
       "schedule",
       "file.picker",
@@ -289,10 +338,21 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
       "bi.sql",
       "storage",
       "ui.html",
+      // The input half of ui.html (M6b): claiming rectangles of the script's own
+      // HTML frame so clicks land there instead of on the grid. Broker-gated
+      // (render.setHitRegions), so part of any author-declared ceiling; absent
+      // from the sandboxed-extension row, whose door has no render.* method.
+      "ui.htmlInput",
       "formula.udf",
       "bi.model",
       "bi.connector",
       "ui.dialog",
+      // A task pane (M2) is the same widget tree behind a SECOND capability,
+      // because ui.dialog promises a dialog you must answer and a pane stays
+      // open while you work. Broker-gated (pane.*), so part of any
+      // author-declared ceiling; absent from the sandboxed-extension row,
+      // whose door (EXTENSION_BROKER_METHODS) has no pane.* method.
+      "ui.pane",
       "distribution.writeback",
       "schedule",
       "file.picker",
@@ -314,12 +374,14 @@ export const SCRIPT_SURFACES: readonly ScriptSurface[] = [
     label: "Sandboxed chart marks",
     runtime: "worker-realm",
     containment:
-      "Per-mark hardened worker; paint-only into the chart's clipped plot rect — returns only an ImageBitmap + hit geometry. The mount hard-codes an EMPTY declared ceiling, so no network / BI / storage is reachable; a LOCAL mark still inherits the broker's automatic ui.html (render.setHtml addresses a shape instance, so it is inert for a mark), and a distributed mark holds nothing at all",
-    // The mount declares []; the broker adds ui.html to the ceiling AND the
-    // grants of every non-distributed script, so a local mark really does hold
-    // it. Stating "no capability" here would understate the broker's behavior.
+      "Per-mark hardened worker; paint-only into the chart's clipped plot rect — returns only an ImageBitmap + hit geometry. The mount hard-codes an EMPTY declared ceiling, so no network / BI / storage is reachable; a LOCAL mark still inherits the broker's automatic ui.html AND ui.htmlInput (render.setHtml and render.setHitRegions both address a shape instance, so both are inert for a mark), and a distributed mark holds nothing at all",
+    // The mount declares []; the broker adds ui.html and ui.htmlInput to the
+    // ceiling AND the grants of every non-distributed script, so a local mark
+    // really does hold both. Stating "no capability" here would understate the
+    // broker's behavior. Derived from BROKER_AUTO_LOCAL_CAPABILITIES by the
+    // taxonomy test, so this row cannot drift from the broker.
     mountCeiling: [],
-    capabilities: ["ui.html"],
+    capabilities: ["ui.html", "ui.htmlInput"],
     gate: "Broker with a hard-coded EMPTY declared ceiling (paint-only) + per-package consent (distributed)",
     executesUserCode: true,
   },

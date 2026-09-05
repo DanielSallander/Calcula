@@ -132,11 +132,18 @@ export function buildHandleFromDefinition(definition: {
   const isDistributed = definition.provenance === "distributed";
   // grants is the LIVE per-script set owned by capabilities.ts — so a JIT or
   // consent grant recorded after mount takes effect for checkPolicy without
-  // rebuilding the handle. ui.html is auto-granted for local scripts;
-  // distributed scripts acquire it (and every other cap) only through consent.
+  // rebuilding the handle. ui.html / ui.htmlInput are auto-granted for local
+  // scripts; distributed scripts acquire them (and every other cap) only
+  // through consent.
+  //
+  // BOTH HALVES, because the split (M6b) exists to make the DISTRIBUTED consent
+  // honest, not to re-ask the user about code they wrote themselves. A local
+  // script that had a clickable HTML frame before the split still has one; a
+  // distributed one now has to say out loud that it takes clicks.
   const grants = getGrantSet(definition.id);
   if (!isDistributed) {
     grants.add("ui.html");
+    grants.add("ui.htmlInput");
   }
   // R19 ceiling. Filter to recognized cap ids so an unknown/garbage id from any
   // source can never enter the ceiling. ui.html is auto for LOCAL scripts, so
@@ -151,6 +158,7 @@ export function buildHandleFromDefinition(definition: {
   }
   if (!isDistributed) {
     declaredCapabilities.add("ui.html");
+    declaredCapabilities.add("ui.htmlInput");
   }
   return {
     scriptId: definition.id,
@@ -313,6 +321,10 @@ const SERVER_AUDITED_METHODS: ReadonlyMap<string, string> = new Map([
  */
 const BROKER_AUDITED_CAPABILITY_METHODS: ReadonlyMap<string, string> = new Map([
   ["render.setHtml", "renders in the host window; no backend call"],
+  // M3b: the claim is a DOM change in the host window (shim elements over the
+  // shape's iframe) — no Rust gate sees it, so this write is the only record
+  // that a script took pointer input away from the grid.
+  ["render.setHitRegions", "claims pointer input in the host window; no backend call"],
   ["formula.udf.invoke", "runs in the UDF worker; no backend call"],
   ["cap.biListConnections", "bi_get_connections takes no scriptId and records nothing"],
   ["cap.scheduleList", "script_scheduler's 'list' arm records nothing (a read of own jobs)"],
@@ -324,6 +336,27 @@ const BROKER_AUDITED_CAPABILITY_METHODS: ReadonlyMap<string, string> = new Map([
   ["form.show", "host-window form; no script-driven backend call"],
   ["form.update", "host-window form; no script-driven backend call"],
   ["form.close", "host-window form; no script-driven backend call"],
+  // Add-in forms (M4). Same three properties as the object-script rows above,
+  // and one reason of their own to be here: an add-in's code lives in %APPDATA%
+  // and follows the user into every workbook, so "which add-in put a form in
+  // front of me, and when" is exactly the question the per-workbook trail has
+  // to survive a reload to answer. No Rust gate sees any of these.
+  ["ext.formShow", "host-window form shown by an add-in; no backend call"],
+  ["ext.formUpdate", "host-window form shown by an add-in; no backend call"],
+  ["ext.formClose", "host-window form shown by an add-in; no backend call"],
+  // Task panes (M2): host-painted through the registerPanel seam, no Rust gate
+  // (ui.pane is deliberately NOT in GRANTABLE_CAPABILITIES), so the broker's
+  // write is the only record of a pane being docked, changed, badged, revealed
+  // or closed by a script.
+  ["pane.dock", "host-window task pane; no script-driven backend call"],
+  ["pane.update", "host-window task pane; no script-driven backend call"],
+  ["pane.setBadge", "host-window task pane; no script-driven backend call"],
+  ["pane.reveal", "host-window task pane; no script-driven backend call"],
+  ["pane.close", "host-window task pane; no script-driven backend call"],
+  // M3c: the same registry answers for a form EMBEDDED on a sheet, so the list
+  // is the one call that tells a script which of its surfaces exist. Reading it
+  // reaches no backend either, and the broker's write is the only record.
+  ["pane.list", "host-window task panes and embedded forms; no backend call"],
   ["cap.fileExportText", "native picker + write, driven from the host; not a gated command"],
   ["cap.fileImportText", "native picker + read, driven from the host; not a gated command"],
   // read_media_file IS privileged and MAIN-window gated, but it is not

@@ -94,10 +94,12 @@ const CAP_LABEL: Record<CapabilityId, string> = {
   "bi.sql": "BI SQL",
   storage: "Storage",
   "ui.html": "Host HTML",
+  "ui.htmlInput": "HTML clicks",
   "formula.udf": "Worksheet fn",
   "bi.model": "BI model edit",
   "bi.connector": "BI connector",
   "ui.dialog": "Ask you",
+  "ui.pane": "Task pane",
   "distribution.writeback": "Package writeback",
   schedule: "Scheduled jobs",
   "file.picker": "Files you pick",
@@ -475,13 +477,17 @@ function HeldByScriptsSection({
     <div style={heldSectionStyle}>
       <div style={heldHeaderStyle}>
         Held by scripts right now (
-        {summary.shortcuts + summary.clipboards + state.watches.length})
+        {summary.shortcuts +
+          summary.clipboards +
+          state.watches.length +
+          summary.panes +
+          summary.forms})
       </div>
 
       {!summary.any && (
         <div style={heldEmptyStyle}>
-          No script is holding a keyboard shortcut, a copy of your cells, or a
-          background check.
+          No script is holding a keyboard shortcut, a copy of your cells, a
+          background check, a task pane, or a dialog.
         </div>
       )}
 
@@ -591,9 +597,103 @@ function HeldByScriptsSection({
         </div>
       ))}
 
+      {/* Surfaces (M2 S7). Every value is plain text from the inventory —
+          a script chooses its own name and its badge, so nothing here may be
+          interpreted as markup. */}
+      {state.panes.map((p) => (
+        <div key={p.paneId} style={heldRowStyle} data-script-pane-id={p.paneId}>
+          <div style={unitHeaderRowStyle}>
+            <span style={jobTargetStyle}>
+              Task pane{p.badge !== null && p.badge !== "" ? ` (badge: ${p.badge})` : ""}
+            </span>
+            <span style={p.visible ? cadenceBadge : pausedBadge}>
+              {p.visible ? "On screen" : "Hidden"}
+            </span>
+          </div>
+          <div style={jobMetaStyle}>
+            Docked by <strong style={{ fontWeight: 600 }}>{p.ownerName}</strong>
+            {p.placement === "ribbon"
+              ? " on the ribbon"
+              : p.placement === "sidebar"
+                ? " in the sidebar"
+                : ""}
+            . {describeBoundCells(p.boundCells, p.visible)} {describePaneUpdates(p)}
+          </div>
+          <div style={badgeRowStyle}>
+            {p.ownerProvenance === "distributed" && (
+              <span style={pkgBadge} title="The owning code arrived in a distributed package">
+                Package: {p.ownerPackage ?? "unknown"}
+              </span>
+            )}
+            {p.ownerMissing && (
+              <span
+                style={orphanBadge}
+                title="No code in this workbook and no live mount owns this pane."
+              >
+                Owner missing
+              </span>
+            )}
+          </div>
+          <div style={jobMetaStyle}>
+            Close it with the pane's own close button, or stop the script — it
+            goes away with the script.
+          </div>
+        </div>
+      ))}
+
+      {state.forms.map((f) => (
+        <div key={f.showId} style={heldRowStyle} data-script-form-id={f.showId}>
+          <div style={unitHeaderRowStyle}>
+            <span style={jobTargetStyle}>Dialog form</span>
+            <span style={cadenceBadge}>Blocking</span>
+          </div>
+          <div style={jobMetaStyle}>
+            Shown by <strong style={{ fontWeight: 600 }}>{f.ownerName}</strong>. No
+            other script can ask you anything while it is up. It closes when you
+            answer it or dismiss it, and on its own if it is left untouched long
+            enough.
+          </div>
+          <div style={badgeRowStyle}>
+            {f.ownerProvenance === "distributed" && (
+              <span style={pkgBadge} title="The owning code arrived in a distributed package">
+                Package: {f.ownerPackage ?? "unknown"}
+              </span>
+            )}
+            {f.ownerMissing && (
+              <span
+                style={orphanBadge}
+                title="No code in this workbook and no live mount owns this dialog."
+              >
+                Owner missing
+              </span>
+            )}
+          </div>
+        </div>
+      ))}
+
       {error && <div style={jobErrorStyle}>{error}</div>}
     </div>
   );
+}
+
+/** "Bound to 3 cells, watched while it is on screen." — the watch exists only while VISIBLE (S5). */
+function describeBoundCells(boundCells: number, visible: boolean): string {
+  if (boundCells === 0) return "Bound to no cells.";
+  const cells = `${boundCells} cell${boundCells === 1 ? "" : "s"}`;
+  return visible
+    ? `Bound to ${cells}, watched while it is on screen.`
+    : `Bound to ${cells}; not watched while hidden.`;
+}
+
+/** "12 updates from the script in the last minute." over the window the inventory reports. */
+function describePaneUpdates(p: { updatesLastMinute: number; updateWindowMs: number }): string {
+  const n = p.updatesLastMinute;
+  const window =
+    p.updateWindowMs === 60_000
+      ? "minute"
+      : `${Math.round(p.updateWindowMs / 1000)} seconds`;
+  if (n === 0) return `No updates from the script in the last ${window}.`;
+  return `${n} update${n === 1 ? "" : "s"} from the script in the last ${window}.`;
 }
 
 // ============================================================================
@@ -1170,6 +1270,8 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
     shortcuts: [],
     clipboards: [],
     watches: [],
+    panes: [],
+    forms: [],
   });
   const [trail, setTrail] = useState<ExtensionAuditTrail | null>(null);
   const [pins, setPins] = useState<TrustedPublisherReport | null>(null);
@@ -1299,6 +1401,12 @@ export function CodeInThisFileSection({ placement }: PanelSectionProps): React.R
                 {heldSummary.runningWatches === 1 ? "" : "s"}
               </span>
             )}
+            {heldSummary.panes > 0 && (
+              <span style={warnChipStyle}>
+                {heldSummary.panes} task pane{heldSummary.panes === 1 ? "" : "s"} docked
+              </span>
+            )}
+            {heldSummary.forms > 0 && <span style={warnChipStyle}>a dialog is up</span>}
           </div>
           {summary.beyondGrid > 0 && (
             <div style={reachCalloutStyle}>

@@ -17,6 +17,9 @@ import {
   getScriptGrants,
   getGrantedOrigins,
   recordCapabilityGrant,
+  recordCapabilityGrantAtInstall,
+  recordCapabilityGrantUnlessRevoked,
+  wasRevokedThisSession,
   revokeCapability,
   revokeScriptGrants,
   resetAllGrants,
@@ -152,6 +155,72 @@ describe("grant store", () => {
     expect(getScriptGrants("s3").caps).toEqual(["ui.html"]);
   });
 
+  // --------------------------------------------------------------------------
+  // A revoke STICKS against the grants nobody was asked about
+  // --------------------------------------------------------------------------
+  //
+  // An add-in's grid.read is written down by the host when a contribution that
+  // will use it is REGISTERED — and `register` is a message the sandboxed worker
+  // posts whenever it likes. Deleting from the live set alone therefore lasted
+  // only until the add-in registered anything else: `caps.add` asked nothing, so
+  // the capability came back silently and every reader resumed.
+
+  it("a revoked capability is NOT restored by a grant nobody was asked about", async () => {
+    const live = getGrantSet("s6");
+    expect(recordCapabilityGrantUnlessRevoked("s6", "grid.read")).toBe(true);
+    expect(live.has("grid.read")).toBe(true);
+
+    await revokeCapability("s6", "grid.read");
+    expect(wasRevokedThisSession("s6", "grid.read")).toBe(true);
+
+    // The registration-driven write — the exact call the extension host makes
+    // when a second bound form, cell-style contributor or cell-content
+    // subscription arrives.
+    expect(recordCapabilityGrantUnlessRevoked("s6", "grid.read")).toBe(false);
+    expect(live.has("grid.read"), "the revoke must outlive the next registration").toBe(false);
+    expect(getScriptGrants("s6").caps).toEqual([]);
+  });
+
+  it("a FRESH CONSENT lifts the revoke — only that, and nothing the script does", async () => {
+    recordCapabilityGrant("s7", "storage");
+    await revokeCapability("s7", "storage");
+    expect(recordCapabilityGrantUnlessRevoked("s7", "storage")).toBe(false);
+
+    // recordCapabilityGrant is only ever reached from a decision the user just
+    // made (a JIT answer, package consent, a persisted "Always" for this exact
+    // source), so it clears the revoke — otherwise the user could never say yes
+    // again without restarting.
+    recordCapabilityGrant("s7", "storage");
+    expect(wasRevokedThisSession("s7", "storage")).toBe(false);
+    expect(recordCapabilityGrantUnlessRevoked("s7", "storage")).toBe(true);
+    expect(getScriptGrants("s7").caps).toEqual(["storage"]);
+  });
+
+  it("a revoke recorded for a script with no grants yet still binds", async () => {
+    // revokeCapability used to return early when the script had no grant state,
+    // which would have left the decision unrecorded and the next silent write
+    // free to grant it.
+    await revokeCapability("s8", "grid.read");
+    expect(recordCapabilityGrantUnlessRevoked("s8", "grid.read")).toBe(false);
+  });
+
+  it("UNMOUNT clears the sticky revoke with the grants — a workbook reset does not", async () => {
+    // Unmount is host- or user-driven — no worker message causes one — and the
+    // code that comes back is being loaded again under its install consent.
+    await revokeCapability("s9", "grid.read");
+    revokeScriptGrants("s9");
+    expect(wasRevokedThisSession("s9", "grid.read")).toBe(false);
+
+    // A workbook reset reloads NOTHING: a distributed add-in is not unmounted on
+    // File > Open, so lifting its revoke there would let it take the capability
+    // straight back by registering another bound form — the exact laundering
+    // `revokedThisSession` exists to stop, one workbook swap later.
+    await revokeCapability("s10", "grid.read");
+    resetAllGrants();
+    expect(wasRevokedThisSession("s10", "grid.read")).toBe(true);
+    expect(recordCapabilityGrantUnlessRevoked("s10", "grid.read")).toBe(false);
+  });
+
   it("resetAllGrants / revokeScriptGrants clear a script's grants", () => {
     recordCapabilityGrant("s4", "net.fetch", "https://x.com");
     revokeScriptGrants("s4");
@@ -159,6 +228,70 @@ describe("grant store", () => {
     recordCapabilityGrant("s5", "storage");
     resetAllGrants();
     expect(getScriptGrants("s5")).toEqual({ caps: [], origins: [] });
+  });
+
+  // --------------------------------------------------------------------------
+  // A workbook reset must not ORPHAN the set a mounted handle is holding
+  // --------------------------------------------------------------------------
+  //
+  // `resetAllGrants` used to be `grantState.clear()`, which drops the Map entry
+  // and leaves the Set object behind — still referenced by every mounted
+  // handle, because `handle.grants` is that exact object, taken once at mount.
+  // A distributed add-in is not unmounted by File > Open, so from the user's
+  // first workbook swap on: the panel listed a capability the store no longer
+  // knew about, `revokeCapability` returned at its `if (!s) return;` guard
+  // without touching the set the broker reads, and the capability kept working.
+
+  it("keeps the live Set the handle holds, so a later revoke and a later grant both reach it", async () => {
+    const live = getGrantSet("x1"); // what buildHandleFromDefinition put on handle.grants
+    recordCapabilityGrantUnlessRevoked("x1", "grid.read"); // install consent, no prompt
+    recordCapabilityGrantAtInstall("x1", "formula.udf"); // ditto
+    recordCapabilityGrant("x1", "storage"); // a JIT answer: "in this workbook"
+
+    resetAllGrants();
+
+    // Install-scoped: still live, and the store AGREES with the handle's set —
+    // the panel reads the handle, so a set the store has forgotten is a revoke
+    // button that does nothing.
+    expect(live.has("grid.read")).toBe(true);
+    expect(live.has("formula.udf")).toBe(true);
+    expect(getScriptGrants("x1").caps.sort()).toEqual(["formula.udf", "grid.read"]);
+    // Prompted: gone from both. The dialog said "in this workbook".
+    expect(live.has("storage")).toBe(false);
+
+    // The transparency panel's revoke button reaches the set the broker reads.
+    await revokeCapability("x1", "grid.read");
+    expect(live.has("grid.read")).toBe(false);
+
+    // ...and a grant recorded AFTER the reset lands in the SAME set, rather than
+    // in a fresh entry the handle does not reference — which is what made the
+    // JIT prompt re-ask forever.
+    recordCapabilityGrant("x1", "storage");
+    expect(live.has("storage")).toBe(true);
+  });
+
+  it("revokeScriptGrants empties the set the handle holds before dropping the entry", () => {
+    // Unmount drops everything, install-scoped included — but it must EMPTY the
+    // set first, for the same reason: a stale handle holding it (a pending form
+    // show, a queued style batch) would otherwise still pass every check.
+    const live = getGrantSet("x2");
+    recordCapabilityGrantUnlessRevoked("x2", "grid.read");
+    recordCapabilityGrant("x2", "net.fetch", "https://x.com");
+    revokeScriptGrants("x2");
+    expect(live.has("grid.read")).toBe(false);
+    expect(live.has("net.fetch")).toBe(false);
+    expect(getGrantedOrigins("x2")).toEqual([]);
+  });
+
+  it("a workbook reset does not carry an install grant back to an UNMOUNTED add-in", () => {
+    // The scope is the MOUNT, not "forever": once the add-in is unmounted its
+    // install-scoped record goes with it, so a grant made for the same id later
+    // is an ordinary per-workbook one and the next reset takes it.
+    recordCapabilityGrantUnlessRevoked("x3", "grid.read");
+    revokeScriptGrants("x3");
+    recordCapabilityGrant("x3", "grid.read"); // a later, per-workbook consent
+    resetAllGrants();
+    expect(getScriptGrants("x3").caps).toEqual([]);
   });
 });
 

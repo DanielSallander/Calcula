@@ -370,6 +370,14 @@ export async function mountWritebackValidator(
     // A validator is a pure predicate: the declared-capability ceiling is
     // EMPTY, so the broker denies every privileged call it could attempt.
     declaredCapabilities: [],
+    // THE ARTIFACT THE CONSENT RECORD NAMES. `approveWritebackValidators` records
+    // `{ id: writebackValidatorScriptId(name), source }` under
+    // `<package>::writeback-validators`; this is that same pair, formed by the
+    // same functions, so the Rust mount gate holds the advisory realm to the
+    // exact body the user approved — the standard the authoritative submit gate
+    // (`validator_consented`, calp_commands.rs) already applies.
+    consentSurface: "writeback-validators",
+    consentArtifacts: [{ id: writebackValidatorScriptId(descriptor.name), source: descriptor.source }],
     apiVersion: "1.0.0",
   });
   mounted.set(descriptor.regionId, { descriptor, instanceId, scriptId: id });

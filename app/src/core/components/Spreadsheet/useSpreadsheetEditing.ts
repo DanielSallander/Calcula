@@ -24,6 +24,7 @@ import {
 } from "../../lib/editOpenBuffer";
 import { getMoveAfterReturn, getMoveDirection, getMoveDelta } from "../../../api/editingPreferences";
 import { alertAsync } from "../../lib/dialogs";
+import { isKeyClaimed } from "../../lib/pointerClaims";
 
 type GridState = ReturnType<typeof useGridState>;
 
@@ -350,6 +351,21 @@ export function useSpreadsheetEditing({
 
   const handleContainerKeyDown = useCallback(
     async (event: React.KeyboardEvent<HTMLDivElement>) => {
+      // A keystroke aimed inside something that CLAIMED the gesture is not the
+      // grid's — the same ancestor walk the pointer door uses
+      // (core/lib/pointerClaims.ts). This door does not delete cells, but it
+      // opens the CELL EDITOR on a printable key and MOVES the active cell on
+      // Enter, both measured with a form's `<button>` focused: the button could
+      // not be pressed with the keyboard at all, and typing into a form put the
+      // characters into the sheet cell hidden underneath it.
+      //
+      // Ahead of the tag check for the same reason as in useGridKeyboard: the
+      // tag list is a census of the widget types that existed when it was
+      // written, and `<select>`/`<button>` were never on it.
+      if (isKeyClaimed(event)) {
+        return;
+      }
+
       // Skip if focus is inside an input, textarea, or contenteditable element
       const target = event.target as HTMLElement;
       if (target) {

@@ -9,7 +9,6 @@ import { PropertyRow } from "./PropertyRow";
 import { CollapsibleSection } from "./CollapsibleSection";
 import {
   getPropertyDefinitions,
-  type ControlPropertyValue,
   type ControlMetadata,
   type PropertyDefinition,
 } from "../lib/types";
@@ -18,9 +17,11 @@ import {
   setControlProperty,
 } from "../lib/controlApi";
 import { listWorkbookScripts } from "@api/workbookScripts";
+import type { ScriptPickerEntry } from "../../_shared/lib/scriptModuleProvenance";
 import { getShapeDefinition } from "../Shape/shapeCatalog";
 import { getShapeHtmlContent, shapeHasScript } from "../Shape/shapeRenderer";
 import { getTemplateCategories, type ShapeTemplate } from "../Shape/shapeTemplateCatalog";
+import { setScriptFrameInert } from "../../_shared/scriptFrame";
 
 // ============================================================================
 // Styles (theme-aware via CSS variables)
@@ -155,6 +156,27 @@ const previewFrameStyle: React.CSSProperties = {
   border: "none",
   width: "100%",
   backgroundColor: v("--bg-surface"),
+  // THE THIRD HOST of a script's `render.setHtmlContent` document, and the same
+  // rule as the other two: painting is `ui.html`, taking the user's input is
+  // `ui.htmlInput`, and this tab asks the script for neither — it shows a
+  // PICTURE of what the shape draws. Without this, a distributed script granted
+  // only "render custom HTML UI" got clicks, focus and keystrokes here as soon
+  // as the user opened the Preview tab. The frame has no bridge either, so an
+  // interactive preview could not even deliver what it took: input landing in
+  // it is loss with no purpose.
+  //
+  // The MOUSE half only, though. An iframe keeps its place in the tab order
+  // whatever its `pointer-events` say, so Tab reached the preview's document and
+  // the picture took the user's keystrokes — which is why the frame is also
+  // marked inert below, the same call the other two hosts make.
+  pointerEvents: "none",
+};
+
+/** Ref for the Preview tab's frame: a picture on BOTH input devices, always.
+ *  Nothing here ever grants the preview input, so — unlike the pane card, which
+ *  tracks the script's claim — this one is inert for the life of the element. */
+const markPreviewFrameInert = (el: HTMLIFrameElement | null): void => {
+  setScriptFrameInert(el, true);
 };
 
 // ============================================================================
@@ -181,7 +203,7 @@ function groupProperties(defs: PropertyDefinition[]): Map<string, PropertyDefini
 function renderGroupProperties(
   defs: PropertyDefinition[],
   metadata: ControlMetadata | null,
-  scripts: Array<{ id: string; name: string }>,
+  scripts: ScriptPickerEntry[],
   handlePropertyChange: (key: string, valueType: "static" | "formula", value: string) => void,
 ): React.ReactNode[] {
   const elements: React.ReactNode[] = [];
@@ -299,7 +321,7 @@ const TemplateCard: React.FC<{ template: ShapeTemplate; onApply: () => void }> =
 
 export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
   const [metadata, setMetadata] = useState<ControlMetadata | null>(null);
-  const [scripts, setScripts] = useState<Array<{ id: string; name: string }>>([]);
+  const [scripts, setScripts] = useState<ScriptPickerEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
 
@@ -342,7 +364,11 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         ]);
         if (!mountedRef.current) return;
         setMetadata(meta);
-        setScripts(scriptList.map((s) => ({ id: s.id, name: s.name })));
+        // The `sourcePackage` stamp travels with the row: a listing that drops
+        // it presents a publisher's module as the user's own code.
+        setScripts(
+          scriptList.map((s) => ({ id: s.id, name: s.name, sourcePackage: s.sourcePackage ?? null })),
+        );
       } catch (err) {
         console.error("[Controls] Failed to load properties:", err);
       } finally {
@@ -619,6 +645,7 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
         <div style={propertiesListStyle}>
           {htmlContent ? (
             <iframe
+              ref={markPreviewFrameInert}
               style={previewFrameStyle}
               srcDoc={`<!DOCTYPE html><html><head><style>body{margin:0;font-family:'Segoe UI Variable','Segoe UI',sans-serif;font-size:12px;}</style></head><body>${htmlContent}</body></html>`}
               sandbox="allow-scripts"

@@ -48,7 +48,7 @@ import type { ClearApplyTo, Table } from "@api/backend";
 import type { CellData, UsedRangeResult } from "@api/types";
 import { navigateToRange } from "@api/grid";
 import { CommandRegistry, CoreCommands } from "@api/commands";
-import { listWorkbookScriptRecords } from "@api/workbookScripts";
+import { listWorkbookScripts } from "@api/workbookScripts";
 import { macroEntriesFrom } from "./macroProvenance";
 import type { MacroEntry } from "./macroProvenance";
 import { hasMacroRunProvider, requireMacroRunProvider } from "@api/macroRunService";
@@ -131,13 +131,13 @@ export interface AppCliGateway {
 
   // --- Macros (workbook module scripts, run through the macroRunService seam) -
   /**
-   * Every module script, WITH the origin derived from its own record.
+   * Every module script, WITH the origin derived from its own row.
    *
-   * There is deliberately no origin-less listing on this interface. The summary
-   * call `list_scripts` drops `source_package`, so a gateway method returning
-   * summaries is a door through which a surface can list a publisher's module as
-   * if it were the user's own — which is exactly what `ls macros` and `run` did.
-   * One door, and it always carries provenance.
+   * There is deliberately no origin-less listing on this interface: one door,
+   * and it always carries provenance. `ls macros` and `run` once listed
+   * publisher modules as the user's own because the summary row dropped
+   * `source_package`; the row carries it now, so the door is the one-round-trip
+   * summary listing and the origin is derived from that field alone.
    */
   listMacros(): Promise<MacroEntry[]>;
   hasMacroRunProvider(): boolean;
@@ -255,10 +255,15 @@ export function createLiveAppGateway(): AppCliGateway {
     hasCommand: (commandId: string) => CommandRegistry.has(commandId),
     listCommands: () => CommandRegistry.getAll(),
 
-    // Through the RECORD inventory, not the summary list: `get_script` is the
-    // only backend read that returns `sourcePackage`, and the origin is derived
-    // from that field alone (macroEntriesFrom -> scriptOriginForStoredRecord).
-    listMacros: async () => macroEntriesFrom(await listWorkbookScriptRecords()),
+    // ONE round trip. The summary row carries `sourcePackage` verbatim from the
+    // record (`script_summary`, app/src-tauri/src/scripting/commands.rs), and
+    // the CLI needs nothing else — no source is listed, shown or run from here
+    // (`run` goes through the macroRunService seam, which reads the record
+    // itself). Listing through `listWorkbookScriptRecords` paid one `get_script`
+    // per module on every `ls`, `run` and session refresh, to fetch bodies that
+    // were then discarded. The origin is still derived from the stamp alone
+    // (macroEntriesFrom -> scriptOriginForStoredRecord).
+    listMacros: async () => macroEntriesFrom(await listWorkbookScripts()),
     hasMacroRunProvider: () => hasMacroRunProvider(),
     runMacroByRef: (macroId: string) => requireMacroRunProvider().runMacroByRef(macroId),
   };

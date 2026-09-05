@@ -118,6 +118,94 @@ describe("pin to grid", () => {
       expect(getAllFloatingControls()).toHaveLength(0);
     });
 
+    it("renames onto a vacated id, never onto one another control still holds", () => {
+      // The block a shift moves is its own set of destinations: two pinned
+      // controls one row apart, with a row inserted above both, produce
+      // `r5 -> r6` and `r6 -> r7`. Applied in store order, the first of those
+      // lands on the control that has not moved yet, so every id-keyed side
+      // table the hooks migrate is overwritten at r6 and the survivor is then
+      // carried on to r7 — one scripted shape's document, iframe and frame-budget
+      // charge destroyed, the other's filed under an id that is not its control's,
+      // by an edit that moved nothing but anchors.
+      addFloatingControl(ctrl(5, 1, true));
+      addFloatingControl(ctrl(6, 1, true));
+
+      // Standing in for every map the real hooks migrate — the html content, the
+      // overlay iframe, the budget charge, the declared hit rectangles.
+      const side = new Map<string, string>([
+        [makeFloatingControlId(0, 5, 1), "upper"],
+        [makeFloatingControlId(0, 6, 1), "lower"],
+      ]);
+      const renames: Array<[string, string]> = [];
+
+      reanchorFloatingControls(0, shiftRowsDownBy(0, 1), movesWithCells, {
+        onRename: (oldId, newId) => {
+          renames.push([oldId, newId]);
+          const carried = side.get(oldId);
+          side.delete(oldId);
+          if (carried !== undefined) side.set(newId, carried);
+        },
+      });
+
+      // The far end of the block moves first, which is what makes every
+      // destination empty when it is written to.
+      expect(renames).toEqual([
+        [makeFloatingControlId(0, 6, 1), makeFloatingControlId(0, 7, 1)],
+        [makeFloatingControlId(0, 5, 1), makeFloatingControlId(0, 6, 1)],
+      ]);
+      // Both controls kept their own state. In store order this ended as the
+      // single entry `{ control-0-7-1: "upper" }`.
+      expect(side.get(makeFloatingControlId(0, 6, 1))).toBe("upper");
+      expect(side.get(makeFloatingControlId(0, 7, 1))).toBe("lower");
+      expect(side.size).toBe(2);
+      expect(getFloatingControl(makeFloatingControlId(0, 6, 1))!.row).toBe(6);
+      expect(getFloatingControl(makeFloatingControlId(0, 7, 1))!.row).toBe(7);
+    });
+
+    it("still applies a rename onto an anchor nobody is going to vacate", () => {
+      // The one collision ordering cannot dissolve: an unpinned control keeps
+      // its anchor and its id while a pinned one shifts straight onto it. The
+      // rename must still happen — the store would otherwise disagree with the
+      // backend about where the pinned control is anchored — so it is applied
+      // last, and the hooks displace the side state exactly as they always did.
+      addFloatingControl(ctrl(8, 1, false));
+      addFloatingControl(ctrl(6, 1, true));
+      const renames: Array<[string, string]> = [];
+
+      const changed = reanchorFloatingControls(0, shiftRowsDownBy(0, 2), movesWithCells, {
+        onRename: (oldId, newId) => {
+          renames.push([oldId, newId]);
+        },
+      });
+
+      expect(changed).toBe(true);
+      expect(renames).toEqual([
+        [makeFloatingControlId(0, 6, 1), makeFloatingControlId(0, 8, 1)],
+      ]);
+      expect(getAllFloatingControls()).toHaveLength(2);
+    });
+
+    it("moves a control onto the anchor of one whose row was deleted", () => {
+      // A deleted control's id is free the moment it is dropped, so the control
+      // shifting up onto that anchor displaces nothing and must not be held back
+      // by the ordering.
+      addFloatingControl(ctrl(5, 1, true));
+      addFloatingControl(ctrl(6, 1, true));
+      const renames: Array<[string, string]> = [];
+
+      reanchorFloatingControls(0, deleteRow(5), movesWithCells, {
+        onRename: (oldId, newId) => {
+          renames.push([oldId, newId]);
+        },
+      });
+
+      expect(renames).toEqual([
+        [makeFloatingControlId(0, 6, 1), makeFloatingControlId(0, 5, 1)],
+      ]);
+      expect(getAllFloatingControls()).toHaveLength(1);
+      expect(getFloatingControl(makeFloatingControlId(0, 5, 1))!.row).toBe(5);
+    });
+
     it("ignores controls on other sheets", () => {
       const other = { ...ctrl(5, 1, true), sheetIndex: 1, id: makeFloatingControlId(1, 5, 1) };
       addFloatingControl(other as FloatingControl);

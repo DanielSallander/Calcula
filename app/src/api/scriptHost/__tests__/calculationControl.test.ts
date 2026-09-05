@@ -174,7 +174,10 @@ describe("the restore is WIRED into every way a script ends (source pins)", () =
   it("both crash paths route through hostUnmountScript (which is what covers faults)", () => {
     // The onerror handler unmounts before respawning AND on the second-crash
     // fault — so the release above covers a crashed script too.
-    const onerror = hostSrc.slice(hostSrc.indexOf("mw.worker.onerror"));
+    // The onerror arrow now delegates to `crashWorker`, which the event-stall
+    // watchdog reuses — so "every way a script ends" is pinned at the one
+    // function all three crash paths run through.
+    const onerror = hostSrc.slice(hostSrc.indexOf("function crashWorker("));
     const body = onerror.slice(0, onerror.indexOf("\n}\n"));
     expect(body).toContain("hostUnmountScript(mw.definition.id)");
     expect(body).toContain("hostUnmountScript(definition.id)");

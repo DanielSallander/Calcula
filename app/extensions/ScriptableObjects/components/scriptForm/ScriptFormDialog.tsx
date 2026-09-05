@@ -44,15 +44,12 @@ import {
   SCRIPT_FORM_PATCH_EVENT,
 } from "@api/scriptHost/scriptFormSpec";
 import {
-  applyFormPatch,
   buildFormResult,
-  coerceValue,
   collectInputs,
   collectWidgets,
-  defaultValue,
   dirtySet,
   initialFormValues,
-  sameFormValue,
+  landFormPatch,
   validateFormValues,
   type FormControlOverride,
   type FormInputWidget,
@@ -61,6 +58,7 @@ import {
   type WidgetOf,
 } from "../../lib/scriptFormState";
 import { FormWidgetTree, type FormRenderContext } from "./FormWidgetTree";
+import { ScriptGlyphSvg, findFormWidgetFocusable, originPhrase } from "./hostChrome";
 import * as S from "./ScriptFormDialog.styles";
 
 /** The default dialog width when the spec names none. */
@@ -74,29 +72,6 @@ const INTERACTION_THROTTLE_MS = 1000;
  * keyboard right after a patch still counts as present.
  */
 const SCRIPT_FOCUS_GRACE_MS = 100;
-/** Widget names are validated identifiers; anything else is refused before querying the DOM. */
-const SAFE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-// ============================================================================
-// Glyph (the same mark the five-field script dialog wears)
-// ============================================================================
-
-const ScriptGlyphSvg = React.createElement(
-  "svg",
-  {
-    width: 15,
-    height: 15,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 2,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-  },
-  React.createElement("path", { d: "M8 8 L4 12 L8 16" }),
-  React.createElement("path", { d: "M16 8 L20 12 L16 16" }),
-  React.createElement("path", { d: "M13.5 6 L10.5 18" }),
-);
 
 // ============================================================================
 // Preview summary
@@ -335,63 +310,44 @@ function FormSession({ request, onClose }: SessionProps): React.ReactElement {
       onAppEvent<ScriptFormPatchPayload>(SCRIPT_FORM_PATCH_EVENT, (detail) => {
         if (!detail || detail.showId !== showId || closed.current) return;
 
-        let nextValues = valuesRef.current;
-        let nextControls = controlsRef.current;
+        // The values / control / seed rules live in ONE place (landFormPatch,
+        // scriptFormState.ts) because the modeless pane lands the same patch:
+        // a script's `values: { amount: "12" }` is 12 on a number widget, and
+        // refreshed seeds land ONLY on widgets the user has not touched — a
+        // dirty widget keeps the user's value and is marked stale so they know
+        // the cell moved underneath them.
+        const landed = landFormPatch(
+          {
+            values: valuesRef.current,
+            controls: controlsRef.current,
+            seeds: seedsRef.current,
+            stale: staleRef.current,
+          },
+          detail,
+          inputsByName,
+          touched.current,
+        );
 
         if (detail.patch) {
-          const applied = applyFormPatch({ values: nextValues, controls: nextControls }, detail.patch);
           if (detail.patch.values) {
-            // A script's `values: { amount: "12" }` lands as 12 on a number
-            // widget — the same coercion the seed went through.
-            for (const name of Object.keys(detail.patch.values)) {
-              const widget = inputsByName.get(name);
-              if (widget) applied.values[name] = coerceValue(widget, applied.values[name]);
-            }
-            const patched = Object.keys(detail.patch.values);
+            const patched = landed.patchedNames;
             setErrors((prev) => {
               const rest = { ...prev };
               for (const name of patched) delete rest[name];
               return rest;
             });
           }
-          nextValues = applied.values;
-          nextControls = applied.controls;
           if (detail.patch.message !== undefined) setMessage(detail.patch.message);
           if (detail.patch.focus) requestFocus(detail.patch.focus, true);
         }
 
         if (detail.seeds) {
-          // Refreshed seeds land ONLY on widgets the user has not touched; a
-          // dirty widget keeps the user's value and is marked so they know
-          // the cell moved underneath them.
-          const nextSeeds = { ...seedsRef.current };
-          const nextStale = new Set(staleRef.current);
-          nextValues = { ...nextValues };
-          for (const [name, seed] of Object.entries(detail.seeds)) {
-            const widget = inputsByName.get(name);
-            const previous = nextSeeds[name];
-            nextSeeds[name] = seed;
-            if (!widget) continue;
-            // Untouched = the user never edited it, or edited it back to what
-            // it held before (the old seed, else the declared default).
-            const before =
-              previous !== undefined
-                ? coerceValue(widget, previous.value)
-                : defaultValue(widget, seedsRef.current);
-            const untouched = !touched.current.has(name) || sameFormValue(nextValues[name], before);
-            if (untouched) {
-              nextValues[name] = coerceValue(widget, seed.value);
-              nextStale.delete(name);
-            } else {
-              nextStale.add(name);
-            }
-          }
-          setSeeds(nextSeeds);
-          setStale(nextStale);
+          setSeeds(landed.seeds);
+          setStale(landed.stale);
         }
 
-        if (nextValues !== valuesRef.current) setValues(nextValues);
-        if (nextControls !== controlsRef.current) setControls(nextControls);
+        if (landed.values !== valuesRef.current) setValues(landed.values);
+        if (landed.controls !== controlsRef.current) setControls(landed.controls);
 
         if (detail.errors) {
           const incoming = detail.errors;
@@ -444,22 +400,20 @@ function FormSession({ request, onClose }: SessionProps): React.ReactElement {
   const consumedFocusSeq = useRef(0);
   useEffect(() => {
     if (!focusRequest || focusRequest.seq === consumedFocusSeq.current) return;
-    if (!SAFE_NAME_RE.test(focusRequest.name)) {
+    const root = dialogRef.current;
+    if (!root) return;
+    const lookup = findFormWidgetFocusable(root, focusRequest.name);
+    if (lookup.kind === "unsafe") {
       consumedFocusSeq.current = focusRequest.seq;
       return;
     }
-    const root = dialogRef.current;
-    if (!root) return;
-    const el = root.querySelector<HTMLElement>(`[data-form-widget="${focusRequest.name}"]`);
-    if (!el) return;
-    const focusable = el.matches("input, select, textarea, button")
-      ? el
-      : el.querySelector<HTMLElement>("input:not([disabled]), select, textarea, button");
+    // Not rendered yet: keep the request and look again on the next render.
+    if (lookup.kind === "missing") return;
     // Stamped immediately before the call, because the focus event it raises
     // is synchronous: `onInteraction` reads this to tell the script's own
     // focus from the user's, and only the user's re-arms the idle deadline.
     if (focusRequest.fromScript) scriptFocusAt.current = Date.now();
-    focusable?.focus();
+    lookup.focusable?.focus();
     consumedFocusSeq.current = focusRequest.seq;
   });
 
@@ -546,10 +500,7 @@ function FormSession({ request, onClose }: SessionProps): React.ReactElement {
   // discriminated `FormOrigin` removes the value that did it: a package named
   // "local" is `{ kind: "package", name: "local" }` and paints as a package.
   const provenance = useMemo(() => {
-    const origin =
-      request.origin.kind === "local"
-        ? "A form from a script in this workbook"
-        : `A form from the package "${request.origin.name}"`;
+    const origin = `A form from ${originPhrase(request.origin)}`;
     return request.callerName ? `${origin} — opened by ${request.callerName}` : origin;
   }, [request.origin, request.callerName]);
 

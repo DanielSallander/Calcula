@@ -28,6 +28,8 @@ import {
 import {
   FORM_CONTAINER_TYPE_SET,
   FORM_INPUT_TYPE_SET,
+  FORM_SPEC_KEYS,
+  FORM_WIDGET_KEYS,
   FORM_WIDGET_TYPES,
   FORM_WIDGET_TYPE_SET,
   MAX_FORM_BIND_CHARS,
@@ -46,6 +48,16 @@ import {
   MIN_FORM_WIDTH,
   isValidFormName,
 } from "./scriptFormSpec";
+import type { FormWidgetType } from "./scriptFormSpec";
+import { MAX_PANE_BADGE_CHARS, MAX_PANE_ID_CHARS, MAX_PANE_KEY_CHARS, PANE_KEY_PATTERN } from "./scriptPaneSpec";
+import {
+  MAX_SHAPE_HIT_COORD,
+  MAX_SHAPE_HIT_REGION_ID,
+  MAX_SHAPE_HIT_REGIONS,
+  MIN_SHAPE_HIT_SIZE,
+  SHAPE_HIT_REGION_ID_RE,
+  SHAPE_HIT_REGION_KEY_SET,
+} from "./shapeHitRegionSpec";
 
 export type Validator = (args: unknown[]) => true | string;
 
@@ -211,8 +223,361 @@ export const vSetState: Validator = ([aspect, aspectArgs]) => {
 export const vDecl: Validator = ([decls]) =>
   typeof decls === "object" && decls !== null ? true : "expected a declarations object";
 
-export const vHtml: Validator = ([html]) =>
-  isBoundedString(html, 5_000_000) ? true : "html must be a string (max 5 MB)";
+/**
+ * A `data:` URI in a URL position, TYPED (`data:image/png;base64,…`) or not
+ * (`data:,hello`).
+ *
+ * Deliberately keyed on the SCHEME and its terminator, never on the word
+ * "base64" — BUG-0099 was a spelling-specific check that `;BASE64,` walked
+ * straight past. It is also not keyed on the attribute name, because
+ * `src`/`href`/`srcset`/`poster`/`background`/`content` and CSS `url()` are not
+ * a closed list and never will be.
+ *
+ * The `/` in the typed form is what keeps prose out: the sentence "the data:
+ * prefix" does not match, and neither does a JS object key called `data:`.
+ *
+ * THE PATTERN IS NOT THE WHOLE GUARD. It is run over the raw argument AND over
+ * `normalizeForSchemeScan(html)`, because the string a script passes is not the
+ * string a browser resolves — see that function.
+ */
+const INLINE_DATA_URI_RE = /\bdata:(?:[a-z0-9.+-]+\/[a-z0-9.+-]+\s*[;,]|[;,])/i;
+
+/**
+ * Every `media:` reference in a URL POSITION — an attribute value (`src=…`,
+ * quoted or not) or the argument of a CSS `url(…)`. Group 1 is the reference
+ * itself, without the delimiter that proved the position.
+ *
+ * THE DELIMITER IS THE WHOLE POINT, and its absence was a real defect: this
+ * pattern used to be an UNANCHORED `\bmedia:` with an optional tail, matched
+ * against the ENTIRE document, so `<div>Social media: 42%</div>` produced the
+ * match "media:" (an empty tail matches) and REFUSED the whole render, with a
+ * message blaming the author for a handle they never wrote. `<p>media:strategy
+ * </p>` and an inline `{media:"screen"}` went the same way. The comment here
+ * already CLAIMED "in a URL-ish position"; only the code did not, and the
+ * sibling `data:` check earned that property deliberately by keying on the
+ * scheme's URL shape.
+ *
+ * Prose cannot supply `="`, `='` or `url(`, so it survives; a genuinely
+ * malformed handle in a URL position — `<img src="media:">` included — still
+ * refuses, because an empty tail THERE is a broken reference rather than an
+ * English colon. The known limit is the second and later entries of a
+ * `srcset="media:… 1x, media:… 2x"`, which only a comma precedes: accepting a
+ * comma as a delimiter would readmit "channels, media: 42%", and this check is
+ * a courtesy to the author, not the byte gate (that is INLINE_DATA_URI_RE).
+ */
+const MEDIA_REFERENCE_RE = /(?:=|\burl\()\s*["']?\s*(media:[^\s"'`)<>]*)/gi;
+
+/**
+ * Every HTML5 named character reference whose expansion is an ASCII character,
+ * without its `&` and `;`.
+ *
+ * WHY THIS LIST IS COMPLETE ENOUGH. A URL scheme is ASCII by definition, so
+ * only ASCII-producing references can help spell `data:`; every one of them is
+ * here. The letters `d`, `a`, `t` cannot arrive by name at all — no named
+ * reference in the HTML5 table expands to a bare ASCII letter — so they can
+ * only arrive numerically, which `decodeCharacterReferences` handles
+ * exhaustively. `&colon;` is the one that matters in practice and it is the
+ * case a review reproduced: `data&colon;image/png;base64,…` renders.
+ *
+ * A Map rather than an object literal so the reference NAMES (`Tab`, `QUOT`,
+ * `DiacriticalGrave`) stay spelled as HTML spells them instead of being bent to
+ * a lint rule about property casing.
+ */
+const ASCII_NAMED_REFERENCES: ReadonlyMap<string, string> = new Map<string, string>([
+  ["Tab", "\t"], ["NewLine", "\n"],
+  ["excl", "!"], ["quot", '"'], ["QUOT", '"'], ["num", "#"], ["dollar", "$"],
+  ["percnt", "%"], ["amp", "&"], ["AMP", "&"], ["apos", "'"], ["lpar", "("],
+  ["rpar", ")"], ["ast", "*"], ["midast", "*"], ["plus", "+"], ["comma", ","],
+  ["period", "."], ["sol", "/"], ["colon", ":"], ["semi", ";"], ["lt", "<"],
+  ["LT", "<"], ["equals", "="], ["gt", ">"], ["GT", ">"], ["quest", "?"],
+  ["commat", "@"], ["lsqb", "["], ["lbrack", "["], ["bsol", "\\"],
+  ["rsqb", "]"], ["rbrack", "]"], ["Hat", "^"], ["lowbar", "_"],
+  ["UnderBar", "_"], ["grave", "`"], ["DiacriticalGrave", "`"], ["lcub", "{"],
+  ["lbrace", "{"], ["verbar", "|"], ["vert", "|"], ["VerticalLine", "|"],
+  ["rcub", "}"], ["rbrace", "}"],
+]);
+
+/** One code point as the HTML parser would emit it (U+FFFD for what it refuses). */
+function codePointToChar(code: number): string {
+  if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return "\uFFFD";
+  if (code >= 0xd800 && code <= 0xdfff) return "\uFFFD";
+  return String.fromCodePoint(code);
+}
+
+/**
+ * HTML character references, decoded the way a tokenizer decodes them — ONE
+ * left-to-right pass, so `&amp;#100;` yields the literal text `&#100;` and is
+ * NOT decoded twice (a browser does not re-scan its own output either, which is
+ * why that spelling renders as text rather than as a URL).
+ *
+ * The trailing `;` is optional because parsers accept it missing: `&#100ata:`
+ * decodes to `data:` in a real attribute value, measured, not assumed.
+ *
+ * An unrecognised `&name;` is DELETED rather than left standing. That is the
+ * paranoid direction on purpose: leaving it would let one reference this table
+ * happens not to carry hide a scheme, while deleting it can only ever glue two
+ * neighbours together — and gluing cannot manufacture the letters of `data`,
+ * only close a gap the author put between them.
+ */
+function decodeCharacterReferences(text: string): string {
+  return text.replace(
+    /&(?:#([0-9]+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z][a-zA-Z0-9]*));?/g,
+    (_match: string, dec?: string, hex?: string, name?: string) => {
+      if (dec !== undefined) return codePointToChar(Number.parseInt(dec, 10));
+      if (hex !== undefined) return codePointToChar(Number.parseInt(hex, 16));
+      return ASCII_NAMED_REFERENCES.get(name as string) ?? "";
+    },
+  );
+}
+
+/**
+ * CSS escapes: `\64 ata:` and `\000064ata:` are both `data:` to a CSS parser,
+ * in a `style=` attribute and inside a `<style>` element alike. `<style>` is
+ * raw text, so character references do NOT decode there — CSS escapes are the
+ * only spelling that works inside it, which is exactly why this pass exists
+ * alongside the one above rather than instead of it.
+ *
+ * `\` + up to six hex digits swallows ONE following whitespace (the CSS
+ * terminator); `\` + a newline is a line continuation and disappears; `\` +
+ * anything else is that character literally, which is what makes `\\` a
+ * backslash.
+ */
+function decodeCssEscapes(text: string): string {
+  return text.replace(
+    /\\(?:([0-9a-fA-F]{1,6})[ \t\r\n\f]?|(\r\n|[^0-9a-fA-F]))/g,
+    (_match: string, hex?: string, literal?: string) => {
+      if (hex !== undefined) return codePointToChar(Number.parseInt(hex, 16));
+      if (literal === undefined) return "";
+      return /^(?:\r\n|[\n\r\f])$/.test(literal) ? "" : literal;
+    },
+  );
+}
+
+/**
+ * ASCII tab / CR / LF sitting BETWEEN two URL characters. The WHATWG URL parser
+ * removes those from anywhere in a URL before it looks at the scheme, so
+ * `<img src="da{TAB}ta:image/png;base64,…">` loads — with no encoding at all.
+ *
+ * Bounding the removal to positions where BOTH neighbours are URL characters is
+ * what keeps prose out: a paragraph that ends a line with "data:" and begins the
+ * next with "," is not joined, because "," is not a URL character. Only a line
+ * break INSIDE something already shaped like a URL closes up.
+ */
+const URL_INTERIOR_WHITESPACE_RE = /(?<=[A-Za-z0-9+./:-])[\t\r\n]+(?=[A-Za-z0-9+./:-])/g;
+
+/**
+ * The string a BROWSER resolves, given the string a script passed.
+ *
+ * THE DEFECT THIS EXISTS FOR. `INLINE_DATA_URI_RE` was keyed on the scheme
+ * rather than on the word "base64" precisely so it could not be walked past by
+ * a re-spelling (BUG-0099, where `;BASE64,` sailed through a check written for
+ * `;base64,`). But it was still a literal test against the RAW argument, and
+ * the raw argument is not what resolves: an HTML parser decodes character
+ * references, a CSS parser decodes backslash escapes, and the URL parser strips
+ * tabs and newlines — all AFTER this validator has looked. Measured against the
+ * shipped validator and a real DOM, every one of these was ALLOWED and every
+ * one of them resolved to `data:image/png;base64,AAAA`:
+ *
+ *     <img src="&#100;ata:image/png;base64,AAAA">      numeric decimal
+ *     <img src="&#x64;ata:image/png;base64,AAAA">      numeric hex
+ *     <img src="&#100ata:image/png;base64,AAAA">       no trailing semicolon
+ *     <img src="dat&#97;:image/png;base64,AAAA">       a LATER character, not the first
+ *     <img src="data&colon;image/png;base64,AAAA">     a named reference
+ *     <img src="da{TAB}ta:image/png;base64,AAAA">      no encoding whatsoever
+ *     <div style="background:url(\64 ata:image/gif;base64,R0lGOD)">   a CSS escape
+ *
+ * That is the same lesson as BUG-0099 one layer down, and the same lesson as
+ * "the host parser must match the renderer's": the PATTERN was never the gap,
+ * the INPUT was. So the gap is closed here, once, by normalising — not by
+ * teaching the pattern another spelling, which is how a check becomes a list of
+ * the bypasses somebody already thought of.
+ *
+ * This is deliberately an OVER-approximation: every pass runs over the whole
+ * document, so a CSS escape is decoded in a place CSS would never look and a
+ * character reference is decoded inside `<style>`, where the parser leaves it
+ * alone. Both directions of that error refuse something a browser would not
+ * render, never the reverse. It is used ONLY for the `data:` scheme scan, which
+ * is the byte gate; the `media:` scan is a courtesy to the author and running a
+ * courtesy over an over-approximated string manufactures false positives, and a
+ * false positive there is a silently blank shape.
+ *
+ * `render.setHtml` accepts 5 MB, so each pass is skipped unless its own trigger
+ * character is present and the whole thing is skipped when none is.
+ */
+export function normalizeForSchemeScan(html: string): string {
+  if (!/[&\\\t\r\n]/.test(html)) return html;
+  let out = html;
+  // Order matches the browser's: references decode first, so `&#92;64 ata:`
+  // becomes a CSS escape before the CSS pass runs, and a CSS `\9 ` becomes a
+  // tab before the URL pass strips it.
+  if (out.includes("&")) out = decodeCharacterReferences(out);
+  if (out.includes("\\")) out = decodeCssEscapes(out);
+  return out.replace(URL_INTERIOR_WHITESPACE_RE, "");
+}
+
+/**
+ * `render.setHtml`: the HTML a script paints inside its own frame.
+ *
+ * THE MEDIA RULE (BUG-0086) APPLIES HERE, and it is not obvious why until you
+ * follow where this string ends up. The HTML is written BY the script, which
+ * means it lives in the script's SOURCE — and a script's source is persisted in
+ * the workbook and shipped inside a signed `.calp`. So a `data:` URI in a
+ * script's HTML is bytes INTRODUCED by code into a signed application, which is
+ * exactly the door `shape.setProperty` was closed on: the standing rule is that
+ * a script may REFERENCE media already in the document, never INTRODUCE bytes.
+ * A multi-megabyte image pasted into an `<img src="data:…">` would ride into
+ * every subscriber's copy, unreviewed, under someone else's signature.
+ *
+ * The way out is real and is named in the refusal: `media:{sha256}`, the inert
+ * handle for a picture the DOCUMENT already holds. Bytes enter through the Rust
+ * validator (`inspect_media`) behind `cap.fileImportMedia`, where they are
+ * proved to be an image from their magic bytes and capped — never through a
+ * string a script assembled.
+ *
+ * The refusal only has force if it cannot be re-spelled, and for a while it
+ * could be: the scan ran over the argument as given, while the frame's parsers
+ * decode it first. `normalizeForSchemeScan` is what closes that, and the whole
+ * argument for why it is shaped as it is lives on that function.
+ */
+export const vHtml: Validator = ([html]) => {
+  if (!isBoundedString(html, 5_000_000)) return "html must be a string (max 5 MB)";
+  // BOTH the string the script passed and the string a browser resolves. The
+  // second is the one that renders, and for a long while only the first was
+  // scanned — see `normalizeForSchemeScan` for the seven spellings that bought.
+  const literal = INLINE_DATA_URI_RE.test(html);
+  const normalized = literal ? html : normalizeForSchemeScan(html);
+  const escaped = !literal && normalized !== html && INLINE_DATA_URI_RE.test(normalized);
+  if (literal || escaped) {
+    return (
+      (escaped
+        ? "html may not contain a data: URI, and escaping it does not help: the browser " +
+          "decodes character references and CSS escapes, and strips tabs and newlines out of " +
+          "a URL, BEFORE it resolves one — so this spelling renders as a data: URI. "
+        : "html may not contain a data: URI. ") +
+      "A script may REFERENCE media already in this " +
+      "document, never INTRODUCE bytes — the HTML lives in your script's source, and your " +
+      "source travels inside the signed application. Use a media:{sha256} handle for a " +
+      "picture the document already holds"
+    );
+  }
+  // `html`, NOT `normalized`, and the asymmetry with the scan above is
+  // deliberate. That copy is an over-approximation built to catch a scheme: it
+  // DELETES character references this file's ASCII table does not carry, which
+  // is the right direction for the byte gate and the wrong one here — deleting
+  // an `&hellip;` would glue a `="` straight onto a `media:` label and refuse a
+  // tooltip. A missed malformed handle costs a broken `<img>`; a false positive
+  // in this scan costs a silently blank shape.
+  //
+  // Group 1, never the whole match: the match carries the `="` or `url(` that
+  // proved this is a URL position, and echoing that back in the refusal would
+  // quote the author a string they did not write.
+  for (const [, ref] of html.matchAll(MEDIA_REFERENCE_RE)) {
+    if (!MEDIA_REF_RE.test(ref)) {
+      // Length-checked before it is echoed: the match is bounded by the regex's
+      // own delimiter set, but a 5 MB string with no delimiter is one match.
+      return (
+        `html contains "${ref.slice(0, 80)}", which is not a media handle. A handle is ` +
+        `"media:" followed by the 64 hex characters of a picture already in this document`
+      );
+    }
+  }
+  return true;
+};
+
+/**
+ * `render.setHitRegions`: the rectangles of a shape's own HTML frame that should
+ * receive pointer input (M3b). Everything the frame does NOT claim stays
+ * click-through, which is why this list is bounded and every number in it is
+ * checked before it reaches CSS.
+ *
+ * ITS OWN ROW, NOT AN `object.setState` ASPECT. `vSetState` ends in
+ * `return true`, so an aspect with no matching arm is UNVALIDATED at restricted
+ * tier with no capability — the shape of the defect that let a multi-megabyte
+ * `data:` URI into a signed `.calp`. A door that hands a script part of the
+ * grid's pointer input gets a validator of its own.
+ *
+ * Every refusal names the budget AND the way out, because the way out is real:
+ * `[]` releases the frame and restores today's behaviour exactly.
+ */
+export const vHitRegions: Validator = ([regions]) => {
+  if (!Array.isArray(regions)) {
+    return (
+      "hit regions must be an array of { id, x, y, width, height } rectangles " +
+      "in your frame's own pixels; pass [] to release the frame"
+    );
+  }
+  if (regions.length > MAX_SHAPE_HIT_REGIONS) {
+    return (
+      `at most ${MAX_SHAPE_HIT_REGIONS} hit regions (got ${regions.length}); ` +
+      `merge adjacent rectangles, or pass [] to release the frame`
+    );
+  }
+  const seenIds = new Set<string>();
+  for (let i = 0; i < regions.length; i++) {
+    const region: unknown = regions[i];
+    if (typeof region !== "object" || region === null || Array.isArray(region)) {
+      return `hit region ${i} must be an object { id, x, y, width, height }`;
+    }
+    const rec = region as Record<string, unknown>;
+    for (const key of Object.keys(rec)) {
+      if (!SHAPE_HIT_REGION_KEY_SET.has(key)) {
+        // Refused rather than dropped: an ignored key is a script author
+        // believing they configured something that has no effect.
+        return (
+          `hit region ${i} has unknown key "${key.slice(0, MAX_KEY)}"; a region carries ` +
+          `only id, x, y, width and height`
+        );
+      }
+    }
+    const id = rec.id;
+    if (typeof id !== "string" || id.length === 0 || id.length > MAX_SHAPE_HIT_REGION_ID) {
+      return `hit region ${i}: id must be a string of 1-${MAX_SHAPE_HIT_REGION_ID} characters`;
+    }
+    // Length-checked BEFORE the id is echoed, so a refusal can never carry an
+    // unbounded script-supplied string into a log line.
+    if (!SHAPE_HIT_REGION_ID_RE.test(id)) {
+      return (
+        `hit region ${i}: id "${id}" must start with a letter or digit and use only ` +
+        `letters, digits, _ . : and -`
+      );
+    }
+    if (seenIds.has(id)) {
+      return (
+        `hit region ${i}: duplicate id "${id}"; each rectangle needs its own id because ` +
+        `the id is what your frame is told was clicked`
+      );
+    }
+    seenIds.add(id);
+    for (const axis of ["x", "y"] as const) {
+      const v = rec[axis];
+      if (!isFiniteNumber(v) || v < 0 || v > MAX_SHAPE_HIT_COORD) {
+        return (
+          `hit region ${i}: ${axis} must be a finite number from 0 to ${MAX_SHAPE_HIT_COORD}, ` +
+          `measured from your frame's top-left corner`
+        );
+      }
+    }
+    for (const dim of ["width", "height"] as const) {
+      const v = rec[dim];
+      if (!isFiniteNumber(v) || v < MIN_SHAPE_HIT_SIZE || v > MAX_SHAPE_HIT_COORD) {
+        return (
+          `hit region ${i}: ${dim} must be a finite number from ${MIN_SHAPE_HIT_SIZE} to ` +
+          `${MAX_SHAPE_HIT_COORD}; a rectangle nobody can aim at is refused, not kept`
+        );
+      }
+    }
+    if (
+      (rec.x as number) + (rec.width as number) > MAX_SHAPE_HIT_COORD ||
+      (rec.y as number) + (rec.height as number) > MAX_SHAPE_HIT_COORD
+    ) {
+      return (
+        `hit region ${i}: the rectangle must end within ${MAX_SHAPE_HIT_COORD} pixels of your ` +
+        `frame's top-left corner`
+      );
+    }
+  }
+  return true;
+};
 
 // ============================================================================
 // Sheet references (Wave 1): index OR name, everywhere a sheet can be named
@@ -3951,38 +4316,11 @@ function shownName(v: unknown): string {
   return s.length > 64 ? `${s.slice(0, 61)}...` : s;
 }
 
-/** Members every widget may carry (FormWidgetBase). */
-const FORM_WIDGET_BASE_KEYS = ["type", "name", "label", "help", "hidden", "disabled", "width"] as const;
-/** Members every INPUT widget may carry in addition (FormInputBase). */
-const FORM_INPUT_BASE_KEYS = [...FORM_WIDGET_BASE_KEYS, "bind", "required", "writeOn"] as const;
-
-/**
- * Per-type key allowlist. An unknown key is refused BY NAME — a silently
- * ignored typo is a support ticket, and `pattern` in particular must never be
- * accepted anywhere (a script-supplied regex run against keystrokes in the
- * trusted main thread is a ReDoS surface with no sandbox around it).
- */
-const FORM_WIDGET_KEYS: Readonly<Record<string, readonly string[]>> = {
-  label:    [...FORM_WIDGET_BASE_KEYS, "text", "style"],
-  textbox:  [...FORM_INPUT_BASE_KEYS, "default", "placeholder", "multiline", "maxLength"],
-  number:   [...FORM_INPUT_BASE_KEYS, "default", "min", "max", "step"],
-  date:     [...FORM_INPUT_BASE_KEYS, "default", "min", "max"],
-  checkbox: [...FORM_INPUT_BASE_KEYS, "default"],
-  toggle:   [...FORM_INPUT_BASE_KEYS, "default"],
-  radio:    [...FORM_INPUT_BASE_KEYS, "options", "default", "layout"],
-  dropdown: [...FORM_INPUT_BASE_KEYS, "options", "default", "allowEmpty"],
-  listbox:  [...FORM_INPUT_BASE_KEYS, "options", "multi", "default", "rows"],
-  button:   [...FORM_WIDGET_BASE_KEYS, "text", "role", "danger"],
-  group:    [...FORM_WIDGET_BASE_KEYS, "title", "children"],
-  tabs:     [...FORM_WIDGET_BASE_KEYS, "pages"],
-  row:      [...FORM_WIDGET_BASE_KEYS, "children", "gap"],
-  column:   [...FORM_WIDGET_BASE_KEYS, "children", "gap"],
-  grid:     [...FORM_WIDGET_BASE_KEYS, "columns", "children"],
-  spacer:   [...FORM_WIDGET_BASE_KEYS, "size"],
-  image:    [...FORM_WIDGET_BASE_KEYS, "src", "alt", "height"],
-  table:    [...FORM_WIDGET_BASE_KEYS, "columns", "rows", "maxRows"],
-  progress: [...FORM_WIDGET_BASE_KEYS, "value", "max", "text"],
-};
+// The per-type key allowlist is `FORM_WIDGET_KEYS` in scriptFormSpec.ts, beside
+// the shape it describes: the visual designer's property panel reads the SAME
+// table to decide which keys it may offer, and a copy here would be the second
+// source of truth that lets a newly added key be accepted by one and unknown to
+// the other.
 
 /** Widgets that MUST carry a name: inputs (result keys), buttons (click
  *  events) and progress bars (patch targets). Everything else may. */
@@ -4050,11 +4388,51 @@ function checkFormOptions(o: unknown, where: string): true | string {
   return true;
 }
 
+/**
+ * WHICH DOOR a widget tree arrived through, because the two doors do not accept
+ * the same tree (M4, docs/design/typescript-forms.md §14).
+ *
+ *  - "script": an OBJECT SCRIPT's form or task pane. The script ships inside the
+ *    workbook, its author knows that workbook's sheets, names and Controls
+ *    pane, and its bound fields write cells back.
+ *  - "extension": a distributed ADD-IN's form. The code lives in %APPDATA% and
+ *    runs against EVERY workbook the user opens, including documents its author
+ *    has never seen — so it may name only a bare cell on the sheet the user is
+ *    already looking at, and its bound fields are display-only.
+ *
+ * The narrowing is expressed as extra REFUSALS inside the one shared walk
+ * rather than as a second walk: a second copy is where the next bound tightened
+ * on one surface and not the other goes to hide (`checkFormSpec`'s own note).
+ */
+export type FormValidationSurface = "script" | "extension";
+
+/** A bare A1 cell with no sheet part: "B2", "$B$2", "AA100". */
+const FORM_BARE_A1_RE = /^\$?[A-Za-z]{1,3}\$?[0-9]{1,7}$/;
+
 /** `bind`: "B2" / "Sheet1!B2" / a name, or EXACTLY ONE of { cell } / { name } / { control }. */
-function checkFormBinding(b: unknown, where: string): true | string {
+function checkFormBinding(
+  b: unknown,
+  where: string,
+  surface: FormValidationSurface,
+): true | string {
+  // THE ADD-IN NARROWING, stated once for both spellings of a binding. An
+  // add-in is mounted against every workbook the user opens: a DEFINED NAME
+  // and a CONTROLS-PANE value mean something different in each of them (and
+  // are authored by the workbook, not by the add-in), and a SHEET NAME aims at
+  // a sheet the user is not looking at. What is left — a bare cell on the
+  // sheet in front of the person — is the only target an add-in's author can
+  // honestly have meant, and it is the only one the user can check by looking.
+  const addInRefusal = (what: string, why: string): string =>
+    `${where}: an add-in's form cannot bind to ${what} — ${why}. Bind to a cell on the sheet the user is looking at, e.g. bind: "B2"`;
   if (typeof b === "string") {
     if (b.length === 0 || b.length > MAX_FORM_BIND_CHARS) {
       return `${where} must be a non-empty cell reference or defined name (max ${MAX_FORM_BIND_CHARS} chars)`;
+    }
+    if (surface === "extension" && !FORM_BARE_A1_RE.test(b)) {
+      return addInRefusal(
+        `"${shownName(b)}"`,
+        "a sheet-qualified reference or a defined name resolves differently in every workbook the add-in is loaded into",
+      );
     }
     return true;
   }
@@ -4066,6 +4444,32 @@ function checkFormBinding(b: unknown, where: string): true | string {
   const target = targets[0];
   if (!isBoundedString(b[target], MAX_FORM_BIND_CHARS) || (b[target] as string).length === 0) {
     return `${where}.${target} must be a non-empty string (max ${MAX_FORM_BIND_CHARS} chars)`;
+  }
+  if (surface === "extension") {
+    if (target === "name") {
+      return addInRefusal(
+        "a defined name",
+        "the same name means a different range in every workbook, and the add-in has not seen this one",
+      );
+    }
+    if (target === "control") {
+      return addInRefusal(
+        "a Controls-pane value",
+        "the Controls pane belongs to the workbook's own author, not to the add-in",
+      );
+    }
+    if (b.sheet !== undefined) {
+      return addInRefusal(
+        "a named sheet",
+        "an add-in's form reads only the sheet you were looking at when it opened",
+      );
+    }
+    if (!FORM_BARE_A1_RE.test(b[target] as string)) {
+      return addInRefusal(
+        `"${shownName(b[target] as string)}"`,
+        "a sheet-qualified reference or a defined name resolves differently in every workbook the add-in is loaded into",
+      );
+    }
   }
   if (b.sheet !== undefined) {
     if (target !== "cell") return `${where}.sheet is only valid alongside ${where}.cell`;
@@ -4195,7 +4599,12 @@ function checkFormTabPages(pages: unknown, where: string): true | string {
  * shape (array / pages) is checked so the walker can push them blindly.
  * `seen` carries every name used so far (uniqueness across the whole tree).
  */
-function checkFormWidget(node: unknown, where: string, seen: Set<string>): true | string {
+function checkFormWidget(
+  node: unknown,
+  where: string,
+  seen: Set<string>,
+  surface: FormValidationSurface,
+): true | string {
   if (!isFormRecord(node)) return `${where} must be an object`;
   const w = node;
   if (typeof w.type !== "string") return `${where}.type must be a string`;
@@ -4204,8 +4613,27 @@ function checkFormWidget(node: unknown, where: string, seen: Set<string>): true 
     return `${where}.type "${shownName(w.type)}" is not a form widget type (allowed: ${FORM_WIDGET_TYPES.join(", ")})`;
   }
   const type = w.type;
-  const known = checkKnownKeys(w, FORM_WIDGET_KEYS[type], `${where} property`);
+  const known = checkKnownKeys(w, FORM_WIDGET_KEYS[type as FormWidgetType], `${where} property`);
   if (known !== true) return known;
+
+  // THE OTHER THREE WAYS A WIDGET TAKES CONTENT FROM THE WORKBOOK, all refused
+  // for an add-in. A `{ range }` choice list, a `{ range }` table and a
+  // `media:` image are reads of a document the add-in's author has never seen,
+  // and none of them is covered by the one sentence its consent note makes ("a
+  // field can be tied to one of your cells"). Refusing them keeps that sentence
+  // exhaustive; allowing them would have meant three more clauses in it, and a
+  // reader who stops at the first.
+  if (surface === "extension") {
+    if (isFormRecord(w.options) && w.options.range !== undefined) {
+      return `${where}.options cannot be read from a range in an add-in's form — list the choices in the form itself`;
+    }
+    if (type === "table" && isFormRecord(w.rows) && w.rows.range !== undefined) {
+      return `${where}.rows cannot be read from a range in an add-in's form — supply the rows in the form itself`;
+    }
+    if (type === "image" && typeof w.src === "string" && w.src.length > 0) {
+      return `${where}.src must be "" in an add-in's form: an add-in cannot show a picture stored in your workbook`;
+    }
+  }
 
   // name: a KEY on the result object, so an identifier and unique — that is
   // what keeps `result.__proto__` from being a thing.
@@ -4234,11 +4662,19 @@ function checkFormWidget(node: unknown, where: string, seen: Set<string>): true 
   // -- FormInputBase --
   if (FORM_INPUT_TYPE_SET.has(type)) {
     if (w.bind !== undefined) {
-      const r = checkFormBinding(w.bind, `${where}.bind`);
+      const r = checkFormBinding(w.bind, `${where}.bind`, surface);
       if (r !== true) return r;
     }
     const req = checkFormBool(w.required, `${where}.required`);
     if (req !== true) return req;
+    // `writeOn` says WHEN a bound field writes its cell. An add-in's form never
+    // writes one, so accepting the key would be accepting an instruction the
+    // host will not carry out — which is how a Submit button becomes a lie.
+    // Refused by NAME, with the reason, so the author meets the rule here
+    // rather than wondering why their cell never changed.
+    if (surface === "extension" && w.writeOn !== undefined) {
+      return `${where}.writeOn is not available to an add-in's form: a field it tied to a cell shows you that cell and is never written back`;
+    }
     if (w.writeOn !== undefined && !isOneOf(w.writeOn, FORM_WRITE_ON)) {
       return `${where}.writeOn must be one of: ${FORM_WRITE_ON.join(", ")}`;
     }
@@ -4360,15 +4796,29 @@ function checkFormWidget(node: unknown, where: string, seen: Set<string>): true 
   }
 }
 
-/** form.define args: [spec]. */
-export const vFormDefine: Validator = ([spec]) => {
+/**
+ * THE ONE VALIDATOR BODY FOR A WIDGET TREE, whichever door it comes through.
+ *
+ * `form.define` (the modal) and `pane.dock` (the modeless task pane, M2) accept
+ * the SAME tree, and each is a separate ALLOWLIST row with its own `validate`.
+ * Two copies of this walk would be two copies that drift — the next bound
+ * tightened here and not there is a limit one surface enforces and the other
+ * only claims — so both rows call this function and neither owns a line of it.
+ * The pane validator tests prove the two doors refuse the same trees by running
+ * each case through BOTH and asserting the verdicts are identical.
+ *
+ * `surface` (M4) says which REALM the tree came from. It never loosens anything
+ * — "extension" only adds refusals (see `FormValidationSurface`) — so a tree an
+ * add-in may show is always a tree an object script may show, and the shared
+ * walk stays the floor for both.
+ */
+export function checkFormSpec(
+  spec: unknown,
+  surface: FormValidationSurface = "script",
+): true | string {
   if (!isFormRecord(spec)) return "spec must be an object";
   const s = spec;
-  const known = checkKnownKeys(
-    s,
-    ["title", "description", "submitLabel", "cancelLabel", "width", "writeOn", "submitOnEnter", "focus", "children"],
-    "form property",
-  );
+  const known = checkKnownKeys(s, FORM_SPEC_KEYS, "form property");
   if (known !== true) return known;
   if (s.title !== undefined && !isBoundedString(s.title, MAX_DIALOG_TITLE)) {
     return `title must be a string (max ${MAX_DIALOG_TITLE} chars)`;
@@ -4383,6 +4833,11 @@ export const vFormDefine: Validator = ([spec]) => {
   }
   if (s.width !== undefined && (!isFiniteNumber(s.width) || s.width < MIN_FORM_WIDTH || s.width > MAX_FORM_WIDTH)) {
     return `width must be a number between ${MIN_FORM_WIDTH} and ${MAX_FORM_WIDTH}`;
+  }
+  // The form-level twin of the per-widget refusal above: an add-in's form has
+  // no write path at all, so it may not declare when one would happen.
+  if (surface === "extension" && s.writeOn !== undefined) {
+    return "writeOn is not available to an add-in's form: a field it tied to a cell shows you that cell and is never written back";
   }
   if (s.writeOn !== undefined && !isOneOf(s.writeOn, FORM_WRITE_ON)) {
     return `writeOn must be one of: ${FORM_WRITE_ON.join(", ")}`;
@@ -4416,7 +4871,7 @@ export const vFormDefine: Validator = ([spec]) => {
 
   while (stack.length > 0) {
     const frame = stack.pop() as Frame;
-    const verdict = checkFormWidget(frame.node, frame.where, seen);
+    const verdict = checkFormWidget(frame.node, frame.where, seen, surface);
     if (verdict !== true) return verdict;
     const w = frame.node as Record<string, unknown>;
     const type = w.type as string;
@@ -4436,22 +4891,35 @@ export const vFormDefine: Validator = ([spec]) => {
     }
   }
   return true;
-};
+}
 
-/** form.show args: [options?] — `{ initial }` only. */
-export const vFormShow: Validator = ([options]) => {
+/** form.define args: [spec]. */
+export const vFormDefine: Validator = ([spec]) => checkFormSpec(spec);
+
+/**
+ * The `{ initial }` option bag `form.show` and `pane.dock` share. `what` names
+ * the door in the message ("show option" / "dock option") and nothing else
+ * differs.
+ */
+function checkFormShowOptions(options: unknown, what: string): true | string {
   if (options === undefined || options === null) return true;
   if (!isFormRecord(options)) return "options must be an object";
-  const known = checkKnownKeys(options, ["initial"], "show option");
+  const known = checkKnownKeys(options, ["initial"], what);
   if (known !== true) return known;
   if (options.initial === undefined) return true;
   return checkFormValues(options.initial, "initial", MAX_FORM_INITIAL_KEYS);
-};
+}
+
+/** form.show args: [options?] — `{ initial }` only. */
+export const vFormShow: Validator = ([options]) => checkFormShowOptions(options, "show option");
 
 const FORM_PATCH_CONTROL_KEYS = ["disabled", "hidden", "label", "text", "options", "error", "value", "max"] as const;
 
-/** form.update args: [patch]. */
-export const vFormUpdate: Validator = ([patch]) => {
+/**
+ * THE ONE VALIDATOR BODY FOR A PATCH — `form.update` and `pane.update` both
+ * call it, for the reason `checkFormSpec` gives.
+ */
+export function checkFormPatch(patch: unknown): true | string {
   if (!isFormRecord(patch)) return "patch must be an object";
   const known = checkKnownKeys(patch, ["values", "controls", "focus", "message"], "patch property");
   if (known !== true) return known;
@@ -4520,7 +4988,10 @@ export const vFormUpdate: Validator = ([patch]) => {
     }
   }
   return true;
-};
+}
+
+/** form.update args: [patch]. */
+export const vFormUpdate: Validator = ([patch]) => checkFormPatch(patch);
 
 /** form.close args: [result?] — what the form reports as its answer. */
 export const vFormClose: Validator = ([result]) => {
@@ -4552,6 +5023,118 @@ export const vFormsShowNamed: Validator = ([name, options]) => {
   }
   return vFormShow([options]);
 };
+
+// ---- add-in forms (M4): the same widget tree, shown by a SANDBOXED EXTENSION.
+//
+// Note what is NOT validated here: the LAYOUT. It never travels on these calls.
+// An add-in registers its forms as declared CONTRIBUTIONS, where the tree is
+// checked once with `checkFormSpec(spec, "extension")` and refused loudly if it
+// breaks a rule; these rows only name a form that already passed. That ordering
+// is the point — an author learns their tree is wrong at registration, not the
+// first time a user is standing in front of a dialog that will not open. ----
+
+/** The declared form NAME every ext.form* call addresses. Bounded like a
+ *  contribution id; the host resolves it among the forms this extension
+ *  actually registered, so an unknown name is a host-side refusal with a
+ *  message that says which names exist. */
+function checkExtFormName(v: unknown): true | string {
+  if (!isBoundedString(v, MAX_DIALOG_TITLE) || (v as string).trim().length === 0) {
+    return `name must be a non-empty form name (max ${MAX_DIALOG_TITLE} chars) — the same name the manifest lists under contributes.forms`;
+  }
+  return true;
+}
+
+/** ext.formShow args: [name, options?] — `{ initial }` only, as for form.show. */
+export const vExtFormShow: Validator = ([name, options]) => {
+  const n = checkExtFormName(name);
+  if (n !== true) return n;
+  return checkFormShowOptions(options, "show option");
+};
+
+/** ext.formUpdate args: [patch] — the SAME patch shape form.update takes. */
+export const vExtFormUpdate: Validator = ([patch]) => checkFormPatch(patch);
+
+/** ext.formClose args: [result?] — the answer show() reports; null = dismissed. */
+export const vExtFormClose: Validator = ([result]) => {
+  if (result === undefined || result === null) return true;
+  return checkFormValues(result, "result", MAX_FORM_INITIAL_KEYS);
+};
+
+// ---- task panes (M2): the modeless door onto the same widget tree. ----
+//
+// Every pane call after the dock NAMES the pane, because one script may hold
+// several (MAX_PANES_PER_SCRIPT) and the host minted the id — a script cannot
+// forge another script's pane because the registry checks ownership, but it
+// can name a pane that is not there, and the message for that case says what
+// to do rather than "invalid argument".
+
+/** A host-minted pane id in a message-producing position. */
+function checkPaneId(v: unknown): true | string {
+  if (typeof v !== "string" || v.length === 0) return "no pane is docked: dock one first";
+  if (v.length > MAX_PANE_ID_CHARS) return `paneId must be a string (max ${MAX_PANE_ID_CHARS} chars)`;
+  return true;
+}
+
+/**
+ * `pane.dock({ key })`: the pane's STABLE key. It becomes a segment of the
+ * panel id the Shell persists the user's placement under, so it is bounded
+ * like an identifier — a space, a slash or a dot in it would be a second
+ * separator inside that id. The message says what the key is FOR, because
+ * the author's likeliest mistake is passing a title here.
+ */
+function checkPaneKey(v: unknown): true | string {
+  if (typeof v === "string" && v.length >= 1 && v.length <= MAX_PANE_KEY_CHARS && PANE_KEY_PATTERN.test(v)) {
+    return true;
+  }
+  return (
+    `key must be 1-${MAX_PANE_KEY_CHARS} characters of letters, digits, "_" or "-" ` +
+    `(it names the pane's slot, so where you last put that pane is remembered; leave it out for the next free slot)`
+  );
+}
+
+/**
+ * pane.dock args: [spec, options?]. The spec is `form.define`'s tree, judged by
+ * `form.define`'s validator; the options are `form.show`'s plus `key`, which
+ * only a pane has (a modal has no placement to remember). A missing spec is
+ * the shim's "nothing was described" and gets the sentence a script author
+ * needs, not "spec must be an object".
+ */
+export const vPaneDock: Validator = ([spec, options]) => {
+  if (spec === null || spec === undefined) return "describe the layout first with pane.define(...)";
+  const s = checkFormSpec(spec);
+  if (s !== true) return s;
+  if (options === undefined || options === null) return true;
+  if (!isFormRecord(options)) return "options must be an object";
+  // `key` is judged here and taken OUT before the shared option check, so the
+  // form's validator body stays one body and never learns a pane-only key.
+  const { key, ...shared } = options;
+  if (key !== undefined) {
+    const k = checkPaneKey(key);
+    if (k !== true) return k;
+  }
+  return checkFormShowOptions(shared, "dock option");
+};
+
+/** pane.update args: [paneId, patch] — `form.update`'s patch, judged by its validator. */
+export const vPaneUpdate: Validator = ([paneId, patch]) => {
+  const id = checkPaneId(paneId);
+  if (id !== true) return id;
+  return checkFormPatch(patch);
+};
+
+/** pane.setBadge args: [paneId, badge | null]. A SHORT string: the tab has room for a count, not a sentence. */
+export const vPaneSetBadge: Validator = ([paneId, badge]) => {
+  const id = checkPaneId(paneId);
+  if (id !== true) return id;
+  if (badge === null) return true;
+  if (!isBoundedString(badge, MAX_PANE_BADGE_CHARS)) {
+    return `badge must be a string (max ${MAX_PANE_BADGE_CHARS} chars) or null`;
+  }
+  return true;
+};
+
+/** pane.reveal / pane.close args: [paneId]. */
+export const vPaneId: Validator = ([paneId]) => checkPaneId(paneId);
 
 export const vKey: Validator = ([key]) =>
   isBoundedString(key, MAX_KEY) && (key as string).length > 0

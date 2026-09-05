@@ -589,6 +589,9 @@ describe("the realm-creation doors are enumerated, not discovered one per round"
     // `definition.packageName`, which a local definition may also carry.
     expect(gateBody).toContain("packageName: origin.name");
     expect(gateBody).toContain("source: definition.source");
-    expect(gateBody).toContain("artifact: definition.consentArtifact ?? null");
+    // The surface and the artifacts are passed THROUGH, never filled in: a
+    // missing surface or an empty artifact list is Rust's refusal to make.
+    expect(gateBody).toContain("surface: definition.consentSurface ?? null");
+    expect(gateBody).toContain("artifacts: definition.consentArtifacts ?? null");
   });
 });

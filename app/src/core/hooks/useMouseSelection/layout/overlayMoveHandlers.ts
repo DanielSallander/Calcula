@@ -199,6 +199,31 @@ export function createOverlayMoveHandlers(
     const hit = checkOverlayBody(mouseX, mouseY);
     if (!hit || !hit.region.floating) return false;
 
+    // A SECONDARY press is a request for a MENU, never a gesture on the object.
+    //
+    // This line is the whole of the "a right-click must not run the macro" fix,
+    // and it is here rather than in Controls' listener because this is the ONLY
+    // place in the codebase where a native mousedown becomes
+    // `floatingObject:selected` (one dispatch, six listeners). Controls turns
+    // that event into `button:clicked` for a run-mode button, so a right-press
+    // RAN the user's script; but the same event is also a chart's pending
+    // click, a slicer's pending click and a Floating Range's selection, and any
+    // listener added later inherits whatever this dispatch means. Filtering in
+    // one listener fixes one listener and has to be re-typed by everyone else;
+    // filtering here cannot be got round, because an extension cannot reach the
+    // dispatch except through this function. It is Core's own path, so it also
+    // holds for extensions that do not exist yet.
+    //
+    // Returning TRUE consumes the press: without that it would fall through to
+    // `handleCellMouseDown` and move the cell cursor to the cell UNDER the
+    // object, which is what a right-click on a chart must never do. Nothing is
+    // lost by not dispatching — every object with a context menu (Charts,
+    // Slicer, TimelineSlicer, FloatingRange, and Controls via M3a's
+    // `installControlObjectMenu`) SELECTS the clicked object itself from its
+    // own capture-phase `contextmenu` listener, because a menu opened with the
+    // keyboard Menu key has no mousedown at all.
+    if (event.button === 2) return true;
+
     // checkOverlayBody is pure GEOMETRY — it never looks at what the mouse
     // actually landed on. An extension may stack real DOM over the canvas
     // (the Floating Range cell editor's <textarea> is the live example, and

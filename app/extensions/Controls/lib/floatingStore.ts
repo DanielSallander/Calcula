@@ -9,6 +9,7 @@ import {
   type GridRegion,
 } from "@api/gridOverlays";
 import { getDesignMode } from "./designMode";
+import { announceFloatingControlRegions } from "./regionPublication";
 
 // ============================================================================
 // Types
@@ -251,6 +252,26 @@ export function resizeFloatingControl(
  *
  * The pixel x/y are deliberately NOT adjusted here: a pinned control's geometry
  * is recomputed from its anchor at render time, and a free one must not move.
+ *
+ * THE ORDER THE RENAMES ARE APPLIED IN IS PART OF THE CONTRACT. A shift moves a
+ * whole block of anchors at once, so the destinations are the block's own ids:
+ * two pinned controls one row apart, with a row inserted above them, produce
+ * `r5 -> r6` and `r6 -> r7`. Renaming in store order applies the first of those
+ * while the second control STILL HOLDS r6, so every id-keyed side table the
+ * hooks migrate — the html document, the overlay iframe, the frame budget's
+ * charge, the declared hit rectangles, the declared properties — is overwritten
+ * at r6 and then carried on to r7 by the second rename. Measured on two 1 MB
+ * scripted shapes: one document destroyed, the other ending up under an id its
+ * control does not have, and a megabyte charged to no frame at all with no way
+ * to give it back. Applying a rename only once its DESTINATION is free turns
+ * that same edit into `r6 -> r7` then `r5 -> r6`, where nothing is displaced at
+ * all.
+ *
+ * A rename whose destination NEVER frees up is still applied — an unpinned
+ * control keeps its anchor while a pinned one shifts onto it, and that is a
+ * genuine collision the store cannot order its way out of. It is applied last,
+ * so a real collision stays exactly what it was and only the self-inflicted
+ * ones disappear.
  */
 export function reanchorFloatingControls(
   sheetIndex: number,
@@ -264,44 +285,107 @@ export function reanchorFloatingControls(
   },
 ): boolean {
   let changed = false;
-  const survivors: FloatingControl[] = [];
+
+  /** A rename decided but not yet applied. `index` is the control's slot in
+   *  `outcome`, so re-ordering the RENAMES never re-orders the store. */
+  interface PendingRename {
+    index: number;
+    ctrl: FloatingControl;
+    newId: string;
+    row: number;
+    col: number;
+  }
+
+  // PHASE 1 — DECIDE. No hook fires here and no id changes: the safe order
+  // cannot be known until every destination is.
+  const outcome: (FloatingControl | null)[] = [];
+  const pending: PendingRename[] = [];
+  /** Every id a control still holds. A destination in here is occupied. */
+  const occupied = new Set<string>();
 
   for (const ctrl of floatingControls) {
+    const index = outcome.length;
     if (ctrl.sheetIndex !== sheetIndex || !shouldMove(ctrl)) {
-      survivors.push(ctrl);
+      outcome.push(ctrl);
+      occupied.add(ctrl.id);
       continue;
     }
     const moved = shift(ctrl.row, ctrl.col);
     if (moved === null) {
       // Anchor row/column deleted — drop the control and its group membership.
+      // Its id is deliberately NOT recorded as occupied: the cell is gone, so a
+      // control shifting onto that anchor is moving into an empty slot rather
+      // than displacing anything.
       removeControlFromGroups(ctrl.id);
       hooks?.onRemove?.(ctrl.id);
       changed = true;
+      outcome.push(null);
       continue;
     }
     if (moved.row === ctrl.row && moved.col === ctrl.col) {
-      survivors.push(ctrl);
+      outcome.push(ctrl);
+      occupied.add(ctrl.id);
       continue;
     }
-    const newId = makeFloatingControlId(sheetIndex, moved.row, moved.col);
+    // Kept under its OLD id until the rename is applied — which is exactly the
+    // occupancy the ordering below has to respect.
+    outcome.push(ctrl);
+    occupied.add(ctrl.id);
+    pending.push({
+      index,
+      ctrl,
+      newId: makeFloatingControlId(sheetIndex, moved.row, moved.col),
+      row: moved.row,
+      col: moved.col,
+    });
+  }
+
+  const applyRename = (p: PendingRename): void => {
     // RENAME the member in place. Going through removeControlFromGroups would
     // dissolve a two-member group (membership momentarily drops to 1) and then
     // point newId at a group that no longer exists.
-    const groupId = controlToGroup.get(ctrl.id);
+    const groupId = controlToGroup.get(p.ctrl.id);
     if (groupId) {
-      controlToGroup.delete(ctrl.id);
-      controlToGroup.set(newId, groupId);
+      controlToGroup.delete(p.ctrl.id);
+      controlToGroup.set(p.newId, groupId);
       const group = controlGroups.get(groupId);
       if (group) {
-        group.memberIds = group.memberIds.map((id) => (id === ctrl.id ? newId : id));
+        group.memberIds = group.memberIds.map((id) => (id === p.ctrl.id ? p.newId : id));
       }
     }
-    hooks?.onRename?.(ctrl.id, newId);
-    survivors.push({ ...ctrl, id: newId, row: moved.row, col: moved.col });
+    hooks?.onRename?.(p.ctrl.id, p.newId);
+    occupied.delete(p.ctrl.id);
+    occupied.add(p.newId);
+    outcome[p.index] = { ...p.ctrl, id: p.newId, row: p.row, col: p.col };
     changed = true;
+  };
+
+  // PHASE 2 — APPLY, VACATED DESTINATIONS FIRST. Each sweep renames whatever
+  // can move without landing on an id somebody still holds, which frees the ids
+  // the next sweep needs; a monotone shift therefore unwinds from the far end of
+  // the block and displaces nothing. The loop is bounded by `pending.length`,
+  // since a sweep that renames nothing ends it.
+  let remaining = pending;
+  while (remaining.length > 0) {
+    const blocked: PendingRename[] = [];
+    for (const p of remaining) {
+      if (occupied.has(p.newId)) blocked.push(p);
+      else applyRename(p);
+    }
+    if (blocked.length === remaining.length) {
+      // No progress: every destination left is held by a control that is not
+      // going to give it up. That is a REAL collision (a pinned control moving
+      // onto an unpinned one's anchor), and the store has no better answer than
+      // the one it always gave — the hooks are told, and they displace what was
+      // there. Doing it here rather than earlier is what keeps the collision
+      // limited to the controls that genuinely collide.
+      for (const p of blocked) applyRename(p);
+      break;
+    }
+    remaining = blocked;
   }
 
-  floatingControls = survivors;
+  floatingControls = outcome.filter((c): c is FloatingControl => c !== null);
   return changed;
 }
 
@@ -327,6 +411,10 @@ export function resetFloatingStore(): void {
   controlToGroup.clear();
   groupIdCounter = 0;
   removeGridRegionsByType("floating-control");
+  // The store's OTHER publication door — it drops the regions itself instead of
+  // going through `syncFloatingControlRegions` — so it announces too, with the
+  // empty set. Nothing is painted after this.
+  announceFloatingControlRegions(new Set());
 }
 
 // ============================================================================
@@ -647,4 +735,13 @@ export function syncFloatingControlRegions(): void {
   }));
 
   replaceGridRegionsByType("floating-control", regions);
+  // The region list is the ONLY thing that decides which controls the render
+  // pass calls a renderer for, so it is also the only honest answer to "which
+  // controls are painted". A control dropped from it (a sheet switch swaps the
+  // whole set) is never rendered again and therefore never reaches any of the
+  // release paths that live inside the render pass — which is how a shape's
+  // pointer-claiming shims survived as invisible click-eaters over the next
+  // sheet's bare grid. Announced HERE, one line under the publication, so the
+  // two cannot drift.
+  announceFloatingControlRegions(new Set(regions.map((r) => r.id)));
 }

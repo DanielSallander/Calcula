@@ -15,6 +15,7 @@ import {
   AppEvents,
   showToast,
   IconFlashFill,
+  isKeyClaimed,
 } from "@api";
 import { getGridBounds } from "@api/lib";
 import { getGridStateSnapshot } from "@api/grid";
@@ -298,6 +299,12 @@ async function buildUpdates(
 // ============================================================================
 
 function handleKeyDown(e: KeyboardEvent): void {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // The tag list below cannot see a <select> or a <button>; the claim can.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(e)) return;
   // Ctrl+E: Flash Fill
   if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "e") {
     // Don't intercept if user is typing in an input/textarea

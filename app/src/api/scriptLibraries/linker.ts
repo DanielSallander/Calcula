@@ -592,6 +592,14 @@ async function mountRealm(
       packageName: locked.package,
       packageVersion: locked.resolved,
       declaredCapabilities: [...effective.capabilities],
+      // THE ARTIFACTS THE CONSENT RECORD NAMES — ONE PER MODULE. `applyInstall`
+      // records `node.modules.map(m => ({ id, source }))` under `lib:<package>`,
+      // and this realm merges exactly those module sources (read back through
+      // the content-addressed cache, hash-verified). Naming every one of them
+      // means a realm that merged a module the record never listed is refused
+      // in Rust, not only by `isConsentCurrent` above.
+      consentSurface: "lib",
+      consentArtifacts: modules.map((m) => ({ id: m.id, source: m.source })),
       apiVersion: "1.0.0",
     });
   } catch (e) {

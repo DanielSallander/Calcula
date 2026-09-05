@@ -52,7 +52,16 @@ const runWorkbookScript = vi.fn(async (_source: string, _file: string) => ({
   screenUpdating: true,
 }));
 
-vi.mock("@api", () => ({
+vi.mock("@api", async () => {
+  // The REAL origin rule: a provenance decision in a test must agree with the one
+  // definition every gate reads, or the test pins a rule the product does not have.
+  const origin = await vi.importActual<typeof import("@api/scriptHost/scriptOrigin")>(
+    "@api/scriptHost/scriptOrigin",
+  );
+  return {
+    scriptOriginForStoredRecord: origin.scriptOriginForStoredRecord,
+    originTagTitle: origin.originTagTitle,
+
   listWorkbookScripts: async () =>
     [...store.values()].map((s) => ({ id: s.id, name: s.name })),
   getWorkbookScript: async (id: string) => {
@@ -82,18 +91,8 @@ vi.mock("@api", () => ({
   },
   runWorkbookScript: (source: string, file: string) => runWorkbookScript(source, file),
   runObjectScriptOnce: (o: unknown) => runObjectScriptOnce(o),
-  // The real implementations — provenance labelling must agree with the one
-  // definition every other transparency surface reads.
-  scriptOriginForStoredRecord: (record: { sourcePackage?: string | null }) => {
-    const name =
-      typeof record.sourcePackage === "string" ? record.sourcePackage.trim() : "";
-    return name === "" ? { kind: "local" } : { kind: "package", name };
-  },
-  originTagTitle: (origin: { kind: string; name?: string }) =>
-    origin.kind === "package"
-      ? `From package "${origin.name}"`
-      : "Authored in this workbook",
-}));
+  };
+});
 
 import {
   describeMacroProvenance,
@@ -157,7 +156,11 @@ describe("the library carries each module's origin", () => {
   it("badges the publisher's macro and leaves the user's own unbadged", () => {
     expect(macroProvenanceTag("Acme Finance Pack")).toBe("Acme Finance Pack");
     expect(macroProvenanceTag(null)).toBeNull();
-    expect(macroProvenanceTag("   ")).toBeNull();
+    // A blank stamp is a DISTRIBUTED record with no usable name — the same
+    // rule every gate applies — so the chip shows the placeholder the mount
+    // gate is asked about, never "local".
+    expect(macroProvenanceTag("   ")).toBe("(unknown package)");
+    expect(isDistributedMacro("   ")).toBe(true);
     expect(isDistributedMacro("Acme Finance Pack")).toBe(true);
     expect(isDistributedMacro(null)).toBe(false);
   });
@@ -334,6 +337,9 @@ describe("running a macro that arrived in an application", () => {
     expect(macroRunAccessLevel("Acme Finance Pack")).toBe("restricted");
     expect(macroRunAccessLevel(null)).toBe("unlocked");
     expect(macroRunAccessLevel(undefined)).toBe("unlocked");
+    // A blank stamp used to answer "unlocked" here — the run tier of a record
+    // every gate treats as distributed. It is restricted, like any other.
+    expect(macroRunAccessLevel("   ")).toBe("restricted");
   });
 });
 

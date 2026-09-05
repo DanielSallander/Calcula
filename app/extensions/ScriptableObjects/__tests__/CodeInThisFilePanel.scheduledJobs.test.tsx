@@ -48,6 +48,8 @@ const getScriptHeldState = vi.fn(async () => ({
   shortcuts: [],
   clipboards: [],
   watches: [],
+  panes: [],
+  forms: [],
 }));
 const getExtensionAuditTrail = vi.fn(async () => ({
   entries: [],
@@ -89,12 +91,21 @@ vi.mock("@api/codeInventory", () => ({
     shortcuts: unknown[];
     clipboards: { cells: number }[];
     watches: { running: boolean }[];
+    panes: unknown[];
+    forms: unknown[];
   }) => ({
     shortcuts: s.shortcuts.length,
     clipboards: s.clipboards.length,
     clipboardCells: s.clipboards.reduce((n, c) => n + c.cells, 0),
     runningWatches: s.watches.filter((w) => w.running).length,
-    any: s.shortcuts.length > 0 || s.clipboards.length > 0 || s.watches.length > 0,
+    panes: s.panes.length,
+    forms: s.forms.length,
+    any:
+      s.shortcuts.length > 0 ||
+      s.clipboards.length > 0 ||
+      s.watches.length > 0 ||
+      s.panes.length > 0 ||
+      s.forms.length > 0,
   }),
   revokeScriptKeybinding: vi.fn(),
   clearScriptClipboard: vi.fn(async () => undefined),

@@ -448,6 +448,16 @@ mod tests {
         // them would create a backend grant nothing ever checks.
         assert!(!is_grantable("ui.html"));
         assert!(!is_grantable("ui.dialog"));
+        // A task pane is host-painted: the renderer decides, Rust holds no
+        // gate, so a Rust grant would be a claim with nothing behind it.
+        assert!(!is_grantable("ui.pane"));
+        // ui.htmlInput (M6b) is the INPUT half of ui.html: it decides whether
+        // the RENDERER puts shim elements over a script's iframe so clicks land
+        // there instead of on the grid. That is host DOM from start to finish —
+        // Rust never sees a pointer event — so a backend grant would be a check
+        // nothing consults, and its presence here would wrongly suggest Rust was
+        // enforcing it.
+        assert!(!is_grantable("ui.htmlInput"));
         assert!(!is_grantable("formula.udf"));
         assert!(!is_grantable("storage"));
         // file.picker is host-mediated: the broker gates the call and a NATIVE

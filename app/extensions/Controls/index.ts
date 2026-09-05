@@ -15,6 +15,7 @@ import {
   IconShapes,
   IconImage,
   IconDesignMode,
+  isKeyClaimed,
 } from "@api";
 import { registerControlsProvider } from "@api/controlsService";
 import type { ControlPropertyValue } from "./lib/types";
@@ -44,7 +45,7 @@ import {
 } from "@api/dimensions";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { showToast } from "@api/notifications";
-import type { OverlayRenderContext, OverlayHitTestContext } from "@api/gridOverlays";
+import type { OverlayRenderContext } from "@api/gridOverlays";
 import {
   overlayGetRowHeaderWidth,
   overlayGetColHeaderHeight,
@@ -54,6 +55,10 @@ import {
   loadButtonScriptModules,
   planInlineButtonRun,
 } from "../_shared/lib/buttonScriptRun";
+// The host -> frame envelope is the shared module's to spell, not this file's.
+// It used to be built by hand a few lines below, which made the protocol tag a
+// four-way copy the moment the pane host learned to share it.
+import { postToScriptFrame } from "../_shared/scriptFrame";
 import { drawButton } from "./Button/rendering";
 import {
   buttonStyleInterceptor,
@@ -67,24 +72,28 @@ import {
 } from "./Button/interceptors";
 import {
   renderFloatingButton,
-  hitTestFloatingButton,
   invalidateFloatingButtonCache,
   invalidateAllFloatingButtonCaches,
 } from "./Button/floatingRenderer";
 import {
   renderFloatingShape,
-  hitTestFloatingShape,
   invalidateShapeCache,
   invalidateAllShapeCaches,
   setCustomCanvasRenderer,
   removeCustomCanvasRenderer,
   setShapeHtmlContent,
   removeShapeHtmlOverlay,
+  releaseAllShapeHtmlOverlays,
   markShapeHasScript,
   unmarkShapeHasScript,
   getShapeOverlayFrame,
   migrateShapeInstanceId,
 } from "./Shape/shapeRenderer";
+import { setShapeHitRegions, resetShapeHitRegions } from "./Shape/shapeHitRegions";
+import {
+  SHAPE_HIT_REGIONS_EVENT,
+  type ShapeHitRegion,
+} from "@api/scriptHost/shapeHitRegionSpec";
 import {
   setDeclaredProperties,
   clearDeclaredProperties,
@@ -93,7 +102,6 @@ import {
 import { getShapeTemplate } from "./Shape/shapeTemplateCatalog";
 import {
   renderFloatingImage,
-  hitTestFloatingImage,
   invalidateImageCache,
   invalidateAllImageCaches,
   forgetImageControl,
@@ -164,6 +172,8 @@ import { setControlMetadata, getControlMetadata, getAllControls, setControlPrope
 import { controlsBackend } from "./lib/controlsBackend";
 import { PropertiesPane } from "./PropertiesPane/PropertiesPane";
 import { registerControlContextMenu } from "./lib/controlContextMenu";
+import { installControlObjectMenu } from "./lib/controlObjectMenu";
+import { hitTestFloatingControl } from "./lib/controlHitTest";
 import {
   copyControl,
   pasteControl,
@@ -397,16 +407,10 @@ function drawMultiSelectionBoundingBox(overlayCtx: OverlayRenderContext): void {
   ctx.restore();
 }
 
-function hitTestFloatingControl(hitCtx: OverlayHitTestContext): boolean {
-  const controlType = hitCtx.region.data?.controlType;
-  if (controlType === "shape") {
-    return hitTestFloatingShape(hitCtx);
-  } else if (controlType === "image") {
-    return hitTestFloatingImage(hitCtx);
-  } else {
-    return hitTestFloatingButton(hitCtx);
-  }
-}
+// `hitTestFloatingControl` moved to lib/controlHitTest.ts, which also answers
+// the same question from CLIENT coordinates. The right-click menu needs the
+// answer from a `MouseEvent` on `window` while Core supplies an
+// `OverlayHitTestContext` — one rule, two callers, one module.
 
 // ============================================================================
 // Activation
@@ -890,6 +894,12 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
   const handleDeleteKey = (e: KeyboardEvent) => {
     if (e.key !== "Delete" && e.key !== "Backspace") return;
+    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+    // field, a shape's declared hit rectangle -- is not this extension's.
+    // The tag list below cannot see a <select> or a <button>; the claim can.
+    // See core/lib/pointerClaims.ts, and the census in
+    // core/lib/globalInputListeners.ts (a new global listener adds a row).
+    if (isKeyClaimed(e)) return;
 
     // Don't intercept when editing a cell or input field
     const target = e.target as HTMLElement;
@@ -954,6 +964,14 @@ function activate(context: ExtensionContext): void {
       loadedSheetIndex = null;
       deselectFloatingControl();
       releaseAllImageMedia();
+      // The html shapes' frames go the same way, and for the same reason the
+      // picture cache does: they belong to the document that just closed. A
+      // frame left behind keeps its share of the live-frame budget — which is
+      // capped per SESSION, so the next workbook opens with fewer frames
+      // available than it has shapes — and, because a control's id derives from
+      // its anchor cell, an ordinary shape in the new document at a matching
+      // anchor would paint the old document's html.
+      releaseAllShapeHtmlOverlays();
       reportedLegacyInlineImages.clear();
       invalidateAllFloatingButtonCaches();
       invalidateAllShapeCaches();
@@ -1051,8 +1069,16 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(context.events.on(AppEvents.CONTROLS_CHANGED, reloadForBackendChange));
 
   // -----------------------------------------------------------------------
-  // 20. Register context menu items for floating controls
+  // 20. Context menus for floating controls
+  //
+  // TWO surfaces, because they answer two different questions. The OBJECT menu
+  // (Duplicate, Order, Flip, Edit Script, Delete…) is opened by this
+  // extension's own capture-phase contextmenu listener, since Core deliberately
+  // emits nothing for a right-click on a floating object — that is what left
+  // every one of these items unreachable. The CELL menu keeps exactly one item,
+  // "Paste", whose context is a cell rather than an object.
   // -----------------------------------------------------------------------
+  cleanupFns.push(installControlObjectMenu());
   const unregContextMenu = registerControlContextMenu();
   cleanupFns.push(unregContextMenu);
 
@@ -1060,6 +1086,12 @@ function activate(context: ExtensionContext): void {
   // 21. Handle Ctrl+C / Ctrl+V / Ctrl+D for floating controls
   // -----------------------------------------------------------------------
   const handleControlKeyboard = async (e: KeyboardEvent) => {
+    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+    // field, a shape's declared hit rectangle -- is not this extension's.
+    // The tag list below cannot see a <select> or a <button>; the claim can.
+    // See core/lib/pointerClaims.ts, and the census in
+    // core/lib/globalInputListeners.ts (a new global listener adds a row).
+    if (isKeyClaimed(e)) return;
     // Don't intercept when editing a cell or input field
     const target = e.target as HTMLElement;
     if (
@@ -1217,17 +1249,37 @@ function activate(context: ExtensionContext): void {
   });
   cleanupFns.push(unsubSetHtml);
 
-  // Handle shape:sendMessage from scripts (forward to iframe)
+  // Handle shape:setHitRegions from scripts (M3b) — the rectangles of its own
+  // HTML frame a script wants pointer input in. An EMPTY list releases the
+  // frame, and that is also the message the script host sends on unmount, so
+  // "released because the script asked" and "released because the script is
+  // gone" take one code path.
+  const unsubHitRegions = onAppEvent(SHAPE_HIT_REGIONS_EVENT, (detail) => {
+    const d = detail as { instanceId: string | null; regions: ShapeHitRegion[] };
+    // Same filter as setHtmlContent: a pane-hosted control's id is not an
+    // on-grid id, and its frame has no grid pixels to claim.
+    if (!d.instanceId || !parseOnGridControlInstanceId(d.instanceId)) return;
+    setShapeHitRegions(d.instanceId, d.regions);
+    emitAppEvent(AppEvents.GRID_REFRESH);
+  });
+  cleanupFns.push(unsubHitRegions);
+  // Deactivating the extension takes the grid down with it; a shim is a DOM
+  // element in the canvas parent and would otherwise survive as an invisible
+  // click-eater with nothing left to forward to. An overlay frame is the same
+  // element problem plus a budget charge that nothing would ever hand back, so
+  // a deactivate/activate cycle would come back with the frame cap already
+  // spent on frames that no longer exist.
+  cleanupFns.push(() => releaseAllShapeHtmlOverlays());
+  cleanupFns.push(() => resetShapeHitRegions());
+
+  // Handle shape:sendMessage from scripts (forward to iframe). The envelope is
+  // posted by the shared module, which owns both ends of the protocol tag — the
+  // pane host's forwarder goes through the same function, so the two hosts
+  // cannot drift into posting different spellings at one bridge.
   const unsubSendMsg = onAppEvent("shape:sendMessage", (detail) => {
     const d = detail as { instanceId: string; type: string; data: unknown };
     if (!parseOnGridControlInstanceId(d.instanceId)) return;
-    const frame = getShapeOverlayFrame(d.instanceId);
-    if (frame?.contentWindow) {
-      frame.contentWindow.postMessage(
-        { target: "shape-html", instanceId: d.instanceId, type: d.type, data: d.data },
-        "*",
-      );
-    }
+    postToScriptFrame(getShapeOverlayFrame(d.instanceId), d.instanceId, d.type, d.data);
   });
   cleanupFns.push(unsubSendMsg);
 
@@ -2947,8 +2999,6 @@ async function loadFloatingControls(): Promise<void> {
         duration: 12000,
       });
     }
-
-    syncFloatingControlRegions();
   } catch (err) {
     // The visible consequence is "my buttons are gone after reopening the
     // file". Logging that to the console tells the person who can fix it
@@ -2960,6 +3010,21 @@ async function loadFloatingControls(): Promise<void> {
         "They are missing from the sheet until this is resolved.",
       { type: "error", duration: 0 },
     );
+  } finally {
+    // PUBLISHED ON EVERY EXIT, the failure above included. Every caller reaches
+    // this loader having ALREADY emptied the store for the departing sheet
+    // (`removeFloatingControlsForSheet`), so a publication that lived only at
+    // the end of the `try` left the OLD sheet's overlay regions standing
+    // whenever the backend read threw: the departed shape kept being rendered
+    // over the sheet the user switched TO, and — because this publication is
+    // also the announcement that releases the per-control DOM a renderer parks
+    // outside the canvas (`announceFloatingControlRegions` ->
+    // `releaseUnpaintedShapeOverlays`) — its pointer-claiming shims kept
+    // swallowing clicks on a sheet its shape is not even on. Publishing here
+    // republishes exactly what the store holds, which is the truth on both
+    // paths, and it is what makes the refusal above TRUE: "missing from the
+    // sheet" must not mean "still painted, and still eating clicks".
+    syncFloatingControlRegions();
   }
 }
 

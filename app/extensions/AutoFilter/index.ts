@@ -12,6 +12,7 @@ import {
   AppEvents,
   registerAutoFitContributor,
   type OverlayRegistration,
+  isKeyClaimed,
 } from "@api";
 import { emitAppEvent, onAppEvent } from "@api/events";
 import { renderFilterChevrons, hitTestFilterChevron, isClickOnChevronButton, getFilterChevronCursor, getFilterChevronCanvas, BUTTON_SIZE, BUTTON_MARGIN } from "./rendering/filterChevronRenderer";
@@ -50,6 +51,13 @@ const cleanupFns: (() => void)[] = [];
 // ============================================================================
 
 function handleKeyDown(e: KeyboardEvent): void {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // This handler had no focus guard at all, and a longer tag list would only
+  // be a census of the widget types that exist today.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(e)) return;
   // Ctrl+Shift+L = Toggle Filter
   if (e.ctrlKey && e.shiftKey && e.key === "L") {
     e.preventDefault();

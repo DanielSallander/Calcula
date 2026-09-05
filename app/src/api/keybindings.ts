@@ -20,12 +20,19 @@
 //          and defer to native otherwise; copy/cut additionally defer when a DOM
 //          text selection exists. Supports user customization, conflict
 //          detection, and a settings UI.
+//          POINTER CLAIMS: this listener is capture-phase on `window`, so it
+//          pre-empts all three of Core's claim-honouring doors and has to answer
+//          the claim itself. It does so in three classes — see the long comment
+//          in `handleGlobalKeyDown`, `core/lib/pointerClaims.ts` for the rule,
+//          and `core/lib/globalInputListeners.ts` for the census of every global
+//          key/pointer listener in the app (a new one adds a row there).
 // NOTE: The grid switch still contains (now-dead) clipboard/undo/fill cases that
 //       the registry pre-empts via capture-phase stopPropagation; removing them
 //       is a tracked, behavior-neutral follow-up (needs clipboard test coverage).
 
 import { CommandRegistry } from "./commands";
 import { showToast } from "./notifications";
+import { findPointerClaim } from "./pointerClaims";
 
 // ============================================================================
 // Types
@@ -316,6 +323,18 @@ export function eventToCombo(event: KeyboardEvent): string | null {
 // Editing State Detection
 // ============================================================================
 
+/**
+ * The TAG half of the question "does the focused thing own its own keys?".
+ *
+ * Incomplete on its own and knowingly so — it is a census of the text controls
+ * that exist in the shell today. `<select>` and `<button>` are not in it, which
+ * is precisely how Delete inside an on-grid form's dropdown reached
+ * `core.edit.clearContents` and wiped the user's selected cells. The missing
+ * half is `isClaimedKeystroke`; `ownsItsOwnKeys` is the question this dispatcher
+ * actually asks. Do NOT lengthen this list to chase a widget type — see
+ * core/lib/pointerClaims.ts, "the answer is the ancestor walk, not a longer tag
+ * list".
+ */
 function isEditing(): boolean {
   const active = document.activeElement;
   if (!active) return false;
@@ -323,6 +342,36 @@ function isEditing(): boolean {
   if (tag === "input" || tag === "textarea") return true;
   if ((active as HTMLElement).contentEditable === "true") return true;
   return false;
+}
+
+/**
+ * The CLAIM half: is this keystroke aimed at something stacked ON the grid that
+ * has said "gestures that land on me are mine" (`data-pointer-claim`)?
+ *
+ * Both sources are consulted because neither is reliable alone here. `target` is
+ * the authoritative one for a real keydown — the browser delivers a key event to
+ * the focused element — but a synthesised event (a test, a re-dispatch) can
+ * carry a null target, and `document.activeElement` is the same basis
+ * `isEditing` already uses. A false "claimed" costs a shortcut; a false
+ * "unclaimed" costs the user's cells, so the OR is the safe direction.
+ */
+function isClaimedKeystroke(event: KeyboardEvent): boolean {
+  if (findPointerClaim(event.target) !== null) return true;
+  const active = typeof document !== "undefined" ? document.activeElement : null;
+  return findPointerClaim(active) !== null;
+}
+
+/**
+ * Does something other than the grid own this keystroke's editing semantics?
+ *
+ * This is THE question, and the tag list was only ever half of it. A claim means
+ * a widget the user can see and has focused is sitting inside the grid's own DOM
+ * subtree; whether that widget happens to be an `<input>`, a `<select>`, a
+ * `<button>` or a custom element with a shadow root is not a question this
+ * dispatcher should have to keep re-answering.
+ */
+function ownsItsOwnKeys(event: KeyboardEvent): boolean {
+  return isEditing() || isClaimedKeystroke(event);
 }
 
 /**
@@ -1046,8 +1095,42 @@ export function handleGlobalKeyDown(event: KeyboardEvent): boolean {
   const modifierKeys = ["Control", "Shift", "Alt", "Meta"];
   if (modifierKeys.includes(event.key)) return false;
 
-  const editing = isEditing();
-  const gridFocused = isGridFocused();
+  // -------------------------------------------------------------------------
+  // WHAT A POINTER CLAIM MEANS FOR A SHORTCUT
+  //
+  // This listener is capture-phase on `window`, the OUTERMOST position there is,
+  // so it runs before every one of Core's three claim-honouring doors and it
+  // calls preventDefault()+stopPropagation() on a match. Whatever it decides is
+  // final; nothing downstream gets a second opinion. It therefore has to answer
+  // the claim itself, and it answers it in three classes rather than one:
+  //
+  //   GRID-SCOPED (GRID_SCOPED_COMMANDS: clear contents, paste, the fills,
+  //     merge, format cells). REFUSED inside a claim. The grid is not the target
+  //     of this keystroke — a claimed element is a surface the user is looking
+  //     at and typing into, and the selected CELLS are somewhere else entirely.
+  //     This is the measured data-loss case: Delete with an on-grid form's
+  //     <select> focused executed core.edit.clearContents over the sheet.
+  //     Refusing before `matches` is populated also means no preventDefault, so
+  //     Ctrl+V falls through to the browser and pastes INTO THE FIELD.
+  //
+  //   EDITING-SENSITIVE (context: "not-editing" — undo, redo, and every script
+  //     shortcut). REFUSED inside a claim, for exactly the reason an <input>
+  //     already refused them: the claimant owns its own text and its own undo.
+  //     Ctrl+Z in a form field must undo the typing, not the workbook.
+  //
+  //   TRULY GLOBAL (context "always" AND not grid-scoped: Ctrl+S, Ctrl+O,
+  //     Ctrl+N, Ctrl+P, Ctrl+F, the panel toggles). ALLOWED inside a claim. A
+  //     user typing into a form on a sheet still expects Ctrl+S to save the
+  //     workbook. A blanket "a claim swallows every shortcut" would break Save,
+  //     which is why the claim is folded into the two questions the dispatcher
+  //     already asks instead of being a fourth gate in front of them.
+  //
+  // Both rules fall out of the binding's OWN declared metadata, so a new binding
+  // is classified by what it says about itself — there is no third hand-written
+  // list here to drift out of date.
+  // -------------------------------------------------------------------------
+  const editing = ownsItsOwnKeys(event);
+  const gridFocused = isGridFocused() && !isClaimedKeystroke(event);
 
   // Find matching keybindings
   const matches: KeyBinding[] = [];

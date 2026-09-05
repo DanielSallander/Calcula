@@ -209,10 +209,29 @@ function provenanceUnreadable(subject: string, err: unknown): Error {
  * empty source and a null package, i.e. as "a local script that isn't this one",
  * which is the one direction that grants.
  */
+/**
+ * What `resolveArtifactOrigin` settles: the trust origin, and — for a
+ * distributed artifact — the `{ id, source }` pair the application's consent
+ * record lists for it, so the mount can name it to the Rust gate.
+ *
+ * The SOURCE named is the one about to RUN, not the stored one. For a record
+ * resolved by identity that is the caller's text, which the gate hashes: an
+ * edited distributed macro therefore fails the artifact check ("its code has
+ * changed since it was approved") instead of riding on the application floor —
+ * the module gate cannot catch that case, because an edited body matches no
+ * stored module and it answers "not a stored module, allow". For a record
+ * resolved by content the two are equal by construction. A local artifact
+ * names nothing: it is never asked.
+ */
+interface ResolvedArtifact {
+  origin: MountOrigin;
+  artifact: { id: string; source: string } | null;
+}
+
 async function resolveArtifactOrigin(options: {
   scriptId?: string | null;
   source: string;
-}): Promise<MountOrigin> {
+}): Promise<ResolvedArtifact> {
   let summaries: Awaited<ReturnType<typeof listWorkbookScripts>>;
   try {
     // id + name only: no source travels, so this stays one small round trip
@@ -237,12 +256,14 @@ async function resolveArtifactOrigin(options: {
       throw provenanceUnreadable(`the stored module "${wanted}"`, err);
     }
     const origin = scriptOriginForStoredRecord(record);
-    if (origin.kind === "package") return origin;
-    if (record.source === options.source) return LOCAL_ORIGIN;
+    if (origin.kind === "package") {
+      return { origin, artifact: { id: wanted, source: options.source } };
+    }
+    if (record.source === options.source) return { origin: LOCAL_ORIGIN, artifact: null };
   }
 
   // THE CONTENT SCAN. Every module's source, compared to what is about to run.
-  let firstPackage: MountOrigin | null = null;
+  let firstPackage: ResolvedArtifact | null = null;
   let unreadable: Error | null = null;
   for (const summary of summaries) {
     let record: Awaited<ReturnType<typeof getWorkbookScript>>;
@@ -259,15 +280,17 @@ async function resolveArtifactOrigin(options: {
     const origin = scriptOriginForStoredRecord(record);
     // A subscriber-authored record with this exact source authorises it
     // outright — the documented way to adapt distributed content.
-    if (isLocalOrigin(origin)) return LOCAL_ORIGIN;
-    if (!firstPackage) firstPackage = origin;
+    if (isLocalOrigin(origin)) return { origin: LOCAL_ORIGIN, artifact: null };
+    if (!firstPackage) {
+      firstPackage = { origin, artifact: { id: summary.id, source: record.source } };
+    }
   }
   if (firstPackage) return firstPackage;
   if (unreadable) throw unreadable;
 
   // Not a stored artifact at all (freshly generated source, a test harness):
   // there is no package behind it, so it is the user's own.
-  return LOCAL_ORIGIN;
+  return { origin: LOCAL_ORIGIN, artifact: null };
 }
 
 /**
@@ -301,7 +324,7 @@ export async function runObjectScriptOnce(
 
   // The artifact decides, not the caller. Resolved BEFORE anything is mounted,
   // and before the run id is minted, so a refusal costs nothing.
-  const origin = await resolveArtifactOrigin({ scriptId, source });
+  const { origin, artifact } = await resolveArtifactOrigin({ scriptId, source });
   // REFUSE A CONTRADICTION, DERIVE AN ABSENCE. A caller that says nothing about
   // the tier gets the artifact's own answer (unlocked for local, restricted for
   // distributed). A caller that EXPLICITLY asks for "unlocked" on a distributed
@@ -375,6 +398,14 @@ export async function runObjectScriptOnce(
       // application's consent record, and `buildHandleFromDefinition` withholds
       // the automatic local `ui.html` grant from a package origin.
       declaredCapabilities: parseDeclaredCapabilities(source).caps,
+      // A module a `.calp` shipped is recorded under the application's BARE key
+      // alongside its object scripts (one grant covers both kinds), and the
+      // artifact is the stored module `resolveArtifactOrigin` settled on — with
+      // the source about to run, so an edited publisher macro is refused at the
+      // hash rather than admitted on the application floor. A local artifact
+      // names none; the gate never asks about it.
+      consentSurface: "object-script",
+      consentArtifacts: artifact ? [artifact] : undefined,
       apiVersion: SCRIPT_API_VERSION,
     });
   } catch (err) {

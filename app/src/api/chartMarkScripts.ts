@@ -16,6 +16,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { hostMountScript, hostUnmountScript } from "./scriptHost/host";
+import { mountProvenanceForOrigin, scriptOriginForStoredRecord } from "./scriptHost/scriptOrigin";
 import { clearBitmapCaches } from "./scriptHost/renderCache";
 import { unregisterChartMark, getChartMarkMeta } from "./chartMarks";
 
@@ -153,9 +154,20 @@ async function rawInstall(lib: ChartMarkLibrary, registrar: SandboxMarkRegistrar
       instanceId: scriptId,
       source,
       accessLevel: "restricted",
-      provenance: sourcePackage ? "distributed" : undefined,
-      packageName: sourcePackage ?? undefined,
+      // Decided by ORIGIN, not truthiness: an exactly-empty stamp is a distributed
+      // record with no usable name, and `"" ? … : undefined` mounted it LOCAL,
+      // which `requireDistributedMountConsent` returns from before asking anyone.
+      ...mountProvenanceForOrigin(scriptOriginForStoredRecord({ sourcePackage })),
       declaredCapabilities: [],
+      // THE ARTIFACT THE CONSENT RECORD NAMES. The Charts gate records the whole
+      // library as ONE consent unit — `{ id: CHART_MARKS_SCRIPT_ID, source:
+      // markLibraryConsentSource(lib) }` under `chart-marks:<package>` — and
+      // this module owns that former, so every mark's worker names the same
+      // artifact its surface recorded, not a re-derivation of it. A publisher
+      // swapping one mark's body changes the canonical JSON, so the hash the
+      // gate checks changes too.
+      consentSurface: "chart-marks",
+      consentArtifacts: [{ id: CHART_MARKS_SCRIPT_ID, source: markLibraryConsentSource(lib) }],
       apiVersion: "1.0.0",
     });
     // hostMountScript resolves AFTER the worker ran setup() (which called

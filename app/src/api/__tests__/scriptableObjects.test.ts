@@ -106,6 +106,37 @@ describe("ObjectScriptManager", () => {
       ObjectScriptManager.registerScript(script);
       expect(listener).toHaveBeenCalledTimes(2); // No more calls after unsub
     });
+
+    // THE WORKBOOK SWAP. `resetObjectScriptManager` used to end with
+    // `changeListeners.clear()`, so a subscriber created once at extension
+    // activation — which is every subscriber that is not a React effect — went
+    // deaf on the first File ▸ Open. The grid's "Place a Form Here" submenu is
+    // rebuilt from this signal and spent the rest of the session offering the
+    // CLOSED workbook's form scripts.
+    it("keeps its subscribers across a reset, and announces the emptying", () => {
+      const listener = vi.fn();
+      const unsub = ObjectScriptManager.onScriptChange(listener);
+
+      ObjectScriptManager.registerScript(makeScript("form", "", { name: "A's form" }));
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // File ▸ Open: the outgoing workbook's registry is torn down...
+      resetObjectScriptManager();
+      // ...which is itself a change the subscriber must hear, or a cached list
+      // outlives the document that produced it.
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(ObjectScriptManager.getAllScripts()).toEqual([]);
+
+      // ...and the INCOMING workbook's scripts still reach it.
+      ObjectScriptManager.registerScript(makeScript("form", "", { name: "B's form" }));
+      expect(listener).toHaveBeenCalledTimes(3);
+      expect(ObjectScriptManager.getAllScripts().map((s) => s.name)).toEqual(["B's form"]);
+
+      // The handle is the only way out of the set — including across a reset.
+      unsub();
+      resetObjectScriptManager();
+      expect(listener).toHaveBeenCalledTimes(3);
+    });
   });
 
   // ---------- Exposed-method registry (broker-backed) ----------

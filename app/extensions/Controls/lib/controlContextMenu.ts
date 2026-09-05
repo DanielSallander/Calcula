@@ -1,14 +1,32 @@
 //! FILENAME: app/extensions/Controls/lib/controlContextMenu.ts
-// PURPOSE: Register context menu items for floating control operations.
-// CONTEXT: Adds z-order, flip, copy/paste/duplicate items to the grid context menu.
-//          Items are only visible when a floating control is selected.
+// PURPOSE: The item MODEL and the actions for a floating control's own
+//          right-click menu (Duplicate, Copy, Paste, Group, Order, Flip, Edit
+//          Script, Apply Template, Delete).
+// CONTEXT: Every item here used to be registered into `gridExtensions`, the
+//          registry only `GridContextMenuHost` renders — and that host opens
+//          solely on `AppEvents.CONTEXT_MENU_REQUEST`, which Core deliberately
+//          does NOT emit for a right-click that lands on a floating object
+//          ("Cell options on an object right-click are always wrong",
+//          Spreadsheet.tsx). Right-clicking a button, a shape or a picture
+//          therefore produced NOTHING: fifteen items, registered, ordered,
+//          gated, and unreachable.
+//
+//          The working precedent is Charts / Slicer / TimelineSlicer / the
+//          Floating Range: the object's own extension owns a capture-phase
+//          `contextmenu` listener and shows its OWN overlay menu. That listener
+//          is `lib/controlObjectMenu.ts`; this module is the part worth
+//          keeping — the items and what they do — so there is still exactly one
+//          place that decides what a control's menu offers.
+//
+//          ONE item stays registered with `gridExtensions`: "Paste", whose
+//          context is a CELL ("put the copied control here"), not an object.
+//          Core does open the cell menu there, so that one was never dead.
 
 import { gridExtensions } from "@api";
 import { AppEvents } from "@api";
 import { emitAppEvent } from "@api/events";
 import type { GridContextMenuItem, GridMenuContext } from "@api/extensions";
 import {
-  getSelectedFloatingControl,
   getSelectedFloatingControls,
   getSelectedControlCount,
 } from "../Button/floatingSelection";
@@ -22,7 +40,6 @@ import {
   groupControls,
   ungroupControls,
   getGroupForControl,
-  getGroupMembers,
 } from "./floatingStore";
 import {
   setControlProperty,
@@ -45,63 +62,54 @@ import {
 } from "../Button/floatingRenderer";
 
 // ============================================================================
-// Context Menu Item IDs
+// Menu Item Model
 // ============================================================================
 
-const ITEM_IDS = [
-  "controls.duplicate",
-  "controls.copy",
-  "controls.paste",
-  "controls.group",
-  "controls.ungroup",
-  "controls.order",
-  "controls.order.bringToFront",
-  "controls.order.bringForward",
-  "controls.order.sendBackward",
-  "controls.order.sendToBack",
-  "controls.flipH",
-  "controls.flipV",
-  "controls.editScript",
-  "controls.applyTemplate",
-  "controls.delete",
-];
+/**
+ * One entry in a floating control's object menu.
+ *
+ * There is no `enabled` flag on purpose: `buildControlObjectMenu` returns only
+ * the items that apply to the control that was actually clicked, so the rule
+ * "a Flip that cannot flip is never offered" lives in ONE function instead of
+ * being re-decided by whatever paints the list.
+ */
+export interface ControlMenuItem {
+  id: string;
+  label: string;
+  shortcut?: string;
+  separatorAfter?: boolean;
+  /** Marks a destructive action so the menu can paint it as one. */
+  destructive?: boolean;
+  /** A submenu (Order). Children are always offered when the parent is. */
+  children?: ControlMenuItem[];
+  run(): void;
+}
+
+/**
+ * "Paste" — the one id that appears in BOTH menus, because it is the one action
+ * whose question ("where should the copy go?") a cell can answer as well as an
+ * object can. Spelled once so the two menus cannot drift apart.
+ */
+const PASTE_ITEM_ID = "controls.paste";
 
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/** Check if a floating control is currently selected. */
-function isControlSelected(): boolean {
-  return getSelectedFloatingControl() !== null;
-}
 
 /** Check if multiple controls are selected (for grouping). */
 function isMultipleControlsSelected(): boolean {
   return getSelectedControlCount() >= 2;
 }
 
-/** Check if a grouped control is selected (for ungrouping). */
-function isGroupedControlSelected(): boolean {
-  const id = getSelectedFloatingControl();
-  if (!id) return false;
-  return getGroupForControl(id) !== null;
-}
-
-/** Check if the selected control supports flip (shape or image, not button). */
-function isFlippableControlSelected(): boolean {
-  const id = getSelectedFloatingControl();
-  if (!id) return false;
-  const ctrl = getFloatingControl(id);
-  if (!ctrl) return false;
-  return ctrl.controlType === "shape" || ctrl.controlType === "image";
-}
-
 /**
- * Toggle a flip property on the selected control.
+ * Toggle a flip property on one control.
+ *
+ * The id is passed in rather than re-read from the selection: the menu opens
+ * for the object the pointer is over, and with two controls selected the
+ * selection's "primary" is whichever was picked first — acting on that one
+ * would flip a shape the user did not right-click.
  */
-async function toggleFlip(property: "flipH" | "flipV"): Promise<void> {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
+async function toggleFlip(id: string, property: "flipH" | "flipV"): Promise<void> {
   const ctrl = getFloatingControl(id);
   if (!ctrl) return;
 
@@ -129,14 +137,14 @@ async function toggleFlip(property: "flipH" | "flipV"): Promise<void> {
 }
 
 /**
- * Delete the currently selected floating control(s).
+ * Delete the selected floating control(s).
+ *
+ * Still routed through the `controls:delete-selected` event that index.ts owns:
+ * deletion has to release backend metadata, render caches, group membership and
+ * the properties pane together, and that whole sequence lives with the
+ * lifecycle owner rather than being re-derived here.
  */
-async function deleteSelectedControl(): Promise<void> {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
-
-  // Dispatch custom event that index.ts handles for deletion
-  // (reuse the existing deleteFloatingControl logic)
+function deleteSelectedControl(): void {
   window.dispatchEvent(new CustomEvent("controls:delete-selected"));
 }
 
@@ -153,10 +161,7 @@ function handleGroup(): void {
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
-function handleUngroup(): void {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
-
+function handleUngroup(id: string): void {
   const groupId = getGroupForControl(id);
   if (!groupId) return;
 
@@ -169,33 +174,25 @@ function handleUngroup(): void {
 // Z-Order Handlers
 // ============================================================================
 
-function handleBringToFront(): void {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
+function handleBringToFront(id: string): void {
   bringToFront(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
-function handleSendToBack(): void {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
+function handleSendToBack(id: string): void {
   sendToBack(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
-function handleBringForward(): void {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
+function handleBringForward(id: string): void {
   bringForward(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
 }
 
-function handleSendBackward(): void {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
+function handleSendBackward(id: string): void {
   sendBackward(id);
   syncFloatingControlRegions();
   emitAppEvent(AppEvents.GRID_REFRESH);
@@ -205,205 +202,197 @@ function handleSendBackward(): void {
 // Copy / Paste / Duplicate Handlers
 // ============================================================================
 
-async function handleCopy(): Promise<void> {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
+async function handleCopy(id: string): Promise<void> {
   await copyControl(id);
 }
 
-async function handlePaste(context: GridMenuContext): Promise<void> {
-  await pasteControl(context.sheetIndex);
+async function handlePaste(sheetIndex: number): Promise<void> {
+  await pasteControl(sheetIndex);
 }
 
-async function handleDuplicate(): Promise<void> {
-  const id = getSelectedFloatingControl();
-  if (!id) return;
+async function handleDuplicate(id: string): Promise<void> {
   await duplicateControl(id);
 }
 
 // ============================================================================
-// Registration
+// The Object Menu
 // ============================================================================
 
 /**
- * Build and register all context menu items for floating controls.
- * Returns a cleanup function that unregisters them.
+ * Build the right-click menu for ONE floating control.
+ *
+ * Evaluated at OPEN time, against the control the pointer is actually over, so
+ * the offer matches the object: a button has no Flip and no Edit Script, a
+ * shape has both, and Group appears only when a second control is selected to
+ * group it with.
+ *
+ * Items that do not apply are OMITTED, never greyed out — the same rule the
+ * `visible()` predicates carried when these items still lived in the grid
+ * registry.
+ */
+export function buildControlObjectMenu(controlId: string): ControlMenuItem[] {
+  const ctrl = getFloatingControl(controlId);
+  if (!ctrl) return [];
+
+  const isShape = ctrl.controlType === "shape";
+  const isFlippable = isShape || ctrl.controlType === "image";
+  const items: ControlMenuItem[] = [];
+
+  items.push({
+    id: "controls.duplicate",
+    label: "Duplicate",
+    shortcut: "Ctrl+D",
+    run: () => void handleDuplicate(controlId),
+  });
+
+  items.push({
+    id: "controls.copy",
+    label: "Copy",
+    shortcut: "Ctrl+C",
+    run: () => void handleCopy(controlId),
+  });
+
+  if (hasClipboardControl()) {
+    items.push({
+      id: PASTE_ITEM_ID,
+      label: "Paste",
+      shortcut: "Ctrl+V",
+      // The control's OWN sheet, not the active sheet: the menu is anchored to
+      // an object, and the object knows which sheet it lives on.
+      run: () => void handlePaste(ctrl.sheetIndex),
+    });
+  }
+
+  if (isMultipleControlsSelected()) {
+    items.push({
+      id: "controls.group",
+      label: "Group",
+      shortcut: "Ctrl+G",
+      run: handleGroup,
+    });
+  }
+
+  if (getGroupForControl(controlId) !== null) {
+    items.push({
+      id: "controls.ungroup",
+      label: "Ungroup",
+      shortcut: "Ctrl+Shift+G",
+      run: () => handleUngroup(controlId),
+    });
+  }
+
+  items.push({
+    id: "controls.order",
+    label: "Order",
+    separatorAfter: true,
+    run: () => {
+      /* Parent of a submenu: opening it is the whole action. */
+    },
+    children: [
+      {
+        id: "controls.order.bringToFront",
+        label: "Bring to Front",
+        run: () => handleBringToFront(controlId),
+      },
+      {
+        id: "controls.order.bringForward",
+        label: "Bring Forward",
+        run: () => handleBringForward(controlId),
+      },
+      {
+        id: "controls.order.sendBackward",
+        label: "Send Backward",
+        run: () => handleSendBackward(controlId),
+      },
+      {
+        id: "controls.order.sendToBack",
+        label: "Send to Back",
+        run: () => handleSendToBack(controlId),
+      },
+    ],
+  });
+
+  if (isFlippable) {
+    items.push({
+      id: "controls.flipH",
+      label: "Flip Horizontal",
+      run: () => void toggleFlip(controlId, "flipH"),
+    });
+    items.push({
+      id: "controls.flipV",
+      label: "Flip Vertical",
+      separatorAfter: true,
+      run: () => void toggleFlip(controlId, "flipV"),
+    });
+  }
+
+  if (isShape) {
+    items.push({
+      id: "controls.editScript",
+      label: "Edit Script...",
+      run: () => {
+        emitAppEvent("scriptable-objects:edit-script", {
+          objectType: "shape",
+          instanceId: controlId,
+          objectName: `Shape (${ctrl.row}, ${ctrl.col})`,
+        });
+      },
+    });
+    items.push({
+      id: "controls.applyTemplate",
+      label: "Apply Template...",
+      separatorAfter: true,
+      run: () => emitAppEvent("shape:openTemplateGallery", { instanceId: controlId }),
+    });
+  }
+
+  items.push({
+    id: "controls.delete",
+    label: "Delete",
+    shortcut: "Del",
+    destructive: true,
+    run: deleteSelectedControl,
+  });
+
+  // A separator declared by an item that ended up LAST would paint a rule under
+  // the menu's bottom edge. The flag is a "there is more below" marker, so the
+  // last item never carries one.
+  const last = items[items.length - 1];
+  if (last?.separatorAfter) items[items.length - 1] = { ...last, separatorAfter: false };
+
+  return items;
+}
+
+// ============================================================================
+// Cell Menu Registration
+// ============================================================================
+
+/**
+ * Register the one control item whose context is a CELL rather than an object:
+ * "Paste", which answers "put the copied control HERE".
+ *
+ * Core does open its cell menu on an empty cell, so this item — unlike the
+ * fourteen object items that used to sit beside it — has always been reachable,
+ * and it is the only route to paste a control when none is selected (the
+ * Ctrl+V handler in index.ts requires a selected control before it intercepts).
+ * Returns a cleanup function that unregisters it.
  */
 export function registerControlContextMenu(): () => void {
   const items: GridContextMenuItem[] = [
-    // -- Duplicate --
     {
-      id: "controls.duplicate",
-      label: "Duplicate",
-      shortcut: "Ctrl+D",
-      group: "controls",
-      order: 1,
-      visible: () => isControlSelected(),
-      onClick: handleDuplicate,
-    },
-
-    // -- Copy --
-    {
-      id: "controls.copy",
-      label: "Copy",
-      shortcut: "Ctrl+C",
-      group: "controls",
-      order: 2,
-      visible: () => isControlSelected(),
-      onClick: handleCopy,
-    },
-
-    // -- Paste --
-    {
-      id: "controls.paste",
+      id: PASTE_ITEM_ID,
       label: "Paste",
       shortcut: "Ctrl+V",
       group: "controls",
       order: 3,
       visible: () => hasClipboardControl(),
-      onClick: handlePaste,
-    },
-
-    // -- Group --
-    {
-      id: "controls.group",
-      label: "Group",
-      shortcut: "Ctrl+G",
-      group: "controls",
-      order: 5,
-      visible: () => isMultipleControlsSelected(),
-      onClick: handleGroup,
-    },
-
-    // -- Ungroup --
-    {
-      id: "controls.ungroup",
-      label: "Ungroup",
-      shortcut: "Ctrl+Shift+G",
-      group: "controls",
-      order: 6,
-      visible: () => isGroupedControlSelected(),
-      separatorAfter: true,
-      onClick: handleUngroup,
-    },
-
-    // -- Order (sub-menu) --
-    {
-      id: "controls.order",
-      label: "Order",
-      group: "controls",
-      order: 10,
-      visible: () => isControlSelected(),
-      onClick: () => {},
-      children: [
-        {
-          id: "controls.order.bringToFront",
-          label: "Bring to Front",
-          onClick: handleBringToFront,
-        },
-        {
-          id: "controls.order.bringForward",
-          label: "Bring Forward",
-          onClick: handleBringForward,
-        },
-        {
-          id: "controls.order.sendBackward",
-          label: "Send Backward",
-          onClick: handleSendBackward,
-        },
-        {
-          id: "controls.order.sendToBack",
-          label: "Send to Back",
-          separatorAfter: true,
-          onClick: handleSendToBack,
-        },
-      ],
-    },
-
-    // -- Flip Horizontal --
-    {
-      id: "controls.flipH",
-      label: "Flip Horizontal",
-      group: "controls",
-      order: 20,
-      visible: () => isFlippableControlSelected(),
-      onClick: () => toggleFlip("flipH"),
-    },
-
-    // -- Flip Vertical --
-    {
-      id: "controls.flipV",
-      label: "Flip Vertical",
-      group: "controls",
-      order: 21,
-      visible: () => isFlippableControlSelected(),
-      separatorAfter: true,
-      onClick: () => toggleFlip("flipV"),
-    },
-
-    // -- Edit Script --
-    {
-      id: "controls.editScript",
-      label: "Edit Script...",
-      group: "controls",
-      order: 25,
-      visible: () => {
-        const id = getSelectedFloatingControl();
-        if (!id) return false;
-        const ctrl = getFloatingControl(id);
-        return ctrl?.controlType === "shape";
-      },
-      separatorAfter: true,
-      onClick: () => {
-        const id = getSelectedFloatingControl();
-        if (!id) return;
-        const ctrl = getFloatingControl(id);
-        if (!ctrl) return;
-        emitAppEvent("scriptable-objects:edit-script", {
-          objectType: "shape",
-          instanceId: id,
-          objectName: `Shape (${ctrl.row}, ${ctrl.col})`,
-        });
-      },
-    },
-
-    // -- Apply Template --
-    {
-      id: "controls.applyTemplate",
-      label: "Apply Template...",
-      group: "controls",
-      order: 26,
-      visible: () => {
-        const id = getSelectedFloatingControl();
-        if (!id) return false;
-        const ctrl = getFloatingControl(id);
-        return ctrl?.controlType === "shape";
-      },
-      separatorAfter: true,
-      onClick: () => {
-        const id = getSelectedFloatingControl();
-        if (!id) return;
-        emitAppEvent("shape:openTemplateGallery", { instanceId: id });
-      },
-    },
-
-    // -- Delete --
-    {
-      id: "controls.delete",
-      label: "Delete",
-      shortcut: "Del",
-      group: "controls",
-      order: 30,
-      visible: () => isControlSelected(),
-      onClick: deleteSelectedControl,
+      onClick: (context: GridMenuContext) => void handlePaste(context.sheetIndex),
     },
   ];
 
   gridExtensions.registerContextMenuItems(items);
 
   return () => {
-    for (const id of ITEM_IDS) {
-      gridExtensions.unregisterContextMenuItem(id);
-    }
+    gridExtensions.unregisterContextMenuItem(PASTE_ITEM_ID);
   };
 }

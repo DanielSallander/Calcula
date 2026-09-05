@@ -207,6 +207,16 @@ pub(crate) fn notebook_consent_script_id(notebook_id: &str, cell_id: &str) -> St
 /// The sanctioned way to RUN a publisher's analysis is to copy its cells into a
 /// notebook of your own — a local notebook carries no stamp, so it is not
 /// gated, and the refusal message says so.
+/// Whether a stored record's `source_package` names an application at all.
+///
+/// The ONE blank-stamp rule for notebooks: `None` and whitespace-only are the
+/// user's own record. Both the stateful gate (which uses it to skip reading the
+/// consent file) and the pure decision (which uses it to pick the LOCAL kind)
+/// go through here, so they cannot drift apart.
+fn is_stamped_package(source_package: Option<&str>) -> bool {
+    source_package.map(str::trim).is_some_and(|p| !p.is_empty())
+}
+
 fn distributed_notebook_refusal(
     source_package: Option<&str>,
     notebook_id: &str,
@@ -219,8 +229,9 @@ fn distributed_notebook_refusal(
     // nothing stamped on it, i.e. the user's own notebook. Same rule as
     // `scriptOriginForStoredRecord` (app/src/api/scriptHost/scriptOrigin.ts):
     // a publisher-chosen name can never select the LOCAL kind, and whitespace
-    // can never select the PACKAGE kind.
-    let package = source_package.map(str::trim).filter(|p| !p.is_empty())?;
+    // can never select the PACKAGE kind. ONE rule, in `is_stamped_package`, so
+    // the stateful half's early return and this decision cannot disagree.
+    let package = source_package.map(str::trim).filter(|_| is_stamped_package(source_package))?;
 
     let source_hash = calp::integrity::sha256_hex(source.as_bytes());
     let consent_id = notebook_consent_script_id(notebook_id, cell_id);
@@ -286,6 +297,16 @@ fn require_distributed_notebook_consent(
     let Some((source_package, name)) = record else {
         return Ok(());
     };
+    // THE USER'S OWN NOTEBOOK NEVER PAYS FOR THE CONSENT FILE. This gate runs
+    // once per CELL on every path (run / run-all / rewind / run-from all funnel
+    // through `run_cell_internal`), and it used to read and parse the whole
+    // consent file BEFORE `distributed_notebook_refusal` looked at the stamp —
+    // so a Run All over N local cells was N parses of a file that could not
+    // change the answer. The blank-stamp rule below is the same one the pure
+    // half applies (and its tests pin); this is only the order.
+    if !is_stamped_package(source_package.as_deref()) {
+        return Ok(());
+    }
     let consent_file = crate::calp_commands::read_script_consent_file(app);
     match distributed_notebook_refusal(
         source_package.as_deref(),
@@ -873,7 +894,8 @@ pub async fn notebook_reset_runtime(
 #[cfg(test)]
 mod notebook_provenance_tests {
     use super::{
-        distributed_notebook_refusal, notebook_consent_script_id, notebook_summary,
+        distributed_notebook_refusal, is_stamped_package, notebook_consent_script_id,
+        notebook_summary,
     };
     use crate::scripting::commands::{sticky_source_package, DISTRIBUTED_SCRIPT_NOT_CONSENTED};
     use crate::scripting::types::{NotebookCell, NotebookDocument};
@@ -1053,6 +1075,22 @@ mod notebook_provenance_tests {
             distributed_notebook_refusal(Some("   "), "nb-9", "My Notebook", "c1", src, None)
                 .is_none()
         );
+    }
+
+    /// The stateful gate skips the consent-file read on exactly the records the
+    /// pure decision treats as LOCAL. One predicate feeds both, and this pins
+    /// that predicate — the "file is never read for a local notebook" ordering
+    /// itself is pinned from TypeScript (distributedNotebookRefusalHonesty), which
+    /// reads this file as text, because there is no tauri mock app to drive the
+    /// stateful half here.
+    #[test]
+    fn a_stamp_names_an_application_only_when_it_has_content() {
+        assert!(!is_stamped_package(None));
+        assert!(!is_stamped_package(Some("")));
+        assert!(!is_stamped_package(Some("   ")));
+        assert!(!is_stamped_package(Some("\t\n")));
+        assert!(is_stamped_package(Some("Acme Finance Pack")));
+        assert!(is_stamped_package(Some("  padded  ")));
     }
 }
 

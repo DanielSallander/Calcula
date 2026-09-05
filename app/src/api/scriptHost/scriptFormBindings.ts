@@ -462,12 +462,13 @@ export function sheetIdentityRefusal(
   cells: ReadonlyArray<{ name: string; sheetIndex: number; sheetName: string | undefined }>,
   pinned: { index: number; name: string } | null,
   sheets: ReadonlyArray<{ index: number; name: string }>,
+  surface: "form" | "pane" = "form",
 ): string | null {
   const nameAt = (index: number): string | undefined => sheets.find((s) => s.index === index)?.name;
   if (pinned !== null && nameAt(pinned.index) !== pinned.name) {
     return (
-      `"${pinned.name}" is no longer where this form opened (the workbook's sheets changed) — ` +
-      `close the form and open it again`
+      `"${pinned.name}" is no longer where this ${surface} opened (the workbook's sheets changed) — ` +
+      `close the ${surface} and open it again`
     );
   }
   for (const cell of cells) {
@@ -477,7 +478,7 @@ export function sheetIdentityRefusal(
     return (
       `"${cell.name}" was read from "${cell.sheetName}", which has moved or been removed ` +
       `(that position now holds ${now === undefined ? "no sheet" : `"${now}"`}) — ` +
-      `close the form and open it again`
+      `close the ${surface} and open it again`
     );
   }
   return null;

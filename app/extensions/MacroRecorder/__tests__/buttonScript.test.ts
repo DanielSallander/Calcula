@@ -17,9 +17,19 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const saveObjectScriptSpy = vi.fn(async () => {
   throw new Error("linkMacroButton must not store a per-button object script");
 });
-vi.mock("@api", () => ({
+vi.mock("@api", async () => {
+  // The REAL origin rule: a provenance decision in a test must agree with the one
+  // definition every gate reads, or the test pins a rule the product does not have.
+  const origin = await vi.importActual<typeof import("@api/scriptHost/scriptOrigin")>(
+    "@api/scriptHost/scriptOrigin",
+  );
+  return {
+    scriptOriginForStoredRecord: origin.scriptOriginForStoredRecord,
+    originTagTitle: origin.originTagTitle,
+
   saveObjectScript: saveObjectScriptSpy,
-}));
+  };
+});
 
 import {
   registerButtonControlProvider,

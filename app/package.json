@@ -42,6 +42,8 @@
     "e2e:visual:review": "node ../tests/regression/validate-baselines.mjs",
     "e2e:invariant": "playwright test --project=invariant",
     "e2e:invariant:manual": "cross-env E2E_MANUAL=1 playwright test --project=invariant",
+    "e2e:platform": "playwright test --project=platform",
+    "e2e:platform:manual": "cross-env E2E_MANUAL=1 playwright test --project=platform",
     "e2e:scenario": "playwright test --project=scenario",
     "e2e:scenario:manual": "cross-env E2E_MANUAL=1 playwright test --project=scenario",
     "e2e:soak:manual": "cross-env E2E_MANUAL=1 playwright test --project=soak",

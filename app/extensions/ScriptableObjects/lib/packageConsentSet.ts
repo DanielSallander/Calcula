@@ -38,7 +38,7 @@
 // backend asks about them, and the capability union stays exactly what the
 // prompt enumerated.
 
-import { listWorkbookScriptRecords } from "@api";
+import { listDistributedWorkbookScriptRecords } from "@api";
 import { areScriptsConsented, isConsentCurrent } from "./consentStore";
 import type { ConsentRecord } from "./consentStore";
 
@@ -66,9 +66,18 @@ const RESERVED_SCRIPT_PREFIX = "__calcula_";
  *
  * So a key that trimmed `"  Sales  "` down to `"Sales"` would write a record
  * neither gate can find, which is the failure mode this whole module exists to
- * close. A name that is blank or whitespace-only is a different matter: nothing
- * was stamped, so it names no application at all — the same reading
- * `scriptOriginForStoredRecord` (app/src/api/scriptHost/scriptOrigin.ts) takes.
+ * close.
+ *
+ * A BLANK OR WHITESPACE-ONLY STAMP IS EXCLUDED, AND DELIBERATELY NOT MAPPED TO
+ * THE PLACEHOLDER. `scriptOriginForStoredRecord` reads such a stamp as a
+ * package with the placeholder name (Rust holds any `Some(..)` stamp to be a
+ * publisher's), so the TIER of a module stamped `"   "` is restricted — that
+ * part is settled there. But the module gate asks `consent_granted_in` with the
+ * RAW stamp, `"   "`, and nothing this side can write under `"   "`: a record
+ * under the placeholder would never satisfy it, so listing the macro on a
+ * prompt as something Allow covers would promise a run Rust still refuses. It
+ * is left out of the grant instead, and stays refused at Run — fail closed,
+ * and said out loud there rather than lied about here.
  *
  * Every caller on this side — the grouping, the dialog payload, the freshness
  * check, the diff and `recordConsent` — goes through this one function. When the
@@ -124,12 +133,18 @@ export async function listPackageMacros(packageName: string): Promise<PackageMac
  * Every distributed module script in the workbook, grouped by the application it
  * arrived in — the same filtering as {@link listPackageMacros}, over ONE listing.
  *
- * `listWorkbookScriptRecords` fans out to one `get_script` per module, so asking
- * it once per package walks the whole store N times on a workbook that
- * subscribes to several applications. The load path groups instead.
+ * THROUGH THE DISTRIBUTED-ONLY DOOR. This runs on every workbook open and every
+ * `.calp` update, and it needs source ONLY for the records it will hash into a
+ * consent entry — the distributed ones. `listWorkbookScriptRecords` fetched
+ * every module's body, the user's own recorded macros included, and threw the
+ * local ones away below; `listDistributedWorkbookScriptRecords` decides which
+ * rows are distributed from the summary (the row already carries
+ * `sourcePackage`) and fetches those alone. Asking once per package would still
+ * walk the store N times on a workbook that subscribes to several
+ * applications, so the load path groups from this one listing.
  */
 export async function listMacrosByPackage(): Promise<Map<string, PackageMacro[]>> {
-  const records = await listWorkbookScriptRecords();
+  const records = await listDistributedWorkbookScriptRecords();
   const byPackage = new Map<string, PackageMacro[]>();
   for (const r of records) {
     if (r.loadError !== null) continue;

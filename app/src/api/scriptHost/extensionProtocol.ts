@@ -6,7 +6,7 @@
 //          authority. Two message families cross the boundary:
 //            - REGISTRATIONS (commands / menu items / event subscriptions /
 //              worksheet functions / ribbon buttons / keybindings / cell styles /
-//              file formats): the extension's handler stays IN the worker; the
+//              file formats / forms): the extension's handler stays IN the worker; the
 //              host installs a proxy in the real registry that RPCs back via
 //              `invokeHandler`. Everything that crosses is DATA — a descriptor
 //              the TRUSTED host renders or registers. No component, no markup,
@@ -39,6 +39,11 @@ import type { CapabilityId } from "./capabilityIds";
 // extensionReachableCapabilities below) — so that set can never be a stale hand-
 // written copy. allowlist.ts does not import this module, so there is no cycle.
 import { ALLOWLIST } from "./allowlist";
+// The declarative form tree (M4). A `form` contribution carries the SAME
+// data-only spec an object script's `form.define` carries — one definition, so
+// the add-in surface can never drift into a second widget vocabulary. Leaf
+// import: scriptFormSpec.ts imports only scriptDialogSpec.ts and scriptOrigin.ts.
+import type { FormSpec } from "./scriptFormSpec";
 
 export const EXTENSION_PROTOCOL_VERSION = 2;
 
@@ -55,6 +60,13 @@ export const EXTENSION_CONTRIBUTION_KINDS = [
   "keybinding",
   "cellStyle",
   "fileFormat",
+  // M4 (docs/design/typescript-forms.md §14). A host-painted FORM: the add-in
+  // declares the exact form names it may put on screen, so every panel it can
+  // ever show is knowable — and consent-visible — before a line of the bundle
+  // runs. The LAYOUT is validated at registration rather than at show, so an
+  // author debugging "my form is refused" is told which rule it broke before
+  // the user has ever seen a dialog.
+  "form",
 ] as const;
 
 export type ExtContributionKind = (typeof EXTENSION_CONTRIBUTION_KINDS)[number];
@@ -79,6 +91,8 @@ export interface ExtContributionDeclaration {
   cellStyles?: string[];
   /** File-format ids. */
   fileFormats?: string[];
+  /** Form names the add-in may register and show. Needs ui.dialog. */
+  forms?: string[];
 }
 
 /** Which `contributes` list governs each registration kind. */
@@ -93,13 +107,15 @@ export const CONTRIBUTION_DECLARATION_KEY: Record<
   keybinding: "keybindings",
   cellStyle: "cellStyles",
   fileFormat: "fileFormats",
+  form: "forms",
 };
 
 /**
  * Contribution kinds that ALSO require a DECLARED capability — declared in the
  * authoritative (Ed25519-signed, when present) sidecar manifest, which the
- * ExtensionManager ZEROES for an unsigned or tampered bundle. Two kinds are
- * here, and they are exactly the two that receive WORKBOOK DATA:
+ * ExtensionManager ZEROES for an unsigned or tampered bundle. Three kinds are
+ * here, and they do NOT all answer the same question. Two receive WORKBOOK
+ * DATA; the third takes a piece of the USER'S SCREEN:
  *
  *   - `formula` -> formula.udf : a worksheet function is code the sheet calls;
  *     its arguments are the user's cells and it re-runs on every recalculation.
@@ -111,6 +127,17 @@ export const CONTRIBUTION_DECLARATION_KEY: Record<
  *     happens, a capability lets them refuse it, lets the signature carry it,
  *     and lets it be revoked. An unsigned add-in now gets no cell contents at
  *     all, because an unsigned manifest declares nothing.
+ *
+ *   - `form` -> ui.dialog : a form takes the app-wide MODAL SLOT — the user
+ *     must answer it or close it before doing anything else — which is exactly
+ *     what `ui.dialog` already names and already gates for `cap.dialogForm`.
+ *     It is here for the SURFACE, not for data: a form's bound fields are a
+ *     separate, per-delivery `grid.read` question asked when the cells would
+ *     actually cross (see EXTENSION_PUSHED_DATA_CAPABILITIES and
+ *     `resolveExtensionFormBindings`). Two questions, two capabilities: "may
+ *     it stop me and ask?" -> ui.dialog; "may it be shown my cells while it
+ *     does?" -> grid.read. Collapsing them would force one sentence describing
+ *     the union, which is the definition of dishonest consent text.
  *
  * Everything else installs a host-rendered affordance (a menu item, a button, a
  * shortcut) whose handler is invoked with no workbook data and can still do
@@ -131,6 +158,7 @@ export const CONTRIBUTION_REQUIRED_CAPABILITY: Partial<
 > = {
   formula: "formula.udf",
   cellStyle: "grid.read",
+  form: "ui.dialog",
 };
 
 /** Human-readable one-liners for the consent prompt + the manager UI. */
@@ -142,6 +170,7 @@ export const CONTRIBUTION_KIND_LABEL: Record<ExtContributionKind, string> = {
   keybinding: "keyboard shortcuts",
   cellStyle: "cell styling",
   fileFormat: "file formats",
+  form: "forms",
 };
 
 /**
@@ -159,8 +188,31 @@ export const CONTRIBUTION_KIND_LABEL: Record<ExtContributionKind, string> = {
  *     cosmetic; the reach is "reads the cells you are looking at". Saying so is
  *     the whole difference between consent and a consent-shaped click. It is
  *     now also GATED (grid.read, above) rather than only disclosed.
- * A kind with no entry adds a host-rendered affordance whose handler can still
- * do nothing without a capability of its own — nothing extra to disclose.
+ *   - `form`: a field can be tied to one of the user's cells, and the host then
+ *     puts that cell's contents in it. So a form is a THIRD way workbook data
+ *     reaches an add-in, and the note has to say so — "adds a form" reads as
+ *     chrome. It also has to say the limit, because the limit is the whole
+ *     reason a bound field is safe to offer at all: an add-in form DISPLAYS a
+ *     cell and never writes that cell back. That sentence is kept true
+ *     structurally, not by promise — there is no write path from a binding to a
+ *     cell in the code at all (`resolveExtensionFormBindings` seeds every cell
+ *     binding `readOnly`, and no `writeBindings` dep is ever supplied), and the
+ *     extension-surface validator refuses `writeOn` outright so an author
+ *     cannot even ask for one.
+ *
+ *     THE CLAUSE THAT WAS TOO BROAD. This note used to end "nothing you do in
+ *     one of its forms is ever written into your workbook". The binding half is
+ *     true; the absolute half was not, and a consent sentence that is false in
+ *     any reading is a defect here. A form's button relays into the add-in's
+ *     own handler (`extensionFormDeps` in extensionWorkerHost.ts), and that
+ *     handler can call `ext.executeCommand` — a door with NO capability
+ *     (allowlist.ts) whose only gate is `CommandRegistry.isScriptSafe`, which
+ *     is unconditionally true for CLEAR_CONTENTS, DELETE_ROW, FILL_DOWN and the
+ *     rest of the grid-bridge set. Pressing a button in an add-in's form really
+ *     can change cells. The note now claims only what the code keeps, and
+ *     EXTENSION_BUILTIN_ACTION_REACH_NOTE below discloses that door.
+ * A kind with no entry adds a host-rendered affordance that carries no reach of
+ * its own beyond the one EVERY add-in has (below) — nothing extra per kind.
  */
 export const CONTRIBUTION_REACH_NOTE: Partial<Record<ExtContributionKind, string>> = {
   formula:
@@ -171,7 +223,31 @@ export const CONTRIBUTION_REACH_NOTE: Partial<Record<ExtContributionKind, string
     "When you open a file of that type, its code produces the cells that are put into your workbook.",
   keybinding:
     "It can only claim a shortcut nothing else uses; a combination already bound is refused.",
+  form:
+    "Calcula draws the form; the add-in supplies only a description of it — never pictures and never markup — and it never sees a keystroke, only what a field holds once you change it and everything you entered when you press its button. A field can be tied to one of your cells: Calcula then shows you that cell's contents in it and hands the value to the add-in, which needs the 'grid.read' permission, and without that permission the field is shown to you switched off with the reason rather than blank. A field tied to a cell is display only: the form never writes that cell back. Its buttons still run the add-in's own code, which can ask Calcula to run its built-in editing actions — so pressing a button in a form can change your workbook that way.",
 };
+
+/**
+ * THE REACH EVERY ADD-IN HAS, whatever it declares. It is NOT a contribution,
+ * which is exactly why it needs a sentence of its own: `CONTRIBUTION_REACH_NOTE`
+ * is rendered per DECLARED kind, so an add-in that declares only `forms` would
+ * otherwise be described entirely by sentences that never mention it.
+ *
+ * `ext.executeCommand` is in EXTENSION_BROKER_METHODS with no `capability` at
+ * all (allowlist.ts, and its absence is pinned by extensionProtocol.test.ts), so
+ * nothing in the consent flow asks about it: no sidecar declaration, no ceiling
+ * entry, no JIT grant. Its only gate is `CommandRegistry.isScriptSafe`, which is
+ * unconditionally true for the grid-bridge set (clear / fill / merge / insert /
+ * delete, acting on whatever the user has selected) and for any command a
+ * feature registered with `scriptSafe: true`.
+ *
+ * Stated ONCE here and rendered by BOTH consent surfaces — the mount prompt
+ * (`ExtensionManager.processPendingConsents`) and the install screen
+ * (`ExtensionsManager/InstallAddInDialog`) — because two hand-copied consent
+ * sentences is how one of them ends up describing code that has since changed.
+ */
+export const EXTENSION_BUILTIN_ACTION_REACH_NOTE =
+  "Whatever it adds, any add-in can also ask Calcula to run the actions Calcula marks as safe for add-ins. Some of those CHANGE your workbook — clearing, filling and merging cells, and inserting or deleting rows and columns in whatever is selected — and other features can mark their own actions that way too. This needs no permission and is listed nowhere above, so a button in one of its forms, menus or ribbon groups can change your cells through it.";
 
 /**
  * Normalize an untrusted `contributes` bag into the declared ceiling: unknown
@@ -357,7 +433,65 @@ export type ExtRegistration =
   | { kind: "ribbonButton"; regId: number; button: ExtRibbonButtonData }
   | { kind: "keybinding"; regId: number; binding: ExtKeybindingData }
   | { kind: "cellStyle"; regId: number; id: string; handlerId: number }
-  | { kind: "fileFormat"; regId: number; handlerId: number; format: ExtFileFormatData };
+  | { kind: "fileFormat"; regId: number; handlerId: number; format: ExtFileFormatData }
+  /**
+   * A host-painted FORM (M4). `spec` is the same data-only widget tree an
+   * object script's `form.define` supplies, validated here against the
+   * EXTENSION surface's narrower rules (`checkFormSpec(spec, "extension")`).
+   *
+   * ONE handler, not four. Every hook the form has — a value changed, a button
+   * clicked, the submit verdict, the final answer — is relayed into this single
+   * worker slot as `{ hook, detail }`, and the submit verdict is simply what
+   * the handler RETURNS (`invokeHandler` already carries a result back). Four
+   * handler ids would have been four things to keep in step across a register,
+   * an unregister and an unmount.
+   */
+  | {
+      kind: "form";
+      regId: number;
+      /** Must appear in `contributes.forms`, or the registration is refused. */
+      name: string;
+      spec: FormSpec;
+      handlerId: number;
+    };
+
+/**
+ * THE HOOK NAMES AN ADD-IN IS ACTUALLY GIVEN, in the order one session
+ * delivers them. This is the published vocabulary: it appears in the
+ * `ui.forms` JSDoc every add-in author writes against
+ * (worker/extensionWorkerContext.ts) and in the shipped example add-in.
+ *
+ * It is deliberately NOT the registry's spelling. `scriptForms.ts` calls its
+ * session deps back with `onShow`/`onChange`/`onClick`/`onClose`, and relaying
+ * those through verbatim handed every add-in a hook its documented
+ * `event.hook === "change"` branch could never match: the example's live VAT
+ * caption never updated, and nothing anywhere reported a fault.
+ */
+export const EXTENSION_FORM_HOOKS = ["show", "change", "click", "submit", "closed"] as const;
+
+export type ExtensionFormHook = (typeof EXTENSION_FORM_HOOKS)[number];
+
+/**
+ * Registry hook -> published name; `null` means NOT DELIVERED. The single
+ * translation table, so the difference above lives in one place rather than at
+ * each relay call site.
+ *
+ * `onClose` is null on purpose. The registry announces a close TWICE — a
+ * `forward("onClose", { reason, values })` immediately followed by
+ * `deps.closed(showId, result)` (scriptForms.ts `endSession`) — while the
+ * published contract names ONE teardown: "closed", the hook that carries the
+ * answers. Delivering both would give an add-in two teardown events where its
+ * own docs promise one, and an author counting closes would count double.
+ *
+ * A hook that is in neither column is a HOST bug, not an add-in's: the relay
+ * refuses to guess a name for it rather than inventing vocabulary at runtime.
+ */
+export const EXTENSION_FORM_HOOK_RELAY: Readonly<Record<string, ExtensionFormHook | null>> = {
+  onShow: "show",
+  onChange: "change",
+  onClick: "click",
+  onClose: null,
+};
 
 /** Registration kinds that are CONTRIBUTIONS (ceiling-gated). `event` is not:
  *  it installs a listener, not a surface, and its reach is already bounded by
@@ -492,6 +626,35 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
   "cap.dialogConfirm",
   "cap.dialogPrompt",
   "cap.dialogForm",
+  // ui.dialog again, for the RICH form (M4): the same modal slot, the same
+  // capability, the same trusted painter — a bigger tree. `ext.formShow` names
+  // a form the add-in already REGISTERED (and the sidecar already declared), so
+  // the worker cannot hand a layout straight to the screen; the layout was
+  // validated, ceiling-checked and listed in the transparency panel before
+  // anything could be shown. Update and close name that same session.
+  //
+  // WHAT IS DELIBERATELY NOT HERE, and why the absence is the design:
+  //   * NO CELL READ. A bound field's value is a HOST PUSH — the host resolves
+  //     the binding and reads the cell under this extension's own handle (an
+  //     audited `sheet.getCellData` row) while the form is being seeded. The
+  //     worker never names a cell in any call it makes, so there is nothing to
+  //     list here, and `sheet.*` stays unreachable from this realm.
+  //   * NO CELL WRITE, and no `writeBindings` dep behind one either. An add-in
+  //     lives outside the workbook and runs against every document the user
+  //     opens; its form can be SHOWN a cell and can never change one. Adding a
+  //     write door here would falsify CONTRIBUTION_REACH_NOTE.form, the
+  //     `grid.read` sentence's "It cannot change your cells with this", and the
+  //     `ext.formShow` desc — all at once, and all in front of users.
+  //   * NO `form.define` / `form.show` / `cap.formsShow` / `form.readControl`.
+  //     Those rows are the OBJECT-SCRIPT doors and their consent sentences
+  //     promise cell writeback, a Controls-pane read, and opening another
+  //     script's form by name — none of which is true of, or available to, an
+  //     add-in. One surface, one set of rows, one set of sentences.
+  //   * NO `pane.*`. A pane stays on screen for hours beside the grid; that is
+  //     `ui.pane`, a different agreement, and M4 does not make it.
+  "ext.formShow",
+  "ext.formUpdate",
+  "ext.formClose",
   // file.picker: "export this as CSV" is one of the commonest reasons an add-in
   // exists, and until now a sandboxed one had no route to it at all. Safe here
   // for the same reason it is safe for an object script: the extension names a
@@ -534,14 +697,32 @@ export const EXTENSION_BROKER_METHODS: ReadonlySet<string> = new Set([
  * neither a broker method it calls nor a contribution it registers, so neither
  * of the two derivations below can see it.
  *
- * Today there is exactly one: the app-event forwarder in extensionWorkerHost.ts
- * hands a subscriber the payloads of APP_EVENTS_CARRYING_CELL_CONTENTS in full
- * when the extension declared `grid.read`, and redacted to coordinates when it
- * did not. An event SUBSCRIPTION is not in the contribution ceiling (it installs
- * a listener, not a surface), which is precisely why this third input exists —
- * without it, deleting the `cellStyle` row from CONTRIBUTION_REQUIRED_CAPABILITY
- * would silently drop grid.read out of the taxonomy while the event door stayed
- * wide open.
+ * ONE capability, TWO paths that neither derivation can see (a third, cell
+ * styling, IS visible to them because it is a contribution):
+ *
+ *   1. the app-event forwarder in extensionWorkerHost.ts hands a subscriber the
+ *      payloads of APP_EVENTS_CARRYING_CELL_CONTENTS in full when the extension
+ *      declared `grid.read`, and redacted to coordinates when it did not. An
+ *      event SUBSCRIPTION is not in the contribution ceiling (it installs a
+ *      listener, not a surface), which is precisely why this third input exists
+ *      — without it, deleting the `cellStyle` row from
+ *      CONTRIBUTION_REQUIRED_CAPABILITY would silently drop grid.read out of
+ *      the taxonomy while the event door stayed wide open.
+ *
+ *   2. a FORM BINDING (M4): `resolveExtensionFormBindings` reads the cell a
+ *      widget's `bind` names and puts its contents in the field. The `form`
+ *      contribution requires `ui.dialog` (the modal slot it takes), NOT
+ *      grid.read — the data question is asked separately, per delivery, at the
+ *      moment the cells would cross — so deriving from the contribution table
+ *      cannot see this path either.
+ *
+ * THE ARRAY IS UNCHANGED BY (2), AND THAT IS THE POINT. A form binding is the
+ * same reach under the same name: the host pushes cell contents into code the
+ * user did not write. What changes is the CONSENT TEXT, because all four
+ * shipped grid.read sentences ENUMERATE the paths — a path added without a
+ * clause makes every one of them stale by omission, which is why
+ * `grid.read` names three paths now and `extensionContributions.test.ts`
+ * asserts the count rather than the keywords.
  */
 export const EXTENSION_PUSHED_DATA_CAPABILITIES: readonly CapabilityId[] = ["grid.read"];
 
@@ -552,10 +733,11 @@ export const EXTENSION_PUSHED_DATA_CAPABILITIES: readonly CapabilityId[] = ["gri
  *   1. a broker method it is allowed to call (EXTENSION_BROKER_METHODS ∩ the
  *      ALLOWLIST rows that name a capability),
  *   2. a contribution kind it is allowed to register
- *      (CONTRIBUTION_REQUIRED_CAPABILITY — `formula` -> `formula.udf` and
- *      `cellStyle` -> `grid.read`, both required by admitContribution and by NO
- *      broker method, so deriving from methods alone would wrongly strip
- *      worksheet functions and cell styling), and
+ *      (CONTRIBUTION_REQUIRED_CAPABILITY — `formula` -> `formula.udf`,
+ *      `cellStyle` -> `grid.read` and `form` -> `ui.dialog`; the first two are
+ *      required by admitContribution and by NO broker method, so deriving from
+ *      methods alone would wrongly strip worksheet functions and cell styling),
+ *      and
  *   3. a host-push path (EXTENSION_PUSHED_DATA_CAPABILITIES), where the host
  *      sends workbook data INTO the sandbox and the capability decides how much
  *      of it crosses.

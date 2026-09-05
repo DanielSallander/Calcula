@@ -164,6 +164,25 @@ export function resetScriptTranspilerForTest(): void {
   compilerPromise = null;
 }
 
+/**
+ * The SAME lazily-loaded compiler instance the save-time transpile uses.
+ *
+ * Exported for the visual form designer's AST reader/writer
+ * (`app/src/api/formDesigner/`), which parses the designer-owned `#region` out
+ * of a script and re-emits it. It deliberately does NOT add a second
+ * `import("typescript")` site: two dynamic import specifiers for the same
+ * package give the bundler two lazy chunks of the same ~3.5 MB module, so a
+ * designer opened after a save would refetch what the save had already
+ * fetched, and `prefetchScriptTranspiler` would warm only one of them. One
+ * loader, one cached promise, one chunk — and `resetScriptTranspilerForTest`
+ * clears it for both callers, which is why that seam takes no argument.
+ */
+export async function loadScriptTypeScript(): Promise<TypeScriptModule> {
+  return loadCompiler();
+}
+
+export type { TypeScriptModule };
+
 function toSyntaxErrors(
   ts: TypeScriptModule,
   diagnostics: readonly import("typescript").Diagnostic[],

@@ -63,6 +63,9 @@ export const NAMED_SUBTREES: ReadonlyArray<readonly [path: string, iface: string
   ["package", "ScriptPackageInfo"],
   // A form's per-widget handle (form.control("qty") -> value/set/enable/...).
   ["control()", "FormControlHandle"],
+  // The modeless door on the same tree (M2): `form.pane` and ITS widget handle.
+  ["pane", "ScriptPaneApi"],
+  ["pane.control()", "PaneControlHandle"],
   ["caps", "ScriptCapabilities"],
   ["caps.storage", "ScriptStorageApi"],
   ["caps.cube", "ScriptCubeApi"],

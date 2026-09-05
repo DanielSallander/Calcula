@@ -14,6 +14,10 @@ import {
 import type { ViewStateDimensions } from "../lib/viewBookmarkTypes";
 import { addViewBookmark } from "../lib/viewBookmarkStore";
 import { showToast } from "@api";
+import {
+  describeDistributedScriptChoice,
+  scriptPickerLabel,
+} from "../../../_shared/lib/scriptModuleProvenance";
 
 // ============================================================================
 // Types
@@ -22,6 +26,8 @@ import { showToast } from "@api";
 interface ScriptSummary {
   id: string;
   name: string;
+  /** The application this module arrived in; `list_scripts` carries it. */
+  sourcePackage?: string | null;
 }
 
 // ============================================================================
@@ -299,10 +305,26 @@ export const ViewBookmarkCreateOverlay: React.FC<OverlayProps> = ({ onClose, anc
               <option value="">None</option>
               {scripts.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.name}
+                  {scriptPickerLabel(s)}
                 </option>
               ))}
             </select>
+            {/* A module that arrived in an application is labelled with it
+                above and said out loud here — the same words every other
+                module picker uses — so a bookmark is never wired to publisher
+                code without the person wiring it being told. */}
+            {(() => {
+              const chosen = scripts.find((s) => s.id === scriptId);
+              const note = chosen ? describeDistributedScriptChoice(chosen) : null;
+              return note ? (
+                <div
+                  data-bookmark-script-provenance
+                  style={{ fontSize: 11, color: "#8a5a00", marginTop: 4 }}
+                >
+                  {note}
+                </div>
+              ) : null;
+            })()}
           </div>
         </>
       )}

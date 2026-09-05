@@ -15,6 +15,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { hostMountScript, hostUnmountScript } from "./scriptHost/host";
+import { mountProvenanceForOrigin, scriptOriginForStoredRecord } from "./scriptHost/scriptOrigin";
 import { callExposedMethod } from "./scriptableObjects";
 import type { CapabilityId } from "./scriptHost/capabilityIds";
 
@@ -175,9 +176,20 @@ async function rawInstall(lib: ChartTransformLibrary, source: string, sourcePack
     instanceId: LIB_INSTANCE_ID,
     source,
     accessLevel: "restricted",
-    provenance: sourcePackage ? "distributed" : undefined,
-    packageName: sourcePackage ?? undefined,
+    // Decided by ORIGIN, not truthiness — see chartMarkScripts.ts for why an
+    // exactly-empty stamp must not read as the user's own library.
+    ...mountProvenanceForOrigin(scriptOriginForStoredRecord({ sourcePackage })),
     declaredCapabilities: lib.capabilities ?? [],
+    // THE ARTIFACT THE CONSENT RECORD NAMES. The Charts gate records the whole
+    // library as ONE consent unit — `{ id: CHART_TRANSFORMS_SCRIPT_ID, source:
+    // transformLibraryConsentSource(lib) }` under `chart-transforms:<package>` —
+    // and this module owns that former (capability pragmas + the library JSON),
+    // so the mount names exactly what its surface recorded. A capability
+    // widening or a body edit changes that string, and so the hash the gate checks.
+    consentSurface: "chart-transforms",
+    consentArtifacts: [
+      { id: CHART_TRANSFORMS_SCRIPT_ID, source: transformLibraryConsentSource(lib) },
+    ],
     apiVersion: "1.0.0",
   });
   mounted = true;

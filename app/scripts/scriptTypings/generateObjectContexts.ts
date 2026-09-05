@@ -181,10 +181,29 @@ function contextTypeMap(probe: ProbeResult): string {
   ].join("\n");
 }
 
+/**
+ * The `ext.*` namespace belongs to the SANDBOXED-EXTENSION realm
+ * (EXTENSION_BROKER_METHODS in extensionProtocol.ts). An object script cannot
+ * call any of it: those rows are dispatched by extensionWorkerHost.ts against a
+ * mounted add-in, and the object-script executor has no arm for them.
+ *
+ * They were invisible here until M4 only because none of them carried a
+ * capability. `ext.formShow` / `ext.formUpdate` / `ext.formClose` carry
+ * `ui.dialog`, so without this filter the table below — whose own header
+ * promises "the broker methods each one unlocks" for an object script — would
+ * have listed three methods an object script's `// @capability ui.dialog`
+ * unlocks nothing of. A generated author-facing artifact that overstates the
+ * surface is the same defect class as consent text that overstates the reach.
+ */
+function isExtensionOnlyMethod(method: string): boolean {
+  return method.startsWith("ext.");
+}
+
 function capabilityTable(): string {
   const byCapability = new Map<string, string[]>();
   for (const [method, policy] of Object.entries(ALLOWLIST)) {
     if (!policy.capability) continue;
+    if (isExtensionOnlyMethod(method)) continue;
     const list = byCapability.get(policy.capability) ?? [];
     list.push(method);
     byCapability.set(policy.capability, list);

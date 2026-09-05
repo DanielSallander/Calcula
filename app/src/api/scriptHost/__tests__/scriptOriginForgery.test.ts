@@ -507,13 +507,43 @@ describe("the origin of a STORED artifact is derived from its record", () => {
     });
     expect(scriptOriginForStoredRecord({ sourcePackage: null })).toEqual({ kind: "local" });
     expect(scriptOriginForStoredRecord({})).toEqual({ kind: "local" });
-    // A blank stamp is nothing stamped — not an unnamed publisher.
-    expect(scriptOriginForStoredRecord({ sourcePackage: "  " })).toEqual({ kind: "local" });
+    // A blank stamp is still a STAMP. Rust reads the same field as an `Option`
+    // and `distributed_module_refusal` holds any `Some(..)` to be a publisher's
+    // code, so a record carrying `"  "` is distributed — by a publisher with no
+    // usable name, which is what the placeholder is for. Reading it as LOCAL
+    // (as this line once asserted) handed such a module the unlocked tier.
+    expect(scriptOriginForStoredRecord({ sourcePackage: "  " })).toEqual({
+      kind: "package",
+      name: "(unknown package)",
+    });
+    expect(scriptOriginForStoredRecord({ sourcePackage: "" })).toEqual({
+      kind: "package",
+      name: "(unknown package)",
+    });
     // ...and a publisher who names the application `local` still gets a PACKAGE.
     expect(scriptOriginForStoredRecord({ sourcePackage: "local" })).toEqual({
       kind: "package",
       name: "local",
     });
+  });
+
+  it("the two halves of the store agree about a blank name", () => {
+    // `packageOrigin` used `name || placeholder`, which KEEPS a whitespace-only
+    // name — so a distributed object script named "   " was keyed under "   "
+    // while a module stamped "   " was read as local by the sibling derivation.
+    // Both now fail the same way: toward the placeholder publisher, never local.
+    const objectScript = scriptOriginForMount({ provenance: "distributed", packageName: "   " });
+    const moduleScript = scriptOriginForStoredRecord({ sourcePackage: "   " });
+    expect(objectScript).toEqual({ kind: "package", name: "(unknown package)" });
+    expect(moduleScript).toEqual(objectScript);
+    expect(packageOrigin("   ").name).toBe("(unknown package)");
+    expect(packageOrigin("").name).toBe("(unknown package)");
+    // A non-blank name is kept VERBATIM — both Rust gates compare the raw string,
+    // so trimming here would key a record neither of them can find.
+    expect(packageOrigin("  Sales  ").name).toBe("  Sales  ");
+    expect(scriptOriginForStoredRecord({ sourcePackage: "  Sales  " })).toEqual(
+      packageOrigin("  Sales  "),
+    );
   });
 
   it("a package origin caps the tier at restricted, whatever was asked for", () => {

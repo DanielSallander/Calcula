@@ -152,8 +152,18 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // object type (FormContext: define/show/close/update/control()/values/
     // isOpen + five hooks, the FormControlHandle sub-object, and the
     // caps.forms.show door every script gets).
-    expect(chains.size).toBe(686);
-    expect(entries.length).toBe(743);
+    // 2026-09-04: 686 -> 710 chains and 743 -> 767 entries with the `pane`
+    // facet on FormContext (M2 S3: ScriptPaneApi define/dock/update/reveal/
+    // setBadge/close/control()/paneId/values/isOpen + three hooks, and the
+    // PaneControlHandle sub-object — 24 new chains, one declaration each).
+    // 2026-09-04 (M3): 710 -> 714 chains and 767 -> 771 entries — the four the
+    // on-grid work added, each one declaration: `pane.list` and `pane.select`
+    // (a script asking WHICH of its surfaces exist, filtered to the caller in
+    // the host), `pane.onOpen` / `onPlacementChange` (an embedded surface the
+    // USER placed opens without the script asking), and `render.setHitRegions`
+    // (a shape declaring which of its own pixels take pointer input).
+    expect(chains.size).toBe(714);
+    expect(entries.length).toBe(771);
     expect(entries.length).toBeGreaterThan(chains.size);
 
     const policyPairs = new Set(
@@ -166,7 +176,11 @@ describe("objectContexts.d.ts is generated, not maintained", () => {
     // 2026-09-02: 894 -> 930 with the `form` object type (the base surface
     // re-probed under one more context interface, plus its own members and
     // caps.forms.show).
-    expect(policyPairs.size).toBe(930);
+    // 2026-09-04: 930 -> 954 with the `pane` facet (the same 24 members, each
+    // probed under FormContext / ScriptPaneApi / PaneControlHandle exactly once).
+    // 2026-09-04 (M3): 954 -> 958, the same four members above, each probed
+    // under exactly one interface.
+    expect(policyPairs.size).toBe(958);
     expect(entries.length).toBeLessThan(policyPairs.size);
 
     // TOTALITY, which is what makes `entryFor`'s exact match total: every

@@ -1089,6 +1089,96 @@ describe("extension contribution ceiling", () => {
   });
 
   // --------------------------------------------------------------------------
+  // 2c-bis. ...AND THE REVOKE MUST STICK
+  // --------------------------------------------------------------------------
+  //
+  // The two tests above prove the READERS re-ask. They were still defeated
+  // upstream: the host writes grid.read down whenever a contribution that will
+  // use it is REGISTERED, and `register` is a message the sandboxed worker posts
+  // whenever it likes. So the add-in put its own revoked capability back — no
+  // prompt, no toast — and both readers resumed against a grant set the user had
+  // already emptied. Three doors write that grant (cellStyle, a form with a
+  // bound field, a cell-content subscription); the form one is covered in
+  // extensionForms.test.ts, and these are the other two.
+
+  it("a REVOKED grid.read is not put back by registering a second cell-style contributor", async () => {
+    const styles = await import("../../styleInterceptors");
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
+      contributes: { cellStyles: ["negatives", "positives"] },
+    });
+    const caps = await import("../capabilities");
+    worker.register({ kind: "cellStyle", regId: 1, id: "negatives", handlerId: 6 });
+    expect(caps.getScriptGrants("extension:test.addin").caps).toContain("grid.read");
+
+    await caps.revokeCapability("extension:test.addin", "grid.read");
+
+    let secondCalls = 0;
+    worker.handlers.set(7, (cells) => {
+      secondCalls++;
+      return (cells as unknown[]).map(() => ({ backgroundColor: "#ff0000" }));
+    });
+    worker.register({ kind: "cellStyle", regId: 2, id: "positives", handlerId: 7 });
+
+    expect(
+      caps.getScriptGrants("extension:test.addin").caps,
+      "registering another contributor must never restore a revoked capability",
+    ).not.toContain("grid.read");
+
+    styles.applyStyleInterceptors("after-revoke", {}, { row: 4, col: 0, sheetIndex: 0 });
+    await settleRenderCache();
+    expect(secondCalls, "the new contributor must not be handed cells either").toBe(0);
+
+    // The panel must not promise the reach it just withheld.
+    const listed = host.listExtensionContributions().find((c) => c.id === "positives");
+    expect(listed?.refusedReason).toBeUndefined();
+    expect(listed?.label).toContain("not allowed to be shown your cells");
+  });
+
+  it("a REVOKED grid.read is not put back by re-subscribing to a cell-content event", async () => {
+    // The CHEAPEST restore of all: a subscription is not a contribution, so it
+    // needs no `contributes` entry and is bounded by nothing at all.
+    const { worker } = await mountFake(host, {
+      ...BASE_MANIFEST,
+      capabilities: ["grid.read"],
+      contributes: {},
+    });
+    const caps = await import("../capabilities");
+    worker.register({
+      kind: "event",
+      regId: 1,
+      eventName: AppEvents.CELL_VALUES_CHANGED,
+      handlerId: 11,
+    });
+    expect(caps.getScriptGrants("extension:test.addin").caps).toContain("grid.read");
+
+    await caps.revokeCapability("extension:test.addin", "grid.read");
+    worker.register({
+      kind: "event",
+      regId: 2,
+      eventName: AppEvents.CELL_VALUES_CHANGED,
+      handlerId: 12,
+    });
+    expect(
+      caps.getScriptGrants("extension:test.addin").caps,
+      "re-subscribing must never restore a revoked capability",
+    ).not.toContain("grid.read");
+
+    worker.received.length = 0;
+    emitAppEvent(AppEvents.CELL_VALUES_CHANGED, {
+      changes: [{ row: 3, col: 4, newValue: "125000" }],
+      source: "user",
+    });
+    const deliveries = worker.received.filter((m) => m.t === "appEvent");
+    expect(deliveries, "both subscriptions still fire — this is redaction").toHaveLength(2);
+    for (const d of deliveries) {
+      expect(JSON.stringify(d.payload)).not.toContain("125000");
+      expect((d.payload as { redacted?: string }).redacted).toBe("grid.read");
+    }
+  });
+
+  // --------------------------------------------------------------------------
   // 2d. The workbook PATH never crosses into the sandbox
   // --------------------------------------------------------------------------
 
@@ -1217,11 +1307,19 @@ describe("contribution layer coverage (derived from source)", () => {
         true,
       );
     }
-    // The two that exist today, pinned by name: both are the "receives workbook
-    // data" kinds, and no third kind may join them without this test changing.
+    // The three that exist today, pinned by name, so no fourth kind can join
+    // them without this test changing. They do NOT all answer the same
+    // question, which is why the pin is the whole map rather than a count:
+    //   formula / cellStyle -> the kind RECEIVES WORKBOOK DATA;
+    //   form (M4)           -> the kind TAKES THE APP-WIDE MODAL SLOT. A
+    //                          form's bound fields are a separate, per-delivery
+    //                          grid.read question (resolveExtensionFormBindings),
+    //                          which is why `form` is not gated on grid.read
+    //                          here — see the enumeration below.
     expect(CONTRIBUTION_REQUIRED_CAPABILITY).toEqual({
       formula: "formula.udf",
       cellStyle: "grid.read",
+      form: "ui.dialog",
     });
   });
 
@@ -1258,6 +1356,27 @@ describe("contribution layer coverage (derived from source)", () => {
 // one. These tests hold the text to the reach, and hold the redaction to the
 // payload shapes it claims to cover.
 // ============================================================================
+
+/** One of the extension-side consent surfaces, read as SOURCE — the phrase
+ *  tables live in components this test must not mount. */
+function readExtensionSource(rel: string): string {
+  return fs.readFileSync(
+    path.resolve(__dirname, "../../../../extensions", extensionPhraseFile(rel)),
+    "utf8",
+  );
+}
+
+/** Where each of the three phrase tables lives, relative to app/extensions. */
+function extensionPhraseFile(rel: string): string {
+  switch (rel) {
+    case "SubscribeDialog.tsx":
+      return "Distribution/components/SubscribeDialog.tsx";
+    case "inspector/ScriptsSection.tsx":
+      return "Distribution/components/inspector/ScriptsSection.tsx";
+    default:
+      return "ScriptableObjects/index.ts";
+  }
+}
 
 describe("grid.read consent text and coverage", () => {
   it("the consent sentence names the real reach, in the user's words", () => {
@@ -1340,14 +1459,59 @@ describe("grid.read consent text and coverage", () => {
     //   cellStyle -> the displayed value of every cell    (grid.read)
     //   fileFormat-> the bytes of a FOREIGN file the user just chose to open;
     //                not the workbook, so it is disclosed rather than gated.
-    const dataBearing: Record<string, string | undefined> = {
+    //   form (M4) -> nothing, UNTIL one of its fields names a cell. The kind's
+    //                own capability is ui.dialog (the modal slot it takes); the
+    //                cell contents are a SEPARATE grid.read question asked per
+    //                delivery in resolveExtensionFormBindings, so it appears
+    //                here as ui.dialog and in the grid.read path count below.
+    const requiredByKind: Record<string, string | undefined> = {
       formula: "formula.udf",
       cellStyle: "grid.read",
+      form: "ui.dialog",
     };
     for (const kind of EXTENSION_CONTRIBUTION_KINDS) {
-      expect(CONTRIBUTION_REQUIRED_CAPABILITY[kind], kind).toBe(dataBearing[kind]);
+      expect(CONTRIBUTION_REQUIRED_CAPABILITY[kind], kind).toBe(requiredByKind[kind]);
     }
     // fileFormat is the deliberate exclusion, and it must stay DISCLOSED.
     expect(CONTRIBUTION_REACH_NOTE.fileFormat).toMatch(/file/i);
+    // ...and so is `form`, whose note must name BOTH the capability its bound
+    // fields need and the limit that makes them safe to offer.
+    expect(CONTRIBUTION_REACH_NOTE.form).toContain("grid.read");
+    expect(CONTRIBUTION_REACH_NOTE.form).toMatch(/display only/i);
+  });
+
+  it("every grid.read sentence a user reads names ALL THREE push paths", () => {
+    // THE DEFECT THIS PINS. All four shipped sentences ENUMERATE the paths
+    // rather than describing the capability abstractly, which is what makes
+    // them honest — and also what makes a NEW path silently falsify every one
+    // of them. Adding the form binding (M4) made all four stale by omission on
+    // the day it shipped, and only this test would have said so.
+    //
+    // Asserted as a COUNT of distinct paths, not as keyword presence: a
+    // sentence can contain the word "form" and still describe two paths.
+    const sentences: Array<{ where: string; text: string }> = [
+      { where: "capabilities.ts CAP_DESCRIPTION", text: describeCapability("grid.read") },
+      ...(["SubscribeDialog.tsx", "inspector/ScriptsSection.tsx", "ScriptableObjects/index.ts"].map(
+        (file) => ({
+          where: file,
+          text: readExtensionSource(file),
+        }),
+      ) as Array<{ where: string; text: string }>),
+    ];
+    for (const { where, text } of sentences) {
+      const sentence =
+        where === "capabilities.ts CAP_DESCRIPTION"
+          ? text
+          : // The phrase table's grid.read entry, up to the next key.
+            (/"grid\.read":\s*\n?\s*"([^"]*)"/.exec(text)?.[1] ?? "");
+      expect(sentence.length, `${where} has no grid.read phrase`).toBeGreaterThan(40);
+      // 1. cell styling, 2. the cell-change events, 3. a form's bound field.
+      expect(sentence, `${where}: the styling path`).toMatch(/style|colou?r/i);
+      expect(sentence, `${where}: the cell-change path`).toMatch(/changes/i);
+      // \b on BOTH sides, or the word "formula" in the cell-change clause
+      // satisfies this — which it did, and a sabotage that deleted the whole
+      // form clause from capabilities.ts still passed.
+      expect(sentence, `${where}: the form-binding path`).toMatch(/\bform\b/i);
+    }
   });
 });

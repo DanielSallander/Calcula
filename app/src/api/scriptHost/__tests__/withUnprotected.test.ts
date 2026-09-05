@@ -565,7 +565,9 @@ describe("the restore is WIRED into every way a script ends (source pins)", () =
   });
 
   it("both crash paths route through hostUnmountScript, so a fault is covered", () => {
-    const onerror = hostSrc.slice(hostSrc.indexOf("mw.worker.onerror"));
+    // The onerror arrow delegates to `crashWorker`, which the event-stall
+    // watchdog reuses — the one function all three crash paths run through.
+    const onerror = hostSrc.slice(hostSrc.indexOf("function crashWorker("));
     const body = onerror.slice(0, onerror.indexOf("\n}\n"));
     expect(body).toContain("hostUnmountScript(mw.definition.id)");
     expect(body).toContain("hostUnmountScript(definition.id)");

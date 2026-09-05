@@ -14,14 +14,40 @@
 //          parsed (boolean/number/text heuristic) and committed via
 //          commitValue() — that is how a custom control publishes its
 //          GET.CONTROLVALUE value. The property event is still forwarded.
-// CONTEXT: The iframe wrapper (srcdoc bridge + allow-scripts sandbox +
-//          e.source integrity check) is REPLICATED from
-//          Controls/Shape/shapeRenderer.ts rather than extracted to _shared:
-//          the on-grid wrapper is welded to canvas-viewport overlay math
-//          (header clipping, absolute positioning over the canvas parent,
-//          pointer-events:none click-through) that a pane card must not
-//          inherit, and extraction would require editing the Controls
-//          extension. Only the ~25-line srcdoc/bridge core is duplicated.
+// CONTEXT: The srcdoc bridge, the postMessage protocol, the e.source integrity
+//          check and the live-frame budget now live in ONE place —
+//          extensions/_shared/scriptFrame — and this host imports them (M6b).
+//          They used to be REPLICATED here from
+//          Controls/Shape/shapeRenderer.ts, byte for byte, with this note
+//          declaring the duplication; two copies of one protocol is a fork
+//          waiting to happen, and the promise a script author is given is that
+//          their HTML works unchanged in both hosts.
+//          WHAT STAYED SEPARATE, deliberately: the on-grid wrapper is welded to
+//          canvas-viewport overlay math (header clipping, absolute positioning
+//          over the canvas parent, pointer-events:none click-through) that a
+//          pane card must not inherit. Only the DOCUMENT and the PROTOCOL are
+//          shared; each host still owns its own element.
+//          THE INPUT GATE IS SHARED TOO, and was not. M6b split `ui.htmlInput`
+//          out of `ui.html` on the premise that a frame granted only `ui.html`
+//          PAINTS and cannot be typed or clicked into. That was true of the
+//          on-grid host, whose frame is `pointer-events: none` forever and
+//          whose every pixel of input arrives through the shims that
+//          `render.setHitRegions` (the gated door) creates — and false here:
+//          this card's frame was hardcoded `pointer-events: auto`, so the SAME
+//          script's SAME document took clicks, focus, text selection and
+//          KEYSTROKES with the paint-only grant. A distributed script declaring
+//          `// @capability ui.html` could paint `<input type=password>` inside
+//          Calcula's own chrome and read what was typed into it. So the card's
+//          frame is hit-transparent until the script claims input, through the
+//          same `render.setHitRegions` door the on-grid host uses — the split
+//          is only real if both hosts implement it.
+//          AND HIT-TRANSPARENCY IS THE MOUSE HALF ONLY. An iframe keeps its
+//          place in the tab order whatever its `pointer-events` say, so the
+//          same password field was still reachable with Tab and still read what
+//          was typed. The frame is `inert` until the same claim as well
+//          (`setScriptFrameInert`, shared with the on-grid host, whose frame is
+//          inert in both modes because its input arrives as synthesized
+//          messages and never as focus).
 
 import React, {
   useCallback,
@@ -43,7 +69,20 @@ import {
   type ObjectScriptDefinition,
 } from "@api/scriptableObjects";
 import { saveObjectScript } from "@api/objectScriptBackend";
+import {
+  SHAPE_HIT_REGIONS_EVENT,
+  type ShapeHitRegion,
+} from "@api/scriptHost/shapeHitRegionSpec";
 import type { ControlValue } from "@api/controlValues";
+import {
+  buildScriptFrameDocument,
+  claimScriptFrameSlot,
+  createScriptFrameRouter,
+  postToScriptFrame,
+  readScriptFrameThemeTokens,
+  releaseScriptFrameSlot,
+  setScriptFrameInert,
+} from "../../_shared/scriptFrame";
 import type { PaneControl, PaneControlConfig } from "../lib/controlsPaneTypes";
 import {
   commitValue,
@@ -85,6 +124,27 @@ interface PaneScriptRuntime {
   declared: DeclaredProperty[];
   /** Current property values (seeded from config, updated by set/edit). */
   values: Map<string, string>;
+  /**
+   * Whether the script has a LIVE hit-region claim on this card — the pane's
+   * flavour of `render.setHitRegions`, and the only thing that makes the card's
+   * frame take the user's input (see the header's INPUT GATE note).
+   *
+   * A claim's RECTANGLES are frame-local grid geometry (shapeHitRegionSpec.ts),
+   * and a pane card has no grid under it and is laid out by the pane rather
+   * than by the script — there is nothing here for a rectangle to protect and
+   * no stable space to measure one in. So the pane takes the DECISION out of
+   * the declaration and not the geometry: non-empty claims the whole card body,
+   * empty (which is also what the script host emits when a script unmounts)
+   * returns it to paint-only. Half-honouring the rectangles against a box the
+   * script cannot see would be a claim that is interactive in some of the
+   * places its author asked for and not others, with nothing saying so.
+   *
+   * The claim is proof of the grant by itself: `render.setHitRegions` is
+   * broker-gated on `ui.htmlInput` (allowlist.ts), so this event can only ever
+   * arrive for a script that holds it. This host reads no capability of its
+   * own, exactly like the on-grid one.
+   */
+  inputClaimed: boolean;
 }
 
 const runtimes = new Map<string, PaneScriptRuntime>();
@@ -96,7 +156,7 @@ const paneFrames = new Map<string, HTMLIFrameElement>();
 function getOrCreateRuntime(controlId: string): PaneScriptRuntime {
   let rt = runtimes.get(controlId);
   if (!rt) {
-    rt = { html: null, declared: [], values: new Map() };
+    rt = { html: null, declared: [], values: new Map(), inputClaimed: false };
     runtimes.set(controlId, rt);
   }
   return rt;
@@ -206,6 +266,7 @@ export function getCustomControlProperties(
 export function removeCustomControlRuntime(controlId: string): void {
   runtimes.delete(controlId);
   paneFrames.delete(controlId);
+  releaseScriptFrameSlot(controlId);
 }
 
 // ============================================================================
@@ -325,6 +386,28 @@ export function ensureCustomControlWiring(): void {
     }),
   );
 
+  // Script -> host: the INPUT CLAIM. `render.setHitRegions` is the only door
+  // in the object surface that costs `ui.htmlInput`, so it is the only thing
+  // that may turn this card's frame from a picture into a surface that takes
+  // the user's clicks and keystrokes. Without this listener the card was
+  // interactive for every script that could paint at all, and the whole M6b
+  // split existed on the on-grid host only.
+  wiringCleanups.push(
+    onAppEvent(SHAPE_HIT_REGIONS_EVENT, (detail) => {
+      const d = detail as { instanceId: string | null; regions: ShapeHitRegion[] };
+      if (!d.instanceId) return;
+      const controlId = controlIdOfInstance(d.instanceId);
+      // An on-grid shape's id belongs to Controls/index.ts, which applies the
+      // rectangles literally; this host claims only its own "pane-" ids.
+      if (!controlId) return;
+      const rt = getOrCreateRuntime(controlId);
+      const claimed = Array.isArray(d.regions) && d.regions.length > 0;
+      if (rt.inputClaimed === claimed) return;
+      rt.inputClaimed = claimed;
+      notifyRuntime(controlId);
+    }),
+  );
+
   // Script -> host: declared properties (Properties popover schema).
   wiringCleanups.push(
     onAppEvent("shape:declareProperties", (detail) => {
@@ -354,43 +437,72 @@ export function ensureCustomControlWiring(): void {
     }),
   );
 
-  // Script -> iframe: forward sendMessage into the card's iframe (same
-  // envelope the on-grid host posts: target "shape-html" + instanceId).
+  // Script -> iframe: forward sendMessage into the card's iframe. Literally the
+  // same poster the on-grid host uses (extensions/_shared/scriptFrame), so the
+  // envelope's tag is spelled in one place for both hosts and for the frame
+  // document itself.
   wiringCleanups.push(
     onAppEvent("shape:sendMessage", (detail) => {
       const d = detail as { instanceId: string; type: string; data: unknown };
       const controlId = controlIdOfInstance(d.instanceId);
       if (!controlId) return;
-      const frame = paneFrames.get(controlId);
-      if (frame?.contentWindow) {
-        frame.contentWindow.postMessage(
-          { target: "shape-html", instanceId: d.instanceId, type: d.type, data: d.data },
-          "*",
-        );
-      }
+      postToScriptFrame(paneFrames.get(controlId) ?? null, d.instanceId, d.type, d.data);
     }),
   );
 
-  // Iframe -> script: the postMessage bridge. Integrity check mirrors
-  // shapeRenderer.ts: e.data is spoofable but e.source is not — only accept
-  // messages that originate from the iframe registered for this control.
-  const onWindowMessage = (e: MessageEvent) => {
-    const data = e.data as
-      | { source?: string; instanceId?: string; type?: string; data?: unknown }
-      | undefined;
-    if (!data || data.source !== "shape-html" || typeof data.instanceId !== "string") return;
-    const controlId = controlIdOfInstance(data.instanceId);
-    if (!controlId) return; // on-grid shapes are handled by shapeRenderer.ts
-    const expectedFrame = paneFrames.get(controlId);
-    if (!expectedFrame || e.source !== expectedFrame.contentWindow) return;
-    emitAppEvent("shape:htmlMessage", {
-      instanceId: data.instanceId,
-      type: data.type,
-      data: data.data,
-    });
-  };
+  // Iframe -> script: the postMessage bridge. The protocol, the e.source
+  // integrity check and the reserved-type handling are the SHARED ones
+  // (extensions/_shared/scriptFrame); `resolveFrame` returning null is how this
+  // router says "not mine" for an on-grid shape's id, which shapeRenderer.ts's
+  // router — listening on this same window — will claim instead.
+  const onWindowMessage = createScriptFrameRouter({
+    resolveFrame: (instanceId) => {
+      const controlId = controlIdOfInstance(instanceId);
+      if (!controlId) return null; // on-grid shapes are handled by shapeRenderer.ts
+      return paneFrames.get(controlId) ?? null;
+    },
+    deliver: ({ instanceId, type, data }) => {
+      emitAppEvent("shape:htmlMessage", { instanceId, type, data });
+    },
+    // A pane card is laid out by the pane, not by the frame's content, so the
+    // intrinsic-size report is consumed and dropped rather than forwarded to
+    // the script as if its own page had sent it.
+  });
   window.addEventListener("message", onWindowMessage);
   wiringCleanups.push(() => window.removeEventListener("message", onWindowMessage));
+}
+
+/**
+ * Drop EVERY pane card's script runtime and the frame budget its cards hold.
+ *
+ * The pane host's half of the DOCUMENT lifecycle, and the twin of the on-grid
+ * `releaseAllShapeHtmlOverlays`. A pane control belongs to the workbook, so its
+ * html, its declared properties and its frame all leave with the document — and
+ * none of them did. The card releases its slot when React unmounts it, which
+ * covers deleting a control and closing the pane, and File > Open unmounts
+ * nothing: the cards stayed mounted showing the departed workbook's tiles, so
+ * their charges stood against a cap that is 24 frames for the whole SESSION and
+ * is SHARED with the on-grid host. Unlike an on-grid frame a pane frame is never
+ * parked, so nothing could preempt it either — the next workbook simply had
+ * fewer frames than it has tiles, and the refusal sentence's "this workbook
+ * already has N" was counting the previous one's.
+ *
+ * Dropping the runtime is also what REMOVES the element, which is what keeps the
+ * release honest: a card re-reads its runtime on every render, finds no html,
+ * and React commits the frame away. Forgetting a charge whose iframe is still in
+ * the DOM would be the same fiction in the other direction. So the maps are
+ * cleared first and the listeners told afterwards, and that next render sees the
+ * empty state rather than the departed workbook's.
+ */
+export function releaseAllPaneControlFrames(): void {
+  // The UNION of the two maps, because they do not quite coincide: a control
+  // whose script has not rendered yet holds a runtime and no frame, and a card
+  // the budget refused holds a runtime and no frame either.
+  const controlIds = new Set<string>([...runtimes.keys(), ...paneFrames.keys()]);
+  runtimes.clear();
+  paneFrames.clear();
+  for (const controlId of controlIds) releaseScriptFrameSlot(controlId);
+  for (const controlId of controlIds) notifyRuntime(controlId);
 }
 
 /** Tear down the module wiring and runtime state (extension deactivate). */
@@ -405,47 +517,28 @@ export function disposeCustomControlWiring(): void {
     }
     wiringCleanups = null;
   }
-  runtimes.clear();
-  paneFrames.clear();
+  // The same sweep the document lifecycle uses: a deactivate that tears the pane
+  // out WITHOUT React unmounting the tree would otherwise leave the charge
+  // standing with no id left to release it under, and an orphaned charge is a
+  // slot no workbook ever gets back.
+  releaseAllPaneControlFrames();
 }
 
 // ============================================================================
-// Sandboxed iframe srcdoc (replicated bridge — see header CONTEXT note)
+// Sandboxed iframe document (SHARED builder — see header CONTEXT note)
 // ============================================================================
 
-/**
- * Build the full srcdoc HTML for the card iframe, injecting the postMessage
- * bridge. Byte-for-byte the same protocol as the on-grid overlay
- * (shapeRenderer.buildIframeSrcDoc) so scripts and their HTML work unchanged
- * in both hosts. The body declares a sensible min-height; rich content
- * renders best with the Controls pane placed in the SIDEBAR (the ribbon band
- * only affords 56px).
- */
-function buildIframeSrcDoc(instanceId: string, userHtml: string): string {
-  // JSON.stringify yields a safe JS string literal; escaping "<" additionally
-  // prevents "</script>" inside the id from terminating the script block.
-  const idLiteral = JSON.stringify(instanceId).replace(/</g, "\\u003c");
-  return `<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<style>
-  body { margin: 0; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 12px; overflow: hidden; min-height: 40px; }
-  * { box-sizing: border-box; }
-</style>
-<script>
-  var SHAPE_ID = ${idLiteral};
-  window.calcula = {
-    sendMessage: function(type, data) {
-      parent.postMessage({ source: 'shape-html', instanceId: SHAPE_ID, type: type, data: data }, '*');
-    }
-  };
-  window.addEventListener('message', function(e) {
-    if (e.data && e.data.target === 'shape-html' && e.data.instanceId === SHAPE_ID) {
-      window.dispatchEvent(new CustomEvent('shape-message', { detail: e.data }));
-    }
+/** The pane card's flavour of the shared script-frame document: a 40px body
+ *  floor, because rich content renders badly in the ribbon band (56px) and a
+ *  card with no floor collapses to nothing while a script is still starting.
+ *  Everything else — bridge, protocol, theme contract — is the one definition
+ *  in extensions/_shared/scriptFrame, so a script's HTML works unchanged here
+ *  and on the grid. */
+function buildCardDocument(instanceId: string, userHtml: string): string {
+  return buildScriptFrameDocument(instanceId, userHtml, {
+    minHeightPx: 40,
+    themeTokens: readScriptFrameThemeTokens(),
   });
-</script>
-</head><body>${userHtml}</body></html>`;
 }
 
 // ============================================================================
@@ -503,6 +596,13 @@ function setup(shape) {
     { key: "label", label: "Label", type: "text", defaultValue: "${name}" },
     { key: "value", label: "Value", type: "number", defaultValue: "0" },
   ]);
+
+  // The card PAINTS under "ui.html". Taking your clicks inside it is the
+  // separate "ui.htmlInput" grant, and this is the call that asks for it —
+  // without it the buttons below are a picture. A pane claim is per CARD: the
+  // rectangle is grid geometry the pane has no use for, so any non-empty
+  // declaration claims the whole card and [] hands it straight back.
+  shape.render.setHitRegions([{ id: "card", x: 0, y: 0, width: 2000, height: 2000 }]);
 
   var count = parseFloat(shape.getProperty("value")) || 0;
 
@@ -760,6 +860,7 @@ export function CustomControlHost({
 
   const rt = getOrCreateRuntime(control.id);
   const html = rt.html;
+  const inputClaimed = rt.inputClaimed;
   const hasBitmapRenderer = html == null && hasShapeBitmapRenderer(instanceId);
   const scriptExists = ObjectScriptManager.getScript("shape", instanceId) !== null;
 
@@ -767,8 +868,10 @@ export function CustomControlHost({
   const [propsAnchor, setPropsAnchor] = useState<DOMRect | null>(null);
 
   // ---- iframe registration (sendMessage forwarding + integrity check) ----
+  const frameElementRef = useRef<HTMLIFrameElement | null>(null);
   const frameCallbackRef = useCallback(
     (el: HTMLIFrameElement | null) => {
+      frameElementRef.current = el;
       if (el) {
         paneFrames.set(control.id, el);
       } else {
@@ -839,17 +942,65 @@ export function CustomControlHost({
 
   const valueSummary = controlValueSummary(control.value);
 
+  // ---- the frame budget ----
+  // Charged during render, not in an effect, so a refused frame is never
+  // PAINTED once and then withdrawn. Safe here because a claim is idempotent
+  // per instanceId: it re-prices an existing slot rather than counting a second
+  // one, so React's double-invoked render costs nothing. The matching release
+  // is an unmount effect below — a charge that outlives its frame is a slow
+  // leak that eventually refuses a frame nothing is holding.
+  const frameDocument = html != null ? buildCardDocument(instanceId, html) : null;
+  const frameSlot =
+    frameDocument !== null ? claimScriptFrameSlot(control.id, frameDocument.length) : null;
+  useEffect(() => {
+    if (frameDocument === null) releaseScriptFrameSlot(control.id);
+  }, [frameDocument, control.id]);
+  useEffect(() => () => releaseScriptFrameSlot(control.id), [control.id]);
+
+  // ---- the input gate's KEYBOARD half ----
+  // `pointerEvents` below is the mouse half and ONLY the mouse half: an iframe
+  // keeps its place in the tab order however it is styled, so Tab left the pane
+  // and landed inside the script's own document, and the credential field a
+  // `ui.html`-only script painted was typeable after all. `inert` on the frame
+  // makes the document inside it inert too — no focusable areas, no selection,
+  // no hit testing — while leaving its scripts, its painting and the
+  // postMessage bridge alone. It tracks the SAME claim the pointer half tracks,
+  // so the card is hit-transparent and keyboard-unreachable together and
+  // interactive to both devices together; two gates over one promise are two
+  // things to keep in step. Re-applied whenever the document changes because a
+  // frame React has just created starts with no attribute at all. Set here
+  // rather than as a JSX prop because React 18's typings carry no `inert`.
+  useEffect(() => {
+    setScriptFrameInert(frameElementRef.current, !inputClaimed);
+  }, [inputClaimed, frameDocument]);
+
   // ---- shared content: iframe / canvas / placeholder ----
   const body =
-    html != null ? (
+    frameDocument !== null && frameSlot?.granted === false ? (
+      <div style={styles.placeholder}>
+        <div style={styles.placeholderName}>{control.name}</div>
+        <div style={styles.placeholderHint}>{frameSlot.message}</div>
+      </div>
+    ) : frameDocument !== null ? (
       <iframe
         ref={frameCallbackRef}
         // allow-scripts only: with srcdoc this gives the iframe an opaque
         // origin, so its scripts cannot reach the parent window, app-origin
         // storage, or __TAURI__. The postMessage bridge is the only path.
         sandbox="allow-scripts"
-        srcDoc={buildIframeSrcDoc(instanceId, html)}
-        style={styles.iframe}
+        srcDoc={frameDocument}
+        // THE INPUT GATE. Paint-only by default — `ui.html` promises drawing
+        // and nothing else, so the frame is hit-transparent to the mouse here
+        // and `inert` to the keyboard in the effect above (hit-transparency
+        // alone left it in the tab order, which is a second way in and was
+        // open). It goes interactive to both only while the script holds a live
+        // `render.setHitRegions` claim, which the broker refuses without
+        // `ui.htmlInput`. Clicks on the
+        // card while it is paint-only still reach `handleBodyClick` on the
+        // wrapper and become the same `shape:clicked` the on-grid host emits,
+        // so a paint-only control keeps its one coarse click and loses the key
+        // stream, which is exactly what the two consent sentences promise.
+        style={inputClaimed ? { ...styles.iframe, pointerEvents: "auto" } : styles.iframe}
         title={control.name}
       />
     ) : hasBitmapRenderer ? (
@@ -1085,9 +1236,13 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100%",
     minHeight: "48px",
     background: "#fff",
-    // Pane cards are interactive hosts (unlike the on-grid overlay, which is
-    // pointer-events:none for grid click-through).
-    pointerEvents: "auto",
+    // PAINT-ONLY BY DEFAULT. This used to read `pointerEvents: "auto"`, with a
+    // comment explaining that pane cards are interactive hosts "unlike the
+    // on-grid overlay" — which made `ui.html` alone worth clicks, focus and
+    // keystrokes on this path while the on-grid path charged `ui.htmlInput` for
+    // pointer input alone. The interactive value is now applied at the element
+    // (see the render site) and only while the script's claim stands.
+    pointerEvents: "none",
     display: "block",
     flex: 1,
   },

@@ -41,9 +41,13 @@ describe("macroEntriesFrom", () => {
     expect(entry.origin).toEqual({ kind: "package", name: "Q3 Report" });
   });
 
-  it("treats an absent or whitespace-only stamp as the user's own code", () => {
+  it("treats an ABSENT stamp as the user's own code, and a blank one as a nameless publisher's", () => {
     expect(entryOf({ sourcePackage: null }).origin.kind).toBe("local");
-    expect(entryOf({ sourcePackage: "   " }).origin.kind).toBe("local");
+    // A present-but-blank stamp is what Rust's gate reads as `Some("   ")` —
+    // distributed. The derivation now agrees (scriptOriginForStoredRecord).
+    const blank = entryOf({ sourcePackage: "   " });
+    expect(blank.origin).toEqual({ kind: "package", name: "(unknown package)" });
+    expect(macroOriginLabel(blank)).toBe("(unknown package)");
   });
 
   it("cannot be talked into 'local' by an application NAMED local", () => {
@@ -59,6 +63,22 @@ describe("macroEntriesFrom", () => {
     const entry = entryOf({ scope: { type: "sheet", name: "Sheet2" }, loadError: "gone" });
     expect(entry.scope).toEqual({ type: "sheet", name: "Sheet2" });
     expect(entry.loadError).toBe("gone");
+  });
+
+  it("accepts a SUMMARY row — no source, no loadError — and derives the same origin", () => {
+    // The gateway lists through `listWorkbookScripts()` (one round trip), whose
+    // rows carry `sourcePackage` but neither `source` nor `loadError`. Nothing
+    // was read that could fail, so the entry is complete with `loadError: null`.
+    const [theirs, mine] = macroEntriesFrom([
+      { id: "macro-remit", name: "Remit", scope: { type: "workbook" }, sourcePackage: "Q3 Report" },
+      { id: "macro-hello", name: "Hello" },
+    ]);
+    expect(theirs.origin).toEqual({ kind: "package", name: "Q3 Report" });
+    expect(theirs.loadError).toBeNull();
+    expect(theirs.scope).toEqual({ type: "workbook" });
+    expect(mine.origin).toEqual({ kind: "local" });
+    expect(mine.loadError).toBeNull();
+    expect(macroOriginLabel(theirs)).toBe("Q3 Report");
   });
 });
 
@@ -101,19 +121,30 @@ describe("display helpers", () => {
 });
 
 describe("the gateway keeps exactly one macro-listing door", () => {
-  const gatewaySource = readFileSync(
-    join(__dirname, "..", "cli", "appGateway.ts"),
-    "utf8",
-  );
+  // Comments stripped: the gateway's prose names the doors it deliberately
+  // does NOT use, and a guard that matched prose would forbid explaining why.
+  const gatewaySource = readFileSync(join(__dirname, "..", "cli", "appGateway.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 
-  it("lists through the RECORD inventory, which is the only call that returns sourcePackage", () => {
-    expect(gatewaySource).toContain("listWorkbookScriptRecords");
+  it("lists through the one-round-trip summary listing, whose rows carry sourcePackage", () => {
+    // `list_scripts` copies `source_package` onto every row (`script_summary`,
+    // app/src-tauri/src/scripting/commands.rs). The gateway once listed through
+    // the full record inventory instead — one `get_script` per module on every
+    // `ls`, `run` and session refresh, to fetch bodies the CLI never shows.
+    expect(gatewaySource).toMatch(/macroEntriesFrom\(await listWorkbookScripts\(\)\)/);
   });
 
-  it("exposes no origin-less summary listing to re-open the hole", () => {
-    // `list_scripts` drops source_package. A gateway method returning its
-    // summaries is a door a surface can list a publisher's module through as if
-    // it were the user's own — which is what `ls macros` and `run` did.
-    expect(gatewaySource).not.toMatch(/\blistWorkbookScripts\b(?!Records)/);
+  it("does not pay a per-record fetch for a listing that needs no source", () => {
+    expect(gatewaySource).not.toContain("listWorkbookScriptRecords");
+    expect(gatewaySource).not.toContain("getWorkbookScript");
+  });
+
+  it("derives the origin on the way through, never hands a raw row out", () => {
+    // The interface's one macro door returns `MacroEntry[]` — rows with a
+    // DERIVED `origin`. A method returning `ScriptSummary[]` would be a door a
+    // surface could list a publisher's module through by name alone.
+    expect(gatewaySource).toMatch(/listMacros\(\): Promise<MacroEntry\[\]>;/);
+    expect(gatewaySource).not.toMatch(/Promise<ScriptSummary\[\]>/);
   });
 });

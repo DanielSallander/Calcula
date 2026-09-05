@@ -27,6 +27,7 @@ import { fnLog, stateLog, eventLog } from '../../utils/component-logger';
 import { getGlobalIsEditing } from "./useEditing";
 import { handleCellTypeKeyDown } from "../../api/cellTypes";
 import { getGridRegions } from "../../api/gridOverlays";
+import { isKeyClaimed } from "../lib/pointerClaims";
 
 /**
  * Options for the useGridKeyboard hook.
@@ -694,6 +695,22 @@ export function useGridKeyboard(options: UseGridKeyboardOptions): void {
 
       if (!enabled) {
         fnLog.exit('handleKeyDown', 'skipped (disabled)');
+        return;
+      }
+
+      // A keystroke aimed INSIDE something that claimed the gesture is not the
+      // grid's keystroke. This is the same ancestor walk the pointer door uses
+      // (core/lib/pointerClaims.ts); it is here rather than folded into the tag
+      // check below because the two answer different questions — the tag list
+      // is about form elements ANYWHERE in the app, the claim is about anything
+      // stacked ON the grid, whatever tag it happens to be.
+      //
+      // It is FIRST because it is the one that loses data if it runs second:
+      // `onDelete` below clears the selected sheet cells, and it was reached
+      // from a `<select>` or a `<button>` inside an on-grid form — neither of
+      // which is in the tag list, and both of which are what a form is made of.
+      if (isKeyClaimed(event)) {
+        fnLog.exit('handleKeyDown', 'skipped (claimed by an on-grid surface)');
         return;
       }
 

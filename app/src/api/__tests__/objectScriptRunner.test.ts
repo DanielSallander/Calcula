@@ -342,11 +342,15 @@ describe("a module that arrived in an application", () => {
   it("names the publisher as a package even when the stamp is blank", async () => {
     storeModule({ id: "m", source: PUBLISHER_SOURCE, sourcePackage: "   " });
     await runObjectScriptOnce({ name: "m", source: PUBLISHER_SOURCE, scriptId: "m" });
-    // A whitespace-only stamp is nothing stamped at all, so this one is LOCAL —
-    // the fallback placeholder is for a package that names itself, not for an
-    // empty field (see scriptOriginForStoredRecord).
-    expect(lastMount().accessLevel).toBe("unlocked");
-    expect(lastMount().provenance).toBe("local");
+    // A whitespace-only stamp is a stamp with no usable name, not an absent one:
+    // Rust's `distributed_module_refusal` reads the same `Option<String>` and
+    // holds any `Some(..)` to be a publisher's code. This test used to assert
+    // the opposite — UNLOCKED and LOCAL for a record the backend gate treats as
+    // distributed — which is exactly the tier a publisher must never be handed
+    // by leaving a field blank.
+    expect(lastMount().accessLevel).toBe("restricted");
+    expect(lastMount().provenance).toBe("distributed");
+    expect(lastMount().packageName).toBe("(unknown package)");
   });
 });
 

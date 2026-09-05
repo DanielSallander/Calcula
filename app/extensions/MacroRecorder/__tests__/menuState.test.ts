@@ -21,7 +21,16 @@ vi.mock("@api/ui", () => ({
 vi.mock("@api/locale", () => ({ getCachedLocale: () => ({ decimalSeparator: "." }) }));
 
 // The macro store: recording end paths must not need a backend.
-vi.mock("@api", () => ({
+vi.mock("@api", async () => {
+  // The REAL origin rule: a provenance decision in a test must agree with the one
+  // definition every gate reads, or the test pins a rule the product does not have.
+  const origin = await vi.importActual<typeof import("@api/scriptHost/scriptOrigin")>(
+    "@api/scriptHost/scriptOrigin",
+  );
+  return {
+    scriptOriginForStoredRecord: origin.scriptOriginForStoredRecord,
+    originTagTitle: origin.originTagTitle,
+
   ExtensionRegistry: { onSelectionChange: () => () => undefined },
   AppEvents: {
     BEFORE_OPEN: "app:before-open",
@@ -46,7 +55,8 @@ vi.mock("@api", () => ({
     screenUpdating: true,
   }),
   onAppEvent: () => () => undefined,
-}));
+  };
+});
 
 const appEventHandlers = new Map<string, Array<() => void>>();
 vi.mock("@api/events", () => ({

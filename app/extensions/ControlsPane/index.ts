@@ -16,6 +16,7 @@ import {
   type ControlValuesProvider,
 } from "@api/controlValues";
 import { registerPaneControlStoreService } from "@api/componentStoreRegistry";
+import { AppEvents, onAppEvent } from "@api/events";
 import { ObjectScriptManager } from "@api/scriptableObjects";
 import { deleteObjectScriptsForInstance } from "@api/objectScriptBackend";
 import {
@@ -39,6 +40,7 @@ import { filterPaneBackend } from "./lib/filterPaneBackend";
 import {
   ensureCustomControlWiring,
   disposeCustomControlWiring,
+  releaseAllPaneControlFrames,
   seedCustomControlRuntime,
   getCustomControlProperties,
   removeCustomControlRuntime,
@@ -47,6 +49,8 @@ import {
 
 let unregisterBadge: (() => void) | null = null;
 let removeWindowListeners: (() => void) | null = null;
+/** Unsubscribers for the @api event-bus listeners (the document lifecycle). */
+let removeAppEventListeners: Array<() => void> = [];
 
 // ============================================================================
 // Pane-control service surfaces
@@ -163,6 +167,38 @@ function activate(context: ExtensionContext): void {
       // Ignore — the control may never have had a script.
     });
   };
+  // The DOCUMENT changed under us (File > New / File > Open, and the .calp
+  // checkout that goes through the same announcement). Pane controls belong to
+  // the workbook, and so does everything their scripts built: the html a card
+  // renders, the properties it declares, and the live-frame budget slot its
+  // iframe holds. None of that left with the document — this extension had no
+  // document listener at all, and its only other refresh triggers are the
+  // mutation-domain fan-out and a "sheet:activated" event nothing dispatches.
+  //
+  // The budget is the half that bites silently. It is ONE cap of 24 shared with
+  // the on-grid shape host and it is per SESSION, so charges the pane never hands
+  // back are slots no later workbook gets: a card is unmounted by React when its
+  // control disappears, and File > Open unmounted nothing, so the previous
+  // workbook's tiles kept their frames — and their charges — for the rest of the
+  // session while the next workbook's shapes were refused with "this workbook
+  // already has 24".
+  //
+  // The refresh is the other half and has to run WITH the release, not instead of
+  // it: releasing the frames while the pane still lists the departed workbook's
+  // controls would leave a strip of permanently empty cards, and refreshing
+  // without releasing would leave a card whose id the new document happens to
+  // reuse showing the OLD workbook's html. The scripts themselves are re-mounted
+  // by ScriptableObjects on this same event, so a control that survives the swap
+  // re-declares its html and paints again.
+  const handleDocumentReplaced = () => {
+    releaseAllPaneControlFrames();
+    refreshCache();
+    refreshControls();
+  };
+  for (const evt of [AppEvents.AFTER_OPEN, AppEvents.AFTER_NEW] as const) {
+    removeAppEventListeners.push(onAppEvent(evt, handleDocumentReplaced));
+  }
+
   window.addEventListener("sheet:activated", handleSheetActivated);
   window.addEventListener("filterpane:filters-refreshed", handleFiltersRefresh);
   window.addEventListener(
@@ -208,6 +244,8 @@ function deactivate(): void {
   unregisterBadge = null;
   removeWindowListeners?.();
   removeWindowListeners = null;
+  for (const off of removeAppEventListeners) off();
+  removeAppEventListeners = [];
   registerControlValuesProvider(null);
   registerPaneControlStoreService(null);
   disposeCustomControlWiring();

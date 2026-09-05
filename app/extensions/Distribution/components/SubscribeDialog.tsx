@@ -57,10 +57,13 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   storage:
     "store its own private data inside this workbook file (up to 256 KB; it travels with the file if you share it)",
   "ui.html": "render custom HTML UI",
+  "ui.htmlInput":
+    "receive what you click and type inside the HTML it draws — where it claims your input, it reaches the script instead of Calcula: on the grid a click stops selecting a cell, and on a Controls-pane card the whole card is taken at once",
   "formula.udf": "define formula functions you can use in cells",
   "bi.model": "change your BI model definitions (measures, relationships, ...)",
   "bi.connector": "feed external data into your BI model",
   "ui.dialog": "interrupt you with a dialog and read your answer",
+  "ui.pane": "keep a task pane open beside the grid while you work, and read what you enter in it",
   "distribution.writeback":
     "fill in and send the input cells of a subscribed application — and, for an application it can sign, read and approve everyone else's answers",
   // Subscribing is the moment somebody else's code enters this workbook, so
@@ -83,7 +86,7 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // and would let a reader picture a file being opened; this is the workbook in
   // front of them, as they look at it.
   "grid.read":
-    "be shown what is in your cells — the value of every cell on screen while it decides how to colour them, and the old value, new value and formula of every cell that changes while it is running",
+    "be shown what is in your cells — the value of every cell on screen while it decides how to colour them, the old value, new value and formula of every cell that changes while it is running, and what is in any cell a field of its form points at",
   // These two can only be REQUESTED here, never exercised: a script that
   // arrives in an application is forced to the restricted tier, and every
   // cap.pkg* row is unlocked-tier. An application declaring them is asking for

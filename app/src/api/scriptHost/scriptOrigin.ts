@@ -82,9 +82,32 @@ export const PREVIEW_ORIGIN: PreviewOrigin = Object.freeze({ kind: "preview" });
  */
 export const UNKNOWN_PACKAGE_NAME = "(unknown package)";
 
-/** Build a package origin. An empty/absent name falls back to the placeholder. */
+/**
+ * The ONE test for "does this string name a package at all": a name that is
+ * absent, empty or whitespace-only names none, and stands in as the placeholder.
+ *
+ * A non-blank name is kept VERBATIM — not trimmed — because both Rust gates
+ * compare the raw string (`consent_granted_in` is asked with the module
+ * record's `source_package` exactly as stored, and the mount gate with
+ * `scriptOriginForMount(definition).name`). Trimming `"  Sales  "` here would
+ * key a consent record neither gate can find.
+ *
+ * `packageOrigin` and `scriptOriginForStoredRecord` both go through this, so
+ * the two halves of the store cannot disagree about a blank name. They did:
+ * `packageOrigin` used `name || placeholder`, which keeps `"   "` as a package
+ * called `"   "`, while the stored-record side trimmed and read the same stamp
+ * as LOCAL. A distributed object script named `"   "` was therefore keyed under
+ * `"   "` while a module carrying the identical stamp ran as the user's own —
+ * at the unlocked tier, through the local JIT-prompt path. One rule now, and
+ * it fails toward "distributed, publisher unnamed", never toward local.
+ */
+function packageNameOrPlaceholder(name: string | null | undefined): string {
+  return typeof name === "string" && name.trim() !== "" ? name : UNKNOWN_PACKAGE_NAME;
+}
+
+/** Build a package origin. A blank/absent name falls back to the placeholder. */
 export function packageOrigin(name?: string | null): PackageOrigin {
-  return Object.freeze({ kind: "package", name: name || UNKNOWN_PACKAGE_NAME });
+  return Object.freeze({ kind: "package", name: packageNameOrPlaceholder(name) });
 }
 
 /**
@@ -121,16 +144,27 @@ export function scriptOriginForMount(definition: {
  * asserting provenance it did not derive — which is exactly how a distributed
  * module came to run with LOCAL provenance and the UNLOCKED tier.
  *
- * An empty or whitespace-only package name is not a package: it is a record
- * with nothing stamped on it, so it is local. A non-empty one can never select
- * the local kind, for the same reason a publisher-chosen name cannot anywhere
- * else in this module.
+ * THE STAMP IS READ THE WAY RUST READS IT — AS AN `Option`. `source_package` is
+ * `Option<String>` on the record, and `distributed_module_refusal`
+ * (app/src-tauri/src/scripting/commands.rs) treats `None` as the user's own
+ * code and ANY `Some(..)` as a publisher's, blank or not. So an absent stamp
+ * (`null` / `undefined`) is local, and a present one — even `""` or `"   "` —
+ * is a package, whose blank name falls back to the placeholder through the
+ * same `packageNameOrPlaceholder` that `packageOrigin` uses.
+ *
+ * This used to trim and read a whitespace-only stamp as LOCAL, which is the
+ * one direction that grants: `runObjectScriptOnce` and the module debug session
+ * derive the TIER from this answer, so a module stamped `"   "` ran unlocked
+ * with local provenance while Rust's own gate held the same record to be
+ * distributed. A non-blank name can never select the local kind, for the same
+ * reason a publisher-chosen name cannot anywhere else in this module.
  */
 export function scriptOriginForStoredRecord(record: {
   sourcePackage?: string | null;
 }): MountOrigin {
-  const name = typeof record.sourcePackage === "string" ? record.sourcePackage.trim() : "";
-  return name === "" ? LOCAL_ORIGIN : packageOrigin(name);
+  return typeof record.sourcePackage === "string"
+    ? packageOrigin(record.sourcePackage)
+    : LOCAL_ORIGIN;
 }
 
 /**

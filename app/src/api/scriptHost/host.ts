@@ -33,6 +33,9 @@ import {
   METHOD_CALL_TIMEOUT_MS,
   RUN_TARGET_EXPOSED_PREFIX,
   COALESCE_HOOKS,
+  EVENT_QUEUE_HIGH_WATER,
+  EVENT_QUEUE_LOW_WATER,
+  EVENT_STALL_MS,
   type DebugAction,
   type DebugPauseState,
   type DebugReadyState,
@@ -104,6 +107,7 @@ import { requestScriptDialog, resetScriptDialogs, revokeScriptDialogs } from "./
 import {
   closeScriptForm,
   defineScriptForm,
+  describeFormError,
   getScriptFormSpec,
   refreshScriptFormSeeds,
   resetScriptForms,
@@ -113,6 +117,25 @@ import {
   type FormSessionDeps,
   type FormSubmitDecision,
 } from "./scriptForms";
+import {
+  closeScriptPane,
+  closeScriptPaneForPlacement,
+  dockScriptPane,
+  getScriptPaneForPlacement,
+  listScriptPanes,
+  noteScriptGesture,
+  refreshScriptPaneSeeds,
+  resetScriptPanes,
+  revealScriptPane,
+  revokeScriptPanes,
+  setScriptPaneBadge,
+  updateScriptPane,
+  type PaneRefusalAudit,
+  type PaneSessionDeps,
+} from "./scriptPanes";
+import { SCRIPT_PANE_PATCH_EVENT, type PaneCloseReason, type ScriptPanePatchPayload } from "./scriptPaneSpec";
+import { EMBEDDED_FORM_ORPHAN_REMEDY, getEmbeddedFormPlacement } from "./embeddedFormPlacements";
+import { SHAPE_HIT_REGIONS_EVENT, type ShapeHitRegion } from "./shapeHitRegionSpec";
 import {
   MAX_FORM_ERROR_CHARS,
   formOriginForMount,
@@ -128,6 +151,7 @@ import {
   scriptOriginForMount,
   scriptOriginForStoredRecord,
 } from "./scriptOrigin";
+import type { MountConsentArtifact, MountConsentSurface } from "./mountConsentSurface";
 import {
   cellWriteFor,
   collectFormBindings,
@@ -561,22 +585,35 @@ export interface HostMountDefinition {
    *  buildHandleFromDefinition; the broker denies any cap not in this set. */
   declaredCapabilities?: string[];
   /**
-   * The ARTIFACT this mount is, when the workbook's consent record names one.
+   * WHICH KIND of distributed code this mount is — the consent-store namespace
+   * the Rust gate judges it under (see `mountConsentSurface.ts`). Every mount
+   * route names its own; a distributed mount that omits it is REFUSED by the
+   * gate, never floored. Not consulted for local mounts, which are never asked.
+   */
+  consentSurface?: MountConsentSurface;
+  /**
+   * The ARTIFACTS this mount is, as its surface's consent record lists them.
    *
    * `source` here is the exact source the user APPROVED — never `definition.source`,
    * which is the composed realm source (a host-generated import prelude, then the
    * body) and hashes to something no consent record has ever seen. Supplying it
-   * tightens the mount gate from "this application is approved" to "this artifact
-   * is covered by that approval, at this hash".
+   * tightens the mount gate from "this application's code on this surface is
+   * approved" to "every one of these artifacts is covered by that approval, at
+   * this hash, under this surface's key".
    *
-   * Only a mount that can name its artifact honestly sets this. A composed realm
-   * — a UDF library, a shared-library realm, a chart mark/transform library —
-   * mounts code merged from many artifacts under a synthetic consent identity its
-   * own surface computes; re-deriving that identity here would be a second copy of
-   * the decision, which is precisely how the run routes came to differ. Those get
-   * the application-level floor, and their surface keeps its artifact check.
+   * Each OWNING SURFACE passes what it already records, and nothing is re-derived
+   * here: an object script `{ id, pre-prelude source }`; a chart mark/transform
+   * library its reserved id plus the canonical consent source its own former
+   * computes; the UDF realm the same; a shared-library realm one entry PER MODULE
+   * it merged; a writeback validator its `writeback-validator:<name>` id plus the
+   * body. Re-deriving any of those identities at this boundary would be a second
+   * copy of the decision, which is precisely how the run routes came to differ.
+   *
+   * An EMPTY list is refused by the gate (a claim that cannot be verified);
+   * omitting the field is the weaker application floor, which no route in this
+   * codebase currently needs (pinned by `mountConsentKeyDrift.test.ts`).
    */
-  consentArtifact?: { id: string; source: string };
+  consentArtifacts?: readonly MountConsentArtifact[];
   apiVersion: string;
   /**
    * Why this mount is happening. `"open"` marks the workbook-open mount path
@@ -640,6 +677,23 @@ interface MountedWorker {
   coalesced: Map<string, unknown>;
   coalesceScheduled: boolean;
   /**
+   * BACKPRESSURE. Dispatches posted to the realm that it has not yet
+   * acknowledged with `{t:"eventDone"}`. Above `EVENT_QUEUE_HIGH_WATER` the
+   * host stops posting: coalesced hooks keep merging in `coalesced`, and every
+   * other hook is queued in `heldEvents` in order. Posting resumes once the
+   * realm has drained below `EVENT_QUEUE_LOW_WATER` (hysteresis), and a realm
+   * that acknowledges nothing for `EVENT_STALL_MS` while held is treated as
+   * crashed. Before this, `EVENT_QUEUE_HIGH_WATER` was declared and read
+   * nowhere: a hook that stopped returning let the queue grow for as long as
+   * the workbook stayed open.
+   */
+  outstandingEvents: number;
+  eventsHeld: boolean;
+  heldEvents: Array<{ hook: string; payload: unknown }>;
+  /** Held events dropped past the hard cap — surfaced, never silent. */
+  droppedHeldEvents: number;
+  stallTimer: ReturnType<typeof setTimeout> | null;
+  /**
    * True while this open-mount still owes its script the `workbook.onOpen`
    * replay (see HostMountDefinition.mountCause). Cleared the moment the hook
    * is wired, so a hook re-declared later in the same mount cannot replay twice.
@@ -683,6 +737,14 @@ interface MountedWorker {
    */
   suspendMountDeadline?: () => void;
   resumeMountDeadline?: () => void;
+  /**
+   * Settle a still-pending mount as SUPERSEDED. Set for the life of the mount
+   * handshake and called by `hostUnmountScript` when a newer mount of the same
+   * id terminates this worker — otherwise the terminated worker never answers,
+   * this mount's deadline fires ten seconds later, and the caller (a debug
+   * session start, over the bridge) learns of its own supersession only then.
+   */
+  rejectMount?: (err: Error) => void;
 }
 
 const mounted = new Map<string, MountedWorker>();
@@ -806,18 +868,20 @@ interface MountAdmission {
   /** `"local"` or `"package:<name>"` — the origin the gates judged. */
   readonly originKey: string;
   /**
-   * The artifact identity the consent gate was asked about (`""` when the mount
-   * named none). Recorded so an admission is a COMPLETE statement of what was
-   * judged rather than three quarters of one — the same reason it carries the
-   * source and the origin.
+   * The surface and artifact identities the consent gate was asked about
+   * (`""` when the mount named neither). Recorded so an admission is a COMPLETE
+   * statement of what was judged rather than three quarters of one — the same
+   * reason it carries the source and the origin.
    */
   readonly artifactKey: string;
 }
 
-/** The artifact identity a definition presents to the consent gate, flattened. */
+/** The surface + artifact identity a definition presents to the consent gate, flattened. */
 function mountArtifactKey(definition: HostMountDefinition): string {
-  const artifact = definition.consentArtifact;
-  return artifact ? JSON.stringify([artifact.id, artifact.source]) : "";
+  const artifacts = definition.consentArtifacts;
+  const surface = definition.consentSurface;
+  if (!artifacts && !surface) return "";
+  return JSON.stringify([surface ?? null, (artifacts ?? []).map((a) => [a.id, a.source])]);
 }
 
 /**
@@ -860,11 +924,16 @@ const DISTRIBUTED_SCRIPT_NOT_CONSENTED = "DISTRIBUTED_SCRIPT_NOT_CONSENTED";
  * workbook approved that APPLICATION's code?", over the same consent file, the
  * same records and the same helpers the subscribe flow writes.
  *
- * WHERE THE ARTIFACT IS NAMEABLE, IT IS NAMED. `definition.consentArtifact`
- * carries the stored id and the pre-prelude source for the one route that
- * honestly knows them (a standing object-script mount), which tightens the check
- * to that artifact's hash. A composed realm has no such identity to offer and
- * gets the application-level floor.
+ * THE SURFACE IS NAMED, AND THE ARTIFACTS ARE NAMED. `definition.consentSurface`
+ * says which consent-store namespace the gate judges under (one, the mount's
+ * own — never every spelling of the application's name), and
+ * `definition.consentArtifacts` carries what that surface's record lists, as the
+ * owning surface already holds it: the object script's id and pre-prelude
+ * source, a chart library's reserved id and canonical consent source, one entry
+ * per merged module for a library realm, and so on. Both are passed through
+ * verbatim. A missing surface, an unknown one, or an empty artifact list is a
+ * REFUSAL on the Rust side, not a fallback to a weaker check — so this function
+ * does not fill either in, and does not decide which mounts "need" them.
  *
  * THE CALL IS MADE HERE AND THE DECISION IS NOT. The mount happens in the
  * renderer, so the renderer is the only place that can ASK. It is not a place
@@ -908,7 +977,8 @@ async function requireDistributedMountConsent(definition: HostMountDefinition): 
       // placeholder — which no consent record can satisfy, so it is refused.
       packageName: origin.name,
       source: definition.source,
-      artifact: definition.consentArtifact ?? null,
+      surface: definition.consentSurface ?? null,
+      artifacts: definition.consentArtifacts ?? null,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -1016,6 +1086,30 @@ async function mountWorker(
     if (wasTransient) transientDebugMounts.add(definition.id);
   }
   faulted.delete(definition.id);
+  // A USER GESTURE for the pane's screen window (scriptPanes.ts): this is the
+  // moment the script comes into existence for this workbook — the person
+  // applied it to an object, opened the workbook that holds it, re-linked it,
+  // or ended a debug session — and a task pane that opens when its script is
+  // set up is the whole point of the surface. Without it a `setup()` that docks
+  // could never SHOW its pane, only register it.
+  //
+  // STAMPED HERE, NOT IN `hostMountScript`: the remount teardown just above
+  // runs `hostUnmountScript`, and that drops this script's stamp along with its
+  // panes. A stamp taken before it would be erased by the very mount it was
+  // taken for.
+  //
+  // BOUNDED BY BEING ONCE. `revokeScriptPanes` drops it on unmount, so this is
+  // one window per mount and not a renewable one; and a dock inside it cannot
+  // be renewed by its own acknowledgement (`dockAckGestureAt`), which is what
+  // stops one window from becoming a licence to re-dock for ever.
+  //
+  // HONEST ABOUT WHAT IT IS NOT: not every mount is a hand on the mouse. A JS
+  // UDF library mounts on its first evaluation, which a recalculation can
+  // trigger, and a crash respawn re-mounts once. Each buys the script ONE pane
+  // opening. The narrower alternative — stamping only at the call sites that
+  // are literally a click — would mean a script the user has just applied
+  // cannot show its own pane, which is the surface failing at its purpose.
+  noteScriptGesture(definition.id);
 
   // An open debug session survives a remount (Save & Apply keeps you in the
   // debugger), but every remount restarts from a clean, un-paused state.
@@ -1051,6 +1145,11 @@ async function mountWorker(
     nextReqId: 1,
     coalesced: new Map(),
     coalesceScheduled: false,
+    outstandingEvents: 0,
+    eventsHeld: false,
+    heldEvents: [],
+    droppedHeldEvents: 0,
+    stallTimer: null,
     openReplayPending: definition.mountCause === "open",
     lastCrashAt: 0,
     respawned: false,
@@ -1130,6 +1229,18 @@ async function mountWorker(
   };
   pauseOnEntryOnce.set(definition.id, false);
 
+  // Already superseded? `mounted` is published before the backend round trips
+  // above (grants, snapshot) are awaited, so a newer mount of the same id can
+  // have terminated this worker BEFORE its handshake promise — and its
+  // `rejectMount` — existed. Posting `mount` to a terminated worker would then
+  // wait out the full deadline for an answer that can never come. Thrown HERE,
+  // synchronously, rather than as a rejection inside the promise executor: a
+  // promise rejected before anything awaits it is an unhandled rejection the
+  // moment `post` refuses the terminated worker on the next line.
+  if (mw.terminated) {
+    throw new Error("Script mount superseded by a newer mount of the same script");
+  }
+
   const mountedPromise = new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
@@ -1153,11 +1264,23 @@ async function mountWorker(
     // debugger can never be killed by the clock it is standing still in front of.
     mw.suspendMountDeadline = disarm;
     mw.resumeMountDeadline = arm;
+    // Superseded by a newer mount of the same id: answer NOW, not when the
+    // deadline of a worker that no longer exists runs out.
+    mw.rejectMount = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      disarm();
+      mw.suspendMountDeadline = undefined;
+      mw.resumeMountDeadline = undefined;
+      mw.rejectMount = undefined;
+      reject(err);
+    };
     wireWorker(mw, (ok, error) => {
       settled = true;
       disarm();
       mw.suspendMountDeadline = undefined;
       mw.resumeMountDeadline = undefined;
+      mw.rejectMount = undefined;
       if (ok) {
         resolve();
       } else {
@@ -1170,7 +1293,14 @@ async function mountWorker(
   try {
     await mountedPromise;
   } catch (err) {
-    hostUnmountScript(definition.id);
+    // ONLY THIS MOUNT'S OWN REALM. A second mount for the same id supersedes
+    // this one by terminating its worker (the `mounted.has` branch above), so
+    // this worker never answers, this deadline fires ten seconds later, and an
+    // unconditional unmount-by-id here tore down the LIVE successor — the
+    // session the user was actually debugging, and the mount two starts in
+    // flight had just brought up. A failure cleans up what it started, nothing
+    // that replaced it.
+    if (mounted.get(definition.id) === mw) hostUnmountScript(definition.id);
     throw err;
   }
 }
@@ -1187,7 +1317,14 @@ export function hostUnmountScript(scriptId: string): void {
   transientDebugMounts.delete(scriptId);
   // There is no realm left to end a session against.
   cancelDebugAutoEnd(scriptId);
+  // ...nor to deliver a held backlog to, nor to wait on for acknowledgements.
+  disarmStallWatchdog(mw);
+  mw.heldEvents = [];
+  mw.coalesced.clear();
   activityStartedAt.delete(scriptId);
+  // A mount still shaking hands learns it was superseded HERE, not from its
+  // own deadline ten seconds after its worker went silent.
+  mw.rejectMount?.(new Error("Script mount superseded by a newer mount of the same script"));
   mw.terminated = true;
   mw.worker.terminate();
   for (const pending of mw.pendingRenderCells.values()) {
@@ -1218,6 +1355,17 @@ export function hostUnmountScript(scriptId: string): void {
   if (mw.definition.instanceId) {
     invalidateBitmap("shape", mw.definition.instanceId);
     invalidateSlicerBitmaps(mw.definition.instanceId);
+    // ...and release every hit rectangle it claimed on its HTML frame (M3b).
+    // A claimed rectangle is a piece of the grid's pointer input, so it must
+    // not outlive the code that asked for it: the frame itself is left painted
+    // (removing it is the control's own teardown), but it goes back to being
+    // click-through the instant the script is gone. An EMPTY declaration
+    // travels the same door a script's own release does, so there is one code
+    // path on the receiving side and no second way to get this wrong.
+    emitAppEvent(SHAPE_HIT_REGIONS_EVENT, {
+      instanceId: mw.definition.instanceId,
+      regions: [] as ShapeHitRegion[],
+    });
   }
   // Drop the script's Rust-side net.fetch grants so an unmounted script can
   // never fetch (session grants in capabilities.ts survive for a remount).
@@ -1230,6 +1378,10 @@ export function hostUnmountScript(scriptId: string): void {
   // show bucket, so a remount starts clean. A caller awaiting that form's
   // answer (the cross-script show) is told null by the registry.
   revokeScriptForms(scriptId);
+  // ...and every task PANE it had docked (M2): the renderer must not keep a
+  // pane up for code that no longer exists, and a remount starts with a clean
+  // pane cap and dock bucket.
+  revokeScriptPanes(scriptId);
   // Take back every keyboard shortcut it held. The per-binding cleanups above
   // already do this; this sweep is by scriptId and is the one that must not be
   // forgettable — a shortcut that outlives its script is a key the user can
@@ -1293,6 +1445,16 @@ export function hostIsMounted(scriptId: string): boolean {
 }
 
 export function hostResetAll(): void {
+  // FIRST, ahead of the per-script unmounts: every task pane, its layout and
+  // its dock bucket (M2). The ORDER is the whole point. This sweep is the only
+  // caller that knows the WORKBOOK is going, and it closes panes as "reset",
+  // which DROPS a bound change still inside the pane's text debounce instead of
+  // writing it out. The unmount loop below would reach those panes first
+  // (hostUnmountScript -> revokeScriptPanes) and close them as "unmount", which
+  // flushes — and a workbook swap sweeps from AFTER_OPEN / AFTER_NEW, after the
+  // document has already been replaced, so that flush wrote what the user typed
+  // into the OLD workbook into the NEW workbook's cell of the same address.
+  resetScriptPanes();
   for (const scriptId of [...mounted.keys()]) {
     hostUnmountScript(scriptId);
   }
@@ -1313,7 +1475,9 @@ export function hostResetAll(): void {
   // ...and every dialog mute / dismissal streak, so the next workbook's scripts
   // are not judged by the previous one's behavior.
   resetScriptDialogs();
-  // ...and every form layout, session, deadline and show bucket.
+  // ...and every form layout, session, deadline and show bucket. (The task
+  // panes were swept at the TOP of this function, before the unmounts — see
+  // the comment there for why the order is load-bearing.)
   resetScriptForms();
   // ...and the save rate buckets: a new workbook is a new file, and the old
   // one's timings say nothing about it.
@@ -2564,6 +2728,11 @@ export async function hostStartDebugSession(
   if (!mw) {
     throw new Error("Cannot debug a script that is not mounted — apply it first.");
   }
+  // A USER GESTURE for the pane's reveal window: a session is entered only
+  // from the script editor's Run / Debug (the bridge command or the in-window
+  // dialog — see the header of this section). Nothing a script can call
+  // reaches here.
+  noteScriptGesture(scriptId);
   // A standing mount is normally a REAL object script: `setup` is its
   // registration step, so the debug mount must keep calling it or the script
   // would come up with no hooks, an empty Fire list and nothing to debug at all.
@@ -2639,7 +2808,12 @@ async function startDebugSessionOn(
     // the panel shows it. Anything else (spawn failure, mount timeout) leaves
     // no session behind.
     const settled = debugSessions.get(scriptId);
-    if (settled?.status !== "failed") {
+    // ...and ONLY if the session on record is still the one THIS call created.
+    // A start superseded by a newer start fails late (its worker was terminated
+    // by the successor; its mount deadline fires ten seconds on), and deleting
+    // by id here would erase the successor's live session and broadcast null
+    // for it — the host side of "two starts in flight".
+    if (settled === session && settled.status !== "failed") {
       debugSessions.delete(scriptId);
       pauseOnEntryOnce.delete(scriptId);
       emitDebugState(null, scriptId);
@@ -2738,6 +2912,12 @@ export async function hostStartModuleScriptDebugSession(
     // tier a button click runs it under, so what you step through is what runs.
     accessLevel: origin.kind === "package" ? "restricted" : "unlocked",
     ...mountProvenanceForOrigin(origin),
+    // A module macro a `.calp` shipped is recorded under the application's BARE
+    // key alongside its object scripts (one grant covers both kinds), and the
+    // record lists exactly `{ id, source }` of the stored module — which is what
+    // this session is about to mount, un-composed.
+    consentSurface: "object-script",
+    consentArtifacts: [{ id: scriptId, source: record.source }],
     apiVersion: SCRIPT_API_VERSION,
   };
 
@@ -2749,6 +2929,10 @@ export async function hostStartModuleScriptDebugSession(
   // so there is only ever ONE mount and it is the instrumented, inert one.
   const admission = await admitMount(definition);
   transientDebugMounts.add(scriptId);
+  // A USER GESTURE for the pane's reveal window: Run / Debug on a module in
+  // the script editor, the same entry `hostStartDebugSession` stamps for a
+  // standing mount. (The macro runs at this mount.)
+  noteScriptGesture(scriptId);
   try {
     return await startDebugSessionOn(definition, breakpoints, options, false, admission);
   } catch (err) {
@@ -2824,6 +3008,10 @@ export async function hostDebugFireTrigger(scriptId: string, triggerId: string):
   if (!trigger.fireable) {
     throw new Error(`${trigger.name} cannot be fired from the debugger: ${trigger.reason}.`);
   }
+  // A USER GESTURE for the pane's reveal window: the Fire / Run row of the
+  // editor's debugger, F5 on a run target. A script cannot reach this (the
+  // header above: a fire exists only because the user opened a session).
+  noteScriptGesture(scriptId);
   if (trigger.kind === "method") {
     // A run-target is invoked under its prefixed relay name (invokeName); an
     // ordinary method under its own name. invokeName defaults to name.
@@ -3096,6 +3284,11 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
       case "debugActivity":
         handleDebugMessage(mw, msg);
         break;
+      case "eventDone":
+        // The realm's own completion signal for one dispatch — the only thing
+        // that can release a backpressure hold or prove a held realm alive.
+        onEventDone(mw);
+        break;
       case "validated":
       case "pong":
         break;
@@ -3103,8 +3296,18 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
   };
 
   mw.worker.onerror = (e) => {
+    crashWorker(mw, e.message || "Worker crashed");
+  };
+}
+
+/**
+ * A realm has died (or, equivalently, stopped acknowledging its dispatches —
+ * see the stall watchdog in `forwardEvent`): respawn already-admitted code
+ * once, fault it on a second crash within 30 s.
+ */
+function crashWorker(mw: MountedWorker, message: string): void {
+  {
     const now = Date.now();
-    const message = e.message || "Worker crashed";
     if (mw.respawned && now - mw.lastCrashAt < 30_000) {
       // Second crash within 30s: fault the script (visible in the panel).
       faulted.set(mw.definition.id, message);
@@ -3134,7 +3337,7 @@ function wireWorker(mw: MountedWorker, onMounted: (ok: boolean, error?: string) 
     }).catch(() => {
       faulted.set(definition.id, message);
     });
-  };
+  }
 }
 
 // ============================================================================
@@ -3372,6 +3575,37 @@ export function mayJitPromptForCapability(handle: Pick<ScriptHandle, "origin">):
 }
 
 /**
+ * The user just answered a permission dialog about THIS script, and what they
+ * allowed is the permission that gates its task pane. That answer IS a user
+ * gesture in the sense scriptPanes.ts means: a modal the person read and
+ * clicked, attributable to this one script, bounded by the same window as every
+ * other stamp.
+ *
+ * Without it a local script's FIRST `pane.dock` could not show its pane.
+ * `handleCall` awaits this dialog BEFORE the executor reaches `dockScriptPane`,
+ * and the only stamp behind a `setup()` dock is the mount's (see `mountWorker`),
+ * so a person who spent longer than PANE_REVEAL_GESTURE_WINDOW_MS reading the
+ * prompt they had to answer got `dockMayOpen() === false`: the pane they had
+ * just authorised was registered in the panel list and never appeared. Nothing
+ * recovered afterwards either — `markDocked` stamps only when the dock OPENED,
+ * so the script's own `pane.reveal` answered `no-gesture` for the rest of the
+ * session, leaving the user no route to the pane but noticing it unprompted.
+ *
+ * SCOPED TO THE PANE CAPABILITY, deliberately. Stamping on every grant would
+ * hand the pane window to code running on its own clock: a `setInterval` whose
+ * first `net.fetch` or `storage` prompt the user answers would open a window for
+ * a pane they were never asked about — exactly what the window exists to refuse
+ * (scriptPanes.ts, "STAMP ONLY AT USER ENTRY POINTS"). `ui.pane` is the one
+ * capability whose dialog says a task pane is what is being granted.
+ *
+ * Never called on a deny: a refusal must not open a window either.
+ */
+function noteCapabilityGrantGesture(scriptId: string, cap: CapabilityId): void {
+  if (cap !== "ui.pane") return;
+  noteScriptGesture(scriptId);
+}
+
+/**
  * JIT-prompt the CONSUMER for a capability its library holds. Mirrors
  * maybeRequestCapabilityGrant's policy exactly — local scripts only, one prompt
  * per session per (capability, origin), "always" persisted against the
@@ -3399,6 +3633,9 @@ async function requestLibraryCapability(
   });
   if (decision === "deny") return;
   recordCapabilityGrant(handle.scriptId, cap, origin ?? undefined);
+  // A library route reaches `pane.dock` the same way the direct one does, so it
+  // carries the same first-dock defect and the same fix.
+  noteCapabilityGrantGesture(handle.scriptId, cap);
   if (origin) {
     try {
       await grantNetOrigin(handle.scriptId, origin);
@@ -3513,6 +3750,9 @@ async function maybeRequestCapabilityGrant(
   });
   if (decision !== "deny") {
     recordCapabilityGrant(handle.scriptId, cap);
+    // The click that answered this dialog is the gesture the call being unblocked
+    // rides — for `ui.pane` only, and never for a deny. See the helper.
+    noteCapabilityGrantGesture(handle.scriptId, cap);
     // Mirror BI-family grants to the authoritative Rust store (the Rust gates
     // re-check it per call).
     if (RUST_MIRRORED_CAPABILITIES.has(cap)) {
@@ -5530,6 +5770,15 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       emitAppEvent("shape:setHtmlContent", { instanceId, html });
       return undefined;
     }
+    case "render.setHitRegions": {
+      // M3b. The rectangles are FRAME-LOCAL (shapeHitRegionSpec.ts states the
+      // space); the Controls extension converts them to canvas pixels. Nothing
+      // here trusts the numbers for anything but forwarding — vHitRegions has
+      // already bounded the count, the coordinates and the ids.
+      const [regions] = args as [ShapeHitRegion[]];
+      emitAppEvent(SHAPE_HIT_REGIONS_EVENT, { instanceId, regions });
+      return undefined;
+    }
 
     // ---- capabilities ----
     case "cap.fetch": {
@@ -5676,6 +5925,89 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const [result] = args as [Record<string, FormValue | string[]> | null | undefined];
       closeScriptForm(definition.id, result ?? null);
       return undefined;
+    }
+    // ---- task panes (M2): the same data-only tree, MODELESS, behind ui.pane.
+    //      `pane.dock` resolves once the renderer acknowledges the pane is on
+    //      screen; nothing awaits the user afterwards. Every call after the
+    //      dock names the pane, and the registry refuses one this script does
+    //      not own.
+    //
+    //      BOUND CELLS take the FORM's pipeline, not a second one: the same
+    //      `resolveFormBindings` thunk (after the registry's guards, so a
+    //      refused dock reads nothing), the same restricted-tier sheet pin,
+    //      the same audited rows under this script's own handle. Two things
+    //      differ, both because a pane has no Submit: every writable binding
+    //      is `writeOn: "change"` (the form default "submit" would mean
+    //      "never" here), and the live watch is installed only while the pane
+    //      is VISIBLE — `paneSessionDeps` — with every bound cell re-read on
+    //      each reveal, so a pane that sat hidden for an hour comes back
+    //      current rather than replaying the hour. ----
+    case "pane.dock": {
+      const [spec, options] = args as [FormSpec, { initial?: Record<string, unknown>; key?: string } | undefined];
+      const holder: { bound: ResolvedFormBindings | null } = { bound: null };
+      return dockScriptPane({
+        scriptId: definition.id,
+        scriptName: definition.name,
+        origin: formOriginForMount(definition),
+        spec,
+        initial: options?.initial,
+        // The stable slot key (vPaneDock bounded it); absent means the registry's lowest free slot.
+        key: options?.key,
+        resolve: async () => {
+          const bound = await resolveFormBindings(mw, spec, "pane.dock");
+          holder.bound = bound;
+          return {
+            seeds: bound.seeds,
+            pinnedSheetName: bound.pinnedSheetName,
+            writeOnChange: bound.cells.map((c) => c.decl.name),
+          };
+        },
+        deps: paneSessionDeps(mw, () => holder.bound),
+      });
+    }
+    case "pane.update": {
+      const [paneId, patch] = args as [string, FormPatch];
+      updateScriptPane(definition.id, paneId, patch);
+      return undefined;
+    }
+    case "pane.setBadge": {
+      const [paneId, badge] = args as [string, string | null];
+      setScriptPaneBadge(definition.id, paneId, badge ?? null);
+      return undefined;
+    }
+    case "pane.reveal": {
+      const [paneId] = args as [string];
+      return revealScriptPane(definition.id, paneId);
+    }
+    case "pane.close": {
+      const [paneId] = args as [string];
+      closeScriptPane(definition.id, paneId);
+      return undefined;
+    }
+    // ---- pane.list (M3c): the script's OWN open surfaces, and nothing else.
+    //      A docked pane's id is the return value of the `pane.dock` that made
+    //      it, so a script never needed this list — but an EMBEDDED form's
+    //      session is opened by the host when the user's placement paints, and
+    //      several copies of one form can be on a sheet at once. Without a way
+    //      to enumerate them a script could address only whichever surface
+    //      opened last.
+    //
+    //      FILTERED TO THE CALLER, HERE, over the registry's full list: pane ids
+    //      are host-minted and predictable (`pane-<n>`), so leaking another
+    //      script's row would hand a script the id it needs to try to drive a
+    //      surface it does not own — the registry would refuse the call, but the
+    //      existence of the other script's pane would already have leaked. Same
+    //      rule `owned()` applies to every call after the open. ----
+    case "pane.list": {
+      return listScriptPanes()
+        .filter((p) => p.scriptId === definition.id)
+        .map((p) => ({
+          paneId: p.paneId,
+          placement: p.placement,
+          embedded: p.embedPlacementId !== null,
+          visible: p.visible,
+          badge: p.badge,
+        }));
     }
     case "cap.formsShow": {
       // Another script's form, by NAME. The caller's own row was admitted and
@@ -5847,6 +6179,12 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
             );
             return;
           }
+          // A USER GESTURE for the pane's reveal window: `run` is invoked by
+          // the app's one keydown listener (keybindings.ts) when the user
+          // presses the combination — and by nothing else. Stamped HERE, not
+          // in hostCallExposed, which a scheduled job and a cross-script call
+          // share: a stamp there would hand the window to code on a timer.
+          noteScriptGesture(scriptId);
           void Promise.resolve(
             hostCallExposed(objectType, boundInstanceId, handlerName, [{ combo: firedCombo }]),
           ).catch((err) => {
@@ -12432,7 +12770,15 @@ function formSessionDeps(
 ): FormSessionDeps {
   let liveWatch: CleanupFn | null = null;
   return {
-    forward: (hook, payload) => forwardEvent(mw, hook, payload),
+    forward: (hook, payload) => {
+      // The user's hand on this script's FORM is a gesture for its pane's
+      // reveal window (scriptPanes.ts `noteScriptGesture`): a click, a change
+      // the USER made, an answer. Not `onShow` (the script opened the form),
+      // not a `source: "cell"` change (a cell moved underneath), not a close
+      // by deadline, script or unmount.
+      if (isFormUserGesture(hook, payload)) noteScriptGesture(mw.definition.id);
+      forwardEvent(mw, hook, payload);
+    },
     mirror: (path, value) => post(mw, { t: "mirror", path, value }),
     relaySubmit: (values) => raceFormSubmitVerdict(mw, values),
     opened: (showId) => {
@@ -12461,6 +12807,488 @@ function formSessionDeps(
       if (caller) releaseFormDeadlines(caller);
     },
   };
+}
+
+/**
+ * Bind a pane session to its OWNING worker. Same construction as
+ * `formSessionDeps`, minus everything a modeless surface must not have: no
+ * deadline hold (nothing in the worker awaits the user), no submit relay (a
+ * pane has no answer), no caller (a pane is never opened on another script's
+ * behalf). The registry (scriptPanes.ts) never sees a MountedWorker.
+ *
+ * THE WATCH IS VISIBILITY-GATED. A form's watch runs from `opened` to
+ * `closed`, and a form is on screen for that whole span. A pane is not: it can
+ * be docked on a ribbon tab that is not selected, or in a sidebar the user
+ * closed, for hours. Watching it then would (a) perform an audited read of
+ * this script's cells on every change to a surface nobody can see, and (b)
+ * queue one `onPaneChange` per change for delivery — an hour of stale events
+ * the script would receive the moment the pane came back. So the watch is
+ * installed on `visible` and torn down on `hidden`, and every reveal RE-READS
+ * the bound cells once (`onlyChanged`: the script hears what is different
+ * now, not every untouched widget). `epoch`/`armEpoch` STOP a re-read whose
+ * pane was hidden, closed or walked off its sheet while its cells were being
+ * read — between cells, so no further IPC is spent and no seed it computed is
+ * adopted; dropping only its final publish still charged the script a read per
+ * remaining cell and left the surface's own settlement overwritten.
+ *
+ * THE REVEAL RE-READ HONOURS THE PIN. At restricted tier every cell binding
+ * was pinned to the sheet on screen at dock, and the restricted read rows take
+ * the ACTIVE sheet — so a reveal while the user is on another sheet (close the
+ * sidebar, switch sheets, open the sidebar) must not re-read at all: each read
+ * would be refused by the tier clamp, charged to the script as a denial for a
+ * gesture the USER made, and adopted as `{ value: null }` — every untouched
+ * bound widget announced to the script as a cell that became empty, and
+ * disabled under the clamp sentence, which is the wrong sentence (nothing was
+ * clamped; the user is on another sheet). Off the pinned sheet the bound
+ * widgets are instead disabled under the PIN sentence — the family the write
+ * refusal uses — with a banner saying so: the seeds are re-read, the widgets
+ * re-enabled and the live watch installed only once the active sheet is the
+ * pinned one again. The watch never installs off-sheet.
+ *
+ * ...AND THE DEPARTURE IS WATCHED, NOT ONLY THE RETURN. Which sheet the pane
+ * is standing on is a fact about the WORKBOOK, not about which renderer input
+ * happened to arrive, so `sheetWatch` is installed for as long as a pinned pane
+ * is VISIBLE — on its own sheet as much as away from it. It used to be
+ * installed at the END of the off-sheet branch, which a pane that never left
+ * the screen never reached: the user switched sheets with the pane in front of
+ * them and NOTHING happened — fully enabled widgets showing the previous
+ * sheet's values, and the truth arriving only afterwards, as a refusal in the
+ * script's own message slot, once they had typed. Every other surface in this
+ * family says it BEFORE the user types. `hidden` and `closed` tear the watch
+ * down with the live one (a hidden pane must still read nothing), and an
+ * unpinned pane — an unlocked script — installs neither.
+ *
+ * ...AND THE PIN IS A SHEET NAME, NOT A SHEET INDEX. The user can renumber the
+ * workbook by hand with a pane docked — delete a sheet, drag a tab — and the
+ * index the pin holds then belongs to a DIFFERENT sheet. `latchSheetIdentity`
+ * runs before the pin comparison on every reveal (and before every read the
+ * live watch starts), so the pane refuses rather than re-aiming; `refuseIdentity`
+ * says what the user can do about it.
+ *
+ * `getBound` is a getter for the reason `formSessionDeps` gives: the bindings
+ * are resolved inside the registry's `resolve` thunk, after these deps exist.
+ */
+function paneSessionDeps(mw: MountedWorker, getBound: () => ResolvedFormBindings | null): PaneSessionDeps {
+  let liveWatch: CleanupFn | null = null;
+  /**
+   * The SHEET_CHANGED listener, held for the whole VISIBILITY of a pinned pane:
+   * it is what turns "the user walked off this pane's sheet" into the same
+   * state an off-sheet reveal produces, and "they walked back" into the return.
+   */
+  let sheetWatch: CleanupFn | null = null;
+  /** Is the off-sheet notice up? One announcement per departure, not per SHEET_CHANGED. */
+  let offSheet = false;
+  let epoch = 0;
+  /** Bumped by every disarm, so a re-read that lands after one announces nothing. */
+  let armEpoch = 0;
+  /**
+   * Which settlement is the CURRENT question about the workbook. Every settle
+   * asks the backend where the user is standing, and two sheet changes in quick
+   * succession put two of those questions in flight at once — over IPC, with no
+   * promise that the older one answers first. The older answer must not be
+   * acted on: it would raise the off-sheet notice against a sheet the user has
+   * already come back from, and `offSheet` would then hold that sentence up
+   * until the next sheet change, telling a user standing on Sheet1 to switch
+   * back to Sheet1. Only the latest settle acts.
+   */
+  let settleTick = 0;
+  /**
+   * Drop the live watch, and any read it has in flight, WITHOUT ending the
+   * visibility — what leaving the pinned sheet does. `epoch` cannot serve here:
+   * `sheetWatch` holds the epoch of its visibility and must keep settling
+   * across the departure and the return.
+   */
+  const disarm = (): void => {
+    armEpoch += 1;
+    liveWatch?.();
+    liveWatch = null;
+  };
+  const stopWatching = (): void => {
+    epoch += 1;
+    disarm();
+    sheetWatch?.();
+    sheetWatch = null;
+    offSheet = false;
+  };
+  /** On the pinned sheet (or unpinned): install the watch, then re-read once. */
+  const arm = (paneId: string, bound: ResolvedFormBindings, mine: number): void => {
+    // Two SHEET_CHANGED events in one turn must not stack two watches: the
+    // first `arm` of an epoch owns the watch, and a second one is a no-op.
+    if (liveWatch !== null) return;
+    const mineArm = armEpoch;
+    /**
+     * Is this arm still the live one? The re-read asks it between cells, so a
+     * hide, a close or a departure stops it mid-run instead of only silencing
+     * its answer — and the same fact decides whether its seeds are adopted, so
+     * there is no third mechanism to keep in step with these two counters.
+     */
+    const stillThisArm = (): boolean => mine === epoch && mineArm === armEpoch;
+    liveWatch = installBoundLiveWatch(
+      mw,
+      bound,
+      "pane",
+      (fresh) => refreshScriptPaneSeeds(paneId, fresh),
+      (message) => refuseIdentity(paneId, bound, message),
+    );
+    void rereadBoundSeeds(mw, bound, stillThisArm).then((fresh) => {
+      if (fresh === null) return;
+      refreshScriptPaneSeeds(paneId, fresh, { onlyChanged: true });
+    });
+  };
+  /**
+   * The pane's sheets moved under it (`latchSheetIdentity`): the pinned sheet
+   * was deleted, or another sheet took its index. READ NOTHING — the cells at
+   * those coordinates now belong to a sheet the script never bound, and reading
+   * them would announce another sheet's values to the script as this pane's
+   * own. The widgets are disabled under the identity sentence, which unlike the
+   * pin sentence is TRUE and followable here: "switch back to Sheet1" cannot be
+   * obeyed by a user already standing on Sheet1 (or by anyone, once Sheet1 is
+   * deleted), while "close the pane and open it again" re-resolves the
+   * bindings against the workbook as it now is.
+   *
+   * `kind: "error"`, not the off-sheet notice's "warning": this one does not
+   * lift by itself, whatever the user does with the sheet tabs.
+   *
+   * Audited as a refused READ, the same way `writeBoundCells` audits a refused
+   * write — a reveal that reads nothing must not look, in the transparency
+   * panel, like a pane that simply had nothing to do.
+   */
+  const refuseIdentity = (paneId: string, bound: ResolvedFormBindings, message: string): void => {
+    stopWatching();
+    const seeds: Record<string, FormSeed> = {};
+    for (const cell of bound.cells) {
+      // The LAST value read, as the off-sheet notice does: the registry's
+      // values are left alone, so nothing reaches the script either.
+      seeds[cell.decl.name] = { ...(bound.seeds[cell.decl.name] ?? { value: null }), readOnly: true, reason: message };
+    }
+    const patch: ScriptPanePatchPayload = { paneId, seeds, hostBindingNotice: { text: message, kind: "error" } };
+    emitAppEvent(SCRIPT_PANE_PATCH_EVENT, patch);
+    if (mw.handle.preview) return;
+    appendAudit({
+      ts: Date.now(),
+      scriptId: mw.handle.scriptId,
+      scriptName: mw.handle.scriptName,
+      method: mw.handle.tier === "unlocked" ? "api.getCellData" : "sheet.getCellData",
+      class: "read",
+      ok: false,
+      error: "HostError",
+    });
+  };
+  /**
+   * What a reveal owes a pane with cell bindings, in order:
+   *
+   * IDENTITY FIRST, by NAME (`latchSheetIdentity`), whatever the tier. Both
+   * comparisons below are indices, and an index is not an identity: an
+   * unlocked pane reads `cell.sheetIndex` outright, and a restricted one is
+   * pinned to an index the workbook can hand to another sheet. Asking the
+   * ACTIVE sheet before asking WHICH sheets exist is how the pane came to
+   * re-read a deleted sheet's coordinates on whatever inherited them.
+   *
+   * Then the pin: compare the ACTIVE sheet (the same authority the write's pin
+   * check asks, so reveal and write cannot disagree) to the pin before any
+   * read. `offSheet` is whether this visibility has already told the pane it is
+   * off-sheet — the notice and the disabled widgets go out once per departure,
+   * for as long as the user is away, however many sheets they visit meanwhile.
+   *
+   * This settles a REVEAL and a SHEET CHANGE with one body, because they are
+   * one question — is the pane standing on its own sheet? — and a second copy
+   * of the answer is how the pane came to have a rule that fired on the reveal
+   * and not on the departure.
+   *
+   * THE NOTICE IS HOST CHROME, IN A HOST-OWNED SLOT (`hostBindingNotice`),
+   * never the script's `message`. Sharing the script's slot gave it two
+   * owners: `pane.update({ message })` overwrote the host's sentence while the
+   * host kept the widgets disabled — the user read the script's text under the
+   * host's lock — and the clear on the user's return deleted whatever the
+   * script had put there. The clear is UNCONDITIONAL on the pinned sheet, not
+   * gated on `offSheet`: a pane hidden while off-sheet keeps its notice in the
+   * renderer's store (the store outlives the section component), so a later
+   * reveal back on the pinned sheet starts a fresh visibility with `offSheet`
+   * false and would otherwise leave that stale sentence over enabled widgets.
+   */
+  const settleOnSheet = async (paneId: string, bound: ResolvedFormBindings, mine: number): Promise<void> => {
+    const asked = ++settleTick;
+    const lib = await getLib();
+    // ONE call for both questions: which sheets exist (the identity) and which
+    // one is active (the pin). Asking them separately would leave a window in
+    // which they disagree.
+    const { sheets, activeIndex: active } = await lib.getSheets();
+    if (mine !== epoch || asked !== settleTick) return;
+    const lost = latchSheetIdentity(bound, bound.cells, sheets, "pane");
+    if (lost !== null) {
+      refuseIdentity(paneId, bound, lost);
+      return;
+    }
+    // Unpinned (an unlocked script, which the tier clamp does not hold to one
+    // sheet): the identity check above is all this pane owes, and it arms
+    // wherever the user is standing.
+    if (bound.pinnedSheet === null || mw.handle.tier === "unlocked") {
+      arm(paneId, bound, mine);
+      return;
+    }
+    // A pinned pane watches the sheet tabs for as long as it is on screen —
+    // installed HERE, before the comparison, so that standing on the pinned
+    // sheet is a watched state and leaving it is observed.
+    if (sheetWatch === null) {
+      sheetWatch = onAppEvent(AppEvents.SHEET_CHANGED, () => {
+        void settleOnSheet(paneId, bound, mine);
+      });
+    }
+    if (active === bound.pinnedSheet) {
+      offSheet = false;
+      const back: ScriptPanePatchPayload = { paneId, hostBindingNotice: null };
+      emitAppEvent(SCRIPT_PANE_PATCH_EVENT, back);
+      arm(paneId, bound, mine);
+      return;
+    }
+    // Away: the live watch goes down first, so nothing is read for a sheet the
+    // user is not on — a reveal off-sheet never armed one, and a departure has
+    // to reach the same state.
+    disarm();
+    if (offSheet) return;
+    offSheet = true;
+    const sheetName = bound.pinnedSheetName ?? "the sheet this pane opened on";
+    const reason = pinnedSheetReturnSentence(bound, "pane", "see and save");
+    const seeds: Record<string, FormSeed> = {};
+    for (const cell of bound.cells) {
+      // The LAST value read, not null: the cell has not changed as far as the
+      // pane knows, and the registry's values are left alone so nothing is
+      // announced to the script.
+      seeds[cell.decl.name] = { ...(bound.seeds[cell.decl.name] ?? { value: null }), readOnly: true, reason };
+    }
+    const away: ScriptPanePatchPayload = {
+      paneId,
+      seeds,
+      hostBindingNotice: { text: `The cells this pane is bound to are on "${sheetName}" — ${reason}`, kind: "warning" },
+    };
+    emitAppEvent(SCRIPT_PANE_PATCH_EVENT, away);
+  };
+  return {
+    // A realm the unmount sweep has already terminated takes no event: the
+    // close flush forwards the last change and then onPaneClose, and posting
+    // either into a dead worker is noise the FakeWorker harness would record as
+    // delivery.
+    forward: (hook, payload) => {
+      if (mw.terminated) return;
+      forwardEvent(mw, hook, payload);
+    },
+    mirror: (path, value) => post(mw, { t: "mirror", path, value }),
+    // An EMBEDDED surface only (M3c): its session was opened by the host when
+    // the user's placement painted, so the shim has never seen its id and every
+    // later `pane.update` would address the wrong surface — or none. A docked
+    // pane needs nothing here: its id is the value its own `dock()` resolved.
+    opened: (paneId, info) => {
+      if (!info.embedded) return;
+      relayPaneOpened(mw, paneId);
+    },
+    visible: (paneId) => {
+      const bound = getBound();
+      if (!bound || (bound.cells.length === 0 && bound.controls.length === 0)) return;
+      stopWatching();
+      const mine = epoch;
+      // A pane with only CONTROL bindings has no sheet identity to lose — a
+      // Controls-pane value is reached by name — so it arms without asking the
+      // sheet list. Everything with a cell binding goes through the identity
+      // check, unlocked scripts included.
+      if (bound.cells.length === 0) {
+        arm(paneId, bound, mine);
+        return;
+      }
+      void settleOnSheet(paneId, bound, mine);
+    },
+    hidden: () => stopWatching(),
+    writeBindings: (paneId, values, names) => {
+      const bound = getBound();
+      if (!bound || bound.cells.length === 0) return Promise.resolve([]);
+      return writePaneBindings(mw, paneId, bound, values, names);
+    },
+    closed: (paneId, reason) => {
+      stopWatching();
+      relayPaneClosed(mw, paneId, reason);
+    },
+    audit: (_paneId, refusal) => auditPaneRefusal(mw, refusal),
+  };
+}
+
+// ============================================================================
+// Embedded forms on a sheet (M3c) — the HOST's own entry point
+// ============================================================================
+//
+// THE ASYMMETRY THAT MAKES THIS SAFE. `pane.dock` is a call a SCRIPT makes, so
+// it is bounded like one: a capability, a validator, a per-script cap, a dock
+// bucket and a user-gesture window before it may take the screen. These two
+// functions are the opposite shape — the USER placed a form on a sheet
+// (`embeddedFormPlacements.ts`), and the trusted renderer asks the host to run
+// it when that placement paints. Nothing on the worker's surface can reach
+// them: they are not broker methods, they take a PLACEMENT id the script has
+// never seen, and a script cannot create a placement.
+//
+// WHAT AN EMBEDDED SESSION STILL OWES, and gets from the ordinary pane path:
+// the bindings are resolved through `resolveFormBindings` under this script's
+// own handle, so a restricted script naming another sheet is refused and
+// audited exactly as its own `sheet.getCellData` would be; the pinned-sheet
+// rule, the visibility-gated live watch and every audited write come from
+// `paneSessionDeps` unchanged; and the surface is listed in the transparency
+// panel beside the docked panes.
+
+/** Why an embedded form could not be opened — a sentence for the surface to paint. */
+export type EmbeddedFormOpenRefusal =
+  | { ok: false; reason: string }
+  | { ok: true; paneId: string };
+
+/**
+ * Open the session for one embedded placement. Called by the trusted renderer
+ * when a placement's surface mounts; idempotent per placement (the registry's
+ * key guard refuses a second session for the same placement, and this reports
+ * the existing one rather than an error, because a re-render is not a fault).
+ *
+ * EVERY REFUSAL IS A SENTENCE, not a throw: this is painted inside the surface
+ * the user placed, and "nothing happened" there is the failure mode the
+ * transparency panel exists to prevent. An orphan, a script that is not
+ * mounted, a script that has not described a layout yet — each has a different
+ * thing the user can do about it, and each says which.
+ */
+export async function openEmbeddedScriptForm(placementId: string): Promise<EmbeddedFormOpenRefusal> {
+  const placement = getEmbeddedFormPlacement(placementId);
+  if (!placement) return { ok: false, reason: "This form's placement is no longer in the workbook." };
+  if (placement.orphaned) {
+    return {
+      ok: false,
+      // The remedy is the ONE constant every orphan sentence reads
+      // (`embeddedFormPlacements.ts`), so this refusal cannot go on naming a
+      // gesture the app has stopped — or, as it did, never started — offering.
+      reason: "The cell this form was anchored to was deleted, so it is not running. " + EMBEDDED_FORM_ORPHAN_REMEDY,
+    };
+  }
+  const existing = getScriptPaneForPlacement(placementId);
+  if (existing) return { ok: true, paneId: existing.paneId };
+
+  const mw = mounted.get(placement.scriptId);
+  if (!mw || mw.terminated) {
+    return {
+      ok: false,
+      reason: "The script for this form is not running. Start it from Code in This File.",
+    };
+  }
+  if (mw.definition.objectType !== "form") {
+    // A placement can only be made for a form script, so this is a workbook
+    // whose script was replaced under an existing placement.
+    return { ok: false, reason: `"${mw.definition.name}" is no longer a form script, so nothing can be painted here.` };
+  }
+  const spec = getScriptFormSpec(placement.scriptId);
+  if (!spec) {
+    return {
+      ok: false,
+      reason: `"${mw.definition.name}" has not described a layout yet. It describes one by calling form.define(...).`,
+    };
+  }
+
+  const holder: { bound: ResolvedFormBindings | null } = { bound: null };
+  try {
+    const result = await dockScriptPane({
+      scriptId: placement.scriptId,
+      scriptName: mw.definition.name,
+      origin: formOriginForMount(mw.definition),
+      spec,
+      embedPlacementId: placement.id,
+      resolve: async () => {
+        // The SAME thunk the dock uses, method name and all: an embedded
+        // surface's reads must appear in the audit ring as the pane reads they
+        // are, under this script's handle, with the same restricted-tier pin.
+        //
+        // WITH ONE ARGUMENT ADDED, and it is the difference between the two
+        // surfaces: THIS layout belongs to a sheet. A docked pane's unqualified
+        // `bind` can only mean the sheet on screen, because the pane is not on
+        // any sheet; a placement IS on one, and binding it to whatever tab
+        // happened to be in front when its session opened is how a form drawn
+        // on Sheet2 came to read, pin to and write Sheet1 (see
+        // `resolveFormBindings`).
+        const bound = await resolveFormBindings(mw, spec, "pane.dock", placement.sheetIndex);
+        holder.bound = bound;
+        return {
+          seeds: bound.seeds,
+          pinnedSheetName: bound.pinnedSheetName,
+          // No Submit here either, for the same reason a pane has none: the
+          // surface has no terminal moment, so `writeOn: "submit"` would mean
+          // "never" and a bound field the user edits would silently not save.
+          writeOnChange: bound.cells.map((c) => c.decl.name),
+        };
+      },
+      deps: paneSessionDeps(mw, () => holder.bound),
+    });
+    return { ok: true, paneId: result.paneId };
+  } catch (e) {
+    return { ok: false, reason: describeFormError(e) };
+  }
+}
+
+/**
+ * End the session for one embedded placement — the user removed the object
+ * ("user") or a structural edit orphaned it ("orphaned"). A placement with no
+ * session is a no-op; see `closeScriptPaneForPlacement`.
+ */
+export function closeEmbeddedScriptForm(placementId: string, reason: PaneCloseReason = "user"): void {
+  closeScriptPaneForPlacement(placementId, reason);
+}
+
+/**
+ * Which form hooks carry the USER's hand (see formSessionDeps.forward). The
+ * payload shapes are the registry's own (scriptForms.ts): `onChange` carries
+ * `source`, `onClose` carries `reason`.
+ */
+function isFormUserGesture(hook: string, payload: unknown): boolean {
+  const p = (payload ?? {}) as { source?: unknown; reason?: unknown };
+  if (hook === "onClick") return true;
+  if (hook === "onChange") return p.source === "user";
+  if (hook === "onClose") return p.reason === "submit" || p.reason === "cancel";
+  return false;
+}
+
+/**
+ * Audit a pane refusal the REGISTRY decided (scriptPanes.ts: a reveal outside
+ * the gesture window or past its bucket, a throttle-ladder step). The broker
+ * audited the call itself as `ok` — an "emit" method returns void whatever
+ * the registry did with it, and a "ui" reveal returns a plain answer — so
+ * without this row a hostile update loop looked, in the transparency panel,
+ * like a script that never had a call refused. Same row shape as the broker's
+ * `audit`, same silence for a dry run (`handle.preview`): a preview mounts
+ * nothing and must leave no trace in the workbook's history.
+ */
+function auditPaneRefusal(mw: MountedWorker, refusal: PaneRefusalAudit): void {
+  if (mw.handle.preview) return;
+  appendAudit({
+    ts: Date.now(),
+    scriptId: mw.handle.scriptId,
+    scriptName: mw.handle.scriptName,
+    method: refusal.method,
+    class: refusal.class,
+    ok: false,
+    error: refusal.error,
+  });
+}
+
+/**
+ * Tell a worker the host opened an EMBEDDED surface for it, so its `form.pane`
+ * facet addresses that surface (`__pane_opened`, the mirror of
+ * `__pane_closed`). Never sent for a docked pane: `pane.dock` already resolved
+ * with the id, and a relay there would move the facet off the pane the script
+ * had just docked.
+ */
+function relayPaneOpened(mw: MountedWorker, paneId: string): void {
+  if (mw.terminated || mounted.get(mw.definition.id) !== mw) return;
+  void relayMethodCall(mw, "__pane_opened", [{ paneId }]).catch(() => {
+    // Same as __pane_closed: the shim's handler cannot throw, so a rejection
+    // here is only a realm that has stopped reading messages.
+  });
+}
+
+/** Tell a worker its pane is gone, unless that worker is already gone itself (see relayFormClosed). */
+function relayPaneClosed(mw: MountedWorker, paneId: string, reason: PaneCloseReason): void {
+  if (mw.terminated || mounted.get(mw.definition.id) !== mw) return;
+  void relayMethodCall(mw, "__pane_closed", [{ paneId, reason }]).catch(() => {
+    // The shim's handler cannot throw; a rejection here is only the deadline
+    // of a realm that stopped reading messages.
+  });
 }
 
 /** One bound widget whose cell the host reads and writes for it. */
@@ -12496,6 +13324,13 @@ interface ResolvedFormBindings {
   pinnedSheet: number | null;
   pinnedSheetName?: string;
   writeOnChange: string[];
+  /**
+   * Set ONCE, by the first check that finds the sheet list has moved under
+   * this layout (`latchSheetIdentity`); the sentence every later reveal, watch
+   * and write then repeats. See that function for why it latches rather than
+   * re-deriving.
+   */
+  identityLost?: string;
 }
 
 /**
@@ -12503,13 +13338,17 @@ interface ResolvedFormBindings {
  * list or a table read from a range (through the script's own range rows, so
  * the tier clamp and the audit apply), and an image resolved ONCE here from
  * its `media:` handle (an IPC, so never per paint).
+ *
+ * `homeIndex` is the sheet an UNQUALIFIED range means — the layout's own sheet,
+ * which is not always the one on screen (see `resolveFormBindings`).
  */
 async function resolveFormSources(
   mw: MountedWorker,
   spec: FormSpec,
   sheets: Parameters<typeof resolveSheetRefIn>[0],
-  activeIndex: number,
+  homeIndex: number,
   seeds: Record<string, FormSeed>,
+  method: string,
 ): Promise<void> {
   const { handle } = mw;
   const restricted = handle.tier !== "unlocked";
@@ -12528,10 +13367,10 @@ async function resolveFormSources(
     try {
       const box = parseFormRange(src.source.range);
       const sheetIndex =
-        box.sheetName === null ? activeIndex : resolveSheetRefIn(sheets, box.sheetName, "form.show");
-      const method = restricted ? "sheet.getRangeValues" : "api.getRangeValues";
+        box.sheetName === null ? homeIndex : resolveSheetRefIn(sheets, box.sheetName, method);
+      const readMethod = restricted ? "sheet.getRangeValues" : "api.getRangeValues";
       const args: unknown[] = [box.startRow, box.startCol, box.endRow, box.endCol, sheetIndex];
-      const cells = (await brokerCall(handle, method, args, () => executeImpl(mw, method, args))) as ScriptCell[][];
+      const cells = (await brokerCall(handle, readMethod, args, () => executeImpl(mw, readMethod, args))) as ScriptCell[][];
       if (src.source.kind === "options") seed.options = optionsFromCells(cells);
       else seed.rows = rowsFromCells(cells);
     } catch (e) {
@@ -12561,12 +13400,49 @@ async function readFormCell(mw: MountedWorker, cell: ResolvedFormCell): Promise<
 }
 
 /**
- * Resolve every `bind` of a form to a cell (or a control value) and read it.
+ * The READ of a Controls-pane value a bound widget starts from (and is
+ * refreshed from on a pane reveal). Through the broker like every other read
+ * the layout performs, so the policy decides it and the audit ring records it
+ * under this script. The executor is inline (host-driven row, no worker shim)
+ * — the same shape as formula.udf.invoke.
+ */
+async function readFormControl(mw: MountedWorker, controlName: string): Promise<ControlValue | null> {
+  const controlArgs: unknown[] = [controlName];
+  return (await brokerCall(mw.handle, "form.readControl", controlArgs, async () => {
+    const { getControlValue } = await import("../controlValues");
+    return getControlValue(controlName) ?? null;
+  })) as ControlValue | null;
+}
+
+/**
+ * Resolve every `bind` of a layout to a cell (or a control value) and read it.
  * Nothing is refused wholesale: a binding this script cannot reach becomes a
  * DISABLED widget carrying the reason, so the user sees why rather than
  * nothing, and the refusal is in the audit ring like any other.
+ *
+ * ONE PIPELINE, THREE SURFACES: a form reads here at show, a pane at dock, an
+ * embedded form when the placement's session opens (`method` only labels a
+ * sheet-resolution refusal with the door it came through). The restricted-tier
+ * pin — every cell binding held to ONE sheet for the life of the layout —
+ * applies to all three identically.
+ *
+ * WHICH sheet that is, is `homeSheet`. A modal form and a docked pane belong to
+ * no sheet, so an unqualified `bind` there can only mean the one in front of the
+ * user and they pass nothing. An EMBEDDED form DOES belong to one — the user put
+ * the object on it — and `openEmbeddedScriptForm` passes it. Letting that case
+ * fall through to the active sheet was measured, and it is every placement at
+ * workbook load (the renderer's reconcile opens them all while sheet 1 is up):
+ * a form placed on Sheet2 bound `A1` to Sheet1!A1, pinned itself to Sheet1, and
+ * so showed Sheet1's values inside a box drawn on Sheet2 while telling the user
+ * to "switch back to Sheet1" as they stood on Sheet2 — and at unlocked tier,
+ * where nothing pins, wrote their typing into Sheet1 with no notice anywhere.
  */
-async function resolveFormBindings(mw: MountedWorker, spec: FormSpec): Promise<ResolvedFormBindings> {
+async function resolveFormBindings(
+  mw: MountedWorker,
+  spec: FormSpec,
+  method: "form.show" | "pane.dock" = "form.show",
+  homeSheet: number | null = null,
+): Promise<ResolvedFormBindings> {
   const { handle } = mw;
   const decls = collectFormBindings(spec);
   const out: ResolvedFormBindings = { seeds: {}, cells: [], controls: [], pinnedSheet: null, writeOnChange: [] };
@@ -12574,8 +13450,11 @@ async function resolveFormBindings(mw: MountedWorker, spec: FormSpec): Promise<R
   if (decls.length === 0 && sources.length === 0) return out;
   const lib = await getLib();
   const { sheets, activeIndex } = await lib.getSheets();
+  const home = homeSheet ?? activeIndex;
+  const homeName = nameOfSheet(sheets, home);
+  const surface = method === "form.show" ? "form" : "pane";
   const restricted = handle.tier !== "unlocked";
-  await resolveFormSources(mw, spec, sheets, activeIndex, out.seeds);
+  await resolveFormSources(mw, spec, sheets, home, out.seeds, method);
   for (const decl of decls) {
     let parsed;
     try {
@@ -12585,17 +13464,9 @@ async function resolveFormBindings(mw: MountedWorker, spec: FormSpec): Promise<R
       continue;
     }
     if (parsed.kind === "control") {
-      // Through the broker like every other read this form performs, so the
-      // policy decides it and the audit ring records it under this script.
-      // The executor is inline (host-driven row, no worker shim) — the same
-      // shape as formula.udf.invoke.
-      const controlArgs: unknown[] = [parsed.name];
       try {
-        const value = await brokerCall(mw.handle, "form.readControl", controlArgs, async () => {
-          const { getControlValue } = await import("../controlValues");
-          return getControlValue(parsed.name) ?? null;
-        });
-        out.seeds[decl.name] = seedFromControlValue(decl.widgetType, value as ControlValue | null, decl.multi);
+        const value = await readFormControl(mw, parsed.name);
+        out.seeds[decl.name] = seedFromControlValue(decl.widgetType, value, decl.multi);
         out.controls.push({ decl, controlName: parsed.name });
       } catch (e) {
         out.seeds[decl.name] = { value: null, readOnly: true, reason: e instanceof Error ? e.message : String(e) };
@@ -12604,10 +13475,10 @@ async function resolveFormBindings(mw: MountedWorker, spec: FormSpec): Promise<R
     }
     let cell: ResolvedFormCell;
     if (parsed.kind === "cell") {
-      let sheetIndex = activeIndex;
+      let sheetIndex = home;
       if (parsed.sheetRef !== null) {
         try {
-          sheetIndex = resolveSheetRefIn(sheets, parsed.sheetRef, "form.show");
+          sheetIndex = resolveSheetRefIn(sheets, parsed.sheetRef, method);
         } catch (e) {
           out.seeds[decl.name] = { value: null, readOnly: true, reason: e instanceof Error ? e.message : String(e) };
           continue;
@@ -12638,20 +13509,128 @@ async function resolveFormBindings(mw: MountedWorker, spec: FormSpec): Promise<R
         col: coords.startCol,
       };
     }
-    const seed = await readFormCell(mw, cell);
+    // THE READ, unless it cannot be MADE yet. A restricted script may only read
+    // the sheet on screen (`clampSheetIndex`), so a binding on this layout's own
+    // HOME sheet is unreadable while the user stands somewhere else — the
+    // ordinary case for an embedded form, whose session opens at workbook load
+    // for every sheet at once. Asking anyway would charge the script a
+    // PermissionDenied it never committed and, worse, DROP the binding for good:
+    // a read-only seed never reaches `out.cells`, and nothing re-resolves a
+    // session once it is open. So the read is DEFERRED, not attempted — the
+    // widget carries the same sentence `settleOnSheet` raises on a departure,
+    // the cell stays bound and pinned, and the first `arm()` on the home sheet
+    // reads it (`rereadBoundSeeds`). A binding the SCRIPT pointed at ANOTHER
+    // sheet is not this case: it is still refused by the clamp, by name.
+    const away = restricted && home !== activeIndex && cell.sheetIndex === home;
+    const seed: FormSeed = away
+      ? { value: null, readOnly: true, reason: switchBackSentence(homeName, surface, "see and save") }
+      : await readFormCell(mw, cell);
     // A choice list read for the same widget (options: { range }) lives on
     // the seed too; keep it when the value read replaces the entry.
     const prior = out.seeds[decl.name];
     out.seeds[decl.name] = prior?.options ? { ...seed, options: prior.options } : seed;
-    if (seed.readOnly) continue;
+    if (seed.readOnly && !away) continue;
     out.cells.push(cell);
     if (decl.writeOn === "change") out.writeOnChange.push(decl.name);
   }
   if (restricted && out.cells.length > 0) {
-    out.pinnedSheet = activeIndex;
-    out.pinnedSheetName = sheets[activeIndex]?.name;
+    out.pinnedSheet = home;
+    // BY INDEX, never by array position. `home` is a sheet INDEX (that is what
+    // `getSheets` reports, and what a placement carries), and
+    // `sheetIdentityRefusal` re-checks this name by index too — so a position
+    // read here would let the two disagree and the pane would refuse ITSELF,
+    // telling the user to switch back to a sheet they are already on. Same
+    // class as the eight position-for-index lookups fixed in 7fce7348.
+    out.pinnedSheetName = homeName;
   }
   return out;
+}
+
+/**
+ * The PIN family of refusals: what the user does to make a restricted layout's
+ * cells reachable again. One sentence shape for the write refusal ("save") and
+ * the pane's off-sheet reveal ("see and save"), so the two surfaces name the
+ * same fix — and neither ever borrows the tier-clamp sentence, which is about
+ * a script naming another sheet, not about the user standing on one.
+ */
+function pinnedSheetReturnSentence(
+  bound: ResolvedFormBindings,
+  surface: "form" | "pane",
+  action: "save" | "see and save",
+): string {
+  return switchBackSentence(bound.pinnedSheetName, surface, action);
+}
+
+/**
+ * The same sentence from a sheet NAME, for the one caller that does not have a
+ * `ResolvedFormBindings` yet: `resolveFormBindings` itself, deferring the read
+ * of a home-sheet binding while the user stands elsewhere. It shares this body
+ * rather than spelling the words a second time, because the deferred widget and
+ * the departure notice describe ONE state and a user who meets both must not be
+ * told two different things about it.
+ */
+function switchBackSentence(
+  sheetName: string | undefined,
+  surface: "form" | "pane",
+  action: "save" | "see and save",
+): string {
+  const sheet = sheetName ?? `the sheet this ${surface} opened on`;
+  return action === "save"
+    ? `switch back to "${sheet}" to save this ${surface}`
+    : `switch back to "${sheet}" to see and save this ${surface}'s cells`;
+}
+
+/**
+ * Has the sheet list moved under this layout? `sheetIdentityRefusal` states the
+ * rule; this is where the answer is REMEMBERED.
+ *
+ * A SHEET INDEX IS NOT AN IDENTITY. The pin and every cell binding hold one
+ * (`pinnedSheet`, `ResolvedFormCell.sheetIndex`), and deleting a sheet or
+ * dragging a tab makes a DIFFERENT sheet inherit it. The write path has asked
+ * by NAME since the forms work of 2026-09-03; the pane's READ path did not, and
+ * a pane docked while the user reorganised the workbook re-read whatever sheet
+ * had taken the pinned index, painted those cells in its widgets and announced
+ * them to the script as its bound values — plus an off-sheet notice raised
+ * against the wrong sheet ("switch back to Sheet3" while the user stands on
+ * Sheet3, which no navigation can satisfy). Reveal, live watch and write now
+ * all ask this.
+ *
+ * IT LATCHES. Once the list has moved, which sheet the user meant is not
+ * recoverable, and a name can come BACK — delete "Sheet1" and add a new
+ * "Sheet1", and a re-derived check would happily re-point the pane at a sheet
+ * it never read. Recording the first refusal makes the pin an identity the
+ * workbook cannot accidentally hand to another sheet, and makes every surface
+ * say the same sentence instead of each re-deriving its own.
+ */
+function latchSheetIdentity(
+  bound: ResolvedFormBindings,
+  cells: ResolvedFormCell[],
+  sheets: ReadonlyArray<{ index: number; name: string }>,
+  surface: "form" | "pane",
+): string | null {
+  if (bound.identityLost !== undefined) return bound.identityLost;
+  const refusal = sheetIdentityRefusal(
+    cells.map((c) => ({ name: c.decl.name, sheetIndex: c.sheetIndex, sheetName: c.sheetName })),
+    bound.pinnedSheet !== null && bound.pinnedSheetName !== undefined
+      ? { index: bound.pinnedSheet, name: bound.pinnedSheetName }
+      : null,
+    sheets,
+    surface,
+  );
+  if (refusal !== null) bound.identityLost = refusal;
+  return refusal;
+}
+
+/** `latchSheetIdentity` for a caller that has no sheet list in hand; latched means no IPC at all. */
+async function sheetIdentityRefusalFor(
+  bound: ResolvedFormBindings,
+  cells: ResolvedFormCell[],
+  surface: "form" | "pane",
+): Promise<string | null> {
+  if (bound.identityLost !== undefined) return bound.identityLost;
+  const lib = await getLib();
+  const { sheets } = await lib.getSheets();
+  return latchSheetIdentity(bound, cells, sheets, surface);
 }
 
 /**
@@ -12661,42 +13640,59 @@ async function resolveFormBindings(mw: MountedWorker, spec: FormSpec): Promise<R
  * user's formula text goes out, never the display string.
  *
  * Restricted tier writes the sheet on screen, checked at call time by the
- * executor; the form's cells were pinned to the sheet it OPENED on, so if the
- * user has since switched sheets the submit is refused with the fix, rather
- * than writing the same (row, col) on whatever sheet is showing.
+ * executor; the layout's cells were pinned to the sheet it OPENED on, so if
+ * the user has since switched sheets the write is refused with the fix,
+ * rather than writing the same (row, col) on whatever sheet is showing.
+ *
+ * ONE WRITER, TWO SURFACES. `writeFormBindings` and `writePaneBindings` are
+ * this with a surface word and a refresh sink; the pin check, the identity
+ * check, the undo batch and the own-write refresh are the same code, so the
+ * two cannot drift. `surface` names which door the refusal sentence says.
  */
-async function writeFormBindings(
+async function writeBoundCells(
   mw: MountedWorker,
-  showId: string,
   bound: ResolvedFormBindings,
   values: Record<string, FormValue | string[]>,
   names: string[] | null,
+  surface: "form" | "pane",
+  refresh: (fresh: Record<string, FormSeed>) => void,
 ): Promise<string[]> {
   const { handle, definition } = mw;
   const restricted = handle.tier !== "unlocked";
   const lib = await getLib();
+  // A refusal decided HERE happens before any broker row, so without this the
+  // audit ring never learned that a write the layout attempted was refused —
+  // and for a pane's close flush that refusal is the only trace the user's
+  // typed value leaves anywhere. Same row the write would have taken, ok=false.
+  const refuse = (message: string): never => {
+    const error = new BrokerError("HostError", message);
+    if (!handle.preview) {
+      appendAudit({
+        ts: Date.now(),
+        scriptId: handle.scriptId,
+        scriptName: handle.scriptName,
+        method: restricted ? "sheet.setCellValue" : "api.setCellValue",
+        class: "mutate",
+        ok: false,
+        error: error.code,
+      });
+    }
+    throw error;
+  };
+  const candidates = bound.cells.filter((c) => names === null || names.includes(c.decl.name));
+  // IDENTITY BEFORE THE PIN, because when the sheet list has moved the pin's
+  // sentence is FALSE. Drag Sheet2 in front of the pinned Sheet1 and the pin
+  // compares 1 against 0 and answers `switch back to "Sheet1"` — to a user
+  // already standing on Sheet1, an instruction no navigation can satisfy.
+  // `latchSheetIdentity` says the true thing (the sheets changed; close and
+  // reopen), and says it once for reveal, watch and write alike.
+  if (candidates.length > 0) {
+    const refusal = await sheetIdentityRefusalFor(bound, candidates, surface);
+    if (refusal !== null) refuse(refusal);
+  }
   if (restricted && bound.pinnedSheet !== null) {
     const active = await lib.getActiveSheet();
-    if (active !== bound.pinnedSheet) {
-      throw new BrokerError(
-        "HostError",
-        `switch back to "${bound.pinnedSheetName ?? "the sheet this form opened on"}" to save this form`,
-      );
-    }
-  }
-  const candidates = bound.cells.filter((c) => names === null || names.includes(c.decl.name));
-  // The sheet list can move under an open form (another script, an MCP tool),
-  // and every binding holds an INDEX. `sheetIdentityRefusal` states the rule.
-  if (candidates.length > 0) {
-    const { sheets } = await lib.getSheets();
-    const refusal = sheetIdentityRefusal(
-      candidates.map((c) => ({ name: c.decl.name, sheetIndex: c.sheetIndex, sheetName: c.sheetName })),
-      bound.pinnedSheet !== null && bound.pinnedSheetName !== undefined
-        ? { index: bound.pinnedSheet, name: bound.pinnedSheetName }
-        : null,
-      sheets,
-    );
-    if (refusal !== null) throw new BrokerError("HostError", refusal);
+    if (active !== bound.pinnedSheet) refuse(pinnedSheetReturnSentence(bound, surface, "save"));
   }
   const toWrite =
     names === null
@@ -12704,7 +13700,8 @@ async function writeFormBindings(
       : new Set(candidates.map((c) => c.decl.name));
   const cells = candidates.filter((c) => toWrite.has(c.decl.name));
   if (cells.length === 0) return [];
-  await withScriptUndoBatch(lib, `Form: ${definition.name}`, async () => {
+  const undoLabel = surface === "form" ? `Form: ${definition.name}` : `Pane: ${definition.name}`;
+  await withScriptUndoBatch(lib, undoLabel, async () => {
     for (const cell of cells) {
       const write = cellWriteFor(cell.decl.widgetType, values[cell.decl.name]);
       const method = restricted ? "sheet.setCellValue" : "api.setCellValue";
@@ -12716,18 +13713,108 @@ async function writeFormBindings(
   // and an unchanged resubmit is not rewritten. Own writes never reach the
   // live watch (isOwnScriptWrite), so this is the refresh.
   //
-  // `echo: false`: this is the form's OWN write coming back. Forwarding it as
-  // `onChange { source: "cell" }` told a `writeOn: "change"` script that an
-  // outside edit had landed on the value it had just written — the same echo
-  // `isOwnScriptWrite` exists to suppress on the watch.
+  // The sink is called with `echo: false` by both surfaces: this is the
+  // layout's OWN write coming back. Forwarding it as `onChange { source:
+  // "cell" }` told a `writeOn: "change"` script that an outside edit had
+  // landed on the value it had just written — the same echo `isOwnScriptWrite`
+  // exists to suppress on the watch.
   const fresh: Record<string, FormSeed> = {};
   for (const cell of cells) {
     const seed = await readFormCell(mw, cell);
     bound.seeds[cell.decl.name] = seed;
     fresh[cell.decl.name] = seed;
   }
-  refreshScriptFormSeeds(showId, fresh, { echo: false });
+  refresh(fresh);
   return cells.map((c) => c.decl.name);
+}
+
+/** The form's writer: dirty widgets on Submit, or exactly `names` on a `writeOn: "change"` change. */
+function writeFormBindings(
+  mw: MountedWorker,
+  showId: string,
+  bound: ResolvedFormBindings,
+  values: Record<string, FormValue | string[]>,
+  names: string[] | null,
+): Promise<string[]> {
+  return writeBoundCells(mw, bound, values, names, "form", (fresh) =>
+    refreshScriptFormSeeds(showId, fresh, { echo: false }),
+  );
+}
+
+/** The pane's writer: always exactly `names` — a pane has no Submit, so every write is per committed change. */
+function writePaneBindings(
+  mw: MountedWorker,
+  paneId: string,
+  bound: ResolvedFormBindings,
+  values: Record<string, FormValue | string[]>,
+  names: string[],
+): Promise<string[]> {
+  return writeBoundCells(mw, bound, values, names, "pane", (fresh) =>
+    refreshScriptPaneSeeds(paneId, fresh, { echo: false }),
+  );
+}
+
+/** What `stillCurrent` answers once a re-read has been overtaken (see LIVE_WATCH_DISPOSED). */
+const REREAD_ABANDONED = Symbol("rereadAbandoned");
+
+/**
+ * Read every bound cell and control of a layout again — the pane's reveal
+ * re-read. Each read is the same audited row the resolve used, under the
+ * script's own handle; a read that is now refused becomes a disabled seed
+ * with the reason, exactly as at dock.
+ *
+ * THIS IS ONE IPC PER BOUND CELL, AND `armed` IS ASKED BETWEEN EVERY PAIR OF
+ * THEM. Only the PUBLISH used to be epoch-guarded, so a pane hidden, closed or
+ * walked off its pinned sheet while the first cell was in flight went on
+ * reading the rest — audited rows charged to the script for a surface that is
+ * gone, and, off the pinned sheet, one `PermissionDenied` per remaining cell
+ * for a gesture the USER made. Worse, the seeds were written into `bound.seeds`
+ * as they arrived, so the departure's own settlement (last value read, disabled
+ * under the pin sentence) was painted from `{ value: null }` afterwards: a
+ * widget that had been showing "steady" came back empty under a sentence that
+ * promises the last value.
+ *
+ * So the seeds are held LOCAL until the whole run is known to be current, and
+ * every await goes through `stillOurs` — the same shape as the live watch's
+ * `stillArmed`, for the same reason: a read or an adoption added later has
+ * nothing else to await through, so it cannot skip the check.
+ */
+async function rereadBoundSeeds(
+  mw: MountedWorker,
+  bound: ResolvedFormBindings,
+  armed: () => boolean,
+): Promise<Record<string, FormSeed> | null> {
+  const fresh: Record<string, FormSeed> = {};
+  const stillOurs = async <T>(work: Promise<T>): Promise<T | typeof REREAD_ABANDONED> => {
+    const value = await work;
+    return armed() ? value : REREAD_ABANDONED;
+  };
+  for (const cell of bound.cells) {
+    const seed = await stillOurs(readFormCell(mw, cell));
+    if (seed === REREAD_ABANDONED) return null;
+    fresh[cell.decl.name] = seed;
+  }
+  for (const c of bound.controls) {
+    // The REFUSAL is folded into the value rather than caught around the
+    // await: a `try` wrapped around `stillOurs` would let a rejected read jump
+    // over the check and carry an abandoned run into the next control — the one
+    // way this loop could still skip it.
+    const read = await stillOurs(
+      readFormControl(mw, c.controlName).then(
+        (value) => ({ ok: true as const, value }),
+        () => ({ ok: false as const, value: null }),
+      ),
+    );
+    if (read === REREAD_ABANDONED) return null;
+    // Refused: the widget keeps what it had, and the refusal is audited.
+    if (!read.ok) continue;
+    fresh[c.decl.name] = seedFromControlValue(c.decl.widgetType, read.value, c.decl.multi);
+  }
+  // A layout with nothing bound awaits nothing above, so the check is repeated
+  // here rather than inferred from the loops having run.
+  if (!armed()) return null;
+  for (const [name, seed] of Object.entries(fresh)) bound.seeds[name] = seed;
+  return fresh;
 }
 
 /**
@@ -12740,10 +13827,73 @@ async function writeFormBindings(
  * subscription's import ordering, which no public entry point can reach).
  */
 export function installFormLiveWatch(mw: MountedWorker, showId: string, bound: ResolvedFormBindings): CleanupFn {
+  return installBoundLiveWatch(mw, bound, "form", (fresh) => refreshScriptFormSeeds(showId, fresh));
+}
+
+/**
+ * What `stillArmed` answers once its watch has been torn down. A symbol, not
+ * `null` or `undefined`: both are legitimate values for the things the batch
+ * awaits (`sheetIdentityRefusalFor` answers `null` for "identity intact"), and
+ * a sentinel that collides with a real answer is not a check.
+ */
+const LIVE_WATCH_DISPOSED = Symbol("liveWatchDisposed");
+
+/**
+ * The live cell (and Controls-pane) watch behind BOTH layout surfaces: a form
+ * holds it from shown to closed, a pane from visible to hidden
+ * (`paneSessionDeps`). `refresh` is the surface's seed sink; everything else —
+ * the pinned-sheet filter, the sheet-identity check, the own-write suppression,
+ * the 16 ms coalescing, the audited re-read — is shared, so the two cannot
+ * disagree about what a change to a bound cell means.
+ *
+ * `onIdentityLost` is how a surface learns the sheet list moved while it was
+ * armed (the pane disables its widgets and says so; a form leaves it to the
+ * write refusal, which is the next thing it does).
+ *
+ * THE CLEANUP HAS TO REACH THE BATCH ALREADY IN FLIGHT, not only the listener.
+ * The coalescer is a 16 ms timer whose body then AWAITS an identity IPC and one
+ * read IPC per changed cell — several turns in which the surface can be torn
+ * down under it. A cleanup that only unsubscribed left that batch running: a
+ * bound cell changed, the batch reached its identity call, the user clicked
+ * another sheet tab, the departure settled the pane read-only at its last
+ * values under the pin warning — and the stale batch then CLOBBERED that
+ * settlement, announcing `{ value: null }` to the script and re-seeding the
+ * renderer under the tier-clamp sentence (the wrong sentence: nothing was
+ * clamped), while charging the script one denied `sheet.getCellData` for the
+ * USER's gesture. The same batch made a HIDDEN pane read and announce, against
+ * the invariant that a pane nobody can see reads nothing.
+ *
+ * So `disposed` is the fact every step of the batch has to ask about, exactly
+ * as the Controls-pane half below already did for its dynamic import, and
+ * EVERY await inside the batch goes through `stillArmed` — which is the point
+ * of routing them through one helper rather than writing `if (disposed)` by
+ * hand: a third await added later cannot reach a read or a publish without
+ * passing the check, because it has nothing else to await through.
+ */
+function installBoundLiveWatch(
+  mw: MountedWorker,
+  bound: ResolvedFormBindings,
+  surface: "form" | "pane",
+  refresh: (fresh: Record<string, FormSeed>) => void,
+  onIdentityLost?: (message: string) => void,
+): CleanupFn {
   const { definition, handle } = mw;
   const restricted = handle.tier !== "unlocked";
   let pending = new Set<string>();
   let scheduled = false;
+  /** The coalescing timer, held so the cleanup can cancel a batch that has not started. */
+  let batchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set by the cleanup: the listener is gone, and so is everything it started. */
+  let disposed = false;
+  /**
+   * Await `work`, then answer whether this watch is still the live one. The
+   * caller cannot use the value without deciding what `LIVE_WATCH_DISPOSED`
+   * means, which is what makes the check impossible to forget.
+   */
+  const stillArmed = async <T>(work: Promise<T>): Promise<T | typeof LIVE_WATCH_DISPOSED> => {
+    const value = await work;
+    return disposed ? LIVE_WATCH_DISPOSED : value;
+  };
   const unsub = onAppEvent(AppEvents.CELL_VALUES_CHANGED, (detail) => {
     const d = detail as { changes?: Array<{ row: number; col: number; sheetIndex?: number }> };
     for (const c of d.changes ?? []) {
@@ -12756,23 +13906,62 @@ export function installFormLiveWatch(mw: MountedWorker, showId: string, bound: R
     }
     if (pending.size === 0 || scheduled) return;
     scheduled = true;
-    setTimeout(() => {
+    batchTimer = setTimeout(() => {
+      batchTimer = null;
       scheduled = false;
       const names = pending;
       pending = new Set();
       void (async () => {
+        // THE FILTER ABOVE IS INDICES, AND INDICES MOVE. A sheet deleted or
+        // dragged while the watch is armed hands its index to another sheet,
+        // and both the pin filter and `cell.sheetIndex ===` then match events
+        // from a sheet this layout never bound — one audited read each, and the
+        // other sheet's values announced to the script as the widget's own.
+        // The identity is asked by NAME here, once per coalesced batch and only
+        // when a bound coordinate actually moved, before any cell is read.
+        const lost = await stillArmed(sheetIdentityRefusalFor(bound, bound.cells, surface));
+        // Torn down while that IPC was out: read nothing, say nothing. Whoever
+        // tore it down has already settled the surface, and this batch's answer
+        // is about the workbook as it was BEFORE their gesture.
+        if (lost === LIVE_WATCH_DISPOSED) return;
+        if (lost !== null) {
+          onIdentityLost?.(lost);
+          return;
+        }
         const fresh: Record<string, FormSeed> = {};
         for (const cell of bound.cells) {
           if (!names.has(cell.decl.name)) continue;
-          const seed = await readFormCell(mw, cell);
+          const seed = await stillArmed(readFormCell(mw, cell));
+          // A teardown between two reads stops the rest of them: every read is
+          // an audited row charged to the script, and a surface that is gone
+          // must not be spending them.
+          if (seed === LIVE_WATCH_DISPOSED) return;
           bound.seeds[cell.decl.name] = seed;
           fresh[cell.decl.name] = seed;
         }
-        refreshScriptFormSeeds(showId, fresh);
+        if (disposed) return;
+        refresh(fresh);
       })();
     }, 16);
   });
-  if (bound.controls.length === 0) return unsub;
+  // ONE cleanup, built before the early return below. Handing the bare `unsub`
+  // to a layout with no Controls-pane binding is precisely how the in-flight
+  // batch came to survive every teardown: the disposal flag and the timer
+  // cancel lived only on the controls path, and a pane bound to plain cells —
+  // the ordinary case — got neither.
+  let unsubControls: CleanupFn = () => {};
+  const cleanup: CleanupFn = () => {
+    disposed = true;
+    if (batchTimer !== null) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    scheduled = false;
+    pending = new Set();
+    unsub();
+    unsubControls();
+  };
+  if (bound.controls.length === 0) return cleanup;
   // Controls-pane values: committed changes only (a mid-drag slider frame is
   // transient and must not re-seed the form on every pixel).
   //
@@ -12783,9 +13972,8 @@ export function installFormLiveWatch(mw: MountedWorker, showId: string, bound: R
   // nobody left to remove it — one that fires for the rest of the session,
   // re-seeding a session that is gone. `disposed` is the fact the `.then` has
   // to ask about, because "was I cleaned up?" cannot be read off a closure
-  // variable that is assigned after the fact.
-  let unsubControls: CleanupFn = () => {};
-  let disposed = false;
+  // variable that is assigned after the fact. (`disposed` is declared at the
+  // top of this function now: the cell batch above asks the same question.)
   void import("../controlValues").then((cv) => {
     const off = cv.onControlValueChange((change) => {
       if (change.transient) return;
@@ -12797,15 +13985,23 @@ export function installFormLiveWatch(mw: MountedWorker, showId: string, bound: R
       // through the same audited row the resolve did — a form left open
       // receives every committed change, and the trail has to show that.
       const args: unknown[] = [change.name];
-      void brokerCall(mw.handle, "form.readControl", args, async () => change.value ?? null)
+      // ...AND THIS READ IS AN AWAIT LIKE ANY OTHER. Its `.then` published
+      // without asking, so a control committed in the same turn the user hid
+      // the pane painted the HIDDEN surface — seeds for a widget nobody can
+      // see — and forwarded the script one `onPaneChange` for it, against the
+      // invariant the whole visibility gate exists for. It goes through
+      // `stillArmed` for the same reason the cell batch does: a publish is
+      // reachable only by deciding what a disposed watch means.
+      void stillArmed(brokerCall(mw.handle, "form.readControl", args, async () => change.value ?? null))
         .then((value) => {
+          if (value === LIVE_WATCH_DISPOSED) return;
           const fresh: Record<string, FormSeed> = {};
           for (const c of watching) {
             const seed = seedFromControlValue(c.decl.widgetType, value as ControlValue | null, c.decl.multi);
             bound.seeds[c.decl.name] = seed;
             fresh[c.decl.name] = seed;
           }
-          if (Object.keys(fresh).length > 0) refreshScriptFormSeeds(showId, fresh);
+          if (Object.keys(fresh).length > 0) refresh(fresh);
         })
         .catch(() => {
           /* refused: the widget keeps what it had, and the refusal is audited */
@@ -12819,11 +14015,7 @@ export function installFormLiveWatch(mw: MountedWorker, showId: string, bound: R
     }
     unsubControls = off;
   });
-  return () => {
-    disposed = true;
-    unsub();
-    unsubControls();
-  };
+  return cleanup;
 }
 
 const FORM_SUBMIT_TIMEOUT = Symbol("formSubmitTimeout");
@@ -13297,6 +14489,87 @@ function mergeCoalescedChangePayloads(prev: unknown, next: unknown): unknown {
   return { ...(n as object), changes: merged, ...(truncated ? { truncated: true } : {}) };
 }
 
+/**
+ * Hard cap on events held while the realm is not acknowledging. Beyond it the
+ * OLDEST held event is dropped and counted: a producer that outruns a stalled
+ * consumer by thousands of discrete events has to lose something, and losing
+ * the oldest keeps the realm's picture of the world current rather than stale.
+ */
+const HELD_EVENTS_HARD_CAP = EVENT_QUEUE_HIGH_WATER * 4;
+
+/** Post one dispatch and count it as outstanding until the realm acknowledges. */
+function postEvent(mw: MountedWorker, hook: string, payload: unknown): void {
+  mw.outstandingEvents += 1;
+  post(mw, { t: "event", hook, payload });
+  if (!mw.eventsHeld && mw.outstandingEvents >= EVENT_QUEUE_HIGH_WATER) {
+    mw.eventsHeld = true;
+    armStallWatchdog(mw);
+  }
+}
+
+/**
+ * The realm finished one dispatch. Below LOW water, release everything held —
+ * in order, the discrete events first, then the coalesced ones — and disarm the
+ * watchdog; otherwise re-arm it, because an acknowledgement is proof of life.
+ */
+function onEventDone(mw: MountedWorker): void {
+  if (mw.outstandingEvents > 0) mw.outstandingEvents -= 1;
+  if (!mw.eventsHeld) return;
+  if (mw.outstandingEvents > EVENT_QUEUE_LOW_WATER) {
+    armStallWatchdog(mw);
+    return;
+  }
+  mw.eventsHeld = false;
+  disarmStallWatchdog(mw);
+  releaseHeldEvents(mw);
+}
+
+function releaseHeldEvents(mw: MountedWorker): void {
+  const held = mw.heldEvents;
+  mw.heldEvents = [];
+  for (let i = 0; i < held.length; i++) {
+    postEvent(mw, held[i].hook, held[i].payload);
+    // Posting can re-engage the hold; whatever is left goes back to the FRONT
+    // of the queue, ahead of anything queued meanwhile, so order is kept.
+    if (mw.eventsHeld) {
+      mw.heldEvents = held.slice(i + 1).concat(mw.heldEvents);
+      return;
+    }
+  }
+  if (mw.coalesced.size > 0) flushCoalesced(mw);
+}
+
+function armStallWatchdog(mw: MountedWorker): void {
+  disarmStallWatchdog(mw);
+  mw.stallTimer = setTimeout(() => {
+    mw.stallTimer = null;
+    if (!mw.eventsHeld || mw.terminated) return;
+    crashWorker(
+      mw,
+      `Script stopped acknowledging events (${mw.outstandingEvents} outstanding for ` +
+        `${Math.round(EVENT_STALL_MS / 1000)}s)`,
+    );
+  }, EVENT_STALL_MS);
+}
+
+function disarmStallWatchdog(mw: MountedWorker): void {
+  if (mw.stallTimer !== null) {
+    clearTimeout(mw.stallTimer);
+    mw.stallTimer = null;
+  }
+}
+
+function flushCoalesced(mw: MountedWorker): void {
+  mw.coalesceScheduled = false;
+  // Held: keep merging, post nothing. The release path flushes when the realm
+  // has drained.
+  if (mw.eventsHeld) return;
+  for (const [h, p] of mw.coalesced) {
+    postEvent(mw, h, p);
+  }
+  mw.coalesced.clear();
+}
+
 function forwardEvent(mw: MountedWorker, hook: string, payload: unknown): void {
   if (COALESCE_HOOKS.has(hook)) {
     const queued =
@@ -13306,17 +14579,19 @@ function forwardEvent(mw: MountedWorker, hook: string, payload: unknown): void {
     mw.coalesced.set(hook, queued);
     if (!mw.coalesceScheduled) {
       mw.coalesceScheduled = true;
-      requestAnimationFrame(() => {
-        mw.coalesceScheduled = false;
-        for (const [h, p] of mw.coalesced) {
-          post(mw, { t: "event", hook: h, payload: p });
-        }
-        mw.coalesced.clear();
-      });
+      requestAnimationFrame(() => flushCoalesced(mw));
     }
     return;
   }
-  post(mw, { t: "event", hook, payload });
+  if (mw.eventsHeld) {
+    mw.heldEvents.push({ hook, payload });
+    if (mw.heldEvents.length > HELD_EVENTS_HARD_CAP) {
+      mw.heldEvents.shift();
+      mw.droppedHeldEvents += 1;
+    }
+    return;
+  }
+  postEvent(mw, hook, payload);
 }
 
 function addForwarder(mw: MountedWorker, hook: string, unsub: CleanupFn): void {
@@ -13779,6 +15054,11 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       addForwarder(mw, hook, onAppEvent("button:clicked", (detail) => {
         const d = detail as { instanceId: string; x: number; y: number };
         if (d.instanceId !== instanceId) return;
+        // A USER GESTURE for the pane's reveal window: a click on the button
+        // this script is attached to. `button:clicked` is emitted by the
+        // Controls extension from the pointer event; no script can emit an
+        // app event (the worker has no bus and `events.subscribe` only reads).
+        noteScriptGesture(mw.definition.id);
         forwardEvent(mw, hook, { x: d.x, y: d.y });
       }));
       break;
@@ -13950,6 +15230,9 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       addForwarder(mw, hook, onAppEvent("shape:clicked", (detail) => {
         const d = detail as { instanceId: string; x: number; y: number };
         if (d.instanceId !== instanceId) return;
+        // A USER GESTURE for the pane's reveal window, as for a button: a
+        // shape with a click handler IS a button the user drew.
+        noteScriptGesture(mw.definition.id);
         forwardEvent(mw, hook, { x: d.x, y: d.y });
       }));
       break;
@@ -13994,6 +15277,10 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
       addForwarder(mw, hook, onAppEvent(eventName, (detail) => {
         const d = detail as { panelId: string; placement: string };
         if (d.panelId !== instanceId) return;
+        // Only the CLICK is a user gesture for the pane's reveal window: the
+        // user pressed this script's panel icon. Activate / deactivate follow
+        // the sidebar's own state changes, which a reveal itself causes.
+        if (hook === "onClick") noteScriptGesture(mw.definition.id);
         forwardEvent(mw, hook, { placement: d.placement });
       }));
       break;
@@ -14027,6 +15314,18 @@ function wireHookForwarder(mw: MountedWorker, hook: string): void {
     case "form.onClick":
     case "form.onClose":
     case "form.onSubmit":
+      break;
+    // The pane facet's hooks (M2) are SEPARATE names on the same object, so a
+    // form's onChange never fires for a keystroke in the script's task pane
+    // and vice versa; scriptPanes.ts delivers them through the session's
+    // `forward` callback exactly as the form registry does.
+    case "form.onPaneChange":
+    case "form.onPaneClick":
+    case "form.onPaneClose":
+    // onPaneOpen fires for EMBEDDED surfaces only (M3c) — a docked pane's id is
+    // its own `dock()` result, so the event would be redundant there; the
+    // registry says so at `markDocked`.
+    case "form.onPaneOpen":
       break;
 
     default:

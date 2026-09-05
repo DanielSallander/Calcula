@@ -98,6 +98,7 @@ import {
   subscribeToFormPreviews,
 } from "../lib/formPreviewBridge";
 import { ActivityDot } from "../../_shared/components/ActivityDot";
+import { FormDesignerPanel } from "./formDesigner";
 import AiEditDiff from "./AiEditDiff";
 import ScriptHistoryPanel from "./ScriptHistoryPanel";
 import {
@@ -1671,6 +1672,55 @@ export function ObjectScriptEditorApp(): React.ReactElement {
   }, [activeScript, activeScriptId, reportToConsole]);
 
   // ==========================================================================
+  // Design form (the visual designer)
+  // ==========================================================================
+  // ONE ARTIFACT: the designer edits the `// #region Form layout` block IN THIS
+  // BUFFER and nowhere else, so "the code tab" and "the designer" are two views
+  // of one text. That is why Monaco stays MOUNTED while the designer is on
+  // screen (hidden, not unmounted): its model, its undo stack and its
+  // breakpoints survive the switch, and a designer edit lands on that same undo
+  // stack — Ctrl+Z in the code tab takes back a drag.
+  const [designing, setDesigning] = useState(false);
+  useEffect(() => {
+    // A different script is not necessarily a form, and one that is has a
+    // different layout. Leaving the designer open across the switch would show
+    // the previous script's widgets over the new script's buffer.
+    setDesigning(false);
+  }, [activeScriptId]);
+
+  /**
+   * Put text the designer produced into the buffer — the same path a keystroke
+   * takes, never a save.
+   *
+   * Through Monaco when it is mounted (which it is: the designer hides it
+   * rather than unmounting it), for the reason `handleAcceptAi` gives — the
+   * edit goes on the undo stack and fires `handleChange`, so dirty-marking and
+   * the module live-persist path behave exactly as they do for typing. The
+   * fallback is not decoration: a test mounts this window without Monaco, and
+   * an edit that silently did nothing there would be an edit that silently did
+   * nothing anywhere the editor failed to mount.
+   *
+   * `handleChange` is defined further down (it needs the persister), so it is
+   * reached through a ref rather than reordered: moving it up here would put
+   * the buffer bookkeeping above the thing it books.
+   */
+  const handleChangeRef = useRef<(value: string | undefined) => void>(() => {});
+  const handleDesignerSource = useCallback(
+    (next: string) => {
+      const ed = editorRef.current;
+      const model = ed?.getModel();
+      if (ed && model) {
+        ed.pushUndoStop();
+        ed.executeEdits("form-designer", [{ range: model.getFullModelRange(), text: next }]);
+        ed.pushUndoStop();
+        return;
+      }
+      handleChangeRef.current(next);
+    },
+    [],
+  );
+
+  // ==========================================================================
   // How this script was written
   // ==========================================================================
   // READ ON OPEN, never on load. An ordinary editing session never asks for the
@@ -2568,6 +2618,8 @@ export function ObjectScriptEditorApp(): React.ReactElement {
     },
     [persister],
   );
+  // The designer writes through this same function when Monaco is not mounted.
+  handleChangeRef.current = handleChange;
 
   const handleInsertMethod = useCallback((methodName: string) => {
     if (editorRef.current) {
@@ -2874,6 +2926,29 @@ export function ObjectScriptEditorApp(): React.ReactElement {
             padding: "0 5px", fontSize: 10, fontWeight: 600, marginLeft: 2,
           }}>{errorCount}</span>}
         </button>
+
+        {/* Design form. The visual designer edits the `// #region Form layout`
+            block IN THIS BUFFER — there is no second stored layout — so the
+            two views never disagree: what the designer writes is what the code
+            tab shows, and code typed in the code tab is what the designer
+            reads when it opens. Offered for a distributed script too, in
+            read-only mode: looking at a layout is always allowed. */}
+        {activeScript && isFormScript && (
+          <button
+            className="ose-btn"
+            data-testid="script-form-design-action"
+            aria-pressed={designing}
+            onClick={() => setDesigning((v) => !v)}
+            style={designing ? { color: "#9CDCFE" } : undefined}
+            title={
+              designing
+                ? "Back to the code. The designer wrote its changes straight into it."
+                : "Lay this form out visually. Every change is written into the layout block in this script."
+            }
+          >
+            <IconTemplate /> {designing ? "Code" : "Design form"}
+          </button>
+        )}
 
         {/* Preview form. ONLY for a form script: the code on screen is run in
             the main window's preview realm against a copy of the active sheet
@@ -3335,7 +3410,28 @@ export function ObjectScriptEditorApp(): React.ReactElement {
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {/* Editor + Console */}
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <div style={{ flex: 1, minHeight: 0 }}>
+          {/* THE DESIGNER SITS BESIDE MONACO, NOT INSTEAD OF IT. Unmounting the
+              editor to show the designer would dispose its model — and with it
+              the undo stack a designer edit is pushed onto, the breakpoints and
+              the cursor. So the code view is HIDDEN while the designer is open,
+              which is also what lets `handleDesignerSource` route its write
+              through `executeEdits`. */}
+          {designing && activeScript && isFormScript && (
+            <div style={{ flex: 1, minHeight: 0 }} data-testid="form-designer-host">
+              <FormDesignerPanel
+                source={source}
+                onSourceChange={handleDesignerSource}
+                onEditAsCode={() => {
+                  setDesigning(false);
+                  editorRef.current?.focus();
+                }}
+                fileLabel={activeScript.name}
+                readOnly={isReadOnly}
+                readOnlyReason={readOnlyReason ?? undefined}
+              />
+            </div>
+          )}
+          <div style={{ flex: 1, minHeight: 0, display: designing ? "none" : undefined }}>
             <Editor
               height="100%"
               language={language}

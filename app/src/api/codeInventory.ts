@@ -65,6 +65,9 @@ import { loadPersistedMarkLibraryWithProvenance, markScriptId } from "./chartMar
 import { mountedWritebackValidators } from "./writebackValidators";
 import { listAllScheduledJobs, type ScheduledJob } from "./scriptHost/scheduler";
 import { listScriptKeybindings } from "./keybindings";
+import { listScriptPanes } from "./scriptHost/scriptPanes";
+import { getActiveScriptForm } from "./scriptHost/scriptForms";
+import { PANE_UPDATE_WINDOW_MS } from "./scriptHost/scriptPaneSpec";
 import { listInstalledLibraries, listLibraryRealms, readLockedSource } from "./scriptLibraries";
 import { invokeBackend } from "./backend";
 
@@ -977,6 +980,13 @@ export function summarizeScheduledJobs(jobs: ScheduledJobEntry[]): ScheduledJobS
 //      Calcula poll a registry on a timer. It is demand-driven, bounded and
 //      authorization-checked in Rust — and it is still network traffic and
 //      background work the user caused without doing anything.
+//   4. SURFACES ON SCREEN (`ui.pane`, `ui.dialog`). A task pane can sit beside
+//      the grid for hours, watching the cells it is bound to and repainting
+//      whenever its script says so; a modal form blocks every other dialog
+//      while it is up. Both wear an identity band, but a band names ONE
+//      pane; this is the one place the user can see EVERY surface a script is
+//      holding at once, which script owns each, whether it is on screen, how
+//      many cells it is bound to, and how hard it is repainting.
 //
 // The rule this section applies is the one the scheduler already established:
 // VISIBILITY PLUS CONTROL. Showing the user a shortcut they cannot revoke, or a
@@ -1040,12 +1050,78 @@ export interface BackgroundWatchEntry {
   lastError: string | null;
 }
 
+/**
+ * One modeless surface a script is holding (`ui.pane`) — a docked task pane, or
+ * a form the user has embedded on a sheet — joined with its owner. The numbers
+ * are the registry's own records (`listScriptPanes`): nothing here re-reads a
+ * cell or re-resolves a binding on the transparency panel's behalf.
+ */
+export interface ScriptPaneHeldEntry {
+  /** Host-minted pane id — stable for the row's lifetime. */
+  paneId: string;
+  scriptId: string;
+  ownerName: string;
+  ownerMissing: boolean;
+  ownerProvenance: "local" | "distributed" | "unknown";
+  ownerPackage: string | null;
+  /** On screen right now. A hidden pane (an unselected ribbon tab) watches nothing. */
+  visible: boolean;
+  /**
+   * Where the user keeps it; null until the renderer has said. "embedded" is a
+   * form the user PLACED ON A SHEET (M3c) — it is not in the panel list at all,
+   * so a row that reported it as a sidebar pane would send the user looking in
+   * the one place it cannot be.
+   */
+  placement: "sidebar" | "ribbon" | "embedded" | null;
+  /**
+   * True for an embedded surface. Read off the registry's own record, not
+   * derived from `placement`, so a future placement cannot make this quietly
+   * wrong.
+   */
+  embedded: boolean;
+  /**
+   * The sheet placement an embedded surface paints into (its minted UUID), or
+   * null for a docked pane. It is how the panel can take the user TO the
+   * surface it is telling them about.
+   */
+  placementId: string | null;
+  /** Cells the pane reads for its widgets and writes on each committed change. */
+  boundCells: number;
+  /** Script-driven repaints admitted in the last `updateWindowMs`. */
+  updatesLastMinute: number;
+  /** The window `updatesLastMinute` counts over, so the panel phrases it honestly. */
+  updateWindowMs: number;
+  /** The badge the script pinned on the pane's tab, if any. */
+  badge: string | null;
+}
+
+/** The modal form on screen (`ui.dialog`), if any, joined with its owner. */
+export interface ScriptFormHeldEntry {
+  /** Host-minted show id. */
+  showId: string;
+  scriptId: string;
+  ownerName: string;
+  ownerMissing: boolean;
+  ownerProvenance: "local" | "distributed" | "unknown";
+  ownerPackage: string | null;
+}
+
 /** Everything scripts are holding on the user's behalf right now. */
 export interface ScriptHeldState {
   shortcuts: ScriptShortcutEntry[];
   clipboards: ScriptClipboardEntry[];
   /** Background work scripts caused. Empty when nothing is polling. */
   watches: BackgroundWatchEntry[];
+  /**
+   * Every modeless script surface open right now, in the order it opened:
+   * docked task panes AND forms the user has embedded on a sheet (M3c). One
+   * list because one registry answers for both (scriptPanes.ts) — and because
+   * the user's question is "what is a script showing me?", not "which of two
+   * mechanisms is it using". `placement` / `embedded` say which each row is.
+   */
+  panes: ScriptPaneHeldEntry[];
+  /** The modal form up right now — at most one, since the modal slot is app-wide. */
+  forms: ScriptFormHeldEntry[];
 }
 
 /** Header roll-up for the held-state section. */
@@ -1056,6 +1132,18 @@ export interface ScriptHeldStateSummary {
   clipboardCells: number;
   /** Background watchers actually running. */
   runningWatches: number;
+  /** Every script surface open right now — docked task panes AND forms embedded on sheets. */
+  panes: number;
+  /**
+   * How many of `panes` are forms EMBEDDED on a sheet (M3c). Counted apart
+   * because the two are found in different places: a docked pane is in the
+   * panel list, an embedded form is somewhere on a sheet, and a header chip
+   * that said "3 panes" for two of one and one of the other would send the
+   * user hunting in the sidebar for a surface that is not there.
+   */
+  embeddedForms: number;
+  /** Modal forms up (0 or 1). */
+  forms: number;
   /** True when a script is holding ANYTHING. */
   any: boolean;
 }
@@ -1146,9 +1234,26 @@ export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeld
     clipboardSizes = [];
   }
 
+  // Surfaces: the pane registry and the modal form registry are pure,
+  // synchronous host state like the shortcut list, and read the same way — a
+  // registry that throws costs its own rows, never the others'.
+  let panesUp: ReturnType<typeof listScriptPanes> = [];
+  try {
+    panesUp = listScriptPanes();
+  } catch (e) {
+    console.warn("[codeInventory] script panes unavailable:", e);
+  }
+  let formUp: ReturnType<typeof getActiveScriptForm> = null;
+  try {
+    formUp = getActiveScriptForm();
+  } catch (e) {
+    console.warn("[codeInventory] script form unavailable:", e);
+  }
+
   // Only fetch the inventory when something is actually held, so a workbook
   // where no script holds anything pays nothing for this section.
-  const needsOwners = held.length > 0 || clipboardSizes.length > 0;
+  const needsOwners =
+    held.length > 0 || clipboardSizes.length > 0 || panesUp.length > 0 || formUp !== null;
   const owners = needsOwners ? (units ?? (await getWorkbookCodeUnits())) : [];
   const ownerById = new Map(owners.map((u) => [u.id, u]));
 
@@ -1195,9 +1300,38 @@ export async function getScriptHeldState(units?: CodeUnit[]): Promise<ScriptHeld
     console.warn("[codeInventory] submission watch status unavailable:", e);
   }
 
+  // Panes stay in DOCK order (the order the user saw them appear), not sorted:
+  // the row is keyed by a host-minted id and the list is short (at most
+  // MAX_PANES_PER_SCRIPT per script), so a stable order matters more than a
+  // ranked one. The name shown is the registry's `scriptName` when the owner
+  // join finds nothing — host-recorded at dock, never the script's own claim.
+  const panes: ScriptPaneHeldEntry[] = panesUp.map((p) => ({
+    paneId: p.paneId,
+    scriptId: p.scriptId,
+    visible: p.visible,
+    placement: p.placement,
+    embedded: p.embedPlacementId !== null,
+    placementId: p.embedPlacementId,
+    boundCells: p.boundCells,
+    updatesLastMinute: p.updatesLastMinute,
+    updateWindowMs: PANE_UPDATE_WINDOW_MS,
+    badge: p.badge,
+    ...joinOwner(p.scriptId, p.scriptName, ownerById, handleById),
+  }));
+
+  const forms: ScriptFormHeldEntry[] = formUp
+    ? [
+        {
+          showId: formUp.showId,
+          scriptId: formUp.scriptId,
+          ...joinOwner(formUp.scriptId, formUp.scriptName, ownerById, handleById),
+        },
+      ]
+    : [];
+
   shortcuts.sort((a, b) => a.combo.localeCompare(b.combo) || a.ownerName.localeCompare(b.ownerName));
   clipboards.sort((a, b) => b.cells - a.cells || a.ownerName.localeCompare(b.ownerName));
-  return { shortcuts, clipboards, watches };
+  return { shortcuts, clipboards, watches, panes, forms };
 }
 
 /** Roll the held state up for a header chip. */
@@ -1209,8 +1343,15 @@ export function summarizeScriptHeldState(state: ScriptHeldState): ScriptHeldStat
     clipboards: state.clipboards.length,
     clipboardCells,
     runningWatches,
+    panes: state.panes.length,
+    embeddedForms: state.panes.filter((p) => p.embedded).length,
+    forms: state.forms.length,
     any:
-      state.shortcuts.length > 0 || state.clipboards.length > 0 || state.watches.length > 0,
+      state.shortcuts.length > 0 ||
+      state.clipboards.length > 0 ||
+      state.watches.length > 0 ||
+      state.panes.length > 0 ||
+      state.forms.length > 0,
   };
 }
 

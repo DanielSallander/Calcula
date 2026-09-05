@@ -60,7 +60,10 @@ import type { H2W, W2H } from "../protocol";
 interface MountGateCall {
   packageName: string;
   source: string;
-  artifact: { id: string; source: string } | null;
+  /** The consent-store namespace the mount asked to be judged under. */
+  surface: string | null;
+  /** What the mount's own surface recorded for it — id + the approved source. */
+  artifacts: Array<{ id: string; source: string }> | null;
 }
 
 const gate = {
@@ -80,7 +83,8 @@ const invokeBackend = vi.fn(async (cmd: string, args?: unknown): Promise<unknown
   mountGateCalls.push({
     packageName: a.packageName ?? "",
     source: a.source ?? "",
-    artifact: a.artifact ?? null,
+    surface: a.surface ?? null,
+    artifacts: a.artifacts ?? null,
   });
   if (gate.unreachable) throw new Error(gate.unreachable);
   if (gate.moduleRefusal) {
@@ -344,29 +348,43 @@ describe("the mount gate asks about the APPLICATION, not just the source", () =>
     expect(host.hostIsMounted("local-script")).toBe(true);
   });
 
-  it("holds a NAMED artifact to the gate too, without hashing it in the renderer", async () => {
+  it("holds NAMED artifacts to the gate too, without hashing them in the renderer", async () => {
     gate.approved.add(PUBLISHER);
 
     await host.hostMountScript({
       ...definition,
       source: "imports = {};\nfunction setup(context) { return 1; }",
-      consentArtifact: { id: "obj-1", source: "function setup(context) { return 1; }" },
+      consentSurface: "object-script",
+      consentArtifacts: [{ id: "obj-1", source: "function setup(context) { return 1; }" }],
     });
 
     // The artifact travels as the PRE-PRELUDE source: hashing is Rust's job, and
     // the composed realm source would hash to something no record has seen.
-    expect(mountGateCalls[0].artifact).toEqual({
-      id: "obj-1",
-      source: "function setup(context) { return 1; }",
-    });
-    expect(mountGateCalls[0].source).not.toBe(mountGateCalls[0].artifact?.source);
+    expect(mountGateCalls[0].artifacts).toEqual([
+      { id: "obj-1", source: "function setup(context) { return 1; }" },
+    ]);
+    expect(mountGateCalls[0].source).not.toBe(mountGateCalls[0].artifacts?.[0].source);
+  });
+
+  it("passes the surface and the artifacts THROUGH — it fills in neither", async () => {
+    // A definition that names no surface asks with `null`, and the Rust gate
+    // refuses that. The host must not guess a surface for it, and must not
+    // substitute an empty list for absent artifacts: both would be a second
+    // copy of a decision that belongs to the owning surface and to Rust.
+    gate.approved.add(PUBLISHER);
+
+    await host.hostMountScript({ ...definition });
+
+    expect(mountGateCalls[0].surface).toBeNull();
+    expect(mountGateCalls[0].artifacts).toBeNull();
   });
 
   it("an admission granted for one artifact cannot be re-presented for another", async () => {
     gate.approved.add(PUBLISHER);
     await host.hostMountScript({
       ...definition,
-      consentArtifact: { id: "obj-1", source: definition.source },
+      consentSurface: "object-script",
+      consentArtifacts: [{ id: "obj-1", source: definition.source }],
     });
     expect(host.hostIsMounted("run-vendor-close")).toBe(true);
 
@@ -429,6 +447,26 @@ describe("route: chart mark scripts", () => {
     expect(FakeWorker.instances).toHaveLength(1);
     mod.uninstallChartMarks();
   });
+
+  it("names its SURFACE and the artifact its own gate recorded", async () => {
+    // The Charts gate records `{ id: CHART_MARKS_SCRIPT_ID, source:
+    // markLibraryConsentSource(lib) }` under `chart-marks:<package>`. The mount
+    // presents exactly that — the same former, over the same library — so Rust
+    // judges it under the chart-marks key and at that hash, not under "any key
+    // this application's name can be spelled with".
+    gate.approved.add(PUBLISHER);
+    const mod = await route<typeof import("../../chartMarkScripts")>("../../chartMarkScripts");
+    await mod.installChartMarkLibrary(MARK_LIB, () => undefined, { sourcePackage: PUBLISHER });
+
+    expect(mountGateCalls).toHaveLength(1);
+    expect(mountGateCalls[0].surface).toBe("chart-marks");
+    expect(mountGateCalls[0].artifacts).toEqual([
+      { id: mod.CHART_MARKS_SCRIPT_ID, source: mod.markLibraryConsentSource(MARK_LIB) },
+    ]);
+    // ...and it is the consent identity, not the generated worker source.
+    expect(mountGateCalls[0].artifacts?.[0].source).not.toBe(mountGateCalls[0].source);
+    mod.uninstallChartMarks();
+  });
 });
 
 // ===========================================================================
@@ -476,6 +514,26 @@ describe("route: chart transform scripts", () => {
     expect(host.hostIsMounted(mod.CHART_TRANSFORMS_SCRIPT_ID)).toBe(true);
     mod.uninstallChartTransforms();
   });
+
+  it("names its SURFACE and the artifact its own gate recorded", async () => {
+    // `{ id: CHART_TRANSFORMS_SCRIPT_ID, source: transformLibraryConsentSource(lib) }`
+    // under `chart-transforms:<package>` — capability pragmas included, so a
+    // widening re-hashes.
+    gate.approved.add(PUBLISHER);
+    const mod = await route<typeof import("../../chartTransformScripts")>(
+      "../../chartTransformScripts",
+    );
+    const withCaps = { ...LIB, capabilities: ["bi.query" as const] };
+    await mod.installChartTransformLibrary(withCaps, { sourcePackage: PUBLISHER });
+
+    expect(mountGateCalls).toHaveLength(1);
+    expect(mountGateCalls[0].surface).toBe("chart-transforms");
+    expect(mountGateCalls[0].artifacts).toEqual([
+      { id: mod.CHART_TRANSFORMS_SCRIPT_ID, source: mod.transformLibraryConsentSource(withCaps) },
+    ]);
+    expect(mountGateCalls[0].artifacts?.[0].source).toContain("// @capability bi.query");
+    mod.uninstallChartTransforms();
+  });
 });
 
 // ===========================================================================
@@ -506,6 +564,54 @@ describe("route: custom function (UDF) realms", () => {
 
     expect(mod.customFunctionsInstalled()).toBe(true);
     expect(FakeWorker.instances).toHaveLength(1);
+    mod.uninstallCustomFunctions();
+  });
+
+  it("names its SURFACE and the artifact its own gate recorded", async () => {
+    // `grantCustomFunctionConsent` records `{ id: CUSTOM_FUNCTIONS_SCRIPT_ID,
+    // source: customFunctionConsentSource(fns, caps) }` under
+    // `custom-functions:<package>`. The realm's mount presents that same pair —
+    // the RECORD's reserved id, not the per-package broker id it mounts under.
+    gate.approved.add(PUBLISHER);
+    const mod = await route<typeof import("../../customFunctions")>("../../customFunctions");
+    const withCaps = { ...LIB, capabilities: ["bi.query" as const] };
+    await mod.installCustomFunctions(withCaps);
+
+    expect(mountGateCalls).toHaveLength(1);
+    expect(mountGateCalls[0].surface).toBe("custom-functions");
+    expect(mountGateCalls[0].artifacts).toEqual([
+      {
+        id: mod.CUSTOM_FUNCTIONS_SCRIPT_ID,
+        source: mod.customFunctionConsentSource(withCaps.functions, ["bi.query"]),
+      },
+    ]);
+    mod.uninstallCustomFunctions();
+  });
+
+  it("the artifact is over EVERY function the package stamped, as the record was", async () => {
+    // The gate groups every function stamped with the package — a blank body
+    // included — and the record is written over that grouping. The realm plan
+    // drops blanks from what MOUNTS, but the artifact it names must still be
+    // the record's string, or a consented package would be refused at the hash.
+    gate.approved.add(PUBLISHER);
+    const mod = await route<typeof import("../../customFunctions")>("../../customFunctions");
+    const withBlank = {
+      functions: [
+        ...LIB.functions,
+        { name: "DRAFT", params: [], body: "   ", sourcePackage: PUBLISHER },
+      ],
+    };
+    await mod.installCustomFunctions(withBlank);
+
+    expect(mountGateCalls[0].artifacts).toEqual([
+      {
+        id: mod.CUSTOM_FUNCTIONS_SCRIPT_ID,
+        source: mod.customFunctionConsentSource(withBlank.functions, []),
+      },
+    ]);
+    // The blank is in the consent identity and NOT in the realm.
+    expect(mountGateCalls[0].artifacts?.[0].source).toContain('"name":"DRAFT"');
+    expect(mountGateCalls[0].source).not.toContain("DRAFT");
     mod.uninstallCustomFunctions();
   });
 });
@@ -575,6 +681,32 @@ describe("route: shared script library realms", () => {
     expect(FakeWorker.instances).toHaveLength(1);
     link.release();
   });
+
+  it("names the `lib` SURFACE and one artifact PER MODULE it merged", async () => {
+    // `applyInstall` records `node.modules.map(m => ({ id, source }))` under
+    // `lib:<package>`; the realm merges exactly those module sources and names
+    // each one, so Rust requires every module to be granted — under the LIBRARY
+    // key, which is the separation consentKey.ts promises.
+    gate.approved.add("acme.stats");
+    lockLibrary();
+    const mod = await route<typeof import("../../scriptLibraries/linker")>(
+      "../../scriptLibraries/linker",
+    );
+    const link = await mod.linkScript({
+      scriptId: "consumer",
+      scriptName: "Consumer",
+      source: CONSUMER_SOURCE,
+      declaredCapabilities: [],
+      accessLevel: "restricted",
+    });
+
+    expect(mountGateCalls).toHaveLength(1);
+    expect(mountGateCalls[0].surface).toBe("lib");
+    expect(mountGateCalls[0].artifacts).toEqual([{ id: "m1", source: LIB_MODULE_SOURCE }]);
+    // The realm source is prelude + wrapped modules; the artifact is the module.
+    expect(mountGateCalls[0].source).not.toBe(LIB_MODULE_SOURCE);
+    link.release();
+  });
 });
 
 // ===========================================================================
@@ -616,7 +748,8 @@ describe("route: standing object-script mounts", () => {
 
     await mod.ObjectScriptManager.mountScript(SCRIPT.id);
 
-    expect(mountGateCalls[0].artifact).toEqual({ id: SCRIPT.id, source: SCRIPT.source });
+    expect(mountGateCalls[0].surface).toBe("object-script");
+    expect(mountGateCalls[0].artifacts).toEqual([{ id: SCRIPT.id, source: SCRIPT.source }]);
     expect(mod.ObjectScriptManager.isScriptMounted(SCRIPT.id)).toBe(true);
     mod.ObjectScriptManager.unmountScript(SCRIPT.id);
   });
@@ -674,6 +807,28 @@ describe("route: writeback validator realms", () => {
     await mod.mountWritebackValidator(DESCRIPTOR);
 
     expect(FakeWorker.instances).toHaveLength(1);
+    mod.unmountWritebackValidators();
+  });
+
+  it("names the writeback-validators SURFACE and the validator's own record entry", async () => {
+    // `approveWritebackValidators` records `{ id: writebackValidatorScriptId(name),
+    // source }` under `<package>::writeback-validators`; the mount presents that
+    // pair, so the advisory realm is held to the exact body the authoritative
+    // submit gate already checks.
+    gate.approved.add(PUBLISHER);
+    const mod = await route<typeof import("../../writebackValidators")>(
+      "../../writebackValidators",
+    );
+    await mod.mountWritebackValidator(DESCRIPTOR);
+
+    expect(mountGateCalls).toHaveLength(1);
+    expect(mountGateCalls[0].surface).toBe("writeback-validators");
+    expect(mountGateCalls[0].artifacts).toEqual([
+      { id: mod.writebackValidatorScriptId(DESCRIPTOR.name), source: DESCRIPTOR.source },
+    ]);
+    // The realm source wraps the body; the artifact IS the body.
+    expect(mountGateCalls[0].source).toContain(DESCRIPTOR.source);
+    expect(mountGateCalls[0].source).not.toBe(DESCRIPTOR.source);
     mod.unmountWritebackValidators();
   });
 });
@@ -740,5 +895,49 @@ describe("route: the one-off object-script runner", () => {
     });
 
     expect(FakeWorker.instances).toHaveLength(1);
+  });
+
+  it("names the object-script SURFACE and the stored module as its artifact", async () => {
+    // A module a `.calp` shipped is recorded under the BARE application key
+    // alongside its object scripts (one grant covers both). The run names the
+    // record's id and the source ABOUT TO RUN, so an edited publisher macro is
+    // refused at the hash instead of admitted on the application floor.
+    gate.approved.add(PUBLISHER);
+    const mod = await route<typeof import("../../objectScriptRunner")>(
+      "../../objectScriptRunner",
+    );
+    await mod.runObjectScriptOnce({
+      name: "Vendor close",
+      source: MACRO_SOURCE,
+      scriptId: "macro-vendor-close",
+    });
+
+    expect(mountGateCalls).toHaveLength(1);
+    expect(mountGateCalls[0].surface).toBe("object-script");
+    expect(mountGateCalls[0].artifacts).toEqual([{ id: "macro-vendor-close", source: MACRO_SOURCE }]);
+
+    // Edited in the textarea: the identity still says publisher, and the
+    // artifact carries the EDITED text — which is what the gate must hash.
+    mountGateCalls.length = 0;
+    const edited = `${MACRO_SOURCE}\n// tweaked locally`;
+    await mod.runObjectScriptOnce({
+      name: "Vendor close",
+      source: edited,
+      scriptId: "macro-vendor-close",
+    });
+    expect(mountGateCalls[0].artifacts).toEqual([{ id: "macro-vendor-close", source: edited }]);
+
+    // Resolved by CONTENT (no id given): the artifact is the record it matched.
+    mountGateCalls.length = 0;
+    await mod.runObjectScriptOnce({ name: "Vendor close", source: MACRO_SOURCE });
+    expect(mountGateCalls[0].artifacts).toEqual([{ id: "macro-vendor-close", source: MACRO_SOURCE }]);
+  });
+
+  it("a local run names the surface and no artifact, and is never asked", async () => {
+    const mod = await route<typeof import("../../objectScriptRunner")>(
+      "../../objectScriptRunner",
+    );
+    await mod.runObjectScriptOnce({ name: "Mine", source: "function setup() {}" });
+    expect(mountGateCalls).toEqual([]);
   });
 });

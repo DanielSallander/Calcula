@@ -247,6 +247,7 @@ export {
 export {
   listWorkbookScripts,
   listWorkbookScriptRecords,
+  listDistributedWorkbookScriptRecords,
   getWorkbookScript,
   saveWorkbookScript,
   deleteWorkbookScript,
@@ -417,6 +418,25 @@ export type {
 // ============================================================================
 
 export { registerCellClickInterceptor, registerCellCursorInterceptor } from "./cellClickInterceptors";
+
+// ============================================================================
+// Pointer Claims
+// ============================================================================
+// An element stacked over the grid canvas is a DESCENDANT of the element Core
+// binds `onMouseDown` to, so stopping `pointerdown`/`click` on it claims
+// nothing. These say "a press that lands on me is mine" — and, because a claim
+// is what finally lets a widget hold FOCUS inside the grid, "a keystroke that
+// lands on me is mine too" (`isKeyClaimed`).
+
+export {
+  POINTER_CLAIM_ATTR,
+  claimPointer,
+  releasePointerClaim,
+  hasPointerClaim,
+  findPointerClaim,
+  isPointerClaimed,
+  isKeyClaimed,
+} from "./pointerClaims";
 
 // ============================================================================
 // Cell Double-Click Interceptors
@@ -2395,6 +2415,31 @@ export {
   FORM_MAX_OPEN_MS,
 } from "./scriptHost/scriptForms";
 export type { FormSessionDeps, FormSubmitDecision } from "./scriptHost/scriptForms";
+// Task panes (M2): the modeless sibling. A LIST rather than an "active" one —
+// several may be open and none blocks anybody (see getActiveScriptForm).
+export {
+  listScriptPanes,
+  revokeScriptPanes,
+  resetScriptPanes,
+} from "./scriptHost/scriptPanes";
+export type { PaneSessionDeps, ScriptPaneSummary } from "./scriptHost/scriptPanes";
+export {
+  MAX_PANES_PER_SCRIPT,
+  PANE_DOCKS_PER_MINUTE,
+  SCRIPT_PANE_REQUEST_EVENT,
+  SCRIPT_PANE_PATCH_EVENT,
+  SCRIPT_PANE_CLOSE_EVENT,
+  SCRIPT_PANE_INPUT_EVENT,
+} from "./scriptHost/scriptPaneSpec";
+export type {
+  PanePlacement,
+  PaneCloseReason,
+  PaneRevealResult,
+  ScriptPaneRequestPayload,
+  ScriptPanePatchPayload,
+  ScriptPaneClosePayload,
+  ScriptPaneInputPayload,
+} from "./scriptHost/scriptPaneSpec";
 // The Worker-realm preview rung: run a draft in the realm it actually runs in,
 // against a COPY of the workbook, and report what it would do. Applies nothing.
 // The editor's "Preview form" paints the layout it captures; the AI author

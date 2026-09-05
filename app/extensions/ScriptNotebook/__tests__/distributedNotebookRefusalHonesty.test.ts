@@ -60,6 +60,37 @@ const CODE = code(SRC)
   .replace(/\\\r?\n\s*/g, "")
   .replace(/\s+/g, " ");
 
+describe("a local notebook never pays for the consent file", () => {
+  // The gate runs once per CELL on every path (run / run-all / rewind / run-from
+  // all funnel through `run_cell_internal`), and it used to read and parse the
+  // whole consent file BEFORE the pure decision looked at the stamp — so a Run
+  // All over N of the user's own cells was N parses of a file that could not
+  // change the answer. The order is the invariant, and only the source can show
+  // it: there is no tauri mock app in the crate to drive the stateful half.
+  function statefulGateBody(): string {
+    const start = CODE.indexOf("fn require_distributed_notebook_consent(");
+    expect(start, "the stateful gate moved or was renamed").toBeGreaterThan(-1);
+    const end = CODE.indexOf("fn is_markdown_source", start);
+    return CODE.slice(start, end > start ? end : undefined);
+  }
+
+  it("decides 'is this stamped at all?' BEFORE it reads the consent file", () => {
+    const body = statefulGateBody();
+    const stampCheck = body.indexOf("is_stamped_package(");
+    const fileRead = body.indexOf("read_script_consent_file(");
+    expect(stampCheck, "the early return through the shared predicate is gone").toBeGreaterThan(-1);
+    expect(fileRead).toBeGreaterThan(-1);
+    expect(stampCheck).toBeLessThan(fileRead);
+  });
+
+  it("...and the pure decision uses the SAME predicate, so the two cannot drift", () => {
+    const start = CODE.indexOf("fn distributed_notebook_refusal(");
+    const end = CODE.indexOf("fn require_distributed_notebook_consent(", start);
+    const pure = CODE.slice(start, end);
+    expect(pure).toContain("is_stamped_package(");
+  });
+});
+
 describe("the refusal does not promise an approval the product cannot give", () => {
   it("no surface writes a notebook consent id — the approval genuinely does not exist", () => {
     // The premise, established from the code rather than asserted. The id
@@ -115,7 +146,12 @@ describe("the refusal does not promise an approval the product cannot give", () 
     // The finding this file answers was explicitly NOT "add notebook consent".
     // The gate still fails closed on a stamped notebook, and the consent branch
     // it already had is still the only way past it.
-    expect(CODE).toContain("let package = source_package.map(str::trim).filter(|p| !p.is_empty())?;");
+    // The fail-closed `?` on an unstamped record, now routed through the ONE
+    // blank-stamp predicate the stateful gate shares (see the ordering block
+    // above). The spelling moved; the rule did not.
+    expect(CODE).toContain(
+      "let package = source_package.map(str::trim).filter(|_| is_stamped_package(source_package))?;",
+    );
     expect(CODE).toContain(
       "if crate::calp_commands::consent_granted_in(file, package, &consent_id, &source_hash) {",
     );

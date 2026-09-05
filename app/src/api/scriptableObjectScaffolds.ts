@@ -1000,6 +1000,27 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
             { name: "onClose", signature: "onClose(handler)", description: "Called when the form leaves the screen ({ reason, values })" },
           ],
         },
+        {
+          category: "Task pane (pane.*)",
+          methods: [
+            { name: "pane.define", signature: "pane.define(spec)", description: "Describe the pane's widget tree, separately from the modal form's; nothing is shown yet" },
+            { name: "pane.dock", signature: "pane.dock({ initial?, key? })", description: "Dock the pane beside the grid and keep working; resolves { paneId, opened, placement } once the renderer has it (needs ui.pane). It only TAKES the screen within 5 s of a user gesture belonging to this script -- otherwise it is registered and listed for the user to open, and opened says so. Options: initial values, and key -- the pane's stable slot (1-32 characters of letters, digits, _ or -) that its sidebar/ribbon placement is remembered under. Refused past 3 open panes, past 10 docks a minute, or when this script already has that key docked" },
+            { name: "pane.update", signature: "pane.update(patch)", description: "Change values, enabled/hidden widgets, choices, errors or your own message on the last docked pane (30 per second; Calcula's own notices about the pane sit in slots a script cannot write to or clear)" },
+            { name: "pane.setBadge", signature: "pane.setBadge(text)", description: "Put up to 8 characters on the pane's tab or launcher; null clears it (it spends the same 30-per-second budget as pane.update)" },
+            { name: "pane.reveal", signature: "pane.reveal()", description: "Ask for the pane to be brought forward -- admitted only within 5 s of a user gesture belonging to this script (an input on its pane or form, the user running it, or the dock itself) and at most 6 times a minute; otherwise it answers { revealed: false, reason: 'no-gesture' | 'throttled' }, and a sentence when the pane is closed, not open yet, or placed on the ribbon" },
+            { name: "pane.close", signature: "pane.close()", description: "Take the pane down from code; whatever a bound field's last keystrokes were still holding is written to its cell first. REFUSED for a form the user embedded on a sheet -- that surface is their object, and only they remove it" },
+            { name: "pane.list", signature: "pane.list()", description: "This script's OWN open surfaces -- its docked panes AND the forms of it the user has placed on sheets ({ paneId, placement, embedded, visible, badge } each). It says nothing about any other script's surfaces" },
+            { name: "pane.select", signature: "pane.select(paneId)", description: "Point the facet at one of this script's own surfaces, by id (from pane.list() or pane.onOpen). Needed when one form is embedded on a sheet more than once -- otherwise the facet addresses whichever surface opened last" },
+            { name: "pane.control", signature: "pane.control(name)", description: "A handle on one pane widget: value, set, setText, enable, show, setOptions, setError, focus, onChange, onClick" },
+            { name: "pane.paneId", signature: "pane.paneId", description: "Id of the last docked pane, or null (sync)" },
+            { name: "pane.values", signature: "pane.values", description: "Every pane input's current value (sync)" },
+            { name: "pane.isOpen", signature: "pane.isOpen", description: "Whether the last docked pane is still up (sync)" },
+            { name: "pane.onChange", signature: "pane.onChange(handler)", description: "Called when a pane widget's value changes ({ paneId, name, value, values, source }); a cell-bound widget writes its cell on each change" },
+            { name: "pane.onClick", signature: "pane.onClick(handler)", description: "Called when a pane button is clicked ({ paneId, name, values })" },
+            { name: "pane.onOpen", signature: "pane.onOpen(handler)", description: "Called when Calcula opens a form of this script the user EMBEDDED on a sheet ({ paneId, placement, placementId, values }); the facet already points at that surface. A docked pane does not fire it -- dock() resolved with its id" },
+            { name: "pane.onClose", signature: "pane.onClose(handler)", description: "Called when a pane comes down ({ paneId, reason: user | script | failed | unmount | reset | throttled | orphaned }); reset is the workbook being closed or replaced -- the keystrokes still held are dropped, not written, and the user is told -- throttled is Calcula closing a pane whose script kept overrunning its limits, and orphaned is an embedded form whose anchor cell was deleted (the placement stays on the sheet for the user to put back)" },
+          ],
+        },
       ];
 
     case "shape":
@@ -1027,6 +1048,7 @@ export function getContextDocumentation(objectType: ScriptableObjectType): Array
           category: "Rendering",
           methods: [
             { name: "render.setHtmlContent", signature: "render.setHtmlContent(html)", description: "Replace canvas rendering with interactive HTML iframe" },
+            { name: "render.setHitRegions", signature: "render.setHitRegions(regions)", description: "Claim rectangles of your HTML frame for clicks (frame-local pixels); [] releases it" },
             { name: "render.sendMessage", signature: "render.sendMessage(type, data?)", description: "Send a message to the shape's HTML iframe" },
             { name: "render.onMessage", signature: "render.onMessage(handler)", description: "Listen for messages from the shape's HTML (via calcula.sendMessage)" },
             { name: "render.canvasRenderer", signature: "render.canvasRenderer(fn)", description: "Provide a custom canvas render function" },

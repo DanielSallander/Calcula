@@ -509,6 +509,95 @@ export function applyFormPatch(state: ScriptFormState, patch: FormPatch): Script
 }
 
 // ============================================================================
+// Landing a host PATCH (values, control overrides, refreshed seeds)
+// ============================================================================
+
+/** The live state a renderer holds for one session; what a PATCH changes. */
+export interface FormLiveState {
+  values: ScriptFormValues;
+  controls: Record<string, FormControlOverride>;
+  seeds: Record<string, FormSeed>;
+  /** Dirty names whose bound cell changed underneath (re-seeded while edited). */
+  stale: ReadonlySet<string>;
+}
+
+/** What `landFormPatch` hands back, beside the next live state. */
+export interface FormLandedPatch extends FormLiveState {
+  /** The input names the patch's `values` named; the caller clears their errors. */
+  patchedNames: string[];
+}
+
+/**
+ * Land what the host sent — a script's patch and/or refreshed seeds — on the
+ * live state, WITHOUT touching a DOM or a React hook, so the modal form and
+ * the modeless pane cannot disagree about what a patch means.
+ *
+ * The rules, in order:
+ *  - a script's `values` land through `applyFormPatch` and are then COERCED to
+ *    the widget's type, so `values: { amount: "12" }` is 12 on a number widget
+ *    (the same ladder the seed went through);
+ *  - refreshed seeds land ONLY on widgets the user has not touched. "Untouched"
+ *    is: never edited, or edited back to what it held before (the previous
+ *    seed's value, else the declared default). A dirty widget keeps the user's
+ *    value and joins `stale`, so the renderer can say the cell moved underneath.
+ *
+ * Identity is preserved where nothing changed: `values` is the same object
+ * when neither `patch.values` nor `seeds` arrived, and `seeds` / `stale` are
+ * the same objects when no seeds arrived — so a caller can compare references
+ * to decide what to re-render, and never mutate the input.
+ */
+export function landFormPatch(
+  state: FormLiveState,
+  incoming: { patch?: FormPatch; seeds?: Record<string, FormSeed> },
+  inputsByName: ReadonlyMap<string, FormInputWidget>,
+  touched: ReadonlySet<string>,
+): FormLandedPatch {
+  let values = state.values;
+  let controls = state.controls;
+  let seeds = state.seeds;
+  let stale = state.stale;
+  const patchedNames: string[] = [];
+
+  if (incoming.patch) {
+    const applied = applyFormPatch({ values, controls }, incoming.patch);
+    if (incoming.patch.values) {
+      for (const name of Object.keys(incoming.patch.values)) {
+        patchedNames.push(name);
+        const widget = inputsByName.get(name);
+        if (widget) applied.values[name] = coerceValue(widget, applied.values[name]);
+      }
+    }
+    values = applied.values;
+    controls = applied.controls;
+  }
+
+  if (incoming.seeds) {
+    const nextSeeds = { ...state.seeds };
+    const nextStale = new Set(state.stale);
+    values = { ...values };
+    for (const [name, seed] of Object.entries(incoming.seeds)) {
+      const widget = inputsByName.get(name);
+      const previous = nextSeeds[name];
+      nextSeeds[name] = seed;
+      if (!widget) continue;
+      const before =
+        previous !== undefined ? coerceValue(widget, previous.value) : defaultValue(widget, state.seeds);
+      const untouched = !touched.has(name) || sameFormValue(values[name], before);
+      if (untouched) {
+        values[name] = coerceValue(widget, seed.value);
+        nextStale.delete(name);
+      } else {
+        nextStale.add(name);
+      }
+    }
+    seeds = nextSeeds;
+    stale = nextStale;
+  }
+
+  return { values, controls, seeds, stale, patchedNames };
+}
+
+// ============================================================================
 // Dirty tracking
 // ============================================================================
 

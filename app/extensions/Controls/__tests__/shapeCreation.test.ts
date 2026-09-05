@@ -325,6 +325,42 @@ describe("controls follow the document AND the active sheet", () => {
 });
 
 // ============================================================================
+// 5b. Defect: a FAILED reload left the departed sheet's controls published
+//
+// Every reloader empties the store for the departing sheet and then calls
+// `loadFloatingControls`, whose publication used to sit at the end of its `try`.
+// A backend read that threw therefore skipped it: the region list still named
+// the OLD sheet's controls, so the departed shape kept being rendered over the
+// sheet the user had switched TO — and since that publication is also the
+// announcement that releases parked per-control DOM
+// (`announceFloatingControlRegions` -> `releaseUnpaintedShapeOverlays`), the
+// shape's pointer-claiming shims kept swallowing clicks on a sheet its shape is
+// not on. The error toast said the controls were "missing from the sheet" while
+// they were still painted and still eating clicks.
+// ============================================================================
+
+describe("the control loader publishes its regions on EVERY exit", () => {
+  const body = functionBody("loadFloatingControls");
+
+  it("re-publishes from a `finally`, not from the success path only", () => {
+    const finallyAt = body.indexOf("} finally {");
+    expect(finallyAt, "loadFloatingControls has no finally block").toBeGreaterThan(-1);
+    const calls = body.match(/syncFloatingControlRegions\(\)/g) ?? [];
+    expect(calls.length, "exactly one publication, and it is the finally's").toBe(1);
+    expect(
+      body.indexOf("syncFloatingControlRegions()"),
+      "the publication is inside the try, so a failed read never republishes",
+    ).toBeGreaterThan(finallyAt);
+  });
+
+  it("still tells the user when the read failed", () => {
+    // The refusal is only true BECAUSE of the finally above: publishing the
+    // (now empty) store is what actually makes the controls missing.
+    expect(body).toContain("They are missing from the sheet until this is resolved.");
+  });
+});
+
+// ============================================================================
 // 6. The instanceId format has ONE home on this side of the seam
 // ============================================================================
 

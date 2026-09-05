@@ -27,6 +27,12 @@ import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import { useDialogWindow } from "@api/dialogWindow";
 import { CAPABILITY_ID_SET, describeCapability, showToast } from "@api";
 import type { CapabilityId } from "@api";
+// The reach EVERY add-in has, whatever it declares. Imported rather than
+// re-typed: the per-kind sentences below ARE hand copies of
+// CONTRIBUTION_REACH_NOTE, and the one about forms drifted into an absolute
+// claim that a second door (`ext.executeCommand`) falsified on both surfaces at
+// once. A sentence about a door no contribution declares gets exactly one copy.
+import { EXTENSION_BUILTIN_ACTION_REACH_NOTE } from "@api/scriptHost/extensionProtocol";
 import { installAddIn, previewAddIn, type InstallExtensionReport } from "./backendChannel";
 
 /** Human labels for the sidecar's contribution keys. */
@@ -38,6 +44,7 @@ export const CONTRIBUTION_LABEL: Record<string, string> = {
   keybindings: "Keyboard shortcuts",
   cellStyles: "Cell styling",
   fileFormats: "File importers",
+  forms: "Forms",
 };
 
 /**
@@ -52,6 +59,14 @@ const CONTRIBUTION_REACH: Record<string, string> = {
     "The add-in is shown the displayed value of every visible cell it styles. That needs the 'grid.read' permission, so an add-in without it is refused rather than shown blanks.",
   fileFormats:
     "The add-in is given the contents of files you choose to import (Calcula opens them; the add-in never picks a file).",
+  // NARROWED, and deliberately: the previous ending ("...so nothing you do in
+  // one of its forms is ever written into your workbook") was an absolute claim
+  // about the whole surface, and a form's button relays into the add-in's own
+  // code, which reaches the built-in actions disclosed once below. The
+  // BINDING half is the part the code keeps structurally, so it is the part
+  // this sentence still promises.
+  forms:
+    "Calcula draws these forms; the add-in supplies only a description of them, never pictures or markup. A field can be tied to one of your cells: it is then shown that cell's contents, which needs the 'grid.read' permission — and it is display only, so the form never writes that cell back. Its buttons run the add-in's own code, which reaches the built-in actions noted below.",
 };
 
 /**
@@ -362,6 +377,12 @@ export function InstallAddInDialog({
                   ))}
                 </ul>
               )}
+              {/* UNCONDITIONAL, and not beside a kind. `ext.executeCommand`
+                  needs no contribution and no capability, so an add-in that
+                  declares nothing at all still holds this door — which is why
+                  it cannot hang off a row in the list above, and why the list
+                  being empty must not hide it. */}
+              <div style={styles.reach}>{EXTENSION_BUILTIN_ACTION_REACH_NOTE}</div>
             </Section>
 
             <Section title="Files that will be installed">

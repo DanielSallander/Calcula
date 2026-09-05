@@ -24,6 +24,14 @@ vi.mock("@api", () => ({
   removeGridRegionsByType: vi.fn(),
   requestOverlayRedraw: vi.fn(),
   emitAppEvent: vi.fn(),
+  // The handler stands down when the keystroke belongs to an on-grid surface
+  // that claimed it (a form the user placed on the sheet). These cases are all
+  // UNCLAIMED, so the double answers false — but it has to EXIST: a partial
+  // `@api` factory that omits an export the module imports throws at import
+  // time, and this suite went red for exactly that reason when the guard
+  // landed. The claimed behaviour is covered by
+  // extensions/DataValidation/__tests__/claimedSurfaceKeys.test.ts.
+  isKeyClaimed: () => false,
 }));
 
 vi.mock("@api/grid", () => ({

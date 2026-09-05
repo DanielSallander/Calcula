@@ -52,9 +52,12 @@ let moduleRecords: FakeRecord[] = [];
 let listThrows: Error | null = null;
 
 vi.mock("@api", () => ({
-  listWorkbookScriptRecords: async () => {
+  // The distributed-only door: what the real one returns is the rows whose
+  // summary stamp names a package, each resolved to its record. The store
+  // double holds full records already, so the filter is the whole difference.
+  listDistributedWorkbookScriptRecords: async () => {
     if (listThrows) throw listThrows;
-    return moduleRecords;
+    return moduleRecords.filter((r) => typeof r.sourcePackage === "string");
   },
 }));
 
@@ -335,8 +338,17 @@ describe("the extension wires the macros into the grant it writes", () => {
   it("the freshness check covers the macros too", () => {
     expect(EXT).toContain("isPackageConsentCurrent(persistedConsents, pkg, pkgScripts, pkgMacros)");
     // Grouped once for the whole load, not re-listed per package: the listing
-    // fans out to one `get_script` per module.
+    // fans out to one `get_script` per DISTRIBUTED module.
     expect(EXT).toContain("await listMacrosByPackage()");
+  });
+
+  it("the grouping lists through the distributed-only door, not the full inventory", () => {
+    // The load path runs on every open and every update. The full inventory
+    // fetched every module's body — the user's own recorded macros included —
+    // to hash the distributed ones and discard the rest.
+    const SET = read("extensions/ScriptableObjects/lib/packageConsentSet.ts");
+    expect(SET).toContain("await listDistributedWorkbookScriptRecords()");
+    expect(SET).not.toContain("listWorkbookScriptRecords(");
   });
 
   it("WRITES THE RECORD BEFORE IT MOUNTS — the mount gate reads that record", () => {

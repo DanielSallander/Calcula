@@ -13,7 +13,6 @@ import {
   resetObjectScriptManager,
   loadAllObjectScripts,
   saveObjectScript,
-  deleteObjectScript,
   getScaffoldTemplate,
   showToast,
   resolveCapabilityRequest,
@@ -29,6 +28,7 @@ import {
   IconScript,
   IconTemplate,
   IconMarketplace,
+  PanelExtensions,
 } from "@api";
 import type {
   CapabilityRequestPayload,
@@ -83,6 +83,12 @@ import { registerScriptEditorProvider } from "@api/scriptEditorService";
 import { installScriptDraftReview, openRememberedDraft } from "./lib/scriptDrafts";
 import { installAiEditBridge, replayAiEditResults } from "./lib/aiEditBridge";
 import { installFormPreviewBridge, replayFormPreviewResults } from "./lib/formPreviewBridge";
+import { installScriptPaneHost } from "./lib/scriptPaneHost";
+import { installScriptEmbedHost } from "./lib/scriptEmbedHost";
+import { installEmbeddedFormLayer } from "./lib/embeddedFormLayer";
+import { registerEmbeddedFormUx } from "./lib/embeddedFormUx";
+import { closeEmbeddedScriptForm, openEmbeddedScriptForm } from "@api/scriptHost/host";
+import { getActiveSheet } from "@api/lib";
 import { registerCellBehaviorUx } from "./lib/cellBehaviorUx";
 import { createFormScript } from "./lib/createForm";
 import {
@@ -168,9 +174,6 @@ export const ScriptableObjectEvents = {
 // Activation
 // ============================================================================
 
-/** Track which packages have been consented to run scripts (this session). */
-const consentedPackages = new Set<string>();
-
 /**
  * THE SET OF ARTIFACTS ONE CONSENT SCREEN PUT IN FRONT OF THE USER, held from
  * the moment the prompt is emitted until its Allow is answered.
@@ -207,6 +210,25 @@ const pendingGrants = new Map<string, PendingConsentGrant>();
 let promptSequence = 0;
 
 /**
+ * How many times ONE application may be re-asked in a session because a grant
+ * for it was REFUSED — the screen it answered was gone, or the workbook moved
+ * on underneath it.
+ *
+ * The refusal path re-prompts so the user is never stranded with no way to
+ * approve, but each re-prompt is a fresh screen, and a workbook that keeps
+ * changing between screen and click (a source that re-fires
+ * `AppEvents.PACKAGE_UPDATED` continuously — none is known, so this is a
+ * bound on a loop nothing is known to drive) would re-ask on every click,
+ * forever. After this many re-asks the loop stops and says so; the next
+ * workbook open, or the next update's own load pass, asks afresh. Exported so
+ * the test that pins the bound reads the same number the toast prints.
+ */
+export const MAX_REFUSAL_REPROMPTS_PER_SESSION = 3;
+
+/** Re-asks issued per application, this session, by the refusal path alone. */
+const refusalReprompts = new Map<string, number>();
+
+/**
  * An order-insensitive fingerprint of an artifact set: id + source for every
  * artifact, sorted by id.
  *
@@ -234,10 +256,13 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   "bi.sql": "Run read-only RAW SQL against this workbook's BI database (any reachable table)",
   storage: "Store script-private data in this workbook",
   "ui.html": "Render sandboxed HTML inside its object",
+  "ui.htmlInput":
+    "Receive what you click and type inside the HTML it draws — where it claims your input, it reaches the script instead of Calcula: on the grid a click stops selecting a cell, and on a Controls-pane card the whole card is taken at once",
   "formula.udf": "Evaluate its functions in worksheet formulas",
   "bi.model": "Modify this workbook's BI model definitions (measures, relationships, ... — undoable; never security roles or connections)",
   "bi.connector": "Feed external data into this workbook's BI model as a data connector",
   "ui.dialog": "Interrupt you with a dialog box and read what you answer",
+  "ui.pane": "Show a task pane you can keep open beside the grid while you work, and read what you enter in it",
   "distribution.writeback":
     "Fill in and send the input cells of a subscribed application — and, for an application this workbook can sign, read and approve everyone else's answers",
   schedule:
@@ -252,7 +277,7 @@ const CAPABILITY_DESCRIPTION: Record<CapabilityId, string> = {
   // vocabulary, and because a package may carry a sandboxed add-in whose
   // cell-styling contribution and cell-change subscription DO need it.
   "grid.read":
-    "Be shown the contents of your cells — the value of every cell on screen while it decides how to style them, and the old value, new value and formula of every cell that changes",
+    "Be shown the contents of your cells — the value of every cell on screen while it decides how to style them, the old value, new value and formula of every cell that changes, and what is in any cell a field of its form points at",
   // This map is rendered ONLY by the PACKAGE consent prompt (see
   // computePackageCapabilities below), and a script that arrived in a package
   // is forced to the restricted tier while every cap.pkg* row is unlocked-tier.
@@ -428,7 +453,6 @@ async function emitPackageConsentPrompt(
  */
 async function repromptPackage(packageName: string): Promise<void> {
   pendingGrants.delete(packageName);
-  consentedPackages.delete(packageName);
 
   // The STORE, for the same reason the grant handler reads it: the session
   // registry still holds scripts an update removed, and re-prompting from it
@@ -448,6 +472,42 @@ async function repromptPackage(packageName: string): Promise<void> {
 
   const persistedConsents = await loadConsents();
   await emitPackageConsentPrompt(persistedConsents, packageName, scripts, macros);
+}
+
+/**
+ * Refuse a grant that cannot honestly be applied, tell the user why — with the
+ * re-ask count — and re-ask, up to `MAX_REFUSAL_REPROMPTS_PER_SESSION` times
+ * per application per session.
+ *
+ * `reason` is the clause after "Nothing was approved for X:", ending in a full
+ * stop. The count is in the toast on purpose: a user who sees "re-ask 3 of 3"
+ * knows the next refusal is the last one, rather than discovering it as a
+ * prompt that silently stops coming back.
+ */
+async function refuseGrantAndReprompt(packageName: string, reason: string): Promise<void> {
+  const asked = (refusalReprompts.get(packageName) ?? 0) + 1;
+  refusalReprompts.set(packageName, asked);
+  if (asked > MAX_REFUSAL_REPROMPTS_PER_SESSION) {
+    // The bound. Nothing is recorded and no screen stands; the load pass on
+    // the next open or update asks afresh, because that pass does not come
+    // through here.
+    pendingGrants.delete(packageName);
+    showToast(
+      `Nothing was approved for "${packageName}": ${reason} Calcula has already ` +
+        `asked again ${MAX_REFUSAL_REPROMPTS_PER_SESSION} times this session and ` +
+        "will not re-ask on its own again until the workbook is reopened or the " +
+        "application is next updated.",
+      { type: "error", duration: 0 },
+    );
+    return;
+  }
+  showToast(
+    `Nothing was approved for "${packageName}": ${reason} Calcula will ask again ` +
+      "about the code this workbook has now " +
+      `(re-ask ${asked} of ${MAX_REFUSAL_REPROMPTS_PER_SESSION} this session).`,
+    { type: "error", duration: 0 },
+  );
+  await repromptPackage(packageName);
 }
 
 /**
@@ -554,37 +614,36 @@ async function loadAndMountScripts(cause?: "open"): Promise<void> {
         ObjectScriptManager.registerScript(script);
       }
 
-      // FRESHNESS IS EVALUATED ON EVERY PASS, AND IT MAY REVOKE.
+      // FRESHNESS IS EVALUATED ON EVERY PASS, AND IT MAY REVOKE. THERE IS NO
+      // SESSION CACHE OF THE ANSWER.
       //
       // `isPackageConsentCurrent` is the ONLY place a macro's presence and hash
-      // are ever checked, and it used to run only when the session set did not
-      // already hold the package. That set is cleared on AFTER_OPEN but NOT by
-      // AppEvents.PACKAGE_UPDATED, which re-runs this whole load — so for an
-      // application approved earlier in the session (or hydrated as current when
-      // the workbook opened), a Distribution ▸ Update that brought a NEW or
-      // CHANGED macro was never looked at: nothing was recorded, the macro was
-      // then refused by Rust, and no prompt would ever appear to fix it.
+      // are ever checked, and it used to run only when a session set
+      // (`consentedPackages`) did not already hold the package. That set was
+      // cleared on AFTER_OPEN but NOT by AppEvents.PACKAGE_UPDATED, which
+      // re-runs this whole load — so for an application approved earlier in
+      // the session (or hydrated as current when the workbook opened), a
+      // Distribution ▸ Update that brought a NEW or CHANGED macro was never
+      // looked at: nothing was recorded, the macro was then refused by Rust,
+      // and no prompt would ever appear to fix it. Once the check ran on every
+      // pass the set had no reader left, and a write-only cache of a security
+      // decision is a cache waiting for someone to read it again — so it is
+      // gone, and the persisted record is the only memory of an approval.
       //
-      // The check now also REVOKES: a package that no longer matches its record
-      // leaves the session set and is prompted again. Already-mounted object
-      // scripts are deliberately left running — they are individually still
-      // hash-consented (a stale macro alone can fail this check), and Allow
-      // re-records and re-mounts.
+      // A package that no longer matches its record is prompted again.
+      // Already-mounted object scripts are deliberately left running — they
+      // are individually still hash-consented (a stale macro alone can fail
+      // this check), and Allow re-records and re-mounts.
       let current = false;
       try {
         current = await isPackageConsentCurrent(persistedConsents, pkg, pkgScripts, pkgMacros);
       } catch (e) {
         // FAILS CLOSED. "I could not find out whether you approved this
-        // application's code" is not approval — not even for a package the
-        // session already held, because the thing that threw is the only thing
-        // that can tell us the record still covers what is about to run.
+        // application's code" is not approval, because the thing that threw is
+        // the only thing that can tell us the record still covers what is
+        // about to run.
         console.warn("[ScriptableObjects] Consent check failed:", e);
         current = false;
-      }
-      if (current) {
-        consentedPackages.add(pkg);
-      } else {
-        consentedPackages.delete(pkg);
       }
 
       if (current) {
@@ -933,6 +992,47 @@ async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
+  // ---- TypeScript Forms, M2: script task panes (modeless) ----
+  // The host registry (scriptHost/scriptPanes.ts) emits SCRIPT_PANE_REQUEST_EVENT
+  // and listens for SCRIPT_PANE_INPUT_EVENT; it owns the guards (the per-script
+  // cap, the dock and update buckets, ownership) and takes a pane down by
+  // emitting SCRIPT_PANE_CLOSE_EVENT. Unlike the form there is no modal slot and
+  // no one-at-a-time rule: several panes can be up, so the wiring is a LIST of
+  // panels keyed by the host-minted pane id, each rendered by the same trusted
+  // widget tree the form paints, hosted through the panel seam so the user
+  // decides where it lives. The user's close reaches the registry first; the
+  // panel comes down on the CLOSE it answers with (lib/scriptPaneHost.ts).
+  cleanupFunctions.push(
+    installScriptPaneHost({
+      panels: context.ui.panels,
+      setBadge: (panelId, text) => PanelExtensions.setBadge(panelId, text),
+    }),
+  );
+
+  // ---- TypeScript Forms, M3c: forms EMBEDDED on a sheet ----
+  // The SAME registry answers (scriptPanes.ts) — an embedded surface is a pane
+  // session with `placement: "embedded"` — so the wire is the same four events,
+  // filtered to requests that name a placement. What differs is who opens one:
+  // nothing a script can call. The user PLACES a form on a sheet
+  // (`@api/scriptHost/embeddedFormPlacements`), the layer paints a DOM host over
+  // the canvas where that placement sits, and the wiring asks the host to run
+  // the form. Two modules because two concerns: `embeddedFormLayer` owns pixels
+  // and the structural-edit shift, `scriptEmbedHost` owns sessions and stores
+  // and is testable without a canvas.
+  const embeddedFormLayer = installEmbeddedFormLayer({
+    openSession: (placementId) => openEmbeddedScriptForm(placementId),
+    closeSession: (placementId, reason) => closeEmbeddedScriptForm(placementId, reason),
+    activeSheetIndex: () => getActiveSheet(),
+  });
+  const embeddedFormWiring = installScriptEmbedHost(embeddedFormLayer.deps);
+  cleanupFunctions.push(embeddedFormWiring);
+  cleanupFunctions.push(embeddedFormLayer.dispose);
+  // The USER's half: nothing a script can call creates a placement, so the grid
+  // context menu is where every embedded form begins and ends. `retry` is handed
+  // over because putting an orphan back is the one gesture that makes a
+  // remembered refusal untrue (lib/scriptEmbedHost.ts).
+  cleanupFunctions.push(registerEmbeddedFormUx((placementId) => embeddedFormWiring.retry(placementId)));
+
   // ---- Load object scripts from backend on startup ----
   // The startup load IS a workbook open (the app just loaded whatever workbook
   // it starts with — including a .cala launched by double-click), so it carries
@@ -951,11 +1051,13 @@ async function activate(context: ExtensionContext): Promise<void> {
       // during open_file); stop ticking for it until the new one is loaded.
       stopSchedulerPump();
       resetObjectScriptManager();
-      consentedPackages.clear();
       // The remembered screens belong to the previous workbook too. A grant
       // arriving after the swap must not be able to record the OLD workbook's
       // artifacts into the NEW one.
       pendingGrants.clear();
+      // ...and so do the re-ask counts: the bound is per application per
+      // WORKBOOK session, not a lifetime ban on a name.
+      refusalReprompts.clear();
       consentQueue.length = 0; // queued prompts belong to the previous workbook
       capabilityQueue.length = 0; // pending JIT prompts belong to the previous workbook
       try {
@@ -1007,13 +1109,10 @@ async function activate(context: ExtensionContext): Promise<void> {
           `[ScriptableObjects] Consent for "${packageName}" arrived for a prompt ` +
             "that is no longer standing; nothing was approved.",
         );
-        showToast(
-          `Nothing was approved for "${packageName}": the approval screen was ` +
-            "replaced before you answered it. Calcula will ask again about the " +
-            "code this workbook has now.",
-          { type: "error", duration: 0 },
+        await refuseGrantAndReprompt(
+          packageName,
+          "the approval screen was replaced before you answered it.",
         );
-        await repromptPackage(packageName);
         return;
       }
       pendingGrants.delete(packageName);
@@ -1063,17 +1162,16 @@ async function activate(context: ExtensionContext): Promise<void> {
         return;
       }
       if (artifactFingerprint(liveArtifacts) !== artifactFingerprint(pending.artifacts)) {
-        showToast(
-          `"${packageName}" changed while its approval screen was open, so ` +
-            "nothing was approved. Calcula will ask again about the code this " +
-            "workbook has now.",
-          { type: "error", duration: 0 },
+        await refuseGrantAndReprompt(
+          packageName,
+          "the application changed while its approval screen was open.",
         );
-        await repromptPackage(packageName);
         return;
       }
 
-      consentedPackages.add(packageName);
+      // A grant that went through ends the refusal loop for this application;
+      // the bound counts consecutive refusals, not a lifetime.
+      refusalReprompts.delete(packageName);
 
       // PERSIST THE APPROVAL BEFORE MOUNTING ANYTHING.
       //
@@ -1179,7 +1277,7 @@ async function activate(context: ExtensionContext): Promise<void> {
       resetObjectScriptManager();
       // The previous workbook's screens go with it — see AFTER_OPEN.
       pendingGrants.clear();
-      consentedPackages.clear();
+      refusalReprompts.clear();
     }),
   );
 
@@ -1629,7 +1727,7 @@ function deactivate(): void {
   // A held consent screen outliving the extension that issued it would let a
   // later grant record artifacts against a session that no longer exists.
   pendingGrants.clear();
-  consentedPackages.clear();
+  refusalReprompts.clear();
 
   // Clean up all registrations
   for (let i = cleanupFunctions.length - 1; i >= 0; i--) {

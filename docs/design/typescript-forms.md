@@ -873,17 +873,54 @@ verdict, which SET a filter belongs to, which SCRIPT a claim answers to.
 Each is additive on the release-one seam; each has defects to close FIRST. The rows below are also
 in `docs/design/open-items.md` §2.ab.
 
-- **M2 — modeless floating window and task pane.** Needs a NEW capability id (`ui.pane`), because
-  "a dialog you must answer or close before continuing" would be false: `ALL_CAPABILITY_IDS`
-  (`capabilityIds.ts`), `CAP_DESCRIPTION` (`capabilities.ts`), the three phrase tables
-  (`SubscribeDialog.tsx` `CAPABILITY_PHRASE`, `inspector/ScriptsSection.tsx` `CAPABILITY_PHRASE`,
-  `ScriptableObjects/index.ts` `CAPABILITY_DESCRIPTION`), `BROKER_AUDITED_CAPABILITY_METHODS`
+- **M2 — task pane. S1–S5 SHIPPED 2026-09-04** (rows in `open-items.md` §2.ab). The NEW capability
+  id `ui.pane` exists in full lockstep — last in `ALL_CAPABILITY_IDS` (`capabilityIds.ts`),
+  `CAP_DESCRIPTION` (`capabilities.ts`), the three phrase tables, `BROKER_AUDITED_CAPABILITY_METHODS`
   (`broker.ts`), the `scriptSurfaces.ts` rows, and Rust `KNOWN_CAPABILITY_IDS`
-  (`core/persistence/src/lib.rs`). Sessions become script-visible instances (the shim already
-  keys waiters by `showId` — `contextShims.ts` `formWaiters` / `awaitFormAnswer`). Real event
-  backpressure: `EVENT_QUEUE_HIGH_WATER` is declared in `protocol.ts` and read nowhere. A panel
-  host: `ExtensionPanelHost` in `docs/design/third-party-addin-authoring.md` §4.6 was never built.
-- **M3 — on-grid embedding.** The `ui.html` frame is permanently `pointer-events: none`
+  (`core/persistence/src/lib.rs`, deliberately NOT grantable) — pinned by `paneConsentHonesty.test.ts`.
+  Event backpressure is real: `EVENT_QUEUE_HIGH_WATER` / `EVENT_QUEUE_LOW_WATER` / `EVENT_STALL_MS`
+  are read by `postEvent` / `onEventDone` in `host.ts` (`eventBackpressure.test.ts`). The pane is the
+  `form.pane` facet of a form script (`contextShims.ts`), a headless registry `scriptPanes.ts` with
+  none of the modal machinery, and a trusted section component
+  (`ScriptableObjects/components/scriptPane/ScriptPaneSection.tsx`) painting the SAME
+  `FormWidgetTree` as the modal, registered through the `registerPanel` seam by
+  `lib/scriptPaneHost.ts` — the `ExtensionPanelHost` of `third-party-addin-authoring.md` §4.6 was
+  never built and is not needed for this. Bindings ride the form's pipeline (`writeBoundCells`,
+  `installBoundLiveWatch` in `host.ts`); every writable pane binding is `writeOn: "change"`.
+  **S6 hardening** bounds the surface a script can seize: `pane.reveal` is admitted only inside a
+  user-gesture window (`noteScriptGesture`, stamped at genuinely user-initiated entries only —
+  never a timer, a hook or a scheduled job) plus a per-script bucket, and a script that keeps
+  earning refusals climbs one ladder — a HOST-owned banner it cannot forge or clear, then a
+  cooldown, then a forced close — with each step audited and each stage able to come back DOWN.
+  **S7** puts every docked pane and the open modal form in `codeInventory`'s held state (owner,
+  visible, bound cells, updates in the last minute), so a user can see what is holding a surface.
+  Three review rounds followed the build; what they found and what was deliberately left alone is
+  in `open-items.md` §2.ab.
+- **M3 — on-grid embedding. SHIPPED 2026-09-04**, proven live by `app/e2e/journeys/on-grid-forms.spec.ts`
+  (4/4). Three slices: a capture-phase right-click menu for on-grid controls (fifteen items had been
+  registered into a registry nothing rendered), declared hit rectangles replacing the unconditional
+  click-through on the `ui.html` frame (`render.setHitRegions`, frame-local coordinates, one
+  transparent shim per rectangle, Design Mode suspending every claim), and a form the user places on
+  a sheet — a pane SESSION with `placement: "embedded"`, painting the SAME `FormWidgetTree`, with a
+  minted-UUID placement that a structural edit MOVES and a deleted anchor ORPHANS. Writing the
+  journey found what the unit tests structurally could not: Core binds its handlers to an ANCESTOR
+  of everything an on-grid surface stacks over the canvas, so a right-click fired a button's macro,
+  a "claimed" rectangle still selected the shape underneath, and a click on an on-grid form's widget
+  was `preventDefault`ed and never focused it. The answer is one generic Core rule —
+  `core/lib/pointerClaims.ts`, an element carrying `data-pointer-claim` owns the gesture, Core never
+  reads the value and knows nothing about claimants — honoured now at every door that can act, with
+  the app's 194 window/document input listeners censused beside it in
+  `core/lib/globalInputListeners.ts` and a drift test that fails in both directions.
+- **M4 — third-party `form` contribution kind. SHIPPED 2026-09-04.** An add-in declares its forms by
+  name in the signed sidecar, registers each as a DATA widget tree, and shows one through the SAME
+  modal slot and trusted tree an object script's form uses — so it needed no new capability id and no
+  Rust. Bound READS ride the existing `grid.read`, asked against ceiling AND live grants and
+  performed host-side (the worker names no cell). Bound WRITES are refused STRUCTURALLY rather than
+  by prose: there is no write dependency to call, every bound seed is `readOnly` with its own
+  sentence, and `writeOn` is refused at the wire. The write door was designed and deliberately not
+  built — a read-only promise is one absolute clause provable by an absent code path, a write promise
+  is five conditional clauses whose truth depends on chrome continuing to render.
+- **M3 (historical note, kept because the trace is instructive).** The `ui.html` frame was permanently `pointer-events: none`
   (`extensions/Controls/Shape/shapeRenderer.ts`, in `updateHtmlOverlay`); on-grid controls have no
   reachable right-click menu (`open-items.md` §2.x); anchor-derived control ids lose their script on
   copy (`createForm.ts` header CONTEXT note), so the form's minted-UUID identity must carry over.
@@ -894,13 +931,46 @@ in `docs/design/open-items.md` §2.ab.
   so bound reads need `grid.read` and bound writes need a new gated door or forms stay read-only
   there; `EXTENSION_BROKER_METHODS` and `extensionReachableCapabilities`
   (`shell/registries/extensionTrust.ts`) updated honestly.
-- **M5 — drag-and-drop designer.** A TypeScript-AST reader/writer for the `#region` block
+- **M5 — drag-and-drop designer. SHIPPED 2026-09-04.** `app/src/api/formDesigner/` reads the
+  scaffold's `// #region Form layout …` block into a `FormSpec` and writes an edited one back under
+  ONE ARTIFACT: no layout JSON, no designer state the code does not determine. The locator is a
+  PARSE, not a search (a marker inside a string or a block comment is ignored, nesting is
+  depth-counted); the region must hold exactly one statement, because a writer that re-emits a block
+  it could not fully read is how a designer deletes a user's code; the literal is read EXACT OR
+  NOTHING, and anything else — a spread, a variable reference, a call — is a refusal that names the
+  construct in the user's own vocabulary, quotes their code and sends them to the code editor. The
+  writer will not write what it could not read, makes NO BYTES on a no-op edit (which is what lets
+  the scaffold round-trip byte-for-byte), refuses until the caller acknowledges that a re-emit
+  destroys comments inside the region, and RE-READS its own output before returning it. The panel
+  holds no layout at all — only a selection path — and every edit goes through the AST writer into
+  the editor's live buffer via `executeEdits`, so a drop lands on the code editor's undo stack and
+  Ctrl+Z takes it back. Ten review repairs, described in `open-items.md` §2.ab.
+- **M5 (historical note).** The original plan: a TypeScript-AST reader/writer for the `#region` block
   (`scriptableObjectScaffolds.ts` `getScaffoldTemplate` `case "form"`; the transpiler already loads
   `typescript` on demand — `app/src/api/scriptTranspile.ts`, its lazy `import("typescript")` — and
   ONE ARTIFACT is its rule, stated in that file's header), round-trip tests that only that block
   changes and `// @capability` pragmas stay byte-identical, `LiveModulePersister` integration
   (`ScriptableObjects/lib/liveModuleBuffer.ts`), `_shared/components/useDragDrop.ts`.
-- **M6 — isolated HTML/CSS apps.** Prove the srcdoc bridge executes under the Tauri CSP, or serve
+- **M6 — isolated HTML/CSS apps. FOUNDATION SHIPPED 2026-09-05; `{ type: "html" }` STAYS REFUSED.**
+  The milestone's first phase was told to build nothing and settle one question with evidence, and
+  the answer was worse than expected: **`tauri dev` on Windows desktop enforces no CSP at all** (the
+  only header-attaching code is the `tauri://` asset protocol, and dev points the webview straight at
+  `devUrl` because the proxy is compiled out on desktop), so every E2E run this project has ever done
+  ran with inline script allowed — and the shipped `ui.html` bridge, an inline `<script>` in an
+  `allow-scripts` srcdoc frame, almost certainly does not execute in a BUNDLED build. There is no
+  nonce-shaped fix, because the shipped templates drive it from inline `onclick=` ATTRIBUTES. What
+  shipped is the foundation that verdict allows: the bridge is now ONE module
+  (`extensions/_shared/scriptFrame/`) instead of two byte-identical copies; the INPUT half of
+  `ui.html` became its own capability `ui.htmlInput` in full lockstep (a claimed rectangle is pointer
+  input taken from the grid, and not one of `ui.html`'s four sentences says the frame can TAKE
+  anything — the same split, for the same reason, as `ui.pane` out of `ui.dialog`); the frame gained
+  a sanitized theme contract, size negotiation, a live-frame cap and a shared byte watchdog; and
+  `vHtml` now refuses a `data:` URI by SCHEME, after decoding what the frame's parsers will decode
+  (seven entity spellings had been getting through). The feature itself waits on the
+  custom-URI-scheme route, measured by `e2e/tests/csp-srcdoc-bridge.spec.ts` in the `platform`
+  project. Refusing to build on an unproven bridge was this milestone's stated purpose, and it is
+  what happened.
+- **M6 (the original plan, kept for its checklist).** Prove the srcdoc bridge executes under the Tauri CSP, or serve
   app documents from a Rust custom URI scheme with their own origin; extract the duplicated bridge
   (`shapeRenderer.ts` `buildIframeSrcDoc` vs `ControlsPane/components/CustomControlHost.tsx`
   `buildIframeSrcDoc` — the duplication is declared in that file's header CONTEXT note); e2e

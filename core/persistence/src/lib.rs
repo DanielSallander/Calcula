@@ -1702,7 +1702,7 @@ impl Default for ScriptProvenance {
 /// the script is denied a capability it correctly declared. The origin argument
 /// of a `// @capability net.fetch <origin>` pragma is a runtime grant hint, not
 /// part of the ceiling, so only the cap id set is collected here.
-pub const KNOWN_CAPABILITY_IDS: [&str; 16] = [
+pub const KNOWN_CAPABILITY_IDS: [&str; 18] = [
     "net.fetch",
     "bi.query",
     "bi.sql",
@@ -1730,6 +1730,21 @@ pub const KNOWN_CAPABILITY_IDS: [&str; 16] = [
     // with an empty ceiling and be denied at the broker with no clue why.
     "distribution.publish",
     "distribution.subscribe",
+    // A modeless script surface (task pane). Host-painted, frontend-only: no
+    // Rust gate, deliberately NOT grantable here (see capability_store.rs) —
+    // it is in this list only so it is DECLARABLE, i.e. survives the ceiling
+    // derivation at save and at .calp publish. LAST: the TypeScript mirror
+    // test pins the order of this array, not just its membership.
+    "ui.pane",
+    // The INPUT half of `ui.html` (M6b): claiming rectangles of a script's own
+    // HTML frame so clicks there reach the script instead of the grid. Split out
+    // because ui.html's user-facing sentences promise rendering and nothing
+    // else. Host-painted, frontend-only: no Rust gate, deliberately NOT
+    // grantable (see capability_store.rs) — it is in this list only so it is
+    // DECLARABLE, i.e. survives the ceiling derivation at save and at .calp
+    // publish. LAST, for the same reason `ui.pane` was: the TypeScript mirror
+    // test pins the order of this array.
+    "ui.htmlInput",
 ];
 
 /// Parse a script source for `// @capability <id> [origin]` line-comment

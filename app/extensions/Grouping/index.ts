@@ -8,6 +8,8 @@ import {
   AppEvents,
   ExtensionRegistry,
   registerPostHeaderOverlay,
+  isKeyClaimed,
+  isPointerClaimed,
 } from "@api";
 import { registerGroupingController } from "@api/groupingService";
 import { GroupSettingsDialog } from "./components/GroupSettingsDialog";
@@ -72,6 +74,11 @@ const cleanupFns: (() => void)[] = [];
  * in the row or column outline bar.
  */
 function handleOutlineBarClick(event: MouseEvent): void {
+  // This handler hit-tests by CLIENT POINT against the canvas, so it cannot
+  // tell "the pointer is over my geometry" from "the pointer is over an
+  // element some surface stacked on the grid put there". The DOM already
+  // answered that; see core/lib/pointerClaims.ts.
+  if (isPointerClaimed(event)) return;
   const { rowYMap, colXMap, outlineBarW, outlineBarH, colHeaderH, rowHeaderW } =
     getLastRenderedState();
 
@@ -215,6 +222,13 @@ function handleOutlineBarClick(event: MouseEvent): void {
 // ============================================================================
 
 function handleKeyDown(event: KeyboardEvent): void {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // This handler had no focus guard at all, and a longer tag list would only
+  // be a census of the widget types that exist today.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(event)) return;
   if (!currentSelection) return;
 
   // Alt+Shift+Right = Group (Excel shortcut) - auto-detect rows vs columns

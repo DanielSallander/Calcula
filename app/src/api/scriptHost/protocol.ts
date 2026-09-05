@@ -390,6 +390,20 @@ export const METHOD_DEADLINES_MS: Record<string, number> = {
   // idle/absolute deadlines in scriptForms.ts, not by this timer; this row only
   // keeps the show from being abandoned while the renderer is still mounting.
   "form.show": UI_DIALOG_DEADLINE_MS,
+  // An ADD-IN's form (M4). Same shape as form.show — it resolves once the
+  // renderer says the form is on screen — plus the reason cap.dialogForm needs
+  // this row: it carries `ui.dialog`, so the FIRST call awaits the consent
+  // prompt, and the generic 30 s timer would abandon it while the person was
+  // still reading. The open form is then bounded by scriptForms.ts's own
+  // idle/absolute deadlines, not by this one.
+  "ext.formShow": UI_DIALOG_DEADLINE_MS,
+  // Task panes (M2). pane.dock never waits on the USER — it resolves once the
+  // renderer acknowledges the pane is on screen — but it is the capability-
+  // bearing entry point, so its FIRST call awaits the ui.pane consent dialog,
+  // and the generic 30 s timer would abandon it while the person was still
+  // reading the prompt. pane.reveal carries the capability too.
+  "pane.dock": UI_DIALOG_DEADLINE_MS,
+  "pane.reveal": UI_DIALOG_DEADLINE_MS,
   // The file.picker family and workbook Save As (class "file"): a native
   // save/open dialog is bounded by the same person a modal is. On the 30s
   // default the worker would abandon the call while the picker was still open,
@@ -424,6 +438,21 @@ export const MAX_INFLIGHT_CALLS = 32;
 export const METHOD_CALL_TIMEOUT_MS = CALL_TIMEOUT_MS;
 /** Per-worker outbound event queue high-water mark. */
 export const EVENT_QUEUE_HIGH_WATER = 256;
+/**
+ * Backpressure releases only once the realm has drained back BELOW this many
+ * outstanding dispatches. One threshold flaps on every acknowledgement — hold
+ * at 256, release at 255, hold at 256 again — so the hold has hysteresis.
+ */
+export const EVENT_QUEUE_LOW_WATER = 64;
+/**
+ * A realm that has outstanding dispatches and acknowledges NONE of them for this
+ * long has stopped running its event loop (an infinite loop in a hook, a
+ * handler awaiting a promise that never settles). The host treats that exactly
+ * as a crash — the realm is respawned once, then faulted — because a script
+ * that has stopped acknowledging is indistinguishable from one that has died,
+ * and its queue would otherwise grow for as long as the workbook stays open.
+ */
+export const EVENT_STALL_MS = 30_000;
 /** Render request: no response within this window -> drop in-flight, degrade. */
 export const RENDER_TIMEOUT_MS = 2_000;
 

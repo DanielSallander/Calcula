@@ -7,34 +7,35 @@
 //          phrase it appends to the outcome.
 //
 // WHY THE CLI NEEDS ITS OWN ANSWER AT ALL. `list_scripts` (the backend call
-// behind `@api/workbookScripts.listWorkbookScripts`) returns id + name + scope
-// and DROPS `source_package` — the field `core/calp/src/pull.rs` stamps on every
-// module it materializes out of a `.calp`. The CLI listed macros from that call,
-// so a publisher's module and the user's own were rendered identically, and
-// `run` executed one without ever saying where it came from. The command line is
-// the power surface: the user typing `run` there is precisely the user who has
-// to be told they are about to run code that arrived inside an application.
+// behind `@api/workbookScripts.listWorkbookScripts`) once returned id + name +
+// scope and DROPPED `source_package` — the field `core/calp/src/pull.rs` stamps
+// on every module it materializes out of a `.calp`. The CLI listed macros from
+// that call, so a publisher's module and the user's own were rendered
+// identically, and `run` executed one without ever saying where it came from.
+// The command line is the power surface: the user typing `run` there is
+// precisely the user who has to be told they are about to run code that arrived
+// inside an application.
 //
-// SO THE LISTING MOVED DOORS. `listWorkbookScriptRecords` resolves each summary
-// through `get_script`, which DOES return `sourcePackage`. It costs one extra
-// IPC round trip per module — paid once per `ls`/`run`, over a workbook's
-// handful of macros — and it is the only @api door that can answer the question
-// truthfully. A cheaper listing that cannot see provenance is not cheaper, it is
-// wrong.
+// THE LISTING MOVED DOORS TWICE. First to `listWorkbookScriptRecords`, which
+// resolves every summary through `get_script` — one IPC round trip per module,
+// on every `ls`, `run` and session refresh, to fetch bodies this file never
+// shows. Then the summary row was taught to carry `sourcePackage` verbatim
+// (`script_summary`, app/src-tauri/src/scripting/commands.rs), and the gateway
+// went back to the one-round-trip listing. Whichever door feeds this, the rule
+// is the same: a listing that cannot see provenance is not cheaper, it is wrong.
 //
 // THE ORIGIN IS DERIVED, NEVER ASSERTED. `scriptOriginForStoredRecord` is the
-// single function that reads a record's `sourcePackage` into a `MountOrigin`
+// single function that reads a row's `sourcePackage` into a `MountOrigin`
 // (app/src/api/scriptHost/scriptOrigin.ts). Nothing here inspects the package
 // NAME to decide a kind — a publisher who names their application `local` still
 // gets `kind: "package"`, because the name only ever lands in `.name`.
 //
-// AN UNREADABLE RECORD IS NOT A LOCAL ONE. `listWorkbookScriptRecords` reports a
-// per-record read failure by returning the summary with `sourcePackage: null`,
-// which `scriptOriginForStoredRecord` reads — correctly, for its own contract —
-// as local. That default is a fail-OPEN provenance claim: an unreadable module
-// would be labelled the user's own code. Every display path here therefore
-// checks `loadError` FIRST and says the origin is unknown, which is the honest
-// answer and the one that makes the user look before they type `run`.
+// AN UNREADABLE RECORD IS NOT A LOCAL ONE. A caller feeding this from the full
+// inventory gets a per-record read failure as `loadError` on the entry. Every
+// display path here checks `loadError` FIRST and says the origin is unknown,
+// which is the honest answer and the one that makes the user look before they
+// type `run`. A summary row carries no `loadError` (nothing was read that could
+// fail), and its `sourcePackage` is the record's own, so the entry is complete.
 
 import {
   isLocalOrigin,
@@ -43,6 +44,17 @@ import {
 } from "@api/scriptHost/scriptOrigin";
 import type { MountOrigin } from "@api/scriptHost/scriptOrigin";
 import type { ScriptScope, WorkbookScriptRecord } from "@api/workbookScripts";
+
+/**
+ * What `macroEntriesFrom` needs of a row: the summary shape, plus the read
+ * failure a full record can carry. A `ScriptSummary` and a
+ * `WorkbookScriptRecord` both satisfy it, so the gateway can list through the
+ * one-round-trip door while a test can still hand over an unreadable record.
+ */
+export type MacroSourceRow = Pick<WorkbookScriptRecord, "id" | "name" | "scope"> & {
+  sourcePackage?: string | null;
+  loadError?: string | null;
+};
 
 /**
  * One macro as the CLI lists, completes and runs it: identity, scope, the
@@ -62,14 +74,14 @@ export interface MacroEntry {
 /** What the `from` column shows when the record could not be read at all. */
 export const UNKNOWN_ORIGIN_LABEL = "(unreadable)";
 
-/** Turn the inventory's records into the CLI's entries, deriving each origin. */
-export function macroEntriesFrom(records: WorkbookScriptRecord[]): MacroEntry[] {
-  return records.map((record) => ({
-    id: record.id,
-    name: record.name,
-    scope: record.scope,
-    origin: scriptOriginForStoredRecord(record),
-    loadError: record.loadError,
+/** Turn listing rows into the CLI's entries, deriving each origin from its stamp. */
+export function macroEntriesFrom(rows: MacroSourceRow[]): MacroEntry[] {
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    scope: row.scope,
+    origin: scriptOriginForStoredRecord(row),
+    loadError: row.loadError ?? null,
   }));
 }
 

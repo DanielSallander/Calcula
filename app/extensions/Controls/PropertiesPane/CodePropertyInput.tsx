@@ -3,14 +3,22 @@
 // CONTEXT: Provides a textarea with autocomplete for Calcula script API functions
 //          and custom script modules from the Script Editor.
 //          Supports chaining commands with semicolons, like PowerApps.
+//          A module that arrived in a .calp is suggested WITH its application:
+//          the `Name()` this inserts runs the publisher's code as published, and
+//          the suggestion says so before it is picked.
 
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import {
+  describeScriptSuggestion,
+  scriptEntryApplication,
+  type ScriptPickerEntry,
+} from "../../_shared/lib/scriptModuleProvenance";
 
 // ============================================================================
 // Types
 // ============================================================================
 
-interface AutocompleteSuggestion {
+export interface AutocompleteSuggestion {
   /** Display label (what gets inserted) */
   label: string;
   /** Full signature shown in the autocomplete list */
@@ -21,6 +29,9 @@ interface AutocompleteSuggestion {
   kind: "api" | "script";
   /** Text to insert when selected */
   insertText: string;
+  /** The application a script module arrived in; null for API entries and
+   *  for the user's own modules. Rendered as a tag beside the signature. */
+  application: string | null;
 }
 
 // ============================================================================
@@ -34,6 +45,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Set the value of a cell",
     kind: "api",
     insertText: "setCellValue(",
+    application: null,
   },
   {
     label: "getCellValue",
@@ -41,6 +53,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Get the display value of a cell",
     kind: "api",
     insertText: "getCellValue(",
+    application: null,
   },
   {
     label: "getRange",
@@ -48,6 +61,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Get a range of cell values (returns JSON)",
     kind: "api",
     insertText: "getRange(",
+    application: null,
   },
   {
     label: "setRange",
@@ -55,6 +69,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Set a range of cell values",
     kind: "api",
     insertText: "setRange(",
+    application: null,
   },
   {
     label: "getCellFormula",
@@ -62,6 +77,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Get the formula of a cell",
     kind: "api",
     insertText: "getCellFormula(",
+    application: null,
   },
   {
     label: "getActiveSheet",
@@ -69,6 +85,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Get active sheet info (returns JSON)",
     kind: "api",
     insertText: "getActiveSheet(",
+    application: null,
   },
   {
     label: "getSheetNames",
@@ -76,6 +93,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Get all sheet names (returns JSON)",
     kind: "api",
     insertText: "getSheetNames(",
+    application: null,
   },
   {
     label: "setActiveSheet",
@@ -83,6 +101,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Switch the active sheet",
     kind: "api",
     insertText: "setActiveSheet(",
+    application: null,
   },
   {
     label: "getSheetCount",
@@ -90,6 +109,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Get the total number of sheets",
     kind: "api",
     insertText: "getSheetCount(",
+    application: null,
   },
   {
     label: "log",
@@ -97,6 +117,7 @@ const CALCULA_API_SUGGESTIONS: AutocompleteSuggestion[] = [
     description: "Log a message to the script console",
     kind: "api",
     insertText: "log(",
+    application: null,
   },
 ];
 
@@ -115,6 +136,76 @@ export function sanitizeScriptName(name: string): string {
     sanitized = "_" + sanitized;
   }
   return sanitized || "_unnamed";
+}
+
+/**
+ * The autocomplete rows for the workbook's script modules.
+ *
+ * Pure, so the provenance a row shows can be pinned without driving the
+ * textarea: a distributed module's row names its application and describes the
+ * terms (published code, unchanged, only once approved) that the `Name()` it
+ * inserts will run under — `planInlineButtonRun` runs exactly that stored
+ * source and refuses everything else.
+ */
+export function buildScriptSuggestions(scripts: ScriptPickerEntry[]): AutocompleteSuggestion[] {
+  // The rows must describe what the inserted `Name()` will DO, and the planner
+  // (`planInlineButtonRun`) resolves a bare `Name()` by name with local-wins and
+  // refuses a name two applications answer to. So: a distributed row whose
+  // identifier a local module also answers to is NOT offered — inserting it
+  // would run the user's own module while the row promised the publisher's —
+  // and two same-named distributed rows collapse into ONE that says the name is
+  // claimed by several applications and cannot be called by name at all.
+  const localNames = new Set(
+    scripts.filter((s) => !scriptEntryApplication(s)).map((s) => sanitizeScriptName(s.name)),
+  );
+  const rows: AutocompleteSuggestion[] = [];
+  const distributedByName = new Map<string, ScriptPickerEntry[]>();
+  for (const s of scripts) {
+    const fnName = sanitizeScriptName(s.name);
+    if (!scriptEntryApplication(s)) {
+      rows.push({
+        label: fnName,
+        signature: `${fnName}()`,
+        description: describeScriptSuggestion(s),
+        kind: "script" as const,
+        insertText: `${fnName}()`,
+        application: null,
+      });
+      continue;
+    }
+    if (localNames.has(fnName)) continue;
+    const group = distributedByName.get(fnName);
+    if (group) group.push(s);
+    else distributedByName.set(fnName, [s]);
+  }
+  for (const [fnName, group] of distributedByName) {
+    if (group.length === 1) {
+      rows.push({
+        label: fnName,
+        signature: `${fnName}()`,
+        description: describeScriptSuggestion(group[0]),
+        kind: "script" as const,
+        insertText: `${fnName}()`,
+        application: scriptEntryApplication(group[0]),
+      });
+      continue;
+    }
+    const apps = [...new Set(group.map((s) => scriptEntryApplication(s) ?? "")).values()]
+      .filter((a) => a !== "")
+      .sort();
+    rows.push({
+      label: fnName,
+      signature: `${fnName}()`,
+      description:
+        `${group.length} script modules answer to ${fnName}() — from ` +
+        apps.map((a) => `"${a}"`).join(" and ") +
+        ". A button cannot call it by name: bind the button to one module directly, or rename one.",
+      kind: "script" as const,
+      insertText: `${fnName}()`,
+      application: apps.join(" / "),
+    });
+  }
+  return rows;
 }
 
 // ============================================================================
@@ -203,6 +294,18 @@ const kindBadgeStyle: React.CSSProperties = {
   gap: 4,
 };
 
+const applicationTagStyle: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 600,
+  fontFamily: "Segoe UI, Tahoma, sans-serif",
+  color: "#5a4a00",
+  background: "#fff8dc",
+  border: "1px solid #e6d78a",
+  borderRadius: 3,
+  padding: "0 5px",
+  whiteSpace: "nowrap",
+};
+
 const hintStyle: React.CSSProperties = {
   fontSize: 10,
   color: "#999",
@@ -219,7 +322,8 @@ interface CodePropertyInputProps {
   value: string;
   onChange: (value: string) => void;
   onCommit: (value: string) => void;
-  scripts: Array<{ id: string; name: string }>;
+  /** Every module the workbook lists, WITH its `sourcePackage` stamp. */
+  scripts: ScriptPickerEntry[];
   placeholder?: string;
 }
 
@@ -242,18 +346,10 @@ export const CodePropertyInput: React.FC<CodePropertyInputProps> = ({
   const autocompleteRef = useRef<HTMLDivElement>(null);
 
   // Build script suggestions from the scripts prop
-  const scriptSuggestions = useMemo<AutocompleteSuggestion[]>(() => {
-    return scripts.map((s) => {
-      const fnName = sanitizeScriptName(s.name);
-      return {
-        label: fnName,
-        signature: `${fnName}()`,
-        description: `Run script module "${s.name}"`,
-        kind: "script" as const,
-        insertText: `${fnName}()`,
-      };
-    });
-  }, [scripts]);
+  const scriptSuggestions = useMemo<AutocompleteSuggestion[]>(
+    () => buildScriptSuggestions(scripts),
+    [scripts],
+  );
 
   // Determine autocomplete context based on cursor position
   const getAutocompleteContext = useCallback((): {
@@ -459,8 +555,9 @@ export const CodePropertyInput: React.FC<CodePropertyInputProps> = ({
         <div ref={autocompleteRef} style={autocompleteListStyle}>
           {filteredSuggestions.map((suggestion, idx) => (
             <div
-              key={suggestion.label + suggestion.kind}
+              key={suggestion.label + suggestion.kind + (suggestion.application ?? "")}
               style={idx === selectedIndex ? autocompleteItemHighlightStyle : autocompleteItemStyle}
+              data-script-suggestion={suggestion.kind === "script" ? suggestion.label : undefined}
               onMouseDown={(e) => {
                 e.preventDefault();
                 insertSuggestion(suggestion);
@@ -471,6 +568,14 @@ export const CodePropertyInput: React.FC<CodePropertyInputProps> = ({
                 <span style={suggestion.kind === "api" ? signatureStyle : scriptSignatureStyle}>
                   {suggestion.signature}
                 </span>
+                {suggestion.application !== null ? (
+                  <span
+                    style={applicationTagStyle}
+                    data-script-suggestion-application={suggestion.application}
+                  >
+                    from application &quot;{suggestion.application}&quot;
+                  </span>
+                ) : null}
               </span>
               <span style={descriptionStyle}>{suggestion.description}</span>
             </div>

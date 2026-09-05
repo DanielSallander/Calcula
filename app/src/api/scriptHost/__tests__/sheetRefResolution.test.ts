@@ -10,6 +10,9 @@
 //          (4) the exported clipboard helpers accepting a sheet NAME where they
 //              accepted an index (assertActiveSheet resolves it).
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 import { vSheetRef, vSheetRename, vCellSet, vBatch, vRangeWrite } from "../validators";
 import {
@@ -248,5 +251,48 @@ describe("assertActiveSheet resolves names (via copyRange, an exported caller)",
     await expect(
       copyRangeToScriptClipboard(lib as unknown as LibLike, "s1", "Sheet1", 0, 0, 1, 1),
     ).rejects.toThrow(/no sheet named "Sheet1".*"Main" \(0\), "Archive" \(1\)/);
+  });
+});
+
+// ============================================================================
+// (5) The pinned-sheet capture resolves BY INDEX, not by array position
+// ============================================================================
+//
+// A restricted form or task pane records the sheet it opened on as an index
+// AND a name, and `sheetIdentityRefusal` re-checks that name by `.index`. If
+// the CAPTURE read the name by array position the two spellings would answer
+// differently the moment positions and indices diverge, and the surface would
+// refuse itself: "switch back to Sheet1" to a user already standing on it.
+// Read from source because the divergence cannot be built through the public
+// seam — `getSheets` hands back the backend's own list.
+
+describe("the pinned-sheet name is resolved by index, never by array position", () => {
+  const source = readFileSync(resolve(__dirname, "../host.ts"), "utf8");
+
+  it("captures it through nameOfSheet", () => {
+    // Asserted through the NAME the assignment uses, not through one spelling
+    // of the call: M3 generalised the pin from "the active sheet" to "this
+    // layout's home sheet" and moved the call above the loop, which a literal
+    // pin read as a regression. What must hold is that whatever value lands in
+    // `pinnedSheetName` was resolved by INDEX.
+    const nameAt = source.indexOf("out.pinnedSheetName");
+    expect(nameAt, "the pin no longer records a sheet name at all").toBeGreaterThan(0);
+    const assigned = /out\.pinnedSheetName\s*=\s*([A-Za-z_$][\w$]*)/.exec(source.slice(nameAt));
+    expect(assigned, "the pinned name is not a plain identifier any more — re-read this guard").not.toBeNull();
+    const decl = new RegExp(`const\\s+${assigned![1]}\\s*=\\s*([^;]+);`).exec(source);
+    expect(decl, `nothing declares ${assigned![1]}`).not.toBeNull();
+    expect(decl![1]).toContain("nameOfSheet(");
+  });
+
+  it("nameOfSheet itself matches on .index", () => {
+    // Sliced to its `return`, not to the first `}` — the parameter's own type
+    // annotation carries a brace before the body ever starts.
+    const fn = source.slice(source.indexOf("function nameOfSheet("));
+    const body = fn.slice(fn.indexOf("return"), fn.indexOf(";", fn.indexOf("return")));
+    expect(body).toContain("s.index === index");
+  });
+
+  it("leaves no sheets[activeIndex] position read anywhere in the host", () => {
+    expect(source).not.toContain("sheets[activeIndex]");
   });
 });

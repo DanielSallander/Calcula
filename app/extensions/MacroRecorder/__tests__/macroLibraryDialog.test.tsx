@@ -35,7 +35,16 @@ const unreadable = new Set<string>();
 /** The one-shot object-script mount the dialog uses for `api.*` macros. */
 const runOnce = vi.fn(async (_options: unknown) => undefined);
 
-vi.mock("@api", () => ({
+vi.mock("@api", async () => {
+  // The REAL origin rule: a provenance decision in a test must agree with the one
+  // definition every gate reads, or the test pins a rule the product does not have.
+  const origin = await vi.importActual<typeof import("@api/scriptHost/scriptOrigin")>(
+    "@api/scriptHost/scriptOrigin",
+  );
+  return {
+    scriptOriginForStoredRecord: origin.scriptOriginForStoredRecord,
+    originTagTitle: origin.originTagTitle,
+
   listWorkbookScripts: async () =>
     [...store.values()].map((s) => ({ id: s.id, name: s.name })),
   getWorkbookScript: async (id: string) => {
@@ -87,18 +96,8 @@ vi.mock("@api", () => ({
     screenUpdating: true,
   }),
   runObjectScriptOnce: (options: unknown) => runOnce(options),
-  // The real derivations: a provenance chip must name a publisher the same way
-  // every other transparency surface does.
-  scriptOriginForStoredRecord: (record: { sourcePackage?: string | null }) => {
-    const name =
-      typeof record.sourcePackage === "string" ? record.sourcePackage.trim() : "";
-    return name === "" ? { kind: "local" } : { kind: "package", name };
-  },
-  originTagTitle: (origin: { kind: string; name?: string }) =>
-    origin.kind === "package"
-      ? `From package "${origin.name}"`
-      : "Authored in this workbook",
-}));
+  };
+});
 
 vi.mock("@api/notifications", () => ({ showToast: vi.fn() }));
 vi.mock("@api/grid", () => ({ refreshGridData: vi.fn() }));

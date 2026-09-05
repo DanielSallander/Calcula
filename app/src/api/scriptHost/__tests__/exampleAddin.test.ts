@@ -19,6 +19,8 @@ import {
   type WX2H,
 } from "../extensionProtocol";
 import { CAPABILITY_ID_SET, type CapabilityId } from "../capabilityIds";
+import { checkFormSpec } from "../validators";
+import { EXTENSION_FORM_HOOKS } from "../extensionProtocol";
 import { UDF_ERROR_KEY } from "../../formulaFunctions";
 
 const EXAMPLE_DIR = path.resolve(__dirname, "../../../../../docs/examples/addin-tax-tools");
@@ -42,6 +44,8 @@ function claimedId(reg: ExtRegistration): string {
       return reg.id;
     case "fileFormat":
       return reg.format.id;
+    case "form":
+      return reg.name;
     default:
       return "";
   }
@@ -118,6 +122,20 @@ describe("the shipped example add-in", () => {
       }
     }
 
+    // The documented FORM (M4) must pass the EXTENSION surface's own validator,
+    // not merely the shared one. The narrowing there is real — no `writeOn`, no
+    // defined name, no sheet, no ranged options, no workbook media — so an
+    // example that quietly used one of them would be a documented path the host
+    // refuses, which is exactly the fiction this file exists to prevent.
+    const formReg = registrations.find(
+      (r): r is Extract<ExtRegistration, { kind: "form" }> => r.kind === "form",
+    );
+    expect(formReg, "the example must ship a form").toBeDefined();
+    expect(checkFormSpec(formReg!.spec, "extension")).toBe(true);
+    // ...and it must really bind a cell, or the grid.read it declares is a
+    // capability the example asks for and never uses.
+    expect(JSON.stringify(formReg!.spec)).toContain('"bind":"B2"');
+
     // The worksheet function really computes — the whole point of the slice.
     const formulaReg = registrations.find(
       (r): r is Extract<ExtRegistration, { kind: "formula" }> =>
@@ -154,6 +172,52 @@ describe("the shipped example add-in", () => {
       (m): m is Extract<WX2H, { t: "handlerResult" }> => m.t === "handlerResult",
     );
     expect(errAnswer?.value).toEqual({ [UDF_ERROR_KEY]: "#N/A" });
+
+    // ...and so does the FORM's live path, driven with the hook names the host
+    // really sends. This is the assertion the file was missing: the example's
+    // caption is updated from `event.hook === "change"`, the host was sending
+    // "onChange", and NOTHING here noticed because the form handler was never
+    // invoked at all. A spec check alone cannot see dead code behind a hook.
+    const secondForm = secondRegs.find(
+      (r): r is Extract<ExtRegistration, { kind: "form" }> => r.kind === "form",
+    );
+    expect(secondForm, "the example must ship a form").toBeDefined();
+    posted.length = 0;
+    const changed = built.runtime.invokeHandler(3, secondForm!.handlerId, [
+      {
+        hook: "change",
+        detail: { name: "country", value: "DE", values: { net: 100, country: "DE" } },
+      },
+    ]);
+    await Promise.resolve();
+    const update = posted.find(
+      (m): m is Extract<WX2H, { t: "call" }> =>
+        m.t === "call" && m.method === "ext.formUpdate",
+    );
+    expect(
+      update,
+      "changing the Country dropdown must update the open form — the example's only live path",
+    ).toBeDefined();
+    // 100 * 0.19, the German rate from the example's own table.
+    expect(JSON.stringify(update!.args)).toContain("VAT: 19.00");
+    built.runtime.settleCall(update!.callId, true, undefined);
+    await changed;
+
+    // The submit verdict is the other half of the documented contract: an
+    // unknown country keeps the form open with the error on the field.
+    posted.length = 0;
+    await built.runtime.invokeHandler(4, secondForm!.handlerId, [
+      { hook: "submit", detail: { values: { net: 100, country: "ZZ" } } },
+    ]);
+    const verdict = posted.find(
+      (m): m is Extract<WX2H, { t: "handlerResult" }> => m.t === "handlerResult",
+    );
+    expect(verdict?.value).toEqual({ cancel: true, errors: { country: "Unknown country code" } });
+
+    // Both names the example reacts to must be ones the host can ever send.
+    for (const hook of ["change", "submit"]) {
+      expect(EXTENSION_FORM_HOOKS, hook).toContain(hook);
+    }
 
     (teardown as () => void)();
     (secondTeardown as () => void)();

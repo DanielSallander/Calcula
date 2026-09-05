@@ -220,17 +220,22 @@ enforced by the compiler, not by review.
 
 ### `.cala` Format Versioning
 
-One `format_version` lives in `manifest.json` and is currently at **7**
-(`CALA_MAX_SUPPORTED_FORMAT_VERSION`, `core/calcula-format/src/manifest.rs`). The writer stamps the
+One `format_version` lives in `manifest.json` and is currently at **8**
+(`CALA_MAX_SUPPORTED_FORMAT_VERSION`, `core/calcula-format/src/manifest.rs`; re-read on 2026-09-04 —
+this paragraph said 7 for a while after the code moved, so check the constant, not the sentence). The writer stamps the
 highest minimum any feature ACTUALLY PRESENT requires (`stamp_feature_format_version`, raise never
 lower); the reader refuses anything higher rather than half-understanding it.
 
 - **Bump explicitly** when the saved shape changes — nothing infers it.
 - **Stamp conditionally.** `USER_HIDDEN_MIN_FORMAT_VERSION` (4), `SHEET_VIEW_MIN_FORMAT_VERSION` (5)
-  `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION` (6) and `SPILL_EXTENT_MIN_FORMAT_VERSION` (7) are
-  written only when the document actually carries that state -- per SHEET for the first three, per
-  CELL for the spill extent (`zip_io.rs:200` stamps it only when some cell has an `sp` field), so an ordinary workbook keeps the lowest version that can express it and stays
-  openable by older builds.
+  `SHEET_DISPLAY_FLAGS_MIN_FORMAT_VERSION` (6), `SPILL_EXTENT_MIN_FORMAT_VERSION` (7) and
+  `PINNED_FILTER_MIN_FORMAT_VERSION` (8) are written only when the document actually carries that
+  state -- per SHEET for the first three, per CELL for the spill extent (stamped only when some
+  cell has an `sp` field), and for 8 only when some slicer/ribbon filter is pinned above level 1 or
+  some BI pivot carries an `engine_filters` entry (`zip_io.rs:243`) -- so an ordinary workbook
+  keeps the lowest version that can express it and stays openable by older builds. Version 8 is a
+  *lie* case, not a loss case: an older reader drops the pin and the pivot comes back UNFILTERED
+  with no error anywhere, which is the reason it links the version rather than a feature id.
 - **The test for whether a section deserves a version link at all:** would an older reader
   MISHANDLE the document, or merely lose something? Ignoring an unknown section is usually fine — it
   is dropped on the next save and the user loses cosmetic state. A link is warranted when the drop

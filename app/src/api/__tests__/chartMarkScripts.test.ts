@@ -92,6 +92,24 @@ describe("installChartMarkLibrary", () => {
     expect(chartMarksInstalled()).toBe(true);
   });
 
+  it("mounts an EXACTLY-EMPTY package stamp as distributed, under the placeholder name", async () => {
+    // `sourcePackage ? "distributed" : undefined` read `""` as the user's own
+    // library and mounted it LOCAL — which `requireDistributedMountConsent`
+    // returns from before asking anyone. A stamp that is present but blank is a
+    // distributed record with no usable name, the same rule every gate applies.
+    await installChartMarkLibrary(lib("sandbox:a"), vi.fn(), { sourcePackage: "" });
+    const spec = hostMountScript.mock.calls[0][0];
+    expect(spec.provenance).toBe("distributed");
+    expect(spec.packageName).toBe("(unknown package)");
+  });
+
+  it("mounts a library with NO stamp as the user's own", async () => {
+    await installChartMarkLibrary(lib("sandbox:a"), vi.fn());
+    const spec = hostMountScript.mock.calls[0][0];
+    expect(spec.provenance).toBe("local");
+    expect(spec.packageName).toBeUndefined();
+  });
+
   it("throws on an invalid markId BEFORE any mount/teardown", async () => {
     const registrar = vi.fn();
     await expect(installChartMarkLibrary({ marks: [{ markId: "nope", label: "x", layoutFamily: "cartesian", body: "x" }] }, registrar))

@@ -66,13 +66,116 @@ vi.mock("../dialogs", () => ({
   confirmAsync: vi.fn().mockResolvedValue(false),
 }));
 
-import { listWorkbookScriptRecords } from "../workbookScripts";
+import {
+  listDistributedWorkbookScriptRecords,
+  listWorkbookScriptRecords,
+} from "../workbookScripts";
 
 beforeEach(() => {
   rows.length = 0;
   records.clear();
   readFailures.clear();
   invokeBackend.mockClear();
+});
+
+/** The ids `get_script` was asked for, in order. */
+function fetchedIds(): string[] {
+  return invokeBackend.mock.calls
+    .filter(([cmd]) => cmd === "get_script")
+    .map(([, args]) => (args as { id: string }).id);
+}
+
+/** A stored record whose body is readable. */
+function storeReadable(id: string, sourcePackage: string | null): void {
+  records.set(id, {
+    id,
+    name: `${id} (name)`,
+    description: null,
+    source: `// body of ${id}`,
+    sourcePackage,
+  });
+}
+
+// ===========================================================================
+// The distributed-only door: N local + M distributed costs M fetches, not N+M
+// ===========================================================================
+//
+// The object-script consent load path runs on every workbook open and every
+// `.calp` update, and it listed the WHOLE store through the full inventory —
+// one `get_script` per module, the user's own recorded macros included, to hash
+// the distributed ones and discard the rest. The summary row already says which
+// rows are distributed; the door below fetches only those.
+
+describe("listDistributedWorkbookScriptRecords — fetches source for distributed rows only", () => {
+  it("N local + M distributed costs M `get_script` calls, and lists exactly those M", async () => {
+    // N = 3 local, M = 2 distributed, interleaved so a prefix/suffix filter
+    // would not pass by accident.
+    rows.push({ id: "l1", name: "Mine 1" });
+    rows.push({ id: "d1", name: "Theirs 1", sourcePackage: "Acme Finance Pack" });
+    rows.push({ id: "l2", name: "Mine 2" });
+    rows.push({ id: "l3", name: "Mine 3" });
+    rows.push({ id: "d2", name: "Theirs 2", sourcePackage: "Beta Reports" });
+    for (const id of ["l1", "l2", "l3"]) storeReadable(id, null);
+    storeReadable("d1", "Acme Finance Pack");
+    storeReadable("d2", "Beta Reports");
+
+    const listed = await listDistributedWorkbookScriptRecords();
+
+    expect(
+      fetchedIds(),
+      "the consent load path must not pay one round trip per LOCAL module to answer a " +
+        "question about the distributed ones",
+    ).toEqual(["d1", "d2"]);
+    expect(invokeBackend.mock.calls.filter(([cmd]) => cmd === "list_scripts")).toHaveLength(1);
+    expect(listed.map((r) => r.id)).toEqual(["d1", "d2"]);
+    expect(listed.map((r) => r.source)).toEqual(["// body of d1", "// body of d2"]);
+    expect(listed.every((r) => r.loadError === null)).toBe(true);
+  });
+
+  it("decides 'distributed' the way the gates do: any present stamp, even a blank one", async () => {
+    // `scriptOriginForStoredRecord` reads a present stamp as a package (Rust
+    // reads the same `Option<String>` and holds any `Some(..)` to be a
+    // publisher's). A door that re-derived the split with `if (sourcePackage)`
+    // would silently drop a blank-stamped module from the consent listing.
+    rows.push({ id: "blank", name: "Blank stamp", sourcePackage: "   " });
+    rows.push({ id: "mine", name: "Mine" });
+    storeReadable("blank", "   ");
+    storeReadable("mine", null);
+
+    const listed = await listDistributedWorkbookScriptRecords();
+
+    expect(fetchedIds()).toEqual(["blank"]);
+    expect(listed.map((r) => r.id)).toEqual(["blank"]);
+  });
+
+  it("a distributed record that fails to read is still listed, provenance kept", async () => {
+    // The consent recorder must SEE that the application ships this module —
+    // it refuses to hash an unreadable one — rather than be told the
+    // application ships one macro fewer.
+    rows.push({ id: "d1", name: "Theirs 1", sourcePackage: "Acme Finance Pack" });
+    rows.push({ id: "l1", name: "Mine 1" });
+    readFailures.set("d1", "record checksum mismatch");
+    storeReadable("l1", null);
+
+    const listed = await listDistributedWorkbookScriptRecords();
+
+    expect(fetchedIds()).toEqual(["d1"]);
+    expect(listed).toHaveLength(1);
+    expect(listed[0].sourcePackage).toBe("Acme Finance Pack");
+    expect(listed[0].loadError).toMatch(/checksum mismatch/);
+    expect(listed[0].source).toBe("");
+  });
+
+  it("the full inventory still fetches every record (the positive control)", async () => {
+    rows.push({ id: "l1", name: "Mine 1" });
+    rows.push({ id: "d1", name: "Theirs 1", sourcePackage: "Acme Finance Pack" });
+    storeReadable("l1", null);
+    storeReadable("d1", "Acme Finance Pack");
+
+    await listWorkbookScriptRecords();
+
+    expect(fetchedIds()).toEqual(["l1", "d1"]);
+  });
 });
 
 describe("listWorkbookScriptRecords — a read failure must not erase provenance", () => {

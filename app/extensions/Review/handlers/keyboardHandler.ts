@@ -12,6 +12,7 @@ import {
   AppEvents,
   DEFAULT_COMMENT_AUTHOR,
   DEFAULT_NOTE_AUTHOR,
+  isKeyClaimed,
 } from "@api";
 import { refreshAnnotationState } from "../lib/annotationStore";
 
@@ -49,6 +50,12 @@ export function unregisterKeyboardShortcuts(): void {
 // ============================================================================
 
 async function handleKeyDown(e: KeyboardEvent): Promise<void> {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // The tag list below cannot see a <select> or a <button>; the claim can.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(e)) return;
   if (!currentActiveCell) return;
 
   // Don't intercept if an input/textarea/contenteditable is focused

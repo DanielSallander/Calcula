@@ -5626,6 +5626,249 @@ declare interface FormContext extends BaseObjectContext {
   ): () => void;
   /** The form left the screen, and why. */
   onClose(handler: (detail: FormCloseDetail) => void): () => void;
+
+  /**
+   * The MODELESS door on the same widget tree: dock it as a TASK PANE beside
+   * the grid instead of showing it as a dialog. Needs `// @capability ui.pane`
+   * — a pane stays open while the user works, which is not what `ui.dialog`
+   * promised them.
+   *
+   * The same facet also drives a form the USER has EMBEDDED on a sheet: the
+   * layout is the one this script gave `define(...)`, Calcula opens the surface
+   * when the placement paints and announces it through `pane.onOpen`, and
+   * `update` / `setBadge` / `control(...)` work on it exactly as on a docked
+   * pane. What a script cannot do to an embedded surface is create one, move
+   * one, bring one forward or close one — all four are the user's.
+   */
+  readonly pane: ScriptPaneApi;
+}
+
+/**
+ * What `pane.dock()` resolves. A dock always REGISTERS the pane — it exists, it
+ * is listed where panes live, it carries its badge, and the user can open it —
+ * but it only TAKES THE SCREEN when the user has just done something that ran
+ * this script. `opened` is that half, and it is the one not to assume: a script
+ * that docks on a timer and starts writing progress into the pane is writing
+ * into a surface nobody is looking at.
+ */
+declare interface PaneDockResult {
+  /** The host-minted id of the pane; every later call and event names it. */
+  paneId: string;
+  /**
+   * The pane took the screen (the sidebar opened onto it). False when the dock
+   * was not within a few seconds of a user gesture belonging to this script, and
+   * false on the ribbon, where nothing can be brought forward from code.
+   */
+  opened: boolean;
+  /** Where the user keeps this script's panes: "sidebar" or "ribbon". */
+  placement: "sidebar" | "ribbon";
+}
+
+/**
+ * What `pane.reveal()` resolves. `revealed: false` carries the reason. Two of
+ * them are CODES a script can branch on: `"no-gesture"` — the user has not
+ * touched this script's pane or form, run the script, or docked the pane in
+ * the last few seconds, so the pane stays where the user left it — and
+ * `"throttled"` — too many reveals this minute, or the pane is in a throttle
+ * cooldown. Every other reason is a sentence about the pane's state (it is
+ * closed, it has not opened yet, it is placed on the ribbon where a script
+ * cannot bring it forward).
+ */
+declare interface PaneRevealResult {
+  revealed: boolean;
+  reason?: "no-gesture" | "throttled" | (string & {});
+}
+
+declare interface PaneChangeDetail {
+  paneId: string;
+  name: string;
+  value: FormValue | string[];
+  values: Record<string, FormValue | string[]>;
+  /** "user" for a keystroke or click; "cell" when a bound cell changed underneath. */
+  source: "user" | "cell";
+}
+declare interface PaneClickDetail {
+  paneId: string;
+  name: string;
+  values: Record<string, FormValue | string[]>;
+}
+declare interface PaneCloseDetail {
+  paneId: string;
+  /**
+   * "user" (the person closed it), "script" (`close()`), "failed" (it never
+   * opened), "unmount" (this script was stopped, faulted or relinked — the
+   * workbook is still there), "reset" (the workbook itself was closed or
+   * replaced: File > New, File > Open, close — a bound field's last keystrokes
+   * are NOT written on this one, because the cell they belonged to went with
+   * the workbook, and the user is told so), or "throttled" — the host closed it
+   * because this script kept making more pane calls than allowed (updates,
+   * badges or reveals) after being slowed down twice (three cooldowns in ten
+   * minutes); the user is told why, or "orphaned" — an embedded form only: the
+   * cell its placement was anchored to was deleted, so the surface stops. The
+   * placement is NOT deleted; it paints as an orphan the user can put back.
+   */
+  reason: "user" | "script" | "failed" | "unmount" | "reset" | "throttled" | "orphaned";
+  values: Record<string, FormValue | string[]>;
+}
+
+/**
+ * An EMBEDDED surface of this script was opened by Calcula (`pane.onOpen`).
+ * Fires ONLY for a form the user has placed on a sheet: a docked pane's id is
+ * the value its own `dock()` resolved, so there is nothing to announce there.
+ */
+declare interface PaneOpenDetail {
+  /** The host-minted id of the surface; `pane.select(...)` takes it. */
+  paneId: string;
+  /** Always "embedded" today — the placement this event exists for. */
+  placement: "embedded";
+  /** The id of the placement on the sheet. Stable across structural edits; a copy has its own. */
+  placementId: string;
+  values: Record<string, FormValue | string[]>;
+}
+
+/** One of this script's own open surfaces, as `pane.list()` reports it. */
+declare interface PaneSurfaceSummary {
+  paneId: string;
+  /** "sidebar" / "ribbon" for a docked pane, "embedded" for a form placed on a sheet. */
+  placement: "sidebar" | "ribbon" | "embedded" | null;
+  /** True when this is a form the user placed on a sheet rather than a docked pane. */
+  embedded: boolean;
+  /** On screen right now. */
+  visible: boolean;
+  badge: string | null;
+}
+
+/**
+ * A handle on one widget of this script's task pane (`pane.control("qty")`).
+ * Setters are sugar over `pane.update`; `value` reads the host-pushed mirror.
+ */
+declare interface PaneControlHandle {
+  /** The widget's current value (sync; read from the host-pushed mirror). */
+  readonly value: unknown;
+  set(value: unknown): void;
+  /** label / button / progress caption. */
+  setText(text: string): void;
+  enable(enabled: boolean): void;
+  show(visible: boolean): void;
+  /** Replace this control's choices — the choices themselves, never a `{ range }`. */
+  setOptions(options: Array<string | FormOption>): void;
+  /** Error text under the control; null clears it. */
+  setError(message: string | null): void;
+  focus(): void;
+  onChange(handler: (detail: PaneChangeDetail) => void): () => void;
+  /** Buttons only. */
+  onClick(handler: (detail: PaneClickDetail) => void): () => void;
+}
+
+/**
+ * `form.pane` — a task pane (VBA's modeless `UserForm.Show vbModeless`, done
+ * right). The same data-only widget tree as the form, painted by trusted
+ * Calcula code in a panel beside the grid; nothing blocks the user, nothing
+ * awaits them, and the panel's identity strip always names this script.
+ *
+ * The facet addresses THE PANE THIS SCRIPT LAST DOCKED. Docking again while
+ * one is open opens a second pane (the host allows a few per script) and the
+ * facet moves to it; `paneId` says which. A script never handles ids itself.
+ *
+ * Named like the other facets (`ScriptDialogApi`, `ScriptFormsApi`) rather
+ * than `*Context`: it is a member of the form's context, not a context an
+ * object type is handed, and the narrowing's tripwire reads the suffix.
+ */
+declare interface ScriptPaneApi {
+  /** Describe (or re-describe, for the next dock) the layout. Nothing is shown. */
+  define(spec: FormSpec): void;
+  /**
+   * Dock the described layout as a task pane. Resolves once the renderer has
+   * the pane — never waits on the user. `initial` overrides widget defaults for
+   * this dock only. Refused when this script already holds its cap of panes,
+   * or has docked too often in the last minute.
+   *
+   * DOCKING IS NOT THE SAME AS TAKING THE SCREEN. The pane opens straight away
+   * only within a few seconds of a user gesture belonging to this script —
+   * typing or clicking in its pane or form, running it, mounting it, or
+   * allowing the permission dialog this very call waits on the first time.
+   * Otherwise it is registered and listed beside the other panes, and the user
+   * opens it when they want it; `opened` in the result says which happened.
+   * Dock from an `onClick` handler or from `setup`, not from `setInterval`.
+   *
+   * `key` is the pane's stable name within this script (1-32 characters:
+   * letters, digits, "_", "-"). Where the user last put a pane with that key
+   * (sidebar or ribbon) is where it comes back, across docks and sessions.
+   * Left out, the lowest free slot "0", "1", "2" is used — so a script's only
+   * pane is always "0" and keeps its place without naming it. Docking a key
+   * this script already has open is refused; close that pane first.
+   */
+  dock(options?: { initial?: Record<string, FormValue | string[]>; key?: string }): Promise<PaneDockResult>;
+  /**
+   * Change what the docked pane shows. `message` is YOURS: Calcula's own
+   * notices about the pane — that it is being slowed down, or that its bound
+   * cells are on a sheet the user has left — appear above it in host slots you
+   * cannot write to, and they never replace or clear your message.
+   */
+  update(patch: FormPatch): void;
+  /**
+   * Ask for the pane to be brought forward. HONEST: resolves `{ revealed:
+   * false, reason }` when it cannot be — the pane is placed on the ribbon
+   * (the user opens it from there), it is not open, or nothing is docked.
+   *
+   * A RESPONSE TO THE USER, NEVER A TIMER. A reveal is admitted only within
+   * a few seconds of a user gesture that belongs to this script — typing or
+   * clicking in its pane or form, running it (Run / F5, a button, shortcut or
+   * panel icon bound to it), mounting it, or a dock that OPENED the pane — and
+   * at most a few times a minute. Outside that the answer is `{ revealed: false, reason:
+   * "no-gesture" }` (or `"throttled"`), the sidebar stays where the user put
+   * it, and the refusal is recorded in the script's audit trail. Reveal from
+   * an `onClick` / `onChange` handler, not from `setInterval`.
+   */
+  reveal(): Promise<PaneRevealResult>;
+  /** A short badge (a count, a word; max 8 characters) on the pane's tab; null clears it. */
+  setBadge(badge: string | null): void;
+  /**
+   * Close the docked pane from code.
+   *
+   * REFUSED for a form the user has EMBEDDED on a sheet: that surface is an
+   * object in their document, not something this script asked for, and only
+   * they remove it. Change what it shows with `update(...)` instead.
+   */
+  close(): void;
+  /**
+   * This script's own open surfaces — its docked panes AND the forms of it the
+   * user has placed on sheets. Only this script's; nothing about any other
+   * script's surfaces is reachable through it.
+   */
+  list(): Promise<PaneSurfaceSummary[]>;
+  /**
+   * Point this facet at one of this script's own surfaces, by id (from
+   * `list()` or `onOpen`). Needed when one form is embedded on a sheet more
+   * than once: without it the facet addresses whichever surface opened last.
+   */
+  select(paneId: string): void;
+  /** A handle on one widget, by name. */
+  control(name: string): PaneControlHandle;
+  /** The host-minted id of the pane this facet addresses, or null when none is docked. */
+  readonly paneId: string | null;
+  /** Every input's current value (sync mirror). */
+  readonly values: Record<string, unknown>;
+  /** Whether the pane is on screen right now (sync mirror). */
+  readonly isOpen: boolean;
+
+  // -- Events --
+
+  /** A widget's value changed (text widgets are delivered a moment after the last keystroke). */
+  onChange(handler: (detail: PaneChangeDetail) => void): () => void;
+  /** A `button` widget was clicked. */
+  onClick(handler: (detail: PaneClickDetail) => void): () => void;
+  /** The pane left the screen, and why. */
+  onClose(handler: (detail: PaneCloseDetail) => void): () => void;
+  /**
+   * Calcula opened an EMBEDDED surface for this script — the user has a form of
+   * it placed on a sheet and it has come on screen. The facet is already
+   * pointing at that surface when the handler runs, so `update(...)` inside it
+   * addresses the surface just announced.
+   *
+   * A docked pane does NOT fire this: `dock()` already resolved with its id.
+   */
+  onOpen(handler: (detail: PaneOpenDetail) => void): () => void;
 }
 
 // ============================================================================
@@ -5642,6 +5885,21 @@ declare interface DeclaredProperty {
 
 /** Rendering bounds passed to custom canvas renderers. */
 declare interface ShapeRenderBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * One rectangle of your HTML frame that should receive pointer input
+ * (`render.setHitRegions`). Coordinates are YOUR FRAME'S OWN pixels — origin at
+ * the frame's top-left, x right, y down — never grid or sheet pixels.
+ */
+declare interface ShapeHitRegion {
+  /** 1-64 characters of letters, digits, `_ . : -`; unique within the list.
+   *  Echoed back to your frame in the pointer message, never shown to the user. */
+  id: string;
   x: number;
   y: number;
   width: number;
@@ -5803,6 +6061,33 @@ declare interface ShapeContext extends BaseObjectContext {
   render: {
     /** Replace canvas rendering with an interactive HTML iframe overlay. */
     setHtmlContent(html: string): void;
+    /**
+     * Claim the rectangles of your HTML frame that should receive pointer input.
+     *
+     * Your frame is click-through until you call this: every pointer event
+     * inside the shape passes to the grid, which is what keeps a decorative
+     * shape from eating the user's clicks. Each rectangle you declare here is
+     * claimed instead — a click inside it is delivered to your frame as a
+     * `shape-message` of type `"calcula:pointer"`, with `detail.data` carrying
+     * `{ region, x, y, kind, button }`. A click anywhere else in the frame still
+     * reaches the grid.
+     *
+     * COORDINATES ARE YOUR FRAME'S OWN PIXELS: the origin is the top-left of
+     * your frame (the same corner your `<body>` measures from), x grows right
+     * and y grows down. You never name grid pixels, sheet positions or scroll
+     * offsets, and this call tells you nothing about them.
+     *
+     * Bounds: at most 16 rectangles, each at least 1 pixel on a side, every
+     * coordinate finite and between 0 and 20000. An `id` is 1-64 characters of
+     * letters, digits, `_ . : -` and must be unique in the list; it is echoed
+     * back to your frame and is never shown to the user. Anything outside those
+     * bounds refuses the WHOLE call and leaves the previous claim in place.
+     *
+     * Pass `[]` to release the frame. The host also releases it for you when
+     * your script unmounts, and suspends every claim while Design Mode is on —
+     * so the user can always select, move, resize and right-click your shape.
+     */
+    setHitRegions(regions: ShapeHitRegion[]): void;
     /** Send a message to the shape's HTML iframe. Inside the iframe, listen via `window.addEventListener('shape-message', (e) => { e.detail.type, e.detail.data })`. */
     sendMessage(type: string, data?: unknown): void;
     /** Listen for messages sent from the shape's HTML iframe via `calcula.sendMessage(type, data)`. */

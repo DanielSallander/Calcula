@@ -1870,8 +1870,10 @@ export const ObjectScriptManager: IObjectScriptAPI = {
         // It is passed for local scripts too, and is simply not consulted for
         // them: the gate is reached only for distributed provenance, and
         // deciding here which mounts "need" it would be a second copy of that
-        // rule.
-        consentArtifact: { id: definition.id, source: definition.source },
+        // rule. The surface is the BARE application key — the one namespace the
+        // object-script grant recorder writes.
+        consentSurface: "object-script",
+        consentArtifacts: [{ id: definition.id, source: definition.source }],
         apiVersion: SCRIPT_API_VERSION,
         mountCause: options?.cause,
       });
@@ -1931,18 +1933,41 @@ export const ObjectScriptManager: IObjectScriptAPI = {
 // Reset (for testing / workbook close)
 // ============================================================================
 
-/** Unmount all scripts and clear all registrations. */
+/**
+ * Unmount all scripts and clear all registrations.
+ *
+ * A SUBSCRIPTION IS NOT DOCUMENT STATE. This used to end with
+ * `changeListeners.clear()`, which unsubscribed everyone — including the
+ * subscribers that are created ONCE at extension activation and never again,
+ * because an extension is not re-activated when a workbook is opened. The grid's
+ * "Place a Form Here" submenu is exactly that shape: `GridContextMenuItem.children`
+ * is a plain array the Shell reads as registered, so the item is REBUILT from
+ * this signal (`extensions/ScriptableObjects/lib/embeddedFormUx.ts`), and after
+ * the first File ▸ Open it went deaf — the menu went on offering the CLOSED
+ * workbook's form scripts, choosing one minted a placement naming a script that
+ * is not in this file (whose surface then says "Start it from Code in This
+ * File", which the user cannot do), and the new workbook's own forms could never
+ * be placed at all. The editor-window notifier in `ScriptableObjects/index.ts`
+ * was silenced the same way. The handle `onScriptChange` returns is the ONLY way
+ * out of the set; nothing may unsubscribe on a subscriber's behalf.
+ *
+ * The reset IS a change, so it announces itself: emptying the registry has to
+ * reach the subscribers, or one that cached a non-empty list keeps painting it
+ * when the incoming workbook registers nothing of its own.
+ */
 export function resetObjectScriptManager(): void {
   for (const scriptId of mountedScripts.keys()) {
     ObjectScriptManager.unmountScript(scriptId);
   }
   registeredScripts.clear();
   mountedScripts.clear();
-  changeListeners.clear();
   linkedImports.clear();
   // Library realms are mounted scripts too — drop them with everything else, or
   // a closed workbook leaves a realm holding a consented capability set.
   resetScriptLibraryRealms();
   clearExposed();
   hostResetAll();
+  // Announced LAST, so a listener that re-reads the manager sees the settled
+  // empty registry rather than a half-torn-down one.
+  notifyChange();
 }

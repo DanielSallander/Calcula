@@ -71,23 +71,45 @@ export const DebugEvents = {
 const BRIDGE_COMMAND_EVENT = "objscript:debug-command";
 const BRIDGE_STATE_EVENT = "objscript:debug-state-broadcast";
 
-type BridgeCommand =
-  | {
-      command: "start";
-      scriptId: string;
-      lines: number[];
-      pauseOnEntry: boolean;
-      /**
-       * Ask the host to resolve this id from the module store and mount it for
-       * the session (a recorded macro has no standing mount). A FLAG, never a
-       * body: the editor window cannot put source into a debug mount.
-       */
-      fromModuleStore?: boolean;
-    }
-  | { command: "stop"; scriptId: string }
-  | { command: "control"; scriptId: string; action: DebugAction }
-  | { command: "breakpoints"; scriptId: string; lines: number[] }
-  | { command: "fire"; scriptId: string; triggerId: string };
+/**
+ * What every command on the bridge carries besides its own arguments.
+ *
+ * `id` IS THE CORRELATION. The main-window bridge echoes it on the broadcast
+ * that answers the command (`DebugStateBroadcast.commandId`), so the editor
+ * window pairs an answer with the exact command it answers — never with
+ * "whichever start went out first". Minted from one window-wide sequence
+ * (`nextBridgeCommandId`), monotonic and never reused, so a stale id matches
+ * nothing; for a `start` it is the same number `startDebugSession` returns as
+ * the attempt token, which is what lets a Run claim its own refusal by id.
+ *
+ * A command WITHOUT a numeric id is dropped by the bridge unanswered: an
+ * unanswerable command is exactly the silent no-op this whole area exists to
+ * stop, and both ends of the bridge are this one file, so nothing legitimate
+ * sends one.
+ */
+interface BridgeEnvelope {
+  id: number;
+  scriptId: string;
+}
+
+type BridgeCommand = BridgeEnvelope &
+  (
+    | {
+        command: "start";
+        lines: number[];
+        pauseOnEntry: boolean;
+        /**
+         * Ask the host to resolve this id from the module store and mount it for
+         * the session (a recorded macro has no standing mount). A FLAG, never a
+         * body: the editor window cannot put source into a debug mount.
+         */
+        fromModuleStore?: boolean;
+      }
+    | { command: "stop" }
+    | { command: "control"; action: DebugAction }
+    | { command: "breakpoints"; lines: number[] }
+    | { command: "fire"; triggerId: string }
+  );
 
 // ============================================================================
 // Breakpoint store — persisted per script IN THE WORKBOOK
@@ -207,7 +229,7 @@ export function loadPersistedBreakpoints(): Promise<void> {
     // Collected before the store is touched, so a backend that throws halfway
     // through leaves the previous (already-announced) set alone rather than
     // installing half of a workbook's breakpoints.
-    let pending: Array<[string, Breakpoint[]]> = [];
+    const pending: Array<[string, Breakpoint[]]> = [];
     try {
       const data = await getExtensionData<PersistedDebugState>(DEBUG_EXTENSION_DATA_ID);
       if (data && data.breakpoints && typeof data.breakpoints === "object") {
@@ -355,6 +377,17 @@ async function hostApi(): Promise<typeof import("@api/scriptHost/host")> {
   return import("@api/scriptHost/host");
 }
 
+/**
+ * One sequence for every command this window puts on the bridge AND for every
+ * start attempt (local or remote). Monotonic and window-wide: a number is never
+ * reused, so an answer to a command that has been accounted for matches nothing.
+ */
+let bridgeCommandSeq = 0;
+
+function nextBridgeCommandId(): number {
+  return ++bridgeCommandSeq;
+}
+
 async function sendCommand(cmd: BridgeCommand): Promise<void> {
   await emitTauriEvent(BRIDGE_COMMAND_EVENT, cmd);
 }
@@ -388,11 +421,12 @@ interface DebugStateBroadcast {
    * in hand and drop, and the root of two defects that made the refusal record
    * worse than not having one.
    *
-   * Present only on the bridge's catch, which knows exactly which relayed command
-   * rejected. Absent on everything the HOST itself announced (`emitDebugState`
+   * Present only on a broadcast the BRIDGE itself built as the answer to one
+   * relayed command: its catch (the command rejected; `error` says why) and, for
+   * a `start` only, the success answer it sends when the host's start promise
+   * resolves. Absent on everything the HOST itself announced (`emitDebugState`
    * relayed out by the bridge's app-event listener): those are unsolicited state
-   * changes, not answers to any one command, and a start is legitimately answered
-   * by them.
+   * changes, not answers to any one command.
    *
    * The rule this enables: only a `start` answer may be paired with a start
    * attempt. A `fire` that rejects after the session auto-ended broadcasts
@@ -401,6 +435,40 @@ interface DebugStateBroadcast {
    * never-mounted.
    */
   command?: BridgeCommandName;
+  /**
+   * The `id` of that command, echoed verbatim. Set together with `command` and
+   * never alone: this is what pairs the answer with ONE start attempt rather
+   * than with the oldest one outstanding. The pairing used to be arrival order —
+   * "the host answers starts in the order it received them, and the bridge
+   * relays in order" — which was an assumption about two async pipelines that
+   * nothing checked. With the id it is not an assumption.
+   */
+  commandId?: number;
+}
+
+/** A broadcast the bridge stamped as the answer to one command, decoded. */
+interface BridgeAnswer {
+  command: BridgeCommandName;
+  id: number;
+}
+
+/**
+ * What a broadcast is: an UNSTAMPED host state (`null`), a well-formed answer
+ * to one command, or `"malformed"` — stamped with a command but no usable id.
+ *
+ * The bridge sets `command` and `commandId` together and refuses to relay a
+ * command that has no id, so a malformed stamp cannot come from this bridge. It
+ * is decoded as its own case rather than folded into either neighbour on
+ * purpose: treating it as unstamped would let it retire a start it does not
+ * belong to, and treating it as an answer would mean guessing WHICH — the
+ * arrival-order pairing this id replaced.
+ */
+function decodeBridgeAnswer(detail: DebugStateBroadcast): BridgeAnswer | null | "malformed" {
+  if (detail.command === undefined) return null;
+  if (typeof detail.commandId !== "number" || !Number.isInteger(detail.commandId)) {
+    return "malformed";
+  }
+  return { command: detail.command, id: detail.commandId };
 }
 
 /**
@@ -460,20 +528,41 @@ interface DebugStateBroadcast {
  * (an empty mirror is not evidence) and reported `{ status: "ran" }` — the exact
  * lie this record exists to stop, reintroduced by the record's own shape.
  *
- * So every start MINTS a token, the token rides with the attempt, and a refusal
- * answers the attempt it belongs to and no other:
+ * So every start MINTS a token, the token rides with the attempt — over the
+ * bridge it IS the command's `id`, and the bridge echoes it on the answer — and
+ * a refusal answers the attempt it belongs to and no other:
  *   * `beginStartAttempt` mints one and appends it to this script's outstanding
  *     queue, BEFORE the command leaves;
- *   * an ANSWER (see above: a settled session, or a `start` rejection — never a
- *     progress state and never another command's answer) answers the OLDEST
- *     outstanding attempt — the host answers starts in the order it received
- *     them, and the bridge relays in order — and a refusal is recorded stamped
- *     with that attempt;
+ *   * a STAMPED `start` answer (the bridge's rejection, or the success answer it
+ *     sends when the host's start promise resolves) retires exactly the attempt
+ *     whose id it echoes, and a refusal is recorded under that id — provided the
+ *     attempt is still outstanding or a Run is still waiting on it. An answer
+ *     to an attempt that is neither belongs to nobody in this window and is
+ *     not kept;
+ *   * an UNSTAMPED settled session (the host's own `emitDebugState`, relayed
+ *     verbatim) is the FALLBACK: it retires the oldest outstanding attempt, as
+ *     the record always did. The bridge answers every start it relays, and the
+ *     host's settled state goes out BEFORE the start promise resolves
+ *     (`mountWorker` resolves from the worker's `mounted` message, and
+ *     `noteDebugMountSettled` runs first), so by the time the fallback fires
+ *     the stamped success answer is already on the wire behind it; the fallback
+ *     matters only for an answer the wire lost, and it can only ever retire —
+ *     it never records a reason, so it can never put words in a Run's mouth;
  *   * `takeStartRefusal(scriptId, attempt)` returns a reason only when the stamps
  *     match, and leaves a non-matching record exactly where it is. A refusal
  *     nobody claimed (a Debug press with no `runAtCursor` behind it) can never
  *     become a later Run's answer, and a later Run's refusal can never be eaten
  *     by an earlier one.
+ *
+ * WHY ARRIVAL ORDER WAS NOT GOOD ENOUGH, even though nobody could show a
+ * reordering on today's wire: two starts are two independent async chains in
+ * the main window (`hostStartDebugSession` awaits a worker spawn, a consent
+ * gate, a mount timeout), and "the host answers starts in the order it received
+ * them" was a property of the current implementation, not of the protocol. A
+ * Run whose refusal arrived BEFORE an earlier Debug press's answer was stamped
+ * onto the Debug press, waited out its backstop, and fired into nothing — the
+ * exact lie this record exists to stop, held off only by an ordering nothing
+ * enforced. The id makes the pairing a fact of the message.
  *
  * Both queues are capped: they are bookkeeping for in-flight gestures, not a log.
  */
@@ -483,9 +572,6 @@ interface RecordedStartRefusal {
   /** The gate's own sentence, verbatim. */
   reason: string;
 }
-
-/** Monotonic, window-wide: a token is never reused, so a stale one matches nothing. */
-let startAttemptSeq = 0;
 
 /** Per script: attempts that have gone out and not yet been answered, oldest first. */
 const outstandingStarts = new Map<string, number[]>();
@@ -502,9 +588,12 @@ const startRefusals = new Map<string, RecordedStartRefusal[]>();
  */
 const MAX_TRACKED_STARTS = 8;
 
-/** Mint the token for a start that is about to go out. */
+/**
+ * Mint the token for a start that is about to go out. Over the bridge the token
+ * is the command's `id`, so it comes from the bridge's own sequence.
+ */
 function beginStartAttempt(scriptId: string): number {
-  const attempt = ++startAttemptSeq;
+  const attempt = nextBridgeCommandId();
   const queue = outstandingStarts.get(scriptId) ?? [];
   queue.push(attempt);
   while (queue.length > MAX_TRACKED_STARTS) queue.shift();
@@ -513,9 +602,12 @@ function beginStartAttempt(scriptId: string): number {
 }
 
 /**
- * Retire the oldest outstanding attempt — the one a just-arrived broadcast
- * answers — and return it. Null when the host is speaking about a start that has
- * already been accounted for (a state change with no start behind it at all).
+ * THE FALLBACK PAIRING: retire the oldest outstanding attempt and return it.
+ * Used only for an UNSTAMPED settled session — a state the host announced on
+ * its own, which names no command. Null when nothing is outstanding (a state
+ * change with no start behind it at all, or one the stamped answer has already
+ * retired — the normal case, since that answer precedes nothing on the wire but
+ * follows the host's settled state by one message).
  */
 function answerOldestStartAttempt(scriptId: string): number | null {
   const queue = outstandingStarts.get(scriptId);
@@ -526,16 +618,20 @@ function answerOldestStartAttempt(scriptId: string): number | null {
 }
 
 /**
- * Retire one specific attempt. The LOCAL transport needs this: there a refusal
- * is a THROW, so no broadcast will ever answer the attempt and it would sit in
- * the queue absorbing somebody else's broadcast.
+ * Retire ONE specific attempt; true when it was still outstanding.
+ *
+ * The stamped answer's door (the bridge echoes the id, so this is exact), and
+ * the LOCAL transport's: there a refusal is a THROW, so no broadcast will ever
+ * answer the attempt and it would sit in the queue absorbing somebody else's.
  */
-function finishStartAttempt(scriptId: string, attempt: number): void {
+function finishStartAttempt(scriptId: string, attempt: number): boolean {
   const queue = outstandingStarts.get(scriptId);
-  if (!queue) return;
+  if (!queue) return false;
   const at = queue.indexOf(attempt);
-  if (at >= 0) queue.splice(at, 1);
+  if (at < 0) return false;
+  queue.splice(at, 1);
   if (queue.length === 0) outstandingStarts.delete(scriptId);
+  return true;
 }
 
 /**
@@ -543,14 +639,16 @@ function finishStartAttempt(scriptId: string, attempt: number): void {
  *
  * The queue above tracks starts the host has not answered; this tracks starts a
  * Run has not finished waiting for, and they are not the same set. A stray
- * settled broadcast (a Debug press in another surface, a trigger-list refresh on
- * some other session) retires the oldest outstanding attempt, so the refusal that
- * really did answer it arrives to an EMPTY queue. Dropping it there is the
- * silence this whole record exists to stop, so a refusal with nothing outstanding
- * is offered to the oldest Run still waiting on this script before it is thrown
- * away. It can only make Run more honest: `runAtCursor` reports `startRefused`
- * only when the mirror ALSO shows no SETTLED mount, so a mount that really came
- * up is never described as refused.
+ * unstamped settled broadcast (a Debug press in another surface, a trigger-list
+ * refresh on some other session) retires the oldest outstanding attempt through
+ * the fallback, so the refusal that really did answer it arrives to find its id
+ * no longer outstanding. Dropping it there is the silence this whole record
+ * exists to stop, so a refusal whose id is no longer outstanding is still kept
+ * when a Run is waiting on THAT id. Matched by id, never "the oldest Run still
+ * waiting": the refusal names its attempt, so there is nothing left to guess.
+ * It can only make Run more honest: `runAtCursor` reports `startRefused` only
+ * when the mirror ALSO shows no SETTLED mount, so a mount that really came up is
+ * never described as refused.
  */
 const waitingStarts = new Map<string, number[]>();
 
@@ -569,14 +667,9 @@ function endStartWait(scriptId: string, attempt: number): void {
   if (queue.length === 0) waitingStarts.delete(scriptId);
 }
 
-/** The oldest still-waiting attempt that has no refusal of its own yet. */
-function oldestUnansweredWait(scriptId: string): number | null {
-  const queue = waitingStarts.get(scriptId);
-  if (!queue) return null;
-  for (const attempt of queue) {
-    if (!hasStartRefusal(scriptId, attempt)) return attempt;
-  }
-  return null;
+/** Whether a Run is still waiting on exactly this attempt. */
+function isStartWaiting(scriptId: string, attempt: number): boolean {
+  return (waitingStarts.get(scriptId) ?? []).includes(attempt);
 }
 
 /** Drop the refusal recorded for one attempt, if there is one. */
@@ -600,23 +693,13 @@ function clearStartRefusal(scriptId: string, attempt: number): void {
  */
 function observeDebugBroadcast(detail: DebugStateBroadcast): void {
   rememberSession(detail.scriptId, detail.session);
-  // Stamped by the bridge's catch with the command that rejected. Anything but a
-  // `start` is a different question and must not touch this script's starts; an
-  // unstamped broadcast is the HOST announcing state, which does answer a start.
-  if (detail.command !== undefined && detail.command !== "start") return;
-  const reason = typeof detail.error === "string" ? detail.error.trim() : "";
-  // A STAMPED broadcast IS the rejection of that command — the bridge only
-  // stamps in its catch. The session it carries is whatever the host happened to
-  // hold at that instant, not evidence the mount came up: a refused `start` can
-  // arrive alongside a leftover `detached`/`starting` session. Judging it by the
-  // settled test dropped the refusal AND left the attempt outstanding forever,
-  // so every later refused Run answered the wrong attempt and reported "ran".
-  // The settled test belongs only to UNSTAMPED host progress states.
-  const stampedStartRejection = detail.command === "start" && reason !== "";
-  if (detail.session && !stampedStartRejection) {
-    // A mount that is still coming up (`starting`, `running`, `detached`) has not
-    // answered anything yet, and retiring the attempt on it discards the refusal
-    // that follows.
+  const answer = decodeBridgeAnswer(detail);
+  if (answer === null) {
+    // UNSTAMPED: the host announcing state on its own. A mount that is still
+    // coming up (`starting`, `running`, `detached`) has not answered anything
+    // yet, and retiring an attempt on it discards the refusal that follows. A
+    // SETTLED one falls back to arrival order — see `answerOldestStartAttempt`
+    // for why that is normally a no-op and never records a word.
     if (!isDebugMountSettled(detail.session)) return;
     const settledAttempt = answerOldestStartAttempt(detail.scriptId);
     // A mount exists and has settled, so this attempt's refusal — if some earlier
@@ -625,15 +708,39 @@ function observeDebugBroadcast(detail: DebugStateBroadcast): void {
     if (settledAttempt !== null) clearStartRefusal(detail.scriptId, settledAttempt);
     return;
   }
-  if (reason === "") return;
-  // No outstanding attempt means something else retired it; the refusal is still
-  // an answer, so it goes to the oldest Run still waiting rather than on the
-  // floor. With neither, there is nobody it can belong to and it is not kept.
-  const attempt =
-    answerOldestStartAttempt(detail.scriptId) ?? oldestUnansweredWait(detail.scriptId);
-  if (attempt === null) return;
+  // A stamp with no usable id names a command this window cannot identify.
+  // Pairing it by guess is the arrival-order rule this id replaced; it updates
+  // the mirror above and touches no start.
+  if (answer === "malformed") return;
+  // Anything but a `start` is a different question and must not touch this
+  // script's starts: a `fire` rejecting after its session auto-ended is
+  // `{ session: null, error }` byte for byte like a refused mount.
+  if (answer.command !== "start") return;
+  // THE ANSWER NAMES ITS ATTEMPT. Retire exactly that one — whether or not it is
+  // the oldest, and whether or not it is outstanding at all (an unstamped
+  // settled state may already have retired it through the fallback).
+  const wasOutstanding = finishStartAttempt(detail.scriptId, answer.id);
+  const reason = typeof detail.error === "string" ? detail.error.trim() : "";
+  if (reason === "") {
+    // The bridge's SUCCESS answer: the host's start promise resolved. Whatever
+    // session rides with it, this attempt was not refused, so a refusal some
+    // earlier broadcast recorded under its id is void.
+    clearStartRefusal(detail.scriptId, answer.id);
+    return;
+  }
+  // A STAMPED rejection IS the refusal of that start. The session it carries is
+  // whatever the host happened to hold at that instant, not evidence the mount
+  // came up: a refused `start` can arrive alongside a leftover
+  // `detached`/`starting` session. Judging it by the settled test dropped the
+  // refusal AND left the attempt outstanding forever, so every later refused Run
+  // answered the wrong attempt and reported "ran". The settled test belongs only
+  // to UNSTAMPED host progress states.
+  //
+  // Kept when the attempt was outstanding OR a Run is waiting on that exact id;
+  // with neither, there is nobody in this window it can belong to.
+  if (!wasOutstanding && !isStartWaiting(detail.scriptId, answer.id)) return;
   const records = startRefusals.get(detail.scriptId) ?? [];
-  records.push({ attempt, reason });
+  records.push({ attempt: answer.id, reason });
   while (records.length > MAX_TRACKED_STARTS) records.shift();
   startRefusals.set(detail.scriptId, records);
 }
@@ -737,11 +844,11 @@ export function subscribeRemoteDebugState(): () => void {
  * mount, so the host remounts it. Callers must say so in the UI.
  *
  * RETURNS THE ATTEMPT TOKEN. Over the remote bridge the answer to this start
- * comes back later, asynchronously, as a broadcast that names only the script —
- * so the token is the only thing that can tell this start's answer from the
- * answer to a start that overlapped it. A caller that goes on to read the
- * refusal (`runAtCursor`) must pass the token it was given here; a caller that
- * only wants a session open (the Debug button) can ignore it.
+ * comes back later, asynchronously, as a broadcast — and the token is the
+ * command `id` that broadcast echoes, so it is what tells this start's answer
+ * from the answer to a start that overlapped it. A caller that goes on to read
+ * the refusal (`runAtCursor`) must pass the token it was given here; a caller
+ * that only wants a session open (the Debug button) can ignore it.
  */
 export async function startDebugSession(
   scriptId: string,
@@ -755,6 +862,7 @@ export async function startDebugSession(
   const attempt = beginStartAttempt(scriptId);
   if (transport === "remote") {
     await sendCommand({
+      id: attempt,
       command: "start",
       scriptId,
       lines,
@@ -784,7 +892,7 @@ export async function startDebugSession(
 /** Stop debugging. Always resumes a paused script first. */
 export async function stopDebugSession(scriptId: string): Promise<void> {
   if (transport === "remote") {
-    await sendCommand({ command: "stop", scriptId });
+    await sendCommand({ id: nextBridgeCommandId(), command: "stop", scriptId });
     return;
   }
   const host = await hostApi();
@@ -838,7 +946,7 @@ export async function stopDebugSessionAndWait(
 /** Continue / step / pause. */
 export async function debugControl(scriptId: string, action: DebugAction): Promise<void> {
   if (transport === "remote") {
-    await sendCommand({ command: "control", scriptId, action });
+    await sendCommand({ id: nextBridgeCommandId(), command: "control", scriptId, action });
     return;
   }
   const host = await hostApi();
@@ -855,7 +963,7 @@ export async function debugControl(scriptId: string, action: DebugAction): Promi
  */
 export async function fireDebugTrigger(scriptId: string, triggerId: string): Promise<void> {
   if (transport === "remote") {
-    await sendCommand({ command: "fire", scriptId, triggerId });
+    await sendCommand({ id: nextBridgeCommandId(), command: "fire", scriptId, triggerId });
     return;
   }
   const host = await hostApi();
@@ -1299,7 +1407,7 @@ function noRunTargetMessage(functions: readonly TopLevelFunction[]): string {
 
 async function sendBreakpoints(scriptId: string, lines: number[]): Promise<void> {
   if (transport === "remote") {
-    await sendCommand({ command: "breakpoints", scriptId, lines });
+    await sendCommand({ id: nextBridgeCommandId(), command: "breakpoints", scriptId, lines });
     return;
   }
   const host = await hostApi();
@@ -1336,7 +1444,10 @@ export function installObjectScriptDebugBridge(): () => void {
   let unlistenCommands: (() => void) | null = null;
   let disposed = false;
   void listenTauriEvent<BridgeCommand>(BRIDGE_COMMAND_EVENT, (cmd) => {
-    if (!cmd || typeof cmd.scriptId !== "string") return;
+    // A command with no id could be relayed but never ANSWERED — its rejection
+    // would pair with nothing and a refused mount would be Run's "ran" again.
+    // Both ends are this file; nothing legitimate sends one.
+    if (!cmd || typeof cmd.scriptId !== "string" || typeof cmd.id !== "number") return;
     void (async () => {
       const host = await hostApi();
       try {
@@ -1367,6 +1478,26 @@ export function installObjectScriptDebugBridge(): () => void {
             await host.hostDebugFireTrigger(cmd.scriptId, cmd.triggerId);
             break;
         }
+        if (cmd.command === "start") {
+          // THE SUCCESS ANSWER, and how a host-announced state gets attributed
+          // to a start at all. The host's own `emitDebugState` names no command
+          // — it cannot: the settled state comes from the worker's `mounted`
+          // message, keyed by mount, not by whichever start asked for it — so
+          // the attribution is made HERE, at the one place that awaited this
+          // exact start. `hostStartDebugSession` resolves from that same
+          // `mounted` message, after `noteDebugMountSettled` has already
+          // broadcast the settled state, so this answer follows the host's own
+          // states on the wire and carries the session as it stands. Only for
+          // `start`: it is the only command a Run pairs with, and a success
+          // answer for every `fire` would be a duplicate render per press.
+          const answered: DebugStateBroadcast = {
+            scriptId: cmd.scriptId,
+            session: host.getDebugSession(cmd.scriptId),
+            command: "start",
+            commandId: cmd.id,
+          };
+          void emitTauriEvent(BRIDGE_STATE_EVENT, answered);
+        }
       } catch (err) {
         // The editor window is waiting on a state broadcast; give it one that
         // carries the error, rather than leaving it spinning.
@@ -1393,11 +1524,16 @@ export function installObjectScriptDebugBridge(): () => void {
         // start it was waiting for and reported a mount that then came up
         // perfectly well as never-mounted. The command is right here; dropping
         // it is what made the two cases the same message.
+        //
+        // AND WHICH ONE: the command's own id, echoed. Two starts in flight are
+        // two answers, and without the id the editor window paired them by
+        // arrival order.
         const broadcast: DebugStateBroadcast = {
           scriptId: cmd.scriptId,
           session: host.getDebugSession(cmd.scriptId),
           error: err instanceof Error ? err.message : String(err),
           command: cmd.command,
+          commandId: cmd.id,
         };
         void emitTauriEvent(BRIDGE_STATE_EVENT, broadcast);
       }

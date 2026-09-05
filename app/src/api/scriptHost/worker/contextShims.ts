@@ -595,7 +595,6 @@ function call(rt: WorkerRuntime, method: string, args: unknown[]): Promise<unkno
 /** Fire-and-forget call (log/notify/emit): failures surface on the console only. */
 function callFire(rt: WorkerRuntime, method: string, args: unknown[]): void {
   void call(rt, method, args).catch((e) => {
-    // eslint-disable-next-line no-console
     console.warn(`[script] ${method} failed:`, e instanceof Error ? e.message : e);
   });
 }
@@ -3487,6 +3486,7 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         declareProperties: (props: unknown) => setStateFire(rt, "shape.declareProperties", [props]),
         render: {
           setHtmlContent: (html: string) => callFire(rt, "render.setHtml", [html]),
+          setHitRegions: (regions: unknown) => callFire(rt, "render.setHitRegions", [regions]),
           sendMessage: (type: string, data?: unknown) => setStateFire(rt, "shape.sendMessage", [type, data]),
           onMessage: (h: Handler) => registerHook(rt, "onMessage", h),
           canvasRenderer(renderer: unknown): CleanupFn {
@@ -3539,7 +3539,14 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
       // Per-widget handlers dispatched from ONE registered hook per kind — one
       // hookRegistered crosses per hook name, never one per widget.
       const widgetHandlers = new Map<string, Map<string, Handler[]>>();
-      const widgetHook = (hook: "onChange" | "onClick", name: string, h: Handler): CleanupFn => {
+      // The pane facet (below) shares this dispatcher under ITS hook names, so a
+      // form widget's handler and a pane widget's handler of the same name
+      // never hear each other's events.
+      const widgetHook = (
+        hook: "onChange" | "onClick" | "onPaneChange" | "onPaneClick",
+        name: string,
+        h: Handler,
+      ): CleanupFn => {
         let byName = widgetHandlers.get(hook);
         if (!byName) {
           byName = new Map();
@@ -3562,6 +3569,171 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         };
       };
       const update = (patch: Record<string, unknown>): void => callFire(rt, "form.update", [patch]);
+
+      // ---- The MODELESS door (M2): `form.pane`. The SAME widget tree, docked
+      // as a task pane beside the grid instead of shown as a dialog. Nothing
+      // awaits the user: `dock()` resolves once the pane is on screen, and
+      // from then on the user's actions arrive as events. The facet addresses
+      // THE PANE THIS SCRIPT LAST DOCKED (VBA's `Me`): the host mints the id
+      // and the shim remembers it, so a script writes `pane.update(...)` and
+      // never handles ids; the host refuses any id this script does not own.
+      // A script that docks again while one is up gets a SECOND pane (up to
+      // the host's per-script cap) and the facet moves to it. `__pane_closed`
+      // is the host's relay that the pane is gone — installed through
+      // `rt.exposed` directly so it is never script-callable. ----
+      const paneState: { spec: Record<string, unknown> | null; currentId: string | null } = {
+        spec: null,
+        currentId: null,
+      };
+      rt.exposed.set("__pane_closed", (payload: unknown) => {
+        const p = (payload ?? {}) as { paneId?: string };
+        if (typeof p.paneId === "string" && p.paneId === paneState.currentId) paneState.currentId = null;
+        return undefined;
+      });
+      // The host opened an EMBEDDED surface for this script (M3c): the user has
+      // a form of its own placed on a sheet and Calcula started it. There was no
+      // `dock()` to return the id, so the facet is pointed at it the same way a
+      // dock would — newest surface wins, and `pane.select(id)` moves it back.
+      // Sent BEFORE the script's own `onPaneOpen`, so a handler can update the
+      // surface it has just been told about.
+      rt.exposed.set("__pane_opened", (payload: unknown) => {
+        const p = (payload ?? {}) as { paneId?: string };
+        if (typeof p.paneId === "string" && p.paneId.length > 0) paneState.currentId = p.paneId;
+        return undefined;
+      });
+      // Every call after the dock names the pane. An EMPTY id is sent when
+      // nothing is docked so the host's validator answers with the sentence
+      // an author needs ("no pane is docked: dock one first") rather than the
+      // call vanishing silently in the worker.
+      const paneId = (): string => paneState.currentId ?? "";
+      const paneValues = (): Record<string, unknown> =>
+        paneState.currentId ? mirror<Record<string, unknown>>(rt, `pane.values.${paneState.currentId}`, {}) : {};
+      const paneUpdate = (patch: Record<string, unknown>): void => callFire(rt, "pane.update", [paneId(), patch]);
+      const paneFacet = {
+        define(spec: Record<string, unknown>): void {
+          paneState.spec = spec;
+        },
+        async dock(options?: { initial?: Record<string, unknown>; key?: string }): Promise<{ paneId: string; opened: boolean; placement: string }> {
+          // Passed through whole: `key` (the pane's stable slot) is the host's
+          // to judge and to default, never the shim's.
+          const result = (await call(rt, "pane.dock", [paneState.spec, options])) as {
+            paneId: string;
+            opened: boolean;
+            placement: string;
+          };
+          paneState.currentId = result.paneId;
+          // Relayed WHOLE, not narrowed to the id. `opened` is the half a
+          // script must not assume: a dock outside the user-gesture window
+          // registers the pane without taking the screen, and a script told
+          // only its id would go on writing progress into a surface nobody is
+          // looking at.
+          return { paneId: result.paneId, opened: result.opened, placement: result.placement };
+        },
+        update: paneUpdate,
+        async reveal(): Promise<{ revealed: boolean; reason?: string }> {
+          // Honest in both directions: the host answers `revealed: false` for
+          // a placement where nothing can be brought forward, and a refused
+          // call (nothing docked, or the capability withheld) is reported the
+          // same way rather than thrown — reveal is a request, not a command.
+          try {
+            return (await call(rt, "pane.reveal", [paneId()])) as { revealed: boolean; reason?: string };
+          } catch (e) {
+            return { revealed: false, reason: e instanceof Error ? e.message : String(e) };
+          }
+        },
+        setBadge(badge: string | null): void {
+          callFire(rt, "pane.setBadge", [paneId(), badge ?? null]);
+        },
+        close(): void {
+          // NO EAGER CLEAR. The shim does not know whether the surface went
+          // away — the host does, and for a form the user EMBEDDED on a sheet
+          // it REFUSES (`closeScriptPane`), so the box correctly stays up. A
+          // `paneState.currentId = null` here forgot the surface it had just
+          // been refused: `callFire` only console-warns the rejection, so from
+          // then on every `pane.update` / `setBadge` / `control(...).set(...)`
+          // went out naming the empty id (rejected again, again only warned)
+          // and `isOpen`/`values` reported a closed pane while the user was
+          // typing in the open one — the refusal names `pane.update(...)` as
+          // the remedy, and this line was what disabled it. `currentId` is
+          // cleared by `__pane_closed` above, the host's relay for every close
+          // that ACTUALLY happened (script, user's X, unmount) and for no
+          // close that did not.
+          callFire(rt, "pane.close", [paneId()]);
+        },
+        /**
+         * This script's own open surfaces (M3c) — its docked panes AND the
+         * forms of it the user has placed on sheets. The host filters the list
+         * to this script; nothing about another script's panes is reachable.
+         */
+        async list(): Promise<
+          Array<{ paneId: string; placement: string | null; embedded: boolean; visible: boolean; badge: string | null }>
+        > {
+          return (await call(rt, "pane.list", [])) as Array<{
+            paneId: string;
+            placement: string | null;
+            embedded: boolean;
+            visible: boolean;
+            badge: string | null;
+          }>;
+        },
+        /**
+         * Point the facet at one of this script's own surfaces (from `list()`
+         * or `onOpen`). SHIM-LOCAL: it sends nothing and grants nothing — the
+         * host refuses every call naming a pane this script does not own, so
+         * selecting a stranger's id only makes the next call fail. It exists
+         * because one form can be embedded on a sheet several times, and
+         * "whichever opened last" is not an answer a script can build on.
+         */
+        select(id: string): void {
+          paneState.currentId = typeof id === "string" && id.length > 0 ? id : null;
+        },
+        control(name: string) {
+          const key = String(name);
+          return {
+            get value(): unknown {
+              return paneValues()[key];
+            },
+            set(value: unknown): void {
+              paneUpdate({ values: { [key]: value } });
+            },
+            setText(text: string): void {
+              paneUpdate({ controls: { [key]: { text } } });
+            },
+            enable(enabled: boolean): void {
+              paneUpdate({ controls: { [key]: { disabled: !enabled } } });
+            },
+            show(visible: boolean): void {
+              paneUpdate({ controls: { [key]: { hidden: !visible } } });
+            },
+            setOptions(options: unknown): void {
+              paneUpdate({ controls: { [key]: { options } } });
+            },
+            setError(message: string | null): void {
+              paneUpdate({ controls: { [key]: { error: message } } });
+            },
+            focus(): void {
+              paneUpdate({ focus: key });
+            },
+            onChange: (h: Handler) => widgetHook("onPaneChange", key, h),
+            onClick: (h: Handler) => widgetHook("onPaneClick", key, h),
+          };
+        },
+        get paneId(): string | null {
+          return paneState.currentId;
+        },
+        get values(): Record<string, unknown> {
+          return { ...paneValues() };
+        },
+        get isOpen(): boolean {
+          return paneState.currentId ? mirror<boolean>(rt, `pane.isOpen.${paneState.currentId}`, false) : false;
+        },
+        onChange: (h: Handler) => registerHook(rt, "onPaneChange", h),
+        onClick: (h: Handler) => registerHook(rt, "onPaneClick", h),
+        onClose: (h: Handler) => registerHook(rt, "onPaneClose", h),
+        // EMBEDDED surfaces only: a docked pane's id is its own dock's result.
+        onOpen: (h: Handler) => registerHook(rt, "onPaneOpen", h),
+      };
+
       return {
         ...base,
         instanceId,
@@ -3620,6 +3792,7 @@ function buildTyped(rt: WorkerRuntime, base: Record<string, unknown>): Record<st
         // accepts on timeout — a stuck script never traps the user in a form.
         onSubmit: (h: (payload: unknown) => unknown) =>
           registerReplyingHook(rt, "onSubmit", "__form_onSubmit", h),
+        pane: paneFacet,
       };
     }
 

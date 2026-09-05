@@ -18,6 +18,10 @@
 import fs from "fs";
 import path from "path";
 import { describe, it, expect } from "vitest";
+// The one sentence about the door no contribution declares (`ext.executeCommand`).
+// Imported, because asserting the TEXT here would recreate the copy that let the
+// same false claim ship on two consent surfaces at once.
+import { EXTENSION_BUILTIN_ACTION_REACH_NOTE } from "../../../src/api/scriptHost/extensionProtocol";
 
 const APP_ROOT = path.resolve(__dirname, "../../..");
 const read = (rel: string): string => fs.readFileSync(path.join(APP_ROOT, rel), "utf8");
@@ -34,10 +38,21 @@ const MANAGER = read("src/shell/registries/ExtensionManager.ts");
  * every `recordCapabilityGrant(..., "<literal>")` call site. The two dynamic
  * call sites inside `maybeRequestCapabilityGrant` pass a variable, so they do
  * not match — which is exactly right: those ARE the prompted ones.
+ *
+ * `recordCapabilityGrantUnlessRevoked` and `recordCapabilityGrantAtInstall`
+ * count too, and must: both are the SAME install-time grant with no prompt —
+ * the first one only adds that a later revoke can withhold it, the second that
+ * it is scoped to the MOUNT rather than to the workbook (an add-in survives
+ * File > Open, and no prompt exists that could give the capability back).
+ * Reading just the base name would have quietly emptied this set the day the
+ * three grid.read doors moved onto it, and an emptied set makes every check
+ * below vacuous rather than red.
  */
 const AUTO_GRANTED: string[] = (() => {
   const found = new Set<string>();
-  for (const m of WORKER_HOST.matchAll(/recordCapabilityGrant\([^,]+,\s*"([^"]+)"/g)) {
+  for (const m of WORKER_HOST.matchAll(
+    /recordCapabilityGrant(?:UnlessRevoked|AtInstall)?\([^,]+,\s*"([^"]+)"/g,
+  )) {
     found.add(m[1]);
   }
   return [...found].sort();
@@ -66,6 +81,44 @@ describe("InstallAddInDialog capability promise", () => {
     expect(flat).toMatch(/asked for separately the first time they are actually used/);
     // ...and the code that backs that promise is still there.
     expect(WORKER_HOST).toContain("maybeRequestCapabilityGrant");
+  });
+
+  it("discloses the built-in actions any add-in can run, and no longer denies them", () => {
+    // THE DEFECT. The forms sentence on this screen ended "...so nothing you do
+    // in one of its forms is ever written into your workbook" — read before any
+    // code runs, and false: a form's button relays into the add-in's own
+    // handler, which can call `ext.executeCommand` (no capability, gated only by
+    // CommandRegistry.isScriptSafe) and run CLEAR_ALL, DELETE_ROW, FILL_DOWN or
+    // any command a feature opted in. The narrow claim survives; the absolute
+    // one is gone and the door is disclosed instead.
+    const flat = DIALOG.replace(/\s+/g, " ");
+    expect(flat).not.toMatch(/nothing you do in one of its forms is ever written/i);
+    expect(flat).toMatch(/never writes that cell back/i);
+    // Rendered from the SHARED constant, not hand-copied: the per-kind
+    // sentences on this screen are copies of CONTRIBUTION_REACH_NOTE, and that
+    // is precisely how the two surfaces made the same false claim twice.
+    expect(flat).toContain("{EXTENSION_BUILTIN_ACTION_REACH_NOTE}");
+    expect(EXTENSION_BUILTIN_ACTION_REACH_NOTE).toMatch(/CHANGE your workbook/);
+    // UNCONDITIONAL. An add-in that declares NOTHING still holds this door, so
+    // the note must not sit inside either arm of the contributions ternary —
+    // the arm that renders a list would hide it from exactly the add-in whose
+    // consent screen says "Nothing in your menus, ribbon, shortcuts or
+    // formulas.". Checked structurally (outside the ternary's span) rather than
+    // as "last thing in the section", so moving it to the top of the section
+    // stays legal; only putting it inside a branch is a defect.
+    const sectionStart = DIALOG.indexOf('<Section title="What it will add to Calcula">');
+    const sectionEnd = DIALOG.indexOf("</Section>", sectionStart);
+    expect(sectionStart, "the contributions section must still exist").toBeGreaterThan(-1);
+    const section = DIALOG.slice(sectionStart, sectionEnd);
+    const ternaryOpen = section.indexOf("report.contributions.length === 0 ? (");
+    const ternaryClose = section.lastIndexOf(")}");
+    const noteRender = section.indexOf("{EXTENSION_BUILTIN_ACTION_REACH_NOTE}");
+    expect(ternaryOpen, "the contributions ternary must still exist").toBeGreaterThan(-1);
+    expect(noteRender, "the note must render inside this section").toBeGreaterThan(-1);
+    expect(
+      noteRender < ternaryOpen || noteRender > ternaryClose,
+      "the note renders inside the contributions ternary, so an add-in that declares nothing would not see it",
+    ).toBe(true);
   });
 
   it("the extension manager's own summary does not repeat the false promise", () => {

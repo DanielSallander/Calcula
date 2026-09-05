@@ -125,6 +125,56 @@ export const FORM_INPUT_TYPE_SET: ReadonlySet<string> = new Set(FORM_INPUT_TYPES
 export const FORM_CONTAINER_TYPES = ["group", "tabs", "row", "column", "grid"] as const;
 export const FORM_CONTAINER_TYPE_SET: ReadonlySet<string> = new Set(FORM_CONTAINER_TYPES);
 
+/** Members every widget may carry (FormWidgetBase). */
+export const FORM_WIDGET_BASE_KEYS = [
+  "type", "name", "label", "help", "hidden", "disabled", "width",
+] as const;
+/** Members every INPUT widget may carry in addition (FormInputBase). */
+export const FORM_INPUT_BASE_KEYS = [
+  ...FORM_WIDGET_BASE_KEYS, "bind", "required", "writeOn",
+] as const;
+
+/**
+ * Per-type key allowlist. The validator refuses an unknown key BY NAME — a
+ * silently ignored typo is a support ticket, and `pattern` in particular must
+ * never be accepted anywhere (a script-supplied regex run against keystrokes in
+ * the trusted main thread is a ReDoS surface with no sandbox around it).
+ *
+ * It lives here rather than in validators.ts because it is a fact about the
+ * SHAPE, and a second reader needs it: the visual designer's property panel
+ * offers exactly the keys a widget may carry, and drives that list from this
+ * table rather than from a copy that drifts the first time a key is added
+ * (`components/formDesigner/propertyFields.ts`, whose own test asserts every
+ * key here has an editor).
+ */
+export const FORM_WIDGET_KEYS: Readonly<Record<FormWidgetType, readonly string[]>> = {
+  label:    [...FORM_WIDGET_BASE_KEYS, "text", "style"],
+  textbox:  [...FORM_INPUT_BASE_KEYS, "default", "placeholder", "multiline", "maxLength"],
+  number:   [...FORM_INPUT_BASE_KEYS, "default", "min", "max", "step"],
+  date:     [...FORM_INPUT_BASE_KEYS, "default", "min", "max"],
+  checkbox: [...FORM_INPUT_BASE_KEYS, "default"],
+  toggle:   [...FORM_INPUT_BASE_KEYS, "default"],
+  radio:    [...FORM_INPUT_BASE_KEYS, "options", "default", "layout"],
+  dropdown: [...FORM_INPUT_BASE_KEYS, "options", "default", "allowEmpty"],
+  listbox:  [...FORM_INPUT_BASE_KEYS, "options", "multi", "default", "rows"],
+  button:   [...FORM_WIDGET_BASE_KEYS, "text", "role", "danger"],
+  group:    [...FORM_WIDGET_BASE_KEYS, "title", "children"],
+  tabs:     [...FORM_WIDGET_BASE_KEYS, "pages"],
+  row:      [...FORM_WIDGET_BASE_KEYS, "children", "gap"],
+  column:   [...FORM_WIDGET_BASE_KEYS, "children", "gap"],
+  grid:     [...FORM_WIDGET_BASE_KEYS, "columns", "children"],
+  spacer:   [...FORM_WIDGET_BASE_KEYS, "size"],
+  image:    [...FORM_WIDGET_BASE_KEYS, "src", "alt", "height"],
+  table:    [...FORM_WIDGET_BASE_KEYS, "columns", "rows", "maxRows"],
+  progress: [...FORM_WIDGET_BASE_KEYS, "value", "max", "text"],
+};
+
+/** The form-level keys `checkFormSpec` admits, in `FormSpec` declaration order. */
+export const FORM_SPEC_KEYS = [
+  "title", "description", "submitLabel", "cancelLabel",
+  "width", "writeOn", "submitOnEnter", "focus", "children",
+] as const;
+
 // ============================================================================
 // Spec shapes
 // ============================================================================

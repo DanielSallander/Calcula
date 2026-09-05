@@ -294,6 +294,33 @@ export interface CustomFunctionRealm {
   functions: CustomFunctionUdf[];
   /** The generated library source for exactly those functions. */
   source: string;
+  /**
+   * The string this realm's consent is recorded against — `customFunctionConsentSource`
+   * over EVERY function stamped with this package (the gate's grouping, empty
+   * bodies included) and the library's capability set. Computed by the same
+   * former the gate checks and the grant recorder writes, so the artifact the
+   * mount names is byte-for-byte the one in the record. Meaningless for the
+   * subscriber's own realm, which is never asked.
+   */
+  consentSource: string;
+}
+
+/**
+ * Every function grouped by the application it arrived in (`""` for the
+ * subscriber's own), in the library's own order — the ONE grouping both the
+ * consent gate and the realm plan use. Empty names/bodies are NOT filtered here:
+ * the consent source is over what the record was written against, and the plan
+ * drops what cannot mount afterwards.
+ */
+function functionsByPackage(lib: CustomFunctionLibrary): Map<string, CustomFunctionUdf[]> {
+  const byPackage = new Map<string, CustomFunctionUdf[]>();
+  for (const d of lib.functions ?? []) {
+    const pkg = typeof d.sourcePackage === "string" ? d.sourcePackage.trim() : "";
+    const list = byPackage.get(pkg);
+    if (list) list.push(d);
+    else byPackage.set(pkg, [d]);
+  }
+  return byPackage;
 }
 
 /** A realm that is (or was about to be) mounted, for teardown. */
@@ -336,35 +363,42 @@ export function customFunctionsInstalled(): boolean {
  */
 export function planCustomFunctionRealms(lib: CustomFunctionLibrary): CustomFunctionRealm[] {
   const uses = lib.uses ?? [];
-  const byPackage = new Map<string, CustomFunctionUdf[]>();
-  for (const d of lib.functions ?? []) {
-    if (!d.name.trim() || !d.body.trim()) continue;
-    const pkg = typeof d.sourcePackage === "string" ? d.sourcePackage.trim() : "";
-    const list = byPackage.get(pkg);
-    if (list) list.push(d);
-    else byPackage.set(pkg, [d]);
-  }
+  const caps = lib.capabilities ?? [];
+  const byPackage = functionsByPackage(lib);
   // Plain lexicographic order: "" is smaller than every package name, so the
   // subscriber's realm sorts first without a special case.
-  return [...byPackage.keys()]
-    .sort()
-    .map((pkg) => {
-      const functions = byPackage.get(pkg) as CustomFunctionUdf[];
-      return {
-        packageName: pkg,
-        origin: scriptOriginForStoredRecord({ sourcePackage: pkg }),
-        scriptId: customFunctionScriptId(pkg),
-        name: pkg === "" ? "Custom Functions" : `Custom Functions (${pkg})`,
-        functions,
-        source: generateLibrarySource(functions, uses),
-      };
+  const plan: CustomFunctionRealm[] = [];
+  for (const pkg of [...byPackage.keys()].sort()) {
+    const all = byPackage.get(pkg) as CustomFunctionUdf[];
+    const functions = all.filter((d) => d.name.trim() && d.body.trim());
+    // A package whose every function is a blank has nothing to mount.
+    if (functions.length === 0) continue;
+    plan.push({
+      packageName: pkg,
+      // `""` is THIS MODULE's spelling of "the subscriber's own group" (the
+      // trim in functionsByPackage folds an absent stamp and a blank one
+      // together), and the origin derivation reads a present stamp — blank or
+      // not — as a package, the way Rust reads `Option<String>`. Hand it the
+      // ABSENCE it means, or the subscriber's own realm mounts as an unnamed
+      // publisher's.
+      origin: scriptOriginForStoredRecord({ sourcePackage: pkg === "" ? null : pkg }),
+      scriptId: customFunctionScriptId(pkg),
+      name: pkg === "" ? "Custom Functions" : `Custom Functions (${pkg})`,
+      functions,
+      source: generateLibrarySource(functions, uses),
+      // Over ALL of the package's functions (the gate's grouping), never the
+      // mountable subset — the record was written against the former.
+      consentSource: customFunctionConsentSource(all, caps),
     });
+  }
+  return plan;
 }
 
 /** Mount one realm and register its functions as UDFs. */
 async function mountRealm(
   plan: CustomFunctionRealm,
   capabilities: CapabilityId[],
+  opts: { cause?: "open" } = {},
 ): Promise<void> {
   // Link declared library imports BEFORE mounting. Each imported library gets a
   // realm at `declared(library) INTERSECT capabilities` — so a library this UDF
@@ -406,6 +440,10 @@ async function mountRealm(
     id: plan.scriptId,
     name: plan.name,
     objectType: LIB_OBJECT_TYPE,
+    // "open" when the install was triggered by this workbook opening. Without it
+    // `openReplayPending` is never set for this realm, so a consented library's
+    // `workbook.onOpen` never fired — while the consent prompt promised it would.
+    mountCause: opts.cause,
     instanceId,
     source: link.prelude + plan.source,
     accessLevel: "restricted",
@@ -415,6 +453,16 @@ async function mountRealm(
     // body came to sit inside the subscriber's own trust origin.
     ...mountProvenanceForOrigin(plan.origin),
     declaredCapabilities: capabilities,
+    // THE ARTIFACT THE CONSENT RECORD NAMES. `grantCustomFunctionConsent` records
+    // `{ id: CUSTOM_FUNCTIONS_SCRIPT_ID, source: consentSource }` under
+    // `custom-functions:<package>`, and `plan.consentSource` is the same string
+    // from the same former over the same grouping — so the Rust gate holds this
+    // realm to the exact functions AND capability set the user approved. The id
+    // is the record's (the library's reserved id), not this realm's per-package
+    // broker id. Passed for the subscriber's own realm too, where it is simply
+    // never consulted.
+    consentSurface: "custom-functions",
+    consentArtifacts: [{ id: CUSTOM_FUNCTIONS_SCRIPT_ID, source: plan.consentSource }],
     apiVersion: "1.0.0",
   });
   realm.mounted = true;
@@ -444,13 +492,14 @@ async function mountRealm(
 async function rawInstall(
   lib: CustomFunctionLibrary,
   plan: CustomFunctionRealm[],
+  opts: { cause?: "open" } = {},
 ): Promise<void> {
   uninstallCustomFunctions();
   if (plan.length === 0) return;
   const capabilities = lib.capabilities ?? [];
   try {
     for (const realm of plan) {
-      await mountRealm(realm, capabilities);
+      await mountRealm(realm, capabilities, opts);
     }
   } catch (e) {
     // All or nothing: a half-mounted library would register some functions and
@@ -562,14 +611,11 @@ export async function gateCustomFunctionLibrary(
 ): Promise<{ library: CustomFunctionLibrary; pending: PendingCustomFunctionPackage[] }> {
   const caps = [...(lib.capabilities ?? [])].sort();
   const all = lib.functions ?? [];
-  const byPackage = new Map<string, CustomFunctionUdf[]>();
-  for (const f of all) {
-    const pkg = typeof f.sourcePackage === "string" ? f.sourcePackage.trim() : "";
-    if (!pkg) continue;
-    const list = byPackage.get(pkg) ?? [];
-    list.push(f);
-    byPackage.set(pkg, list);
-  }
+  // The same grouping the realm plan uses, minus the subscriber's own bucket:
+  // the consent source a realm later names is over THIS list, so the two must
+  // not be built by two loops that could drift.
+  const byPackage = functionsByPackage(lib);
+  byPackage.delete("");
   if (byPackage.size === 0) return { library: lib, pending: [] };
 
   const consents = await loadConsents();
@@ -613,7 +659,10 @@ export async function grantCustomFunctionConsent(
   await loadAndInstallCustomFunctions();
 }
 
-async function doInstall(lib: CustomFunctionLibrary): Promise<void> {
+async function doInstall(
+  lib: CustomFunctionLibrary,
+  opts: { cause?: "open" } = {},
+): Promise<void> {
   // THE GATE. Everything below this line operates on the consented subset only.
   const { library: gated, pending } = await gateCustomFunctionLibrary(lib);
   if (pending.length > 0) {
@@ -627,7 +676,7 @@ async function doInstall(lib: CustomFunctionLibrary): Promise<void> {
   const plan = planCustomFunctionRealms(gated);
   const prev = lastGood;
   try {
-    await rawInstall(gated, plan);
+    await rawInstall(gated, plan, opts);
     lastGood = { lib: gated, plan };
   } catch (e) {
     // Mount/compile failed — restore the previous good library rather than
@@ -652,8 +701,11 @@ async function doInstall(lib: CustomFunctionLibrary): Promise<void> {
  * pre-fetch path) — the result is served to the evaluator. Serialized: concurrent
  * calls run in order; on failure the previous working library is restored.
  */
-export function installCustomFunctions(lib: CustomFunctionLibrary): Promise<void> {
-  const run = () => doInstall(lib);
+export function installCustomFunctions(
+  lib: CustomFunctionLibrary,
+  opts: { cause?: "open" } = {},
+): Promise<void> {
+  const run = () => doInstall(lib, opts);
   const next = installQueue.then(run, run);
   // Keep the queue alive even if this install rejects (don't poison the chain).
   installQueue = next.catch(() => undefined);
@@ -697,11 +749,13 @@ export async function savePersistedLibrary(lib: CustomFunctionLibrary): Promise<
 
 /** Load the persisted library (if any) and install it. Call on startup + open.
  *  Best-effort: a corrupt/failing library must not throw into the open path. */
-export async function loadAndInstallCustomFunctions(): Promise<void> {
+export async function loadAndInstallCustomFunctions(
+  opts: { cause?: "open" } = {},
+): Promise<void> {
   try {
     const lib = await loadPersistedLibrary();
     if (lib && lib.functions.length > 0) {
-      await installCustomFunctions(lib);
+      await installCustomFunctions(lib, opts);
     } else {
       uninstallCustomFunctions();
     }

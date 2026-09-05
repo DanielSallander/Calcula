@@ -284,6 +284,48 @@ export function buildLocalPreamble(localModules: ButtonScriptModule[]): {
 // ============================================================================
 
 /**
+ * The refusal for a `Name()` that MORE THAN ONE distributed module answers to.
+ *
+ * `distributed.find(...)` used to take the first match in listing order — and
+ * `list_scripts` (app/src-tauri/src/scripting/commands.rs) sorts by name only,
+ * with a stable sort over `HashMap::values()`, so two modules with equal names
+ * keep the map's RandomState iteration order, which can differ between two
+ * launches of the same workbook. The plan came back `kind: "run"` with the
+ * arbitrary winner and `unavailable: []`: one of two publishers' code ran by
+ * coin-flip, and nothing said so. A button that does that is worse than one
+ * that does not run, so this is a refusal, never a guess.
+ *
+ * The candidates are listed sorted by (application, module name, id), so the
+ * message is the same on every launch — the disclosure must not inherit the
+ * very nondeterminism it is disclosing.
+ */
+function ambiguousDistributedCallRefusal(
+  called: string,
+  candidates: ButtonScriptModule[],
+): ButtonScriptPlan {
+  const described = candidates
+    .map((m) => ({
+      app: moduleApplicationName(m) ?? "an application",
+      name: m.name,
+      id: m.id,
+    }))
+    .sort(
+      (a, b) =>
+        a.app.localeCompare(b.app) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+    )
+    .map((c) => `"${c.name}" from the application "${c.app}"`);
+  return {
+    kind: "refuse",
+    message:
+      `${described.length} script modules answer to ${called}(): ` +
+      `${described.join(", and ")}. This button will not pick one of them for you, ` +
+      "so it will not run. Bind the button to one module directly — a button cell " +
+      "whose action names the module — or rename one of the modules so the " +
+      "names differ.",
+  };
+}
+
+/**
  * Plan the run for a button whose action is INLINE CODE (the `onSelect`
  * property of a Controls button).
  *
@@ -291,6 +333,18 @@ export function buildLocalPreamble(localModules: ButtonScriptModule[]): {
  * distributed invocation when no LOCAL module answers to that name, so a
  * user-authored button calling a user-authored module takes exactly the path it
  * always took.
+ *
+ * The same rule decides what is REPORTED. A distributed module is "unavailable"
+ * to a button only when nothing else in the workbook answers to its name: if
+ * one of the user's own modules sanitizes to the same identifier, `Name()` IS
+ * defined — by the user's module, which is what runs — and a notice saying it
+ * is "not defined here" and telling the user to set the action to exactly
+ * `Name()` (the action it already is) would be false on both counts. That was
+ * the defect: step 1 correctly let the local module win and step 2 then
+ * reported the publisher's, because it only asked "was the name mentioned?".
+ * There is no notice for the shadow at all, deliberately — the user's own code
+ * running under the user's own name is the documented rule, not a problem, and
+ * a toast about working-as-designed behaviour is noise.
  */
 export function planInlineButtonRun(
   inlineSource: string,
@@ -301,12 +355,26 @@ export function planInlineButtonRun(
   for (const module of modules) {
     (isDistributedModule(module) ? distributed : local).push(module);
   }
+  // Only a local module that will actually be WRAPPED shadows a distributed
+  // namesake. `buildLocalPreamble` skips an empty or unreadable module, so a
+  // set built from every local record let such a module suppress both the
+  // delegation and the notice — `Name()` then ran with nothing defined and no
+  // word about why.
+  const localNames = new Set(
+    local
+      .filter((m) => !m.loadError && m.source.trim() !== "")
+      .map((m) => sanitizeScriptName(m.name)),
+  );
 
   // 1. An invocation of a DISTRIBUTED module runs that module's stored source
   //    VERBATIM, which is the only shape the Rust consent gate can rule on.
   const called = singleModuleCallName(inlineSource);
-  if (called !== null && !local.some((m) => sanitizeScriptName(m.name) === called)) {
-    const target = distributed.find((m) => sanitizeScriptName(m.name) === called);
+  if (called !== null && !localNames.has(called)) {
+    const candidates = distributed.filter((m) => sanitizeScriptName(m.name) === called);
+    if (candidates.length > 1) {
+      return ambiguousDistributedCallRefusal(called, candidates);
+    }
+    const target = candidates[0];
     if (target) {
       if (target.loadError) {
         return {
@@ -328,12 +396,34 @@ export function planInlineButtonRun(
   }
 
   // 2. Anything else is the user's own inline code, with the user's own modules
-  //    available as functions — and nothing else.
+  //    available as functions — and nothing else. A distributed module is
+  //    reported only when the code names it AND no local module answers to
+  //    that name (see above).
   const { preamble, unavailable } = buildLocalPreamble(local);
   const referenced = referencedIdentifiers(inlineSource);
+  // ONE notice per NAME, not per module. When two applications both ship a
+  // `Report`, a notice per module told the user twice to "set the action to
+  // exactly Report()" — the one thing the planner then refuses as ambiguous.
+  // The remedy in the notice must be the remedy that works.
+  const referencedByName = new Map<string, ButtonScriptModule[]>();
   for (const module of distributed) {
-    if (referenced.has(sanitizeScriptName(module.name))) {
-      unavailable.push(distributedUnavailable(module));
+    const fnName = sanitizeScriptName(module.name);
+    if (!referenced.has(fnName) || localNames.has(fnName)) continue;
+    const group = referencedByName.get(fnName);
+    if (group) group.push(module);
+    else referencedByName.set(fnName, [module]);
+  }
+  for (const [fnName, group] of referencedByName) {
+    if (group.length === 1) {
+      unavailable.push(distributedUnavailable(group[0]));
+    } else {
+      const refusal = ambiguousDistributedCallRefusal(fnName, group);
+      unavailable.push({
+        id: group.map((m) => m.id).sort().join("+"),
+        name: fnName,
+        reason: "distributed",
+        message: refusal.kind === "refuse" ? refusal.message : "",
+      });
     }
   }
 

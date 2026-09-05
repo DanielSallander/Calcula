@@ -8,6 +8,7 @@ import {
   ExtensionRegistry,
   AppEvents,
   registerSlicerStoreService,
+  isPointerClaimed,
 } from "@api";
 import {
   setSlicerItemRenderer,
@@ -396,6 +397,11 @@ function activate(context: ExtensionContext): void {
   // -----------------------------------------------------------------------
 
   const handleWheel = (e: WheelEvent) => {
+    // This handler hit-tests by CLIENT POINT against the canvas, so it cannot
+    // tell "the pointer is over my geometry" from "the pointer is over an
+    // element some surface stacked on the grid put there". The DOM already
+    // answered that; see core/lib/pointerClaims.ts.
+    if (isPointerClaimed(e)) return;
     if (!gridContainer) {
       gridContainer = document.querySelector("[data-grid-area]") as HTMLElement | null;
     }

@@ -75,12 +75,14 @@ const FILE_PUBLISHER = path.join(WORK, "publisher.cala");
 /**
  * A per-run application name.
  *
- * `consentedPackages` in the ScriptableObjects extension is SESSION state keyed
- * by package name, and one app instance serves the whole suite. A fixed name
- * would mean that a second run against the same running app found the package
- * already consented and never showed the prompt — the decline test would then
- * pass for the wrong reason, which is the exact failure mode this spec exists
- * to rule out.
+ * An application's approval is remembered in the workbook's persisted consent
+ * record (`.calcula/script-consent.json`), keyed by package name, and one app
+ * instance serves the whole suite. A fixed name would mean that a second run
+ * against a workbook that still carries an earlier run's record found the
+ * package already consented and never showed the prompt — the decline test
+ * would then pass for the wrong reason, which is the exact failure mode this
+ * spec exists to rule out. (There is no longer a session-level set of consented
+ * packages in the extension; the record is the only memory.)
  */
 const RUN = Date.now().toString(36);
 const PACKAGE = `script-form-app-${RUN}`;
@@ -788,8 +790,8 @@ test.describe.serial("a `.calp` form: declined, then approved", () => {
     await invoke(page, "set_active_sheet", { index: 0 });
 
     // The extension re-prompts because the decline recorded no consent: the
-    // package is neither in this session's `consentedPackages` nor in the
-    // workbook's persisted consent file.
+    // freshness check runs on every load pass and finds no record for the
+    // package in the workbook's persisted consent file.
     await announcePull(page, VERSION, 2);
     await expect(consentDialogHeading(page)).toBeVisible({ timeout: 20_000 });
     await page.getByRole("button", { name: "Allow Scripts", exact: true }).click();

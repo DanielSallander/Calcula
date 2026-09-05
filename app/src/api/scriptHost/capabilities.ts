@@ -15,6 +15,16 @@
 // use). Distributed scripts acquire them via package consent (Phase 4.2) — JIT
 // is suppressed for them here.
 //
+// GRANTS HAVE A SCOPE, and it is not the same one for both kinds. A PROMPTED
+// grant is scoped to the workbook the dialog named ("remember it for this script
+// in this workbook" — CapabilityRequestDialog.tsx), so the workbook reset drops
+// it. A grant the INSTALL screen already promised — an add-in's grid.read /
+// formula.udf, written down by the host with no prompt at all — is scoped to the
+// MOUNT: a distributed add-in is NOT unmounted by a workbook swap, and there is
+// no prompt that could hand the capability back, so dropping it there would
+// silently break the add-in for the rest of the session. See
+// `installScopedGrants` and `resetAllGrants` below.
+//
 // "ALWAYS" NOW MEANS ALWAYS (F1). A local script's "Allow always" decision is
 // persisted per WORKBOOK + SCRIPT + SOURCE HASH in @api/scriptSecurity (local
 // user state, localStorage, never inside the file) and re-established at mount
@@ -74,9 +84,47 @@ export function getGrantedOrigins(scriptId: string): string[] {
 }
 
 /**
+ * Capabilities the user REVOKED this session, per script. A revoke is a
+ * DECISION, not a momentary state, so nothing that merely OBSERVES the code
+ * about to use a capability may put it back.
+ *
+ * THE DEFECT THIS EXISTS FOR. An extension's `grid.read` is written down by the
+ * host at contribution REGISTRATION — a form carrying a `bind`, a cell-style
+ * contributor, a subscription to an event that carries cell contents — and a
+ * `register` message is one the sandboxed worker may post at ANY moment after
+ * activation (from a command click, an event handler, a scheduled job). So an
+ * add-in whose grid.read the user had just revoked in the transparency panel
+ * got it straight back by registering a second declared form, or merely by
+ * unregistering and re-registering its only one. It was silent (no prompt, no
+ * toast), and from that moment its cell-style contributor was again handed the
+ * displayed value of every cell on screen, its CELL_VALUES_CHANGED deliveries
+ * came un-redacted again, and its next form show read the bound cell again.
+ *
+ * Only two things clear an entry: a FRESH CONSENT (`recordCapabilityGrant`,
+ * below — every one of its callers is a decision the user just made), and the
+ * script's grants being dropped wholesale on UNMOUNT. Both are host- or
+ * user-driven; no worker message reaches either. A workbook reset is neither: it
+ * reloads nothing, and the add-in it would be lifting the decision for is still
+ * running (see `resetAllGrants`).
+ */
+const revokedThisSession = new Map<string, Set<CapabilityId>>();
+
+/** Did the user revoke this capability from this script during this session? */
+export function wasRevokedThisSession(scriptId: string, cap: CapabilityId): boolean {
+  return revokedThisSession.get(scriptId)?.has(cap) === true;
+}
+
+/**
  * Record a grant in the live set. The caller is responsible for mirroring a
  * net.fetch origin to the Rust store (grantNetOrigin) and persisting an
  * "always" grant (Phase 4.2).
+ *
+ * EVERY CALLER OF THIS FUNCTION IS A CONSENT: a JIT dialog the user answered,
+ * the package consent screen, or the restore of a persisted "Always" recorded
+ * for this exact source. That is why reaching here LIFTS a session revoke — the
+ * question was asked again and answered yes. A grant nobody was asked about
+ * (the host noticing that a registered contribution will use a capability) must
+ * go through `recordCapabilityGrantUnlessRevoked` instead.
  */
 export function recordCapabilityGrant(
   scriptId: string,
@@ -86,18 +134,137 @@ export function recordCapabilityGrant(
   const s = ensureState(scriptId);
   s.caps.add(cap);
   if (origin) s.origins.add(origin);
+  revokedThisSession.get(scriptId)?.delete(cap);
 }
 
-/** Forget a script's session grants (workbook reset). Per-script Rust state is
+/**
+ * Capabilities a script holds because INSTALLING it was the consent, rather than
+ * because somebody answered a prompt. Only the extension host writes these — an
+ * add-in's `grid.read` for a contribution that is about to be handed cells, and
+ * `formula.udf` for a worksheet function it registered — and the install screen
+ * says so in those words: "granted by installing ... they take effect as soon as
+ * the add-in loads, with no further prompt" (InstallAddInDialog.tsx, pinned by
+ * installConsentText.test.ts).
+ *
+ * THE DEFECT THIS EXISTS FOR. `resetAllGrants` is the WORKBOOK reset, and a
+ * distributed add-in is not unmounted on that path — nothing calls
+ * `resetWorkerExtensions` from AFTER_OPEN / AFTER_NEW. Emptying its grants there
+ * would contradict that install sentence in the one direction that cannot be
+ * repaired: no prompt exists that would bring `grid.read` back, so the add-in
+ * would quietly stop being shown cells the moment the user opened a second
+ * workbook, and its worksheet functions would keep running while the
+ * transparency panel reported no capability behind them.
+ *
+ * A PROMPTED grant is the opposite case and is deliberately NOT recorded here:
+ * the JIT dialog scopes itself to "this script in this workbook", so the next
+ * workbook asks again.
+ */
+const installScopedGrants = new Map<string, Set<CapabilityId>>();
+
+/**
+ * Record a grant whose consent is the INSTALL, not a prompt (see
+ * `installScopedGrants`). It survives a workbook reset for as long as the code
+ * holding it stays mounted, and goes with everything else when it is unmounted.
+ */
+export function recordCapabilityGrantAtInstall(scriptId: string, cap: CapabilityId): void {
+  recordCapabilityGrant(scriptId, cap);
+  let fromInstall = installScopedGrants.get(scriptId);
+  if (!fromInstall) {
+    fromInstall = new Set<CapabilityId>();
+    installScopedGrants.set(scriptId, fromInstall);
+  }
+  fromInstall.add(cap);
+}
+
+/**
+ * Record a grant that NOBODY WAS ASKED ABOUT — the host observing that a
+ * contribution which will use the capability has been registered (an add-in's
+ * cell-style contributor, a form with a bound field, a subscription to an event
+ * carrying cell contents). Install-time consent is what backs these, which is
+ * why they are written down with no prompt; that also makes them the one class
+ * of grant an ATTACKER CAN TIME, because `register` is a worker message.
+ *
+ * Returns false — and writes NOTHING — when the user has revoked this
+ * capability for this script since. The caller must then degrade (and say so),
+ * never proceed as though it had been granted.
+ *
+ * Install-time consent is also this grant's SCOPE, so it is written down through
+ * `recordCapabilityGrantAtInstall`: a workbook swap leaves the add-in mounted
+ * and would leave it with no way of asking for the capability again.
+ */
+export function recordCapabilityGrantUnlessRevoked(
+  scriptId: string,
+  cap: CapabilityId,
+): boolean {
+  if (wasRevokedThisSession(scriptId, cap)) return false;
+  recordCapabilityGrantAtInstall(scriptId, cap);
+  return true;
+}
+
+/** Forget a script's session grants (unmount). Per-script Rust state is
  *  cleared via revokeBackendCapabilities on unmount. */
 export function revokeScriptGrants(scriptId: string): void {
+  // EMPTIED IN PLACE BEFORE THE ENTRY GOES. `handle.grants` is a live reference
+  // to this exact Set (broker.ts `buildHandleFromDefinition`), so dropping only
+  // the Map entry hands every holder of that reference a full grant set the
+  // store no longer knows about — one nothing here can revoke any more.
+  const s = grantState.get(scriptId);
+  if (s) {
+    s.caps.clear();
+    s.origins.clear();
+  }
   grantState.delete(scriptId);
+  installScopedGrants.delete(scriptId);
   deniedThisSession.delete(scriptId);
+  // The session revoke goes with them, for the same reason the session denials
+  // do: this runs on UNMOUNT, which is host- or user-driven — no worker message
+  // causes one — so the code that comes back is being loaded again under its
+  // install consent, not sneaking past a decision. A WORKBOOK RESET is not that
+  // case and does not reach here; see `resetAllGrants`.
+  revokedThisSession.delete(scriptId);
   lapsedGrantNotices.delete(scriptId);
 }
 
+/**
+ * The WORKBOOK reset — File > Open / File > New, via host.ts `hostResetAll`.
+ *
+ * IT NO LONGER DROPS THE MAP ENTRIES, and that is the whole of the fix.
+ * `handle.grants` is a live reference to the `Set` inside an entry (broker.ts:
+ * `getGrantSet(definition.id)`), taken ONCE at mount, and a distributed add-in
+ * is not unmounted on this path — nothing calls `resetWorkerExtensions` from
+ * AFTER_OPEN / AFTER_NEW. A bare `grantState.clear()` therefore left every
+ * mounted add-in holding a Set the store no longer knew about, and all three
+ * readers disagreed from then on: the transparency panel still listed the
+ * capability and still drew its revoke button (PermissionsPanel renders
+ * `handle.grants`), `revokeCapability` returned at its `if (!s) return;` guard
+ * without touching the Set the broker actually reads, and the capability kept
+ * working — so `extensionFormBindings.ts`'s promise that a revoke bites the next
+ * show was false for the rest of the session after the user's first File > Open.
+ * A grant recorded AFTER the reset was orphaned the other way, landing in a
+ * fresh entry the handle does not reference, which made the JIT prompt re-ask
+ * forever. Both directions are fixed by keeping the Set the handle holds.
+ *
+ * WHAT IS CLEARED is every grant a prompt or a per-workbook consent produced —
+ * the JIT dialog scopes itself to "this script in this workbook" — including
+ * every granted net.fetch origin, since an origin only ever comes from one of
+ * those. WHAT SURVIVES is the install-scoped set (`installScopedGrants`), for
+ * exactly as long as the code holding it stays mounted; `revokeScriptGrants`
+ * takes those too when it goes.
+ *
+ * THE SESSION REVOKES SURVIVE IT AS WELL, unlike the denials. Nothing is
+ * reloaded here — the add-in never left — so lifting its revoke would let it
+ * take the capability straight back by registering another bound form, which is
+ * the exact laundering `revokedThisSession` exists to stop, one workbook swap
+ * later. A fresh consent still lifts it, as it always did.
+ */
 export function resetAllGrants(): void {
-  grantState.clear();
+  for (const [scriptId, s] of grantState) {
+    const fromInstall = installScopedGrants.get(scriptId);
+    for (const cap of [...s.caps]) {
+      if (!fromInstall?.has(cap)) s.caps.delete(cap);
+    }
+    s.origins.clear();
+  }
   deniedThisSession.clear();
   lapsedGrantNotices.clear();
 }
@@ -253,8 +420,21 @@ export function getScriptGrants(scriptId: string): { caps: CapabilityId[]; origi
  * it also clears the script's granted origins and the authoritative Rust store.
  * The script keeps running; its next use of the cap re-prompts (local) or is
  * denied (distributed). ui.html and other grants are untouched.
+ *
+ * IT ALSO STICKS. Deleting from the live set alone was undone by the next thing
+ * that wrote the grant WITHOUT asking — for an add-in, its own next
+ * registration (see `revokedThisSession`). The decision is remembered until a
+ * fresh consent, or until the script's grants are dropped wholesale.
  */
 export async function revokeCapability(scriptId: string, cap: CapabilityId): Promise<void> {
+  // Remembered BEFORE the early return below: a script with no live grant state
+  // yet must still not be handed this capability by a later silent write.
+  let revoked = revokedThisSession.get(scriptId);
+  if (!revoked) {
+    revoked = new Set<CapabilityId>();
+    revokedThisSession.set(scriptId, revoked);
+  }
+  revoked.add(cap);
   const s = grantState.get(scriptId);
   if (!s) return;
   s.caps.delete(cap);
@@ -424,7 +604,28 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   // whatever the script kept, which is the opposite of what they were told.
   storage:
     "store its own private data inside this workbook file (up to 256 KB; it travels with the file if you share it)",
+  // Paint only. The frame cannot be clicked into OR TABBED INTO without
+  // `ui.htmlInput` below, which is why this sentence is allowed to stay as
+  // short as it is — and that is now true of EVERY host of such a document (the
+  // on-grid overlay, the Controls-pane card and the Properties pane's preview),
+  // not just the one the split was written for. The Controls-pane card took
+  // clicks, focus and keystrokes on this sentence alone until the gate was put
+  // in on both sides; hit-transparency then closed the mouse and left the
+  // keyboard, because an iframe keeps its place in the tab order however it is
+  // styled, so each host also marks the frame `inert`.
+  // `htmlInputConsentHonesty.test.ts` now fails if a host drifts back on either.
   "ui.html": "render custom HTML UI",
+  // The other half, split out in M6b. Says what the USER loses — the input goes
+  // to the script instead of to Calcula — rather than naming the mechanism
+  // ("hit regions"), because the mechanism is the part nobody can picture. It
+  // names TYPING as well as clicking because the two hosts take different
+  // amounts: on the grid the host forwards pointer events into rectangles the
+  // script named, while a claimed pane card is an ordinary interactive frame the
+  // user can focus and type into. A sentence that promised only clicks would be
+  // true of the smaller host and false of the other, which is the exact failure
+  // this id was split out to stop.
+  "ui.htmlInput":
+    "receive what you click and type inside the HTML it draws — where it claims your input, it reaches the script instead of Calcula: on the grid a click stops selecting a cell, and on a Controls-pane card the whole card is taken at once",
   // "evaluate worksheet formulas" described the wrong direction — it sounds like
   // the script gets to READ your sheet through the formula engine, and it is
   // asking for the reverse: to BE a formula. The consequence that matters is
@@ -435,6 +636,7 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
   "bi.model": "modify your BI model definitions (measures, relationships, ... — undoable; never security roles or connections)",
   "bi.connector": "feed external data into your BI model as a data connector",
   "ui.dialog": "show you a dialog and receive what you enter",
+  "ui.pane": "show you a task pane you can keep open beside the grid while you work, and read what you enter in it",
   "distribution.writeback":
     "fill in the input cells of a subscribed application and send your answers to its publisher (and, if it can sign the application, read and approve everyone else's)",
   // Honest on THREE counts, and the third one used to be wrong. It starts ITSELF
@@ -467,13 +669,23 @@ const CAP_DESCRIPTION: Record<CapabilityId, string> = {
     "claim a keyboard shortcut of the form Ctrl+Shift+<letter>, so pressing it runs its code. It cannot take a shortcut anything else already uses, it cannot take the keys Calcula needs, and it never sees anything you type — only that its own shortcut was pressed. It appears in your shortcut list and goes away when the script stops",
   // Phrased as a PUSH, because that is what it is: nothing here asks for a cell
   // by address. The host hands an add-in the values so it can decide how to
-  // paint them, and hands it each edit so it can react. The two clauses are the
-  // two real paths (cell styling; the cell-change events), and the last clause
-  // is the honest limit — it is shown what is there, it cannot change it, and
-  // it cannot send it anywhere without a separate permission you would also be
-  // asked for.
+  // paint them, hands it each edit so it can react, and puts a cell's contents
+  // in a field of its form when the form names one. The three clauses are the
+  // three real paths (cell styling; the cell-change events; a form's bound
+  // field — M4), and the last clause is the honest limit — it is shown what is
+  // there, it cannot change it, and it cannot send it anywhere without a
+  // separate permission you would also be asked for. A path added here without
+  // a clause makes this sentence stale by omission, which is why the honesty
+  // test counts them.
+  //
+  // "EACH TIME THAT FORM OPENS", not "while it is open", and the difference is
+  // load-bearing: an add-in's bound field is seeded ONCE, at show
+  // (resolveExtensionFormBindings), and there is no live cell watch behind it.
+  // The object-script pipeline does re-read on every change; describing this
+  // surface with that sentence would have promised a reach the code does not
+  // take, which is the same defect as understating one.
   "grid.read":
-    "be shown the contents of your cells — the value of every cell on screen while it decides how to style them, and the old value, new value and formula of every cell that changes. It cannot change your cells with this, and it cannot send them anywhere without separately asking you for network or file access",
+    "be shown the contents of your cells — the value of every cell on screen while it decides how to style them, the old value, new value and formula of every cell that changes, and the contents of any cell a field of one of its forms is tied to, each time that form opens. It cannot change your cells with this, and it cannot send them anywhere without separately asking you for network or file access",
   // OUTBOUND. The two clauses a person needs before saying yes: WHO it goes out
   // as (you, cryptographically), and that it cannot be recalled. The last clause
   // is the honest limit that makes this grantable — a script cannot become a

@@ -113,7 +113,17 @@ export default defineConfig({
       // had its own `invariant` project the whole time; it was simply also
       // being picked up here. It is also budgeted for an in-spec ddmin shrink
       // on failure, which is minutes, not the 30s this project assumes.
-      testIgnore: "**/state-consistency.spec.ts",
+      //
+      // `csp-srcdoc-bridge` is carved out for a different reason: it measures a
+      // property of the SHIPPED build (is the app's `security.csp` in force, and
+      // does the `ui.html` srcdoc bridge execute under it?) and this project
+      // launches `cargo tauri dev`, which on Windows desktop delivers no CSP at
+      // all. Left here it would be red on EVERY nightly run for a cause nobody
+      // can act on until the custom-URI-scheme route lands -- and a permanent
+      // red is how a suite acquires a known-failures list, after which the day
+      // someone adds 'unsafe-inline' to script-src and that spec turns green for
+      // the wrong reason passes unnoticed. It runs from the `platform` project.
+      testIgnore: ["**/state-consistency.spec.ts", "**/csp-srcdoc-bridge.spec.ts"],
     },
     {
       name: "visual",
@@ -144,6 +154,20 @@ export default defineConfig({
       // Oracle checkpoints (digest + undo/redo round-trip + recalc +
       // periodic save/reload) add real time per run.
       timeout: 300_000,
+    },
+    {
+      // PLATFORM MEASUREMENTS: specs whose subject is the shipped build's own
+      // security surface rather than a product behaviour. They are invoked
+      // deliberately (`npm run e2e:platform:manual` against an installed or
+      // `tauri build` binary), never as part of a functional sweep, because the
+      // answer they exist to give cannot be given by `cargo tauri dev` -- and a
+      // spec that cannot pass in the build the suite launches is noise, not a
+      // gate. Each one carries its own run-time guard (see
+      // e2e/helpers/buildFlavor.ts) and SKIPS with the reason rather than
+      // rendering a verdict about an unprotected build.
+      name: "platform",
+      testDir: "./e2e/tests",
+      testMatch: "**/csp-srcdoc-bridge.spec.ts",
     },
     {
       // Soak walks: long random action sequences with semantic oracles and

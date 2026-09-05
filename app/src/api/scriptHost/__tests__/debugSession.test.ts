@@ -95,6 +95,8 @@ class FakeWorker {
    * before its own exposes landed — an artifact of the fake, not of the host.
    */
   static deferMounted = false;
+  /** How many of the next mounts answer NOTHING — a worker gone silent. */
+  static silentMounts = 0;
 
   constructor() {
     FakeWorker.instances.push(this);
@@ -138,6 +140,13 @@ class FakeWorker {
         return;
       }
       if (debugging) this.activity(false, "setup");
+      // A realm that goes silent: its `mounted` never arrives. This is what a
+      // worker terminated mid-handshake looks like to the host, and it is the
+      // shape of "two starts in flight" — the FIRST start's worker.
+      if (FakeWorker.silentMounts > 0) {
+        FakeWorker.silentMounts -= 1;
+        return;
+      }
       if (FakeWorker.deferMounted) {
         setTimeout(() => this.emit({ t: "mounted", ok: true }), 0);
       } else {
@@ -315,6 +324,7 @@ function resetFakeWorker(): void {
   FakeWorker.reportActivity = true;
   FakeWorker.deferMounted = false;
   FakeWorker.setupError = null;
+  FakeWorker.silentMounts = 0;
 }
 
 describe("debug sessions (host)", () => {
@@ -758,6 +768,73 @@ describe("run-at-cursor run-targets", () => {
     expect(worker.methodCalls().map((m) => m.methodName)).toEqual([
       `${RUN_TARGET_EXPOSED_PREFIX}doThing`,
     ]);
+  });
+});
+
+describe("a superseded mount cleans up only what it started", () => {
+  // The host side of "two starts in flight". A second mount of the same id
+  // terminates the first's worker, which then never answers; the first mount's
+  // ten-second deadline used to fire and unmount BY ID — tearing down the LIVE
+  // successor the user was actually debugging, and deleting its session.
+  beforeEach(async () => {
+    resetFakeWorker();
+    globalScope.Worker = FakeWorker as unknown as typeof Worker;
+    vi.resetModules();
+    host = await import("../host");
+  });
+  afterEach(() => {
+    host.hostUnmountScript(DEFINITION.id);
+  });
+
+  /**
+   * Wait until a NEW worker (beyond `before` instances) exists and has been
+   * handed its `mount` — i.e. the first handshake is genuinely in flight.
+   */
+  async function untilRegistered(before: number): Promise<void> {
+    for (let i = 0; i < 500; i++) {
+      const w = FakeWorker.last;
+      if (
+        FakeWorker.instances.length > before &&
+        w !== null &&
+        w.received.some((m) => m.t === "mount")
+      ) {
+        return;
+      }
+      await new Promise<void>((r) => setTimeout(r, 1));
+    }
+    throw new Error("the first handshake never started");
+  }
+
+  it("the superseded mount is rejected at once, and the successor survives", async () => {
+    FakeWorker.silentMounts = 1;
+    const first = host.hostMountScript({ ...DEFINITION });
+    // Let the first mount get as far as REGISTERING its worker before the second
+    // supersedes it — by observation, not by counting microtasks: how many
+    // awaits precede `mounted.set` is an implementation detail that has
+    // already moved once, and a probe pinned to it would then race itself.
+    await untilRegistered(0);
+    await host.hostMountScript({ ...DEFINITION });
+
+    // Answered NOW — not ten seconds later by a deadline for a dead worker.
+    await expect(first).rejects.toThrow(/superseded/);
+    expect(FakeWorker.instances.length).toBe(2);
+    expect(FakeWorker.instances[0].terminated).toBe(true);
+    expect(FakeWorker.instances[1].terminated, "the successor was torn down").toBe(false);
+    expect(host.hostIsMounted(DEFINITION.id)).toBe(true);
+  });
+
+  it("a superseded debug start does not delete the successor's session", async () => {
+    await host.hostMountScript({ ...DEFINITION });
+    FakeWorker.silentMounts = 1;
+    const before = FakeWorker.instances.length;
+    const first = host.hostStartDebugSession(DEFINITION.id, [2]);
+    await untilRegistered(before);
+    await host.hostStartDebugSession(DEFINITION.id, [3]);
+
+    await expect(first).rejects.toThrow(/superseded/);
+    expect(host.getDebugSession(DEFINITION.id), "the live session was erased").not.toBeNull();
+    expect(host.hostIsMounted(DEFINITION.id)).toBe(true);
+    await host.hostStopDebugSession(DEFINITION.id);
   });
 });
 

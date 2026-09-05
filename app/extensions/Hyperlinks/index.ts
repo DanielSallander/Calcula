@@ -19,6 +19,7 @@ import {
   createCoalescedRefresh,
   IconHyperlink,
   IconFollowLink,
+  isKeyClaimed,
 } from "@api";
 import type { GridContextMenuItem, GridMenuContext } from "@api";
 import {
@@ -174,6 +175,12 @@ function openEditDialog(row: number, col: number): void {
 let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
 async function handleKeyDown(e: KeyboardEvent): Promise<void> {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // The tag list below cannot see a <select> or a <button>; the claim can.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(e)) return;
   // Ctrl+K: Insert/Edit Hyperlink
   if (e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") {
     // Don't intercept if an input/textarea/contenteditable is focused

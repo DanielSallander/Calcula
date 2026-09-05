@@ -273,17 +273,35 @@ describe("session control (remote transport — the standalone editor window)", 
 
     expect(hostStartDebugSession).not.toHaveBeenCalled();
     const commands = emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]);
+    // EVERY command carries an id from one monotonic sequence — the bridge
+    // echoes it on the answer, and that echo is what pairs an answer with the
+    // command it answers rather than with the oldest one outstanding.
     expect(commands).toEqual([
       {
+        id: 1,
         command: "start",
         scriptId: SCRIPT,
         lines: [2],
         pauseOnEntry: false,
         fromModuleStore: false,
       },
-      { command: "control", scriptId: SCRIPT, action: "continue" },
-      { command: "stop", scriptId: SCRIPT },
+      { id: 2, command: "control", scriptId: SCRIPT, action: "continue" },
+      { id: 3, command: "stop", scriptId: SCRIPT },
     ]);
+  });
+
+  it("the attempt token a start returns IS the id on its wire command", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const first = await fresh.startDebugSession(SCRIPT);
+    const second = await fresh.startDebugSession(SCRIPT);
+
+    const ids = emitTauriEvent.mock.calls.map((c) => ((c as unknown[])[1] as { id: number }).id);
+    expect(ids).toEqual([first, second]);
+    expect(second).toBeGreaterThan(first);
   });
 
   // THE SECURITY PROPERTY: the editor window can name a module, never define
@@ -301,6 +319,7 @@ describe("session control (remote transport — the standalone editor window)", 
       Record<string, unknown>
     >;
     expect(command).toEqual({
+      id: 1,
       command: "start",
       scriptId: SCRIPT,
       lines: [],
@@ -740,23 +759,48 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
 
   /**
    * What the MAIN-WINDOW BRIDGE'S CATCH puts on the wire when a relayed command
-   * REJECTS — the shape `installObjectScriptDebugBridge` builds, command and all.
+   * REJECTS — the shape `installObjectScriptDebugBridge` builds, command, id
+   * and all.
    *
    * The command is the load-bearing field: `{ session: null, error }` is the
    * shape of a refused mount AND of a `fire` into a session that had already
-   * ended, and without the name they are the same message.
+   * ended, and without the name they are the same message. The id is the other
+   * half: it names WHICH start this rejection answers, so two starts in flight
+   * are two answers rather than a queue paired by arrival order.
    */
   function bridgeRejection(
     scriptId: string,
     command: string,
     session: unknown,
     error: string,
+    commandId: number,
   ): void {
     window.dispatchEvent(
       new CustomEvent("objectscript:debug-state", {
-        detail: { scriptId, session, error, command },
+        detail: { scriptId, session, error, command, commandId },
       }),
     );
+  }
+
+  /**
+   * The bridge's SUCCESS answer to a `start`: sent when the host's start promise
+   * resolves, after the host's own settled state, stamped and error-free.
+   */
+  function bridgeStartAnswered(scriptId: string, session: unknown, commandId: number): void {
+    window.dispatchEvent(
+      new CustomEvent("objectscript:debug-state", {
+        detail: { scriptId, session, command: "start", commandId },
+      }),
+    );
+  }
+
+  /** The ids of the `start` commands this window put on the wire, in order. */
+  function startIds(): number[] {
+    return (emitTauriEvent.mock.calls.map((c) => (c as unknown[])[1]) as Array<
+      Record<string, unknown>
+    >)
+      .filter((c) => c.command === "start")
+      .map((c) => c.id as number);
   }
 
   /** Yield to the event loop so `startDebugSession` has installed its listener. */
@@ -865,7 +909,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     await tick();
     // The consent gate threw at the mount boundary, so the host never built a
     // session: the bridge relays its reason beside a null.
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
     const outcome = await pending;
 
     expect(outcome.status).toBe("startRefused");
@@ -894,8 +938,10 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     const fresh = await import("../debugger");
     fresh.setRemoteDebugTransport();
     emitTauriEvent.mockClear();
-    emitTauriEvent.mockImplementationOnce(async () => {
-      bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    emitTauriEvent.mockImplementationOnce(async (...args: unknown[]) => {
+      // The answer echoes the id of the very command being put on the wire.
+      const cmd = args[1] as { id: number };
+      bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, cmd.id);
       return undefined;
     });
 
@@ -938,6 +984,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
       "start",
       { scriptId: SCRIPT, status: "failed", autoInvokeSetup: true, triggers: [], error: "boom" },
       "boom",
+      startIds()[0],
     );
     const outcome = await pending;
 
@@ -960,7 +1007,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     const refused = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
     await tick();
     await tick();
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
     expect((await refused).status).toBe("startRefused");
 
     const allowed = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
@@ -984,7 +1031,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     emitTauriEvent.mockClear();
 
     await fresh.startDebugSession(SCRIPT);
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
 
     vi.useFakeTimers();
     try {
@@ -1028,9 +1075,9 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     await tick();
 
     // The host refuses both mounts; the bridge relays one error per start, in
-    // the order the starts reached it.
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    // the order the starts reached it, each naming the start it answers.
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[1]);
 
     const outcomes = await Promise.all([first, second]);
     expect(outcomes.map((o) => o.status)).toEqual(["startRefused", "startRefused"]);
@@ -1062,8 +1109,8 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     await tick();
     await tick();
 
-    // NOW the Debug press is refused. It answers the DEBUG press.
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    // NOW the Debug press is refused. It answers the DEBUG press, by id.
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
     await tick();
     // ...and the Run's own mount settles.
     broadcast(SCRIPT, SETTLED);
@@ -1093,7 +1140,13 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     await tick();
     await tick();
 
-    bridgeRejection(SCRIPT, "start", { scriptId: SCRIPT, status: "detached", triggers: [] }, CONSENT_REFUSAL);
+    bridgeRejection(
+      SCRIPT,
+      "start",
+      { scriptId: SCRIPT, status: "detached", triggers: [] },
+      CONSENT_REFUSAL,
+      startIds()[0],
+    );
     await tick();
 
     const outcome = await run;
@@ -1117,7 +1170,13 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     const first = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
     await tick();
     await tick();
-    bridgeRejection(SCRIPT, "start", { scriptId: SCRIPT, status: "detached", triggers: [] }, CONSENT_REFUSAL);
+    bridgeRejection(
+      SCRIPT,
+      "start",
+      { scriptId: SCRIPT, status: "detached", triggers: [] },
+      CONSENT_REFUSAL,
+      startIds()[0],
+    );
     await tick();
     expect((await first).status).toBe("startRefused");
     // The host deletes the session it announced and says so, as it does on every
@@ -1130,7 +1189,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     const second = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
     await tick();
     await tick();
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[1]);
     await tick();
 
     expect((await second).status, "the second Run must get its OWN answer").toBe("startRefused");
@@ -1167,7 +1226,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     // Byte for byte the live sequence, in the live order.
     broadcast(SCRIPT, { scriptId: SCRIPT, status: "starting", triggers: [] });
     broadcast(SCRIPT, null);
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
 
     const outcome = await pending;
 
@@ -1209,7 +1268,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     // The host announces the Debug press's mount before awaiting it...
     broadcast(SCRIPT, { scriptId: SCRIPT, status: "starting", triggers: [] });
     // ...and then refuses it. This answers the DEBUG press.
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
     await tick();
     // The Run's own mount settles, with its run-target registered.
     broadcast(SCRIPT, SETTLED);
@@ -1230,7 +1289,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
     await tick();
     await tick();
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
     // Somebody presses Debug; the host announces that mount before awaiting it.
     broadcast(SCRIPT, { scriptId: SCRIPT, status: "starting", triggers: [] });
 
@@ -1263,11 +1322,13 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
       await tick();
 
       // The debug panel's own button, on a session that had just auto-ended.
+      // Its id is that button's command, never a start's.
       bridgeRejection(
         SCRIPT,
         command,
         null,
         '"method:writeA1" is not a trigger this script has registered',
+        4242,
       );
       await tick();
       // ...and THIS Run's mount settles, with its run-target registered.
@@ -1297,7 +1358,7 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     // Both land before this Run's continuation can run, so the wait is still
     // registered when the refusal arrives.
     broadcast(SCRIPT, SETTLED);
-    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, startIds()[0]);
 
     const outcome = await pending;
 
@@ -1323,6 +1384,193 @@ describe("run-at-cursor (remote transport — the standalone editor window)", ()
     } finally {
       vi.useRealTimers();
     }
+    expect(bridgeCommands()).toEqual(["start", "fire"]);
+  });
+
+  // ==========================================================================
+  // AN ANSWER NAMES ITS START — the pairing is the id, not arrival order
+  // ==========================================================================
+  //
+  // Every probe above delivers answers in the order the starts went out, which
+  // is the order the host happens to answer them today. That was the whole
+  // pairing rule: "the host answers starts in the order it received them, and
+  // the bridge relays in order" — a property of two async pipelines that
+  // nothing enforced. The bridge now echoes each command's id on its answer,
+  // and these probes deliver answers OUT of that order. Each one is red under
+  // arrival-order pairing.
+
+  /** A refusal from the OTHER gate, so two answers can be told apart by words. */
+  const SECURITY_REFUSAL =
+    "SCRIPT_SECURITY: object scripts are disabled for this workbook (Script Security is " +
+    "set to Disable All), so 'macro1' will not run.";
+
+  // Two Runs are in flight and both are refused — by DIFFERENT gates, so each
+  // answer has words of its own. The answers arrive in the opposite order to the
+  // starts. Paired by arrival, the first Run is told the second's reason and
+  // vice versa: the right verdict, addressed to the wrong gesture, in words that
+  // name a remedy for a refusal that gesture did not get.
+  it("out-of-order answers to two outstanding Runs each reach their OWN Run", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const first = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    const second = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    const [firstId, secondId] = startIds();
+    expect(secondId).toBeGreaterThan(firstId);
+
+    // The SECOND start's answer lands first.
+    bridgeRejection(SCRIPT, "start", null, SECURITY_REFUSAL, secondId);
+    bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, firstId);
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.status).toBe("startRefused");
+    expect(b.status).toBe("startRefused");
+    if (a.status === "startRefused") {
+      expect(a.message, "the first Run reads the answer addressed to ITS start").toContain(
+        "SalesApp",
+      );
+      expect(a.message).not.toContain("Disable All");
+    }
+    if (b.status === "startRefused") {
+      expect(b.message, "the second Run reads the answer addressed to ITS start").toContain(
+        "Disable All",
+      );
+      expect(b.message).not.toContain("SalesApp");
+    }
+    expect(bridgeCommands()).toEqual(["start", "start"]);
+  });
+
+  // THE CASE WHERE ARRIVAL ORDER DID NOT MERELY MISWORD, IT LIED. A Debug press
+  // is outstanding with nobody waiting on it; a Run follows; the RUN's refusal
+  // comes back first (its gate threw at once; the Debug press's mount is still
+  // spawning). Paired by arrival, that refusal was stamped onto the Debug press,
+  // the Run found no answer of its own, waited out its twenty-second backstop,
+  // and fired into a script that had never mounted — "Running writeB1()…".
+  it("a Run's refusal that arrives BEFORE an earlier Debug press's answer reaches the Run", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    vi.useFakeTimers();
+    try {
+      // The Debug button: on the wire, unanswered, nobody waiting.
+      await fresh.startDebugSession(SCRIPT);
+      const run = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      const [debugId, runId] = startIds();
+      expect(runId).toBeGreaterThan(debugId);
+
+      // The Run's own start is refused, and its answer says which start.
+      bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, runId);
+
+      // Answered NOW, not on the backstop: a refusal addressed to this Run is
+      // not something to keep waiting for.
+      let settled = false;
+      void run.then(() => {
+        settled = true;
+      });
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(settled, "the Run's own refusal ended its wait without the backstop").toBe(true);
+
+      // Under arrival-order pairing the wait ends here instead, on the timer,
+      // and Run fires into nothing.
+      await vi.advanceTimersByTimeAsync(21000);
+      const outcome = await run;
+      expect(outcome.status, "the refusal reached the Run it was addressed to").toBe(
+        "startRefused",
+      );
+      if (outcome.status === "startRefused") expect(outcome.message).toContain("SalesApp");
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(bridgeCommands()).toEqual(["start", "start"]);
+  });
+
+  // THE HOST'S OWN STATES ARE ATTRIBUTED AT THE BRIDGE. `emitDebugState` names
+  // no command, and cannot: the settled state comes from the worker's `mounted`
+  // message, keyed by mount. But the bridge AWAITED this exact start, so when
+  // the host's start promise resolves it sends a stamped, error-free answer —
+  // after the host's own settled state, which goes out first. That answer
+  // retires exactly its own attempt, so the outstanding queue no longer depends
+  // on arrival order to drain.
+  //
+  // WHERE THAT IS VISIBLE: two starts in one tick (F5 auto-repeats), so the
+  // first Run's refusal can land before its wait is registered — the window the
+  // outstanding queue exists for. The SECOND start is answered first. Retiring
+  // the oldest on that answer takes the FIRST start off the queue; its refusal
+  // then finds it neither outstanding nor waited on, is dropped, and the first
+  // Run waits out its backstop and fires into a script that never mounted.
+  it("a stamped success answer retires its own start, leaving an earlier one to its refusal", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    vi.useFakeTimers();
+    try {
+      // Two Runs in the same tick; the first will be refused, the second comes up.
+      const first = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+      const second = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+      const [firstId, secondId] = startIds();
+      expect(secondId).toBeGreaterThan(firstId);
+
+      // Both answers land before either Run has registered its wait. The
+      // second start's answer, stamped, with its session still coming up (so
+      // the settled fallback has nothing to say about it)...
+      bridgeStartAnswered(SCRIPT, { scriptId: SCRIPT, status: "running", triggers: [] }, secondId);
+      // ...then the first start's refusal, beside no session at all.
+      bridgeRejection(SCRIPT, "start", null, CONSENT_REFUSAL, firstId);
+
+      let settled = false;
+      void first.then(() => {
+        settled = true;
+      });
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(settled, "the first Run's refusal was still on record when it looked").toBe(true);
+
+      await vi.advanceTimersByTimeAsync(21000);
+      const a = await first;
+      expect(a.status, "the first Run got the refusal addressed to it").toBe("startRefused");
+
+      // The second Run's mount settles and it runs.
+      broadcast(SCRIPT, SETTLED);
+      expect(await second).toEqual({ status: "ran", functionName: "writeB1" });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(bridgeCommands()).toEqual(["start", "start", "fire"]);
+  });
+
+  // A STAMP WITHOUT AN ID ANSWERS NOTHING. The bridge sets both together and
+  // refuses to relay a command that has no id, so this shape cannot come from
+  // it. Pairing it by guess would be the arrival-order rule again; it updates
+  // the mirror and touches no start, and the Run is judged on what follows.
+  it("a stamped broadcast with no id is not paired with any start", async () => {
+    vi.resetModules();
+    const fresh = await import("../debugger");
+    fresh.setRemoteDebugTransport();
+    emitTauriEvent.mockClear();
+
+    const pending = fresh.runAtCursor(SCRIPT, MACRO_SOURCE, 6);
+    await tick();
+    await tick();
+    window.dispatchEvent(
+      new CustomEvent("objectscript:debug-state", {
+        detail: { scriptId: SCRIPT, session: null, error: CONSENT_REFUSAL, command: "start" },
+      }),
+    );
+    await tick();
+    broadcast(SCRIPT, SETTLED);
+
+    expect(await pending).toEqual({ status: "ran", functionName: "writeB1" });
     expect(bridgeCommands()).toEqual(["start", "fire"]);
   });
 });
@@ -1391,7 +1639,7 @@ describe("the main-window debug bridge", () => {
     hostSession = live;
     hostDebugFireTrigger.mockRejectedValueOnce(new Error("Error: E2EBOOM"));
 
-    await sendFromEditor({ command: "fire", scriptId: SCRIPT, triggerId: "method:boom" });
+    await sendFromEditor({ id: 11, command: "fire", scriptId: SCRIPT, triggerId: "method:boom" });
 
     const broadcasts = stateBroadcasts();
     expect(broadcasts.length, "the editor window was told something").toBeGreaterThan(0);
@@ -1407,7 +1655,7 @@ describe("the main-window debug bridge", () => {
       new Error("Cannot debug a script that is not mounted — apply it first."),
     );
 
-    await sendFromEditor({ command: "start", scriptId: SCRIPT, lines: [] });
+    await sendFromEditor({ id: 12, command: "start", scriptId: SCRIPT, lines: [] });
 
     const last = stateBroadcasts().pop();
     expect(last?.error).toMatch(/not mounted/);
@@ -1417,6 +1665,47 @@ describe("the main-window debug bridge", () => {
     // editor window cannot tell a refused mount from a `fire` that rejected
     // after the session ended: both are `{ session: null, error }`.
     expect(last?.command).toBe("start");
+    // ...and WHICH ONE: the command's own id, echoed. Two starts in flight are
+    // two answers, and without this the editor paired them by arrival order.
+    expect(last?.commandId).toBe(12);
+  });
+
+  it("answers a start that RESOLVED with a stamped, error-free broadcast carrying its id", async () => {
+    // The host's own `emitDebugState` cannot name the start it follows (the
+    // settled state comes from the worker's `mounted` message, keyed by mount).
+    // The bridge awaited this exact start, so it is where the attribution is
+    // made — and it is the ONLY command answered on success: a `fire` is not
+    // paired with anything, and a success answer per press would be a
+    // duplicate render each time.
+    const settled = {
+      scriptId: SCRIPT,
+      status: "waiting",
+      autoInvokeSetup: false,
+      triggers: [{ id: "method:run", kind: "method", name: "run", fireable: true }],
+    };
+    hostSession = settled;
+
+    await sendFromEditor({ id: 21, command: "start", scriptId: SCRIPT, lines: [] });
+
+    expect(stateBroadcasts()).toEqual([
+      { scriptId: SCRIPT, session: settled, command: "start", commandId: 21 },
+    ]);
+
+    await sendFromEditor({ id: 22, command: "fire", scriptId: SCRIPT, triggerId: "method:run" });
+    expect(hostDebugFireTrigger).toHaveBeenCalledWith(SCRIPT, "method:run");
+    expect(stateBroadcasts().length, "a fire that resolved is not answered").toBe(1);
+  });
+
+  it("drops a command that carries no id rather than relaying it unanswerable", async () => {
+    // Its rejection could pair with nothing, and a refused mount would be Run's
+    // "ran" again. Both ends of the bridge are one file; nothing legitimate
+    // sends this.
+    await sendFromEditor({ command: "fire", scriptId: SCRIPT, triggerId: "method:boom" });
+    await sendFromEditor({ command: "start", scriptId: SCRIPT, lines: [] });
+
+    expect(hostDebugFireTrigger).not.toHaveBeenCalled();
+    expect(hostStartDebugSession).not.toHaveBeenCalled();
+    expect(stateBroadcasts()).toEqual([]);
   });
 
   // THE FIELD THE CATCH USED TO DROP. It has the command in hand — it is
@@ -1428,10 +1717,10 @@ describe("the main-window debug bridge", () => {
     hostDebugFireTrigger.mockRejectedValueOnce(new Error("no session to fire into"));
     hostStopDebugSession.mockRejectedValueOnce(new Error("nothing to stop"));
 
-    await sendFromEditor({ command: "fire", scriptId: SCRIPT, triggerId: "method:boom" });
-    expect(stateBroadcasts().pop()).toMatchObject({ command: "fire", session: null });
+    await sendFromEditor({ id: 31, command: "fire", scriptId: SCRIPT, triggerId: "method:boom" });
+    expect(stateBroadcasts().pop()).toMatchObject({ command: "fire", commandId: 31, session: null });
 
-    await sendFromEditor({ command: "stop", scriptId: SCRIPT });
-    expect(stateBroadcasts().pop()).toMatchObject({ command: "stop", session: null });
+    await sendFromEditor({ id: 32, command: "stop", scriptId: SCRIPT });
+    expect(stateBroadcasts().pop()).toMatchObject({ command: "stop", commandId: 32, session: null });
   });
 });

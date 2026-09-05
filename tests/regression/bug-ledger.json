@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 113,
+  "nextId": 114,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4240,6 +4240,24 @@
         ]
       },
       "notes": "Sabotage-verified 2026-09-03, one revert per fix. (A) Reverting runObjectScriptOnce to provenance: \"local\" + an uncapped accessLevel reds 7: \"expected unlocked to be restricted\" (x3 -- with the id, without it, and with edited source), \"expected local to be distributed\", \"promise resolved undefined instead of rejecting\" for the explicit-unlocked refusal, plus both source-level guards. (B) Reverting hostStartModuleScriptDebugSession reds 4: \"expected unlocked to be restricted\" and \"expected undefined to deeply equal { name: 'Acme Finance Pack', ... }\" for the mount spec's packageInfo. (C) Reverting the macro library reds 6: \"expected null to be 'Acme Finance Pack'\" for the dropped listing field, \"expected null not to be null\" for the missing chip and the missing detail line, and \"to match object { accessLevel: 'restricted' }\" three times across Run, the seam and the linked button. (D) Reverting the codeInventory UDF derivation reds \"expected local to be distributed\". The drift guard was itself found toothless on its first draft: /provenance: (local|distributed)/ matched 12 legitimate sites -- type declarations and the safe \"distributed\" direction -- and its first narrowing, \\s*(?!\\|), still matched type unions because \\s* can consume nothing and the lookahead then succeeds on a space. Fixed to (?!\\s*\\|) and re-verified: 0 offenders clean, 1 per planted literal."
+    },
+    {
+      "id": "BUG-0113",
+      "status": "open",
+      "discovered": "2026-09-05",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "TypeScript Forms M6a — the milestone's first phase was told to build nothing and settle one question with evidence: does the ui.html srcdoc bridge execute under the shipped CSP? The reasoning said no; the measurement below confirmed it against a real bundled build."
+      },
+      "violation": {
+        "oracleId": "ui-html-bridge-blocked-by-shipped-csp",
+        "message": "EVERY SHIPPED ui.html TEMPLATE THAT TALKS BACK IS INERT IN A BUILT APP. `render.setHtml` paints a script's HTML into an `allow-scripts` srcdoc iframe and injects an INLINE <script> as the postMessage bridge (extensions/_shared/scriptFrame/frameDocument.ts, formerly duplicated in shapeRenderer.ts and CustomControlHost.tsx). The app ships `script-src 'self' blob:` with no 'unsafe-inline', no nonce and no hash (app/src-tauri/tauri.conf.json), and a srcdoc child inherits its embedder's policy container — so the bridge is refused and `window.calcula` never exists. The frame still PAINTS, so a display-only template looks perfect; only the ones that talk back are dead. MEASURED against a release build (`tauri build --no-bundle`, rebuilt with src-tauri/tauri.e2e.conf.json which changes only withGlobalTauri) serving from http://tauri.localhost/: violations = [\"script-src-elem blocked inline\"], `window.calcula` absent, and a real click inside the frame reached the host through nothing. There is NO nonce-shaped fix: the shipped \"Interactive Counter\" template (extensions/Controls/Shape/shapeTemplateCatalog.ts) and the default custom-pane scaffold (extensions/ControlsPane/components/CustomControlHost.tsx) drive the bridge from inline `onclick=` ATTRIBUTES, which a nonce cannot rescue even in principle — the route is to serve app documents from a Rust custom URI scheme with their own origin and policy.",
+        "digestDiffPaths": []
+      },
+      "whyNobodyNoticed": "THREE independent reasons, each verified. (1) `tauri dev` on Windows desktop enforces NO CSP AT ALL: the only code that attaches the header is the tauri:// asset protocol, and in dev the webview is pointed straight at devUrl because the dev-server proxy is compiled out on desktop (PROXY_DEV_SERVER = cfg!(all(dev, mobile)), tauri 2.9.5). `devCsp` is dead text on this platform, so every E2E run this project has ever done ran with inline script ALLOWED. (2) Four of the five shipped templates are display-only, and a blocked script still paints. (3) A dead bridge is completely silent: an inbound message has no audit row, no counter and no error path.",
+      "repro": "app/e2e/tests/csp-srcdoc-bridge.spec.ts, in the `platform` playwright project. It cannot be run by the functional suite (which launches `tauri dev`, where no policy is delivered) and keys its skip on WHERE the document is served from, never on whether a policy was observed. To run it: `npx tauri build --no-bundle --config src-tauri/tauri.e2e.conf.json`, launch the release binary with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222, then `npx cross-env E2E_MANUAL=1 playwright test --project=platform`.",
+      "notes": "Pre-dates the M6 work; M6 found it rather than caused it. M6 shipped the foundation (one bridge module, the ui.htmlInput capability split, the frame budget, the data: refusal keyed on scheme) and deliberately left `{ type: \"html\" }` REFUSED, because building the feature on an unproven bridge was the exact failure that milestone existed to avoid."
     }
   ]
 }

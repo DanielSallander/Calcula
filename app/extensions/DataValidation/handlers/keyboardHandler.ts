@@ -6,6 +6,7 @@
 
 import { getCurrentSelection, getOpenDropdownCell } from "../lib/validationStore";
 import { closeDropdown, toggleDropdownFromKeyboard } from "./dropdownHandler";
+import { isKeyClaimed } from "@api";
 
 let keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
@@ -23,6 +24,12 @@ export function unregisterValidationKeyboardShortcuts(): void {
 
 /** Exported for tests. */
 export function handleKeyDown(e: KeyboardEvent): void {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // The tag list below cannot see a <select> or a <button>; the claim can.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(e)) return;
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
   if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
 

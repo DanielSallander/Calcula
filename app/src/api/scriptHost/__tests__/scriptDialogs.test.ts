@@ -267,21 +267,37 @@ describe("ui method class", () => {
     .map(([method]) => method)
     .sort();
 
-  it("is exactly the ui.dialog family", () => {
+  it("is exactly the ui.dialog family plus the add-in form door and the two capability-bearing pane doors", () => {
     expect(uiMethods).toEqual([
       "cap.dialogAlert", "cap.dialogConfirm", "cap.dialogForm", "cap.dialogPrompt",
       // Forms: the two methods that interrupt the user — a script's own form
       // and another script's form by name. Both resolve once the form is ON
       // SCREEN; the answer arrives later as a relay (scriptForms.ts).
       "cap.formsShow",
+      // An ADD-IN's form (M4). Same shape as form.show and the same modal slot,
+      // through a door of its own because the object-script sentences promise
+      // cell writeback that an add-in's bound field never does. It carries
+      // ui.dialog, so its FIRST call awaits the consent prompt — which is the
+      // other reason it needs the person-length deadline.
+      "ext.formShow",
       "form.show",
+      // Task panes (M2): NEITHER waits on the user. They are "ui" because they
+      // carry ui.pane, so their FIRST call awaits a consent dialog — and on
+      // the 30 s default that call would be abandoned while the person was
+      // still reading the prompt (scriptPanes.ts). update/setBadge/close never
+      // prompt and stay "emit".
+      "pane.dock",
+      "pane.reveal",
     ]);
   });
 
-  it("every ui method is restricted-tier and gated by the ui.dialog capability", () => {
+  it("every ui method is restricted-tier and gated by ui.dialog — or, for a pane door, by ui.pane", () => {
     for (const method of uiMethods) {
       expect(ALLOWLIST[method].tier, method).toBe("restricted");
-      expect(ALLOWLIST[method].capability, method).toBe("ui.dialog");
+      // A pane may NOT ride on ui.dialog: that sentence promises a dialog you
+      // must answer, and a pane stays open while you work. The split is by
+      // NAMESPACE so a pane row that borrowed ui.dialog reds here.
+      expect(ALLOWLIST[method].capability, method).toBe(method.startsWith("pane.") ? "ui.pane" : "ui.dialog");
     }
   });
 

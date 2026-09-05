@@ -18,6 +18,7 @@ import { InlineEditor } from "../InlineEditor";
 import { Scrollbar, ScrollbarCorner } from "../Scrollbar/Scrollbar";
 import { useScrollbarMetrics } from "../Scrollbar/useScrollbarMetrics";
 import { useSpreadsheet } from "./useSpreadsheet";
+import { gridPointerMouseDown, gridPointerDoubleClick } from "./gridPointerEntry";
 import {
   clearRange,
   clearRangeWithOptions,
@@ -1299,28 +1300,33 @@ function SpreadsheetContent({
   // -------------------------------------------------------------------------
   // Split bar drag wrappers
   // -------------------------------------------------------------------------
+  // The body lives in gridPointerEntry.ts: this is the OUTERMOST pointer door
+  // (the pointer-claim rule is decided there, before any grid gesture is
+  // chosen), and a door two layers of `preventDefault()` sit behind has to be
+  // testable without mounting the grid.
   const wrappedMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) { handleMouseDown(event); return; }
-      const z = gridState.zoom;
-      const mouseX = (event.clientX - rect.left) / z;
-      const mouseY = (event.clientY - rect.top) / z;
-
-      const hitBar = hitTestSplitBar(mouseX, mouseY);
-      if (hitBar) {
-        event.preventDefault();
-        event.stopPropagation();
-        setSplitDrag({
-          axis: hitBar,
-          startPixel: hitBar === "row" ? mouseY : mouseX,
-          startValue: hitBar === "row" ? (splitConfig.splitRow ?? 0) : (splitConfig.splitCol ?? 0),
-        });
-        return;
-      }
-      handleMouseDown(event);
+      gridPointerMouseDown(event, {
+        containerRef,
+        zoom: gridState.zoom,
+        hitTestSplitBar,
+        splitRow: splitConfig.splitRow,
+        splitCol: splitConfig.splitCol,
+        beginSplitDrag: setSplitDrag,
+        onGridMouseDown: handleMouseDown,
+      });
     },
     [handleMouseDown, hitTestSplitBar, splitConfig, containerRef, gridState.zoom]
+  );
+
+  // The SECOND door bound to this element that can act on a gesture. It is not
+  // reached through `wrappedMouseDown`, so it needs the claim check of its own —
+  // see `gridPointerDoubleClick`.
+  const wrappedDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      gridPointerDoubleClick(event, handleDoubleClickEvent);
+    },
+    [handleDoubleClickEvent]
   );
 
   const wrappedMouseMove = useCallback(
@@ -1403,7 +1409,7 @@ function SpreadsheetContent({
         onMouseDown={wrappedMouseDown}
         onMouseMove={wrappedMouseMove}
         onMouseUp={wrappedMouseUp}
-        onDoubleClick={handleDoubleClickEvent}
+        onDoubleClick={wrappedDoubleClick}
         style={effectiveCursor ? { cursor: effectiveCursor } : undefined}
         onWheel={handleWheel}
         onContextMenu={handleContextMenu}

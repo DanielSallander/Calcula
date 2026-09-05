@@ -46,7 +46,7 @@ import {
   APP_EVENTS_CARRYING_CELL_CONTENTS,
   thinAppEventForScripts,
 } from "./allowlist";
-import { MAX_FILE_TEXT_CHARS } from "./validators";
+import { MAX_FILE_TEXT_CHARS, checkFormSpec } from "./validators";
 import type { PickerTextEncoding } from "../filesystem";
 import {
   fetchOriginOf,
@@ -55,6 +55,8 @@ import {
   RUST_MIRRORED_CAPABILITIES,
   hasFetchOrigin,
   recordCapabilityGrant,
+  recordCapabilityGrantAtInstall,
+  recordCapabilityGrantUnlessRevoked,
   requestCapabilityGrant,
   revokeBackendCapabilities,
   revokeScriptGrants,
@@ -65,6 +67,7 @@ import {
   CONTRIBUTION_REGISTRATION_KINDS,
   CONTRIBUTION_REQUIRED_CAPABILITY,
   EXTENSION_BROKER_METHODS,
+  EXTENSION_FORM_HOOK_RELAY,
   EXTENSION_PROTOCOL_VERSION,
   EXTENSION_HANDLER_TIMEOUT_MS,
   EXTENSION_DEACTIVATE_GRACE_MS,
@@ -84,6 +87,31 @@ import {
 } from "./extensionProtocol";
 import { registerCellRenderCache, invalidateCellRenderCache } from "./renderCache";
 import { requestScriptDialog, revokeScriptDialogs } from "./scriptDialogs";
+// The SHARED form registry (M4). It owns the modal slot, the show bucket, the
+// idle/absolute deadlines, the dismissal mute and the renderer handshake — the
+// same guards an object script's form passes — and it reaches the host realm
+// only through the `FormSessionDeps` this module hands it, exactly as host.ts
+// does for object scripts. Nothing about the surface is re-implemented here.
+import {
+  closeScriptForm,
+  defineScriptLayout,
+  describeFormError,
+  getActiveScriptForm,
+  revokeScriptForms,
+  showScriptForm,
+  updateScriptForm,
+  type FormSessionDeps,
+  type FormSubmitDecision,
+} from "./scriptForms";
+import { resolveExtensionFormBindings } from "./extensionFormBindings";
+import { collectFormBindings } from "./scriptFormBindings";
+import { packageOrigin } from "./scriptOrigin";
+import type {
+  FormPatch,
+  FormSpec,
+  FormValue,
+  FormSubmitVerdict,
+} from "./scriptFormSpec";
 import type {
   ScriptDialogFormSpec,
   ScriptDialogPromptOptions,
@@ -136,6 +164,32 @@ interface MountedExtension {
   refusalCount: number;
   /** Cell-style cache ids this extension owns (for invalidate()). */
   cellStyleCacheIds: Set<string>;
+  /**
+   * The FORMS this extension registered (M4), by declared name. The layout was
+   * validated and ceiling-checked at registration; `ext.formShow` can only name
+   * one of these, so a worker can never hand a tree straight to the screen.
+   * `handlerId` is the single worker slot every hook of that form relays into.
+   */
+  forms: Map<string, { spec: FormSpec; handlerId: number }>;
+  /**
+   * Declared name -> the showId of the session THAT registration currently has
+   * on screen. Written when `ext.formShow` has actually committed a show and
+   * deleted when the registry reports that session closed, so it names a form
+   * the user is looking at and nothing else.
+   *
+   * IT EXISTS BECAUSE THE LAYOUT IS NOT AN IDENTITY. The teardown below used to
+   * ask the registry which spec was defined, on the reasoning that
+   * `ext.formShow` re-declares the layout immediately before showing. That is
+   * true only of a show that SUCCEEDS: the layout is swapped BEFORE
+   * `showScriptForm` runs, and every guard inside it — the per-script modal
+   * slot, the app-wide slot, the show bucket, the dismissal mute — refuses
+   * after the swap. One refused second show therefore re-pointed the layout at
+   * a form that was never painted, and from then on the identity check answered
+   * backwards in BOTH directions: unregistering the OPEN form left it on screen
+   * with its handler deleted, and unregistering the REFUSED one tore the user's
+   * half-filled form away.
+   */
+  formSessions: Map<string, string>;
   /** regId -> the declarative ribbon button the host paints. */
   ribbonButtons: Map<
     number,
@@ -335,6 +389,8 @@ export async function mountWorkerExtension(
     refusals: [],
     refusalCount: 0,
     cellStyleCacheIds: new Set(),
+    forms: new Map(),
+    formSessions: new Map(),
     ribbonButtons: new Map(),
     pendingInvokes: new Map(),
     nextReqId: 1,
@@ -456,6 +512,8 @@ export async function unmountWorkerExtension(extId: string): Promise<void> {
   mw.refusals.length = 0;
   mw.ribbonButtons.clear();
   mw.cellStyleCacheIds.clear();
+  mw.forms.clear();
+  mw.formSessions.clear();
   notifyContributions();
   for (const cleanup of mw.cleanups) {
     try {
@@ -469,6 +527,11 @@ export async function unmountWorkerExtension(extId: string): Promise<void> {
   // Take down any modal this extension had on screen — otherwise it keeps
   // asking on behalf of code that no longer exists (same rule as hostUnmountScript).
   revokeScriptDialogs(mw.handle.scriptId);
+  // ...and the same for a FORM (M4). It shares the app-wide modal slot, so a
+  // session left open by an unmounted add-in would refuse every later dialog in
+  // the session as well as painting for code that is gone. `revokeScriptForms`
+  // closes the session as "unmount", forgets the layout and resets the bucket.
+  revokeScriptForms(mw.handle.scriptId);
   mw.worker.terminate();
 }
 
@@ -566,6 +629,8 @@ function contributionIdOf(reg: ExtRegistration): string {
       return reg.id;
     case "fileFormat":
       return reg.format?.id ?? "";
+    case "form":
+      return String(reg.name ?? "").trim();
     default:
       return "";
   }
@@ -690,6 +755,46 @@ function acceptContribution(
 }
 
 /**
+ * Write the `grid.read` grant down for a contribution that is about to start
+ * being handed the user's cells — UNLESS the user has revoked it since.
+ *
+ * ONE FUNCTION FOR ALL THREE DOORS (a bound form field, a cell-style
+ * contributor, a subscription to an event carrying cell contents) so they
+ * cannot drift, and so the rule below is written once.
+ *
+ * WHY THIS IS NOT A BARE `recordCapabilityGrant`. `register` is a message the
+ * sandboxed worker may post at ANY moment after activation — from a command
+ * click, an event handler, a scheduled job — and an add-in may declare several
+ * forms and several cell-style contributors. Registration is therefore an
+ * ATTACKER-TIMED event, not a one-shot mount step, and an unconditional
+ * `caps.add("grid.read")` here handed the capability back to an add-in the user
+ * had just revoked it from: register a second declared form, or simply
+ * unregister and re-register the only one, and the grant was silently restored.
+ * Both readers then saw a grant set the user had already emptied, and
+ * `extensionFormBindings.ts`'s promise — "a form registered an hour ago must
+ * not still be shown cells because it was allowed then" — was false as shipped.
+ *
+ * A WITHHELD GRANT IS AUDITED, NOT SILENT. The add-in's reach is degrading
+ * because of a decision the user made, and the transparency panel is where they
+ * confirm the decision took. Returns whether the capability is live, so the
+ * caller can tell the panel what this contribution can actually do.
+ */
+function recordGridReadInUse(mw: MountedExtension, surface: ExtContributionKind | "event"): boolean {
+  if (!mw.handle.declaredCapabilities.has("grid.read")) return false;
+  if (recordCapabilityGrantUnlessRevoked(mw.handle.scriptId, "grid.read")) return true;
+  appendAudit({
+    ts: Date.now(),
+    scriptId: mw.handle.scriptId,
+    scriptName: mw.handle.scriptName,
+    method: `ext.withheld.grid.read.${surface}`,
+    class: "read",
+    ok: false,
+    error: "Revoked",
+  });
+  return false;
+}
+
+/**
  * Ceiling check for one registration. Returns the claimed id when the
  * contribution may proceed, or null when it was refused (and reported).
  *
@@ -786,10 +891,12 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
       // The subscription IS the use of the capability, so write the grant down
       // now — otherwise an add-in that reads the workbook only through events
       // would be the one holder of grid.read that never appears in the
-      // transparency panel.
-      if (mw.handle.declaredCapabilities.has("grid.read")) {
-        recordCapabilityGrant(mw.handle.scriptId, "grid.read");
-      }
+      // transparency panel. Not unconditionally, though: a subscription needs no
+      // `contributes` entry and is bounded by nothing, so re-subscribing was the
+      // CHEAPEST way to undo a revoke (see recordGridReadInUse). Withheld, the
+      // handler still fires and still learns WHERE the change was; the redaction
+      // below is what keeps the contents from crossing.
+      recordGridReadInUse(mw, "event");
       appendAudit({
         ts: Date.now(),
         scriptId: mw.handle.scriptId,
@@ -965,6 +1072,10 @@ function setupRegistration(mw: MountedExtension, reg: ExtRegistration): void {
     setupCellStyleRegistration(mw, reg.regId, reg.id, reg.handlerId);
     return;
   }
+  if (reg.kind === "form") {
+    setupFormRegistration(mw, reg.regId, contributionId ?? reg.name, reg.spec, reg.handlerId);
+    return;
+  }
   if (reg.kind === "fileFormat") {
     const format = reg.format;
     const extensions = (format.extensions ?? [])
@@ -1117,7 +1228,22 @@ function setupFormulaRegistration(
   // data every time those cells recalculate"). Writing the grant down means the
   // transparency panel shows formula.udf in use rather than leaving the most
   // consequential contribution the only one with no capability record.
-  recordCapabilityGrant(mw.handle.scriptId, "formula.udf");
+  //
+  // DELIBERATELY NOT `recordGridReadInUse`'s revoke-aware writer, unlike the
+  // three grid.read doors. Here the grant record is pure DISCLOSURE: the
+  // invocation path brokers each call under its own `udf:<NAME>` handle (see
+  // above), so this grant gates nothing, and withholding it would only hide a
+  // function that is still in the catalog and still running on every
+  // recalculation. Making a formula.udf revoke actually BITE means retiring the
+  // registered functions — a separate change; until then the honest record is
+  // the one that says the reach is live.
+  //
+  // INSTALL-SCOPED, for the same reason it is written down at all. The function
+  // stays in the catalog across a workbook swap (nothing unmounts an add-in on
+  // File > Open), so a grant that did not would leave the panel reporting no
+  // capability behind code that is still running on every recalculation — the
+  // disclosure silently inverted by the user opening a second workbook.
+  recordCapabilityGrantAtInstall(mw.handle.scriptId, "formula.udf");
   acceptContribution(mw, regId, "formula", name, `${name}(${params.join(", ")})`);
 }
 
@@ -1242,13 +1368,260 @@ function setupCellStyleRegistration(
   // screen, and the transparency panel must show grid.read in use rather than
   // leaving the reach visible only in this label. The consent behind it is the
   // install-time package consent, which enumerated both the declared
-  // capabilities and the cellStyles contribution with its reach note.
-  recordCapabilityGrant(mw.handle.scriptId, "grid.read");
+  // capabilities and the cellStyles contribution with its reach note — but a
+  // REVOKE outranks that consent, so the write can be withheld.
+  const isShownCells = recordGridReadInUse(mw, "cellStyle");
   // The label is what the transparency UI prints. A cell-style contributor is
   // the one contribution whose reach is wider than its name (it is shown the
   // DISPLAYED VALUE of every cell it is asked about), so the reach is in the
   // label rather than only in the install-time consent the user saw once.
-  acceptContribution(mw, regId, "cellStyle", id, `${id} (is shown the cells it styles)`);
+  //
+  // ...and the label must say the reach this contributor ACTUALLY has. Printing
+  // "is shown the cells it styles" beside a registration the resolver above will
+  // refuse would tell the user their revoke had not taken, in the one panel
+  // where they went to check.
+  acceptContribution(
+    mw,
+    regId,
+    "cellStyle",
+    id,
+    isShownCells
+      ? `${id} (is shown the cells it styles)`
+      : `${id} (not allowed to be shown your cells, so it styles nothing)`,
+  );
+}
+
+// ============================================================================
+// Forms (M4): the host paints a declared widget tree; the add-in supplies data
+// ============================================================================
+//
+// WHAT THIS SURFACE IS. Exactly the tree an object script's `form.define`
+// describes, painted by exactly the same trusted renderer, through exactly the
+// same registry (`scriptForms.ts`) — so the modal slot, the show bucket, the
+// three-dismissal mute, the idle and absolute deadlines, the renderer
+// handshake, the identity band and the transparency panel's "what is holding a
+// surface" row all apply to an add-in's form without a line of them being
+// written twice. `getActiveScriptForm()` therefore already reports it, which is
+// why `codeInventory.getScriptHeldState` needed no add-in case: a surface the
+// user cannot enumerate is what this project exists to prevent, and the way to
+// guarantee that is to have ONE registry rather than a second one that
+// remembers to register itself.
+//
+// WHAT IS NARROWER THAN AN OBJECT SCRIPT'S FORM, and why:
+//   * the LAYOUT is a declared CONTRIBUTION, not an argument to a call. It is
+//     named in the signed sidecar, validated once at registration, refused
+//     loudly if it breaks a rule, and listed before the bundle ever shows
+//     anything. An add-in cannot compose a tree at the moment it wants it on
+//     screen.
+//   * bound fields are DISPLAY ONLY and there is no write path in the code
+//     (extensionFormBindings.ts). No `writeBindings` dep is supplied here, and
+//     omitting it is already the registry's read-only path — `handleInput`
+//     simply has nothing to call.
+//   * no Controls-pane bindings, no defined names, no other sheet, no ranged
+//     option lists, no workbook media (validators.ts, `FormValidationSurface`).
+
+/**
+ * Turn a worker's `{ kind: "form" }` registration into a form the add-in may
+ * later show. Nothing is painted here — this is the DECLARATION arriving.
+ *
+ * The spec is validated against the EXTENSION surface's rules, and a failure is
+ * a loud contribution refusal carrying the validator's own sentence: an author
+ * asking for `writeOn: "change"` is told that a bound field of an add-in form
+ * is never written back, at the moment they wrote it, rather than discovering
+ * later that their cell never changed.
+ */
+function setupFormRegistration(
+  mw: MountedExtension,
+  regId: number,
+  name: string,
+  spec: FormSpec,
+  handlerId: number,
+): void {
+  const verdict = checkFormSpec(spec, "extension");
+  if (verdict !== true) {
+    refuseContribution(mw, "form", name, verdict);
+    return;
+  }
+  if (mw.forms.has(name)) {
+    refuseContribution(mw, "form", name, `it has already registered a form called "${name}"`);
+    return;
+  }
+  mw.forms.set(name, { spec, handlerId });
+  // THE GRANT IS WRITTEN DOWN WHEN THE FORM CAN ACTUALLY BE SHOWN CELLS, and
+  // only then. The same rule setupCellStyleRegistration follows and for the
+  // same reason — install-time package consent enumerated both the capability
+  // and this contribution with its reach note, and a capability that is really
+  // in use must appear in the transparency panel rather than only in a label.
+  // Narrower than the cell-style path on purpose: a form with no `bind` at all
+  // is never shown a cell, so recording grid.read for it would overstate.
+  //
+  // And it can be WITHHELD. This registration is the third door through which an
+  // unconditional write put a revoked grid.read back (recordGridReadInUse says
+  // how) — the one whose own module header promises the opposite, because
+  // `resolveExtensionFormBindings` asks the live grant set at delivery and was
+  // being handed a set the user had already emptied.
+  const bound = collectFormBindings(spec).length;
+  const isShownCells = bound > 0 && recordGridReadInUse(mw, "form");
+  mw.regCleanups.set(regId, () => {
+    mw.forms.delete(name);
+    const openShowId = mw.formSessions.get(name);
+    mw.formSessions.delete(name);
+    // A form on screen must never outlive its registration: it would be asking
+    // on behalf of code that no longer exists (the rule unmount follows). The
+    // worker has already deleted its own handler by the time this arrives —
+    // `ui.forms.register`'s disposer drops the handler and THEN posts the
+    // unregister — so a session left up relays Submit into nothing, and
+    // `relaySubmit` reads a failed relay as ACCEPT: the user's answers would go
+    // nowhere while the modal slot stays held.
+    //
+    // ...but only if the form on screen IS THE ONE THIS REGISTRATION OPENED. An
+    // add-in may declare several forms, and closing unconditionally took the
+    // user's open dialog away mid-answer when an unrelated registration was
+    // torn down. The identity is the SESSION this registration opened
+    // (`mw.formSessions`), never the registry's defined layout: the layout is
+    // swapped before `showScriptForm` and so re-points on a REFUSED show too,
+    // which made both directions of this test answer backwards.
+    if (openShowId && getActiveScriptForm()?.showId === openShowId) {
+      closeScriptForm(mw.handle.scriptId, null);
+    }
+  });
+  // The label is the transparency panel's sentence about this form, so it says
+  // what the form WILL do, not what its layout asks for. "shows you 1 cell"
+  // beside a bound field the user will actually see greyed out — because the
+  // add-in never declared grid.read, or because they revoked it — is the panel
+  // contradicting the form.
+  const cells = bound === 1 ? "1 cell" : `${bound} cells`;
+  acceptContribution(
+    mw,
+    regId,
+    "form",
+    name,
+    bound === 0
+      ? name
+      : isShownCells
+        ? `${name} (shows you ${cells})`
+        : `${name} (tied to ${cells}, but not allowed to be shown them)`,
+  );
+}
+
+/** The form this extension has on screen, if the name still resolves. */
+function extensionForm(mw: MountedExtension, name: string): { spec: FormSpec; handlerId: number } {
+  const entry = mw.forms.get(name);
+  if (entry) return entry;
+  const known = [...mw.forms.keys()];
+  throw new BrokerError(
+    "HostError",
+    known.length > 0
+      ? `no form called "${name}" is registered; this add-in registered: ${known.join(", ")}`
+      : `no form called "${name}" is registered — register it first, and list it in the manifest under contributes.forms`,
+  );
+}
+
+/**
+ * Normalize whatever the add-in's `onSubmit` returned into the registry's
+ * verdict. The SAME vocabulary an object script's onSubmit uses (`false`,
+ * `"cancel"`, `{ cancel: true, errors, message }`), because an author reading
+ * one set of docs must not find two dialects — and anything unrecognized
+ * ACCEPTS, so a form cannot be wedged shut by a handler that returns junk.
+ */
+function extensionSubmitDecision(raw: unknown): FormSubmitDecision | null {
+  const verdict = raw as FormSubmitVerdict;
+  if (verdict === false || verdict === "cancel") return { cancel: true };
+  if (verdict && typeof verdict === "object" && (verdict as { cancel?: unknown }).cancel === true) {
+    const v = verdict as { errors?: Record<string, string>; message?: string };
+    return {
+      cancel: true,
+      ...(v.errors && typeof v.errors === "object" ? { errors: v.errors } : {}),
+      ...(typeof v.message === "string" ? { message: v.message } : {}),
+    };
+  }
+  return null;
+}
+
+/**
+ * The host callbacks one add-in form session drives.
+ *
+ * ONE WORKER SLOT FOR EVERY HOOK. `forward` and `relaySubmit` both land on the
+ * registration's single `handlerId` as `{ hook, detail }`; the submit verdict is
+ * simply what that handler RETURNS, because `invokeHandler` already carries a
+ * result back. Four handler ids would have been four things to keep in step
+ * across register, unregister and unmount.
+ *
+ * AND THE NAME IN THAT SLOT IS TRANSLATED, never passed through: the registry's
+ * `onShow`/`onChange`/`onClick`/`onClose` become the add-in's published
+ * `show`/`change`/`click` (and nothing at all, because `closed` below is the one
+ * teardown) through `EXTENSION_FORM_HOOK_RELAY`. `relaySubmit` and `closed`
+ * supply their published names directly, which is why those two were the only
+ * ones an add-in could ever match while the rest went out under host-internal
+ * spellings.
+ *
+ * NOTE WHAT IS ABSENT: `writeBindings`. Omitting it is not an oversight to be
+ * filled in later — it IS the read-only guarantee the consent note makes, and
+ * the registry's own behaviour for a session without it is to write nothing.
+ * Adding it here would falsify `CONTRIBUTION_REACH_NOTE.form` and the
+ * `ext.formShow` desc in the same commit.
+ */
+function extensionFormDeps(mw: MountedExtension, name: string, handlerId: number): FormSessionDeps {
+  const relay = (hook: string, detail: unknown): Promise<unknown> =>
+    invokeWorkerHandler(mw, handlerId, [{ hook, detail }]);
+  return {
+    forward(hook, payload) {
+      // THE ADD-IN'S VOCABULARY IS NOT THE REGISTRY'S. What an author writes
+      // against is the `ui.forms` JSDoc and the shipped example, both of which
+      // say "show"/"change"/"click". Relaying `onChange` verbatim made the
+      // example's own `event.hook === "change"` branch unreachable — its live
+      // VAT caption stayed empty for the whole session with no error anywhere,
+      // and every add-in written against the docs got the same silence.
+      const published = EXTENSION_FORM_HOOK_RELAY[hook];
+      if (published === undefined) {
+        // A registry hook nobody published. Guessing a name for it is how this
+        // defect happened, so it is reported here instead of shipped.
+        console.error(
+          `[ext:${mw.extId}] form hook "${hook}" has no published add-in name and was not delivered`,
+        );
+        return;
+      }
+      // `onClose` maps to null: `closed` below is the ONE teardown the contract
+      // names, and it is the one carrying the answers.
+      if (published === null) return;
+      void relay(published, payload).catch((e: unknown) => {
+        console.error(`[ext:${mw.extId}] form ${published} handler failed:`, e);
+      });
+    },
+    // A sandboxed extension has no `form.values` sync getter to mirror INTO —
+    // its context is async-RPC only, and the values it needs arrive with every
+    // hook and with the final answer. So the mirror is deliberately a no-op
+    // rather than a message the worker has nowhere to put.
+    mirror() {},
+    async relaySubmit(values) {
+      try {
+        return extensionSubmitDecision(await relay("submit", { values }));
+      } catch (e) {
+        // A handler that threw must not hold the form shut: the registry's own
+        // default is to accept, and this says so out loud in the console rather
+        // than leaving the user pressing a button that does nothing.
+        console.error(`[ext:${mw.extId}] form submit handler failed:`, describeFormError(e));
+        return null;
+      }
+    },
+    closed(showId, result) {
+      // Forget the session BEFORE telling the add-in: every close path lands
+      // here (submit, cancel, deadline, the script's own close, unmount), so
+      // this is the one place that can promise `mw.formSessions` names a form
+      // that is genuinely on screen. Guarded on the showId because a stale
+      // entry from an earlier session must not delete the current one's.
+      if (mw.formSessions.get(name) === showId) mw.formSessions.delete(name);
+      void relay("closed", { showId, values: result }).catch(() => {
+        /* the worker may already be gone; the session is over either way */
+      });
+    },
+    // The worker's own call clock is not held while a form is open: `ext.*`
+    // calls are short and `ext.formShow` has already resolved by the time
+    // anyone is typing. (An object script needs this because its `run()` may be
+    // awaiting the form inside a relayed method call.)
+    suspendDeadlines() {},
+    resumeDeadlines() {},
+  };
 }
 
 // ============================================================================
@@ -1731,6 +2104,62 @@ async function executeExtensionImpl(mw: MountedExtension, method: string, args: 
       });
       if (answer.dismissed) return null;
       return answer.value !== null && typeof answer.value === "object" ? answer.value : null;
+    }
+    // ---- add-in FORMS (M4): the rich tree, through the same modal slot ----
+    //
+    // `ext.formShow` names a form the add-in ALREADY REGISTERED and the sidecar
+    // already declared; no layout travels on this call, so there is nothing for
+    // a hostile worker to compose at the moment it wants the screen. The show
+    // resolves as soon as the trusted renderer says the form is up — the ANSWER
+    // arrives later through the registration's own handler ("closed"), exactly
+    // as it does for an object script.
+    case "ext.formShow": {
+      const [name, options] = args as [string, { initial?: Record<string, unknown> } | undefined];
+      const entry = extensionForm(mw, name);
+      // The registry keys ONE layout per script, so the form being shown is
+      // declared immediately before it is shown. An add-in may register several
+      // forms; only one can be on screen (the modal slot), so this is the whole
+      // of the multi-form story.
+      defineScriptLayout(scriptId, "form", entry.spec);
+      const result = await showScriptForm({
+        scriptId,
+        scriptName: mw.handle.scriptName,
+        // Provenance is HOST-built from the mount, never from the add-in: the
+        // identity band says which code is asking and no manifest field can
+        // select the wording (scriptOrigin.ts).
+        origin: packageOrigin(mw.extId),
+        ...(options?.initial ? { initial: options.initial } : {}),
+        // Deferred until every guard has passed and the modal slot is claimed
+        // (see showScriptForm): a muted add-in calling show() in a loop must not
+        // perform one audited cell read per binding for a dialog nobody sees.
+        resolve: async () => {
+          const bound = await resolveExtensionFormBindings(mw.handle, entry.spec);
+          return {
+            seeds: bound.seeds,
+            ...(bound.pinnedSheetName ? { pinnedSheetName: bound.pinnedSheetName } : {}),
+            // No writeOnChange, ever: an add-in's bound field is display-only.
+            writeOnChange: [],
+          };
+        },
+        deps: extensionFormDeps(mw, name, entry.handlerId),
+      });
+      // ONLY A COMMITTED SHOW IS A SESSION. `showScriptForm` throws when a
+      // guard refuses (both modal slots, the show bucket) and returns
+      // `closed: true` without painting anything when the add-in is muted, so
+      // neither leaves a record here — which is what keeps the registration
+      // teardown's identity honest after a refused second show.
+      if (result.closed !== true) mw.formSessions.set(name, result.showId);
+      return { showId: result.showId, closed: result.closed === true };
+    }
+    case "ext.formUpdate": {
+      const [patch] = args as [FormPatch];
+      updateScriptForm(scriptId, patch);
+      return undefined;
+    }
+    case "ext.formClose": {
+      const [result] = args as [Record<string, FormValue | string[]> | null | undefined];
+      closeScriptForm(scriptId, result ?? null);
+      return undefined;
     }
     // ---- file.picker: the user picks the file, the host does the I/O ----
     // Identical construction to the object-script path: the extension supplies a

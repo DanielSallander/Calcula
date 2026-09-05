@@ -86,6 +86,9 @@ const bus = new Map<string, Set<BusHandler>>();
 const emittedEvents: Array<{ name: string; detail: Record<string, unknown> }> = [];
 const pendingHandlers: Array<Promise<unknown>> = [];
 
+/** Every toast the extension raised, in order. */
+const toasts: string[] = [];
+
 // ===========================================================================
 // Mocks
 // ===========================================================================
@@ -152,7 +155,9 @@ vi.mock("@api", async () => {
     saveObjectScript: async () => undefined,
     deleteObjectScript: async () => undefined,
     getScaffoldTemplate: () => "",
-    showToast: () => undefined,
+    showToast: (message: string) => {
+      toasts.push(message);
+    },
     resolveCapabilityRequest: () => undefined,
     resolveScriptDialog: () => undefined,
     dismissScriptDialog: () => undefined,
@@ -171,9 +176,13 @@ vi.mock("@api", async () => {
     IconScript: null,
     IconTemplate: null,
     IconMarketplace: null,
-    listWorkbookScriptRecords: async () => {
+    // The distributed-only door the consent set lists through: the rows whose
+    // stamp names a package (decided by the same derivation the real door
+    // uses), each resolved to its record. The double holds full records, so the
+    // filter is the whole difference from the full inventory.
+    listDistributedWorkbookScriptRecords: async () => {
       if (moduleListingThrows) throw moduleListingThrows;
-      return moduleRecords;
+      return moduleRecords.filter((r) => origin.scriptOriginForStoredRecord(r).kind === "package");
     },
   };
 });
@@ -204,6 +213,11 @@ vi.mock("@api/scriptSecurity", () => ({
 
 vi.mock("@api/scriptHost/host", () => ({
   hostStopTransientDebugSessions: async () => undefined,
+  // M3c: activate() hands these to the embedded-form layer. Doubled here for
+  // the same reason as everything else in this file — the load path is what is
+  // under test, not the surfaces it installs.
+  openEmbeddedScriptForm: async () => ({ ok: false, reason: "no host in this test" }),
+  closeEmbeddedScriptForm: () => undefined,
 }));
 
 vi.mock("@api/scriptHost/scriptFormSpec", () => ({
@@ -245,6 +259,31 @@ vi.mock("../lib/aiEditBridge", () => ({
 vi.mock("../lib/formPreviewBridge", () => ({
   installFormPreviewBridge: () => () => undefined,
   replayFormPreviewResults: async () => undefined,
+}));
+
+vi.mock("../lib/scriptPaneHost", () => ({
+  installScriptPaneHost: () => () => undefined,
+}));
+
+// M3c: the embedded-form surfaces and their grid gestures, doubled like the
+// task pane's above. The UX module registers grid context-menu items through
+// `gridExtensions`, which this file's `@api` double does not carry.
+vi.mock("../lib/embeddedFormUx", () => ({
+  registerEmbeddedFormUx: () => () => undefined,
+}));
+vi.mock("../lib/scriptEmbedHost", () => ({
+  installScriptEmbedHost: () => Object.assign(() => undefined, { retry: () => undefined, reconcile: () => undefined }),
+}));
+vi.mock("../lib/embeddedFormLayer", () => ({
+  installEmbeddedFormLayer: () => ({
+    deps: {
+      paint: () => undefined,
+      forget: () => undefined,
+      openSession: async () => ({ ok: false, reason: "no layer in this test" }),
+      closeSession: () => undefined,
+    },
+    dispose: () => undefined,
+  }),
 }));
 
 vi.mock("../lib/cellBehaviorUx", () => ({
@@ -427,6 +466,7 @@ beforeEach(() => {
   bus.clear();
   emittedEvents.length = 0;
   pendingHandlers.length = 0;
+  toasts.length = 0;
 });
 
 afterEach(() => {
@@ -866,6 +906,97 @@ describe("a grant is tied to the screen that produced it", () => {
     await allowWithStalePrompt(PKG, undefined);
 
     expect(files.get(CONSENT_FILE)).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// (4b) THE REFUSAL PATH RE-ASKS A BOUNDED NUMBER OF TIMES
+// ===========================================================================
+//
+// A refused grant re-prompts so the user is never stranded, but each re-prompt
+// is a fresh screen, and a workbook that kept changing between screen and click
+// would be re-asked on every click forever. No source is known to re-fire
+// PACKAGE_UPDATED continuously, so the bound is proportionate: a per-package
+// count for the session, printed in the refusal toast, after which the loop
+// stops and says so. The next open, or the next update's own load pass, asks
+// afresh — and a grant that goes through resets the count.
+
+describe("a refused grant is re-asked a bounded number of times per session", () => {
+  /** Press Allow on a screen that never existed — always refused, always re-asked. */
+  async function pressAllowOnAGhostScreen(): Promise<void> {
+    await allowWithStalePrompt(PKG, "no-such-screen");
+  }
+
+  async function activateAndReadTheBound(): Promise<number> {
+    await activateFreshExtension();
+    // The same module instance `activateFreshExtension` loaded — no reset in
+    // between — so this is the number the toasts print.
+    const mod = (await import("../index")) as unknown as Record<string, unknown>;
+    return mod.MAX_REFUSAL_REPROMPTS_PER_SESSION as number;
+  }
+
+  it("re-asks up to the bound, numbering each re-ask in the toast, then stops and says so", async () => {
+    objectScripts = [objectScript()];
+    const MAX = await activateAndReadTheBound();
+    expect(MAX).toBeGreaterThan(0);
+    expect(consentPrompts()).toHaveLength(1);
+
+    for (let n = 1; n <= MAX; n++) {
+      await pressAllowOnAGhostScreen();
+      expect(consentPrompts(), `re-ask ${n} must produce a fresh screen`).toHaveLength(1 + n);
+      expect(
+        toasts[toasts.length - 1],
+        "the user must be able to see how many re-asks are left",
+      ).toContain(`re-ask ${n} of ${MAX} this session`);
+    }
+
+    // The (MAX+1)th refusal: no new screen, and the toast says the loop ended.
+    await pressAllowOnAGhostScreen();
+    expect(
+      consentPrompts(),
+      "an unbounded refusal path re-prompts on every click, forever",
+    ).toHaveLength(1 + MAX);
+    expect(toasts[toasts.length - 1]).toContain("will not re-ask on its own again");
+    expect(toasts[toasts.length - 1]).toContain(`${MAX} times this session`);
+    // Nothing was approved at any point.
+    expect(files.get(CONSENT_FILE)).toBeUndefined();
+  });
+
+  it("the next update's load pass still asks, and a grant that goes through resets the count", async () => {
+    objectScripts = [objectScript()];
+    const MAX = await activateAndReadTheBound();
+    for (let n = 0; n <= MAX; n++) await pressAllowOnAGhostScreen();
+    const exhausted = consentPrompts().length;
+
+    // The load pass is NOT the refusal path: an update asks afresh.
+    const { emitAppEvent } = await import("@api/events");
+    emitAppEvent("app:package-updated", {});
+    await settle();
+    expect(consentPrompts().length, "the bound must not silence the load pass").toBe(exhausted + 1);
+
+    // A real Allow on that screen goes through...
+    await allow(PKG);
+    expect(await consentGrantedIn(PKG, "obj-refresh", objectScript().source)).toBe(true);
+
+    // ...and the count starts over: the next refusal is "1 of MAX" again, not
+    // "already asked MAX times".
+    await pressAllowOnAGhostScreen();
+    expect(toasts[toasts.length - 1]).toContain(`re-ask 1 of ${MAX} this session`);
+  });
+
+  it("the count is per application: one application's refusals do not spend another's", async () => {
+    const OTHER = "Other App";
+    objectScripts = [
+      objectScript(),
+      objectScript({ id: "obj-other", name: "Other", instanceId: "btn-9", packageName: OTHER }),
+    ];
+    const MAX = await activateAndReadTheBound();
+    for (let n = 0; n <= MAX; n++) await pressAllowOnAGhostScreen();
+    const otherBefore = consentPrompts().filter((p) => p.packageName === OTHER).length;
+
+    await allowWithStalePrompt(OTHER, "no-such-screen");
+    expect(consentPrompts().filter((p) => p.packageName === OTHER)).toHaveLength(otherBefore + 1);
+    expect(toasts[toasts.length - 1]).toContain(`re-ask 1 of ${MAX} this session`);
   });
 });
 

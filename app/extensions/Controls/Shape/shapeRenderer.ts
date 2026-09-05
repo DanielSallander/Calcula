@@ -13,8 +13,30 @@ import {
   overlaySheetToCanvas,
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
+import { showToast } from "@api/notifications";
 import { getShapeBitmap, hasShapeBitmapRenderer } from "@api";
 import { getDesignMode } from "../lib/designMode";
+import {
+  clearShapeHitRegions,
+  migrateShapeHitRegions,
+  removeShapeHitDom,
+  shapeHitDomIds,
+  syncShapeHitDom,
+} from "./shapeHitRegions";
+import { onFloatingControlRegionsPublished } from "../lib/regionPublication";
+import {
+  buildScriptFrameDocument,
+  claimScriptFrameSlot,
+  createScriptFrameRouter,
+  migrateScriptFrameSlot,
+  parkScriptFrameSlot,
+  readScriptFrameThemeTokens,
+  releaseScriptFrameSlot,
+  scriptFrameBudgetUsage,
+  setScriptFrameInert,
+  unparkScriptFrameSlot,
+  type ScriptFrameSlotRefusal,
+} from "../../_shared/scriptFrame";
 import { resolveControlProperties } from "../lib/controlApi";
 import { isFloatingControlSelected, getSelectedFloatingControls } from "../Button/floatingSelection";
 import { getShapeDefinition, isConnectorShape, type ShapePathCommand } from "./shapeCatalog";
@@ -23,18 +45,22 @@ import { getShapeDefinition, isConnectorShape, type ShapePathCommand } from "./s
 // Global postMessage listener (receives messages from shape iframes)
 // ============================================================================
 
-window.addEventListener("message", (e) => {
-  if (e.data?.source === "shape-html") {
-    const { instanceId, type, data } = e.data;
-    // Integrity check: e.data is spoofable by any frame/script, but e.source
-    // is not. Only accept messages that actually originate from the iframe
-    // registered for this instanceId.
-    const expectedFrame = htmlOverlayElements.get(instanceId);
-    if (!expectedFrame || e.source !== expectedFrame.contentWindow) {
-      return;
-    }
+// The protocol, the integrity check and the reserved-type handling all live in
+// extensions/_shared/scriptFrame — ONE definition shared with the Controls-pane
+// card host, which listens on this same window for its own frames. This router
+// resolves only the ids THIS host registered, so the two never fight over an id.
+const routeShapeFrameMessage = createScriptFrameRouter({
+  resolveFrame: (instanceId) => htmlOverlayElements.get(instanceId) ?? null,
+  deliver: ({ instanceId, type, data }) => {
     emitAppEvent("shape:htmlMessage", { instanceId, type, data });
-  }
+  },
+  // No onIntrinsicSize: an on-grid shape is the size the user drew it. The
+  // report is still CONSUMED rather than forwarded — bridge plumbing must not
+  // arrive at a script as if its own page had sent it.
+});
+
+window.addEventListener("message", (e) => {
+  routeShapeFrameMessage(e);
 });
 
 // ============================================================================
@@ -86,6 +112,96 @@ const htmlOverlayElements = new Map<string, HTMLIFrameElement>();
 /** Track content hash per controlId to avoid unnecessary iframe reloads. */
 const overlayContentHash = new Map<string, string>();
 
+// ----------------------------------------------------------------------------
+// A refused frame budget
+//
+// The budget refuses a NEW frame once the workbook already holds 24 of them, or
+// once their documents total 16 MB. What the shape does about it is decided
+// here, because the alternative shipped once and was worse than the budget it
+// was protecting: the render pass returned early on a refusal, so the shape
+// painted NOTHING — no fill, no stroke, no text, not even the default rectangle
+// a shape without any html would draw — while staying selectable, an invisible
+// hole in the grid. And it was mute: `claimScriptFrameSlot` builds a sentence
+// naming the budget and the way out, and the call site dropped it, where the
+// pane card host shows the same sentence in place of its frame.
+//
+// So a refusal now does two things. The render pass falls through to the
+// ordinary shape catalog (the shape is drawn as if it had no html at all), and
+// the sentence is said out loud: `console.warn` per instance so a diagnosis
+// names every affected shape, and one toast per REFUSAL KIND so a dashboard
+// with a dozen refused shapes tells the user once rather than a dozen times.
+//
+// AND IT DOES NOT KEEP TRYING. A refused shape has no frame and no content
+// hash, so it re-enters the "needs a document" branch on every single paint —
+// rebuilding a document the per-call validator lets reach 5 MB, sixty times a
+// second, for a claim already known to fail. The record below remembers the
+// html and the budget as they stood when the answer came back, and a repaint
+// that changes neither is answered from it. Releasing another frame moves the
+// budget, so the retry the refusal sentence tells the user to make still
+// happens on the very next paint.
+// ----------------------------------------------------------------------------
+
+/** What the budget said, and what it said it about. */
+interface FrameRefusalRecord {
+  refusal: ScriptFrameSlotRefusal;
+  message: string;
+  /** The exact html that was turned down. Different content is a new question. */
+  html: string;
+  /** The budget's occupancy at the moment of refusal, as one comparable string.
+   *  A different occupancy is also a new question — that is the self-heal. */
+  budgetStamp: string;
+}
+
+/** Map of controlId -> the standing refusal for its html frame. */
+const frameRefusals = new Map<string, FrameRefusalRecord>();
+
+/** Refusal kinds already toasted; cleared when nothing is refused any more, so
+ *  a budget that fills up again is announced again rather than staying silent
+ *  for the rest of the session. */
+const announcedRefusalKinds = new Set<ScriptFrameSlotRefusal>();
+
+function currentBudgetStamp(): string {
+  const usage = scriptFrameBudgetUsage();
+  return `${usage.frames}:${usage.bytes}`;
+}
+
+/** The refusal sentence for a shape whose html frame the budget turned down,
+ *  or undefined when its frame is live (or it has no html at all). */
+export function getShapeFrameRefusal(instanceId: string): string | undefined {
+  return frameRefusals.get(instanceId)?.message;
+}
+
+/** Record a refusal and say it once. Repeated frames of the same refusal are
+ *  silent — this runs from the render loop. */
+function noteFrameRefusal(
+  instanceId: string,
+  refusal: ScriptFrameSlotRefusal,
+  message: string,
+  html: string,
+): void {
+  const previous = frameRefusals.get(instanceId);
+  // The record is rewritten either way: the budget or the content moved to get
+  // here, and a stale stamp would make the next paint ask all over again.
+  frameRefusals.set(instanceId, {
+    refusal,
+    message,
+    html,
+    budgetStamp: currentBudgetStamp(),
+  });
+  if (previous?.message === message) return;
+  console.warn(`[ShapeRenderer] HTML frame refused for ${instanceId}: ${message}`);
+  if (!announcedRefusalKinds.has(refusal)) {
+    announcedRefusalKinds.add(refusal);
+    showToast(`This shape is drawn without its HTML: ${message}`, { variant: "warning" });
+  }
+}
+
+/** Forget a refusal — the frame was granted, or the shape lost its html. */
+function clearFrameRefusal(instanceId: string): void {
+  if (!frameRefusals.delete(instanceId)) return;
+  if (frameRefusals.size === 0) announcedRefusalKinds.clear();
+}
+
 /** Register a custom canvas renderer for a shape. */
 export function setCustomCanvasRenderer(instanceId: string, renderer: CustomCanvasRenderer): void {
   customCanvasRenderers.set(instanceId, renderer);
@@ -127,7 +243,151 @@ export function removeShapeHtmlOverlay(instanceId: string): void {
   }
   customHtmlContent.delete(instanceId);
   overlayContentHash.delete(instanceId);
+  // A shape with no html has nothing left to refuse, and leaving the record
+  // behind would keep the "already announced" latch shut for a budget that has
+  // just been given room.
+  clearFrameRefusal(instanceId);
+  // ...and its share of the frame budget. A charge that outlives its frame is a
+  // slow leak that eventually refuses a frame nothing is actually holding.
+  releaseScriptFrameSlot(instanceId);
+  // The frame is gone, so its declared hit rectangles have nothing to claim on
+  // behalf of. Dropped HERE rather than at each of the four call sites, because
+  // a shim that outlives its frame is an invisible element eating clicks over
+  // the bare grid.
+  clearShapeHitRegions(instanceId);
 }
+
+/**
+ * Park the DOM a shape keeps OUTSIDE the canvas — its overlay iframe, the shims
+ * claiming pointer input over it and the design-mode outlines showing what was
+ * claimed — for every shape that is no longer painted.
+ *
+ * WHY THIS EXISTS. Every other release runs from inside the render pass or from
+ * an explicit teardown, so all of them assume the shape is still being
+ * rendered. A shape that simply STOPS being rendered reached none of them: a
+ * sheet switch swaps the floating store, the departing sheet's control loses its
+ * overlay region, `renderFloatingShape` is never called for it again — and its
+ * shims stayed exactly where they were, `pointer-events: auto` at zIndex 6 in
+ * the canvas parent, swallowing every click on the NEXT sheet's bare grid, with
+ * Design Mode unable to give them back (the suspension lives in
+ * `syncShapeHitDom`, the function that is no longer running). A shape left
+ * behind IN Design Mode is the same failure wearing the other coat: no shims to
+ * strand, but a dashed outline still drawn over the next sheet's grid, naming a
+ * claim nothing on screen is making.
+ *
+ * PARKED, NOT TORN DOWN. Nothing here touches what the SCRIPT declared — the
+ * html content and the hit rectangles both survive — because the script is still
+ * mounted and will never re-declare on its own: the user switching back to the
+ * sheet must get the same interactive shape, not a blank frame. The frame is
+ * hidden rather than removed for the same reason the off-screen branch hides it:
+ * `display: none` costs the frame nothing, where removing the element would
+ * reload its srcdoc and drop whatever state its own scripts had built up. The
+ * next paint of that shape sets `display: block` and rebuilds the shims from the
+ * declaration, so this is exactly reversible.
+ *
+ * PARKED IS NOT FREE, THOUGH. A hidden frame is still a whole document holding
+ * the user's memory, and it still held its share of the live-frame budget — with
+ * nothing anywhere ever giving it back, because the budget's only release ran
+ * from teardown paths a parked shape reaches by definition never. Twenty-four
+ * frames on a sheet nobody is looking at therefore refused every frame on the
+ * sheet the user IS looking at, permanently and silently. So the budget is TOLD
+ * the frame is parked: the charge stands (the memory is real), but it becomes
+ * the first thing spent when the next sheet's shapes need room, and
+ * `evictParkedShapeFrame` below is what the budget calls to make that teardown
+ * real.
+ */
+export function releaseUnpaintedShapeOverlays(paintedIds: ReadonlySet<string>): void {
+  for (const instanceId of shapeHitDomIds()) {
+    if (!paintedIds.has(instanceId)) removeShapeHitDom(instanceId);
+  }
+  for (const [instanceId, el] of htmlOverlayElements) {
+    // `display: none` does not travel to the shims (they are siblings of the
+    // frame, not children), which is why both halves are swept here: a hidden
+    // frame with live shims is the invisible click-eater, and a live frame with
+    // no shims is a stale picture on the wrong sheet.
+    if (paintedIds.has(instanceId)) continue;
+    el.style.display = "none";
+    parkScriptFrameSlot(instanceId, evictParkedShapeFrame);
+  }
+}
+
+/**
+ * Give a parked frame's memory back because another frame needs it.
+ *
+ * Called by the budget, and only for a frame this host parked. The DOM goes —
+ * that is the point: the charge has already been dropped, and an element that
+ * outlives its charge is the same leak wearing the other coat. What the SCRIPT
+ * declared stays: `customHtmlContent` and the hit-region declaration both
+ * survive, so the shape rebuilds itself on its next paint exactly as a first
+ * paint would and claims the budget again then. The content hash goes with the
+ * element, because a hash with no frame would make that next paint believe the
+ * document was already loaded.
+ *
+ * What is lost is the frame's own internal state — its scripts start over. That
+ * is precisely the cost the parking above exists to avoid, and it is now paid
+ * only under real pressure instead of the budget being spent forever.
+ */
+function evictParkedShapeFrame(instanceId: string): void {
+  const el = htmlOverlayElements.get(instanceId);
+  if (el) {
+    el.remove();
+    htmlOverlayElements.delete(instanceId);
+  }
+  overlayContentHash.delete(instanceId);
+  // Belt and braces: a parked shape's shims were already dropped by the sweep
+  // above, but an evictor that leaves DOM behind is exactly the class of defect
+  // this function exists to close.
+  removeShapeHitDom(instanceId);
+}
+
+/**
+ * Tear down EVERY on-grid html frame, and everything keyed alongside one.
+ *
+ * The DOCUMENT-lifecycle release, wired to File > New / File > Open and to the
+ * extension's deactivate. Nothing did this at all: the budget's charges, the
+ * script-supplied html and the content hashes all survived a document swap, so
+ * the second workbook of a session began with the first one's frames still
+ * charged — the budget measured "frames ever created this session" rather than
+ * "frames alive", and the refusal sentence's "this workbook already has N" was
+ * counting somebody else's workbook. A control's id derives from its anchor
+ * cell, so the surviving content was worse than an accounting error: a plain
+ * shape in the new workbook, at an anchor the old one had an html shape at,
+ * painted the OLD workbook's frame.
+ *
+ * Every id is RELEASED rather than the budget being blanket-reset. Forgetting a
+ * charge is only honest when the frame it stood for is really gone, and this is
+ * the function that makes that true.
+ */
+export function releaseAllShapeHtmlOverlays(): void {
+  // The UNION of every map this host keys by control id, walked once, so no
+  // single map's bookkeeping decides what gets released. They very nearly
+  // coincide, but not exactly: a shape the budget refused has html and no
+  // element, one the budget evicted while parked has html and no hash, and a
+  // frame that is on screen has all of them.
+  const instanceIds = new Set<string>([
+    ...htmlOverlayElements.keys(),
+    ...customHtmlContent.keys(),
+    ...overlayContentHash.keys(),
+    ...frameRefusals.keys(),
+  ]);
+  for (const instanceId of instanceIds) {
+    htmlOverlayElements.get(instanceId)?.remove();
+    releaseScriptFrameSlot(instanceId);
+    clearShapeHitRegions(instanceId);
+  }
+  htmlOverlayElements.clear();
+  customHtmlContent.clear();
+  overlayContentHash.clear();
+  frameRefusals.clear();
+  announcedRefusalKinds.clear();
+}
+
+// The subscription is made at MODULE SCOPE, not from the extension's activate,
+// because that is what makes it impossible to forget: a shim or an overlay frame
+// can only exist once this module has been loaded, so the listener is always in
+// place before there is anything to release — and it stays in place across a
+// deactivate/activate cycle, exactly like the maps it sweeps.
+onFloatingControlRegionsPublished(releaseUnpaintedShapeOverlays);
 
 /**
  * Migrate every id-keyed piece of shape state to a control's NEW id.
@@ -152,48 +412,76 @@ export function migrateShapeInstanceId(oldId: string, newId: string): void {
   const frame = htmlOverlayElements.get(oldId);
   if (frame !== undefined) {
     htmlOverlayElements.delete(oldId);
+    // The destination id can already own a frame: ids are anchor-derived, and a
+    // re-anchor lands a pinned control on a cell an unpinned one still anchors
+    // (nothing checks for the collision). Setting over that entry orphaned a
+    // LIVE document in the canvas parent — no map names it, so no teardown,
+    // sheet switch or File > New can ever reach it again, and it keeps painting
+    // over the grid. Removed here, so the element and its budget charge (dropped
+    // by `migrateScriptFrameSlot` below) go together.
+    htmlOverlayElements.get(newId)?.remove();
     htmlOverlayElements.set(newId, frame);
+    // The element's own label follows the re-key as well: it is how a frame
+    // sitting in the canvas parent is traced back to a control, and one still
+    // naming the dead id makes a migrated frame and an orphan look alike.
+    frame.dataset.shapeOverlay = newId;
   }
   const hash = overlayContentHash.get(oldId);
   if (hash !== undefined) {
     overlayContentHash.delete(oldId);
     overlayContentHash.set(newId, hash);
   }
+  // A standing refusal moves with the control too. Left under the old id it
+  // would re-announce itself on the new id's very next paint, and
+  // `getShapeFrameRefusal` would answer for a control that no longer exists.
+  const refusal = frameRefusals.get(oldId);
+  if (refusal !== undefined) {
+    frameRefusals.delete(oldId);
+    frameRefusals.set(newId, refusal);
+  }
+  // The frame budget is keyed by instanceId too. Leaving the charge under the
+  // old id leaks it forever AND leaves the new id uncounted — the budget would
+  // drift in both directions at once on every structural edit.
+  migrateScriptFrameSlot(oldId, newId);
+  migrateShapeHitRegions(oldId, newId);
 }
 
 /**
- * Build the full srcdoc HTML for the iframe, injecting the postMessage bridge.
+ * Build the full document for the overlay iframe.
+ *
+ * The document itself — bridge, protocol spellings, theme contract — is built
+ * by extensions/_shared/scriptFrame, shared byte-for-byte with the pane card
+ * host. Only the on-grid flavour is decided here: no min-height, because an
+ * on-grid shape is exactly the box the user drew.
  */
-function buildIframeSrcDoc(controlId: string, userHtml: string): string {
-  // JSON.stringify yields a safe JS string literal; escaping "<" additionally
-  // prevents "</script>" inside the id from terminating the script block.
-  const idLiteral = JSON.stringify(controlId).replace(/</g, "\\u003c");
-  return `<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8">
-<style>
-  body { margin: 0; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 12px; overflow: hidden; }
-  * { box-sizing: border-box; }
-</style>
-<script>
-  var SHAPE_ID = ${idLiteral};
-  window.calcula = {
-    sendMessage: function(type, data) {
-      parent.postMessage({ source: 'shape-html', instanceId: SHAPE_ID, type: type, data: data }, '*');
-    }
-  };
-  window.addEventListener('message', function(e) {
-    if (e.data && e.data.target === 'shape-html' && e.data.instanceId === SHAPE_ID) {
-      window.dispatchEvent(new CustomEvent('shape-message', { detail: e.data }));
-    }
+function buildOverlayDocument(controlId: string, userHtml: string): string {
+  return buildScriptFrameDocument(controlId, userHtml, {
+    themeTokens: readScriptFrameThemeTokens(),
   });
-</script>
-</head><body>${userHtml}</body></html>`;
+}
+
+/** The frame's laid-out box in canvas pixels. */
+interface HtmlOverlayBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 /**
  * Create or update the positioned iframe overlay element for a shape.
  * Called from the render loop with current viewport info.
+ *
+ * The design-mode chrome for a claimed rectangle is placed from HERE too, by
+ * `syncShapeHitDom`, over the same clipped box the shims are placed on. It used
+ * to be returned to the caller so the renderer could stroke it onto the canvas,
+ * and every one of those strokes landed UNDER this opaque frame — the outline
+ * has to be a sibling element above it (see shapeHitRegions.ts's header), which
+ * means it is placed where the box is known rather than computed a second time.
+ *
+ * Returns whether the frame OWNS the shape's pixels this paint. `false` is the
+ * budget refusing it, and the caller must then paint the ordinary shape: this
+ * function returned void for one release, so a refusal painted nothing at all.
  */
 function updateHtmlOverlay(
   controlId: string,
@@ -207,8 +495,62 @@ function updateHtmlOverlay(
   canvasWidth: number,
   canvasHeight: number,
   canvasParent: HTMLElement,
-): void {
+): boolean {
   let el = htmlOverlayElements.get(controlId);
+
+  // Being painted is the opposite of being parked, and the unpark has to happen
+  // HERE rather than in the claim below: a shape whose content has not changed
+  // never reaches the claim, so a frame that came back from a sheet switch would
+  // stay on the eviction list — visible, interactive, and first in line to be
+  // torn down under the next shape's pressure. Idempotent and cheap, which it
+  // has to be: this runs from the render loop.
+  unparkScriptFrameSlot(controlId);
+
+  // The document is rebuilt only when the content actually changed (or there is
+  // no frame yet) — this runs from the render loop, and re-assigning `srcdoc`
+  // reloads the frame and throws away whatever state its own scripts built.
+  const needsDocument = !el || overlayContentHash.get(controlId) !== html;
+  let overlayDocument: string | null = null;
+  if (needsDocument) {
+    // A refusal that nothing has changed since is answered from the record
+    // rather than by rebuilding a document (up to 5 MB of it) and asking a
+    // question whose answer is already known. Neither branch below is skipped
+    // when the html or the budget HAS moved, so the way out the refusal
+    // sentence names — clear another frame — takes effect on the next paint.
+    const standing = frameRefusals.get(controlId);
+    if (standing && standing.html === html && standing.budgetStamp === currentBudgetStamp()) {
+      return false;
+    }
+    overlayDocument = buildOverlayDocument(controlId, html);
+    // The frame budget, charged BEFORE the element exists. A workbook has no
+    // limit on shapes and a frame is a whole document with its own event loop,
+    // so an app that puts one on every shape it owns spends the user's memory
+    // until Calcula dies — and it looks like Calcula being slow rather than an
+    // app misbehaving. Re-priced (never double-counted) per instanceId. A
+    // refusal tears down the frame — no frame, no shims, no half-built element
+    // to strand — and answers `false`, which is what makes the caller paint the
+    // shape from the catalog instead of leaving a hole in the grid.
+    const slot = claimScriptFrameSlot(controlId, overlayDocument.length);
+    if (!slot.granted) {
+      if (el) {
+        el.remove();
+        htmlOverlayElements.delete(controlId);
+        overlayContentHash.delete(controlId);
+        releaseScriptFrameSlot(controlId);
+      }
+      removeShapeHitDom(controlId);
+      noteFrameRefusal(
+        controlId,
+        slot.refusal ?? "too-many-frames",
+        slot.message ?? "the workbook's live HTML frame budget is full",
+        html,
+      );
+      return false;
+    }
+    // Granted: whatever the last paint refused is history, and the shape's
+    // pixels are the frame's again.
+    clearFrameRefusal(controlId);
+  }
 
   // Create iframe if it doesn't exist
   if (!el) {
@@ -225,9 +567,29 @@ function updateHtmlOverlay(
     el.style.borderRadius = "4px";
     el.style.background = "#ffffff";
     el.style.boxShadow = "0 2px 8px rgba(0,0,0,0.12)";
-    el.style.pointerEvents = "none";  // Always none; interactive only via design mode toggle
+    // The FRAME itself never takes pointer events, in either mode. Turning this
+    // to "auto" would hand the script every pixel of the shape's box — including
+    // the ones that select, move and resize the shape — and CSS cannot make one
+    // element hit-transparent in part of its box while still painting there.
+    // Pointer input is claimed a rectangle at a time instead, by the shim
+    // elements `syncShapeHitDom` puts ABOVE this frame (M3b). Undeclared
+    // pixels stay click-through exactly as they were.
+    //
+    // The `background: #ffffff` above is also why the design-mode outline is an
+    // element and not a canvas stroke: this frame is opaque and paints over the
+    // canvas, so anything drawn on the canvas inside its box is invisible.
+    el.style.pointerEvents = "none";
+    // ...and the KEYBOARD never reaches it either, in either mode. Hit-
+    // transparency is a mouse property: the frame stayed in the tab order, so
+    // Tab walked out of the grid and into the script's own `<input>`, and a
+    // document painted under `ui.html` alone read what was typed there. The
+    // shims are SIBLINGS of this element rather than children, so inertness
+    // does not travel to them and the claimed path keeps working exactly as it
+    // did — the frame is fed synthesized pointer events, which an inert
+    // document still receives.
+    setScriptFrameInert(el, true);
     el.style.zIndex = "5";
-    el.srcdoc = buildIframeSrcDoc(controlId, html);
+    el.srcdoc = overlayDocument as string;
     overlayContentHash.set(controlId, html);
     canvasParent.appendChild(el);
     htmlOverlayElements.set(controlId, el);
@@ -241,7 +603,16 @@ function updateHtmlOverlay(
 
   if (!isVisible) {
     el.style.display = "none";
-    return;
+    // A hidden frame claims nothing, and says nothing about a claim either:
+    // `display: none` does not travel to the shims or the outlines (they are
+    // siblings, not children), so leaving them behind would leave invisible
+    // click-eaters — and, in Design Mode, a dashed rectangle naming a claim that
+    // is nowhere on screen — over whatever scrolled into that space.
+    removeShapeHitDom(controlId);
+    // The frame is alive and still owns these pixels; it is merely scrolled
+    // where none of them are on screen. Painting the catalog shape here would
+    // draw an ordinary rectangle under the header the frame is hiding behind.
+    return true;
   }
 
   el.style.display = "block";
@@ -252,17 +623,41 @@ function updateHtmlOverlay(
   const clippedRight = Math.min(endX, canvasWidth);
   const clippedBottom = Math.min(endY, canvasHeight);
 
-  el.style.left = `${clippedLeft}px`;
-  el.style.top = `${clippedTop}px`;
-  el.style.width = `${clippedRight - clippedLeft}px`;
-  el.style.height = `${clippedBottom - clippedTop}px`;
+  const box: HtmlOverlayBox = {
+    left: clippedLeft,
+    top: clippedTop,
+    width: clippedRight - clippedLeft,
+    height: clippedBottom - clippedTop,
+  };
 
-  // Update content only if changed (avoid iframe reload on every render)
-  const prevHash = overlayContentHash.get(controlId);
-  if (prevHash !== html) {
-    el.srcdoc = buildIframeSrcDoc(controlId, html);
+  el.style.left = `${box.left}px`;
+  el.style.top = `${box.top}px`;
+  el.style.width = `${box.width}px`;
+  el.style.height = `${box.height}px`;
+
+  // Update content only if changed (avoid iframe reload on every render).
+  // `overlayDocument` is non-null exactly when it did change — the budget was
+  // charged for that document above.
+  if (overlayDocument !== null && overlayContentHash.get(controlId) !== html) {
+    el.srcdoc = overlayDocument;
     overlayContentHash.set(controlId, html);
   }
+
+  // Claim whatever the script declared — or, in Design Mode, outline it instead
+  // of claiming it — over the frame's CLIPPED box: the box the frame's own
+  // content lays out in, so a shim sits on the pixels the frame actually paints
+  // even when the shape is half-scrolled under a header.
+  syncShapeHitDom({
+    instanceId: controlId,
+    frame: el,
+    canvasParent,
+    frameLeft: box.left,
+    frameTop: box.top,
+    frameWidth: box.width,
+    frameHeight: box.height,
+  });
+
+  return true;
 }
 
 // ============================================================================
@@ -412,9 +807,21 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
   const endX = canvasX + shapeWidth;
   const endY = canvasY + shapeHeight;
 
-  // Skip if not visible
-  if (endX < rowHeaderWidth || endY < colHeaderHeight) return;
-  if (canvasX > overlayCtx.canvasWidth || canvasY > overlayCtx.canvasHeight) return;
+  // Skip if not visible. These early-outs bypass updateHtmlOverlay entirely, so
+  // a shape scrolled off screen would otherwise keep its hit shims — and, in
+  // Design Mode, its outlines — at the canvas pixels it USED to occupy:
+  // invisible click-eaters, or a dashed rectangle naming a claim nothing on
+  // screen is making, sitting over whatever scrolled into that space. Release
+  // them here, at the two returns that skip the only code that would have
+  // repositioned them.
+  if (endX < rowHeaderWidth || endY < colHeaderHeight) {
+    removeShapeHitDom(region.id);
+    return;
+  }
+  if (canvasX > overlayCtx.canvasWidth || canvasY > overlayCtx.canvasHeight) {
+    removeShapeHitDom(region.id);
+    return;
+  }
 
   // Clip to cell area (not over headers)
   ctx.save();
@@ -482,38 +889,68 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     return;
   }
 
-  // If shape has HTML content, render via DOM overlay (run mode) or canvas preview (design mode)
+  // If shape has HTML content, the pixels are the DOM overlay's — there is no
+  // canvas preview of an html shape in either mode, and nothing the canvas
+  // paints inside the frame's box can be seen through it.
+  //
+  // ...UNLESS there is no frame. `updateHtmlOverlay` answers `false` when the
+  // live-frame budget refused this one, and a canvas parent is a precondition
+  // for a DOM overlay existing at all. In either case the html is not on
+  // screen, so the pixels are the CANVAS's again and this branch must fall
+  // through to the shape catalog below. It returned unconditionally for one
+  // release: a refused shape painted no fill, no stroke, no text — an invisible
+  // hole in the grid that could still be selected, with nothing said anywhere.
   const htmlContent = customHtmlContent.get(controlId);
-  if (htmlContent !== undefined) {
-    const canvasParent = ctx.canvas.parentElement;
+  const canvasParent = htmlContent !== undefined ? ctx.canvas.parentElement : null;
+  // The frame itself is always click-through; only the rectangles the script
+  // DECLARED take pointer input, and `updateHtmlOverlay` places those — along
+  // with the design-mode outlines that show them, which have to be siblings
+  // ABOVE the frame rather than strokes on the canvas under it.
+  const framePaintsTheShape =
+    htmlContent !== undefined &&
+    canvasParent !== null &&
+    updateHtmlOverlay(
+      controlId,
+      htmlContent,
+      canvasX,
+      canvasY,
+      shapeWidth,
+      shapeHeight,
+      rowHeaderWidth,
+      colHeaderHeight,
+      overlayCtx.canvasWidth,
+      overlayCtx.canvasHeight,
+      canvasParent,
+    );
 
-    // Always show the iframe overlay (pointer-events: none allows click-through)
-    if (canvasParent) {
-      updateHtmlOverlay(
-        controlId,
-        htmlContent,
-        canvasX,
-        canvasY,
-        shapeWidth,
-        shapeHeight,
-        rowHeaderWidth,
-        colHeaderHeight,
-        overlayCtx.canvasWidth,
-        overlayCtx.canvasHeight,
-        canvasParent,
-      );
-    }
-
-    // Draw selection indicators on top of the iframe when selected
+  if (framePaintsTheShape) {
+    // Selection border and resize handles. NOT "on top of the iframe", as this
+    // said until the outline defect was traced: these are canvas strokes at the
+    // shape's bounds, which is exactly the box the opaque frame covers, so on
+    // this path they are painted UNDER it and only the sub-pixel slivers outside
+    // its border-radius show. The shape is still selectable (hit-testing is
+    // canvas-side) and still movable; what is missing is the picture of it. The
+    // fix is the same one the hit-region outline just took — a sibling element
+    // above the frame — and it is filed rather than smuggled in here.
     drawSelectionIndicators(ctx, controlId, canvasX, canvasY, shapeWidth, shapeHeight, overlayCtx);
     ctx.restore();
     return;
-  } else {
+  }
+
+  if (htmlContent === undefined) {
+    // A shape with no html has nothing the budget could be refusing, whichever
+    // way it lost the content.
+    clearFrameRefusal(controlId);
     // No HTML content — remove any leftover overlay element
     const existingOverlay = htmlOverlayElements.get(controlId);
     if (existingOverlay) {
       existingOverlay.remove();
       htmlOverlayElements.delete(controlId);
+      overlayContentHash.delete(controlId);
+      releaseScriptFrameSlot(controlId);
+      // ...and the claim that frame carried. A shim over a frame that is no
+      // longer painted is an invisible element eating clicks on bare grid.
+      clearShapeHitRegions(controlId);
     }
   }
 

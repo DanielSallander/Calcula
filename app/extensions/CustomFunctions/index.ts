@@ -15,6 +15,7 @@ import {
   onAppEvent,
   describeCapability,
   grantCustomFunctionConsent,
+  showToast,
   CUSTOM_FUNCTIONS_CONSENT_NEEDED,
   type PendingCustomFunctionPackage,
 } from "@api";
@@ -123,7 +124,23 @@ function activate(context: ExtensionContext): void {
             if (epoch === consentEpoch) showNextConsent();
           })
           .catch((e) => {
-            console.error("[CustomFunctions] failed to record package consent", e);
+            // The user pressed Allow and would otherwise see NOTHING: the
+            // functions stay #NAME? and the only trace is a console line.
+            // `grantCustomFunctionConsent` records the approval BEFORE it
+            // installs, so in the common case this is a failed install, not a
+            // lost consent — but the extension cannot tell the two apart from
+            // here, so the toast says what happens in either case rather than
+            // asserting which one it was. (Same reason the Charts caller got
+            // its toast: `charts:library-consent-granted`.)
+            console.error("[CustomFunctions] failed to grant package consent", e);
+            showToast(
+              `Approved, but the functions from "${packageName}" did not start: ` +
+                `${e instanceof Error ? e.message : String(e)}. Calcula keeps the ` +
+                "approval and tries them again the next time this workbook's " +
+                "functions load; if it asks you again instead, the approval " +
+                "itself could not be saved.",
+              { type: "error", duration: 0 },
+            );
             if (epoch === consentEpoch) showNextConsent();
           });
         return;
@@ -157,7 +174,11 @@ function activate(context: ExtensionContext): void {
       DialogExtensions.closeDialog(CONSENT_DIALOG_ID);
       activeConsent = null;
     }
-    void loadAndInstallCustomFunctions();
+    // THIS install is the workbook opening, and the realm must know it: the
+    // host delivers `workbook.onOpen` only to a mount that says so (its one-shot
+    // replay is gated on `mountCause === "open"`), and the consent prompt tells
+    // the user a publisher's library can register handlers that run then.
+    void loadAndInstallCustomFunctions({ cause: "open" });
   });
   cleanupFns.push(unsub);
 

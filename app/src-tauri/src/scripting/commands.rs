@@ -448,16 +448,44 @@ fn distributed_module_refusal(
 // composed realm, and it is the floor distribution requires: nothing from an
 // application the user never said yes to may create a realm.
 //
-// THE FLOOR IS DELIBERATELY COARSE, and the coarseness is bounded. Every consent
-// record for one application lives under one of a small, closed set of keys —
-// the bare name for object scripts plus the namespaces each surface adds so two
-// writers of one file cannot clobber each other. A mount cannot prove WHICH
-// surface it is (the renderer composes the source and names the package), so the
-// strongest true statement Rust can make is "this workbook holds an approval for
-// an application by this name". Where the mount CAN name its artifact — a stored
-// object script, whose id and pre-prelude source are exactly what the consent
-// record lists — the check tightens to that artifact and its hash, which is the
-// same standard `consent_granted_in` applies everywhere else.
+// ...AND ABOUT THE SURFACE. One consent file has many writers, and each
+// namespaces its records so approving an application's chart marks neither
+// clobbers nor inherits the approval of its object scripts: the bare name for
+// object scripts, `chart-marks:<app>`, `chart-transforms:<app>`,
+// `custom-functions:<app>`, `lib:<app>`, `<app>::writeback-validators`. The
+// first version of this gate expanded the application name into ALL of those
+// and admitted the mount when ANY held a record — so an approval of a REPORT
+// application called `acme.stats` satisfied the floor for a LIBRARY called
+// `acme.stats`, which `app/src/api/scriptLibraries/consentKey.ts` names as the
+// one collision its namespace exists to prevent. The mount now says WHICH
+// surface it is (`surface`, a closed vocabulary — `CONSENT_SURFACES`), and the
+// gate narrows to that surface's key alone.
+//
+// WHAT THAT IS WORTH, HONESTLY. The surface is a claim made by the renderer,
+// and the renderer is assumed hostile: a compromised renderer can name whichever
+// surface holds a record, which puts it exactly where the any-namespace floor
+// already put it — no weaker, and no stronger. Under an HONEST renderer the
+// narrowing is a real separation: a library realm asks about `lib:acme.stats`
+// and nothing else, so the report's approval cannot leak into it. That is the
+// strongest true statement available from here, and it is stated at that
+// strength — not as a defence against a lying renderer.
+//
+// A MOUNT THAT NAMES NO SURFACE, OR ONE THIS LIST DOES NOT KNOW, IS REFUSED. It
+// does not fall back to the old any-namespace floor: falling back is how the
+// hole would be re-opened one omitted field at a time, and every mount route in
+// the renderer names its surface (pinned by
+// `app/src/api/__tests__/mountConsentKeyDrift.test.ts`).
+//
+// AND THE ARTIFACTS. Every route can name what the consent record lists for it
+// — an object script names `{id, pre-prelude source}`; a chart mark/transform
+// library its reserved id plus the canonical consent source its own surface
+// computes; the UDF realm the same; a shared-library realm one entry PER
+// MODULE it merged; a writeback validator `writeback-validator:<name>` plus
+// the body. Those values are produced by the SAME code that recorded them
+// (the owning surface passes what it already holds; nothing is re-derived at
+// this boundary), and every named artifact must be granted under the
+// surface's key at its hash. A mount that names none gets the application
+// floor only — weaker, and said so below.
 //
 // AND THIS RUNS ALONGSIDE THE MODULE GATE, NOT INSTEAD OF IT. A module macro
 // that a `.calp` shipped is still refused by exact-source ownership even when
@@ -465,53 +493,71 @@ fn distributed_module_refusal(
 // application does not list the macro. Replacing the module question with the
 // application question would have let that macro through.
 
-/// Consent-store key namespaces, as PREFIXES (`"<ns>:<application>"`).
-///
-/// One consent file has many writers, and each namespaces its records so
-/// approving an application's chart marks neither clobbers nor inherits the
-/// approval of its object scripts. This list is the Rust side of that vocabulary
-/// and is pinned against every TypeScript key-former by
-/// `app/src/api/__tests__/mountConsentKeyDrift.test.ts` — Rust is the source of
-/// truth, because the renderer is the part that can be compromised.
-///
-/// A namespace that exists in TypeScript and is missing here fails CLOSED: that
-/// surface's consented mounts are refused (visible breakage), never admitted.
-pub(crate) const CONSENT_KEY_PREFIXES: &[&str] = &[
-    // app/extensions/Charts/index.ts
-    "chart-marks:",
-    "chart-transforms:",
-    // app/src/api/customFunctions.ts (customFunctionConsentKey)
-    "custom-functions:",
-    // app/src/api/scriptLibraries/consentKey.ts (consentKeyFor)
-    "lib:",
-];
-
-/// Consent-store key namespaces, as SUFFIXES (`"<application><suffix>"`).
-pub(crate) const CONSENT_KEY_SUFFIXES: &[&str] = &[
-    // app/src/api/writebackValidators.ts (writebackValidatorConsentKey)
-    // and validator_consent_key in app/src-tauri/src/calp_commands.rs.
-    "::writeback-validators",
-];
-
-/// Every consent-store key under which application `application`'s code can have
-/// been approved: the bare name (object scripts) plus one per namespace.
-pub(crate) fn consent_keys_for_application(application: &str) -> Vec<String> {
-    let mut keys = Vec::with_capacity(1 + CONSENT_KEY_PREFIXES.len() + CONSENT_KEY_SUFFIXES.len());
-    keys.push(application.to_string());
-    for prefix in CONSENT_KEY_PREFIXES {
-        keys.push(format!("{}{}", prefix, application));
-    }
-    for suffix in CONSENT_KEY_SUFFIXES {
-        keys.push(format!("{}{}", application, suffix));
-    }
-    keys
+/// One surface distributed code can mount on: the wire name a mount presents
+/// (`surface` on `check_distributed_mount_consent`) and the consent-store key
+/// shape that surface's TypeScript key-former writes, as `prefix + app + suffix`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConsentSurface {
+    /// The discriminant the renderer sends. Mirrors `MountConsentSurface` in
+    /// `app/src/api/scriptHost/mountConsentSurface.ts`.
+    pub wire: &'static str,
+    /// Prepended to the application name (`"chart-marks:"`), or empty.
+    pub prefix: &'static str,
+    /// Appended to the application name (`"::writeback-validators"`), or empty.
+    pub suffix: &'static str,
+    /// The human noun the refusal uses for "that application's <what>".
+    pub what: &'static str,
 }
 
-/// The artifact a mount IS, when the workbook's consent record names one.
+/// The closed set of surfaces and the consent key each one is judged under.
+///
+/// Pinned three ways by `app/src/api/__tests__/mountConsentKeyDrift.test.ts`:
+/// every TypeScript key-former's spelling matches the row here, every wire name
+/// is a member of the TypeScript `MountConsentSurface` union, and every mount
+/// route names a surface whose row exists. Rust is the source of truth because
+/// the renderer is the part that can be compromised. A surface that exists in
+/// TypeScript and is missing here fails CLOSED: that surface's consented mounts
+/// are refused (visible breakage), never admitted under a neighbour's key.
+pub(crate) const CONSENT_SURFACES: &[ConsentSurface] = &[
+    // app/extensions/ScriptableObjects/index.ts — the BARE application name.
+    // Object scripts AND the module macros a .calp ships are both recorded here
+    // (one grant covers both kinds), which is why the one-off runner and the
+    // module debug session present this surface too.
+    ConsentSurface { wire: "object-script", prefix: "", suffix: "", what: "object scripts" },
+    // app/extensions/Charts/index.ts
+    ConsentSurface { wire: "chart-marks", prefix: "chart-marks:", suffix: "", what: "chart marks" },
+    ConsentSurface { wire: "chart-transforms", prefix: "chart-transforms:", suffix: "", what: "chart transforms" },
+    // app/src/api/customFunctions.ts (customFunctionConsentKey)
+    ConsentSurface { wire: "custom-functions", prefix: "custom-functions:", suffix: "", what: "custom functions" },
+    // app/src/api/scriptLibraries/consentKey.ts (consentKeyFor)
+    ConsentSurface { wire: "lib", prefix: "lib:", suffix: "", what: "script library" },
+    // app/src/api/writebackValidators.ts (writebackValidatorConsentKey) and
+    // validator_consent_key in app/src-tauri/src/calp_commands.rs.
+    ConsentSurface { wire: "writeback-validators", prefix: "", suffix: "::writeback-validators", what: "writeback validators" },
+];
+
+/// The surface behind a wire name, or `None` for anything this build does not
+/// know — which the gate treats as a refusal, never as "some surface".
+pub(crate) fn consent_surface(wire: &str) -> Option<&'static ConsentSurface> {
+    CONSENT_SURFACES.iter().find(|s| s.wire == wire)
+}
+
+impl ConsentSurface {
+    /// The consent-store key application `application`'s code on this surface
+    /// is recorded under.
+    pub(crate) fn consent_key(&self, application: &str) -> String {
+        format!("{}{}{}", self.prefix, application, self.suffix)
+    }
+}
+
+/// One artifact a mount IS, as the workbook's consent record lists it.
 ///
 /// `source` is the EXACT source the user approved — never the composed realm
 /// source, which carries a host-generated import prelude and would hash to
-/// something no record has ever seen.
+/// something no record has ever seen. For a surface whose consent identity is
+/// synthetic (a chart library's canonical JSON, a UDF package's pragma-plus-
+/// canonical-functions string) it is that synthetic string, produced by the
+/// surface's own former — the same one that wrote the record.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountConsentArtifact {
@@ -523,24 +569,57 @@ pub struct MountConsentArtifact {
 /// refuse, `None` to allow. Pure over the parsed consent file, so every branch is
 /// unit-testable without a Tauri window or a workbook.
 ///
-/// FAILS CLOSED on every uncertainty. No application name, no consent file, no
-/// record for the application, or a record that does not cover the named artifact
-/// are all refusals — "I could not establish that you approved this publisher's
-/// code" is not approval, and this is the path that spawns a real worker realm
-/// for a stranger's JavaScript.
+/// FAILS CLOSED on every uncertainty. No application name, no surface, a surface
+/// this build does not know, no consent file, no record for the application
+/// UNDER THAT SURFACE'S KEY, an empty artifact list, or a named artifact the
+/// record does not cover are all refusals — "I could not establish that you
+/// approved this publisher's code" is not approval, and this is the path that
+/// spawns a real worker realm for a stranger's JavaScript.
 fn distributed_mount_refusal(
     consent_file: Option<&serde_json::Value>,
     application: &str,
-    artifact: Option<&MountConsentArtifact>,
+    surface: Option<&str>,
+    artifacts: Option<&[MountConsentArtifact]>,
 ) -> Option<String> {
-    let application = application.trim();
-    if application.is_empty() {
+    // JUDGED UNDER THE NAME THE RENDERER RECORDED, VERBATIM. Every writer of the
+    // consent file keys on the raw application name, and both other Rust gates
+    // (`distributed_module_refusal`, `validator_consented`) compare it raw. This
+    // gate used to TRIM before forming the key, so an application whose name
+    // carried edge whitespace was recorded under one key and judged under
+    // another — refused after a genuine approval. Trimming decides only whether
+    // there is a name at all.
+    if application.trim().is_empty() {
         return Some(format!(
             "{}: this code arrived inside a distributed application, but the mount named no \
              application, so there is no approval to check it against. It will not run.",
             DISTRIBUTED_SCRIPT_NOT_CONSENTED
         ));
     }
+    // THE SURFACE, BEFORE THE FILE. A mount that does not say what it is cannot
+    // be judged under any key, and "judge it under every key" is the hole this
+    // parameter closes — so its absence is a refusal even when the workbook
+    // holds approvals, not a fallback to the coarse floor.
+    let surface = match surface.map(str::trim) {
+        None | Some("") => {
+            return Some(format!(
+                "{}: '{}' arrived in a distributed application, but the mount did not say \
+                 which kind of code it is (object script, chart mark, library, ...), so there \
+                 is no approval it can be checked against. It will not run.",
+                DISTRIBUTED_SCRIPT_NOT_CONSENTED, application
+            ));
+        }
+        Some(wire) => match consent_surface(wire) {
+            Some(surface) => surface,
+            None => {
+                return Some(format!(
+                    "{}: '{}' arrived in a distributed application and the mount named a \
+                     kind of code this build does not know ('{}'), so there is no approval \
+                     it can be checked against. It will not run.",
+                    DISTRIBUTED_SCRIPT_NOT_CONSENTED, application, wire
+                ));
+            }
+        },
+    };
     let Some(file) = consent_file else {
         return Some(format!(
             "{}: '{}' arrived in a distributed application and this workbook records no \
@@ -549,33 +628,46 @@ fn distributed_mount_refusal(
             DISTRIBUTED_SCRIPT_NOT_CONSENTED, application
         ));
     };
-    let keys = consent_keys_for_application(application);
-    if !keys
-        .iter()
-        .any(|key| crate::calp_commands::consent_record_exists_in(file, key))
-    {
+    let key = surface.consent_key(application);
+    if !crate::calp_commands::consent_record_exists_in(file, &key) {
         return Some(format!(
             "{}: '{}' arrived in the application '{}' and you have not approved that \
-             application's code, so it will not run. Approve the application first — code that \
-             arrives in an application stays switched off until you do.",
+             application's {}, so it will not run. Approve them first — code that arrives in \
+             an application stays switched off until you do.",
+            DISTRIBUTED_SCRIPT_NOT_CONSENTED, application, application, surface.what
+        ));
+    }
+    // The application's code on this surface is approved. Hold the mount to the
+    // artifacts it names — every one of them, under THIS surface's key.
+    let Some(artifacts) = artifacts else {
+        // The application floor alone. Weaker than the artifact check, and
+        // reached only by a route that cannot name what it is; every route in
+        // the renderer currently can, so in practice this branch is the
+        // hostile-renderer case — where the artifact check would bind nothing
+        // anyway, because the realm source is never hashed here.
+        return None;
+    };
+    if artifacts.is_empty() {
+        return Some(format!(
+            "{}: '{}' arrived in the application '{}' and the mount named an empty list of \
+             approved code to check against, which is not a claim that can be verified. It \
+             will not run.",
             DISTRIBUTED_SCRIPT_NOT_CONSENTED, application, application
         ));
     }
-    // The application is approved. If this mount can name the artifact the record
-    // lists, hold it to that artifact and its hash too.
-    let Some(artifact) = artifact else { return None };
-    let source_hash = calp::integrity::sha256_hex(artifact.source.as_bytes());
-    if keys.iter().any(|key| {
-        crate::calp_commands::consent_granted_in(file, key, &artifact.id, &source_hash)
-    }) {
-        return None;
+    for artifact in artifacts {
+        let source_hash = calp::integrity::sha256_hex(artifact.source.as_bytes());
+        if !crate::calp_commands::consent_granted_in(file, &key, &artifact.id, &source_hash) {
+            return Some(format!(
+                "{}: '{}' from the application '{}' is not covered by the approval this \
+                 workbook records for its {} — its code has changed since it was approved, or \
+                 it was never part of what you approved. Review and re-approve '{}' before it \
+                 runs.",
+                DISTRIBUTED_SCRIPT_NOT_CONSENTED, artifact.id, application, surface.what, application
+            ));
+        }
     }
-    Some(format!(
-        "{}: '{}' from the application '{}' is not covered by the approval this workbook \
-         records for it — its code has changed since it was approved, or it was never part of \
-         what you approved. Review and re-approve '{}' before it runs.",
-        DISTRIBUTED_SCRIPT_NOT_CONSENTED, artifact.id, application, application
-    ))
+    None
 }
 
 /// Ask BOTH consent gates about a MOUNT, without executing anything.
@@ -588,8 +680,14 @@ fn distributed_mount_refusal(
 ///      module-runtime route (`run_script`) applies it, local-source escape
 ///      hatch included. A stored module a `.calp` shipped is still refused
 ///      unless the record names that module and its hash.
-///   2. `distributed_mount_refusal` — the application-level floor above, which
-///      is the half a composed realm source can answer.
+///   2. `distributed_mount_refusal` — the application-and-surface question
+///      above, over the artifacts the mount names.
+///
+/// `surface` is the mount's own statement of which kind of code it is (see
+/// `CONSENT_SURFACES`); `artifacts` is what its consent record lists for it.
+/// Both are renderer claims, and the header above says exactly what they are
+/// worth. Neither may be omitted to get a weaker check: no surface is a
+/// refusal, and an empty artifact list is a refusal.
 ///
 /// It reads state and executes nothing, so it takes no `DocumentEffect` and no
 /// window-label guard: the standalone Object Script Editor is its own webview and
@@ -600,14 +698,20 @@ pub fn check_distributed_mount_consent(
     window: tauri::Window,
     package_name: String,
     source: String,
-    artifact: Option<MountConsentArtifact>,
+    surface: Option<String>,
+    artifacts: Option<Vec<MountConsentArtifact>>,
 ) -> Result<(), String> {
     use tauri::Manager;
 
     require_distributed_module_consent(&script_state, &window, &source)?;
     let consent_file =
         crate::calp_commands::read_script_consent_file(Manager::app_handle(&window));
-    match distributed_mount_refusal(consent_file.as_ref(), &package_name, artifact.as_ref()) {
+    match distributed_mount_refusal(
+        consent_file.as_ref(),
+        &package_name,
+        surface.as_deref(),
+        artifacts.as_deref(),
+    ) {
         Some(msg) => Err(msg),
         None => Ok(()),
     }
@@ -1678,7 +1782,13 @@ pub fn list_scripts(
         .collect();
 
     // Sort by name for consistent ordering
-    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    // (name, id), not name alone: `workbook_scripts` is a HashMap, so two modules
+    // with the same name (two applications each shipping a `Report`) kept
+    // RandomState iteration order under a name-only stable sort — a different
+    // order on two launches of the same workbook, visible in every picker and in
+    // the transparency panel. The button planner refuses that tie outright; the
+    // listing itself should at least be the same list twice.
+    summaries.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
     Ok(summaries)
 }
 
@@ -2053,7 +2163,7 @@ mod tests {
              gate exists",
         );
         // The mount gate refuses it, because nothing from that application is approved.
-        let refusal = distributed_mount_refusal(None, "Acme Finance Pack", None)
+        let refusal = distributed_mount_refusal(None, "Acme Finance Pack", Some("chart-marks"), None)
             .expect("an unapproved application must not mount");
         assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
         assert!(refusal.contains("Acme Finance Pack"), "{}", refusal);
@@ -2062,8 +2172,9 @@ mod tests {
     #[test]
     fn an_application_with_no_record_at_all_is_refused() {
         let file = consent_file_under_key("Other Pack", "s1", "code");
-        let refusal = distributed_mount_refusal(Some(&file), "Acme Finance Pack", None)
-            .expect("one application's approval never covers another's");
+        let refusal =
+            distributed_mount_refusal(Some(&file), "Acme Finance Pack", Some("object-script"), None)
+                .expect("one application's approval never covers another's");
         assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
     }
 
@@ -2075,82 +2186,275 @@ mod tests {
             "version": 1,
             "consents": [{ "packageName": "Acme", "scripts": [], "grantedCapabilities": [] }],
         });
-        assert!(distributed_mount_refusal(Some(&file), "Acme", None).is_some());
+        assert!(distributed_mount_refusal(Some(&file), "Acme", Some("object-script"), None).is_some());
     }
 
     #[test]
     fn an_unnamed_application_is_refused_rather_than_waved_through() {
-        assert!(distributed_mount_refusal(None, "", None).is_some());
-        assert!(distributed_mount_refusal(None, "   ", None).is_some());
+        assert!(distributed_mount_refusal(None, "", Some("object-script"), None).is_some());
+        assert!(distributed_mount_refusal(None, "   ", Some("object-script"), None).is_some());
         let file = consent_file_under_key("Acme", "s1", "code");
-        assert!(distributed_mount_refusal(Some(&file), "", None).is_some());
+        assert!(distributed_mount_refusal(Some(&file), "", Some("object-script"), None).is_some());
+    }
+
+    /// Every writer of the consent file keys on the RAW application name, and
+    /// the module and validator gates compare it raw. This gate trimmed before
+    /// forming its key, so a name with edge whitespace was recorded under
+    /// `" Sales"` and judged under `"Sales"` — refused after a real approval.
+    /// Trimming decides only whether there is a name at all.
+    #[test]
+    fn a_name_with_edge_whitespace_is_judged_under_the_key_the_renderer_recorded() {
+        let file = consent_file_under_key(" Sales", "s1", "code");
+        assert!(
+            distributed_mount_refusal(Some(&file), " Sales", Some("object-script"), None).is_none(),
+            "the approval was recorded under the raw name and must admit the raw name"
+        );
+        // ...and the trimmed spelling is a DIFFERENT application, not this one.
+        assert!(
+            distributed_mount_refusal(Some(&file), "Sales", Some("object-script"), None).is_some()
+        );
+    }
+
+    // ---- THE SURFACE. The floor is judged under ONE key, the mount's own. ----
+
+    #[test]
+    fn a_mount_that_names_no_surface_is_refused_even_for_an_approved_application() {
+        // Every spelling of the application's approval is present, and the mount
+        // still cannot be admitted: without a surface there is no key to judge it
+        // under, and "judge it under all of them" is the hole this closes. This
+        // must NOT fall back to the coarse floor.
+        let file = serde_json::json!({
+            "version": 1,
+            "consents": CONSENT_SURFACES.iter().map(|s| serde_json::json!({
+                "packageName": s.consent_key("Acme"),
+                "scripts": [{ "id": "s1", "sourceHash": calp::integrity::sha256_hex(b"code"), "source": "code" }],
+                "grantedCapabilities": [],
+            })).collect::<Vec<_>>(),
+        });
+        for missing in [None, Some(""), Some("   ")] {
+            let refusal = distributed_mount_refusal(Some(&file), "Acme", missing, None)
+                .expect("a mount that names no surface must be refused, not floored");
+            assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+            assert!(refusal.contains("which kind of code"), "{}", refusal);
+        }
+    }
+
+    #[test]
+    fn a_surface_this_build_does_not_know_is_refused_by_name() {
+        let file = consent_file_under_key("Acme", "s1", "code");
+        let refusal = distributed_mount_refusal(Some(&file), "Acme", Some("forms"), None)
+            .expect("an unknown surface has no key and must be refused");
+        assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+        assert!(refusal.contains("'forms'"), "{}", refusal);
+    }
+
+    #[test]
+    fn an_approval_under_another_surfaces_key_does_not_admit_this_surface() {
+        // THE DEFECT THE SURFACE CLOSES. Approving a REPORT application called
+        // `acme.stats` (object scripts, bare key) must not satisfy the check for
+        // a LIBRARY called `acme.stats` (`lib:acme.stats`) — the requirement
+        // `app/src/api/scriptLibraries/consentKey.ts` states, and which the first
+        // version of this gate did not meet. Every surface, against every other.
+        for approved_on in CONSENT_SURFACES {
+            let file = consent_file_under_key(&approved_on.consent_key("acme.stats"), "s1", "code");
+            for asked_as in CONSENT_SURFACES {
+                let verdict =
+                    distributed_mount_refusal(Some(&file), "acme.stats", Some(asked_as.wire), None);
+                if asked_as.wire == approved_on.wire {
+                    assert!(
+                        verdict.is_none(),
+                        "an approval under '{}' must admit a '{}' mount",
+                        approved_on.consent_key("acme.stats"),
+                        asked_as.wire,
+                    );
+                } else {
+                    let refusal = verdict.unwrap_or_else(|| {
+                        panic!(
+                            "an approval under '{}' must NOT admit a '{}' mount",
+                            approved_on.consent_key("acme.stats"),
+                            asked_as.wire,
+                        )
+                    });
+                    assert!(refusal.starts_with(DISTRIBUTED_SCRIPT_NOT_CONSENTED), "{}", refusal);
+                    assert!(refusal.contains(asked_as.what), "{}", refusal);
+                }
+            }
+        }
     }
 
     // ---- THE POSITIVE CONTROLS. A consented application must keep working. ----
 
     #[test]
-    fn every_surfaces_consent_key_admits_that_applications_mount() {
-        // One application, six spellings of its approval — the bare name (object
-        // scripts) plus one per surface namespace. A mount presents only the
-        // application name, so each spelling on its own must admit it; a
-        // namespace missing from CONSENT_KEY_PREFIXES/SUFFIXES would fail CLOSED
-        // and break that surface for a consented publisher.
-        for key in consent_keys_for_application("Acme Finance Pack") {
+    fn every_surfaces_own_consent_key_admits_that_surfaces_mount() {
+        // One application, six surfaces, each approved under its own key: each
+        // must admit a mount that names that surface. A surface whose row here
+        // drifted from its TypeScript key-former would fail CLOSED and break
+        // that surface for a consented publisher — the drift test in
+        // app/src/api/__tests__/mountConsentKeyDrift.test.ts is what catches
+        // that before a user does.
+        for surface in CONSENT_SURFACES {
+            let key = surface.consent_key("Acme Finance Pack");
             let file = consent_file_under_key(&key, "s1", "code");
             assert!(
-                distributed_mount_refusal(Some(&file), "Acme Finance Pack", None).is_none(),
-                "an approval recorded under '{}' must admit a mount from that application",
+                distributed_mount_refusal(Some(&file), "Acme Finance Pack", Some(surface.wire), None)
+                    .is_none(),
+                "an approval recorded under '{}' must admit a '{}' mount from that application",
                 key,
+                surface.wire,
             );
         }
     }
 
     #[test]
-    fn the_key_list_covers_every_surface_that_writes_the_consent_file() {
-        let keys = consent_keys_for_application("app");
+    fn the_surface_table_covers_every_writer_of_the_consent_file() {
+        let keys: Vec<(String, String)> = CONSENT_SURFACES
+            .iter()
+            .map(|s| (s.wire.to_string(), s.consent_key("app")))
+            .collect();
         for expected in [
-            "app",
-            "chart-marks:app",
-            "chart-transforms:app",
-            "custom-functions:app",
-            "lib:app",
-            "app::writeback-validators",
+            ("object-script", "app"),
+            ("chart-marks", "chart-marks:app"),
+            ("chart-transforms", "chart-transforms:app"),
+            ("custom-functions", "custom-functions:app"),
+            ("lib", "lib:app"),
+            ("writeback-validators", "app::writeback-validators"),
         ] {
-            assert!(keys.contains(&expected.to_string()), "missing key '{}'", expected);
+            assert!(
+                keys.contains(&(expected.0.to_string(), expected.1.to_string())),
+                "missing surface {:?} in {:?}",
+                expected,
+                keys
+            );
         }
         assert_eq!(keys.len(), 6, "{:?}", keys);
+        // Wire names are unique: a duplicate would make `consent_surface` answer
+        // for whichever came first.
+        let mut wires: Vec<&str> = CONSENT_SURFACES.iter().map(|s| s.wire).collect();
+        wires.sort_unstable();
+        wires.dedup();
+        assert_eq!(wires.len(), CONSENT_SURFACES.len());
+        assert!(consent_surface("chart-marks").is_some());
+        assert!(consent_surface("Chart-Marks").is_none(), "wire names are exact");
+        assert!(consent_surface("").is_none());
     }
 
-    // ---- The artifact half: tighter where the mount CAN name its artifact ----
+    // ---- The artifact half: every named artifact, under THIS surface's key ----
 
     #[test]
     fn a_named_artifact_must_be_covered_by_the_approval_it_claims() {
         let approved = "function setup(c) { return 1; }";
         let file = consent_file_under_key("Acme", "obj-1", approved);
-        let artifact = MountConsentArtifact {
+        let artifact = [MountConsentArtifact {
             id: "obj-1".to_string(),
             source: approved.to_string(),
-        };
-        assert!(distributed_mount_refusal(Some(&file), "Acme", Some(&artifact)).is_none());
+        }];
+        assert!(
+            distributed_mount_refusal(Some(&file), "Acme", Some("object-script"), Some(&artifact))
+                .is_none()
+        );
 
         // Same id, edited body: the hash no longer matches, so an upstream
         // refresh cannot inherit yesterday's approval even though the
         // APPLICATION is still approved.
-        let changed = MountConsentArtifact {
+        let changed = [MountConsentArtifact {
             id: "obj-1".to_string(),
             source: "function setup(c) { return 999; }".to_string(),
-        };
-        let refusal = distributed_mount_refusal(Some(&file), "Acme", Some(&changed))
-            .expect("a changed artifact must not inherit the approval");
+        }];
+        let refusal =
+            distributed_mount_refusal(Some(&file), "Acme", Some("object-script"), Some(&changed))
+                .expect("a changed artifact must not inherit the approval");
         assert!(refusal.contains("obj-1"), "{}", refusal);
 
         // An artifact the record never listed — a script the publisher added
         // after the user approved the application — is refused too.
-        let added = MountConsentArtifact {
+        let added = [MountConsentArtifact {
             id: "obj-2".to_string(),
             source: approved.to_string(),
-        };
-        assert!(distributed_mount_refusal(Some(&file), "Acme", Some(&added)).is_some());
+        }];
+        assert!(
+            distributed_mount_refusal(Some(&file), "Acme", Some("object-script"), Some(&added))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn every_named_artifact_must_be_granted_not_just_one() {
+        // A shared-library realm names one artifact PER MODULE it merged. A
+        // record that covers two of three modules is not an approval of the
+        // realm — the third module's body was never shown to the user.
+        let file = serde_json::json!({
+            "version": 1,
+            "consents": [{
+                "packageName": "lib:acme.stats",
+                "scripts": [
+                    { "id": "m1", "sourceHash": calp::integrity::sha256_hex(b"one"), "source": "one" },
+                    { "id": "m2", "sourceHash": calp::integrity::sha256_hex(b"two"), "source": "two" },
+                ],
+                "grantedCapabilities": [],
+            }],
+        });
+        let two = [
+            MountConsentArtifact { id: "m1".into(), source: "one".into() },
+            MountConsentArtifact { id: "m2".into(), source: "two".into() },
+        ];
+        assert!(distributed_mount_refusal(Some(&file), "acme.stats", Some("lib"), Some(&two)).is_none());
+
+        let three = [
+            MountConsentArtifact { id: "m1".into(), source: "one".into() },
+            MountConsentArtifact { id: "m2".into(), source: "two".into() },
+            MountConsentArtifact { id: "m3".into(), source: "three".into() },
+        ];
+        let refusal = distributed_mount_refusal(Some(&file), "acme.stats", Some("lib"), Some(&three))
+            .expect("a realm merging an unapproved module must not mount");
+        assert!(refusal.contains("'m3'"), "{}", refusal);
+    }
+
+    #[test]
+    fn an_artifact_granted_under_another_surfaces_key_does_not_count() {
+        // The UDF library's reserved id is recorded under `custom-functions:<app>`.
+        // The same {id, source} sitting under the bare key (as if it were an object
+        // script) is a different approval, and a `custom-functions` mount may not
+        // borrow it — even though the APPLICATION floor for that surface is met.
+        let source = "// @capability bi.query\n{\"name\":\"FEE\"}";
+        let file = serde_json::json!({
+            "version": 1,
+            "consents": [
+                {
+                    "packageName": "custom-functions:Acme",
+                    "scripts": [{ "id": "other", "sourceHash": calp::integrity::sha256_hex(b"x"), "source": "x" }],
+                    "grantedCapabilities": [],
+                },
+                {
+                    "packageName": "Acme",
+                    "scripts": [{ "id": "__calcula_custom_functions__", "sourceHash": calp::integrity::sha256_hex(source.as_bytes()), "source": source }],
+                    "grantedCapabilities": [],
+                },
+            ],
+        });
+        let artifact = [MountConsentArtifact {
+            id: "__calcula_custom_functions__".into(),
+            source: source.into(),
+        }];
+        assert!(
+            distributed_mount_refusal(Some(&file), "Acme", Some("custom-functions"), Some(&artifact))
+                .is_some(),
+            "an artifact recorded under the object-script key must not satisfy a UDF mount",
+        );
+    }
+
+    #[test]
+    fn an_empty_artifact_list_is_refused_not_floored() {
+        // "I name my artifacts: none" is not the same claim as "I cannot name
+        // them". A route that composes its list and comes up empty has nothing
+        // the record could cover, so it is refused rather than admitted on the
+        // application floor.
+        let file = consent_file_under_key("lib:acme.stats", "m1", "one");
+        let none: [MountConsentArtifact; 0] = [];
+        let refusal = distributed_mount_refusal(Some(&file), "acme.stats", Some("lib"), Some(&none))
+            .expect("an empty artifact list must be refused");
+        assert!(refusal.contains("empty list"), "{}", refusal);
+        // ...while naming none at all is the floor, deliberately weaker.
+        assert!(distributed_mount_refusal(Some(&file), "acme.stats", Some("lib"), None).is_none());
     }
 
     /// A changed literal value produces an update carrying the new literal,

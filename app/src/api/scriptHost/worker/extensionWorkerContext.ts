@@ -180,6 +180,7 @@ export function buildExtensionContext(
       keybindings: Object.freeze([...(contributes.keybindings ?? [])]),
       cellStyles: Object.freeze([...(contributes.cellStyles ?? [])]),
       fileFormats: Object.freeze([...(contributes.fileFormats ?? [])]),
+      forms: Object.freeze([...(contributes.forms ?? [])]),
     }),
 
     /** Set by the extension if it returns a deactivate function from activate. */
@@ -266,19 +267,92 @@ export function buildExtensionContext(
           return () => post({ t: "unregister", regId });
         },
       },
+      /**
+       * HOST-PAINTED FORMS (M4) — the rich sibling of capabilities.dialog.form.
+       *
+       * `register` posts a DESCRIPTION of the form: a tree of plain objects the
+       * trusted host paints in the app skin. No component, no markup, no
+       * closure and no pixels ever cross. The name must appear in the
+       * manifest's `contributes.forms`, so every form this add-in can ever put
+       * on screen is knowable — and shown to the user at install — before a
+       * line of the bundle runs; an undeclared name is refused loudly and the
+       * form simply does not exist.
+       *
+       * WHAT A BOUND FIELD DOES HERE, because it is NOT what an object script's
+       * does: `bind: "B2"` SHOWS the user's cell in the field (and hands the
+       * value to this code) and can never write it. The field is painted
+       * switched off. `writeOn`, `bind: { name }`, `bind: { control }` and a
+       * sheet-qualified reference are refused at registration with the reason
+       * — an add-in runs against every workbook the user opens, including ones
+       * its author has never seen.
+       *
+       * Every hook lands on ONE handler as `{ hook, detail }`, and the whole
+       * vocabulary is: "show", "change", "click", "submit", "closed".
+       *
+       * What the "submit" hook RETURNS is the verdict — `false`, `"cancel"` or
+       * `{ cancel: true, errors, message }` keeps the form open. "closed" is the
+       * ONE teardown hook, however the form ended, and carries
+       * `{ showId, values }` — `values` is null when the user dismissed the
+       * form. That is where the ANSWER arrives; `show()` itself resolves as soon
+       * as the form is on screen and never waits for the person, so a form left
+       * open for an hour costs no pending call.
+       *
+       * (These are the names the host really sends — pinned against the relay
+       * table by `extensionForms.test.ts`, because a JSDoc naming hooks nobody
+       * delivers is a promise an author's code silently fails to keep.)
+       */
+      forms: {
+        register(name: string, spec: unknown, onEvent?: Handler): () => void {
+          const handlerId = registerHandler(onEvent ?? (() => undefined));
+          const regId = nextRegId++;
+          post({
+            t: "register",
+            reg: {
+              kind: "form",
+              regId,
+              name: String(name),
+              spec: spec as never,
+              handlerId,
+            },
+          });
+          return () => {
+            handlers.delete(handlerId);
+            post({ t: "unregister", regId });
+          };
+        },
+        /** Open a registered form. Resolves once it is ON SCREEN; the user's
+         *  answers arrive at the registration's handler as `{ hook: "closed" }`. */
+        show(name: string, options?: { initial?: Record<string, unknown> }): Promise<unknown> {
+          return brokerCall("ext.formShow", [name, options]);
+        },
+        /** Change what the open form shows (values, enabled/hidden, choices, a message). */
+        update(patch: unknown): Promise<unknown> {
+          return brokerCall("ext.formUpdate", [patch]);
+        },
+        /** Close the open form from code; `result` becomes the answer it reports. */
+        close(result?: Record<string, unknown> | null): Promise<unknown> {
+          return brokerCall("ext.formClose", [result ?? null]);
+        },
+      },
       get taskPanes(): never {
+        // A PANE is not a form: it stays beside the grid for hours, which is
+        // the `ui.pane` agreement and not one an add-in has been given. The
+        // "instead" text used to point at capabilities.dialog.form and became
+        // stale the day ui.forms shipped — a wrong signpost costs an author the
+        // same hour a missing one does.
         return unsupported(
           "ui.taskPanes",
-          "Use ui.ribbon.registerButton + capabilities.dialog.form for an input surface.",
+          "Use ui.forms.register + ui.forms.show for an input surface the host paints; a docked task pane is not available to add-ins.",
         );
       },
       get dialogs(): never {
         // ui.dialogs registers a React COMPONENT, which cannot cross a worker
         // boundary. Asking the user something can: capabilities.dialog.* renders
-        // a declarative modal in trusted host code and resolves with the answer.
+        // a declarative modal in trusted host code and resolves with the answer,
+        // and ui.forms paints a full widget tree the same way.
         return unsupported(
           "ui.dialogs",
-          "To ask the user something use capabilities.dialog.confirm / prompt / form — the host paints the modal from your data.",
+          "To ask the user something use capabilities.dialog.confirm / prompt / form, or ui.forms for a full form — the host paints it from your data.",
         );
       },
       get overlays(): never {
@@ -287,7 +361,7 @@ export function buildExtensionContext(
       get panels(): never {
         return unsupported(
           "ui.panels",
-          "Use ui.ribbon.registerButton; a host-rendered panel surface is a later slice.",
+          "Use ui.ribbon.registerButton, or ui.forms for an input surface; a host-rendered panel is a later slice.",
         );
       },
       get activityBar(): never {

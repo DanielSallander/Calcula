@@ -26,6 +26,7 @@ import {
   DialogExtensions,
   IconChartMarks,
   IconChartTransforms,
+  isKeyClaimed,
 } from "@api";
 import { registerSandboxMark } from "./rendering/sandboxMarkShim";
 import { ChartMarksDialog } from "./components/ChartMarksDialog";
@@ -46,6 +47,7 @@ import {
 } from "@api/gridOverlays";
 import { emitAppEvent } from "@api/events";
 import { showToast } from "@api/notifications";
+import { originPackageName, scriptOriginForStoredRecord } from "@api/scriptHost/scriptOrigin";
 import { showOverlay, hideOverlay } from "@api/ui";
 
 import {
@@ -1388,7 +1390,11 @@ function activate(context: ExtensionContext): void {
       if (gateEpoch !== epoch) return; // superseded by a workbook switch
       if (!res || res.lib.marks.length === 0) { uninstallChartMarks(); return; }
       const { lib, sourcePackage } = res;
-      if (!sourcePackage) {
+      // THE SHARED RULE, not truthiness: an exactly-empty stamp is a distributed
+      // record with no usable name, and `!""` read it as the user's own library
+      // and installed it with no consent gate at all.
+      const origin = scriptOriginForStoredRecord({ sourcePackage });
+      if (origin.kind === "local") {
         await installChartMarkLibrary(lib, registerSandboxMark);
         refreshAfterLibraryChange();
         return;
@@ -1400,7 +1406,9 @@ function activate(context: ExtensionContext): void {
       const d: LibraryGateDescriptor = {
         scriptId: CHART_MARKS_SCRIPT_ID,
         consentKey: `chart-marks:${sourcePackage}`,
-        displayPackage: sourcePackage,
+        // Never null here: the local case returned above. The placeholder for a
+        // blank stamp, verbatim otherwise — the same name the mount gate is asked.
+        displayPackage: originPackageName(origin) ?? "",
         artifactLabel: "chart mark",
         itemNames: lib.marks.map((m) => m.label || m.markId),
         capabilities: [],
@@ -1424,7 +1432,9 @@ function activate(context: ExtensionContext): void {
       if (gateEpoch !== epoch) return;
       if (!res || res.lib.transforms.length === 0) { uninstallChartTransforms(); return; }
       const { lib, sourcePackage } = res;
-      if (!sourcePackage) {
+      // Same rule as the mark loader above: decide by ORIGIN, not truthiness.
+      const origin = scriptOriginForStoredRecord({ sourcePackage });
+      if (origin.kind === "local") {
         await installChartTransformLibrary(lib);
         refreshAfterLibraryChange();
         return;
@@ -1434,7 +1444,9 @@ function activate(context: ExtensionContext): void {
       const d: LibraryGateDescriptor = {
         scriptId: CHART_TRANSFORMS_SCRIPT_ID,
         consentKey: `chart-transforms:${sourcePackage}`,
-        displayPackage: sourcePackage,
+        // Never null here: the local case returned above. The placeholder for a
+        // blank stamp, verbatim otherwise — the same name the mount gate is asked.
+        displayPackage: originPackageName(origin) ?? "",
         artifactLabel: "chart transform",
         itemNames: lib.transforms.map((t) => t.label || t.type),
         capabilities: lib.capabilities ?? [],
@@ -1719,6 +1731,12 @@ function activate(context: ExtensionContext): void {
 
   const handleDeleteKey = (e: KeyboardEvent) => {
     if (e.key !== "Delete" && e.key !== "Backspace") return;
+    // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+    // field, a shape's declared hit rectangle -- is not this extension's.
+    // The tag list below cannot see a <select> or a <button>; the claim can.
+    // See core/lib/pointerClaims.ts, and the census in
+    // core/lib/globalInputListeners.ts (a new global listener adds a row).
+    if (isKeyClaimed(e)) return;
 
     // Don't intercept when editing a cell or input field
     const target = e.target as HTMLElement;

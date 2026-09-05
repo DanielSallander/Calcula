@@ -23,6 +23,9 @@ export { styles } from './EditorStyles';
 
 // Drag and Drop
 export { useDraggable, useDropZone, useDragState } from './useDragDrop';
+// ...and the same gesture carrying anything, on a caller-named channel.
+export { useDragPayload, useDropTarget, useDragPayloadState } from './useDragDrop';
+export type { GenericDragPayload } from './useDragDrop';
 
 // Components
 export { FieldItem } from './FieldItem';

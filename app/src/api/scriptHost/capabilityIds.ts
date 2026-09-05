@@ -43,7 +43,64 @@
  *                   HIGHER-TRUST superset of bi.query (can read any table the
  *                   connection's credentials reach); Rust re-validates read-only
  *  - storage      : per-script 256 KB workbook-local key/value store
- *  - ui.html      : render sandboxed HTML inside the object's shape
+ *  - ui.html      : render sandboxed HTML inside the object's shape. PAINT
+ *                   ONLY — see ui.htmlInput for the other half.
+ *  - ui.htmlInput : take the user's input INSIDE that HTML — claim the frame
+ *                   (`render.setHitRegions`) so the input lands in the script's
+ *                   page instead of in Calcula: rectangle by rectangle on the
+ *                   grid, whole card at a time in the Controls pane.
+ *
+ *                   WHY THIS IS NOT PART OF `ui.html`, which is where it lived
+ *                   until M6b. Consent text is a promise, and `ui.html`'s
+ *                   promise is "render sandboxed HTML inside the object's
+ *                   shape" — four user-facing sentences, in the consent dialog,
+ *                   the package inspector, the subscribe dialog and the
+ *                   security settings page, and not one of them says the frame
+ *                   can also TAKE something. A rectangle claimed with
+ *                   `render.setHitRegions` is pointer input removed from the
+ *                   grid: inside it the user's click no longer selects a cell,
+ *                   it reaches a distributed author's page. That is a
+ *                   different question with a different answer — a KPI tile
+ *                   that only paints should not have to be granted the ability
+ *                   to intercept clicks — and it is exactly the split that made
+ *                   `ui.pane` a second id rather than a widening of
+ *                   `ui.dialog`.
+ *
+ *                   BOUNDED BY SHAPE, not by promise. A claim can only ever
+ *                   cover pixels the frame already occupies (the rectangles are
+ *                   in the frame's OWN coordinates and the shims are placed
+ *                   over its clipped box), it is capped in count and validated
+ *                   per rectangle (`vHitRegions`), Design Mode suspends every
+ *                   claim at once, and `[]` releases the frame completely. On
+ *                   the grid it is pointer input only — the host forwards the
+ *                   events into the rectangles itself and the frame is INERT
+ *                   (hit-transparency alone leaves it in the TAB order), so
+ *                   nothing focuses and there is no key stream at all.
+ *
+ *                   THE OTHER HOST, and the reason that paragraph is scoped to
+ *                   the grid. A Controls-pane card renders the same script's
+ *                   same document in an ordinary iframe, where a rectangle
+ *                   means nothing (the pane lays the card out) and an
+ *                   interactive frame can be focused and TYPED into. It honours
+ *                   the same gate — hit-transparent AND inert until it claims,
+ *                   claimed WHOLE when it does — so `ui.html` still buys paint
+ *                   alone on both, and the consent sentence names typing as
+ *                   well as clicking because one of the two hosts really does
+ *                   hand over the keystrokes. The pane card was interactive on
+ *                   the paint grant until that gate was added, which is the
+ *                   defect `htmlInputConsentHonesty.test.ts` now watches for on
+ *                   EVERY host of such a document.
+ *
+ *                   Purely frontend / host-mediated (same shape as ui.dialog,
+ *                   ui.pane, file.picker, ui.shortcut and grid.read): the gate
+ *                   is the broker deciding whether to put shim elements in the
+ *                   host window, so there is NO Rust CapabilityStore entry, it
+ *                   is NOT in RUST_MIRRORED_CAPABILITIES, and it is asserted
+ *                   non-grantable in capability_store.rs. It still belongs in
+ *                   the vocabulary (and in the Rust KNOWN_CAPABILITY_IDS)
+ *                   because it must be declarable in a signed sidecar
+ *                   manifest, consent-visible, and revocable like every other
+ *                   id.
  *  - formula.udf  : evaluate a registered user-defined function from a worksheet
  *                   formula (purely frontend/in-worker — NO Rust enforcement; the
  *                   JS impl runs in the owning script's realm through the broker)
@@ -132,11 +189,22 @@
  *                   the user loses, not for a mechanism, because the mechanism
  *                   is the part that hid it: nothing here is a call the code
  *                   makes. The host PUSHES workbook data into third-party code
- *                   that never asked for a cell by address — a cell-style
- *                   contributor is handed the displayed value of every visible
- *                   cell so it can decide how to paint it, and a subscriber to
- *                   the cell-change events is handed each changed cell's old
- *                   value, new value and formula.
+ *                   that never asked for a cell by address. THREE paths, and
+ *                   every user-facing sentence about this id ENUMERATES them —
+ *                   so a fourth path added without a clause makes all of them
+ *                   stale by omission, which is the shape of the defect
+ *                   `extensionContributions.test.ts` now counts rather than
+ *                   keyword-matches:
+ *                     1. a cell-style contributor is handed the displayed value
+ *                        of every visible cell so it can decide how to paint it;
+ *                     2. a subscriber to the cell-change events is handed each
+ *                        changed cell's old value, new value and formula;
+ *                     3. a field of an add-in's FORM that names a cell (M4) is
+ *                        shown that cell's contents, and the value reaches the
+ *                        add-in's own code with the user's answers. It is still
+ *                        SHOWN, not changed: an add-in's form has no write path
+ *                        to a cell at all (extensionFormBindings.ts), which is
+ *                        what keeps the last clause of the sentence true.
  *
  *                   SCOPE — read this before applying it anywhere new. This
  *                   capability gates the surfaces where workbook DATA reaches
@@ -230,6 +298,21 @@ export const ALL_CAPABILITY_IDS = [
   "grid.read",
   "distribution.publish",
   "distribution.subscribe",
+  // A MODELESS script surface (task pane). Deliberately NOT `ui.dialog`: that
+  // id's four user-facing sentences promise "a dialog you must answer or close
+  // before continuing", and a pane that stays open beside the grid for hours
+  // makes every one of them false. Frontend-only — the host paints the widget
+  // tree; there is no Rust gate — so it is absent from RUST_MIRRORED_CAPABILITIES
+  // and asserted non-grantable in capability_store.rs. LAST, because the Rust
+  // mirror pins order.
+  "ui.pane",
+  // The INPUT half of `ui.html` (M6b): claiming rectangles of a script's own
+  // HTML frame so clicks there reach the script instead of the grid. Split out
+  // because ui.html's four user-facing sentences promise painting and nothing
+  // else. Frontend-only — the shims are host DOM; there is no Rust gate — so it
+  // is absent from RUST_MIRRORED_CAPABILITIES and asserted non-grantable in
+  // capability_store.rs. LAST, because the Rust mirror pins order.
+  "ui.htmlInput",
 ] as const;
 
 export type CapabilityId = (typeof ALL_CAPABILITY_IDS)[number];

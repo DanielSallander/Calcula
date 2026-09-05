@@ -19,6 +19,7 @@ import {
   showOverlay,
   registerFloatingRangeProvider,
   type CellValuesChangedPayload,
+  isKeyClaimed,
 } from "@api";
 import { getActiveSheet } from "@api/lib";
 import {
@@ -859,6 +860,12 @@ function setupFloatingObjectEvents(): void {
 // ============================================================================
 
 function handleFrKeyDown(e: KeyboardEvent): void {
+  // A keystroke aimed at a surface stacked ON the grid -- an on-grid form's
+  // field, a shape's declared hit rectangle -- is not this extension's.
+  // The tag list below cannot see a <select> or a <button>; the claim can.
+  // See core/lib/pointerClaims.ts, and the census in
+  // core/lib/globalInputListeners.ts (a new global listener adds a row).
+  if (isKeyClaimed(e)) return;
   const target = e.target as HTMLElement | null;
   if (
     target &&

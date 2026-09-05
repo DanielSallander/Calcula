@@ -40,7 +40,16 @@ const runWorkbookScript = vi.fn(async (_source: string, _file: string) => ({
   screenUpdating: true,
 }));
 
-vi.mock("@api", () => ({
+vi.mock("@api", async () => {
+  // The REAL origin rule: a provenance decision in a test must agree with the one
+  // definition every gate reads, or the test pins a rule the product does not have.
+  const origin = await vi.importActual<typeof import("@api/scriptHost/scriptOrigin")>(
+    "@api/scriptHost/scriptOrigin",
+  );
+  return {
+    scriptOriginForStoredRecord: origin.scriptOriginForStoredRecord,
+    originTagTitle: origin.originTagTitle,
+
   listWorkbookScripts: async () =>
     [...store.values()].map((s) => ({ id: s.id, name: s.name })),
   getWorkbookScript: async (id: string) => {
@@ -70,7 +79,8 @@ vi.mock("@api", () => ({
   },
   runWorkbookScript: (source: string, file: string) => runWorkbookScript(source, file),
   runObjectScriptOnce: (o: unknown) => runObjectScriptOnce(o),
-}));
+  };
+});
 
 vi.mock("@api/ui", () => ({ showDialog: () => undefined }));
 vi.mock("@api/lib", () => ({ getActiveSheet: async () => 0 }));

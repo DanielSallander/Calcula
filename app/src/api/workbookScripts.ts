@@ -11,6 +11,7 @@ import { invokeBackend, emitTauriEvent, listenTauriEvent } from "./backend";
 import type { UnlistenFn } from "./backend";
 import { getGridStateSnapshot } from "../core/state/GridContext";
 import { confirmAsync } from "./dialogs";
+import { scriptOriginForStoredRecord } from "./scriptHost/scriptOrigin";
 
 /** Scope of a script: workbook-level or attached to a specific sheet. */
 export type ScriptScope =
@@ -382,7 +383,17 @@ export interface ScriptRunError {
 
 export type ScriptRunResult = ScriptRunSuccess | ScriptRunError;
 
-/** List all saved workbook script modules (id + name only). */
+/**
+ * List all saved workbook script modules: id, name, scope and PROVENANCE, in
+ * one IPC round trip. No source travels — a caller that needs the body of a
+ * module fetches that record through `getWorkbookScript`.
+ *
+ * This is the door for a surface that only needs to know WHOSE code each
+ * module is (the CLI's `ls macros`, the button-action picker): the row carries
+ * `sourcePackage` verbatim from the record (`script_summary`,
+ * app/src-tauri/src/scripting/commands.rs), so provenance derived from it
+ * (`scriptOriginForStoredRecord`) is the same answer the full record gives.
+ */
 export async function listWorkbookScripts(): Promise<ScriptSummary[]> {
   return invokeBackend<ScriptSummary[]>("list_scripts");
 }
@@ -470,12 +481,52 @@ export interface WorkbookScriptRecord {
 /**
  * Every module script in the workbook, with its full record resolved.
  *
- * `list_scripts` returns id+name only, so this fans out to `get_script`. A
- * per-record failure is reported on that record rather than failing the whole
- * listing: one unreadable module must not make the other nine invisible.
+ * `list_scripts` carries no source, so this fans out to one `get_script` per
+ * module. A per-record failure is reported on that record rather than failing
+ * the whole listing: one unreadable module must not make the other nine
+ * invisible.
+ *
+ * THIS COSTS N ROUND TRIPS, AND MOST CALLERS DO NOT NEED THEM. A caller that
+ * needs only provenance reads it off `listWorkbookScripts()` — the summary row
+ * already carries `sourcePackage`. A caller that needs source for the
+ * DISTRIBUTED modules alone (the consent recorder hashes their bodies) uses
+ * `listDistributedWorkbookScriptRecords`, which pays one fetch per distributed
+ * record and none for the user's own. This full inventory is for the surfaces
+ * that really show every body: the macro library, the editor, the code
+ * inventory.
  */
 export async function listWorkbookScriptRecords(): Promise<WorkbookScriptRecord[]> {
+  return resolveWorkbookScriptRecords(await listWorkbookScripts());
+}
+
+/**
+ * The module scripts that ARRIVED IN A DISTRIBUTED APPLICATION, with their full
+ * records resolved — and nothing fetched for the user's own.
+ *
+ * Which rows are distributed is decided by `scriptOriginForStoredRecord` over
+ * the summary's `sourcePackage`, i.e. by the one derivation every gate uses;
+ * this function does not re-derive it. A distributed record that fails to read
+ * is still listed, with `loadError` set and the summary's provenance kept — the
+ * consent recorder must see that such a module exists (and refuse to hash it),
+ * not be told the application ships one macro fewer.
+ *
+ * WHY THIS EXISTS. The object-script consent load path runs on every workbook
+ * open and every `.calp` update, and it listed the whole store through
+ * `listWorkbookScriptRecords` — one `get_script` for every module, including
+ * the user's own recorded macros, whose source it then discarded. N local + M
+ * distributed modules cost N+M round trips to answer a question about M.
+ */
+export async function listDistributedWorkbookScriptRecords(): Promise<WorkbookScriptRecord[]> {
   const summaries = await listWorkbookScripts();
+  return resolveWorkbookScriptRecords(
+    summaries.filter((summary) => scriptOriginForStoredRecord(summary).kind === "package"),
+  );
+}
+
+/** Fan `summaries` out to `get_script`, one record per row, failures carried. */
+async function resolveWorkbookScriptRecords(
+  summaries: ScriptSummary[],
+): Promise<WorkbookScriptRecord[]> {
   const records: WorkbookScriptRecord[] = [];
   for (const summary of summaries) {
     try {

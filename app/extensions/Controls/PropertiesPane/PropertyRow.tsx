@@ -9,6 +9,12 @@ import { FormulaPropertyInput } from "./FormulaPropertyInput";
 import { CodePropertyInput } from "./CodePropertyInput";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { SliderInput } from "./SliderInput";
+import {
+  describeDistributedScriptChoice,
+  scriptEntryApplication,
+  scriptPickerLabel,
+  type ScriptPickerEntry,
+} from "../../_shared/lib/scriptModuleProvenance";
 
 // ============================================================================
 // Styles (theme-aware via CSS variables)
@@ -88,6 +94,16 @@ const scriptSelectStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+const provenanceNoteStyle: React.CSSProperties = {
+  ...hintStyle,
+  color: "#5a4a00",
+  background: "#fff8dc",
+  border: "1px solid #e6d78a",
+  borderRadius: 3,
+  padding: "4px 6px",
+  marginTop: 3,
+};
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -131,7 +147,8 @@ function fromDisplayValue(
 interface PropertyRowProps {
   definition: PropertyDefinition;
   value: ControlPropertyValue | undefined;
-  scripts: Array<{ id: string; name: string }>;
+  /** Every module the workbook lists, WITH its `sourcePackage` stamp. */
+  scripts: ScriptPickerEntry[];
   onChange: (key: string, valueType: "static" | "formula", value: string) => void;
 }
 
@@ -364,25 +381,41 @@ export const PropertyRow: React.FC<PropertyRowProps> = ({
           />
         );
 
-      case "script":
+      case "script": {
+        // The chosen module's provenance, from the LISTED row's stamp: a
+        // publisher's module is named as such before the control is bound to it.
+        const chosen = scripts.find((s) => s.id === localValue) ?? null;
+        const provenanceNote = chosen ? describeDistributedScriptChoice(chosen) : null;
         return (
-          <select
-            style={scriptSelectStyle}
-            value={localValue}
-            onChange={(e) => {
-              const newVal = e.target.value;
-              setLocalValue(newVal);
-              onChange(definition.key, "static", newVal);
-            }}
-          >
-            <option value="">(None)</option>
-            {scripts.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+          <>
+            <select
+              style={scriptSelectStyle}
+              value={localValue}
+              data-control-script-select={definition.key}
+              onChange={(e) => {
+                const newVal = e.target.value;
+                setLocalValue(newVal);
+                onChange(definition.key, "static", newVal);
+              }}
+            >
+              <option value="">(None)</option>
+              {scripts.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {scriptPickerLabel(s)}
+                </option>
+              ))}
+            </select>
+            {provenanceNote && chosen ? (
+              <span
+                style={provenanceNoteStyle}
+                data-control-script-provenance={scriptEntryApplication(chosen) ?? ""}
+              >
+                {provenanceNote}
+              </span>
+            ) : null}
+          </>
         );
+      }
 
       default:
         return (

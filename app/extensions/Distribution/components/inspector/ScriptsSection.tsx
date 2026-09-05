@@ -55,9 +55,12 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   storage:
     "store its own private data inside this workbook file (up to 256 KB; it travels with the file if you share it)",
   "ui.html": "render custom HTML UI",
+  "ui.htmlInput":
+    "receive what you click and type inside the HTML it draws — where it claims your input, it reaches the script instead of Calcula: on the grid a click stops selecting a cell, and on a Controls-pane card the whole card is taken at once",
   "formula.udf": "define formula functions",
   "bi.connector": "feed external data into the BI model",
   "ui.dialog": "interrupt you with a dialog and read your answer",
+  "ui.pane": "keep a task pane open beside the grid while you work, and read what you enter in it",
   // Both halves of the .calp collection loop. The publisher half (read
   // everyone's answers, approve/reject them) additionally needs the application's
   // signing key, but the phrase must not understate what the grant covers.
@@ -85,7 +88,7 @@ const CAPABILITY_PHRASE: Record<CapabilityId, string> = {
   // lands in. It names the push ("is shown"), because nothing in the code reads
   // as a cell read: the host volunteers the values.
   "grid.read":
-    "be shown the contents of your cells — the displayed value of every cell on screen when it styles them, and the old value, new value and formula of every cell that changes",
+    "be shown the contents of your cells — the displayed value of every cell on screen when it styles them, the old value, new value and formula of every cell that changes, and what is in any cell a field of its form points at",
   "distribution.publish":
     "publish workbooks to your workspaces, signed with YOUR publisher key — only to workspaces you added, and only if you already have a publisher identity",
   "distribution.subscribe":
