@@ -49,6 +49,56 @@ pub struct RefreshPreview {
     /// list is the whole truth. False gates Apply: the user cannot be asked to
     /// resolve a list that silently omits rows.
     pub conflicts_exact: bool,
+    /// Subscriptions that follow the development line while their application
+    /// now defines environments.
+    ///
+    /// NEVER re-targeted silently. The subscriber chose the line — or was on it
+    /// before environments existed — and moving them to `prod` would change
+    /// which content their workbook accepts without them asking. So it is a
+    /// notice with a one-click switch, and it is computed for every line
+    /// subscription whether or not it has an update: a subscription with no
+    /// update produces no preview row to carry it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_notices: Vec<EnvironmentNotice>,
+    /// Subscriptions that could not be resolved at all — an environment that no
+    /// longer exists, or one nothing has been promoted into.
+    ///
+    /// A ROW, not an error for the whole preview. `compute_preview` used to
+    /// propagate any resolution failure with `?`, which for a removed
+    /// environment would mean one admin's tidy-up blanked every OTHER
+    /// subscription's preview in every subscriber's workbook. The apply refuses
+    /// while this is non-empty, so nothing is silently skipped either.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<UnavailableSubscription>,
+}
+
+/// A line-following subscription whose application has since defined
+/// environments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentNotice {
+    pub package_name: String,
+    pub registry_url: String,
+    /// The environments now on offer, in pipeline order. The last is the one
+    /// the UI should suggest — it is production by convention.
+    pub environments: Vec<String>,
+}
+
+/// A subscription this refresh cannot resolve, and why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnavailableSubscription {
+    pub package_name: String,
+    pub registry_url: String,
+    /// The environment it follows, when that is what went missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// The refusal, in the words the user should read.
+    pub reason: String,
+    /// What it could follow instead, in pipeline order. Empty when the
+    /// application has no environments at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available: Vec<String>,
 }
 
 /// Preview for a single subscription's refresh.
@@ -63,8 +113,21 @@ pub struct SubscriptionPreview {
     /// receives puts both rows in one list. Without this the apply's
     /// previewed-version gate could match a row to the wrong subscription.
     pub registry_url: String,
+    /// The environment this subscription follows, or `None` for the line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     pub current_version: String,
     pub new_version: String,
+    /// True when `new_version` is LOWER than `current_version`: the environment
+    /// was rolled back.
+    ///
+    /// The dialog must say "rolled back", not "update available". A subscriber
+    /// who reads a downgrade as an update concludes the publisher changed those
+    /// cells; what actually happened is that a known-good version was restored,
+    /// and the conflict list they are about to resolve is against the OLDER
+    /// content.
+    #[serde(default)]
+    pub is_rollback: bool,
     /// Sheets that would be added (new in upstream).
     pub sheets_added: Vec<SheetChangeInfo>,
     /// Sheets that would be removed (deleted in upstream).
@@ -256,10 +319,53 @@ pub fn compute_preview(
     // layer-wide sweep after the loop cannot count one of them twice.
     let mut examined_anywhere: std::collections::HashSet<(SheetId, CellId)> =
         std::collections::HashSet::new();
+    let mut environment_notices: Vec<EnvironmentNotice> = Vec::new();
+    let mut unavailable: Vec<UnavailableSubscription> = Vec::new();
 
     for sub in subscriptions {
-        let pin = VersionPin::parse(&sub.version_pin)?;
-        let resolved = registry.resolve_version(&sub.package_name, &pin)?;
+        let target = sub.target()?;
+
+        // A LINE SUBSCRIPTION ON AN APPLICATION THAT HAS SINCE GROWN A PIPELINE.
+        // Computed here, before the update check, because a subscription with
+        // no update produces no preview row and would otherwise carry no notice
+        // — and "you are following unreleased work" is exactly the thing a
+        // subscriber with nothing to apply still needs told. Best-effort: a
+        // workspace that will not answer must not block a refresh.
+        if matches!(target, crate::manifest::SubscriptionTarget::Line(_)) {
+            if let Ok(envs) = crate::environments::environments(registry, &sub.package_name) {
+                if !envs.is_empty() {
+                    environment_notices.push(EnvironmentNotice {
+                        package_name: sub.package_name.clone(),
+                        registry_url: sub.registry_url.clone(),
+                        environments: envs.iter().map(|e| e.name.clone()).collect(),
+                    });
+                }
+            }
+        }
+
+        let resolved =
+            match crate::environments::resolve_target(registry, &sub.package_name, &target) {
+                Ok(v) => v,
+                // ONE ROW, NOT THE WHOLE PREVIEW. A removed or empty
+                // environment is a fact about ONE subscription; propagating it
+                // would blank every other subscription's preview in the
+                // workbook and leave the user unable to refresh anything.
+                Err(e @ (CalpError::EnvironmentNotFound { .. }
+                    | CalpError::EnvironmentEmpty { .. }
+                    | CalpError::PromotionLogInvalid { .. })) => {
+                    unavailable.push(UnavailableSubscription {
+                        package_name: sub.package_name.clone(),
+                        registry_url: sub.registry_url.clone(),
+                        environment: sub.environment.clone(),
+                        reason: e.to_string(),
+                        available: crate::environments::environments(registry, &sub.package_name)
+                            .map(|envs| envs.into_iter().map(|x| x.name).collect())
+                            .unwrap_or_default(),
+                    });
+                    continue;
+                }
+                Err(other) => return Err(other),
+            };
         let new_version_str = resolved.to_string();
 
         if new_version_str == sub.resolved_version {
@@ -366,7 +472,16 @@ pub fn compute_preview(
         let preview = SubscriptionPreview {
             package_name: sub.package_name.clone(),
             registry_url: sub.registry_url.clone(),
+            environment: sub.environment.clone(),
             current_version: sub.resolved_version.clone(),
+            // Compared as SEMVER, not as strings: "1.9.0" > "1.10.0"
+            // lexicographically, and a rollback across a two-digit minor is
+            // exactly when a subscriber most needs to be told which way they
+            // are going.
+            is_rollback: match (crate::version::SemVer::parse(&sub.resolved_version), crate::version::SemVer::parse(&new_version_str)) {
+                (Ok(current), Ok(next)) => next < current,
+                _ => false,
+            },
             new_version: new_version_str,
             cells_changed,
             cells_changed_exact: cells_exact,
@@ -424,6 +539,8 @@ pub fn compute_preview(
         total_overrides_auto_cleared: total_cleared,
         total_cells_changed_exact: total_cells_exact,
         conflicts_exact,
+        environment_notices,
+        unavailable,
     })
 }
 
@@ -708,8 +825,9 @@ pub fn pull_all_updates(
     let mut payloads = Vec::new();
 
     for (i, sub) in subscriptions.iter().enumerate() {
-        let pin = VersionPin::parse(&sub.version_pin)?;
-        let resolved = registry.resolve_version(&sub.package_name, &pin)?;
+        let target = sub.target()?;
+        let resolved =
+            crate::environments::resolve_target(registry, &sub.package_name, &target)?;
         let new_version_str = resolved.to_string();
 
         if let Some(shown) = previewed {
@@ -722,7 +840,13 @@ pub fn pull_all_updates(
 
         let request = PullRequest {
             package_name: sub.package_name.clone(),
-            version_pin: pin,
+            // The subscription's OWN target, so the pull follows what the
+            // subscriber chose. `apply_refresh` keeps the existing
+            // `version_pin` / `environment` and takes only the sheets and the
+            // resolved version from the payload, but handing `pull()` a
+            // different target than the subscription holds would still be a
+            // second answer to "what does this workbook follow".
+            target: target.clone(),
             now: String::new(), // Caller sets this
         };
 
@@ -776,6 +900,7 @@ pub fn apply_refresh(
             .collect();
 
         // Detect removed sheets (structural conflicts if they have overrides)
+        let mut removed_locally: Vec<SheetId> = Vec::new();
         for old_sub_sheet in &sub.sheets {
             if !new_package_sheet_ids.contains(&old_sub_sheet.package_sheet_id) {
                 let ovr_count = override_layer
@@ -787,6 +912,21 @@ pub fn apply_refresh(
                         override_count: ovr_count,
                     });
                 }
+                // THE SHEET STAYS IN THE WORKBOOK, so say so in the ledger.
+                //
+                // `calp_refresh_apply` replaces and appends grids; it never
+                // removes one. So a sheet the new version drops keeps its tab —
+                // which is the kind behaviour — but dropping it from
+                // `sub.sheets` alone left it as an ORPHAN: not tracked, and not
+                // tombstoned either. The next version that brings the sheet
+                // BACK then sees it as newly added and materializes a second
+                // copy beside it as `Sheet2 (2)`, with the orphan's overrides
+                // pointing at a sheet the ledger no longer knows.
+                //
+                // Rare while publishers seldom delete sheets. A ROLLBACK makes
+                // it ordinary: every sheet added since the version being rolled
+                // back to is "removed", and rolling forward again re-adds it.
+                removed_locally.push(old_sub_sheet.package_sheet_id);
                 sheets_removed += 1;
             }
         }
@@ -820,6 +960,15 @@ pub fn apply_refresh(
             {
                 new_sheet.local_sheet_id = old.local_sheet_id;
                 new_sheet.local_name = old.local_name.clone();
+            }
+        }
+        // Tombstone the sheets this refresh dropped but the workbook keeps.
+        // Same list  uses, and for the same reason: without it the next
+        // version to bring the sheet back materializes a SECOND copy beside the
+        // one still on screen.
+        for id in removed_locally {
+            if !sub.detached_sheets.contains(&id) {
+                sub.detached_sheets.push(id);
             }
         }
         sub.resolved_version = pull.resolved_version.to_string();
@@ -911,6 +1060,313 @@ mod tests {
         reg
     }
 
+    // -----------------------------------------------------------------------
+    // Environments: a subscription follows a POINTER, not the head
+    // -----------------------------------------------------------------------
+
+    /// One subscription to `test-pkg`, following `env` (or the line at `pin`).
+    fn env_subscription(dir: &TempDir, env: Option<&str>, pin: &str, at: &str) -> Subscription {
+        Subscription {
+            package_name: "test-pkg".to_string(),
+            registry_url: format!("file://{}", dir.path().display()),
+            version_pin: pin.to_string(),
+            resolved_version: at.to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            environment: env.map(|s| s.to_string()),
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            detached_sheets: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    fn keypair_of(prof: &TempDir) -> crate::signing::PublisherKeypair {
+        crate::signing::PublisherKeypair::load_or_create(prof.path()).unwrap()
+    }
+
+    fn set_envs(reg: &LocalWorkspace, kp: &crate::signing::PublisherKeypair, list: &[&str]) {
+        let names: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+        let seq = reg.get_application_manifest("test-pkg").unwrap().promotion_sequence;
+        crate::environments::set_pipeline(reg, "test-pkg", &names, seq, kp, "2026-09-05T00:00:00Z")
+            .unwrap();
+    }
+
+    /// THE WHOLE POINT OF THE FEATURE. A push moves the line's head; a
+    /// subscriber of `prod` is offered NOTHING until somebody promotes.
+    ///
+    /// SABOTAGE: resolve an `Environment` target as `VersionPin::Latest`. Every
+    /// end user is then offered every push the moment it lands, which is the
+    /// state this work exists to end.
+    #[test]
+    fn an_environment_subscription_moves_only_when_the_pointer_moves() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        // The workspace holds 1.0.0 and 1.1.0; prod points at 1.0.0.
+        let reg = setup_registry_with_versions(&dir, prof.path());
+        let kp = keypair_of(&prof);
+        set_envs(&reg, &kp, &["prod"]);
+        crate::environments::promote(
+            &reg, "test-pkg", "prod", Some(SemVer::new(1, 0, 0)), None, &kp,
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+
+        let sub = env_subscription(&dir, Some("prod"), "", "1.0.0");
+        let layer = OverrideLayer::new();
+        let preview =
+            compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert!(
+            preview.subscription_previews.is_empty(),
+            "1.1.0 is published but prod still points at 1.0.0 — nothing to offer"
+        );
+
+        // A line subscription on the same workspace IS offered it, which is what
+        // makes the previous assertion mean something.
+        let line = env_subscription(&dir, None, "^1.0.0", "1.0.0");
+        let line_preview =
+            compute_preview(&reg, &[line], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(line_preview.subscription_previews[0].new_version, "1.1.0");
+
+        // Promote, and now prod's subscriber is offered it.
+        crate::environments::promote(
+            &reg, "test-pkg", "prod", Some(SemVer::new(1, 1, 0)), None, &kp,
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        let after =
+            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(after.subscription_previews[0].new_version, "1.1.0");
+        assert_eq!(after.subscription_previews[0].environment.as_deref(), Some("prod"));
+        assert!(!after.subscription_previews[0].is_rollback);
+    }
+
+    /// A ROLLBACK IS A REFRESH IN THE OTHER DIRECTION, and it says so.
+    ///
+    /// SABOTAGE: guard the update check with `if resolved > current`. The
+    /// subscriber is then never offered the rollback at all and stays on the
+    /// version the publisher pulled — silently, with no surface saying why.
+    /// Second sabotage: compute `is_rollback` by string comparison, and
+    /// 1.9.0 → 1.10.0 reports as a rollback.
+    #[test]
+    fn a_rollback_refreshes_backwards_and_says_so() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+        let kp = keypair_of(&prof);
+        set_envs(&reg, &kp, &["prod"]);
+        crate::environments::promote(
+            &reg, "test-pkg", "prod", Some(SemVer::new(1, 0, 0)), None, &kp, "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        crate::environments::promote(
+            &reg, "test-pkg", "prod", Some(SemVer::new(1, 1, 0)), None, &kp, "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        // ...and back.
+        crate::environments::promote(
+            &reg, "test-pkg", "prod", Some(SemVer::new(1, 0, 0)), None, &kp, "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+
+        // The subscriber is on 1.1.0 and prod is back at 1.0.0.
+        let sub = env_subscription(&dir, Some("prod"), "", "1.1.0");
+        let layer = OverrideLayer::new();
+        let preview =
+            compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let row = &preview.subscription_previews[0];
+        assert_eq!(row.current_version, "1.1.0");
+        assert_eq!(row.new_version, "1.0.0");
+        assert!(row.is_rollback, "going backwards must be flagged as such");
+
+        // And the apply half produces a payload for it.
+        let payloads = pull_all_updates(
+            &reg, &[sub], &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse, None,
+        )
+        .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].pull_result.resolved_version.to_string(), "1.0.0");
+    }
+
+    /// A REMOVED ENVIRONMENT DEGRADES ONE ROW, not the whole preview.
+    ///
+    /// SABOTAGE: propagate the resolution error with `?`. One admin tidying up
+    /// a pipeline then blanks every OTHER subscription's preview in every
+    /// subscriber's workbook, and nobody can refresh anything.
+    #[test]
+    fn a_removed_environment_is_one_unavailable_row() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+        let kp = keypair_of(&prof);
+        set_envs(&reg, &kp, &["staging", "prod"]);
+        crate::environments::promote(
+            &reg, "test-pkg", "staging", Some(SemVer::new(1, 0, 0)), None, &kp,
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        // The admin drops staging.
+        set_envs(&reg, &kp, &["prod"]);
+
+        let orphan = env_subscription(&dir, Some("staging"), "", "1.0.0");
+        let healthy = env_subscription(&dir, None, "^1.0.0", "1.0.0");
+        let layer = OverrideLayer::new();
+        let preview = compute_preview(
+            &reg, &[orphan, healthy], &layer, &HashMap::new(), &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(preview.unavailable.len(), 1);
+        let row = &preview.unavailable[0];
+        assert_eq!(row.environment.as_deref(), Some("staging"));
+        assert!(row.reason.contains("staging"), "the refusal names it: {}", row.reason);
+        assert_eq!(row.available, vec!["prod"], "and what it could follow instead");
+
+        // The other subscription previewed normally.
+        assert_eq!(preview.subscription_previews.len(), 1);
+        assert_eq!(preview.subscription_previews[0].new_version, "1.1.0");
+    }
+
+    /// An environment nothing has been promoted into refuses by name too — it
+    /// is a different sentence from "no such environment" because the remedy is
+    /// different (wait for a promotion, not pick another name).
+    #[test]
+    fn an_empty_environment_is_unavailable_with_its_own_reason() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+        let kp = keypair_of(&prof);
+        set_envs(&reg, &kp, &["prod"]);
+
+        let sub = env_subscription(&dir, Some("prod"), "", "1.0.0");
+        let layer = OverrideLayer::new();
+        let preview =
+            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(preview.unavailable.len(), 1);
+        assert!(
+            preview.unavailable[0].reason.contains("nothing has been promoted"),
+            "{}",
+            preview.unavailable[0].reason
+        );
+    }
+
+    /// A LINE SUBSCRIPTION IS NEVER RE-TARGETED SILENTLY when its application
+    /// grows a pipeline. It is told, and the choice stays the subscriber's.
+    ///
+    /// SABOTAGE: auto-switch to the last environment. Every existing
+    /// subscriber's workbook then changes which content it accepts without
+    /// anyone asking — and on a rollback, that means their document moves
+    /// BACKWARDS on a refresh they thought was routine.
+    #[test]
+    fn a_line_subscription_is_told_about_environments_not_moved_to_one() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+        let kp = keypair_of(&prof);
+        set_envs(&reg, &kp, &["test", "prod"]);
+        crate::environments::promote(
+            &reg, "test-pkg", "test", Some(SemVer::new(1, 0, 0)), None, &kp, "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+
+        let sub = env_subscription(&dir, None, "^1.0.0", "1.0.0");
+        let layer = OverrideLayer::new();
+        let preview =
+            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+
+        // Still following the line: offered the head, not test's pointer.
+        assert_eq!(preview.subscription_previews[0].new_version, "1.1.0");
+        assert_eq!(preview.subscription_previews[0].environment, None);
+
+        // And told, in pipeline order so the UI can suggest the last one.
+        assert_eq!(preview.environment_notices.len(), 1);
+        assert_eq!(preview.environment_notices[0].package_name, "test-pkg");
+        assert_eq!(preview.environment_notices[0].environments, vec!["test", "prod"]);
+    }
+
+    /// The notice appears even when there is NOTHING to apply — a subscription
+    /// with no update produces no preview row to carry it, and "you are
+    /// following unreleased work" is exactly what a subscriber with nothing to
+    /// apply still needs told.
+    ///
+    /// SABOTAGE: compute the notice inside the update branch.
+    #[test]
+    fn the_environment_notice_survives_having_no_update() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+        let kp = keypair_of(&prof);
+        set_envs(&reg, &kp, &["prod"]);
+
+        // Already at the head: no update, so no preview row.
+        let sub = env_subscription(&dir, None, "^1.0.0", "1.1.0");
+        let layer = OverrideLayer::new();
+        let preview =
+            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert!(preview.subscription_previews.is_empty());
+        assert_eq!(preview.environment_notices.len(), 1);
+    }
+
+    /// A DEV subscription never reaches environment resolution: it points at a
+    /// local `.cala` file, and there is no workspace to resolve a name against.
+    ///
+    /// SABOTAGE: rename `channel` to `environment` mechanically, leaving
+    /// `make_dev_subscription`'s literal `"dev"` in place. Every dev
+    /// subscription then looks for an environment called "dev" in an
+    /// application called `dev:C:/...`.
+    #[test]
+    fn a_dev_subscription_carries_no_environment() {
+        let sub = Subscription {
+            package_name: "dev:C:/w/book.cala".to_string(),
+            registry_url: "file://C:/w/book.cala".to_string(),
+            version_pin: "dev".to_string(),
+            resolved_version: "dev".to_string(),
+            resolved_at: "2026-01-01T00:00:00Z".to_string(),
+            sheets: Vec::new(),
+            environment: None,
+            data_source_configs: Vec::new(),
+            objects: Vec::new(),
+            detached_sheets: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        };
+        assert!(crate::dev_mode::is_dev_subscription(&sub));
+        assert_eq!(sub.environment, None);
+        // And the constructor agrees, so this cannot drift.
+        let pulled = crate::dev_mode::DevPullResult {
+            sheets: Vec::new(),
+            tables: Vec::new(),
+            named_ranges: Vec::new(),
+            controls: Vec::new(),
+            media: std::collections::HashMap::new(),
+        };
+        let made = crate::dev_mode::make_dev_subscription("C:/w/book.cala", &pulled, "now");
+        assert_eq!(made.environment, None);
+    }
+
+    /// NOTHING ELSE PARSES A PIN OFF A SUBSCRIPTION. One interpretation of
+    /// (`version_pin`, `environment`), so a forgotten branch is impossible
+    /// rather than merely unlikely — the shape the dead `channel:` prefix had,
+    /// where twelve sites each remembered a special case nothing produced.
+    ///
+    /// SABOTAGE: re-add `VersionPin::parse(&sub.version_pin)` to
+    /// `compute_preview` or `pull_all_updates`.
+    #[test]
+    fn refresh_never_parses_a_subscription_pin_directly() {
+        const SELF: &str = include_str!("refresh.rs");
+        // Assembled so this test does not match itself.
+        let needle = format!("VersionPin::parse(&sub.{})", "version_pin");
+        let product = SELF.split("mod tests {").next().unwrap();
+        assert!(
+            !product.contains(&needle),
+            "a resolver is reading the pin directly; go through Subscription::target()"
+        );
+        assert_eq!(
+            product.matches("environments::resolve_target(").count(),
+            2,
+            "exactly the two resolution sites, both through the one resolver"
+        );
+    }
+
     #[test]
     fn preview_detects_available_update() {
         let dir = TempDir::new().unwrap();
@@ -929,7 +1385,7 @@ mod tests {
                 local_name: "Sheet1".to_string(),
                 extra: std::collections::HashMap::new(),
             }],
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1008,7 +1464,7 @@ mod tests {
                 local_name: "Sheet1".to_string(),
                 extra: std::collections::HashMap::new(),
             }],
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1041,7 +1497,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1073,7 +1529,7 @@ mod tests {
             resolved_version: "1.1.0".to_string(), // already at latest matching
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1098,7 +1554,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1130,7 +1586,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1218,7 +1674,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1248,7 +1704,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1288,7 +1744,7 @@ mod tests {
 
         let pull_result = pull::pull(&reg, &PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::parse("^1.0").unwrap(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::parse("^1.0").unwrap()),
             now: "2026-01-01T00:00:00Z".to_string(),
         }, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         let mut subs = vec![pull_result.subscription.clone()];
@@ -1339,7 +1795,7 @@ mod tests {
 
         let pull_result = pull::pull(&reg, &PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::parse("^1.0").unwrap(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::parse("^1.0").unwrap()),
             now: "2026-01-01T00:00:00Z".to_string(),
         }, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         let mut subs = vec![pull_result.subscription.clone()];
@@ -1371,7 +1827,7 @@ mod tests {
         // Subscribe at 1.0.0
         let pull_result = pull::pull(&reg, &PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::parse("^1.0").unwrap(),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::parse("^1.0").unwrap()),
             now: "2026-01-01T00:00:00Z".to_string(),
         }, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
         let mut subs = vec![pull_result.subscription.clone()];
@@ -1421,7 +1877,7 @@ mod tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: String::new(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -1547,7 +2003,7 @@ mod tests {
                 local_name: "Sheet1".to_string(),
                 extra: std::collections::HashMap::new(),
             }],
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),

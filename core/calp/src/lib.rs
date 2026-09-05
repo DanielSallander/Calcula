@@ -9,6 +9,7 @@ pub mod checkout;
 pub mod compat;
 pub mod diff;
 pub mod dev_mode;
+pub mod environments;
 pub mod error;
 pub mod fold;
 pub mod html_export;

@@ -118,7 +118,15 @@ pub fn make_dev_subscription(
         resolved_version: "dev".to_string(),
         resolved_at: now.to_string(),
         sheets,
-        channel: "dev".to_string(),
+        // NOT an environment, and the distinction is load-bearing. A dev
+        // subscription points at a local `.cala` FILE — there is no workspace,
+        // no signed manifest and no promotion log to resolve a name against.
+        // The field it replaces carried the literal `"dev"` here, so a
+        // mechanical rename would have sent every dev subscription looking for
+        // an environment called "dev" in an application called `dev:C:/...`.
+        // `is_dev_subscription` short-circuits before any resolution; this
+        // keeps that true even if a caller forgets.
+        environment: None,
         data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
@@ -228,7 +236,7 @@ mod tests {
             resolved_version: "dev".to_string(),
             resolved_at: String::new(),
             sheets: Vec::new(),
-            channel: "dev".to_string(),
+            environment: None,
             data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
@@ -243,7 +251,7 @@ mod tests {
             resolved_version: "1.2.0".to_string(),
             resolved_at: String::new(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),

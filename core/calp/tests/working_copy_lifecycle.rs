@@ -121,7 +121,7 @@ fn identity_survives_checkout_and_push() {
         &reg,
         &PullRequest {
             package_name: "sales".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-29T01:00:00Z".to_string(),
         },
         &scope,
@@ -243,7 +243,7 @@ fn a_subscribed_copy_carries_different_identity_than_the_package() {
         &reg,
         &PullRequest {
             package_name: "sales".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-29T01:00:00Z".to_string(),
         },
         &scope,
@@ -480,7 +480,7 @@ fn tampering_with_the_change_summary_breaks_the_signature() {
         &reg,
         &PullRequest {
             package_name: "sales".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-08-29T01:00:00Z".to_string(),
         },
         &scope,
@@ -593,7 +593,7 @@ fn a_delegate_can_push_and_subscribers_accept_it_without_re_pinning() {
         &reg,
         &PullRequest {
             package_name: "sales".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-29T01:00:00Z".to_string(),
         },
         &scope,
@@ -655,7 +655,7 @@ fn a_delegate_can_push_and_subscribers_accept_it_without_re_pinning() {
         &reg,
         &PullRequest {
             package_name: "sales".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-29T03:00:00Z".to_string(),
         },
         &scope,

@@ -5819,7 +5819,7 @@ mod distribution_user_file_restore_tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),

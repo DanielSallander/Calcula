@@ -105,7 +105,7 @@ fn publish_and_pull_sheets(
         &reg,
         &calp::pull::PullRequest {
             package_name: "literals".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-30T01:00:00Z".to_string(),
         },
         &scope,

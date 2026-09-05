@@ -139,7 +139,26 @@ pub struct PublishResponse {
 pub struct PullParams {
     pub registry_path: String,
     pub package_name: String,
+    /// A pin on the development line. Empty when `environment` is given.
+    #[serde(default)]
     pub version_pin: String,
+    /// The ENVIRONMENT to follow, e.g. `"prod"`.
+    ///
+    /// Exactly one of this and `version_pin` may be supplied; both is refused
+    /// (`CALP_PULL_TARGET_AMBIGUOUS`) rather than one silently winning, because
+    /// the two answer the same question differently and a caller that sent both
+    /// does not know which it wants.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Deliberately subscribe to the DEVELOPMENT LINE on an application that
+    /// has environments.
+    ///
+    /// Required, because the line receives every push the moment it lands —
+    /// which is the exact accident environments exist to prevent. A subscriber
+    /// who has not asked for that gets `CALP_PULL_ENVIRONMENT_REQUIRED` naming
+    /// the environments on offer, not a silent seat on unreleased work.
+    #[serde(default)]
+    pub follow_line: bool,
     /// The user was shown a CROSS-WORKSPACE NAME CONFLICT -- this application name is
     /// already pinned to a different publisher key from another workspace -- and
     /// answered a second, differently-worded question accepting it anyway.
@@ -2631,8 +2650,7 @@ fn materialize_pulled_tables(
 /// `package_name` is `dev:<source path>` (`calp::dev_mode`), which can never
 /// equal a target application name, so the exemption never excluded anything —
 /// and leaving it there would let it silently activate if dev subscriptions ever
-/// gained real names. `channel:` subscriptions carry REAL names and were never
-/// exempt; they are caught, correctly.
+/// gained real names.
 pub(crate) fn subscribes_to(
     subscriptions: &[calp::manifest::Subscription],
     registry_path: &str,
@@ -3515,14 +3533,82 @@ pub fn calp_pull(
     let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_path)
         .map_err(|e| e.to_string())?;
 
-    let version_pin = VersionPin::parse(&params.version_pin)
-        .map_err(|e| e.to_string())?;
+    // WHAT THIS SUBSCRIPTION WILL FOLLOW. Three refusals, all of them BEFORE
+    // the document is touched, and all of them about the same thing: a
+    // subscriber must know which stream of versions they are joining.
+    let has_pin = !params.version_pin.trim().is_empty();
+    let target = match (&params.environment, has_pin) {
+        (Some(env), true) => {
+            return Err(format!(
+                "CALP_PULL_TARGET_AMBIGUOUS: this subscribe names both an environment \
+                 ('{}') and a version pin ('{}'). They are two different answers to \
+                 'which version should this workbook follow', so pick one.",
+                env,
+                params.version_pin.trim()
+            ));
+        }
+        (Some(env), false) => calp::manifest::SubscriptionTarget::Environment(env.clone()),
+        (None, _) => {
+            // NO ENVIRONMENT NAMED. Fine for an application that has none —
+            // which is every application until a team sets a pipeline up. On one
+            // that HAS environments it is the footgun the whole feature exists
+            // to close: the line receives every push before anyone has tested
+            // it, and a consumer who lands there finds out when a half-finished
+            // report reaches them. Following the line stays possible, as a
+            // choice somebody made.
+            if !params.follow_line {
+                let envs = calp::environments::environments(&registry, &params.package_name)
+                    .unwrap_or_default();
+                if !envs.is_empty() {
+                    return Err(format!(
+                        "CALP_PULL_ENVIRONMENT_REQUIRED: '{}' publishes through environments \
+                         ({}). Pick one — usually '{}' — or choose to follow the development \
+                         line deliberately, which receives every change before it has been \
+                         tested.",
+                        params.package_name,
+                        envs.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "),
+                        envs.last().map(|e| e.name.as_str()).unwrap_or("prod"),
+                    ));
+                }
+            }
+            calp::manifest::SubscriptionTarget::Line(
+                VersionPin::parse(&params.version_pin).map_err(|e| e.to_string())?,
+            )
+        }
+    };
+
+    // ONE ROLE PER APPLICATION, and one subscription per application.
+    //
+    // Two subscriptions to the same (workspace, application) — test and prod in
+    // one workbook, say — collide in three places that key on the package name
+    // alone: `PreviewedVersions`, `calp_reset_subscription`'s first-match
+    // lookup, and the materializer's sheet-collision pass. Refused here rather
+    // than half-working.
+    {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        if let Some(existing) = subs.subscriptions.iter().find(|s| {
+            s.package_name == params.package_name
+                && calp::same_workspace(&s.registry_url, &params.registry_path)
+        }) {
+            return Err(format!(
+                "CALP_PULL_ALREADY_SUBSCRIBED: this workbook already subscribes to '{}' \
+                 from that workspace{}. To follow a different environment, change it in \
+                 Manage Subscriptions rather than subscribing twice.",
+                params.package_name,
+                existing
+                    .environment
+                    .as_ref()
+                    .map(|e| format!(" (environment '{e}')"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
 
     let now = chrono::Utc::now().to_rfc3339();
 
     let request = calp::pull::PullRequest {
         package_name: params.package_name.clone(),
-        version_pin,
+        target,
         now,
     };
 
@@ -5643,9 +5729,11 @@ pub fn calp_subscription_trust(
     let mut out = Vec::with_capacity(subs.subscriptions.len());
 
     for sub in &subs.subscriptions {
-        // Dev and file-channel subscriptions have no workspace manifest to
-        // verify; they are excluded from every other trust path too.
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        // A dev subscription points at a local .cala file: no workspace
+        // manifest to verify, and it is excluded from every other trust path
+        // too. An ENVIRONMENT subscription is NOT exempt — it has a workspace
+        // and a signed manifest like any other.
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         let registry_path = subscription_registry_path(sub).to_string();
@@ -6489,13 +6577,13 @@ fn subscription_registry_path(sub: &calp::manifest::Subscription) -> &str {
 
 /// Group refreshable subscriptions by workspace path, preserving each
 /// subscription's index into the workbook subscription list. Dev and
-/// channel subscriptions are skipped (they refresh through their own flows).
+/// Dev subscriptions are skipped (they refresh through their own flow).
 fn group_subscriptions_by_registry(
     subs: &[calp::manifest::Subscription],
 ) -> Vec<(String, Vec<usize>)> {
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     for (i, sub) in subs.iter().enumerate() {
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         let path = subscription_registry_path(sub).to_string();
@@ -6570,6 +6658,11 @@ pub fn calp_refresh_preview(
         // LIST incomplete, and a resolver may not present a partial list as a
         // complete set of decisions. Apply refuses while this is false.
         conflicts_exact: true,
+        // Merged across workspace groups like every other field. A line
+        // subscription whose application grew a pipeline, and a subscription
+        // whose environment no longer resolves, are facts about ONE row each.
+        environment_notices: Vec::new(),
+        unavailable: Vec::new(),
     };
 
     for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
@@ -9142,8 +9235,8 @@ fn rebuild_writeback_index_inner(
     let mut deferred_any = false;
 
     for sub in &subscriptions {
-        // Skip dev and file-channel subscriptions (no writeback in those)
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        // Skip dev subscriptions (no workspace, so no writeback tree)
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         let registry_path = subscription_registry_path(sub);
@@ -9458,7 +9551,7 @@ fn owning_subscription_for_region(
 ) -> Result<(String, String, String), String> {
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     for sub in &subs.subscriptions {
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         let registry_path = subscription_registry_path(sub).to_string();
@@ -12117,7 +12210,7 @@ fn owning_subscription_for_model_writeback(
 ) -> Result<(String, String, String, calp::writeback::ModelWritebackDeclaration), String> {
     let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
     for sub in &subs.subscriptions {
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         // RAW location, and RAW is also what is returned to the caller — which
@@ -13537,8 +13630,8 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
     };
 
     for sub in &subscriptions {
-        // Skip dev and file-channel subscriptions
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        // Skip dev subscriptions
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
 
@@ -13868,7 +13961,7 @@ mod writeback_rebuild_tests {
             resolved_version: "1.0.0".to_string(),
             resolved_at: "2026-01-01T00:00:00Z".to_string(),
             sheets: Vec::new(),
-            channel: String::new(),
+            environment: None,
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
@@ -13965,16 +14058,22 @@ mod writeback_rebuild_tests {
         assert!(state.writeback_rebuild_skips.lock().unwrap().is_empty());
     }
 
-    /// Dev and channel subscriptions carry no writeback and are not reported as
-    /// failures.
+    /// A DEV subscription carries no writeback and is not reported as a failure.
+    ///
+    /// It used to test a second shape beside it: a subscription whose pin began
+    /// . Eleven skip sites checked for that prefix and NOTHING in the
+    /// product ever produced one — this fixture was its only author. An
+    /// ENVIRONMENT subscription is the real thing that vocabulary was reaching
+    /// for, and it is the opposite of exempt: it has a workspace, a signed
+    /// manifest, a concrete resolved version, and therefore writeback, GATHER
+    /// and trust like any other. Skipping it would have been the defect the
+    /// prefix invited.
     #[test]
-    fn dev_and_channel_subscriptions_are_skipped_without_a_report() {
+    fn dev_subscriptions_are_skipped_without_a_report() {
         let _seq = seq_guard();
         let mut dev = subscription("acme.dev", "https://registry.example.com/reg");
         dev.version_pin = "dev".to_string();
-        let mut channel = subscription("acme.chan", "https://registry.example.com/reg");
-        channel.version_pin = "channel:test".to_string();
-        let state = state_with(vec![dev, channel]);
+        let state = state_with(vec![dev]);
 
         let outcome = rebuild_writeback_index_inner(&state, false, next_writeback_rebuild_seq());
 
@@ -15522,7 +15621,7 @@ pub struct ApplicationConnectionRestoreSkip {
 ///   30-second-timeout blocking read, on the open, before a cell is drawn —
 ///   the precise hang `rebuild_writeback_index_deferring_http` was written to
 ///   avoid.
-/// * **Dev / channel subscriptions** — skipped silently, as in every other
+/// * **Dev subscriptions** — skipped silently, as in every other
 ///   workspace walk: a dev subscription's source is a local `.cala`, not a
 ///   signed workspace application, so there is no manifest to verify.
 ///
@@ -15548,7 +15647,7 @@ pub(crate) fn restore_application_bi_connections(
     let mut skips: Vec<ApplicationConnectionRestoreSkip> = Vec::new();
 
     for sub in &subscriptions {
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         // RAW location — see `subscription_registry_path`.
@@ -16165,8 +16264,8 @@ pub async fn calp_refresh_data(
         let mut result = Vec::new();
 
         for sub in &subs.subscriptions {
-            // Skip dev and file-channel subscriptions
-            if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+            // Skip dev subscriptions
+            if calp::dev_mode::is_dev_subscription(sub) {
                 continue;
             }
 
@@ -16444,7 +16543,7 @@ pub fn calp_get_data_sources(
     let mut result = Vec::new();
 
     for sub in &subs.subscriptions {
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
 
@@ -16633,8 +16732,13 @@ pub fn calp_reset_subscription(
         .map_err(|e| e.to_string())?;
     let request = calp::pull::PullRequest {
         package_name: params.package_name.clone(),
-        version_pin: calp::VersionPin::parse(&format!("={}", resolved_version))
-            .map_err(|e| e.to_string())?,
+        // The EXACT resolved version, never the subscription's own target: a
+        // reset restores what this workbook currently has, and re-resolving an
+        // environment could land somewhere else if it moved since.
+        target: calp::manifest::SubscriptionTarget::Line(
+            calp::VersionPin::parse(&format!("={}", resolved_version))
+                .map_err(|e| e.to_string())?,
+        ),
         now: chrono::Utc::now().to_rfc3339(),
     };
     // ALREADY-TRUSTED: "Reset to published" restores an application the user

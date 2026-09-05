@@ -145,7 +145,7 @@ fn publish_version(
 fn pull_version(package: &str, version: SemVer) -> PullRequest {
     PullRequest {
         package_name: package.to_string(),
-        version_pin: VersionPin::Exact(version),
+        target: calp::manifest::SubscriptionTarget::Line(VersionPin::Exact(version)),
         now: "2026-06-15T01:00:00Z".to_string(),
     }
 }
@@ -606,7 +606,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
         resolved_version: version.to_string(),
         resolved_at: "2026-07-31T00:00:00Z".to_string(),
         sheets: Vec::new(),
-        channel: String::new(),
+        environment: None,
         data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),

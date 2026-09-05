@@ -2105,9 +2105,9 @@ mod tests {
         for ver in ["1.0.0", "1.0.1"] {
             let req = crate::pull::PullRequest {
                 package_name: "dedup".to_string(),
-                version_pin: crate::version::VersionPin::Exact(
+                target: crate::manifest::SubscriptionTarget::Line(crate::version::VersionPin::Exact(
                     if ver == "1.0.0" { SemVer::new(1, 0, 0) } else { SemVer::new(1, 0, 1) },
-                ),
+                )),
                 now: "2026-05-18T01:00:00Z".to_string(),
             };
             let scope =

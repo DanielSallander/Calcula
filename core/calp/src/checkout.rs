@@ -49,10 +49,15 @@ pub fn checkout(
 ) -> Result<PullResult, CalpError> {
     let request = PullRequest {
         package_name: package_name.to_string(),
-        version_pin: match version {
+        // ALWAYS the line, never an environment. A working copy is a working
+        // copy OF A VERSION — the thing a push declares as its base — and an
+        // environment is a pointer that moves under you. Checking out "prod"
+        // would produce a link whose base version silently disagreed with the
+        // workspace's head the moment somebody promoted.
+        target: crate::manifest::SubscriptionTarget::Line(match version {
             Some(v) => VersionPin::Exact(v),
             None => VersionPin::Latest,
-        },
+        }),
         now: now.to_string(),
     };
     pull_with_options(
@@ -136,7 +141,7 @@ mod tests {
             &reg,
             &PullRequest {
                 package_name: "sales".to_string(),
-                version_pin: VersionPin::Latest,
+                target: crate::manifest::SubscriptionTarget::Line(VersionPin::Latest),
                 now: "2026-08-29T01:00:00Z".to_string(),
             },
             &scope,

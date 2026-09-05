@@ -154,7 +154,7 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
     for sub in &subs.subscriptions {
         // Same skips as build_gather_data: dev and file-channel subscriptions
         // have no versioned submission tree.
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         // RAW `registry_url` — see the note in `bi/writeback.rs`. A local

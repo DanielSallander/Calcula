@@ -109,7 +109,7 @@ fn a_pull_materializes_literals_as_well_as_formulas() {
         &reg,
         &PullRequest {
             package_name: "literals".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-30T01:00:00Z".to_string(),
         },
         &scope,

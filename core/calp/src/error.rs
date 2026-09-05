@@ -147,4 +147,33 @@ pub enum CalpError {
 
     #[error("'{package}' does not list this computer's publisher key among those allowed to publish it. Ask {root_holder} — the publisher who created the package — to add you as a co-publisher, or to push this change for you.")]
     NotAuthorizedPublisher { package: String, root_holder: String },
+
+    // -- Environments (the promotion pipeline) ------------------------------
+    // Same rule as the push gates above: these strings ARE the user-facing
+    // copy. An environment is a named pointer to one version on the
+    // development line; promoting moves the pointer and copies nothing.
+
+    #[error("'{package}' has no environment called '{environment}'. It has: {available}.")]
+    EnvironmentNotFound { package: String, environment: String, available: String },
+
+    #[error("'{package}' has an environment called '{environment}', but nothing has been promoted into it yet. Ask whoever publishes it to promote a version, or follow the development line instead.")]
+    EnvironmentEmpty { package: String, environment: String },
+
+    #[error("'{name}' cannot be an environment name: {reason}")]
+    InvalidEnvironmentName { name: String, reason: String },
+
+    #[error("This computer's publisher key is not allowed to promote '{package}'. Ask {root_holder} — the publisher who created the application — to add you as a co-publisher, or to promote it for you.")]
+    NotAuthorizedToPromote { package: String, root_holder: String },
+
+    #[error("Cannot move {package} '{environment}' to v{version}: an environment can only move to {allowed}.")]
+    PromotionNotLinear { package: String, environment: String, version: String, allowed: String },
+
+    #[error("'{package}' '{environment}' is already at v{version}.")]
+    EnvironmentAlreadyAt { package: String, environment: String, version: String },
+
+    #[error("'{package}' '{environment}' moved while you were deciding: it was at {shown} when you were shown it, and is at {actual} now. Re-open the promotion so you can see what you are actually promoting over.")]
+    PromotionStale { package: String, environment: String, shown: String, actual: String },
+
+    #[error("The promotion history of '{package}' cannot be trusted: {reason}. Its environments are unavailable until the publisher repairs it.")]
+    PromotionLogInvalid { package: String, reason: String },
 }

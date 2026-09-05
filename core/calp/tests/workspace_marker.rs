@@ -135,7 +135,7 @@ fn a_pull_through_the_marker_spelling_pins_the_same_scope() {
         &reg,
         &PullRequest {
             package_name: "budget".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-31T01:00:00Z".to_string(),
         },
         &folder_scope,
@@ -161,7 +161,7 @@ fn a_pull_through_the_marker_spelling_pins_the_same_scope() {
         &reg,
         &PullRequest {
             package_name: "budget".to_string(),
-            version_pin: VersionPin::Latest,
+            target: calp::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-08-31T02:00:00Z".to_string(),
         },
         &file_scope,

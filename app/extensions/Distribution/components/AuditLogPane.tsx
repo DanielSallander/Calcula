@@ -26,7 +26,10 @@ const EVENT_META: Record<string, { label: string; category: Category }> = {
   subscribe: { label: "Subscribed", category: "subscription" },
   refresh: { label: "Refreshed", category: "subscription" },
   detach: { label: "Detached", category: "subscription" },
-  channel_changed: { label: "Channel changed", category: "subscription" },
+  subscription_environment_changed: {
+    label: "Environment changed",
+    category: "subscription",
+  },
   override_created: { label: "Override created", category: "override" },
   override_reverted: { label: "Override reverted", category: "override" },
   conflict_resolved: { label: "Conflict resolved", category: "override" },

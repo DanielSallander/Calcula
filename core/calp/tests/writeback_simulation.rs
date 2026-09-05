@@ -173,7 +173,7 @@ fn subscriber_pull(
 ) -> pull::PullResult {
     let req = PullRequest {
         package_name: PKG.to_string(),
-        version_pin: VersionPin::Exact(version),
+        target: calp::manifest::SubscriptionTarget::Line(VersionPin::Exact(version)),
         now: "2026-06-15T01:00:00Z".to_string(),
     };
     pull::pull(reg, &req, scope, prof, PinPolicy::PinOnFirstUse).expect("pull failed")

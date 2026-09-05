@@ -18,7 +18,13 @@ use crate::version::{SemVer, VersionPin};
 /// Request to pull (subscribe to) an application.
 pub struct PullRequest {
     pub package_name: String,
-    pub version_pin: VersionPin,
+    /// What to follow: a pin on the development line, or an environment.
+    ///
+    /// A `SubscriptionTarget` rather than a bare pin plus an optional
+    /// environment name, on `PushMode`'s reasoning: a caller that has not
+    /// decided which of the two this is does not compile, and it is impossible
+    /// to hand `pull()` two claims about which version it should fetch.
+    pub target: crate::manifest::SubscriptionTarget,
     pub now: String,
 }
 
@@ -413,7 +419,8 @@ pub fn pull_with_options(
     policy: PinPolicy,
     sheet_id_mode: SheetIdMode,
 ) -> Result<PullResult, CalpError> {
-    let resolved = registry.resolve_version(&request.package_name, &request.version_pin)?;
+    let resolved =
+        crate::environments::resolve_target(registry, &request.package_name, &request.target)?;
     let version_str = resolved.to_string();
     let pkg = request.package_name.as_str();
     let ver = version_str.as_str();
@@ -852,11 +859,13 @@ pub fn pull_with_options(
         // was filed under — so subscribe, the stored subscription and every later
         // refresh all name the workspace with ONE string.
         registry_url: scope.label.clone(),
-        version_pin: request.version_pin.to_string(),
+        version_pin: Subscription::pin_for(&request.target),
         resolved_version: version_str.clone(),
         resolved_at: request.now.clone(),
         sheets: subscribed_sheets,
-        channel: String::new(), // default/production channel
+        // Which environment this follows, or None for the development line.
+        // An environment subscription stores NO pin: see Subscription::target.
+        environment: Subscription::environment_for(&request.target),
         data_source_configs: Vec::new(),
         // Filled by the app layer after materialization (it knows what actually
         // landed vs was skipped on collision).
@@ -1094,7 +1103,7 @@ mod tests {
         let scope = crate::workspace_id::workspace_scope(&typed).unwrap();
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &request, &scope, prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -1161,7 +1170,7 @@ mod tests {
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
@@ -1224,7 +1233,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "co-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -1285,7 +1294,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "styled-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -1350,7 +1359,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "controls-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-02T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -1467,7 +1476,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "media-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-08-07T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse)
@@ -1566,7 +1575,7 @@ mod tests {
         publish_test_package(&reg, prof.path());
         let pull_req = PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-08-07T01:00:00Z".to_string(),
         };
         let result =
@@ -1647,7 +1656,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "pane-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-03T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -1833,7 +1842,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "slicer-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2044,7 +2053,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "filter-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2113,7 +2122,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "layout-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2166,7 +2175,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "theme-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2220,7 +2229,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "ext-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2327,7 +2336,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "sales-model".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-02T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2398,7 +2407,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "fidelity-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2502,7 +2511,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "wave-b-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2546,7 +2555,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "wave-b-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result =
@@ -2624,7 +2633,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: pkg.to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2644,7 +2653,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "wave-b-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-07-12T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2702,7 +2711,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "charted-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2764,7 +2773,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "sparked-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-06-28T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -2786,7 +2795,7 @@ mod tests {
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::Caret(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Caret(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
@@ -2838,7 +2847,7 @@ mod tests {
         // ^1.0 should resolve to 1.1.0
         let request = PullRequest {
             package_name: "versioned".to_string(),
-            version_pin: VersionPin::Caret(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Caret(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
 
@@ -2854,7 +2863,7 @@ mod tests {
 
         let request = PullRequest {
             package_name: "ghost".to_string(),
-            version_pin: VersionPin::Latest,
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Latest),
             now: "2026-05-18T00:00:00Z".to_string(),
         };
 
@@ -2867,7 +2876,7 @@ mod tests {
     fn make_pull_request() -> PullRequest {
         PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         }
     }
@@ -3064,7 +3073,7 @@ mod tests {
 
         let request = PullRequest {
             package_name: "test-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &request, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -3140,7 +3149,7 @@ mod tests {
 
         let pull_req = PullRequest {
             package_name: "d9-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -3246,7 +3255,7 @@ mod tests {
         // Pull and assert content round-trips (and passes the integrity gate).
         let pull_req = PullRequest {
             package_name: "c8-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();
@@ -3386,7 +3395,7 @@ mod tests {
         // stripped defensively at pull.
         let pull_req = PullRequest {
             package_name: "evil-pkg".to_string(),
-            version_pin: VersionPin::Exact(SemVer::new(1, 0, 0)),
+            target: crate::manifest::SubscriptionTarget::Line(VersionPin::Exact(SemVer::new(1, 0, 0))),
             now: "2026-05-18T01:00:00Z".to_string(),
         };
         let result = pull(&reg, &pull_req, &scope_of(&dir), prof.path(), PinPolicy::PinOnFirstUse).unwrap();

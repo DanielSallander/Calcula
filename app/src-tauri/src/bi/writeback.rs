@@ -330,7 +330,7 @@ pub(crate) fn collect_distributed_writeback_entries(
     };
 
     for sub in &subs.subscriptions {
-        if sub.version_pin == "dev" || sub.version_pin.starts_with("channel:") {
+        if calp::dev_mode::is_dev_subscription(sub) {
             continue;
         }
         // The RAW `registry_url`, exactly as the subscription stores it. Do NOT

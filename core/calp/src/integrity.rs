@@ -492,11 +492,16 @@ fn delegate_is_authorized(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn verify_manifest_signature_bytes(
+/// The TOFU half, over a manifest whose signature `load_signed_manifest_via`
+/// has already verified.
+///
+/// Split from the crypto so promotion can ask for the crypto alone. The two
+/// must stay in this order and this function must never be reachable without
+/// the other: TOFU decides whether the key that signed is the key this machine
+/// AGREED to, which is a question about a signature that has already checked
+/// out. Reversing them would pin a key on the strength of an unverified claim.
+fn verify_manifest_trust_bytes(
     registry: &dyn crate::transport::WorkspaceTransport,
-    manifest_bytes: &[u8],
-    sig_hex: &str,
     manifest: &VersionManifest,
     package: &str,
     scope: &WorkspaceScope,
@@ -504,15 +509,6 @@ fn verify_manifest_signature_bytes(
     policy: PinPolicy,
 ) -> Result<(TrustStatus, Vec<OtherScopePin>), CalpError> {
     let version = manifest.version.as_str();
-
-    // (2) Cryptographic verification against the asserted publisher key.
-    crate::signing::verify_signature(
-        &manifest.publisher_key,
-        manifest_bytes,
-        sig_hex,
-        package,
-        version,
-    )?;
 
     // (3) TOFU. The store is READ on every path — a key that contradicts an
     // existing pin is refused even on a passive inspection, because an application
@@ -666,6 +662,51 @@ pub fn verify_and_load_manifest_via(
     profile_dir: &Path,
     policy: PinPolicy,
 ) -> Result<VerifiedManifest, CalpError> {
+    // (1)+(2) Read, require a signature, and verify the crypto — the half that
+    // says "this is a real, signed version of this application".
+    let signed = load_signed_manifest_via(t, package, version)?;
+
+    // (3) TOFU over the SAME bytes the signature was checked against.
+    let (trust, other_scope_pins) = verify_manifest_trust_bytes(
+        t,
+        &signed.manifest,
+        package,
+        scope,
+        profile_dir,
+        policy,
+    )?;
+    Ok(VerifiedManifest {
+        trust,
+        manifest: signed.manifest,
+        other_scope_pins,
+    })
+}
+
+/// A version manifest whose signature has been checked against the key it names.
+pub struct SignedManifest {
+    pub manifest: VersionManifest,
+    /// The exact bytes the signature was verified over. Anything derived from
+    /// this manifest must come from `manifest` (parsed from these bytes) and
+    /// never from a re-read — the split-view defence.
+    pub bytes: Vec<u8>,
+}
+
+/// Read a version manifest and prove it was signed by the key it names.
+/// Crypto only: no pin store is read and none is written.
+///
+/// Steps (1) and (2) of [`verify_and_load_manifest_via`], extracted because
+/// PROMOTION asks exactly this question and must not ask the other one. A
+/// publisher moving their own application's `prod` pointer has no TOFU pin for
+/// it — pinning during a promotion would file the publisher's own key into the
+/// store subscribers use to detect a hijack, and refusing for want of a pin
+/// would make an application unpromotable by the person who owns it. What
+/// promotion needs is narrower and is all of it: the target version exists, it
+/// is signed, and the key that signed it is one this application authorises.
+pub fn load_signed_manifest_via(
+    t: &dyn WorkspaceTransport,
+    package: &str,
+    version: &str,
+) -> Result<SignedManifest, CalpError> {
     // The single trusted copy of the manifest bytes. Everything downstream
     // (publisher_key, checksums, min_app_version, inventory) is parsed from
     // exactly these bytes AND is what the signature is checked against.
@@ -690,23 +731,17 @@ pub fn verify_and_load_manifest_via(
         }
     };
 
-    // (2)+(3) Crypto + TOFU over the SAME bytes we parsed `manifest` from.
+    // (2) Cryptographic verification against the asserted publisher key.
     let sig_hex = String::from_utf8_lossy(&sig_bytes);
-    let (trust, other_scope_pins) = verify_manifest_signature_bytes(
-        t,
+    crate::signing::verify_signature(
+        &manifest.publisher_key,
         &manifest_bytes,
         sig_hex.trim(),
-        &manifest,
         package,
-        scope,
-        profile_dir,
-        policy,
+        version,
     )?;
-    Ok(VerifiedManifest {
-        trust,
-        manifest,
-        other_scope_pins,
-    })
+
+    Ok(SignedManifest { manifest, bytes: manifest_bytes })
 }
 
 /// `verify_and_load_manifest_via` for the ALREADY-TRUSTED callers: the manifest

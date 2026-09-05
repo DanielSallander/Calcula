@@ -1622,9 +1622,19 @@ mod tests {
         );
         assert_eq!(status, "verified");
         let scanned: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
-        assert_eq!(
-            scanned["capabilities"],
-            serde_json::json!(["formula.udf", "ui.dialog"])
+        // The example's OWN declaration, read from its manifest rather than
+        // re-typed here. Re-typing is what made this assertion go stale when
+        // `grid.read` was added to the example: the test then reported a
+        // scanner defect where the scanner was right and the copy was old.
+        let declared: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(example.join("tax-tools.manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scanned["capabilities"], declared["capabilities"]);
+        // ...and it is a real ceiling, not an empty one.
+        assert!(
+            scanned["capabilities"].as_array().is_some_and(|a| !a.is_empty()),
+            "the scan must report the declared ceiling the frontend honors"
         );
     }
 

@@ -67,8 +67,14 @@ pub enum AuditEvent {
     /// author-side counterpart of `Subscribe`: same materialization, different
     /// intent — this workbook is now something that can push.
     CheckedOut,
-    /// Changed active channel.
-    ChannelChanged,
+    /// Changed which ENVIRONMENT a subscription follows — or moved it to or
+    /// from the development line.
+    ///
+    /// It replaces a `ChannelChanged` variant that no code ever recorded,
+    /// beside a `Subscription.channel` field no code ever read. Opt-in like
+    /// `Subscribe` rather than always-on: it changes what WILL arrive on the
+    /// next refresh, not what has already left the machine.
+    SubscriptionEnvironmentChanged,
     /// Submitted writeback values to the workspace.
     WritebackSubmitted,
     /// Writeback drafts invalidated by refresh (removed/incompatible regions).

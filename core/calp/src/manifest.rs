@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use identity::{EntityId, SheetId};
 use serde::{Deserialize, Serialize};
+use crate::error::CalpError;
 use crate::version::SemVer;
 
 /// Application-level manifest (calp-manifest.json).
@@ -23,10 +24,26 @@ pub struct ApplicationManifest {
     pub author: String,
     pub created: String,
     pub versions: Vec<VersionEntry>,
+    /// The ordered promotion pipeline and each environment's current pointer.
+    ///
+    /// A LISTING CONVENIENCE, exactly like `VersionEntry.base_version` below:
+    /// it renders a browse list from one manifest read, and an HTTP workspace
+    /// can serve it without the application-artifact route. The AUTHORITY is
+    /// the signed `promotions.json`, which `environments::resolve_environment`
+    /// folds; nothing resolves through this field. It is written second, after
+    /// the log, so a crash leaves a stale listing over a correct authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environments: Vec<crate::environments::Environment>,
+    /// Sequence of the last promotion record. The optimistic-concurrency token
+    /// a pipeline edit carries, so two admins cannot lose each other's change.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub promotion_sequence: u64,
     /// Forward-compatibility: preserves unknown fields from future format versions.
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
+
+fn is_zero(n: &u64) -> bool { *n == 0 }
 
 fn default_kind() -> String { "report".to_string() }
 
@@ -67,6 +84,8 @@ impl ApplicationManifest {
             author: author.to_string(),
             created: now.to_string(),
             versions: Vec::new(),
+            environments: Vec::new(),
+            promotion_sequence: 0,
             extra: HashMap::new(),
         }
     }
@@ -585,13 +604,21 @@ pub struct Subscription {
     pub resolved_version: String,
     pub resolved_at: String,
     pub sheets: Vec<SubscribedSheet>,
-    /// Named channel for this subscription (e.g., "dev", "test", "staging", "prod").
-    /// Empty string means the default/production channel.
-    /// Channels let teams maintain parallel subscription environments —
-    /// the same workbook can subscribe to different sources per channel,
-    /// and the active channel determines which source is used.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub channel: String,
+    /// Which ENVIRONMENT this subscription follows.
+    ///
+    /// `None` follows the development line through `version_pin`, as every
+    /// subscription did before environments existed. `Some(name)` resolves
+    /// through the application's verified promotion log, and `version_pin` is
+    /// then EMPTY — see [`Subscription::target`].
+    ///
+    /// An `Option` rather than a string whose emptiness carries meaning, because
+    /// the field this replaces was exactly that and nothing ever read it: a
+    /// `channel: String` documented as "dev/test/staging/prod", written as `""`
+    /// or `"dev"`, with no reader anywhere. An `Option` makes "follows the line"
+    /// a state every `match` must handle, and it cannot collide with the
+    /// `version_pin == "dev"` sentinel the local preview uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     /// Subscriber-local connection configurations for data sources.
     /// Stored in the .cala file, never in the shared workspace.
     /// Contains the subscriber's connection strings (may include credentials).
@@ -620,6 +647,55 @@ pub struct Subscription {
     pub detached_sheets: Vec<SheetId>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// What a subscription follows: a pin on the development line, or an
+/// environment's pointer.
+///
+/// A TYPE rather than two fields the caller reads separately, for the reason
+/// `PushMode` is one: a caller that has not decided which of the two this is
+/// does not compile, and no caller can hand a resolver both claims at once.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubscriptionTarget {
+    Line(crate::version::VersionPin),
+    Environment(String),
+}
+
+impl Subscription {
+    /// THE one interpretation of (`version_pin`, `environment`).
+    ///
+    /// Nothing else in the codebase parses a pin off a subscription — a rule
+    /// worth stating because the shape it replaces was twelve call sites each
+    /// remembering to special-case a `channel:` prefix that nothing produced.
+    /// A resolver that forgot the environment branch would read an environment
+    /// subscription's EMPTY pin and fail loudly (`InvalidVersion`), which is why
+    /// the pin is empty rather than a mirror of the resolved version: a mirror
+    /// would make the same omission report "up to date" forever.
+    pub fn target(&self) -> Result<SubscriptionTarget, CalpError> {
+        match &self.environment {
+            Some(env) => Ok(SubscriptionTarget::Environment(env.clone())),
+            None => Ok(SubscriptionTarget::Line(crate::version::VersionPin::parse(
+                &self.version_pin,
+            )?)),
+        }
+    }
+
+    /// The pin string to store for a target. An environment subscription stores
+    /// none — see [`Subscription::target`].
+    pub fn pin_for(target: &SubscriptionTarget) -> String {
+        match target {
+            SubscriptionTarget::Line(pin) => pin.to_string(),
+            SubscriptionTarget::Environment(_) => String::new(),
+        }
+    }
+
+    /// The environment to store for a target.
+    pub fn environment_for(target: &SubscriptionTarget) -> Option<String> {
+        match target {
+            SubscriptionTarget::Line(_) => None,
+            SubscriptionTarget::Environment(name) => Some(name.clone()),
+        }
+    }
 }
 
 /// One object a subscription materialized into the local workbook.

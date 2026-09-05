@@ -915,6 +915,63 @@ mod tests {
         );
     }
 
+    /// The `channel:` pin prefix is gone, and one predicate answers "is this a
+    /// dev subscription?".
+    ///
+    /// ELEVEN call sites tested `version_pin.starts_with("channel:")` to skip a
+    /// subscription out of trust verification, writeback, GATHER, BI connection
+    /// restore and data-source refresh. NOTHING in the product ever produced
+    /// such a pin — its only author was a test fixture — so eleven exemptions
+    /// guarded a shape that did not exist, and would have activated the moment
+    /// something started minting one.
+    ///
+    /// That matters now rather than merely being tidy: an ENVIRONMENT
+    /// subscription is what that dead vocabulary was reaching for, and it is the
+    /// OPPOSITE of exempt. It has a workspace, a signed manifest and a concrete
+    /// resolved version, so it needs every one of those paths. A revived prefix
+    /// would silently opt production subscribers out of trust verification.
+    ///
+    /// `AuditEvent::ChannelChanged` goes with it — a variant nothing ever
+    /// recorded, beside a `Subscription.channel` field nothing ever read.
+    ///
+    /// Lives here for the reason the census above does: the source-walking
+    /// machinery is here.
+    ///
+    /// THE NEEDLES ARE ASSEMBLED AND THE MESSAGE SPELLS NONE OF THEM — the
+    /// first cut of this test did spell them, matched its own failure text, and
+    /// reported itself. They are also anchored to the STRING-LITERAL form
+    /// (a leading quote), because the bare prefix is a substring of
+    /// `mpsc::channel::<T>` and a census that cries wolf on a thread channel is
+    /// one the next person deletes.
+    #[test]
+    fn the_dead_pin_prefix_is_gone_and_dev_has_one_predicate() {
+        let prefix = format!("{}{}{}", '"', "channel", ':');
+        let variant = format!("Channel{}", "Changed");
+        let hand_rolled = format!("version_pin == {}dev{}", '"', '"');
+        let mut offenders: Vec<String> = Vec::new();
+        for (path, text) in crate_sources() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for (i, line) in code_lines(&text) {
+                for needle in [&prefix, &variant, &hand_rolled] {
+                    if line.contains(needle.as_str()) {
+                        offenders.push(format!("{}:{}: {}", name, i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "A subscription either IS a local-preview subscription or it is not, \
+             and `calp::dev_mode::is_dev_subscription` is the one place that \
+             decides. The lines below spell that decision at a call site instead. \
+             That is how eleven exemptions came to guard a pin shape nothing ever \
+             produced — and an ENVIRONMENT subscription, which needs trust \
+             verification, writeback and GATHER like any other, would inherit \
+             every one of them.\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// THE GUARANTEE THIS WHOLE MODULE EXISTS FOR.
     ///
     /// `FileState::is_modified` is private, so the compiler already rejects an

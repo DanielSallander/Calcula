@@ -1847,10 +1847,18 @@ mod capability_pragma_tests {
         include_str!("../../../app/src/api/scriptHost/capabilityIds.ts");
 
     /// Extract the string literals of the `ALL_CAPABILITY_IDS = [...]` array.
+    ///
+    /// ANCHORED ON THE DECLARATION, not on the first mention of the name. The
+    /// file's own header explains the vocabulary and names it in prose, and this
+    /// used to find THAT — then took the next `[`, which for a long time
+    /// happened to be the real array and then, the day a doc comment further
+    /// down wrote `` `[]` ``, became an empty pair. The test failed comparing
+    /// eighteen ids against nothing: loud, but pointing at drift that did not
+    /// exist. `const ALL_CAPABILITY_IDS` cannot appear in prose.
     fn ts_capability_ids() -> Vec<String> {
         let start = CAPABILITY_IDS_TS
-            .find("ALL_CAPABILITY_IDS")
-            .expect("ALL_CAPABILITY_IDS not found in capabilityIds.ts");
+            .find("const ALL_CAPABILITY_IDS")
+            .expect("the ALL_CAPABILITY_IDS declaration was not found in capabilityIds.ts");
         let open = CAPABILITY_IDS_TS[start..]
             .find('[')
             .expect("no [ after ALL_CAPABILITY_IDS")
@@ -1859,8 +1867,16 @@ mod capability_pragma_tests {
             .find(']')
             .expect("unterminated ALL_CAPABILITY_IDS array")
             + open;
-        CAPABILITY_IDS_TS[open + 1..close]
-            .split(',')
+        // COMMENTS OUT FIRST, then split. Every entry in that array carries a
+        // paragraph explaining why the id exists, and those paragraphs contain
+        // commas — so a bare `split(',')` returns prose fragments as capability
+        // ids and the mirror reports drift that is entirely its own.
+        let body: String = CAPABILITY_IDS_TS[open + 1..close]
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        body.split(',')
             .filter_map(|tok| {
                 let t = tok.trim().trim_matches(|c| c == '"' || c == '\'');
                 if t.is_empty() { None } else { Some(t.to_string()) }

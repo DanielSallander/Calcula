@@ -84,7 +84,7 @@ fn subscribe_sheet(state: &AppState, index: usize, package: &str, registry: &str
         resolved_version: "1.0.0".to_string(),
         resolved_at: "2026-08-31T00:00:00Z".to_string(),
         sheets: vec![entry],
-        channel: String::new(),
+        environment: None,
         data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
