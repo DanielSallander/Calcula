@@ -42,7 +42,8 @@ Power BI users already have the model we want, so we borrow its shape:
 | `.pbix` opened locally | **Working copy** — a `.cala` produced by *checkout*, carrying a *working-copy link* | NEW |
 | Publish from Desktop | **Push** — records base version + change summary | reworked |
 | Version history | Application version list (immutable, retained forever) | exists, unsurfaced |
-| Deployment-pipeline gates | **Push gates** | NEW |
+| Deployment pipeline | **Environments** — named pointers to versions on ONE line; promotion moves a pointer and copies nothing | NEW |
+| Publish-time checks | **Push gates** | NEW |
 | "Get the app" | Subscription (pull / refresh / overrides) | exists, unchanged |
 | `.pbip` pointer file | **`workspace.calcula`** — names the workspace so a file dialog can select it | NEW |
 
@@ -273,6 +274,134 @@ consequences of that one change:
   materialize package content INTO the open document. Tearing the stores down
   would delete the BI connection the materialization had just created.
 
+### 2.5 Environments: one line, named pointers
+
+Before environments, **a push was a release.** The head of the version line is
+what every `latest` subscriber's next refresh offers, so the moment a developer
+pushed, every end user was offered the unreleased work. There was no way to test
+a version before consumers saw it, no way to hold consumers on a known-good one
+while development continued, and no way to roll them back without republishing.
+
+An **environment** is a *named pointer to an immutable version on that same
+line*. `test` points at v1.5.0; `prod` points at v1.2.0. Promotion moves the
+pointer. Nothing is copied, nothing is rebuilt, and what was tested is
+bit-for-bit what ships — the artifacts are content-addressed blobs shared at the
+workspace root, so a promotion is one signed record and a manifest listing.
+
+```
+  Development line (immutable versions, one head)
+  v1.2.0 ─ v1.3.0 ─ v1.4.0 ─ v1.5.0  (head — where every push lands)
+     ▲                          ▲
+   prod                       test        ← environments
+```
+
+**No environments by default.** An application that defines none behaves exactly
+as it always did: one line, one head, `latest` resolves to it.
+
+#### The decisions, and why
+
+**One shared development line, not per-developer branches.** The diagram this
+design started from had a Dev environment per developer. They collapse into one
+line fed by N working copies: a developer's working copy *is* their personal dev
+environment, and a push lands on the line through the existing gates (base
+version, merge, conflict). Promotion has to be a pointer move, and a pointer move
+needs linear history — the merge machinery only works inside a live workbook,
+because it recalculates through the edit pipeline, and a headless
+version-to-version merge needs the state-agnostic evaluator judged too large in
+`open-items.md` §2.aa. "Draft" pushes off the line are a follow-on, not v1.
+
+**Promotion is linear.** Environment N+1 takes environment N's *current*
+version; the first environment takes any version on the line, defaulting to the
+head. No skipping. A promotion that is not linear is refused by name
+(`PromotionNotLinear`) and says what would be allowed.
+
+**A rollback is the same command.** Moving a pointer to a version that
+environment *previously held* — read from the signed log, never "any older
+version" — is a rollback. Same gates, same signature, same log entry. Only the
+presentation differs, and it differs loudly: the confirm says **OLDER**, the
+subscriber's refresh card says *rolled back* in amber, and the version list a
+rollback offers contains only versions that environment has actually run.
+Offering "any older version" would be offering an untested promotion wearing a
+rollback's clothes.
+
+**Subscribers subscribe to an environment**, defaulting to the LAST one —
+production by convention. An environment subscription follows the pointer
+exactly: its `version_pin` is `""`, so any resolver that forgets the environment
+branch fails loudly (`InvalidVersion`) instead of reporting "up to date" forever.
+
+**Subscribing to the LINE on an application that has environments is an explicit
+choice** (`followLine: true`), refused otherwise. The line receives every push
+the moment it lands, which is exactly the accident environments exist to
+prevent. The dialog offers it under *Advanced*, with the consequence spelled out.
+
+**An application that grows a pipeline does not silently re-target its existing
+subscribers.** Moving somebody's subscription because their publisher added
+environments would change what they receive without their asking. The refresh
+preview and the Subscriptions pane say *"follows the development line — switch
+to prod?"* with a one-click switch, and *Not now* is a real answer.
+
+**No rename in v1.** The name *is* the identity — subscriptions record it as a
+string and there is no id behind it — so a rename would silently strand every
+subscriber of the old name with no error anywhere. The pipeline editor offers
+add, remove and reorder; a removed environment strands its subscribers *by name,
+loudly*, and their next refresh names it and blocks Apply until they pick
+another.
+
+**Promotion is human-only in v1.** It is a trust decision, like adding a
+workspace, so the script gateway does not expose it. A script *can* name an
+environment when it subscribes, and gets the same "say what you mean" rule the
+dialog does.
+
+#### What is stored, and what is trusted
+
+| Location | Content | Trust | Role |
+|---|---|---|---|
+| `{application}/promotions.json` | `PromotionLog`, each record Ed25519-signed by its promoter | per-record | **Authority.** `resolve_environment` folds this. |
+| `calp-manifest.json` → `environments`, `promotionSequence` | ordered pipeline + current pointer per environment | unsigned | Cheap listing for browsing; written SECOND, self-corrects. |
+| `.cala` → `Subscription.environment` | which environment this subscriber follows | local | Subscriber intent. |
+
+**Per-record signatures, not a whole-file signature**, for the reason
+`publishers::write_signed` is root-only: a whole-file signer would be vouching
+for every earlier promoter's record. `package_name` and a dense `sequence` sit
+INSIDE the signed bytes, so a record cannot be transplanted between applications
+or re-ordered, and the signed struct carries **no `extra` flatten** — an unknown
+field fails the signature rather than creating a split view.
+
+#### Threat model, stated plainly
+
+A share-writer who is not a publisher **cannot** fabricate a promotion or point
+prod at a version nobody promoted: `resolve_environment` verifies every record
+against the same authorised-key set the push gate uses (the root key of version 1
+plus the delegates in the root-signed `publishers.json`) and fails closed.
+
+They **can** replay an older signed log, rolling prod back to a legitimately
+promoted earlier version. This is the same limit `publishers.json` already
+documents, and it is detectable with a client-side high-water mark, which v1 does
+not build. A delegate removed from `publishers.json` invalidates the promotions
+they signed until someone still authorised re-promotes — the same rule their
+published versions already follow.
+
+The subscriber's TOFU pin still guards the version that is actually pulled, so
+the worst a compromised pointer can do is offer a *differently signed, legitimate*
+version of that application.
+
+#### Writeback across environments
+
+Submissions are stored under the version they were made against, and an
+environment is a pointer to a version — so testers filling in test@v1.5.0 and a
+production audience later promoted onto v1.5.0 land in the same tree. Every
+`WritebackSubmission` therefore carries an `environment` tag, stamped at the one
+point where a value leaves the machine (the authoritative submit, not the draft —
+drafts persist in the `.cala` and can predate a switch), and every reader that
+feeds a number filters on it through `calp::writeback::visible_in`.
+
+**Carry-forward follows the environment's own history, not semver order.** A
+rollback makes an environment's current pointer *lower* than a version it ran
+last week; under a "strictly older" rule the subscriber's own submissions against
+that newer version would stop counting the moment their environment was rolled
+back, and re-appear if it were rolled forward again. A line subscription keeps
+the semver rule it always had.
+
 ## 3. Invariants
 
 1. **Versions are immutable.** Publishing over an existing version is refused.
@@ -355,6 +484,30 @@ The backend never takes an "I acknowledge" flag: it cannot verify that a human
 read anything. The token it *can* verify is the base version the dialog showed —
 which is exactly what the push carries.
 
+### 5.1 Promotion gates
+
+Same shape, same lock, one difference at the top: **an empty authorised-key set
+is a REFUSAL here**, where the push gate treats it as "no delegation configured,
+root only". A promotion nobody can be shown to have authorised is worth less than
+no promotion.
+
+| Gate | Kind | What it prevents |
+|---|---|---|
+| Workspace is writable | refuse | A promotion that appears to succeed against an HTTP mirror. |
+| Signing identity exists (`load_existing`, never `load_or_create`) | refuse | A promotion minting a publisher identity as a side effect. |
+| Promoter's key is root or a listed delegate | refuse | Anyone with share write access retargeting `prod`. |
+| Promotion log verifies, every record, no gaps | refuse | A tampered or truncated history read as a shorter legitimate one. |
+| Environment exists in the pipeline | refuse | Promoting into a name nobody defined. |
+| `expectedCurrent` matches the pointer the dialog showed | refuse | Promoting over a colleague's promotion that landed between render and click. |
+| Target version exists, is signed, and its signer is authorised | refuse | Pointing an environment at something that was never legitimately published. |
+| Not already there | refuse | A log full of no-ops. |
+| Linear: the previous environment's version, or one this environment held | refuse | Skipping the pipeline, or "rolling back" to something untested. |
+| Log written BEFORE the manifest listing | ordering | A listing that claims a promotion the signed log does not carry. |
+
+Pipeline edits take an `expectedSequence` for the same reason a push takes a base
+version: the workspace lock serialises two admins' writes but cannot see that the
+second one's *read* was stale.
+
 ## 6. Lifecycle walkthrough
 
 **One developer, adding a button and a formula.**
@@ -387,6 +540,55 @@ limit, and she is told which.
 **Two developers, colliding work.** Both edit `Summary!B4`. The second push is
 refused, naming the cell, the other developer, and the version that changed it.
 
+### 6.1 Dev → Test → Prod, end to end
+
+**Setting up.** `sales` has been pushed a few times and everyone subscribes to
+whatever was pushed last. Developer A opens it for editing, opens the Application
+Explorer's *Environments* section — *Development line — v1.4.0 (head)* and
+nothing else — and clicks *Set up pipeline…*, taking the *test → prod* preset.
+Nothing changes for subscribers yet: their next refresh preview says *"sales"
+follows the development line, but the application now has environments (test,
+prod). Switch to prod?* User X clicks *Not now*.
+
+**Push.** A adds a button and a formula and pushes v1.5.0 — the same dialog as
+before — and lands with *"Pushed sales v1.5.0 to the development line: 3 sheets.
+test has nothing yet, prod has nothing yet — promote from the Application
+Explorer."* No environment is chosen at push. A push is a push; deciding who
+receives it is a separate, signed, attributed act, and keeping the two gestures in
+two places is what stops "I saved my work" from meaning "I shipped to
+production".
+
+**Promote to test.** A clicks *Promote to test*. The window shows *test:
+(nothing) → v1.5.0 (from the development line)* and, because test holds nothing
+yet, says subscribers will receive v1.5.0 in full. A confirms. Tester T
+subscribes: the dialog offers *test — v1.5.0 / prod — nothing promoted yet* with
+prod pre-selected as the last environment; T picks test. T's status bar reads
+*↓ Subscribed: sales (test) v1.5.0*.
+
+**Fix and re-test.** T finds a wrong formula. A pushes v1.5.1 and promotes test
+again — this time the window shows the one-cell diff test subscribers will see,
+because test already held v1.5.0. T refreshes: *sales (test): v1.5.0 → v1.5.1*.
+
+**Promote to prod.** On the test row A clicks *Promote → prod*: *prod: (nothing)
+→ v1.5.1 (from test)*, signed with A's key and attributed in the Explorer, the
+Inspector and the promotion log. Co-publisher B could have done it; a subscriber
+could not.
+
+**The end user.** X switches to prod from the Subscriptions pane, refreshes, and
+sees *sales (prod): v1.4.0 → v1.5.1* — one card, the cell count, the conflicts if
+any. X never saw v1.5.0. Testers' writeback submissions against test never reach
+prod's aggregates: every submission is tagged with the environment it was made
+in, and every reader that feeds a number filters on it.
+
+**Rollback.** v1.5.1 breaks a sheet nobody tested. A opens *Roll back…* on prod —
+which has only ever held v1.5.1, so there is nothing to roll back TO — and
+instead promotes test's v1.5.0 explicitly. The confirm reads *Roll "sales" prod
+back from v1.5.1 to v1.5.0? Everyone subscribed to prod will be offered v1.5.0 —
+an OLDER version — at their next refresh.* X's next preview: *sales (prod):
+v1.5.1 → v1.5.0 — rolled back*, in amber, overrides kept. Nothing was copied, no
+version was deleted, the line still ends at v1.5.1, and the fix, when it lands as
+v1.5.2, walks the same path: line → test → prod.
+
 ## 7. Multiple developers
 
 **Today's ceiling: one publishing key per application.** A profile holds exactly
@@ -405,6 +607,14 @@ root) and verify a delegate's version by chain: the version is signed by K, and
 K appears in a `publishers.json` signed by the pinned root. TOFU storage and its
 UX do not change at all; the trust panel gains one line naming the delegate.
 
+**Promotion rights are push rights.** A promotion is answered by exactly the
+authorised-key set a push is — root, or a delegate in the root-signed
+`publishers.json`. There is no separate promoter list and no per-environment
+permission in v1: anyone the application trusts to publish a version is trusted
+to decide who receives it, and every promotion is signed and attributed either
+way. Per-environment permissions ("only Alice may promote to prod") are a v2
+question, and `open-items.md` carries a row for it.
+
 Its honest limit on a dumb file share: removing a delegate is
 rollback-vulnerable — someone with write access can restore an older list. A
 monotonic revision number plus a client-side high-water mark makes that
@@ -422,6 +632,11 @@ is out of scope here.
   and it is left alone.
 - **The workspace is not a trust signal.** Presence in a workspace means
   published, not reviewed. Gates are a workflow, not a curation claim.
+- **Existing subscriptions.** An application that grows a pipeline does not
+  re-target anybody. A line subscription keeps following the line until its owner
+  chooses otherwise; the refresh preview and Subscriptions pane offer the switch
+  and accept a refusal. The one thing that DOES change is honesty: both surfaces
+  now say that following the line means receiving every push the moment it lands.
 
 ## 9. Known lossy edges when round-tripping through an application
 
@@ -480,6 +695,39 @@ deliberately does not carry does not come back:
 - **The workspace pointer file.** `workspace.calcula`, §2.0. Selecting a
   workspace is a file dialog now, and the file and its directory are one pin
   scope by construction.
+
+**Built (2026-09-05).**
+
+- **Environments** (§2.5). `core/calp/src/environments.rs` holds the model: a
+  signed append-only `promotions.json` is the authority, the manifest listing is a
+  cheap unverified mirror written second, and `resolve_environment` folds the log
+  against the push gate's authorised-key set and fails closed.
+  `SubscriptionTarget` makes "pin or environment" one interpretation nothing else
+  parses — the `PushMode` precedent — and `VersionPin::parse` now REFUSES an
+  `env:` or `channel:` prefix by name, so the dead magic-prefix convention cannot
+  be reintroduced from a frontend string.
+- **The dead `channel` fossil is gone.** `Subscription.channel` was documented as
+  exactly dev/test/staging/prod and was 100% dead: written as `""` or `"dev"`,
+  never read, with `AuditEvent::ChannelChanged` never emitted and twelve
+  `version_pin.starts_with("channel:")` skip sites nothing ever produced. Deleted
+  rather than reused — a magic pin prefix that opts a subscription out of trust
+  verification is a trap this design must not inherit — and a census beside the
+  other crate-walking guards keeps it deleted.
+- **Publisher UI.** An Environments section in the Application Explorer, a
+  promote/rollback window that shows the cell diff subscribers of THAT
+  environment will experience (from the target's own pointer, not the source's),
+  and a pipeline editor with no rename control and a reason on screen for its
+  absence.
+- **Subscriber UI.** An environment picker in Subscribe with the pin controls
+  moved under *Advanced*, rollback cards in amber, per-subscription switching,
+  and a refresh that BLOCKS on an environment that no longer resolves rather than
+  applying the others around it.
+- **Writeback across environments.** Every `WritebackSubmission` carries an
+  `environment` tag stamped at the authoritative submit; every reader that feeds
+  a number filters through `calp::writeback::visible_in`; carry-forward follows
+  the environment's own promotion history rather than semver order. The rollup
+  Parquet gained an `environment` column rather than splitting into per-environment
+  files, because its path is a contract a database points at.
 
 **Not built yet.**
 

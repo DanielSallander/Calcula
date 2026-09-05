@@ -210,6 +210,69 @@ SemVer-style:
 
 Major-version bumps signal "overrides may not survive."
 
+**A pin is one of TWO possible targets, never a place to encode the other.**
+An environment subscription carries no pin at all (see below), and
+`VersionPin::parse` REFUSES an `env:` / `environment:` / `channel:` prefix by
+name, pointing at the parameter instead. A magic prefix inside a pin string is a
+convention every parser has to special-case, and this codebase already carried a
+dead one: twelve sites skipped trust verification for a `"channel:"` pin nothing
+ever produced.
+
+### Environments
+
+An **environment** is a named pointer to an immutable version on the one
+development line — `test` at v1.5.0, `prod` at v1.2.0. Promotion moves the
+pointer and copies nothing, so what was tested is bit-for-bit what ships. An
+application with no environments behaves exactly as it always did. The model, the
+gates and the threat model live in `calp-workspace-collaboration.md` §2.5; what
+matters on the SUBSCRIBER side is here.
+
+**Target.** A subscription follows either a pin on the line or an environment,
+and exactly one. An environment subscription stores `version_pin: ""` and
+`environment: Some(name)`; the empty pin is deliberate, because
+`VersionPin::parse("")` errs, so any resolver that forgets the environment branch
+fails loudly instead of reporting "up to date" forever.
+
+**Default.** A new subscriber is offered the LAST environment — production by
+convention, the end of the pipeline being what consumers consume. Subscribing to
+the development line on an application that HAS environments requires
+`followLine: true`; without it the pull is refused and names the environments on
+offer, because the line receives every push the moment it lands.
+
+**Rollback presentation.** A refresh can now go BACKWARDS. The card says
+*v1.5.0 → v1.2.0 — rolled back* in amber and adds that cells the subscriber
+edited keep their overrides. Without the direction in the words, a subscriber
+reads a downgrade as an update and concludes the publisher changed those cells;
+what actually happened is that a known-good version was restored, and the
+conflicts they are about to resolve are against the OLDER content. The direction
+is computed from parsed versions, never string order — `"1.9.0" > "1.10.0"`
+lexicographically, and a rollback across a two-digit minor is exactly when the
+answer matters most.
+
+**Notices, not re-targeting.** When an application grows a pipeline, existing
+line subscriptions are NOT moved. The refresh preview and the Subscriptions pane
+say so and offer a one-click switch; the preview's copy is dismissible for that
+showing, the pane's is permanent, because only one of the two has somebody
+mid-decision in front of it. Switching PULLS NOTHING — it records intent and
+re-runs the preview, so a two-word choice in a dropdown never becomes an
+unreviewed content change.
+
+**Unresolvable targets block the whole refresh.** An environment that was removed
+from the pipeline, or is empty, or whose promotion log does not verify, degrades
+ONE row to `unavailable` rather than aborting every other subscription's preview —
+and Apply is disabled while any such row exists. A refresh is one gesture over
+every subscription in the workbook, so applying while one silently sat out would
+leave that report on an old version with nothing on screen having said so.
+
+**Writeback.** Submissions are stored per version, and an environment is a
+pointer to a version — so testers filling in test@v1.5.0 and a production
+audience later promoted onto v1.5.0 land in the same tree. Every submission
+therefore carries an `environment` tag, stamped at the authoritative submit (not
+at draft time: drafts persist in the `.cala` and can predate a switch), and every
+reader that feeds a number filters on it. Lenient carry-forward follows the
+environment's own promotion history rather than semver order, so a rollback does
+not make the subscriber's own submissions disappear.
+
 ### Refresh behavior
 
 On workbook open: never block. If the workspace is unreachable, open with last
@@ -927,13 +990,23 @@ A side pane with three views (filterable or tabbed - implementation choice):
 
 ## Author Workflow
 
-Authors need a fast iteration loop that does not require version-bump-and-publish
-per save:
+This section described a `--dev` flag, a dev-channel URL and a "Publish to test
+workspace" command. None of the three was ever built, and the shape they were
+sketching arrived differently. What exists:
 
-- `--dev` subscription flag: subscription points at a working `.cala` via
-  local path or a dev-channel URL, follows HEAD, and refreshes on file change.
-- "Publish to test workspace" command separate from production publish.
-- Production publish bumps a version, signs (if configured), and uploads.
+- **Working copy.** *Distribution ▸ Open Application for Editing* materializes an
+  application into a workbook keeping its sheet ids, and *Push* publishes the
+  next version through the base-version / merge / conflict gates. That is the
+  iteration loop; see `calp-workspace-collaboration.md`.
+- **Dev mode** (`calp_dev_subscribe`) answers the other question — *what will a
+  subscriber see* — by materializing a local `.cala` with subscriber semantics and
+  fresh ids. It is a preview, not a channel, and it is the only thing `--dev` ever
+  meant.
+- **Test before production is an ENVIRONMENT, not a second workspace.** "Publish
+  to test workspace" would have meant two copies of the artifacts, two version
+  lines, and a promotion that rebuilds rather than re-points — so what was tested
+  would not be what ships. A push lands on the one line; promotion moves a named
+  pointer.
 
 ## Identity Migration of Existing Numeric IDs
 

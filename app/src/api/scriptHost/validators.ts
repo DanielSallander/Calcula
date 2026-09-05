@@ -3988,12 +3988,48 @@ function versionTextError(v: unknown, label: string): string | null {
 /** cap.pkgBrowse args: [registry]. */
 export const vDistRegistry: Validator = ([registry]) => registryLocationError(registry) ?? true;
 
-/** cap.pkgInspect / cap.pkgPull args: [registry, packageName, versionPin]. */
-export const vDistPackageRef: Validator = ([registry, packageName, versionPin]) =>
-  registryLocationError(registry) ??
-  packageNameError(packageName) ??
-  versionTextError(versionPin, "versionPin") ??
-  true;
+/**
+ * cap.pkgInspect / cap.pkgPull args:
+ * [registry, packageName, versionPin, environment?, followLine?].
+ *
+ * EXACTLY ONE TARGET, refused here rather than downstream. A pin beside an
+ * environment is two claims about what to follow, and whichever one the backend
+ * happened to prefer would be a silent answer to a question the script asked
+ * twice. The backend refuses it too — this is the earlier, clearer refusal.
+ */
+export const vDistPackageRef: Validator = ([
+  registry,
+  packageName,
+  versionPin,
+  environment,
+  followLine,
+]) => {
+  const err = registryLocationError(registry) ?? packageNameError(packageName);
+  if (err) return err;
+
+  const wantsEnvironment = environment !== undefined && environment !== null;
+  if (wantsEnvironment) {
+    if (!isBoundedString(environment, 32)) {
+      return "environment must be a string of at most 32 characters";
+    }
+    if (!/^[a-z0-9-]+$/.test(environment as string)) {
+      return "environment must be lowercase letters, digits and hyphens";
+    }
+    // An environment carries its own version; a pin beside it is a second,
+    // contradictory answer.
+    if (typeof versionPin === "string" && versionPin.trim() !== "") {
+      return "pass either versionPin or environment, not both";
+    }
+  } else {
+    const pinErr = versionTextError(versionPin, "versionPin");
+    if (pinErr) return pinErr;
+  }
+
+  if (followLine !== undefined && typeof followLine !== "boolean") {
+    return "followLine must be a boolean";
+  }
+  return true;
+};
 
 /** cap.pkgNextVersion args: [registry, packageName, bump]. */
 export const vDistNextVersion: Validator = ([registry, packageName, bump]) => {

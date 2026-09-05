@@ -212,6 +212,7 @@ fn commit(
             .unwrap_or_else(|e| panic!("schema rejected {who:?} row {row}: {e}"));
     }
     let sub = WritebackSubmission {
+        environment: String::new(),
         model_key: None,
         id: sub_id.to_string(),
         region_id: region.id.clone(),

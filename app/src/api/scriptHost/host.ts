@@ -6430,21 +6430,47 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       });
     }
     case "cap.pkgInspect": {
-      const [registry, packageName, versionPin] = args as [string, string, string];
+      const [registry, packageName, versionPin, environment] = args as [
+        string,
+        string,
+        string,
+        string | null | undefined,
+      ];
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_distribution", {
         scriptId: definition.id,
         action: "inspectApplication",
-        payload: { registryPath: registry, packageName, versionPin },
+        payload: {
+          registryPath: registry,
+          packageName,
+          versionPin,
+          environment: environment ?? null,
+        },
       });
     }
     case "cap.pkgPull": {
-      const [registry, packageName, versionPin] = args as [string, string, string];
+      const [registry, packageName, versionPin, environment, followLine] = args as [
+        string,
+        string,
+        string,
+        string | null | undefined,
+        boolean | undefined,
+      ];
       const { invokeBackend } = await import("../backend");
       const response = await invokeBackend<PullResponse>("script_distribution", {
         scriptId: definition.id,
         action: "pull",
-        payload: { registryPath: registry, packageName, versionPin },
+        payload: {
+          registryPath: registry,
+          packageName,
+          versionPin,
+          environment: environment ?? null,
+          // Forwarded, never defaulted to true. A script that does not say it
+          // means the development line is refused on an application that has
+          // environments, with the environments named — the same rule the
+          // dialog follows.
+          followLine: followLine === true,
+        },
       });
       await announcePulledPackage(response);
       return response;

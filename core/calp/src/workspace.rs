@@ -1310,6 +1310,7 @@ mod tests {
 
     fn make_test_submission(region_id: &str, submitter_name: &str) -> crate::writeback::WritebackSubmission {
         crate::writeback::WritebackSubmission {
+        environment: String::new(),
         model_key: None,
             id: format!("sub-{}-{}", region_id, submitter_name),
             region_id: region_id.to_string(),

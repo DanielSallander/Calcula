@@ -29,6 +29,7 @@ vi.mock("@api", () => ({
   // Returns an unsubscribe, like the real one — a component that leaks a
   // listener across document replacement would show the previous file's role.
   onAppEvent: () => () => undefined,
+  ENVIRONMENTS_CHANGED_EVENT: "distribution:environments-changed",
 }));
 
 import { DistributionRoleStatusItem } from "../components/DistributionRoleStatusItem";

@@ -218,6 +218,38 @@ export interface WorkingCopyStatus {
   /** Whether this machine holds the key that signed the head. */
   holdsPublisherKey: boolean;
   registryError: string;
+  /**
+   * The application's environments and where each points, so the push dialog
+   * can say "test is at v1.3.0, prod at v1.2.0" the moment a push lands.
+   * From the manifest listing — cheap, and enough for a sentence.
+   */
+  environments: EnvironmentSummary[];
+  /**
+   * Whether this computer may promote — root key or an authorised delegate.
+   * The same question `holdsPublisherKey` answers for pushing, because they are
+   * the same question: promotion rights are push rights.
+   */
+  youMayPromote: boolean;
+  /**
+   * The environment whose pointer equals this working copy's BASE while the
+   * line's head has moved past it — the hotfix shape.
+   *
+   * The developer is patching what is live, and the line is linear: a push from
+   * here lands at the head and carries every unreleased change between. Saying
+   * so at the push is the only place they are still present to hear it.
+   */
+  baseIsPromoted?: string | null;
+}
+
+/** One environment as a browse list shows it: a name and where it points. */
+export interface EnvironmentSummary {
+  name: string;
+  /**
+   * `null` = defined but nothing promoted into it yet. Such an environment
+   * cannot be subscribed to; the picker shows it as unavailable rather than
+   * offering a seat on nothing.
+   */
+  version?: string | null;
 }
 
 // ============================================================================
@@ -610,7 +642,25 @@ export async function listTrustedPublishers(): Promise<TrustedPublisherReport> {
 export interface PullParams {
   registryPath: string;
   packageName: string;
+  /** A pin on the development line. Empty when `environment` is given. */
   versionPin: string;
+  /**
+   * The ENVIRONMENT to follow, e.g. "prod".
+   *
+   * Exactly one of this and `versionPin` may be supplied; both is refused
+   * (CALP_PULL_TARGET_AMBIGUOUS) rather than one silently winning.
+   */
+  environment?: string | null;
+  /**
+   * Deliberately subscribe to the DEVELOPMENT LINE on an application that has
+   * environments.
+   *
+   * Required, because the line receives every push the moment it lands — the
+   * exact accident environments exist to prevent. Without it, a subscribe that
+   * names no environment is refused (CALP_PULL_ENVIRONMENT_REQUIRED) with the
+   * environments on offer, rather than seating a consumer on unreleased work.
+   */
+  followLine?: boolean;
   /** The user was shown a cross-workspace NAME CONFLICT and accepted it in a
    *  second, differently-worded confirmation. Omitting it makes a conflicting
    *  subscribe FAIL with an explanation rather than pin — fail closed. */
@@ -768,6 +818,12 @@ export interface ApplicationInfo {
   kind: string;
   author: string;
   versions: VersionInfo[];
+  /**
+   * The application environments, from the manifest LISTING — unverified, and
+   * enough to render a picker. The version a subscription actually lands on is
+   * resolved through the SIGNED promotion log at pull.
+   */
+  environments: EnvironmentSummary[];
 }
 
 export interface VersionInfo {
@@ -794,6 +850,15 @@ export interface Subscription {
   resolvedVersion: string;
   resolvedAt: string;
   sheets: SubscribedSheet[];
+  /**
+   * Which ENVIRONMENT this follows. Absent follows the development line through
+   * `versionPin`, as every subscription did before environments existed.
+   *
+   * An environment subscription has NO pin, so a surface that shows "(pin X)"
+   * must show the environment instead — otherwise it invents a hint that is
+   * not there and calls every rolled-back prod subscription stale.
+   */
+  environment?: string | null;
   /** Provenance ledger: every object this subscription materialized
    * (written at pull, updated at refresh). May be absent on subscriptions
    * created before the ledger existed. */
@@ -869,6 +934,38 @@ export interface RefreshPreview {
    * partial list as a complete set of decisions.
    */
   conflictsExact: boolean;
+  /**
+   * Subscriptions following the development line whose application now defines
+   * environments. NEVER re-targeted silently: the subscriber chose the line, or
+   * was on it before there was anything else, and moving them would change
+   * which content their workbook accepts without them asking.
+   */
+  environmentNotices?: EnvironmentNotice[];
+  /**
+   * Subscriptions that could not be resolved at all. A ROW, not an error for
+   * the whole preview — one admin tidying up a pipeline must not blank every
+   * other subscription's preview. Apply is BLOCKED while this is non-empty.
+   */
+  unavailable?: UnavailableSubscription[];
+}
+
+/** A line-following subscription whose application has since grown a pipeline. */
+export interface EnvironmentNotice {
+  packageName: string;
+  registryUrl: string;
+  /** In pipeline order; the LAST is the one to suggest. */
+  environments: string[];
+}
+
+/** A subscription this refresh cannot resolve, and why. */
+export interface UnavailableSubscription {
+  packageName: string;
+  registryUrl: string;
+  environment?: string | null;
+  /** The refusal, in the words the user should read. */
+  reason: string;
+  /** What it could follow instead, in pipeline order. */
+  available?: string[];
 }
 
 export interface SubscriptionPreview {
@@ -881,8 +978,19 @@ export interface SubscriptionPreview {
    * their own share.
    */
   registryUrl: string;
+  /** The environment this follows, or absent for the development line. */
+  environment?: string | null;
   currentVersion: string;
   newVersion: string;
+  /**
+   * The refresh goes BACKWARDS — the environment was rolled back to a version
+   * published earlier.
+   *
+   * Computed backend-side by comparing parsed versions, never by string order:
+   * `"1.9.0" > "1.10.0"` lexicographically, and a rollback across a two-digit
+   * minor is exactly when a subscriber most needs the direction to be right.
+   */
+  isRollback: boolean;
   sheetsAdded: SheetChangeInfo[];
   sheetsRemoved: SheetChangeInfo[];
   sheetsUpdated: SheetChangeInfo[];
@@ -1184,6 +1292,175 @@ export function diffSheetCells(params: {
   return invokeBackend("calp_diff_sheet_cells", { params });
 }
 
+// ============================================================================
+// Environments — Dev → Test → Prod as pointers on one development line
+// ============================================================================
+
+/** One environment, as the publisher surfaces show it. */
+export interface EnvironmentPointer {
+  name: string;
+  /** `null` = defined but nothing promoted into it yet. */
+  version?: string | null;
+  previousVersion: string;
+  promotedAt: string;
+  /** Display name of the promoter. Not verified; `promoterKey` is. */
+  promotedBy: string;
+  promoterKey: string;
+  /** Whether THIS computer holds the key that last moved this pointer. */
+  isYou: boolean;
+  sequence: number;
+  /**
+   * Every version this environment has held, newest first, excluding the
+   * current one — the rollback candidates. Computed from the whole signed log,
+   * so a rollback across two promotions is reachable.
+   */
+  heldVersions: string[];
+}
+
+/** One entry in the signed promotion history. */
+export interface PromotionHistoryEntry {
+  sequence: number;
+  /** `"pipeline"` or `"promote"`. */
+  kind: string;
+  environment: string;
+  version: string;
+  previousVersion: string;
+  /** The whole ordered pipeline, for a `pipeline` entry. */
+  environments: string[];
+  at: string;
+  by: string;
+  key: string;
+  isYou: boolean;
+  isRollback: boolean;
+}
+
+export interface EnvironmentsResponse {
+  packageName: string;
+  /** Where the next push lands, and what the first environment promotes from. */
+  headVersion: string;
+  environments: EnvironmentPointer[];
+  /** Newest first. */
+  history: PromotionHistoryEntry[];
+  youMayPromote: boolean;
+  /** False for an HTTP workspace, which is read-only. */
+  writable: boolean;
+  /**
+   * Set when the promotion log exists but could not be trusted. Rendered as a
+   * problem, never as "no environments": those two must not look alike.
+   */
+  problem: string;
+}
+
+/** Fired after a push, a promotion, a pipeline edit or a subscription switch. */
+export const ENVIRONMENTS_CHANGED_EVENT = "distribution:environments-changed";
+
+export interface EnvironmentsChangedPayload {
+  registryPath: string;
+  packageName: string;
+}
+
+/** The application's pipeline, its promotion history, and whether you may promote. */
+export function listEnvironments(params: {
+  registryPath: string;
+  packageName: string;
+}): Promise<EnvironmentsResponse> {
+  return invokeBackend("calp_environments", { params });
+}
+
+/**
+ * Define the ordered pipeline. An empty list removes every environment.
+ *
+ * `expectedSequence` is the `sequence` the caller read. The workspace lock
+ * serializes two admins' writes but cannot see that the second one's READ was
+ * stale — the same lost update the base-version gate exists for.
+ */
+export function setEnvironments(params: {
+  registryPath: string;
+  packageName: string;
+  environments: string[];
+  expectedSequence: number;
+}): Promise<EnvironmentsResponse> {
+  return invokeBackend("calp_set_environments", { params });
+}
+
+/**
+ * Move one environment's pointer. Forward is a promotion; back to a version it
+ * held before is a rollback. Same gates, same signature.
+ *
+ * ALWAYS pass `version` and `expectedCurrent` explicitly — the version the user
+ * was SHOWN, and the pointer the dialog rendered. A push or a colleague's
+ * promotion can land between the render and the click, and promoting over a
+ * pointer nobody looked at is the defect `previewedVersions` closed for refresh.
+ */
+export function promoteEnvironment(params: {
+  registryPath: string;
+  packageName: string;
+  environment: string;
+  version: string;
+  /** What the dialog showed the target holding — `null` for "nothing". */
+  expectedCurrent: string | null;
+}): Promise<PromoteResult> {
+  const { expectedCurrent, ...rest } = params;
+  // TWO FIELDS on the wire. `Option<Option<String>>` does not survive JSON —
+  // serde reads `null` as the outer `None`, so "the dialog showed an empty
+  // environment" would arrive as "do not check", silently disabling the gate.
+  return invokeBackend("calp_promote", {
+    params: { ...rest, checkCurrent: true, expectedCurrent: expectedCurrent ?? "" },
+  });
+}
+
+/**
+ * What a promotion WOULD do to data already collected in the target
+ * environment.
+ *
+ * A SEPARATE READ so the window can show it before the confirm. The same
+ * report comes back from the promotion itself, but a report that arrives after
+ * the decision is a receipt, not a warning.
+ */
+export function promotionImpact(params: {
+  registryPath: string;
+  packageName: string;
+  environment: string;
+  /** The version being offered. Always send it — an unnamed one answers nothing. */
+  version: string;
+}): Promise<{ writebackReport: string }> {
+  return invokeBackend("calp_promotion_impact", { params });
+}
+
+export interface PromoteResult {
+  /**
+   * What this promotion did to data already collected in the environment —
+   * regions that moved, were removed, or are new. Empty when nothing is
+   * affected, so an application without writeback carries no noise.
+   */
+  writebackReport: string;
+  environment: string;
+  from?: string | null;
+  to: string;
+  isRollback: boolean;
+  sequence: number;
+  environments: EnvironmentPointer[];
+}
+
+/**
+ * Change which environment a subscription follows, or move it to the
+ * development line.
+ *
+ * PULLS NOTHING. The next refresh moves the content, and its preview shows what
+ * that will be — so a two-word choice never becomes an unreviewed content
+ * change. `environment: null` returns to the line and needs a `versionPin`.
+ */
+export function setSubscriptionEnvironment(params: {
+  registryUrl: string;
+  packageName: string;
+  environment: string | null;
+  versionPin?: string;
+}): Promise<void> {
+  return invokeBackend("calp_set_subscription_environment", {
+    params: { versionPin: "", ...params },
+  });
+}
+
 /** Who may publish this application — the root, plus any delegates it authorized. */
 export function listCoPublishers(params: {
   registryPath: string;
@@ -1358,8 +1635,22 @@ export function inspectApplication(
   registryPath: string,
   packageName: string,
   versionPin: string,
+  /**
+   * Resolve through an environment's pointer instead of the pin.
+   *
+   * A PARAMETER, never a prefix inside the pin string. Encoding it there would
+   * recreate the dead `channel:` convention exactly: a magic prefix every
+   * parser has to special-case, and eleven that did while nothing produced one.
+   * `VersionPin::parse` now refuses such a prefix by name.
+   */
+  environment?: string | null,
 ): Promise<ApplicationInspection> {
-  return invokeBackend("calp_inspect_application", { registryPath, packageName, versionPin });
+  return invokeBackend("calp_inspect_application", {
+    registryPath,
+    packageName,
+    versionPin,
+    environment: environment ?? null,
+  });
 }
 
 /**
@@ -1380,6 +1671,15 @@ export interface SubscriptionTrustInfo {
   packageName: string;
   registryUrl: string;
   resolvedVersion: string;
+  /** The environment this follows, or absent for the development line. */
+  environment?: string | null;
+  /**
+   * Every environment the application now offers, in pipeline order.
+   *
+   * What lets the Subscriptions pane offer a switch — and lets it tell a
+   * line-following subscription that a pipeline appeared since it was made.
+   */
+  availableEnvironments?: string[];
   /** A `CalpTrustStatus`, or "unavailable" when the workspace/manifest could not
    *  be read or verified at all (see `error`). */
   trustStatus: CalpTrustStatus | "unavailable";
@@ -1482,6 +1782,12 @@ export interface SheetProvenanceInfo {
    * longer answer it.
    */
   role: SheetProvenanceRole;
+  /**
+   * The environment a SUBSCRIBED sheet follows, or absent for the development
+   * line. Always absent for a working-copy sheet: a working copy is of a
+   * VERSION on the line, never of an environment.
+   */
+  environment?: string | null;
 }
 
 /** @see SheetProvenanceInfo.role */
@@ -2100,6 +2406,13 @@ export function setSubmissionState(
 export interface RegionSubmission {
   /** The submission event id this row shows — pass back on approve/reject. */
   submissionId: string;
+  /**
+   * The stream this was submitted in; empty = the development line.
+   *
+   * Shown, not just carried: a dashboard reporting "3 responses" without
+   * saying whose is how a test count gets read as a production one.
+   */
+  environment: string;
   regionId: string;
   cellRow: number;
   cellCol: number;
@@ -2118,8 +2431,19 @@ export interface RegionSubmission {
 
 /** Load every submission for a writeback region across all submitters — the
  *  publisher's "see all" view (D5). Not filtered by per-subscriber visibility. */
-export function loadRegionSubmissions(regionId: string): Promise<RegionSubmission[]> {
-  return invokeBackend("calp_load_region_submissions", { regionId });
+/**
+ * Every submitter's current record for one region — the publisher inbox.
+ *
+ * `environment` looks at a stream OTHER than the one this workbook follows.
+ * Omit it for the workbook's own, which is the only correct answer for
+ * anything that feeds a value; the dashboard passes it so a publisher can
+ * check what testers submitted without switching their own subscription.
+ */
+export function loadRegionSubmissions(
+  regionId: string,
+  environment?: string | null,
+): Promise<RegionSubmission[]> {
+  return invokeBackend("calp_load_region_submissions", { regionId, environment });
 }
 
 /** Export every submission for a region as CSV text (publisher data-collection

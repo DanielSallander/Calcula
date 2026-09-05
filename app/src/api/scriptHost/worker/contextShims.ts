@@ -1219,7 +1219,13 @@ function buildCapsShim(rt: WorkerRuntime): {
     listSubscriptions(): Promise<unknown>;
     browse(registry: string): Promise<unknown[]>;
     inspect(registry: string, packageName: string, versionPin: string): Promise<unknown>;
-    pull(registry: string, packageName: string, versionPin: string): Promise<unknown>;
+    pull(
+      registry: string,
+      packageName: string,
+      versionPin: string | null,
+      environment?: string | null,
+      followLine?: boolean,
+    ): Promise<unknown>;
     refreshPreview(): Promise<unknown>;
     refreshApply(): Promise<unknown>;
   };
@@ -1575,14 +1581,36 @@ function buildCapsShim(rt: WorkerRuntime): {
       },
       /** Look inside a package version — sheets, data sources, every script it
        *  carries and the capabilities each declares — WITHOUT taking it. */
-      async inspect(registry: string, packageName: string, versionPin: string) {
-        return call(rt, "cap.pkgInspect", [registry, packageName, versionPin]);
+      async inspect(
+        registry: string,
+        packageName: string,
+        versionPin: string,
+        environment?: string | null,
+      ) {
+        return call(rt, "cap.pkgInspect", [
+          registry,
+          packageName,
+          versionPin,
+          environment ?? null,
+        ]);
       },
       /** Subscribe to a package and materialize it. Verified exactly as an
        *  interactive subscribe is: Ed25519 signature, publisher trust pin,
        *  per-artifact checksums, minimum app version. */
-      async pull(registry: string, packageName: string, versionPin: string) {
-        return call(rt, "cap.pkgPull", [registry, packageName, versionPin]);
+      async pull(
+        registry: string,
+        packageName: string,
+        versionPin: string | null,
+        environment?: string | null,
+        followLine?: boolean,
+      ) {
+        return call(rt, "cap.pkgPull", [
+          registry,
+          packageName,
+          versionPin ?? "",
+          environment ?? null,
+          followLine === true,
+        ]);
       },
       /** What updating every subscription would change — without changing it. */
       async refreshPreview() {

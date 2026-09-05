@@ -20,7 +20,6 @@ use crate::overrides::{OverrideLayer, OverrideValue};
 use crate::pull::{self, PullRequest, PullResult};
 use crate::workspace_id::WorkspaceScope;
 use crate::transport::WorkspaceTransport;
-use crate::version::VersionPin;
 
 // ============================================================================
 // Refresh Preview
@@ -1011,8 +1010,8 @@ mod tests {
     use crate::manifest::SubscribedSheet;
     use crate::workspace::LocalWorkspace;
     use tempfile::TempDir;
-    use crate::publish::{self, PublishRequest, PushMode};
-    use crate::version::SemVer;
+    use crate::publish::{self, PublishRequest};
+    use crate::version::{SemVer, VersionPin};
 
     /// The scope a real call site derives from the workspace's location.
     fn scope_of(dir: &TempDir) -> WorkspaceScope {

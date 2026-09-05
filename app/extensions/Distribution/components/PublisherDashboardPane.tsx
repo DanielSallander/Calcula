@@ -13,6 +13,7 @@ import { acquireSubmissionWatch } from "@api/distribution";
 import {
   getWritebackRegions,
   loadRegionSubmissions,
+  getSubscriptionTrust,
   setSubmissionState,
   exportRegionSubmissionsCsv,
   exportRegionSubmissionsParquet,
@@ -59,6 +60,20 @@ export function PublisherDashboardPane(): React.ReactElement {
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
 
+  /**
+   * Which stream the inbox is showing.
+   *
+   * `null` is this workbook's own — the default, and the only one that matches
+   * what a GATHER on these sheets computes. A publisher who wants to see what
+   * testers submitted picks the environment explicitly, and the strip below
+   * names whichever is being shown, because "3 responses" without the stream is
+   * how a test count gets read as a production one.
+   */
+  const [viewing, setViewing] = useState<string | null>(null);
+  const [environments, setEnvironments] = useState<string[]>([]);
+  const viewingRef = useRef<string | null>(null);
+  viewingRef.current = viewing;
+
   const loadRegions = useCallback(async () => {
     try {
       const r = await getWritebackRegions();
@@ -74,7 +89,7 @@ export function PublisherDashboardPane(): React.ReactElement {
     setError(null);
     try {
       const [subs, st, rp] = await Promise.all([
-        loadRegionSubmissions(regionId),
+        loadRegionSubmissions(regionId, viewingRef.current),
         regionResponseStatus(regionId).catch(() => null),
         getWritebackRollup(regionId).catch(() => false),
       ]);
@@ -95,6 +110,33 @@ export function PublisherDashboardPane(): React.ReactElement {
     const unsub = onAppEvent(AppEvents.SHEET_CHANGED, loadRegions);
     return unsub;
   }, [loadRegions]);
+
+  // Which streams this workbook's subscriptions know about, so the picker
+  // offers real ones. Best effort — an application without environments simply
+  // gets no picker.
+  useEffect(() => {
+    let cancelled = false;
+    getSubscriptionTrust()
+      .then((rows) => {
+        if (cancelled) return;
+        const names = new Set<string>();
+        for (const r of rows) {
+          for (const e of r.availableEnvironments ?? []) names.add(e);
+        }
+        setEnvironments([...names]);
+      })
+      .catch(() => {
+        if (!cancelled) setEnvironments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (selected) void loadSubs(selected);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewing]);
 
   // Hold a submission watch while this pane is open, and refresh when it says
   // answers arrived. The watch is refcounted and demand-driven: opening this
@@ -223,6 +265,21 @@ export function PublisherDashboardPane(): React.ReactElement {
             ))}
           </select>
         )}
+        {environments.length > 0 && (
+          <select
+            value={viewing ?? ""}
+            onChange={(e) => setViewing(e.target.value || null)}
+            style={styles.select}
+            title="Which environment's submissions to show. Your own is what a GATHER on these sheets computes."
+          >
+            <option value="">this workbook&rsquo;s stream</option>
+            {environments.map((e) => (
+              <option key={e} value={e}>
+                {e}
+              </option>
+            ))}
+          </select>
+        )}
         <button onClick={() => selected && loadSubs(selected)} disabled={loading || !selected} style={styles.smallBtn}>
           {loading ? "..." : "Refresh"}
         </button>
@@ -247,6 +304,14 @@ export function PublisherDashboardPane(): React.ReactElement {
       {selected && (
         <div style={styles.summary}>
           <span style={styles.summaryItem}>{respondents} respondent{respondents !== 1 ? "s" : ""}</span>
+          {viewing && (
+            <span
+              style={{ ...styles.chip, background: "#e8f0fe", color: "#1a5fb4" }}
+              title="These rows are from another environment, not the one this workbook follows."
+            >
+              in {viewing}
+            </span>
+          )}
           {pending > 0 && <span style={{ ...styles.chip, ...styles.chipPending }}>{pending} pending</span>}
           {approved > 0 && <span style={{ ...styles.chip, ...styles.chipApproved }}>{approved} approved</span>}
           {rejected > 0 && <span style={{ ...styles.chip, ...styles.chipRejected }}>{rejected} rejected</span>}

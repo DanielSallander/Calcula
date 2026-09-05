@@ -2024,6 +2024,12 @@ export {
   listCoPublishers,
   setCoPublishers,
   myPublisherKey,
+  listEnvironments,
+  setEnvironments,
+  promoteEnvironment,
+  promotionImpact,
+  setSubscriptionEnvironment,
+  ENVIRONMENTS_CHANGED_EVENT,
 } from "./distribution";
 
 export type {
@@ -2097,6 +2103,14 @@ export type {
   PieceKey,
   CoPublisherInfo,
   CoPublishersResponse,
+  EnvironmentPointer,
+  EnvironmentSummary,
+  EnvironmentsResponse,
+  EnvironmentsChangedPayload,
+  PromotionHistoryEntry,
+  PromoteResult,
+  EnvironmentNotice,
+  UnavailableSubscription,
 } from "./distribution";
 
 // ============================================================================

@@ -1629,6 +1629,9 @@ declare interface ScriptPackagesApi {
   /** Look inside a package version — including every script it carries and the
    *  capabilities each declares — WITHOUT bringing anything in.
    *
+   *  Pass `environment` to resolve through an environment's pointer instead of
+   *  the pin; exactly one of the two, never both.
+   *
    * Calcula policy (generated): Look inside a published application before taking it — its sheets, its data sources and every script it carries — without bringing anything in.
    * Reach: broker `cap.pkgInspect`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 20.
    */
@@ -1636,12 +1639,25 @@ declare interface ScriptPackagesApi {
     registry: string,
     packageName: string,
     versionPin: string,
+    environment?: string | null,
   ): Promise<ScriptPackageInspection>;
   /**
    * Subscribe to a package and materialize it into this workbook.
    *
-   * `versionPin` is a semver pin: an exact version ("1.2.0"), a range
-   * ("^1.0.0", "~1.2.0") or "latest".
+   * EXACTLY ONE TARGET. Either `versionPin` — a semver pin: an exact version
+   * ("1.2.0"), a range ("^1.0.0", "~1.2.0") or "latest" — or `environment`, the
+   * name of a deployment environment such as "prod". Passing both is refused
+   * rather than one silently winning.
+   *
+   * An environment subscription follows that environment's POINTER: it moves
+   * when somebody promotes, not when a version is pushed. That is the point —
+   * the development line receives every push the moment it lands, including
+   * work nobody has released.
+   *
+   * Which is why subscribing to the LINE on an application that HAS
+   * environments requires `followLine: true`. Without it the pull is refused
+   * and names the environments on offer, so a script cannot quietly seat every
+   * machine that runs it on unreleased work.
    *
    * Calcula policy (generated): Bring somebody else's published application into this workbook — its sheets, data and any code it carries (the code stays switched off until you say yes, and only workspaces you already added can be used).
    * Reach: broker `cap.pkgPull`, unlocked tier, class net, requires the `distribution.subscribe` capability. Limits: perMinute 6.
@@ -1649,7 +1665,9 @@ declare interface ScriptPackagesApi {
   pull(
     registry: string,
     packageName: string,
-    versionPin: string,
+    versionPin: string | null,
+    environment?: string | null,
+    followLine?: boolean,
   ): Promise<ScriptPullResult>;
   /** What updating every subscription would change — without changing it.
    *

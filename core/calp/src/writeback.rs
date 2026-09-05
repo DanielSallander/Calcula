@@ -1089,6 +1089,20 @@ pub struct WritebackSubmission {
     /// Display name of the publisher who made the approve/reject decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed_by: Option<String>,
+    /// WHICH ENVIRONMENT this was submitted against. Empty = the development
+    /// line, which is also what every submission made before environments
+    /// existed deserializes to.
+    ///
+    /// WHY A SUBMISSION NEEDS ONE AT ALL. Submissions are stored per VERSION,
+    /// and an environment is a pointer to a version — so testers submitting
+    /// against test@v1.5.0 and a production audience later moved onto v1.5.0
+    /// land in the SAME tree, indistinguishably. The publisher's aggregate then
+    /// silently mixes test data into production numbers, and nothing anywhere
+    /// says it happened. The tag is what keeps the two apart; every reader
+    /// filters on it through `visible_in`, which exists so that filtering is one
+    /// decision rather than nine.
+    #[serde(default)]
+    pub environment: String,
     /// MODEL-KEYED submission (writeback COLUMN, engine v21): the host row's
     /// key VALUES, pairing positionally with the declaration's `key_columns`.
     /// When set, `region_id` is the writeback column id and
@@ -1927,6 +1941,7 @@ mod tests {
 
     fn make_submission(region_id: &str, row: u32, col: u32, value: f64, submitter: &str) -> WritebackSubmission {
         WritebackSubmission {
+            environment: String::new(),
             model_key: None,
             id: format!("sub-{}-{}-{}", region_id, row, col),
             region_id: region_id.to_string(),
@@ -2443,5 +2458,106 @@ mod tests {
         let review: ReviewEvent = serde_json::from_value(minimal).unwrap();
         assert!(review.review_reason.is_none());
         assert!(review.reviewed_by.is_none());
+    }
+}
+
+
+/// The submissions a reader in `environment` may see.
+///
+/// ONE PLACE, because the alternative is nine call sites each deciding, and the
+/// failure mode of getting it wrong is invisible: a production total that quietly
+/// includes a tester's number reads exactly like a production total.
+///
+/// `None` means "every environment" and is for the PUBLISHER's dashboard, which
+/// is the one reader that legitimately wants to see across the pipeline — with a
+/// selector, so the mixing is a thing a person asked for rather than a thing that
+/// happened. Everything a subscriber reads passes `Some`, and a subscriber on the
+/// development line passes `Some("")`.
+pub fn visible_in(
+    submissions: Vec<WritebackSubmission>,
+    environment: Option<&str>,
+) -> Vec<WritebackSubmission> {
+    match environment {
+        None => submissions,
+        Some(env) => submissions
+            .into_iter()
+            .filter(|s| s.environment == env)
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod environment_tag_tests {
+    use super::*;
+
+    fn sub(id: &str, environment: &str) -> WritebackSubmission {
+        WritebackSubmission {
+            id: id.to_string(),
+            region_id: "r1".to_string(),
+            cell_row: 0,
+            cell_col: 0,
+            cell_id: None,
+            submitter: crate::identity_provider::SubmitterIdentity {
+                id: "u1".to_string(),
+                display_name: "U".to_string(),
+                extra: Default::default(),
+            },
+            value: SubmissionValue::Number { value: 1.0 },
+            state: SubmissionState::Submitted,
+            created_at: String::new(),
+            updated_at: String::new(),
+            submitted_at: None,
+            review_reason: None,
+            reviewed_by: None,
+            environment: environment.to_string(),
+            model_key: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// A tester's number must not reach a production aggregate.
+    ///
+    /// SABOTAGE: return `submissions` unfiltered for `Some` too. Both rows come
+    /// back, and every total computed downstream is wrong in a way no screen
+    /// anywhere can show.
+    #[test]
+    fn a_reader_sees_only_its_own_environment() {
+        let all = vec![sub("a", "test"), sub("b", "prod"), sub("c", "")];
+
+        let prod = visible_in(all.clone(), Some("prod"));
+        assert_eq!(prod.len(), 1);
+        assert_eq!(prod[0].id, "b");
+
+        // The development line is an environment like any other here, spelled
+        // "". A subscriber who follows the line must not see prod's data either.
+        let line = visible_in(all.clone(), Some(""));
+        assert_eq!(line.len(), 1);
+        assert_eq!(line[0].id, "c");
+
+        // The publisher dashboard, which asks across the pipeline deliberately.
+        assert_eq!(visible_in(all, None).len(), 3);
+    }
+
+    /// A submission written before environments existed is a LINE submission,
+    /// not an untagged one visible everywhere.
+    ///
+    /// SABOTAGE: make the field `Option<String>` and treat `None` as a wildcard.
+    #[test]
+    fn an_untagged_submission_deserializes_onto_the_line() {
+        let json = serde_json::json!({
+            "id": "old",
+            "regionId": "r1",
+            "cellRow": 0,
+            "cellCol": 0,
+            "submitter": { "id": "u1", "displayName": "U" },
+            "value": { "type": "number", "value": 1.0 },
+            "state": "submitted",
+            "createdAt": "",
+            "updatedAt": ""
+        });
+        let parsed: WritebackSubmission = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.environment, "");
+        assert_eq!(visible_in(vec![parsed.clone()], Some("")).len(), 1);
+        assert_eq!(visible_in(vec![parsed], Some("prod")).len(), 0);
     }
 }

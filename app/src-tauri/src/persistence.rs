@@ -5852,6 +5852,7 @@ mod distribution_user_file_restore_tests {
             .unwrap()
             .drafts
             .push(calp::writeback::WritebackSubmission {
+                environment: String::new(),
                 id: "sub-a".to_string(),
                 region_id: "region-a".to_string(),
                 cell_row: 1,

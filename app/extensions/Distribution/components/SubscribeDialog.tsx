@@ -30,6 +30,10 @@ import {
 } from "@api/distributionWorkspaces";
 import { pickWorkspaceFile } from "../lib/pickWorkspace";
 import { useDialogWindow } from "@api/dialogWindow";
+import {
+  defaultEnvironment,
+  formatSubscriptionTarget,
+} from "../lib/environments";
 import { openApplicationInspectorWindow } from "../lib/openApplicationInspectorWindow";
 import { getConnections, connect, updateConnection } from "../../_shared/lib/bi-api";
 import { ConnectSourceDialog, type ConnectSourceFields } from "../../_shared/components/ConnectSourceDialog";
@@ -213,6 +217,19 @@ export function SubscribeDialog({ onClose }: DialogProps) {
   const [registryPath, setRegistryPath] = useState("");
   const [packageName, setPackageName] = useState("");
   const [versionPin, setVersionPin] = useState("latest");
+  /**
+   * Which environment this subscription will follow — `null` means the
+   * development line.
+   *
+   * The DEFAULT for an application with a pipeline is its LAST environment,
+   * production by convention: the end of the pipeline is what consumers
+   * consume. Following the line is still reachable, but only under Advanced and
+   * only deliberately — the line receives every push the moment it lands, which
+   * is the exact accident environments exist to prevent.
+   */
+  const [environment, setEnvironment] = useState<string | null>(null);
+  /** Whether the Advanced pin controls are showing. */
+  const [showPinControls, setShowPinControls] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inspection, setInspection] = useState<ApplicationInspection | null>(null);
@@ -292,7 +309,14 @@ export function SubscribeDialog({ onClose }: DialogProps) {
     setError(null);
     setStatus("Inspecting application...");
     try {
-      const result = await inspectApplication(registryPath, packageName, versionPin);
+      const result = await inspectApplication(
+        registryPath,
+        packageName,
+        // Exactly one target. An environment subscription has no pin, and
+        // sending both is refused rather than one silently winning.
+        environment ? "" : versionPin,
+        environment,
+      );
       setInspection(result);
       setStatus(null);
     } catch (err: unknown) {
@@ -372,7 +396,13 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       const result = await subscribeToApplication({
         registryPath,
         packageName,
-        versionPin,
+        versionPin: environment ? "" : versionPin,
+        environment,
+        // Following the LINE on an application that has environments is the
+        // footgun this feature exists to remove, so it is never the default and
+        // never implicit. The backend refuses without this flag and names the
+        // environments on offer.
+        followLine: !environment,
         // Only set when the Review step SHOWED the cross-workspace name conflict
         // and the user answered the second, differently-worded question. The
         // backend refuses a conflicting subscribe without it, so a UI that
@@ -792,7 +822,12 @@ export function SubscribeDialog({ onClose }: DialogProps) {
             return (
               <div
                 key={pkg.name}
-                onClick={() => { setPackageName(pkg.name); setVersionPin("latest"); }}
+                onClick={() => {
+                  setPackageName(pkg.name);
+                  setVersionPin("latest");
+                  setEnvironment(defaultEnvironment(pkg.environments));
+                  setShowPinControls(false);
+                }}
                 style={{ padding: "6px 8px", borderBottom: "1px solid var(--border-default)", cursor: "pointer", background: selected ? "#eef5ff" : "transparent", color: selected ? "#1a1a1a" : "inherit" }}
               >
                 <div style={{ fontWeight: 600, fontSize: 13 }}>{pkg.name}</div>
@@ -801,10 +836,86 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                   {` · ${pkg.versions.length} version${pkg.versions.length !== 1 ? "s" : ""}`}
                   {pkg.author ? ` · ${pkg.author}` : ""}
                 </div>
-                {selected && pkg.versions.length > 0 && (
+                {/* ENVIRONMENTS FIRST, as radios rather than chips. A chip row
+                    invites a scan for the newest number; the question here is
+                    which audience you are joining, and it has a right answer
+                    the publisher already made. */}
+                {selected && pkg.environments.length > 0 && (
+                  <div style={{ marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 2 }}>
+                      Environment
+                    </div>
+                    {pkg.environments.map((env) => (
+                      <label
+                        key={env.name}
+                        style={{
+                          display: "flex",
+                          gap: 6,
+                          alignItems: "baseline",
+                          fontSize: 12,
+                          opacity: env.version ? 1 : 0.55,
+                          cursor: env.version ? "pointer" : "not-allowed",
+                        }}
+                        title={
+                          env.version
+                            ? undefined
+                            : `Nothing has been promoted into ${env.name} yet.`
+                        }
+                      >
+                        <input
+                          type="radio"
+                          name="subscribe-environment"
+                          checked={environment === env.name}
+                          disabled={!env.version}
+                          onChange={() => {
+                            setEnvironment(env.name);
+                            // An environment subscription carries no pin: the
+                            // pointer IS the target, and a stale pin beside it
+                            // would be a second answer to the same question.
+                            setVersionPin("");
+                          }}
+                        />
+                        <span>
+                          {env.name}
+                          {env.version ? ` — v${env.version}` : " — nothing promoted yet"}
+                        </span>
+                      </label>
+                    ))}
+                    <button
+                      onClick={() => setShowPinControls((v) => !v)}
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        color: "var(--link-color, #0b5cad)",
+                        cursor: "pointer",
+                        padding: 0,
+                        fontSize: 11,
+                        textDecoration: "underline",
+                        marginTop: 4,
+                      }}
+                    >
+                      {showPinControls
+                        ? "Hide advanced"
+                        : "Advanced: pin a version on the development line instead"}
+                    </button>
+                    {showPinControls && (
+                      <div style={{ fontSize: 11, color: "#664d03", background: "#fff3cd", padding: "4px 6px", borderRadius: 3, marginTop: 4, lineHeight: 1.4 }}>
+                        The development line receives every push the moment it lands,
+                        including work that has not been through {pkg.environments[0]?.name ?? "testing"}.
+                        Pick a version below only if you mean to follow unreleased work.
+                      </div>
+                    )}
+                  </div>
+                )}
+                {selected &&
+                  pkg.versions.length > 0 &&
+                  (pkg.environments.length === 0 || showPinControls) && (
                   <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }} onClick={(e) => e.stopPropagation()}>
                     <button
-                      onClick={() => setVersionPin("latest")}
+                      onClick={() => {
+                        setVersionPin("latest");
+                        setEnvironment(null);
+                      }}
                       style={{ fontSize: 11, padding: "1px 6px", border: "none", borderRadius: 3, cursor: "pointer", background: versionPin === "latest" ? "#1967d2" : "#f1f3f4", color: versionPin === "latest" ? "#fff" : "#333" }}
                     >
                       latest
@@ -814,7 +925,10 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                       return (
                         <button
                           key={v.version}
-                          onClick={() => setVersionPin(pin)}
+                          onClick={() => {
+                            setVersionPin(pin);
+                            setEnvironment(null);
+                          }}
                           title={`Published ${v.publishedAt}${v.publishedBy ? ` by ${v.publishedBy}` : ""}`}
                           style={{ fontSize: 11, padding: "1px 6px", border: "none", borderRadius: 3, cursor: "pointer", background: versionPin === pin ? "#1967d2" : "#f1f3f4", color: versionPin === pin ? "#fff" : "#333" }}
                         >
@@ -835,13 +949,26 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         <input style={inputStyle} value={packageName} onChange={(e) => setPackageName(e.target.value)}
           placeholder="sales-report" />
       </div>
-      <div style={fieldStyle}>
-        <label>Version Pin</label>
-        <input style={inputStyle} value={versionPin} onChange={(e) => setVersionPin(e.target.value)} />
-        <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
-          Examples: =1.2.3, ^1.0, ~1.2, latest
-        </span>
-      </div>
+      {/* THE TARGET, in one line, whatever produced it. Radio, chip, or typed
+          pin all end up here, and a subscriber should be able to read what they
+          are about to follow without reconstructing it from three controls. */}
+      {environment ? (
+        <div style={fieldStyle}>
+          <label>Following</label>
+          <div style={{ fontSize: 12 }}>
+            <strong>{environment}</strong> — this subscription moves when{" "}
+            {environment} is promoted, not when a version is pushed.
+          </div>
+        </div>
+      ) : (
+        <div style={fieldStyle}>
+          <label>Version Pin</label>
+          <input style={inputStyle} value={versionPin} onChange={(e) => setVersionPin(e.target.value)} />
+          <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+            Examples: =1.2.3, ^1.0, ~1.2, latest — this follows the development line.
+          </span>
+        </div>
+      )}
 
       {messages}
     </>
@@ -852,7 +979,8 @@ export function SubscribeDialog({ onClose }: DialogProps) {
       <div style={headerStyle} onMouseDown={win.onHeaderMouseDown}>
         <span style={{ fontWeight: 600 }}>
           {inspection
-            ? `Review: ${inspection.packageName} v${inspection.resolvedVersion}`
+            ? `Review: ${formatSubscriptionTarget(inspection.packageName, environment)} ` +
+              `v${inspection.resolvedVersion}`
             : "Subscribe to Application"}
         </span>
         <button style={closeButtonStyle} onClick={onClose} aria-label="Close" title="Close">

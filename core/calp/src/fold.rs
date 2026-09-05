@@ -157,6 +157,7 @@ mod tests {
         value: f64,
     ) -> WritebackSubmission {
         WritebackSubmission {
+            environment: String::new(),
             id: id.to_string(),
             region_id: region.to_string(),
             cell_row: row,

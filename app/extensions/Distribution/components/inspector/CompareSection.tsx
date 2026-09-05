@@ -7,6 +7,8 @@
 // first view that reads more than one of them at a time.
 
 import React, { useEffect, useMemo, useState } from "react";
+import { listEnvironments, type EnvironmentPointer } from "@api/distribution";
+import { versionLabel } from "../../lib/environments";
 import type { CellDiff, VersionDiff } from "@api";
 import { diffSheetCells, diffVersions } from "@api";
 import type { InspectorContext } from "./ApplicationInspectorApp";
@@ -34,6 +36,41 @@ export function CompareSection({
   const [fromVersion, setFromVersion] = useState(
     versions[inspectedIndex + 1] ?? versions[inspectedIndex] ?? "",
   );
+
+  /**
+   * The pipeline, for labelling and for the default From.
+   *
+   * "What changed since the last release" is the comparison an inspector is
+   * opened for far more often than "what changed between two adjacent
+   * versions", and only the pipeline knows which version that was. Best-effort:
+   * an application without environments, or a log that does not verify, simply
+   * leaves the labels bare rather than failing a comparison that does not
+   * depend on it.
+   */
+  const [envs, setEnvs] = useState<EnvironmentPointer[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    listEnvironments({ registryPath: ctx.registryPath, packageName: ctx.packageName })
+      .then((r) => {
+        if (cancelled) return;
+        setEnvs(r.environments);
+        // Default From to what the LAST environment is running — the version
+        // the audience actually has — when it is one of the versions listed.
+        const last = r.environments[r.environments.length - 1]?.version;
+        if (last && last !== overview.resolvedVersion && versions.includes(last)) {
+          setFromVersion(last);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setEnvs([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx.registryPath, ctx.packageName]);
+
+  const head = versions[0] ?? "";
 
   const [diff, setDiff] = useState<VersionDiff | null>(null);
   const [busy, setBusy] = useState(false);
@@ -120,7 +157,7 @@ export function CompareSection({
           <select value={fromVersion} onChange={(e) => setFromVersion(e.target.value)}>
             {versions.map((v) => (
               <option key={v} value={v}>
-                v{v}
+                {versionLabel(v, envs, head)}
               </option>
             ))}
           </select>
@@ -131,7 +168,7 @@ export function CompareSection({
           <select value={toVersion} onChange={(e) => setToVersion(e.target.value)}>
             {versions.map((v) => (
               <option key={v} value={v}>
-                v{v}
+                {versionLabel(v, envs, head)}
               </option>
             ))}
           </select>

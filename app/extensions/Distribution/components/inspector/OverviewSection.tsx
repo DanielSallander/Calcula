@@ -3,8 +3,14 @@
 //          version history, a content census, and the policy-exclusion
 //          disclosure (what a .calp can NEVER carry).
 
-import React from "react";
-import type { CalpTrustStatus, InspectorOverview } from "@api/distribution";
+import React, { useEffect, useState } from "react";
+import type {
+  CalpTrustStatus,
+  EnvironmentsResponse,
+  InspectorOverview,
+} from "@api/distribution";
+import { listEnvironments } from "@api/distribution";
+import { environmentsAtVersion } from "../../lib/environments";
 import {
   Badge,
   KV,
@@ -111,8 +117,12 @@ function CountChip({ label, count }: { label: string; count: number }): React.Re
 
 export function OverviewSection({
   overview,
+  registryPath,
+  packageName,
 }: {
   overview: InspectorOverview;
+  registryPath: string;
+  packageName: string;
 }): React.ReactElement {
   const m = overview.manifest;
   const p = overview.package;
@@ -207,6 +217,12 @@ export function OverviewSection({
         )}
       </div>
 
+      <EnvironmentsCard
+        registryPath={registryPath}
+        packageName={packageName}
+        inspected={overview.resolvedVersion}
+      />
+
       <div style={cardStyle}>
         <div style={cardHeaderStyle}>Version history</div>
         <table style={tableStyle}>
@@ -250,6 +266,148 @@ export function OverviewSection({
           manifest, never from the source).
         </div>
       </div>
+    </div>
+  );
+}
+
+
+/**
+ * Where each environment points, and who moved it there.
+ *
+ * READ THROUGH THE SIGNED LOG, not the manifest listing. The listing is a cheap
+ * unverified mirror, fine for populating a picker; an inspector is the surface a
+ * person opens BECAUSE they want to know whether to believe what they are
+ * looking at, so the one place that must not take the mirror's word for it is
+ * this one. A log that does not verify renders as a problem, never as "no
+ * environments" — those two must not look alike here of all places.
+ */
+function EnvironmentsCard({
+  registryPath,
+  packageName,
+  inspected,
+}: {
+  registryPath: string;
+  packageName: string;
+  inspected: string;
+}): React.ReactElement | null {
+  const [info, setInfo] = useState<EnvironmentsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setInfo(null);
+    setError(null);
+    listEnvironments({ registryPath, packageName })
+      .then((r) => {
+        if (!cancelled) setInfo(r);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [registryPath, packageName]);
+
+  // An application with no pipeline gets no card. Rendering "no environments"
+  // beside twenty content counts would imply something is missing.
+  if (!error && (!info || (info.environments.length === 0 && !info.problem))) return null;
+
+  const here = info ? environmentsAtVersion(info.environments, inspected) : [];
+
+  return (
+    <div style={cardStyle}>
+      <div style={cardHeaderStyle}>Environments</div>
+      {error && <div style={{ ...mutedStyle, color: DANGER_RED }}>{error}</div>}
+      {info?.problem && (
+        <div style={{ ...mutedStyle, color: DANGER_RED, lineHeight: 1.5 }}>
+          {info.problem}
+        </div>
+      )}
+
+      {info && info.environments.length > 0 && (
+        <>
+          <KV label="Development line">
+            {info.headVersion ? `v${info.headVersion} (head)` : "—"}
+          </KV>
+          {here.length > 0 && (
+            <KV label="This version is live in">
+              <b>{here.join(", ")}</b>
+            </KV>
+          )}
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Environment</th>
+                <th style={thStyle}>Version</th>
+                <th style={thStyle}>Promoted</th>
+                <th style={thStyle}>By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {info.environments.map((e) => (
+                <tr key={e.name}>
+                  <td style={tdStyle}>{e.name}</td>
+                  <td style={tdStyle}>
+                    {e.version ? (
+                      e.version === inspected ? (
+                        <b>v{e.version} (inspected)</b>
+                      ) : (
+                        `v${e.version}`
+                      )
+                    ) : (
+                      "nothing promoted yet"
+                    )}
+                  </td>
+                  <td style={tdStyle}>{e.promotedAt || "—"}</td>
+                  <td style={tdStyle}>
+                    {e.promotedBy || "—"}
+                    {e.promoterKey ? ` (${e.promoterKey.slice(0, 12)}…)` : ""}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {info && info.history.length > 0 && (
+        <>
+          <div style={{ ...cardHeaderStyle, marginTop: 12 }}>Promotions</div>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>#</th>
+                <th style={thStyle}>What</th>
+                <th style={thStyle}>When</th>
+                <th style={thStyle}>Signed by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {info.history.map((h) => (
+                <tr key={h.sequence}>
+                  <td style={tdStyle}>{h.sequence}</td>
+                  <td style={tdStyle}>
+                    {h.kind === "pipeline"
+                      ? `pipeline = ${h.environments.join(" → ") || "(none)"}`
+                      : `${h.environment}: ${h.previousVersion ? `v${h.previousVersion} → ` : ""}v${h.version}${h.isRollback ? " (rolled back)" : ""}`}
+                  </td>
+                  <td style={tdStyle}>{h.at}</td>
+                  <td style={tdStyle}>
+                    {h.by || "—"} ({h.key.slice(0, 12)}…)
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ ...mutedStyle, fontSize: 11.5, marginTop: 6, lineHeight: 1.5 }}>
+            Every row above is signed by the key beside it and verified against the
+            application&rsquo;s authorised publishers. A promotion moves a pointer; it
+            copies nothing, so the version an environment names is bit-for-bit the one
+            published under that number.
+          </div>
+        </>
+      )}
     </div>
   );
 }

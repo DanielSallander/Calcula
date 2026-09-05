@@ -18,6 +18,7 @@ import {
   PublishPreviewSection,
 } from "./components/ApplicationExplorerPanel";
 import { WorkingCopySection } from "./components/WorkingCopySection";
+import { EnvironmentsSection } from "./components/EnvironmentsSection";
 import {
   DistributionManifest,
   DISTRIBUTION_MENU_ID,
@@ -42,6 +43,10 @@ import {
   SubscribeDialogDefinition,
   RefreshPreviewDialogDefinition,
   SubscriptionDiffDialogDefinition,
+  PromoteDialogDefinition,
+  EditPipelineDialogDefinition,
+  PROMOTE_DIALOG_ID,
+  EDIT_PIPELINE_DIALOG_ID,
   DesignateWritebackDialogDefinition,
   ConnectionDialogDefinition,
 } from "./manifest";
@@ -202,6 +207,14 @@ function activate(context: ExtensionContext): void {
         component: WorkingCopySection,
       },
       {
+        // Directly after the working copy, because it answers the developer's
+        // SECOND question: this is where my work stands — and who has it.
+        // A push moves the line; only a promotion moves an audience.
+        id: `${APPLICATION_EXPLORER_PANEL_ID}.environments`,
+        label: "Environments",
+        component: EnvironmentsSection,
+      },
+      {
         id: `${APPLICATION_EXPLORER_PANEL_ID}.connected`,
         label: "Connected objects",
         component: ConnectedObjectsSection,
@@ -265,9 +278,13 @@ function activate(context: ExtensionContext): void {
           color: SUBSCRIBED_CHIP.fg,
           background: SUBSCRIBED_CHIP.bg,
           tooltip:
-            `This sheet came from the application "${entry.packageName}". It is refreshed ` +
-            `from the workspace, your edits on it are kept as overrides, and it is ` +
-            `left out of a publish unless you tick it deliberately.`,
+            `This sheet came from the application "${entry.packageName}"` +
+            (entry.environment
+              ? `, following its "${entry.environment}" environment — it moves when ` +
+                `${entry.environment} is promoted, not when a version is pushed`
+              : "") +
+            `. It is refreshed from the workspace, your edits on it are kept as ` +
+            `overrides, and it is left out of a publish unless you tick it deliberately.`,
         };
       },
     }),
@@ -445,6 +462,8 @@ function activate(context: ExtensionContext): void {
   context.ui.dialogs.register(SubscriptionDiffDialogDefinition);
   context.ui.dialogs.register(DesignateWritebackDialogDefinition);
   context.ui.dialogs.register(ConnectionDialogDefinition);
+  context.ui.dialogs.register(PromoteDialogDefinition);
+  context.ui.dialogs.register(EditPipelineDialogDefinition);
   cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(PUBLISH_MODEL_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(SUBSCRIBE_DIALOG_ID));
@@ -452,6 +471,8 @@ function activate(context: ExtensionContext): void {
   cleanupFns.push(() => context.ui.dialogs.unregister(SUBSCRIPTION_DIFF_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(DESIGNATE_WRITEBACK_DIALOG_ID));
   cleanupFns.push(() => context.ui.dialogs.unregister(CONNECTION_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(PROMOTE_DIALOG_ID));
+  cleanupFns.push(() => context.ui.dialogs.unregister(EDIT_PIPELINE_DIALOG_ID));
 
   // -----------------------------------------------------------------------
   // Menus. Distribution and Writeback are two features, so they are two

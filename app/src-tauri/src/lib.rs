@@ -135,6 +135,7 @@ pub mod r1c1;
 pub mod calp_commands;
 pub mod calp_diff;
 pub mod calp_merge;
+pub mod calp_environments;
 pub mod calp_publishers;
 pub mod calp_inspector;
 pub mod library_commands;
@@ -256,6 +257,9 @@ mod calp_push_gate_tests;
 
 #[cfg(test)]
 mod subscribed_sheet_tests;
+
+#[cfg(test)]
+mod calp_environments_tests;
 
 #[cfg(test)]
 mod refresh_resolution_tests;
@@ -6445,6 +6449,11 @@ pub fn run() {
             calp_merge::calp_push_merge_analyze,
             calp_merge::calp_push_merge_apply,
             // Co-publishing: who besides the creator may push to a package.
+            calp_environments::calp_environments,
+            calp_environments::calp_set_environments,
+            calp_environments::calp_promote,
+            calp_environments::calp_promotion_impact,
+            calp_environments::calp_set_subscription_environment,
             calp_publishers::calp_list_co_publishers,
             calp_publishers::calp_set_co_publishers,
             calp_publishers::calp_my_publisher_key,

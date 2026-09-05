@@ -22,7 +22,15 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import type { WorkingCopyStatus } from "@api";
-import { workingCopyStatus, getSubscriptions, AppEvents, onAppEvent, openPanel } from "@api";
+import {
+  workingCopyStatus,
+  getSubscriptions,
+  AppEvents,
+  onAppEvent,
+  openPanel,
+  ENVIRONMENTS_CHANGED_EVENT,
+} from "@api";
+import { formatSubscriptionTarget } from "../lib/environments";
 import { APPLICATION_EXPLORER_PANEL_ID } from "../manifest";
 import {
   SUBSCRIBED_CHIP,
@@ -32,7 +40,11 @@ import {
 
 interface Role {
   workingCopy: WorkingCopyStatus | null;
-  subscriptions: Array<{ packageName: string; resolvedVersion: string }>;
+  subscriptions: Array<{
+    packageName: string;
+    resolvedVersion: string;
+    environment?: string | null;
+  }>;
 }
 
 const wrap: React.CSSProperties = {
@@ -81,6 +93,9 @@ export function DistributionRoleStatusItem(): React.ReactElement | null {
       onAppEvent(AppEvents.AFTER_OPEN, () => void reload()),
       onAppEvent(AppEvents.AFTER_NEW, () => void reload()),
       onAppEvent(AppEvents.PACKAGE_UPDATED, () => void reload()),
+      // A promotion, a pipeline edit, or a switch in the Subscriptions pane all
+      // change what this chip should say without any document event firing.
+      onAppEvent(ENVIRONMENTS_CHANGED_EVENT, () => void reload()),
     ];
     return () => offs.forEach((off) => off());
   }, [reload]);
@@ -101,7 +116,11 @@ export function DistributionRoleStatusItem(): React.ReactElement | null {
       : null,
     subscriptions.length > 0
       ? `Subscribed to ${subscriptions
-          .map((s) => `"${s.packageName}" v${s.resolvedVersion}`)
+          .map(
+            (s) =>
+              `"${formatSubscriptionTarget(s.packageName, s.environment)}" ` +
+              `v${s.resolvedVersion}`,
+          )
           .join(", ")}. A subscribed copy can never push to the application it came from.`
       : null,
     "Click to open the Application Explorer.",
@@ -134,8 +153,14 @@ export function DistributionRoleStatusItem(): React.ReactElement | null {
         <span style={chip(SUBSCRIBED_CHIP.bg, SUBSCRIBED_CHIP.fg)}>
           {/* A down arrow for "this came from somewhere else" — read-only. */}
           {SUBSCRIBED_CHIP.glyph} Subscribed:{" "}
+          {/* WHICH STREAM, not just which application. "sales v1.2.0" and
+              "sales (prod) v1.2.0" answer different questions, and the second
+              is the one a subscriber checks before believing a number. */}
           {subscriptions.length === 1
-            ? `${subscriptions[0].packageName} v${subscriptions[0].resolvedVersion}`
+            ? `${formatSubscriptionTarget(
+                subscriptions[0].packageName,
+                subscriptions[0].environment,
+              )} v${subscriptions[0].resolvedVersion}`
             : `${subscriptions.length} applications`}
         </span>
       )}

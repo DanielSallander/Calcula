@@ -15,6 +15,7 @@ import { listApplicationsInWorkspace, checkoutApplication } from "@api";
 import { listWorkspaces, type SavedWorkspace, isHttpWorkspace } from "@api/distributionWorkspaces";
 import { useDialogWindow } from "@api/dialogWindow";
 import { pickWorkspaceFile } from "../lib/pickWorkspace";
+import { environmentsAtVersion } from "../lib/environments";
 
 export function CheckoutDialog({ onClose, data }: DialogProps) {
   const win = useDialogWindow({ minWidth: 460, minHeight: 380 });
@@ -337,6 +338,26 @@ export function CheckoutDialog({ onClose, data }: DialogProps) {
                   />
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ fontWeight: 600 }}>v{v.version}</span>
+                    {/* WHICH ONE IS LIVE. A developer opening an application to
+                        fix something needs to know whether the version they are
+                        about to base on is the one an audience is running —
+                        that is the hotfix shape, and the push dialog warns about
+                        it, but it is cheaper to see it here first. */}
+                    {environmentsAtVersion(pkg?.environments ?? [], v.version).map((name) => (
+                      <span
+                        key={name}
+                        style={{
+                          marginLeft: 6,
+                          fontSize: "11px",
+                          padding: "0 5px",
+                          borderRadius: 8,
+                          background: "#e8f0fe",
+                          color: "#1a5fb4",
+                        }}
+                      >
+                        {name}
+                      </span>
+                    ))}
                     {i === 0 && (
                       <span
                         style={{

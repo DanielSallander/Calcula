@@ -751,6 +751,19 @@ The RESET side of the same request shipped 2026-09-01 and is unaffected; it is s
 artifact produced is the subscriber's own live workbook and the command now recalculates the
 sheets it mixed.
 
+### 2.ac Environments (Dev → Test → Prod), release one — what shipped 2026-09-05 left open
+
+Environments shipped as named pointers on one development line:
+`docs/design/calp-workspace-collaboration.md` §2.5 is the as-built record. Two of the
+three rows below are limits the design states out loud rather than defects, and are
+here so nobody re-derives them; the third is a follow-on the owner deferred.
+
+| item | verified at |
+|---|---|
+| **A replayed promotion log is undetectable to a client.** A share-writer who is not a publisher cannot FABRICATE a promotion — every record is verified against the push gate's authorised-key set and the fold fails closed — but they can restore an older signed log, rolling `prod` back to a version that was legitimately promoted at some point. This is the same limit `publishers.json` already documents for delegate removal, and the same fix applies: a monotonic revision plus a CLIENT-SIDE high-water mark makes it detectable rather than silent. Not built, because the mark has to live somewhere a share-writer cannot reach, and where that is depends on whether the subscriber's TOFU store is the right home. | `core/calp/src/environments.rs` (`load_verified_log`), §2.5 "Threat model" |
+| **Per-environment promotion permissions do not exist.** Any authorised publisher may promote to any environment — the owner's call, and the right default for a small team, since every promotion is signed and attributed either way. "Only Alice may promote to prod" needs a second, separately-signed list and a UI for it, and would want to answer what happens when the only person on that list leaves. | `core/calp/src/environments.rs` (`require_authorized`), §7 |
+| **A "draft" push, off the line, does not exist.** Every push lands at the head, so a developer who wants to share work-in-progress with one colleague has no way that does not move the line. Deferred deliberately: promotion has to be a pointer move, which needs linear history, and an off-line branch needs a headless version-to-version merge — the state-agnostic evaluator that §2.aa closed as too large. | §2.5 "One shared development line" |
+
 ### 2.ab TypeScript Forms, release one — what shipped 2026-09-02 left open (filed 2026-09-03)
 
 Modal forms shipped as a new `form` object type: `docs/design/typescript-forms.md` is the as-built

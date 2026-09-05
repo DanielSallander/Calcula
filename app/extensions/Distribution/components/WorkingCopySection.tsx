@@ -18,6 +18,14 @@ import {
 } from "@api";
 import { AppEvents, onAppEvent } from "@api";
 import { promptAsync, confirmAsync } from "@api/dialogs";
+import {
+  ddStyle,
+  dtStyle,
+  formatWhen,
+  linkButtonStyle,
+  mutedStyle,
+  warnBoxStyle,
+} from "./explorerStyles";
 
 export function WorkingCopySection() {
   const [status, setStatus] = useState<WorkingCopyStatus | null>(null);
@@ -358,34 +366,5 @@ function CoPublishers({
   );
 }
 
-const linkButtonStyle: React.CSSProperties = {
-  background: "transparent",
-  border: "none",
-  color: "var(--link-color, #0b5cad)",
-  cursor: "pointer",
-  padding: 0,
-  fontSize: "11px",
-  textDecoration: "underline",
-};
-
-const mutedStyle: React.CSSProperties = {
-  color: "var(--text-secondary)",
-  fontSize: "11px",
-};
-const dtStyle: React.CSSProperties = { color: "var(--text-secondary)" };
-const ddStyle: React.CSSProperties = { margin: 0 };
-const warnBoxStyle: React.CSSProperties = {
-  marginTop: 8,
-  padding: "6px 8px",
-  borderRadius: 4,
-  background: "#fff3cd",
-  color: "#664d03",
-  lineHeight: 1.4,
-};
-
-/** RFC3339 → something a person reads, falling back to the raw string. */
-function formatWhen(iso: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
-}
+// The styles and `formatWhen` now live in ./explorerStyles so the Environments
+// section beside this one renders identically rather than from a second copy.

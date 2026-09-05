@@ -155,12 +155,18 @@ describe("working-copy sheets carry a DIFFERENT mark", () => {
       packageName: "vendor-kpis",
       registryUrl: "C:\\shared\\ws",
       resolvedVersion: "2.1.0",
+      // Absent on the row, so normalised to "follows the development line"
+      // rather than left undefined: the tab tooltip and the change comparison
+      // both read it, and undefined vs null there would be a difference with
+      // no meaning behind it.
+      environment: null,
       role: "subscribed",
     });
     expect(provenanceForSheetId("APP-SHEET-1")).toEqual({
       packageName: "sales-report",
       registryUrl: "C:\\shared\\ws",
       resolvedVersion: "1.4.0",
+      environment: null,
       role: "workingCopy",
     });
   });

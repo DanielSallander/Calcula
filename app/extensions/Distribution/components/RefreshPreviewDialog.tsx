@@ -24,7 +24,7 @@
 //    Default is "keep mine", which is exactly what a refresh has always done, so
 //    a user who ignores the list gets the old behaviour.
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import type { DialogProps } from "@api";
 import {
   refreshPreview,
@@ -36,11 +36,18 @@ import {
   type CellResolution,
   type ConflictPreviewCell,
 } from "@api";
-import { getSubscriptions, resetSubscription, type Subscription } from "@api/distribution";
+import {
+  getSubscriptions,
+  resetSubscription,
+  setSubscriptionEnvironment,
+  listApplicationsInWorkspace,
+  type Subscription,
+} from "@api/distribution";
 import { confirmAsync } from "@api/dialogs";
 import { useDialogWindow } from "@api/dialogWindow";
 import { ThreeWayRow, type RowChoice } from "./ThreeWayRow";
 import { announceSubscribedContentReplaced } from "../lib/refreshAftermath";
+import { describeRefreshCard, formatSubscriptionTarget } from "../lib/environments";
 
 /** Stable key for one conflicted cell. */
 const cellKey = (c: ConflictPreviewCell) => `${c.localSheetId}:${c.cellId}`;
@@ -58,24 +65,36 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
   /** cellKey -> choice. Absent means "keep mine", the default. */
   const [choices, setChoices] = useState<Record<string, RowChoice>>({});
 
+  /**
+   * Recompute the preview.
+   *
+   * Also the aftermath of switching an environment: switching PULLS NOTHING, so
+   * the only honest thing to do is re-run the preview and let the user look at
+   * what the new target would bring before applying it. Anything else would
+   * turn a two-word choice into an unreviewed content change.
+   */
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // Both in one call site: the up-to-date state needs subscription names and
+      // versions to offer a reset, and a second round trip could disagree
+      // with the preview about which subscriptions exist.
+      const [p, manifest] = await Promise.all([
+        refreshPreview(),
+        getSubscriptions().catch(() => null),
+      ]);
+      setPreview(p);
+      setSubscriptions(manifest?.subscriptions ?? []);
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    (async () => {
-      try {
-        // Both in one effect: the up-to-date state needs subscription names and
-        // versions to offer a reset, and a second round trip could disagree
-        // with the preview about which subscriptions exist.
-        const [p, manifest] = await Promise.all([
-          refreshPreview(),
-          getSubscriptions().catch(() => null),
-        ]);
-        setPreview(p);
-        setSubscriptions(manifest?.subscriptions ?? []);
-      } catch (err: unknown) {
-        setError(String(err));
-      } finally {
-        setLoading(false);
-      }
-    })();
+    void reload();
     // RE-READ ON EVERY SHOW. With `[]` this ran once per mount, and the dialog
     // is non-modal — so choosing "Refresh Subscriptions…" again while it was
     // still open did nothing at all: no refetch, and `result` still holding the
@@ -84,6 +103,10 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.__openCount]);
 
+  /** Notices the user answered "Not now" to, for this showing only. */
+  const [dismissedNotices, setDismissedNotices] = useState<Set<string>>(new Set());
+  const [switching, setSwitching] = useState<string | null>(null);
+
   // Everything a fresh show must forget.
   const openCount = data?.__openCount;
   useEffect(() => {
@@ -91,6 +114,7 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
     setError(null);
     setConfirming(false);
     setChoices({});
+    setDismissedNotices(new Set());
     setLoading(true);
   }, [openCount]);
 
@@ -109,6 +133,28 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
   // sheet could not be read, some conflicts are unknown, and applying would
   // silently resolve them as "keep mine" without ever showing them.
   const blocked = !!preview && !preview.conflictsExact;
+
+  /**
+   * Subscriptions whose target could not be resolved at all — the environment
+   * was removed from the pipeline, or is empty, or the promotion log did not
+   * verify.
+   *
+   * These BLOCK Apply. A refresh is one gesture over every subscription in the
+   * workbook, and applying while one of them silently sat out would leave that
+   * report on an old version with nothing on screen having said so. One
+   * degraded row, one blocked button, and the row says which and why.
+   */
+  const unavailable = preview?.unavailable ?? [];
+  /**
+   * Line subscriptions on applications that have since grown a pipeline.
+   *
+   * NOT auto-switched. Moving somebody's subscription because their publisher
+   * added environments would change what they receive without their asking; the
+   * notice offers the switch and takes "Not now" for an answer.
+   */
+  const notices = (preview?.environmentNotices ?? []).filter(
+    (n) => !dismissedNotices.has(`${n.packageName}@${n.registryUrl}`),
+  );
 
   const handleApply = async () => {
     setApplying(true);
@@ -345,6 +391,94 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
           </>
         )}
 
+        {/* CANNOT BE RESOLVED AT ALL. Rendered before anything else and
+            outside the `hasUpdates` branch, because a workbook whose only
+            subscription is stranded has no updates to show and would otherwise
+            read as "all up to date". */}
+        {!loading && !result && unavailable.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            {unavailable.map((u) => (
+              <div
+                key={`${u.packageName}@${u.registryUrl}`}
+                style={{
+                  padding: "8px",
+                  marginBottom: "8px",
+                  borderRadius: 4,
+                  background: "#fdeceb",
+                  color: "#c5221f",
+                  lineHeight: 1.4,
+                  fontSize: "12px",
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>
+                  {formatSubscriptionTarget(u.packageName, u.environment)} cannot be
+                  refreshed
+                </div>
+                <div style={{ marginTop: 2 }}>{u.reason}</div>
+                <div style={{ marginTop: 6 }}>
+                  <EnvironmentSwitcher
+                    registryUrl={u.registryUrl}
+                    packageName={u.packageName}
+                    current={u.environment ?? null}
+                    busy={switching}
+                    setBusy={setSwitching}
+                    onSwitched={reload}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* A PIPELINE APPEARED. The subscription still works — it follows the
+            line — so this is a notice, not a block, and "Not now" is a real
+            answer that lasts the rest of this showing. */}
+        {!loading && !result && notices.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            {notices.map((n) => (
+              <div
+                key={`${n.packageName}@${n.registryUrl}`}
+                style={{
+                  padding: "8px",
+                  marginBottom: "8px",
+                  borderRadius: 4,
+                  background: "#fff3cd",
+                  color: "#664d03",
+                  lineHeight: 1.4,
+                  fontSize: "12px",
+                }}
+              >
+                <div>
+                  <strong>{n.packageName}</strong> follows the development line, but the
+                  application now has environments ({n.environments.join(", ")}). The
+                  development line receives every push the moment it lands, including work
+                  that has not been released.
+                </div>
+                <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <EnvironmentSwitcher
+                    registryUrl={n.registryUrl}
+                    packageName={n.packageName}
+                    current={null}
+                    environments={n.environments}
+                    busy={switching}
+                    setBusy={setSwitching}
+                    onSwitched={reload}
+                  />
+                  <button
+                    onClick={() =>
+                      setDismissedNotices((prev) =>
+                        new Set(prev).add(`${n.packageName}@${n.registryUrl}`),
+                      )
+                    }
+                  >
+                    Not now
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {!loading && !result && hasUpdates && preview && (
           <>
             {preview.subscriptionPreviews.map((sp) => (
@@ -357,10 +491,47 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
                   borderRadius: "4px",
                 }}
               >
-                <div style={{ fontWeight: 600 }}>{sp.packageName}</div>
-                <div style={{ fontSize: "12px", ...secondary }}>
-                  {sp.currentVersion} {"->"} {sp.newVersion}
+                <div style={{ fontWeight: 600 }}>
+                  {formatSubscriptionTarget(sp.packageName, sp.environment)}
                 </div>
+                {/* THE DIRECTION IS IN THE WORDS. A subscriber who reads a
+                    downgrade as an update concludes the publisher changed those
+                    cells; what actually happened is that a known-good version
+                    was restored, and the conflicts below are against the OLDER
+                    content. */}
+                <div
+                  style={{
+                    fontSize: "12px",
+                    ...(sp.isRollback
+                      ? { color: "#664d03", fontWeight: 600 }
+                      : secondary),
+                  }}
+                >
+                  {
+                    describeRefreshCard({
+                      packageName: sp.packageName,
+                      environment: sp.environment,
+                      currentVersion: sp.currentVersion,
+                      newVersion: sp.newVersion,
+                    }).versions
+                  }
+                </div>
+                {sp.isRollback && (
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      background: "#fff3cd",
+                      color: "#664d03",
+                      padding: "4px 6px",
+                      borderRadius: 3,
+                      margin: "4px 0",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {sp.environment ?? "This application"} was rolled back to a version
+                    published earlier. Cells you edited keep their overrides.
+                  </div>
+                )}
                 {sp.sheetsAdded.length > 0 && (
                   <div style={{ fontSize: "12px", color: "green" }}>
                     + {sp.sheetsAdded.length} sheet(s) added:{" "}
@@ -537,11 +708,13 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
               <button onClick={onClose}>Cancel</button>
               <button
                 onClick={() => setConfirming(true)}
-                disabled={applying || blocked}
+                disabled={applying || blocked || unavailable.length > 0}
                 title={
-                  blocked
-                    ? "Some sheets could not be read, so the conflict list is incomplete"
-                    : undefined
+                  unavailable.length > 0
+                    ? "One or more subscriptions point at an environment that cannot be resolved — pick another first"
+                    : blocked
+                      ? "Some sheets could not be read, so the conflict list is incomplete"
+                      : undefined
                 }
                 style={{ fontWeight: 600 }}
               >
@@ -556,5 +729,118 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
 
       {win.resizeHandles}
     </div>
+  );
+}
+
+
+/**
+ * Move one subscription onto a different environment (or back to the line).
+ *
+ * PULLS NOTHING — `calp_set_subscription_environment` records intent and stops.
+ * The caller re-runs the preview, so the content change is still reviewed and
+ * still applied by the user's own hand.
+ *
+ * The environment list is read from the WORKSPACE rather than passed in, except
+ * where the caller already has it: a stranded subscription's whole problem is
+ * that the name it holds is not in the pipeline any more, so the list it needs
+ * is the one that exists now.
+ */
+function EnvironmentSwitcher({
+  registryUrl,
+  packageName,
+  current,
+  environments,
+  busy,
+  setBusy,
+  onSwitched,
+}: {
+  registryUrl: string;
+  packageName: string;
+  current: string | null;
+  environments?: string[];
+  busy: string | null;
+  setBusy: (v: string | null) => void;
+  onSwitched: () => void | Promise<void>;
+}): React.ReactElement {
+  const key = `${packageName}@${registryUrl}`;
+  const [options, setOptions] = useState<string[]>(environments ?? []);
+  const [choice, setChoice] = useState<string>("");
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (environments) {
+      setOptions(environments);
+      return;
+    }
+    let cancelled = false;
+    listApplicationsInWorkspace(registryUrl)
+      .then((apps) => {
+        if (cancelled) return;
+        const app = apps.find((a) => a.name === packageName);
+        setOptions((app?.environments ?? []).filter((e) => e.version).map((e) => e.name));
+      })
+      .catch(() => {
+        if (!cancelled) setOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [registryUrl, packageName, environments]);
+
+  // Default to the LAST — production by convention.
+  useEffect(() => {
+    if (!choice && options.length > 0) setChoice(options[options.length - 1]);
+  }, [choice, options]);
+
+  const apply = async (target: string | null) => {
+    setBusy(key);
+    setErr(null);
+    try {
+      await setSubscriptionEnvironment({
+        registryUrl,
+        packageName,
+        environment: target,
+        // Returning to the LINE needs a pin, because the line has no pointer to
+        // follow. "latest" is what a line subscription meant before
+        // environments existed.
+        versionPin: target === null ? "latest" : "",
+      });
+      await onSwitched();
+    } catch (e: unknown) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+      {options.length > 0 ? (
+        <>
+          <select
+            value={choice}
+            onChange={(e) => setChoice(e.target.value)}
+            disabled={busy !== null}
+          >
+            {options.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+          <button onClick={() => void apply(choice)} disabled={busy !== null || !choice}>
+            {busy === key ? "Switching…" : `Use ${choice}`}
+          </button>
+        </>
+      ) : (
+        <span>This application has no environment with a version in it.</span>
+      )}
+      {current !== null && (
+        <button onClick={() => void apply(null)} disabled={busy !== null}>
+          Follow the development line
+        </button>
+      )}
+      {err && <span style={{ color: "#c5221f" }}>{err}</span>}
+    </span>
   );
 }

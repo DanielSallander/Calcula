@@ -15,7 +15,12 @@ At the same time, Calcula must fix the legitimate downsides that got VBA shunned
   via writeback. The vocabulary is Power BI's, and deliberately: a *workspace* is the folder or URL
   that hosts applications, an *application* is the `.calp` a team develops together, and a developer
   opens one as a **working copy** (Distribution > Open Application for Editing) to edit and push it
-  back through the gates in `core/calp/src/publish.rs`. A workspace carries a `workspace.calcula`
+  back through the gates in `core/calp/src/publish.rs`. A push lands on the ONE development
+  line; who receives it is a separate signed act -- an **environment** (`test`, `prod`) is a
+  named pointer to a version on that line, promotion moves the pointer and copies nothing, and the
+  authority is the per-record-signed `{application}/promotions.json` that
+  `core/calp/src/environments.rs` folds (the manifest listing is an unverified mirror written
+  SECOND). An application with no environments behaves exactly as before. A workspace carries a `workspace.calcula`
   pointer file so it can be selected in a FILE dialog rather than a folder picker; the pointer and
   its directory collapse to one pin scope in `strip_workspace_marker`
   (`core/calp/src/workspace_id.rs`), because if they did not, one user who browsed to the file and
@@ -342,7 +347,7 @@ in `tests/regression/bug-ledger.json` via its allocator, which assigns ids and r
   a pure-CRLF file as LF, and `grep -c $'\x00'` degrades to an empty pattern that "matches" every
   line, so it can never detect a NUL byte. Measure endings and NUL bytes with node, not the shell.
 
-`generate_handler!` in `app/src-tauri/src/lib.rs` registers 786 commands (recounted 2026-09-01; bracket-matched parse, comments stripped LINE-WISE, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). **How you strip the comments changes the answer**: a parse that splits the bracket on commas and strips `//` per chunk reads 789, because four doc comments in there contain a comma -- each swallows the command name after it AND leaves a fragment standing as an entry, net +4. That parse is where the "787" and "789" recounts came from. Nothing enforces this number, so re-run the parse -- line-wise -- rather than trusting the sentence. Its debug-build
+`generate_handler!` in `app/src-tauri/src/lib.rs` registers 792 commands (recounted 2026-09-05; bracket-matched parse, comments stripped LINE-WISE, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). **How you strip the comments changes the answer**: a parse that splits the bracket on commas and strips `//` per chunk reads 789, because four doc comments in there contain a comma -- each swallows the command name after it AND leaves a fragment standing as an entry, net +4. That parse is where the "787" and "789" recounts came from. Nothing enforces this number, so re-run the parse -- line-wise -- rather than trusting the sentence. Its debug-build
 dispatch frame sits on the OS MAIN thread (tao requires the event loop there, so wrapping it in a
 larger-stack `thread::spawn` panics); `app/src-tauri/build.rs` links with `/STACK:33554432` (32 MB)
 to hold it. Adding commands in bulk eats that headroom -- the symptom is

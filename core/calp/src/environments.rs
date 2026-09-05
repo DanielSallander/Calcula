@@ -459,6 +459,48 @@ pub fn promotion_history(
     })
 }
 
+/// Every version an environment has EVER held, newest first.
+///
+/// From the signed log, never from the version listing. Two readers need this
+/// and they need the same answer: the rollback picker (which may only offer a
+/// version this environment actually ran) and writeback carry-forward (which
+/// may only count submissions made against one). A second hand-rolled fold
+/// would give them two answers, and the one that drifted would be silently
+/// wrong — an offered rollback the backend refuses, or a subscriber's own
+/// numbers vanishing after a rollback.
+///
+/// Includes the CURRENT version. Callers that want candidates filter it out.
+pub fn versions_held_by(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+    environment: &str,
+) -> Result<Vec<String>, CalpError> {
+    let history = promotion_history(registry, package)?;
+    let mut out: Vec<String> = Vec::new();
+    for record in &history {
+        if let PromotionEvent::Promote { environment: name, version, previous_version } =
+            &record.event
+        {
+            if name != environment {
+                continue;
+            }
+            // BOTH ends of every move it made. The version it came FROM is one
+            // it ran, and after two promotions forward that is the only place
+            // the older one still appears.
+            for v in [version, previous_version] {
+                if !v.is_empty() && !out.contains(v) {
+                    out.push(v.clone());
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| match (SemVer::parse(a), SemVer::parse(b)) {
+        (Ok(x), Ok(y)) => y.cmp(&x),
+        _ => b.cmp(a),
+    });
+    Ok(out)
+}
+
 /// The version an environment currently points at.
 ///
 /// FAILS CLOSED in every direction. A missing environment, an empty one, or a

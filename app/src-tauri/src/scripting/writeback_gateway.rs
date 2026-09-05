@@ -653,6 +653,11 @@ fn dispatch(
                 let rows = calp_cmds::calp_load_region_submissions(
                     state.clone(),
                     region_id,
+                    // A SCRIPT READS ITS OWN WORKBOOK'S STREAM, always. Letting a
+                    // distributed script name an environment would let it read
+                    // submissions from a stream the workbook it runs in does not
+                    // follow — a disclosure the consent screen never mentioned.
+                    None,
                     window.clone(),
                 )?;
                 serde_json::to_value(rows).map_err(|e| e.to_string())

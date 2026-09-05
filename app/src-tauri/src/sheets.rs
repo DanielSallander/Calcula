@@ -197,6 +197,8 @@ pub(crate) struct SheetOrigin {
     pub package_name: String,
     pub registry_url: String,
     pub resolved_version: String,
+    /// The environment the subscription follows, or None for the line.
+    pub environment: Option<String>,
     /// The LIVE workbook name, NOT `SubscribedSheet::local_name` — a subscriber
     /// may rename a subscribed sheet, and a refusal must name the tab the user
     /// is actually looking at.
@@ -240,6 +242,7 @@ impl SheetProvenance {
                         package_name: sub.package_name.clone(),
                         registry_url: sub.registry_url.clone(),
                         resolved_version: sub.resolved_version.clone(),
+                        environment: sub.environment.clone(),
                         sheet_name: sheet_names
                             .get(index)
                             .cloned()

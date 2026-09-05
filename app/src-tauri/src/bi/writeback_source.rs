@@ -34,7 +34,7 @@ use tauri::{Manager, State};
 
 use crate::calp_commands::{
     apply_gather_governance, calcula_profile_dir, get_subscriber_identity,
-    merge_lenient_submissions, older_package_versions, submission_state_str,
+    merge_lenient_submissions, submission_state_str,
 };
 use crate::persistence::FileState;
 use crate::AppState;
@@ -205,7 +205,13 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
         // bucketed by region.
         let mut current_by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
             HashMap::new();
-        match registry.load_current_submissions(&sub.package_name, &sub.resolved_version) {
+        // See `bi/writeback.rs`: a dataset table built across environments puts
+        // test values into production measures.
+        let environment = sub.environment.clone().unwrap_or_default();
+        match registry
+            .load_current_submissions(&sub.package_name, &sub.resolved_version)
+            .map(|all| calp::writeback::visible_in(all, Some(&environment)))
+        {
             Ok(all) => {
                 for s in all {
                     current_by_region
@@ -217,12 +223,22 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
             Err(_) => continue,
         }
 
-        // Strictly older versions for lenient carry-forward (verified the same
-        // way as the current version).
+        // The versions this stream ran before the current one, for lenient
+        // carry-forward (verified the same way as the current version).
+        //
+        // NOT "strictly older" for an environment: a rollback makes the current
+        // pointer LOWER than one it ran last week, and the semver rule would
+        // drop the subscriber's own submissions the moment their environment
+        // was rolled back.
         let older: Vec<(
             Vec<calp::WritebackRegionDeclaration>,
             HashMap<String, Vec<calp::writeback::WritebackSubmission>>,
-        )> = older_package_versions(registry.as_ref(), &sub.package_name, &sub.resolved_version)
+        )> = crate::calp_commands::carry_forward_versions(
+            registry.as_ref(),
+            &sub.package_name,
+            &sub.resolved_version,
+            &environment,
+        )
             .iter()
             .filter_map(|version| {
                 let manifest = calp::integrity::load_pinned_manifest_via(
@@ -235,10 +251,12 @@ pub fn collect_writeback_datasets(state: &AppState) -> Vec<WritebackDataset> {
                 .ok()?;
                 let mut by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
                     HashMap::new();
-                for s in registry
-                    .load_current_submissions(&sub.package_name, version)
-                    .ok()?
-                {
+                for s in calp::writeback::visible_in(
+                    registry
+                        .load_current_submissions(&sub.package_name, version)
+                        .ok()?,
+                    Some(&environment),
+                ) {
                     by_region.entry(s.region_id.clone()).or_default().push(s);
                 }
                 Some((manifest.writeback_regions.unwrap_or_default(), by_region))
@@ -895,6 +913,7 @@ mod tests {
         value: SubmissionValue,
     ) -> WritebackSubmission {
         WritebackSubmission {
+            environment: String::new(),
             model_key: None,
             id: format!("sub-{submitter}-{row}-{col}"),
             region_id: "r1".to_string(),

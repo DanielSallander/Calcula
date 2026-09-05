@@ -42,6 +42,16 @@ export interface SheetProvenanceEntry {
   packageName: string;
   registryUrl: string;
   resolvedVersion: string;
+  /**
+   * The environment this sheet's subscription follows, or absent for the
+   * development line.
+   *
+   * Part of what the tab says, so it is part of what `same()` compares below:
+   * switching prod → test moves no sheet and changes no version until the next
+   * refresh, but it DOES change what the tooltip should say, and a comparison
+   * that ignored it would leave every tab claiming the old stream.
+   */
+  environment?: string | null;
   role: SheetProvenanceRole;
 }
 
@@ -154,6 +164,7 @@ export async function refreshSubscribedSheets(): Promise<boolean> {
         packageName: row.packageName,
         registryUrl: row.registryUrl,
         resolvedVersion: row.resolvedVersion,
+        environment: row.environment ?? null,
         role: row.role,
       };
       // A ROW WITH NO ID IS DROPPED, not indexed by position instead. Every
@@ -172,7 +183,14 @@ export async function refreshSubscribedSheets(): Promise<boolean> {
   const same = (
     a: SheetProvenanceEntry | undefined,
     b: SheetProvenanceEntry | undefined,
-  ): boolean => a?.packageName === b?.packageName && a?.role === b?.role;
+  ): boolean =>
+    a?.packageName === b?.packageName &&
+    a?.role === b?.role &&
+    // The environment is IN the tooltip, so it is in the comparison. Without
+    // this, switching a subscription from prod to test returns `false` here —
+    // "nothing to repaint" — and every tab keeps naming the environment the
+    // workbook no longer follows.
+    (a?.environment ?? null) === (b?.environment ?? null);
   const sameById =
     nextById.size === byId.size && [...nextById].every(([k, v]) => same(byId.get(k), v));
 

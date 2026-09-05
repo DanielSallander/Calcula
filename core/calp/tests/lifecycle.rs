@@ -170,6 +170,7 @@ fn make_submission(
     sub_id: &str,
 ) -> calp::writeback::WritebackSubmission {
     calp::writeback::WritebackSubmission {
+        environment: String::new(),
         model_key: None,
         id: sub_id.to_string(),
         region_id: region_id.to_string(),

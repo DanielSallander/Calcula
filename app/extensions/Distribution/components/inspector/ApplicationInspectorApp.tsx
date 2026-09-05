@@ -21,6 +21,7 @@ import {
   type InspectorOpenPayload,
 } from "../../lib/inspectorWindowEvents";
 import { installInspectorFormPreviewClient } from "../../lib/inspectorFormPreview";
+import { resolveVersionChoice, versionLabel } from "../../lib/environments";
 import {
   ACCENT,
   BORDER,
@@ -251,6 +252,11 @@ export function ApplicationInspectorApp(): React.ReactElement {
   };
 
   const selectedPackage = packages?.find((p) => p.name === packageName) ?? null;
+  // The line's head: the LAST entry, because the listing is published in
+  // ascending version order and the head is what a push moves.
+  const head = selectedPackage?.versions.length
+    ? selectedPackage.versions[selectedPackage.versions.length - 1].version
+    : "";
 
   return (
     <div style={appStyle}>
@@ -313,16 +319,43 @@ export function ApplicationInspectorApp(): React.ReactElement {
               disabled={!selectedPackage}
             >
               <option value="latest">latest</option>
+              {/* "What is prod running?" is the question an inspector is opened
+                  with more often than any version number. The optgroup answers
+                  it without the reader having to cross-reference a pointer
+                  against a list of versions. */}
+              {(selectedPackage?.environments.length ?? 0) > 0 && (
+                <optgroup label="Environments">
+                  {selectedPackage!.environments.map((e) => (
+                    <option key={`env:${e.name}`} value={`env:${e.name}`} disabled={!e.version}>
+                      {e.name} {e.version ? `→ v${e.version}` : "— nothing promoted yet"}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
               {selectedPackage?.versions.map((v) => (
                 <option key={v.version} value={v.version}>
-                  v{v.version}
+                  {versionLabel(v.version, selectedPackage?.environments ?? [], head)}
                 </option>
               ))}
             </select>
             <button
               style={primaryButtonStyle}
               disabled={busy || !packageName}
-              onClick={() => void loadOverview(registryPath.trim(), packageName, versionPin)}
+              onClick={() => {
+                // `env:prod` is UI-LOCAL and never travels. A prefix inside a pin
+                // string is the dead `channel:` convention — a magic form every
+                // parser has to special-case — and `VersionPin::parse` refuses
+                // it by name. Resolve here, before any backend call.
+                const choice = resolveVersionChoice(
+                  versionPin,
+                  selectedPackage?.environments ?? [],
+                );
+                if ("error" in choice) {
+                  setError(choice.error);
+                  return;
+                }
+                void loadOverview(registryPath.trim(), packageName, choice.version);
+              }}
             >
               {busy ? "Inspecting…" : "Inspect"}
             </button>
@@ -368,7 +401,13 @@ export function ApplicationInspectorApp(): React.ReactElement {
             </div>
           ) : (
             <>
-              {section === "overview" && <OverviewSection overview={overview} />}
+              {section === "overview" && (
+                <OverviewSection
+                  overview={overview}
+                  registryPath={ctx?.registryPath ?? registryPath}
+                  packageName={ctx?.packageName ?? packageName}
+                />
+              )}
               {section === "compare" && <CompareSection ctx={ctx} overview={overview} />}
               {section === "sheets" && <SheetsSection ctx={ctx} overview={overview} />}
               {section === "objects" && <ObjectsSection overview={overview} />}

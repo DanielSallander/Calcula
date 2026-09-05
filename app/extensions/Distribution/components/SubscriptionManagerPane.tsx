@@ -26,6 +26,7 @@ import {
 import {
   exportPackageHtml,
   resetSubscription,
+  setSubscriptionEnvironment,
   getWritebackRebuildSkips,
   getApplicationConnectionSkips,
   WRITEBACK_INDEX_CHANGED_EVENT,
@@ -316,6 +317,33 @@ export function SubscriptionManagerPane(): React.ReactElement {
   // Reset a subscription's sheets to the pristine published content. The
   // backend records it as ONE undo transaction, so Ctrl+Z restores every
   // local change (cells, formatting, sizes, merges, override edits).
+  /**
+   * Move a subscription onto a different environment, or back to the line.
+   *
+   * PULLS NOTHING. The pane re-reads so the chip is right, but the content only
+   * changes at the next refresh — where the preview shows what that will be. A
+   * two-word choice in a side pane must never be an unreviewed content change.
+   */
+  const [switching, setSwitching] = useState<string | null>(null);
+  const handleSwitchEnvironment = async (s: Subscription, environment: string | null) => {
+    setSwitching(subKey(s));
+    try {
+      await setSubscriptionEnvironment({
+        registryUrl: s.registryUrl,
+        packageName: s.packageName,
+        environment,
+        // The line has no pointer to follow, so it needs a pin. "latest" is
+        // what a line subscription meant before environments existed.
+        versionPin: environment === null ? "latest" : "",
+      });
+      await refresh();
+    } catch (e: unknown) {
+      setError(String(e));
+    } finally {
+      setSwitching(null);
+    }
+  };
+
   const handleReset = useCallback(async (s: Subscription) => {
     const key = subKey(s);
     setError(null);
@@ -374,16 +402,83 @@ export function SubscriptionManagerPane(): React.ReactElement {
           </div>
         ) : (
           subs.map((s) => {
-            const stale = s.versionPin !== s.resolvedVersion && s.versionPin !== `=${s.resolvedVersion}`;
+            // A PIN ONLY MEANS SOMETHING ON THE LINE. An environment
+            // subscription follows a pointer and carries no pin at all, so
+            // rendering "(pin )" against it would invent a second, empty answer
+            // to what it is following.
+            const followsEnvironment = !!s.environment;
+            const stale =
+              !followsEnvironment &&
+              s.versionPin !== s.resolvedVersion &&
+              s.versionPin !== `=${s.resolvedVersion}`;
+            const t0 = trust[subKey(s)];
+            const availableEnvironments = t0?.availableEnvironments ?? [];
+            const followsLineWithPipeline = !followsEnvironment && availableEnvironments.length > 0;
             return (
               <div key={`${s.packageName}@${s.registryUrl}`} style={styles.item}>
                 <div style={styles.itemHeader}>
                   <span style={styles.pkgName}>{s.packageName}</span>
+                  {s.environment && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        padding: "0 5px",
+                        borderRadius: 8,
+                        background: "#e8f0fe",
+                        color: "#1a5fb4",
+                        marginLeft: 4,
+                      }}
+                      title={`This subscription follows the "${s.environment}" environment. It moves when ${s.environment} is promoted, not when a version is pushed.`}
+                    >
+                      {s.environment}
+                    </span>
+                  )}
                   <span style={styles.version}>
                     {s.resolvedVersion}
                     {stale && <span style={styles.pinHint}> (pin {s.versionPin})</span>}
                   </span>
                 </div>
+
+                {/* A PIPELINE APPEARED UNDER A LINE SUBSCRIPTION. Permanent, not
+                    dismissible: unlike the refresh preview's version of this
+                    notice, nobody is mid-decision here, and the condition
+                    persists until the user acts on it. */}
+                {followsLineWithPipeline && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      background: "#fff3cd",
+                      color: "#664d03",
+                      padding: "4px 6px",
+                      borderRadius: 3,
+                      margin: "4px 0",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    Follows the development line, which receives every push the moment it
+                    lands. This application now has environments:{" "}
+                    {availableEnvironments.join(", ")}.
+                  </div>
+                )}
+
+                {availableEnvironments.length > 0 && (
+                  <div style={{ ...styles.meta, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <span>Follow</span>
+                    <select
+                      value={s.environment ?? ""}
+                      disabled={switching !== null}
+                      onChange={(e) => void handleSwitchEnvironment(s, e.target.value || null)}
+                    >
+                      <option value="">the development line</option>
+                      {availableEnvironments.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                    {switching === subKey(s) && <span>Switching…</span>}
+                  </div>
+                )}
                 <div style={styles.meta}>{s.registryUrl}</div>
                 <div style={styles.meta}>
                   {s.sheets.length} sheet{s.sheets.length !== 1 ? "s" : ""} · resolved {s.resolvedAt}

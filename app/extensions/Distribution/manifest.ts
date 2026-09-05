@@ -11,6 +11,8 @@ import { RefreshPreviewDialog } from "./components/RefreshPreviewDialog";
 import { SubscriptionDiffDialog } from "./components/SubscriptionDiffDialog";
 import { DesignateWritebackDialog } from "./components/DesignateWritebackDialog";
 import { ConnectionDialog } from "./components/ConnectionDialog";
+import { PromoteDialog } from "./components/PromoteDialog";
+import { EditPipelineDialog } from "./components/EditPipelineDialog";
 
 export const DISTRIBUTION_EXTENSION_ID = "calcula.distribution";
 
@@ -52,6 +54,9 @@ export const REFRESH_PREVIEW_DIALOG_ID = "distribution:refreshPreviewDialog";
 export const SUBSCRIPTION_DIFF_DIALOG_ID = "distribution:subscriptionDiffDialog";
 export const DESIGNATE_WRITEBACK_DIALOG_ID = "distribution:designateWritebackDialog";
 export const CONNECTION_DIALOG_ID = "distribution:connectionDialog";
+/** One id for BOTH directions; `data.mode` picks promote or rollback. */
+export const PROMOTE_DIALOG_ID = "distribution:promoteDialog";
+export const EDIT_PIPELINE_DIALOG_ID = "distribution:editPipelineDialog";
 
 export const PublishDialogDefinition: DialogDefinition = {
   id: PUBLISH_DIALOG_ID,
@@ -115,4 +120,21 @@ export const ConnectionDialogDefinition: DialogDefinition = {
   id: CONNECTION_DIALOG_ID,
   component: ConnectionDialog as React.ComponentType<DialogProps>,
   priority: 100,
+};
+
+export const PromoteDialogDefinition: DialogDefinition = {
+  id: PROMOTE_DIALOG_ID,
+  component: PromoteDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+  // Non-modal floating window: the workbook stays interactive while it is
+  // open. That matters here — the whole point is to look at what changes
+  // before moving what an audience receives.
+  dismissOnEscape: false,
+};
+
+export const EditPipelineDialogDefinition: DialogDefinition = {
+  id: EDIT_PIPELINE_DIALOG_ID,
+  component: EditPipelineDialog as React.ComponentType<DialogProps>,
+  priority: 100,
+  dismissOnEscape: false,
 };

@@ -76,6 +76,28 @@ impl VersionPin {
     pub fn parse(s: &str) -> Result<Self, CalpError> {
         let s = s.trim();
 
+        // A PIN IS NEVER AN ENVIRONMENT, and this refuses the shape that would
+        // make it look like one.
+        //
+        // `channel:test` was a real convention here once: eleven call sites
+        // tested for the prefix to skip a subscription out of trust
+        // verification, writeback and GATHER — and NOTHING ever produced one,
+        // so eleven exemptions guarded a shape that did not exist and would
+        // have activated the moment something started minting it. Environments
+        // are now a separate field on the subscription and a separate parameter
+        // on every command that takes a target. A string arriving here with
+        // either prefix is a caller reaching for that dead convention, and the
+        // refusal names where the value actually goes.
+        for prefix in ["env:", "environment:", "channel:"] {
+            if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+                return Err(CalpError::InvalidPin(format!(
+                    "'{s}' is not a version pin. An environment is named in the `environment` \
+                     parameter, not encoded into the pin — a pin selects a version on the \
+                     development line, and an environment is a pointer to one."
+                )));
+            }
+        }
+
         if s.eq_ignore_ascii_case("latest") {
             return Ok(VersionPin::Latest);
         }

@@ -13,7 +13,7 @@ use crate::integrity::{PinPolicy, TrustStatus, VerifiedManifest};
 use crate::manifest::*;
 use crate::workspace_id::WorkspaceScope;
 use crate::transport::WorkspaceTransport;
-use crate::version::{SemVer, VersionPin};
+use crate::version::SemVer;
 
 /// Request to pull (subscribe to) an application.
 pub struct PullRequest {
@@ -1079,6 +1079,7 @@ mod sheet_name_collision_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::version::VersionPin;
     use std::fs;
     use tempfile::TempDir;
 
@@ -3022,6 +3023,7 @@ mod tests {
         // separate trust domain and must not trip the publisher-artifact
         // integrity gate.
         let submission = crate::writeback::WritebackSubmission {
+            environment: String::new(),
             model_key: None,
             id: "sub-1".to_string(),
             region_id: "r1".to_string(),

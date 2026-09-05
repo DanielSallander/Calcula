@@ -34,10 +34,13 @@ import {
   undo,
   showDialog,
   listApplicationsInWorkspace,
+  emitAppEvent,
+  ENVIRONMENTS_CHANGED_EVENT,
+  openPanel,
 } from "@api";
 import type { ApplicationInfo } from "@api";
 import { holdBackCells, type HoldBackCellRef } from "@api/distribution";
-import { CHECKOUT_DIALOG_ID } from "../manifest";
+import { CHECKOUT_DIALOG_ID, APPLICATION_EXPLORER_PANEL_ID } from "../manifest";
 import { VersionDiffView, cellKeyOf } from "./VersionDiffView";
 
 /**
@@ -58,6 +61,7 @@ import { listWorkspaces, type SavedWorkspace } from "@api/distributionWorkspaces
 import { useDialogWindow } from "@api/dialogWindow";
 import { pickWorkspaceFile, pickWorkspaceFolder } from "../lib/pickWorkspace";
 import { pushBlockingReason } from "../lib/pushReadiness";
+import { describePushLanding } from "../lib/environments";
 import { PublishReportView } from "./ApplicationExplorerPanel";
 
 /** Which of the two things this dialog is doing right now. */
@@ -514,9 +518,20 @@ export function PublishDialog({ onClose, data }: DialogProps) {
         expectedBaseVersion: mode === "push" ? workspace?.baseVersion : undefined,
         changeSummary,
       });
+      // WHERE THE RELEASE NOW STANDS. "Pushed v1.5.0" answers where the bytes
+      // went, not who receives them, and the whole point of environments is
+      // that those are different questions. The landing line names each
+      // environment and its version — and is EMPTY when the application has
+      // none, so a solo workbook is not told about a feature it has not adopted.
+      const landing = describePushLanding(result.version, workspace?.environments ?? []);
       setStatus(
-        `${mode === "push" ? "Pushed" : "Published"} ${result.packageName} v${result.version}: ${result.sheetsPublished} sheet(s)`,
+        `${mode === "push" ? "Pushed" : "Published"} ${result.packageName} v${result.version} to the ` +
+          `development line: ${result.sheetsPublished} sheet(s).` +
+          (landing ? ` ${landing}` : ""),
       );
+      // Anything reading the pipeline is now stale: the head moved, which is
+      // what the first environment promotes FROM.
+      emitAppEvent(ENVIRONMENTS_CHANGED_EVENT, { registryPath, packageName });
       setReport(result.report);
       setReportLabel(`Published ${result.packageName} v${result.version}`);
       setWarnings(result.warnings);
@@ -1294,6 +1309,54 @@ export function PublishDialog({ onClose, data }: DialogProps) {
           }}
         >
           {error ?? status ?? blocked}
+          {/* A push cannot be undone from here, so the next gesture — deciding
+              who receives it — needs a door, not a memory. */}
+          {pushed && (workspace?.environments?.length ?? 0) > 0 && (
+            <>
+              {" "}
+              <button
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "inherit",
+                  cursor: "pointer",
+                  padding: 0,
+                  font: "inherit",
+                  textDecoration: "underline",
+                }}
+                onClick={() => openPanel(APPLICATION_EXPLORER_PANEL_ID)}
+              >
+                Open Application Explorer
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/*
+        THE HOTFIX SHAPE. This working copy's base is what an environment is
+        RUNNING, and the line has moved past it. The developer's mental model is
+        "I am fixing what is live", but the line is linear: this push lands at
+        the head and carries every unreleased change in between. Promoting it
+        therefore ships all of that, which is the opposite of a hotfix and is
+        invisible at the moment of the push unless it is said here.
+      */}
+      {!pushed && mode === "push" && workspace?.baseIsPromoted && (
+        <div
+          style={{
+            flexShrink: 0,
+            padding: "6px 16px",
+            fontSize: "12px",
+            lineHeight: 1.35,
+            background: "#fff3cd",
+            color: "#664d03",
+            borderTop: "1px solid var(--border-default)",
+          }}
+        >
+          You are patching the version <strong>{workspace.baseIsPromoted}</strong> runs
+          (v{workspace.baseVersion}), but this push lands at the head of the development
+          line — so promoting it would also ship everything published since. Promote it
+          through your pipeline rather than straight to {workspace.baseIsPromoted}.
         </div>
       )}
 

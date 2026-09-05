@@ -3030,6 +3030,7 @@ mod script_apply_tests {
     /// A validated draft already in the local writeback layer for one slot.
     fn draft_for(region_id: &str, row: u32, col: u32) -> calp::writeback::WritebackSubmission {
         calp::writeback::WritebackSubmission {
+            environment: String::new(),
             id: "sub-1".to_string(),
             region_id: region_id.to_string(),
             cell_row: row,

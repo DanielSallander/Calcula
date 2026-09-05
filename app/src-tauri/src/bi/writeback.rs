@@ -377,7 +377,14 @@ pub(crate) fn collect_distributed_writeback_entries(
         // tie-break resolves identically on every machine.
         let mut by_region: HashMap<String, Vec<calp::writeback::WritebackSubmission>> =
             HashMap::new();
-        if let Ok(all) = registry.load_current_submissions(&sub.package_name, &sub.resolved_version)
+        // WHICH STREAM THIS MODEL IS BUILT FROM. A writeback column feeds the
+        // semantic model, so an unfiltered read here puts test values inside
+        // measures — the one place where a wrong number is hardest to trace back
+        // to its source.
+        let environment = sub.environment.clone().unwrap_or_default();
+        if let Ok(all) = registry
+            .load_current_submissions(&sub.package_name, &sub.resolved_version)
+            .map(|all| calp::writeback::visible_in(all, Some(&environment)))
         {
             for s in all {
                 if s.model_key.is_some() {

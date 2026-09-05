@@ -856,11 +856,21 @@ fn scripted_pull_params(
     registry_path: &str,
     package_name: &str,
     version_pin: &str,
+    environment: Option<&str>,
+    follow_line: bool,
 ) -> Result<calp_cmds::PullParams, String> {
     serde_json::from_value(json!({
         "registryPath": registry_path,
         "packageName": package_name,
         "versionPin": version_pin,
+        "environment": environment,
+        // A SCRIPT MUST NAME ITS TARGET. `calp_pull` refuses a bare pin on an
+        // application that has environments unless the caller says it means the
+        // development line — and a script gets that rule too, not a bypass. A
+        // library that subscribed "latest" before the team set up a pipeline
+        // should stop and be told, not quietly start following unreleased work
+        // on every machine that runs it.
+        "followLine": follow_line,
         "requirePinned": true,
     }))
     .map_err(|e| e.to_string())
@@ -905,10 +915,12 @@ fn dispatch(
             let registry_path = registry_location(p)?;
             let package_name: String = field(p, "packageName")?;
             let version_pin: String = field(p, "versionPin")?;
+            let environment: Option<String> = field(p, "environment").unwrap_or(None);
             let inspection = calp_cmds::calp_inspect_application(
                 registry_path,
                 package_name,
                 version_pin,
+                environment,
                 window.clone(),
             )?;
             serde_json::to_value(inspection).map_err(|e| e.to_string())
@@ -933,7 +945,15 @@ fn dispatch(
             // the genuine publisher's next release would then read as
             // `publisherChanged`. `Action::RefreshApply` below already reasoned
             // its way here; Pull gets the same answer.
-            let params = scripted_pull_params(&registry_path, &package_name, &version_pin)?;
+            let environment: Option<String> = field(p, "environment").unwrap_or(None);
+            let follow_line: bool = field(p, "followLine").unwrap_or(false);
+            let params = scripted_pull_params(
+                &registry_path,
+                &package_name,
+                &version_pin,
+                environment.as_deref(),
+                follow_line,
+            )?;
             let response = calp_cmds::calp_pull(
                 (*state).clone(),
                 (*file_state).clone(),
@@ -1125,7 +1145,7 @@ mod tests {
     /// the person whose machine is deciding whom to trust.
     #[test]
     fn a_scripted_pull_runs_under_require_pinned() {
-        let params = scripted_pull_params("file:///regs/main", "acme.finance", "^1.0.0")
+        let params = scripted_pull_params("file:///regs/main", "acme.finance", "^1.0.0", None, false)
             .expect("params build");
         assert!(
             params.require_pinned,
