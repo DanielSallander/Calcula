@@ -37,20 +37,30 @@ describe("exactly one target reaches the backend", () => {
     // A pin beside an environment is two claims about what to follow, and the
     // backend refuses rather than letting one win — but only if the frontend
     // actually stops sending the stale one.
+    //
+    // BOTH means both. The two needles here used to be satisfied by the PULL
+    // call alone — the second is a substring of the first — so deleting the
+    // guard from `inspectApplication` left this green.
     // SABOTAGE: `versionPin,` in either call.
-    expect(SUBSCRIBE).toContain("versionPin: environment ? \"\" : versionPin,");
-    expect(SUBSCRIBE).toContain("environment ? \"\" : versionPin,");
-    expect(SUBSCRIBE).toContain("environment,");
+    const occurrences = SUBSCRIBE.split('environment ? "" : versionPin').length - 1;
+    expect(occurrences, "the pin is suppressed in inspect AND in pull").toBe(2);
+    expect(SUBSCRIBE).toContain('versionPin: environment ? "" : versionPin,');
   });
 
   it("marks a line subscription as DELIBERATE rather than defaulting to it", () => {
     // The line receives every push the moment it lands. A subscribe that names
     // no environment on an application that has them is refused, and this flag
     // is the only thing that can say "yes, I mean the line".
-    // SABOTAGE: `followLine: true` unconditionally — the refusal never fires
-    // and consumers land on unreleased work with no dialog having said so.
-    expect(SUBSCRIBE).toContain("followLine: !environment,");
+    // AND IT IS A CHOICE, not the absence of one. `followLine: !environment`
+    // asserted a deliberate line subscription on every subscribe that had not
+    // picked an environment — including one where the user typed an application
+    // name and was never OFFERED an environment, so the backend refusal that
+    // names them could not fire.
+    // SABOTAGE: `followLine: !environment` or `followLine: true`.
+    expect(SUBSCRIBE).toContain("followLine: !environment && lineChosen,");
     expect(SUBSCRIBE).not.toContain("followLine: true");
+    // The flag is only ever set by an explicit control.
+    expect(SUBSCRIBE).toContain("setLineChosen(true)");
   });
 
   it("defaults a new subscriber to the LAST environment", () => {
@@ -119,20 +129,32 @@ describe("an unresolvable environment blocks the whole refresh", () => {
     // a block nested under `hasUpdates` would render "all up to date" over a
     // subscription that cannot refresh at all.
     // SABOTAGE: move the unavailable block inside `hasUpdates && preview &&`.
+    //
+    // ORDER IS NOT ENOUGH: a block placed before the has-updates branch could
+    // still be nested inside another condition that hides it. The guard also
+    // reads the condition the block is actually rendered under.
     const at = REFRESH.indexOf("unavailable.length > 0 && (");
     const hasUpdatesAt = REFRESH.indexOf("!result && hasUpdates && preview && (");
     expect(at).toBeGreaterThan(0);
     expect(hasUpdatesAt).toBeGreaterThan(0);
     expect(at).toBeLessThan(hasUpdatesAt);
+    const condition = REFRESH.slice(Math.max(0, at - 90), at);
+    expect(condition, "the stranded rows must not be gated on having updates").not.toContain(
+      "hasUpdates",
+    );
   });
 
   it("offers a way out of the block rather than only naming it", () => {
     // SABOTAGE: delete the switcher from the unavailable card. Apply is then
     // disabled with no control on screen that can re-enable it.
-    const block = REFRESH.slice(
-      REFRESH.indexOf("unavailable.length > 0 && ("),
-      REFRESH.indexOf("!result && hasUpdates && preview && ("),
-    );
+    //
+    // The slice used to run to the has-updates branch, which swallowed the
+    // NOTICES block and its own switcher — so the guard passed on the notice's
+    // control while the stranded card had none. It now ends at the notices.
+    const start = REFRESH.indexOf("unavailable.length > 0 && (");
+    const noticesAt = REFRESH.indexOf("notices.length > 0 && (");
+    expect(noticesAt).toBeGreaterThan(start);
+    const block = REFRESH.slice(start, noticesAt);
     expect(block).toContain("EnvironmentSwitcher");
   });
 });
@@ -142,8 +164,13 @@ describe("a line subscription is never re-targeted behind the user's back", () =
     // Moving somebody's subscription because their publisher added environments
     // would change what they receive without their asking.
     // SABOTAGE: call `setSubscriptionEnvironment` from the notice's own effect.
+    //
+    // Presence of the words was not enough: the guard passed on a "Not now"
+    // button that did nothing. It now checks the button actually dismisses.
     expect(REFRESH).toContain("Not now");
-    expect(REFRESH).toContain("setDismissedNotices");
+    const notNowAt = REFRESH.indexOf("Not now");
+    const handler = REFRESH.slice(Math.max(0, notNowAt - 400), notNowAt);
+    expect(handler, "the button must record the dismissal").toContain("setDismissedNotices");
     // The dismissal is per-showing: the condition persists, so a permanent
     // dismissal would hide a real difference forever.
     expect(REFRESH).toContain("setDismissedNotices(new Set());");
@@ -161,7 +188,13 @@ describe("a line subscription is never re-targeted behind the user's back", () =
     // An environment subscription carries no pin at all, so "(pin )" would be a
     // second, empty answer to what it is following.
     // SABOTAGE: drop `!followsEnvironment &&` from `stale`.
+    //
+    // The bare needle matched a second, unrelated occurrence, so deleting it
+    // from the `stale` expression left the guard green. It now reads the whole
+    // expression.
     expect(MANAGER).toContain("const followsEnvironment = !!s.environment;");
-    expect(MANAGER).toContain("!followsEnvironment &&");
+    expect(MANAGER).toContain(
+      "const stale =\n              !followsEnvironment &&",
+    );
   });
 });

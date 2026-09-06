@@ -151,7 +151,22 @@ pub fn strip_workspace_marker(location: &str) -> String {
 /// exactly this, and the push gate's subscriber check had no comparison at all —
 /// it matched on the application NAME alone, so a push to YOUR `sales` was
 /// refused because you subscribe to somebody else's `sales`.
+/// THE SCOPE DECIDES, when both locations can be scoped. `workspace_scope`
+/// already folds the `workspace.calcula` marker, the scheme and the separators
+/// into one identity, and that identity is what the pin store keys on — so two
+/// spellings of one workspace must not be two workspaces here either. Comparing
+/// the raw strings let `C:/ws` and `C:\ws\workspace.calcula` past the
+/// already-subscribed gate as different workspaces, and a workbook that
+/// subscribed twice to one application then had first-match lookups resolving
+/// the wrong row and its sheets materialized twice.
+///
+/// The trimmed-and-lowercased fallback is kept for locations that cannot be
+/// scoped at all, where refusing to compare would be worse than comparing
+/// loosely.
 pub fn same_workspace(a: &str, b: &str) -> bool {
+    if let (Ok(x), Ok(y)) = (workspace_scope(a), workspace_scope(b)) {
+        return x.id == y.id;
+    }
     fn norm(s: &str) -> String {
         s.trim().trim_end_matches(['/', '\\']).to_lowercase()
     }

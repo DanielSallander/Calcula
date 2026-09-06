@@ -30,6 +30,7 @@ import {
   refreshPreview,
   refreshApply,
   emitAppEvent,
+  ENVIRONMENTS_CHANGED_EVENT,
   AppEvents,
   type ApplicationUpdatedPayload,
   type RefreshPreview,
@@ -805,6 +806,9 @@ function EnvironmentSwitcher({
         // environments existed.
         versionPin: target === null ? "latest" : "",
       });
+      // See the Subscriptions pane: the status chip and tab tooltips follow
+      // this event, not the preview reload.
+      emitAppEvent(ENVIRONMENTS_CHANGED_EVENT, { registryPath: registryUrl, packageName });
       await onSwitched();
     } catch (e: unknown) {
       setErr(String(e));

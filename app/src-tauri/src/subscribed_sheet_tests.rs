@@ -88,6 +88,7 @@ fn subscribe_sheet(state: &AppState, index: usize, package: &str, registry: &str
         data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
+        upstream_removed_sheets: Vec::new(),
         extra: HashMap::new(),
     });
 }

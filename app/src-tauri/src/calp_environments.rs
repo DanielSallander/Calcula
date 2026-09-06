@@ -566,6 +566,13 @@ fn describe_writeback_change(
             .and_then(|m| m.writeback_regions)
             .unwrap_or_default()
     };
+    let model_columns = |version: &str| -> Vec<calp::writeback::ModelWritebackDeclaration> {
+        registry
+            .get_version_manifest(package_name, version)
+            .ok()
+            .and_then(|m| m.model_writebacks)
+            .unwrap_or_default()
+    };
     let new_regions = regions(to);
     // Nothing promoted into this environment yet: subscribers receive the
     // version whole, and there is no earlier collection to invalidate.
@@ -573,7 +580,13 @@ fn describe_writeback_change(
         return String::new();
     };
     let old_regions = regions(from);
-    if old_regions.is_empty() && new_regions.is_empty() {
+    // An application may collect through MODEL COLUMNS and no grid regions at
+    // all, so the empty short-circuit has to consider both.
+    if old_regions.is_empty()
+        && new_regions.is_empty()
+        && model_columns(from).is_empty()
+        && model_columns(to).is_empty()
+    {
         return String::new();
     }
 
@@ -605,6 +618,38 @@ fn describe_writeback_change(
             compat.added.join(", ")
         ));
     }
+
+    // MODEL WRITEBACK COLUMNS TOO. The subscriber's refresh path runs
+    // `check_model_writeback_compatibility` and audits what it loses, so a
+    // promotion that re-keys or removes a master-data column used to report
+    // "nothing affected" to the promoter and surface later, on somebody else's
+    // machine. The promoter is the one deciding, so the promoter is the one who
+    // has to see it — which is this helper's own stated contract.
+    let model_compat = calp::writeback::check_model_writeback_compatibility(
+        &model_columns(from),
+        &model_columns(to),
+    );
+    if !model_compat.incompatible.is_empty() {
+        parts.push(format!(
+            "{} writeback column(s) changed key or shape, so values already collected against \
+             them stop counting: {}",
+            model_compat.incompatible.len(),
+            model_compat
+                .incompatible
+                .iter()
+                .map(|(id, reason)| format!("{id} ({reason})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !model_compat.removed.is_empty() {
+        parts.push(format!(
+            "{} writeback column(s) no longer exist in v{to}: {}",
+            model_compat.removed.len(),
+            model_compat.removed.join(", ")
+        ));
+    }
+
     parts.join(" · ")
 }
 
@@ -644,6 +689,31 @@ pub fn calp_set_subscription_environment(
     calp::environments::resolve_target(registry.as_ref(), &params.package_name, &target)
         .map_err(|e| e.to_string())?;
 
+    // EVERY REFUSAL FIRST, then the effect. `DocumentEffect::mutates` dirties
+    // AT CONSTRUCTION, so building it before the not-subscribed check marked a
+    // clean workbook as unsaved for an operation that then refused — the user
+    // got a "save changes?" prompt for a switch that never happened. A no-op
+    // switch is refused here too, rather than signing an audit row reading
+    // "now follows environment 'prod' (was: environment 'prod')".
+    {
+        let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+        let Some(existing) = subs.subscriptions.iter().find(|s| {
+            s.package_name == params.package_name
+                && calp::same_workspace(&s.registry_url, &params.registry_url)
+        }) else {
+            return Err(format!(
+                "CALP_ENV_SWITCH_NOT_SUBSCRIBED: this workbook does not subscribe to '{}' from \
+                 that workspace.",
+                params.package_name
+            ));
+        };
+        let already = existing.environment == calp::manifest::Subscription::environment_for(&target)
+            && existing.version_pin == calp::manifest::Subscription::pin_for(&target);
+        if already {
+            return Ok(());
+        }
+    }
+
     // The last refusal is behind us.
     let effect = crate::document_effect::DocumentEffect::mutates(&file_state);
     let described = {
@@ -672,6 +742,16 @@ pub fn calp_set_subscription_environment(
             .unwrap_or_else(|| format!("the development line (pin {})", sub.version_pin));
         format!("'{}' now follows {} (was: {})", params.package_name, now, was)
     };
+
+    // WHAT THE SWITCH ACTUALLY CHANGED, invalidated. `sub.environment` is the
+    // field every writeback reader filters on, so re-targeting it changes what
+    // `=GATHER()` and the BI dataset tables should compute RIGHT NOW — the
+    // published content is what waits for the next refresh, not this. Without
+    // the invalidation the model tables kept serving the previous stream's
+    // submissions until an unrelated submit, approve, pull or reopen, and the
+    // steady state after a linear promotion is both environments on one version,
+    // so nothing else would have touched it.
+    crate::calp_commands::invalidate_gather_cache(&state);
 
     crate::calp_commands::record_audit_event(
         &state,

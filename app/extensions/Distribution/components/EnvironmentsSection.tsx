@@ -167,7 +167,12 @@ export function EnvironmentsSection() {
         )}
       </div>
 
-      {envs.length === 0 && (
+      {/* GATED ON THE PROBLEM TOO. When the log fails verification the command
+          answers with an EMPTY list and a `problem`, so this stated "every
+          subscriber follows the development line" as fact directly under the
+          warning box — while environment subscribers could not refresh at all.
+          The Inspector's sibling card already got this right. */}
+      {envs.length === 0 && !info?.problem && (
         <div style={mutedStyle}>
           This application has no environments, so every subscriber follows the
           development line and sees each push at their next refresh. A pipeline lets
@@ -202,6 +207,11 @@ export function EnvironmentsSection() {
               {env.previousVersion && (
                 <span style={mutedStyle}>· was v{env.previousVersion}</span>
               )}
+              {env.unauthorizedPointer && (
+                <span style={{ color: "#664d03", fontWeight: 600 }}>
+                  · not vouched for
+                </span>
+              )}
             </div>
             {env.version && (
               <div style={{ ...mutedStyle, marginTop: 2 }}>
@@ -213,6 +223,16 @@ export function EnvironmentsSection() {
             <div style={{ ...mutedStyle, marginTop: 2 }}>
               Promoted from {source.label}.
             </div>
+            {/* The pointer stands, and subscribers refuse to follow it, until
+                somebody who may publish today promotes again. Saying so here is
+                what makes the repair reachable. */}
+            {env.unauthorizedPointer && (
+              <div style={warnBoxStyle}>
+                The key that last promoted {env.name} is no longer allowed to publish this
+                application, so subscribers refuse to follow this pointer. Promote into{" "}
+                {env.name} again to re-establish it.
+              </div>
+            )}
 
             <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
               {after && (
@@ -274,7 +294,7 @@ export function EnvironmentsSection() {
             mayPromote ? undefined : "Only a publisher of this application can change this."
           }
         >
-          {envs.length === 0 ? "Set up pipeline…" : "Edit pipeline…"}
+          {envs.length === 0 && !info?.problem ? "Set up pipeline…" : "Edit pipeline…"}
         </button>
         <button onClick={() => void reload()} disabled={busy}>
           {busy ? "Refreshing…" : "Refresh"}

@@ -692,6 +692,9 @@ impl WritebackIndex {
                     .cloned()
                     .unwrap_or_default();
                 entries.push(WritebackRegionEntry {
+                    // Filled by the app command from the owning subscription;
+                    // the flat index has no idea which application it came from.
+                    package_name: None,
                     sheet_id,
                     sheet_index,
                     region_id,
@@ -742,6 +745,15 @@ pub struct WritebackRegionEntry {
     /// Whether the region's schema marks values required (for the UI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
+    /// The application this region belongs to. Filled by the app command from
+    /// the owning subscription, not by `to_flat_list`.
+    ///
+    /// A workbook can subscribe to several applications, and their environments
+    /// are unrelated: without this the publisher dashboard's environment picker
+    /// unioned every subscription's streams and offered ones the selected
+    /// region's application does not have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
     /// Submission deadline (ISO 8601) for an `until_deadline` region, surfaced
     /// so the subscriber UI can show a countdown / overdue state.
     #[serde(default, skip_serializing_if = "Option::is_none")]

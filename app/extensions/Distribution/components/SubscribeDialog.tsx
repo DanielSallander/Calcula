@@ -228,6 +228,16 @@ export function SubscribeDialog({ onClose }: DialogProps) {
    * is the exact accident environments exist to prevent.
    */
   const [environment, setEnvironment] = useState<string | null>(null);
+  /**
+   * The user CHOSE the development line, by an explicit control.
+   *
+   * `followLine: !environment` asserted that choice on every subscribe that had
+   * not picked an environment — including one where the user typed an
+   * application name and never pressed "List Applications", so no environment
+   * was ever offered. The backend refusal that names the environments on offer
+   * therefore never fired, and the dialog seated them on the line silently.
+   */
+  const [lineChosen, setLineChosen] = useState(false);
   /** Whether the Advanced pin controls are showing. */
   const [showPinControls, setShowPinControls] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -400,9 +410,10 @@ export function SubscribeDialog({ onClose }: DialogProps) {
         environment,
         // Following the LINE on an application that has environments is the
         // footgun this feature exists to remove, so it is never the default and
-        // never implicit. The backend refuses without this flag and names the
-        // environments on offer.
-        followLine: !environment,
+        // never implicit. Asserted only when an explicit control said so — a
+        // typed application name with no environment offered is NOT a choice,
+        // and the backend refusal that names the environments has to fire.
+        followLine: !environment && lineChosen,
         // Only set when the Review step SHOWED the cross-workspace name conflict
         // and the user answered the second, differently-worded question. The
         // backend refuses a conflicting subscribe without it, so a UI that
@@ -826,6 +837,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                   setPackageName(pkg.name);
                   setVersionPin("latest");
                   setEnvironment(defaultEnvironment(pkg.environments));
+                  setLineChosen(pkg.environments.length === 0);
                   setShowPinControls(false);
                 }}
                 style={{ padding: "6px 8px", borderBottom: "1px solid var(--border-default)", cursor: "pointer", background: selected ? "#eef5ff" : "transparent", color: selected ? "#1a1a1a" : "inherit" }}
@@ -869,6 +881,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                           disabled={!env.version}
                           onChange={() => {
                             setEnvironment(env.name);
+                            setLineChosen(false);
                             // An environment subscription carries no pin: the
                             // pointer IS the target, and a stale pin beside it
                             // would be a second answer to the same question.
@@ -915,6 +928,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                       onClick={() => {
                         setVersionPin("latest");
                         setEnvironment(null);
+                        setLineChosen(true);
                       }}
                       style={{ fontSize: 11, padding: "1px 6px", border: "none", borderRadius: 3, cursor: "pointer", background: versionPin === "latest" ? "#1967d2" : "#f1f3f4", color: versionPin === "latest" ? "#fff" : "#333" }}
                     >
@@ -928,6 +942,7 @@ export function SubscribeDialog({ onClose }: DialogProps) {
                           onClick={() => {
                             setVersionPin(pin);
                             setEnvironment(null);
+                            setLineChosen(true);
                           }}
                           title={`Published ${v.publishedAt}${v.publishedBy ? ` by ${v.publishedBy}` : ""}`}
                           style={{ fontSize: 11, padding: "1px 6px", border: "none", borderRadius: 3, cursor: "pointer", background: versionPin === pin ? "#1967d2" : "#f1f3f4", color: versionPin === pin ? "#fff" : "#333" }}

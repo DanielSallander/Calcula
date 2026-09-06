@@ -223,6 +223,29 @@ impl WorkspaceTransport for HttpWorkspace {
         Ok(self.get_json::<Vec<String>>("packages.json")?.unwrap_or_default())
     }
 
+    /// Files at the APPLICATION ROOT: `publishers.json`, `publishers.sig`,
+    /// `promotions.json`.
+    ///
+    /// WITHOUT THIS, THE TRAIT DEFAULT ANSWERS `Ok(None)` — "this application has
+    /// no such file" — and an HTTP workspace became a workspace where nothing
+    /// has environments and nobody has delegates. Two things then broke in the
+    /// direction that flatters the attacker: the subscribe gate that refuses a
+    /// bare-pin subscription on an application WITH environments never fired, so
+    /// a script pull was silently seated on the development line; and a
+    /// delegate-signed version could not verify at all, because the list
+    /// vouching for the delegate was invisible. Meanwhile the Subscribe dialog
+    /// still offered `prod`, because the browse listing comes from the manifest,
+    /// which HTTP DOES serve.
+    fn read_application_artifact(
+        &self,
+        package_name: &str,
+        rel_path: &str,
+    ) -> Result<Option<Vec<u8>>, CalpError> {
+        Self::check_package(package_name)?;
+        Self::check_rel_path(rel_path)?;
+        self.get_bytes(&format!("{package_name}/{rel_path}"))
+    }
+
     fn get_application_manifest(&self, package_name: &str) -> Result<ApplicationManifest, CalpError> {
         Self::check_package(package_name)?;
         self.get_json(&format!("{package_name}/calp-manifest.json"))?

@@ -5823,6 +5823,7 @@ mod distribution_user_file_restore_tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         }
     }

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::CalpError;
 use crate::integrity::PinPolicy;
 use crate::manifest::Subscription;
+use crate::manifest::UpstreamRemovedSheet;
 use crate::overrides::{OverrideLayer, OverrideValue};
 use crate::pull::{self, PullRequest, PullResult};
 use crate::workspace_id::WorkspaceScope;
@@ -80,6 +81,12 @@ pub struct EnvironmentNotice {
     pub registry_url: String,
     /// The environments now on offer, in pipeline order. The last is the one
     /// the UI should suggest — it is production by convention.
+    ///
+    /// PROMOTED ONES ONLY. A defined-but-empty environment cannot be subscribed
+    /// to — `resolve_environment` answers `EnvironmentEmpty` — so offering it
+    /// here produced a pre-armed "Use prod" button whose only outcome was a
+    /// refusal. A pipeline with nothing promoted into it yet therefore raises no
+    /// notice at all, which is correct: there is nothing to switch to.
     pub environments: Vec<String>,
 }
 
@@ -299,6 +306,10 @@ pub struct RefreshResult {
 pub fn compute_preview(
     registry: &dyn WorkspaceTransport,
     subscriptions: &[Subscription],
+    // WHOSE WORD DECIDES which version an environment names. The preview must
+    // use the same anchor the apply does, or it promises a version the apply
+    // then refuses.
+    trust: crate::environments::PromotionTrust<'_>,
     override_layer: &OverrideLayer,
     override_positions: &HashMap<(SheetId, CellId), (u32, u32)>,
     // LIVE local sheet names by local sheet id. The ledger name is stamped at
@@ -331,33 +342,51 @@ pub fn compute_preview(
         // subscriber with nothing to apply still needs told. Best-effort: a
         // workspace that will not answer must not block a refresh.
         if matches!(target, crate::manifest::SubscriptionTarget::Line(_)) {
-            if let Ok(envs) = crate::environments::environments(registry, &sub.package_name) {
-                if !envs.is_empty() {
+            if let Ok(envs) = crate::environments::environments_via(registry, &sub.package_name, trust) {
+                // Only environments a subscriber could actually move to: one
+                // with no version refuses the switch, and one whose pointer is
+                // no longer vouched for refuses to resolve.
+                let offerable: Vec<String> = envs
+                    .iter()
+                    .filter(|e| e.version.is_some() && !e.unauthorized_pointer)
+                    .map(|e| e.name.clone())
+                    .collect();
+                if !offerable.is_empty() {
                     environment_notices.push(EnvironmentNotice {
                         package_name: sub.package_name.clone(),
                         registry_url: sub.registry_url.clone(),
-                        environments: envs.iter().map(|e| e.name.clone()).collect(),
+                        environments: offerable,
                     });
                 }
             }
         }
 
         let resolved =
-            match crate::environments::resolve_target(registry, &sub.package_name, &target) {
+            match crate::environments::resolve_target_via(registry, &sub.package_name, &target, trust) {
                 Ok(v) => v,
                 // ONE ROW, NOT THE WHOLE PREVIEW. A removed or empty
                 // environment is a fact about ONE subscription; propagating it
                 // would blank every other subscription's preview in the
                 // workbook and leave the user unable to refresh anything.
+                // EVERY WAY AN ENVIRONMENT CAN FAIL TO RESOLVE IS ONE ROW.
+                //
+                // `PublisherListInvalid` used to fall through to the propagate
+                // arm below, so an unsigned `publishers.json` on ONE application
+                // blanked every other subscription's preview — precisely the
+                // one-admin-blanks-everyone outcome this row exists to prevent.
+                // Enumerating variants meant every future variant defaulted to
+                // the blanking branch, so the set is now stated as "resolution
+                // failed" and only genuine transport IO still propagates.
                 Err(e @ (CalpError::EnvironmentNotFound { .. }
                     | CalpError::EnvironmentEmpty { .. }
+                    | CalpError::PublisherListInvalid { .. }
                     | CalpError::PromotionLogInvalid { .. })) => {
                     unavailable.push(UnavailableSubscription {
                         package_name: sub.package_name.clone(),
                         registry_url: sub.registry_url.clone(),
                         environment: sub.environment.clone(),
                         reason: e.to_string(),
-                        available: crate::environments::environments(registry, &sub.package_name)
+                        available: crate::environments::environments_via(registry, &sub.package_name, trust)
                             .map(|envs| envs.into_iter().map(|x| x.name).collect())
                             .unwrap_or_default(),
                     });
@@ -826,7 +855,12 @@ pub fn pull_all_updates(
     for (i, sub) in subscriptions.iter().enumerate() {
         let target = sub.target()?;
         let resolved =
-            crate::environments::resolve_target(registry, &sub.package_name, &target)?;
+            crate::environments::resolve_target_via(
+                registry,
+                &sub.package_name,
+                &target,
+                crate::environments::PromotionTrust::Pinned { scope, profile_dir },
+            )?;
         let new_version_str = resolved.to_string();
 
         if let Some(shown) = previewed {
@@ -855,6 +889,23 @@ pub fn pull_all_updates(
         // and, under RequirePinned, so does a refresh of an application this machine
         // never agreed to trust in the first place.
         let result = pull::pull(registry, &request, scope, profile_dir, policy)?;
+
+        // THE PULL RESOLVED THE TARGET A SECOND TIME, and the version it
+        // installs is the one it found — not the one checked against what the
+        // user was shown a few lines up. For a non-exact pin or an environment
+        // target, a head push or a pointer move landing between the two reads
+        // would install a version the stale-preview gate never saw, and
+        // `apply_refresh` would stamp it. The window is microseconds rather than
+        // the dialog window the gate documents, but the whole point of the gate
+        // is that decisions are applied to the values they were made about.
+        if result.resolved_version.to_string() != new_version_str {
+            return Err(CalpError::RefreshMoved(format!(
+                "CALP_REFRESH_MOVED: the workspace changed while this refresh was running. \n                 '{}' resolved to {} when the refresh was checked and to {} a moment later, \n                 so applying it would install a version nothing verified against what you were \n                 shown. Close and re-open Refresh.",
+                sub.package_name,
+                new_version_str,
+                result.resolved_version
+            )));
+        }
 
         payloads.push(RefreshPayload {
             subscription_index: i,
@@ -951,7 +1002,9 @@ pub fn apply_refresh(
         // and the workbook's sheet list keep using the original ones.
         let mut new_sheets = pull.subscription.sheets.clone();
         // ...and drop the detached ones entirely, or the ledger would re-adopt a
-        // sheet the user deliberately made theirs.
+        // sheet the user deliberately made theirs. UPSTREAM-REMOVED sheets are
+        // NOT dropped here: they are the publisher's, the user never claimed
+        // them, and a version that brings one back must re-adopt it.
         new_sheets.retain(|s| !sub.detached_sheets.contains(&s.package_sheet_id));
         for new_sheet in new_sheets.iter_mut() {
             if let Some(old) = sub.sheets.iter()
@@ -959,16 +1012,39 @@ pub fn apply_refresh(
             {
                 new_sheet.local_sheet_id = old.local_sheet_id;
                 new_sheet.local_name = old.local_name.clone();
+            } else if let Some(back) = sub
+                .upstream_removed_sheets
+                .iter()
+                .find(|s| s.package_sheet_id == new_sheet.package_sheet_id)
+            {
+                // BACK FROM A TOMBSTONE. Restore the identity the workbook is
+                // still rendering, so the returning version updates the tab in
+                // place instead of arriving beside it as `Sheet (2)`.
+                new_sheet.local_sheet_id = back.local_sheet_id;
+                new_sheet.local_name = back.local_name.clone();
             }
         }
-        // Tombstone the sheets this refresh dropped but the workbook keeps.
-        // Same list  uses, and for the same reason: without it the next
-        // version to bring the sheet back materializes a SECOND copy beside the
-        // one still on screen.
+        // A returning sheet is no longer removed.
+        let returned: Vec<SheetId> = new_sheets.iter().map(|s| s.package_sheet_id).collect();
+        sub.upstream_removed_sheets
+            .retain(|s| !returned.contains(&s.package_sheet_id));
+        // Tombstone the sheets this refresh dropped but the workbook keeps,
+        // WITH the local identity, so the next version to bring one back updates
+        // the tab already on screen rather than materializing a second copy.
         for id in removed_locally {
-            if !sub.detached_sheets.contains(&id) {
-                sub.detached_sheets.push(id);
+            if sub.upstream_removed_sheets.iter().any(|s| s.package_sheet_id == id) {
+                continue;
             }
+            let Some(old) = sub.sheets.iter().find(|s| s.package_sheet_id == id) else {
+                continue;
+            };
+            sub.upstream_removed_sheets.push(UpstreamRemovedSheet {
+                package_sheet_id: id,
+                local_sheet_id: old.local_sheet_id,
+                local_name: old.local_name.clone(),
+                removed_at_version: pull.resolved_version.to_string(),
+                extra: Default::default(),
+            });
         }
         sub.resolved_version = pull.resolved_version.to_string();
         sub.resolved_at = now.to_string();
@@ -1076,6 +1152,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }
     }
@@ -1114,7 +1191,7 @@ mod tests {
         let sub = env_subscription(&dir, Some("prod"), "", "1.0.0");
         let layer = OverrideLayer::new();
         let preview =
-            compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub.clone()], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(
             preview.subscription_previews.is_empty(),
             "1.1.0 is published but prod still points at 1.0.0 — nothing to offer"
@@ -1124,7 +1201,7 @@ mod tests {
         // makes the previous assertion mean something.
         let line = env_subscription(&dir, None, "^1.0.0", "1.0.0");
         let line_preview =
-            compute_preview(&reg, &[line], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[line], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(line_preview.subscription_previews[0].new_version, "1.1.0");
 
         // Promote, and now prod's subscriber is offered it.
@@ -1134,7 +1211,7 @@ mod tests {
         )
         .unwrap();
         let after =
-            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(after.subscription_previews[0].new_version, "1.1.0");
         assert_eq!(after.subscription_previews[0].environment.as_deref(), Some("prod"));
         assert!(!after.subscription_previews[0].is_rollback);
@@ -1172,7 +1249,7 @@ mod tests {
         let sub = env_subscription(&dir, Some("prod"), "", "1.1.0");
         let layer = OverrideLayer::new();
         let preview =
-            compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub.clone()], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         let row = &preview.subscription_previews[0];
         assert_eq!(row.current_version, "1.1.0");
         assert_eq!(row.new_version, "1.0.0");
@@ -1211,7 +1288,7 @@ mod tests {
         let healthy = env_subscription(&dir, None, "^1.0.0", "1.0.0");
         let layer = OverrideLayer::new();
         let preview = compute_preview(
-            &reg, &[orphan, healthy], &layer, &HashMap::new(), &HashMap::new(),
+            &reg, &[orphan, healthy], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new(),
         )
         .unwrap();
 
@@ -1240,7 +1317,7 @@ mod tests {
         let sub = env_subscription(&dir, Some("prod"), "", "1.0.0");
         let layer = OverrideLayer::new();
         let preview =
-            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(preview.unavailable.len(), 1);
         assert!(
             preview.unavailable[0].reason.contains("nothing has been promoted"),
@@ -1271,16 +1348,31 @@ mod tests {
         let sub = env_subscription(&dir, None, "^1.0.0", "1.0.0");
         let layer = OverrideLayer::new();
         let preview =
-            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
 
         // Still following the line: offered the head, not test's pointer.
         assert_eq!(preview.subscription_previews[0].new_version, "1.1.0");
         assert_eq!(preview.subscription_previews[0].environment, None);
 
-        // And told, in pipeline order so the UI can suggest the last one.
+        // And told — but only about environments they could actually move to.
+        // `prod` is defined and empty, so switching to it would be refused with
+        // `EnvironmentEmpty`; offering it here armed a "Use prod" button whose
+        // only outcome was that refusal.
         assert_eq!(preview.environment_notices.len(), 1);
         assert_eq!(preview.environment_notices[0].package_name, "test-pkg");
-        assert_eq!(preview.environment_notices[0].environments, vec!["test", "prod"]);
+        assert_eq!(preview.environment_notices[0].environments, vec!["test"]);
+
+        // Promote into prod and it joins the offer, in pipeline order so the UI
+        // can suggest the last one.
+        crate::environments::promote(
+            &reg, "test-pkg", "prod", Some(SemVer::new(1, 0, 0)), None, &kp,
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        let sub2 = env_subscription(&dir, None, "^1.0.0", "1.0.0");
+        let after =
+            compute_preview(&reg, &[sub2], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(after.environment_notices[0].environments, vec!["test", "prod"]);
     }
 
     /// The notice appears even when there is NOTHING to apply — a subscription
@@ -1296,14 +1388,43 @@ mod tests {
         let reg = setup_registry_with_versions(&dir, prof.path());
         let kp = keypair_of(&prof);
         set_envs(&reg, &kp, &["prod"]);
+        crate::environments::promote(
+            &reg, "test-pkg", "prod", Some(SemVer::new(1, 0, 0)), None, &kp,
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
 
         // Already at the head: no update, so no preview row.
         let sub = env_subscription(&dir, None, "^1.0.0", "1.1.0");
         let layer = OverrideLayer::new();
         let preview =
-            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(preview.subscription_previews.is_empty());
         assert_eq!(preview.environment_notices.len(), 1);
+    }
+
+    /// A pipeline nothing has been promoted into raises NO notice.
+    ///
+    /// Every environment in it would refuse the switch, so the notice offered a
+    /// pre-armed control whose only outcome was `EnvironmentEmpty`.
+    ///
+    /// SABOTAGE: drop the `version.is_some()` filter from the notice.
+    #[test]
+    fn an_unpromoted_pipeline_raises_no_notice() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let reg = setup_registry_with_versions(&dir, prof.path());
+        let kp = keypair_of(&prof);
+        set_envs(&reg, &kp, &["test", "prod"]);
+
+        let sub = env_subscription(&dir, None, "^1.0.0", "1.0.0");
+        let layer = OverrideLayer::new();
+        let preview =
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        assert!(
+            preview.environment_notices.is_empty(),
+            "nothing has been promoted, so there is nothing to switch to"
+        );
     }
 
     /// A DEV subscription never reaches environment resolution: it points at a
@@ -1326,6 +1447,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(crate::dev_mode::is_dev_subscription(&sub));
@@ -1360,7 +1482,7 @@ mod tests {
             "a resolver is reading the pin directly; go through Subscription::target()"
         );
         assert_eq!(
-            product.matches("environments::resolve_target(").count(),
+            product.matches("environments::resolve_target_via(").count(),
             2,
             "exactly the two resolution sites, both through the one resolver"
         );
@@ -1388,11 +1510,12 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
         let layer = OverrideLayer::new();
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
 
         assert_eq!(preview.subscription_previews.len(), 1);
         assert_eq!(preview.subscription_previews[0].new_version, "1.1.0");
@@ -1467,11 +1590,12 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
         let preview =
-            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &OverrideLayer::new(), &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.cells_changed, 2, "one edited cell and one added cell");
         assert!(p.cells_changed_exact, "small package: the count is the whole truth");
@@ -1500,11 +1624,12 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
         let preview =
-            compute_preview(&reg, &[sub], &OverrideLayer::new(), &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &OverrideLayer::new(), &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.new_version, "1.1.0", "an update IS available");
         assert_eq!(p.cells_changed, 0, "…but the same workbook was republished");
@@ -1532,11 +1657,12 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
         let layer = OverrideLayer::new();
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(preview.subscription_previews.is_empty());
     }
 
@@ -1557,6 +1683,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -1589,6 +1716,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -1677,6 +1805,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
 
@@ -1707,6 +1836,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
 
@@ -1880,6 +2010,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }];
         let mut layer = OverrideLayer::new();
@@ -2006,6 +2137,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         }
     }
@@ -2036,7 +2168,7 @@ mod tests {
         layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "999"));
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(
             p.conflicts.len(),
@@ -2074,7 +2206,7 @@ mod tests {
         layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "999"));
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.conflicts.len(), 1, "upstream changed a cell the user had edited");
 
@@ -2121,7 +2253,7 @@ mod tests {
         layer.set_override(parity_override(local_sheet, cell_id, (0, 0), "100", "150"));
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(preview.subscription_previews[0].conflicts.len(), 0);
         // AND THE PREVIEW SAYS SO. This was a hardcoded 0 while the apply four
         // lines down returned 1 — the subscriber was told the refresh would
@@ -2170,7 +2302,7 @@ mod tests {
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
         let preview =
-            compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+            compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(
             preview.subscription_previews[0].overrides_auto_cleared, 1,
             "the subscription's own row counts only its own sheets"
@@ -2214,7 +2346,7 @@ mod tests {
 
         // Without the registry: reads B2, which is empty, so it reports a
         // conflict against the wrong "theirs".
-        let blind = compute_preview(&reg, &[sub.clone()], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let blind = compute_preview(&reg, &[sub.clone()], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(
             blind.subscription_previews[0].conflicts[0].upstream_new,
             OverrideValue::Empty,
@@ -2224,7 +2356,7 @@ mod tests {
         // With it: reads A1 and reports the real upstream value.
         let mut positions = HashMap::new();
         positions.insert((local_sheet, cell_id), (0u32, 0u32));
-        let seeing = compute_preview(&reg, &[sub], &layer, &positions, &HashMap::new()).unwrap();
+        let seeing = compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &positions, &HashMap::new()).unwrap();
         let c = &seeing.subscription_previews[0].conflicts[0];
         assert_eq!(c.position, (0, 0));
         assert_eq!(c.a1, "A1");
@@ -2272,7 +2404,7 @@ mod tests {
         );
 
         let sub = parity_subscription(&dir, pkg_sheet, local_sheet);
-        let preview = compute_preview(&reg, &[sub], &layer, &HashMap::new(), &HashMap::new()).unwrap();
+        let preview = compute_preview(&reg, &[sub], crate::environments::PromotionTrust::Workspace, &layer, &HashMap::new(), &HashMap::new()).unwrap();
         let p = &preview.subscription_previews[0];
         assert_eq!(p.unexamined_sheets.len(), 1);
         assert_eq!(p.unexamined_sheets[0].reason, "unreadable");

@@ -1703,6 +1703,14 @@ pub struct InspectorModelWriteback {
 #[serde(rename_all = "camelCase")]
 pub struct InspectorRegionStats {
     pub region_id: String,
+    /// The stream these were submitted in; empty = the development line.
+    ///
+    /// STATS ARE GROUPED BY (region, environment), not by region alone. Both
+    /// environments sit on one version right after a linear promotion, so one
+    /// pooled row read "45 submissions" while silently mixing five testers into
+    /// forty respondents.
+    #[serde(default)]
+    pub environment: String,
     pub submission_count: usize,
     pub submitter_count: usize,
     pub approved: usize,
@@ -1714,6 +1722,9 @@ pub struct InspectorRegionStats {
 #[serde(rename_all = "camelCase")]
 pub struct InspectorSubmissionDetail {
     pub region_id: String,
+    /// The stream this was submitted in; empty = the development line.
+    #[serde(default)]
+    pub environment: String,
     pub submitter_name: String,
     pub cell_row: u32,
     pub cell_col: u32,
@@ -1856,6 +1867,12 @@ pub fn calp_inspector_writeback(
     // Folded current state (separate, UNSIGNED trust domain). Failures degrade
     // to "no activity" — a missing submissions tree is normal for an application
     // nobody has responded to.
+    // ACROSS EVERY ENVIRONMENT, deliberately and now visibly. The Inspector is
+    // a transparency surface for one published VERSION, and both environments
+    // sit on one version right after a linear promotion — so "45 submissions"
+    // silently mixed five testers into forty respondents. The rows carry their
+    // environment so the section can group and label them rather than presenting
+    // one pool.
     let submissions = if is_publisher {
         reg.load_current_submissions(&package_name, &version)
             .unwrap_or_default()
@@ -1870,10 +1887,13 @@ pub fn calp_inspector_writeback(
         0
     };
 
-    let mut per_region: BTreeMap<String, (usize, std::collections::HashSet<String>, usize, usize, usize)> =
+    // KEYED BY (region, environment). See `InspectorRegionStats::environment`.
+    let mut per_region: BTreeMap<(String, String), (usize, std::collections::HashSet<String>, usize, usize, usize)> =
         BTreeMap::new();
     for s in &submissions {
-        let entry = per_region.entry(s.region_id.clone()).or_default();
+        let entry = per_region
+            .entry((s.region_id.clone(), s.environment.clone()))
+            .or_default();
         entry.0 += 1;
         entry.1.insert(s.submitter.id.clone());
         match s.state {
@@ -1885,8 +1905,9 @@ pub fn calp_inspector_writeback(
     let region_stats: Vec<InspectorRegionStats> = per_region
         .into_iter()
         .map(
-            |(region_id, (count, submitters, approved, rejected, pending))| InspectorRegionStats {
+            |((region_id, environment), (count, submitters, approved, rejected, pending))| InspectorRegionStats {
                 region_id,
+                environment,
                 submission_count: count,
                 submitter_count: submitters.len(),
                 approved,
@@ -1902,6 +1923,7 @@ pub fn calp_inspector_writeback(
             let (value_display, value_kind) = submission_value_display(&s.value);
             InspectorSubmissionDetail {
                 region_id: s.region_id.clone(),
+                environment: s.environment.clone(),
                 submitter_name: s.submitter.display_name.clone(),
                 cell_row: s.cell_row,
                 cell_col: s.cell_col,

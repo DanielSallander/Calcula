@@ -611,6 +611,7 @@ fn lifecycle_only_subscribe_may_create_the_pin() {
         data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
+        upstream_removed_sheets: Vec::new(),
         extra: HashMap::new(),
     };
 

@@ -42,6 +42,7 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "../fixtures";
 import { parseCellRef } from "../helpers/grid";
 
+const REPO = path.resolve(process.cwd(), "..");
 const WORK = path.join(os.tmpdir(), "calcula-environments");
 const REGISTRY = path.join(WORK, "workspace");
 const FILE_DEV = path.join(WORK, "dev.cala");
@@ -563,6 +564,91 @@ test.describe.serial("environments — one line, named pointers, over a real wor
     const after = await environments(page);
     expect(after.problem).toBe("");
     expect(after.environments.find((e) => e.name === "prod")!.version).toBe("1.1.0");
+  });
+
+  // =========================================================================
+  // 8b. THE REVIEW'S FIXES, live. Each was a confirmed finding.
+  // =========================================================================
+  test("an unreadable promotion log refuses the subscribe instead of admitting it", async ({
+    appPage: page,
+  }) => {
+    test.setTimeout(300_000);
+    await newFile(page);
+
+    // The gate used to read the pipeline with `unwrap_or_default()`, so a log
+    // it could not trust collapsed into "no environments" and a bare-pin
+    // subscribe was admitted onto the development line with no refusal and no
+    // notice — the one outcome the gate exists to prevent.
+    const original = fs.readFileSync(logPath(), "utf8");
+    fs.writeFileSync(logPath(), original.replace(/"sequence": 2/, '"sequence": 7'));
+    try {
+      const message = await refusal(page, "calp_pull", {
+        params: {
+          registryPath: REGISTRY,
+          packageName: APP,
+          versionPin: "latest",
+          environment: null,
+          followLine: false,
+        },
+      });
+      expect(message).toMatch(/CALP_PULL_ENVIRONMENT_UNKNOWN/);
+    } finally {
+      fs.writeFileSync(logPath(), original);
+    }
+  });
+
+  test("a promotion that moves an environment backwards reports itself as a rollback", async ({
+    appPage: page,
+  }) => {
+    test.setTimeout(300_000);
+
+    // prod is at 1.1.0 and test at 1.1.0. Roll TEST back to 1.0.0, then promote
+    // test into prod: that second step moves prod BACKWARDS through the ordinary
+    // promote path, which the dialog used to present as a plain promotion.
+    await invoke(page, "calp_promote", {
+      params: {
+        registryPath: REGISTRY,
+        packageName: APP,
+        environment: "test",
+        version: "1.0.0",
+        checkCurrent: false,
+        expectedCurrent: "",
+      },
+    });
+    const back = await invoke<{ isRollback: boolean; from: string | null; to: string }>(
+      page,
+      "calp_promote",
+      {
+        params: {
+          registryPath: REGISTRY,
+          packageName: APP,
+          environment: "prod",
+          version: "1.0.0",
+          checkCurrent: false,
+          expectedCurrent: "",
+        },
+      },
+    );
+    expect(back.isRollback, "a backwards move through PROMOTE is still a rollback").toBe(
+      true,
+    );
+    expect(back.to).toBe("1.0.0");
+  });
+
+  test("an HTTP workspace can read the promotion log at all", async ({ appPage: page }) => {
+    test.setTimeout(300_000);
+    // `HttpWorkspace` inherited the trait default `Ok(None)` for application-root
+    // files, so environments were inert over HTTP and the follow-line gate could
+    // not fire. There is no HTTP server in this journey, so this asserts the
+    // implementation exists rather than its behaviour over the wire — the unit
+    // tier cannot see it either, because the default silently answered.
+    const src = fs.readFileSync(
+      path.join(REPO, "app/src-tauri/src/calp_registry.rs"),
+      "utf8",
+    );
+    const impl = src.slice(src.indexOf("impl WorkspaceTransport for HttpWorkspace"));
+    expect(impl).toContain("fn read_application_artifact(");
+    expect(impl).toContain("check_rel_path");
   });
 
   // =========================================================================

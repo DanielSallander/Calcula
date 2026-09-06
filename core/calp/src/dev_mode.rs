@@ -130,6 +130,7 @@ pub fn make_dev_subscription(
         data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
+        upstream_removed_sheets: Vec::new(),
         extra: std::collections::HashMap::new(),
     }
 }
@@ -240,6 +241,7 @@ mod tests {
             data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
+        upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(is_dev_subscription(&sub));
@@ -255,6 +257,7 @@ mod tests {
             data_source_configs: Vec::new(),
         objects: Vec::new(),
         detached_sheets: Vec::new(),
+        upstream_removed_sheets: Vec::new(),
             extra: std::collections::HashMap::new(),
         };
         assert!(!is_dev_subscription(&normal_sub));

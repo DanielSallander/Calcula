@@ -690,6 +690,9 @@ fn dispatch(
                         new_state,
                         reason,
                         submission_id,
+                        // A SCRIPT REVIEWS ITS OWN WORKBOOK'S STREAM, always —
+                        // the same rule the region reads follow.
+                        None,
                         window.clone(),
                     )?;
                     Ok(json!({ "reviewed": true }))

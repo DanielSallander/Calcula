@@ -3577,18 +3577,35 @@ pub fn calp_pull(
             // report reaches them. Following the line stays possible, as a
             // choice somebody made.
             if !params.follow_line {
-                let envs = calp::environments::environments(&registry, &params.package_name)
-                    .unwrap_or_default();
-                if !envs.is_empty() {
-                    return Err(format!(
-                        "CALP_PULL_ENVIRONMENT_REQUIRED: '{}' publishes through environments \
-                         ({}). Pick one — usually '{}' — or choose to follow the development \
-                         line deliberately, which receives every change before it has been \
-                         tested.",
-                        params.package_name,
-                        envs.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "),
-                        envs.last().map(|e| e.name.as_str()).unwrap_or("prod"),
-                    ));
+                // MATCH, DO NOT `unwrap_or_default`. Collapsing an error into
+                // "no environments" made this gate fail OPEN: a tampered or
+                // unreadable promotion log — or a transport that cannot serve
+                // one at all — admitted a bare-pin subscriber onto the
+                // development line with no refusal and no notice, which is the
+                // one outcome the gate exists to prevent. The core module says
+                // it in as many words: "no log" and "a log I could not trust"
+                // must not behave alike.
+                match calp::environments::environments(&registry, &params.package_name) {
+                    Ok(envs) if envs.is_empty() => {}
+                    Ok(envs) => {
+                        return Err(format!(
+                            "CALP_PULL_ENVIRONMENT_REQUIRED: '{}' publishes through environments \
+                             ({}). Pick one — usually '{}' — or choose to follow the development \
+                             line deliberately, which receives every change before it has been \
+                             tested.",
+                            params.package_name,
+                            envs.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "),
+                            envs.last().map(|e| e.name.as_str()).unwrap_or("prod"),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "CALP_PULL_ENVIRONMENT_UNKNOWN: '{}' could not be checked for \
+                             environments, so this subscribe cannot tell whether following the \
+                             development line is what you want: {e}",
+                            params.package_name
+                        ));
+                    }
                 }
             }
             calp::manifest::SubscriptionTarget::Line(
@@ -6789,7 +6806,7 @@ pub fn calp_refresh_preview(
     };
 
     for (registry_path, indices) in group_subscriptions_by_registry(&subs.subscriptions) {
-        let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
+        let (registry, scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
             .map_err(|e| format!("Workspace '{}': {}", registry_path, e))?;
         let group: Vec<_> = indices.iter()
             .map(|&i| subs.subscriptions[i].clone())
@@ -6798,6 +6815,14 @@ pub fn calp_refresh_preview(
             calp::refresh::compute_preview(
                 &registry,
                 &group,
+                // THE SAME ANCHOR THE APPLY USES. A preview resolved against the
+                // workspace's own account would promise a version the pull then
+                // refuses, which is the two-surfaces-disagree failure this
+                // feature has already produced once.
+                calp::environments::PromotionTrust::Pinned {
+                    scope: &scope,
+                    profile_dir: &calcula_profile_dir(),
+                },
                 &layer,
                 &override_positions,
                 &local_sheet_names,
@@ -9234,6 +9259,14 @@ pub fn calp_get_writeback_regions(
     // Enrich each entry with its declaration's value type / required / deadline,
     // so the client commit guard can coerce typed input and the UI can show a
     // deadline countdown. The flat index carries no schema; the declarations do.
+    // Which application each region belongs to, so a surface with more than one
+    // subscription can scope itself to the right one.
+    for e in entries.iter_mut() {
+        if let Ok(owner) = owning_subscription_for_region(&state, &e.region_id) {
+            e.package_name = Some(owner.package_name);
+        }
+    }
+
     if let Ok(decls) = state.writeback_declarations.lock() {
         for e in entries.iter_mut() {
             if let Some(decl) = decls.iter().find(|d| d.id == e.region_id) {
@@ -10236,7 +10269,12 @@ fn reconcile_writeback_layer_internal(
             continue;
         };
         // Newest version first: resolved, then older versions sorted descending.
-        let mut older = older_package_versions(&registry, &package_name, &resolved_version);
+        // See `rebuild_gather_cache`: an environment carries forward over what
+        // it has HELD. Under the semver rule a review decision recorded against
+        // the version an environment was rolled back FROM never reached the
+        // contributor who made the submission.
+        let mut older =
+            carry_forward_versions(&registry, &package_name, &resolved_version, &environment);
         older.sort_by(|a, b| match (calp::SemVer::parse(b), calp::SemVer::parse(a)) {
             (Ok(bv), Ok(av)) => bv.cmp(&av),
             _ => b.cmp(a),
@@ -12640,19 +12678,26 @@ pub fn calp_list_model_submissions(
     window: tauri::Window,
 ) -> Result<Vec<calp::writeback::WritebackSubmission>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let (package_name, resolved_version, registry_path, _env, _) =
+    let (package_name, resolved_version, registry_path, environment, _) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
     let (registry, _scope) =
         crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
     // AUTHORIZATION (parity with calp_set_model_submission_state): this returns
     // EVERY submitter's raw values and identity for the column. Publisher only.
     require_publisher(&*registry, &package_name, &resolved_version)?;
-    let mut subs: Vec<calp::writeback::WritebackSubmission> = registry
-        .load_current_submissions(&package_name, &resolved_version)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|s| s.region_id == writeback_id && s.model_key.is_some())
-        .collect();
+    // ONE STREAM, like every region read. Unfiltered, a `distribution.writeback`
+    // script listing a MODEL column saw every environment's submissions —
+    // contradicting the rule the gateway enforces for regions one branch over,
+    // and disclosing values from a stream the workbook does not follow.
+    let mut subs: Vec<calp::writeback::WritebackSubmission> = calp::writeback::visible_in(
+        registry
+            .load_current_submissions(&package_name, &resolved_version)
+            .map_err(|e| e.to_string())?,
+        Some(&environment),
+    )
+    .into_iter()
+    .filter(|s| s.region_id == writeback_id && s.model_key.is_some())
+    .collect();
     subs.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at).then_with(|| a.id.cmp(&b.id)));
     // Publisher-side, best-effort rollup freshness: submissions arrive while
     // the publisher only reads, so the review-pane load keeps the parquet
@@ -12689,7 +12734,7 @@ pub fn calp_set_model_submission_state(
         }
     };
 
-    let (package_name, resolved_version, registry_path, _env, _) =
+    let (package_name, resolved_version, registry_path, environment, _) =
         owning_subscription_for_model_writeback(&state, &writeback_id)?;
     let (registry, _scope) =
         crate::calp_registry::open_workspace_scoped(&registry_path).map_err(|e| e.to_string())?;
@@ -12698,11 +12743,16 @@ pub fn calp_set_model_submission_state(
     // this any subscriber could self-approve a masterData value.
     require_publisher(&registry, &package_name, &resolved_version)?;
 
-    let submission = registry
-        .load_current_submissions(&package_name, &resolved_version)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|s| s.id == submission_id && s.region_id == writeback_id && s.model_key.is_some())
+    // See `calp_list_model_submissions`: a review must target a submission in
+    // the stream this workbook actually follows.
+    let submission = calp::writeback::visible_in(
+        registry
+            .load_current_submissions(&package_name, &resolved_version)
+            .map_err(|e| e.to_string())?,
+        Some(&environment),
+    )
+    .into_iter()
+    .find(|s| s.id == submission_id && s.region_id == writeback_id && s.model_key.is_some())
         .ok_or_else(|| {
             format!(
                 "No model submission '{}' found for writeback column '{}'",
@@ -12771,9 +12821,13 @@ pub fn calp_set_submission_state(
     new_state: String,
     reason: Option<String>,
     submission_id: Option<String>,
+    // Review a stream OTHER than the one this workbook follows, matching the
+    // dashboard's environment picker. `None` is the workbook's own.
+    environment: Option<String>,
     window: tauri::Window,
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
+    let environment_override = environment;
     let target_state = match new_state.as_str() {
         "approved" => calp::writeback::SubmissionState::Approved,
         "rejected" => calp::writeback::SubmissionState::Rejected,
@@ -12796,6 +12850,17 @@ pub fn calp_set_submission_state(
     // aggregate, or reject a rival's so GATHER drops it.
     require_publisher(&registry, &package_name, &resolved_version)?;
 
+    // WHICH STREAM IS BEING REVIEWED. The dashboard can be pointed at another
+    // environment, and this command used to filter only by the workbook's own —
+    // so approving a row shown "in test" answered "No submission found", or, if
+    // the submitter had also answered in prod, the misleading "superseded by a
+    // newer one". It failed closed, but the button on screen could not work.
+    // The override is the publisher's own deliberate choice, and it is audited.
+    let reviewing = environment_override
+        .as_deref()
+        .unwrap_or(environment.as_str())
+        .to_string();
+
     // Search the resolved version first, then older ones: lenient regions
     // carry submissions forward across version bumps, and those records live
     // in the version directory they were submitted against — the review event
@@ -12805,22 +12870,32 @@ pub fn calp_set_submission_state(
         &registry,
         &package_name,
         &resolved_version,
-        &environment,
+        &reviewing,
     ));
 
+    // THE NEWEST RECORD ACROSS VERSIONS, not the first version that has one.
+    // `versions` is version-ordered and descending after a rollback, so breaking
+    // on the first hit targeted the OLDER record and Approve landed on a value
+    // the publisher was not looking at — while the dashboard, built on the same
+    // arbitration, now shows the newer one.
     let mut found: Option<(String, calp::writeback::WritebackSubmission)> = None;
     for version in &versions {
         let Ok(submissions) = registry
             .load_current_submissions_by(&package_name, version, &submitter_id)
-            .map(|subs| calp::writeback::visible_in(subs, Some(&environment)))
+            .map(|subs| calp::writeback::visible_in(subs, Some(&reviewing)))
         else {
             continue;
         };
         if let Some(s) = submissions.into_iter().find(|s| {
             s.region_id == region_id && s.cell_row == cell_row && s.cell_col == cell_col
         }) {
-            found = Some((version.clone(), s));
-            break;
+            let newer = found.as_ref().is_none_or(|(_, cur)| {
+                (s.updated_at.as_str(), s.id.as_str())
+                    > (cur.updated_at.as_str(), cur.id.as_str())
+            });
+            if newer {
+                found = Some((version.clone(), s));
+            }
         }
     }
     let (version, submission) = found.ok_or_else(|| {
@@ -12979,18 +13054,32 @@ fn load_region_current_submissions(
         environment_override.unwrap_or(&environment),
     ));
 
-    // Newest version first: keep the current record per (submitter, cell)
-    // slot. Each version's load is already collapsed by the workspace fold, so
-    // `or_insert` only arbitrates ACROSS versions.
+    // Across versions, the NEWEST RECORD WINS — by timestamp, not by version
+    // order. The list is version-ordered and `versions_held_by` sorts descending,
+    // so after a rollback it reads [1.4.0, 1.5.0] and a first-hit rule handed
+    // back Monday's answer over Wednesday's. `merge_lenient_submissions` already
+    // arbitrates by `updated_at`, and the BI dataset built on it disagreed with
+    // this list, the exports and the review command for the same slot.
+    // Each version's load is already collapsed by the workspace fold, so this
+    // only arbitrates ACROSS versions.
     let mut by_slot: std::collections::HashMap<(String, u32, u32), calp::writeback::WritebackSubmission> =
         std::collections::HashMap::new();
     let reading = environment_override.unwrap_or(&environment);
     for version in &versions {
         if let Ok(subs) = registry.load_current_region_submissions(&package_name, version, region_id) {
             for s in calp::writeback::visible_in(subs, Some(reading)) {
-                by_slot
-                    .entry((s.submitter.id.clone(), s.cell_row, s.cell_col))
-                    .or_insert(s);
+                match by_slot.entry((s.submitter.id.clone(), s.cell_row, s.cell_col)) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(s);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        let newer = (s.updated_at.as_str(), s.id.as_str())
+                            > (o.get().updated_at.as_str(), o.get().id.as_str());
+                        if newer {
+                            o.insert(s);
+                        }
+                    }
+                }
             }
         }
     }
@@ -13079,20 +13168,31 @@ fn csv_escape(s: &str) -> String {
 pub fn calp_export_region_submissions_csv(
     state: State<AppState>,
     region_id: String,
+    // The stream the dashboard is SHOWING. Without it a publisher following
+    // prod who viewed test read a respondent count for prod under a list of
+    // test rows, and exported prod's values under a filename naming test.
+    environment: Option<String>,
     window: tauri::Window,
 ) -> Result<String, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // AUTHORIZATION: an export is the same disclosure as the dashboard, in a
     // form that leaves the app. Publisher only.
     require_region_publisher(&state, &region_id)?;
-    let rows = load_region_submission_infos(&state, &region_id, None)?;
+    let rows = load_region_submission_infos(&state, &region_id, environment.as_deref())?;
+    // THE ENVIRONMENT IS A COLUMN, as it is in the Parquet export and the
+    // rollup. Without it the file is a set of numbers with no record of which
+    // stream produced them, which is exactly how a test total gets read as a
+    // production one after it leaves the app.
     let mut out =
-        String::from("submitter,submitterId,cell,value,type,state,submittedAt,updatedAt,reviewedBy,reviewReason\n");
+        String::from("submitter,submitterId,environment,cell,value,type,state,submittedAt,updatedAt,reviewedBy,reviewReason\n");
     for r in &rows {
         let cell = format!("R{}C{}", r.cell_row + 1, r.cell_col + 1);
+        let environment_label =
+            if r.environment.is_empty() { "(development line)" } else { r.environment.as_str() };
         let fields = [
             r.submitter_name.as_str(),
             r.submitter_id.as_str(),
+            environment_label,
             cell.as_str(),
             r.value_display.as_str(),
             r.value_kind.as_str(),
@@ -13267,12 +13367,16 @@ fn encode_submissions_parquet(
 pub fn calp_export_region_submissions_parquet(
     state: State<AppState>,
     region_id: String,
+    // The stream the dashboard is SHOWING. Without it a publisher following
+    // prod who viewed test read a respondent count for prod under a list of
+    // test rows, and exported prod's values under a filename naming test.
+    environment: Option<String>,
     window: tauri::Window,
 ) -> Result<Vec<u8>, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     // AUTHORIZATION: same disclosure as the CSV export. Publisher only.
     require_region_publisher(&state, &region_id)?;
-    let subs = load_region_current_submissions(&state, &region_id, None)?;
+    let subs = load_region_current_submissions(&state, &region_id, environment.as_deref())?;
     encode_submissions_parquet(&subs)
 }
 
@@ -13430,11 +13534,19 @@ pub struct RegionResponseStatus {
 pub fn calp_region_response_status(
     state: State<AppState>,
     region_id: String,
+    // The stream the dashboard is SHOWING. Without it a publisher following
+    // prod who viewed test read a respondent count for prod under a list of
+    // test rows, and exported prod's values under a filename naming test.
+    environment: Option<String>,
     window: tauri::Window,
 ) -> Result<RegionResponseStatus, String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
-    let OwningSubscription { package_name, resolved_version, registry_path, environment } =
-        owning_subscription_for_region(&state, &region_id)?;
+    let OwningSubscription {
+        package_name,
+        resolved_version,
+        registry_path,
+        environment: environment_of_sub,
+    } = owning_subscription_for_region(&state, &region_id)?;
     let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&registry_path)
         .map_err(|e| e.to_string())?;
     // AUTHORIZATION: `responded` names every contributor across all submitters
@@ -13452,17 +13564,19 @@ pub fn calp_region_response_status(
 
     // Distinct submitters (id -> display name) with a non-empty submission,
     // across the resolved version and the ones this stream ran before it.
+    // The stream being asked about: the picker's, or this workbook's own.
+    let counting = environment.as_deref().unwrap_or(environment_of_sub.as_str()).to_string();
     let mut versions = vec![resolved_version.clone()];
     versions.extend(carry_forward_versions(
         &registry,
         &package_name,
         &resolved_version,
-        &environment,
+        &counting,
     ));
     let mut respondents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for version in &versions {
         if let Ok(subs) = registry.load_current_region_submissions(&package_name, version, &region_id) {
-            for s in calp::writeback::visible_in(subs, Some(&environment)) {
+            for s in calp::writeback::visible_in(subs, Some(&counting)) {
                 if matches!(s.value, calp::writeback::SubmissionValue::Empty) {
                     continue;
                 }
@@ -14038,8 +14152,14 @@ pub(crate) fn rebuild_gather_cache(state: &AppState) -> std::collections::HashMa
         // Strictly OLDER versions, each loaded once: their region
         // declarations (for the schema-compatibility gate) and their
         // submissions bucketed by region.
+        // THE ENVIRONMENT'S OWN HISTORY, not strictly-lower semver. A rollback
+        // makes the current pointer LOWER than a version the environment ran
+        // last week, so the semver rule dropped every submission filed under it
+        // — out of `=GATHER()` totals only, while the dashboard and the BI feed
+        // (both already on `carry_forward_versions`) kept counting them. A
+        // smaller, plausible number with nothing on screen to explain it.
         let older: Vec<(Vec<calp::WritebackRegionDeclaration>, std::collections::HashMap<String, Vec<calp::writeback::WritebackSubmission>>)> =
-            older_package_versions(&registry, &sub.package_name, &sub.resolved_version)
+            carry_forward_versions(&registry, &sub.package_name, &sub.resolved_version, &environment)
                 .iter()
                 .filter_map(|version| {
                     // Older versions' region schemas gate lenient carry-forward;
@@ -14299,6 +14419,7 @@ mod writeback_rebuild_tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         }
     }

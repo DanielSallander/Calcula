@@ -170,6 +170,7 @@ fn identity_survives_checkout_and_push() {
     let preview = refresh::compute_preview(
         &reg,
         &subscriptions,
+        calp::environments::PromotionTrust::Workspace,
         &OverrideLayer::new(),
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),

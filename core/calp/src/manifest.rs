@@ -645,6 +645,22 @@ pub struct Subscription {
     /// `extra`'s flatten preserves it verbatim across a save anyway.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detached_sheets: Vec<SheetId>,
+    /// Sheets the UPSTREAM version dropped while this workbook kept them.
+    ///
+    /// A SEPARATE LIST FROM `detached_sheets`, and the separation is the whole
+    /// point. Both used to share one reason-less list, so a sheet the publisher
+    /// removed became indistinguishable from one the user deliberately took —
+    /// and the retain that keeps a detached sheet out of the ledger then kept
+    /// this one out FOREVER. After a rollback across a sheet-adding version, the
+    /// roll-forward left the tab on screen with stale numbers, no badge, no
+    /// delete guard, and, worst, no publish exclusion, so the publisher's own
+    /// sheet could be republished inside the subscriber's application as theirs.
+    ///
+    /// The local identity travels with it, so a version that brings the sheet
+    /// back is re-adopted IN PLACE rather than materialized as a second copy —
+    /// which is what the tombstone was for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_removed_sheets: Vec<UpstreamRemovedSheet>,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -727,6 +743,24 @@ pub struct SubscribedSheet {
     pub local_sheet_id: SheetId,
     /// The sheet's name in the local workbook (may differ from application name).
     pub local_name: String,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// A sheet the publisher REMOVED while the subscriber kept it on screen.
+///
+/// Carries the local identity so a later version that brings the sheet back is
+/// re-adopted in place. Without that, the returning sheet arrives as an addition
+/// and materializes a second copy beside the one already rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamRemovedSheet {
+    pub package_sheet_id: SheetId,
+    pub local_sheet_id: SheetId,
+    pub local_name: String,
+    /// The version this sheet stopped being published in — display only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub removed_at_version: String,
     #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, serde_json::Value>,
 }

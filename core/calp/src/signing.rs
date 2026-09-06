@@ -498,6 +498,23 @@ impl PinStore {
 ///
 /// A v1 store is migrated in place on first load: extension pins carry over
 /// losslessly, everything else is discarded (see `migrate_v1_store`).
+
+/// The publisher key this machine PINNED for one (workspace, application).
+///
+/// The anchor for anything a subscriber must not let the workspace decide for
+/// itself. `None` means this machine never agreed to trust anyone for this
+/// application, which callers must read as "nobody is authorised", never as
+/// "no restriction".
+pub fn pinned_publisher_key(
+    profile_dir: &Path,
+    scope: &WorkspaceScope,
+    package: &str,
+) -> Result<Option<String>, CalpError> {
+    Ok(load_pins(profile_dir)?
+        .get(&PinKey::calp(scope, package))
+        .map(|r| r.publisher_key.clone()))
+}
+
 pub fn load_pins(profile_dir: &Path) -> Result<PinStore, CalpError> {
     let path = trusted_publishers_file_path(profile_dir);
     if !path.exists() {

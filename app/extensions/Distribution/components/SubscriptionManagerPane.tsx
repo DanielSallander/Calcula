@@ -20,6 +20,7 @@ import {
   getSubscriptionTrust,
   detach,
   emitAppEvent,
+  ENVIRONMENTS_CHANGED_EVENT,
   onAppEvent,
   AppEvents,
 } from "@api";
@@ -335,6 +336,15 @@ export function SubscriptionManagerPane(): React.ReactElement {
         // The line has no pointer to follow, so it needs a pin. "latest" is
         // what a line subscription meant before environments existed.
         versionPin: environment === null ? "latest" : "",
+      });
+      // THE WHOLE APP FOLLOWS THE SWITCH, not just this pane. The status chip
+      // and the sheet-tab tooltips name the stream, and both listen for this
+      // event — its own comment names this exact trigger, and the API documents
+      // it as firing on "a subscription switch". Without it they kept naming
+      // the environment the workbook no longer follows.
+      emitAppEvent(ENVIRONMENTS_CHANGED_EVENT, {
+        registryPath: s.registryUrl,
+        packageName: s.packageName,
       });
       await refresh();
     } catch (e: unknown) {

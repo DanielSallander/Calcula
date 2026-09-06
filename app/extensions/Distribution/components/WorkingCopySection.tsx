@@ -16,7 +16,7 @@ import {
   setCoPublishers,
   workingCopyStatus,
 } from "@api";
-import { AppEvents, onAppEvent } from "@api";
+import { AppEvents, onAppEvent, ENVIRONMENTS_CHANGED_EVENT } from "@api";
 import { promptAsync, confirmAsync } from "@api/dialogs";
 import {
   ddStyle,
@@ -50,8 +50,16 @@ export function WorkingCopySection() {
     // when a push lands. Re-read rather than showing the previous document's
     // application, which is the specific failure the persistence restore guards
     // against on its side.
-    const off = onAppEvent(AppEvents.AFTER_OPEN, () => void reload());
-    return () => off();
+    // A PUSH LANDS HERE TOO, which this comment already claimed and the code
+    // did not do: a push emits only the environments event, so the section sat
+    // showing the old base and a history missing the version just pushed,
+    // directly above an Environments section that had reloaded.
+    const offs = [
+      onAppEvent(AppEvents.AFTER_OPEN, () => void reload()),
+      onAppEvent(AppEvents.PACKAGE_UPDATED, () => void reload()),
+      onAppEvent(ENVIRONMENTS_CHANGED_EVENT, () => void reload()),
+    ];
+    return () => offs.forEach((off) => off());
   }, [reload]);
 
   if (!loaded) {

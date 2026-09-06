@@ -40,7 +40,12 @@ import {
 import { confirmAsync } from "@api/dialogs";
 import { useDialogWindow } from "@api/dialogWindow";
 import { VersionDiffView } from "./VersionDiffView";
-import { describePromotion, promotionSource, rollbackCandidates } from "../lib/environments";
+import {
+  describePromotion,
+  isRollback,
+  promotionSource,
+  rollbackCandidates,
+} from "../lib/environments";
 import { errorTextStyle, mutedStyle, warnBoxStyle } from "./explorerStyles";
 
 export interface PromoteRequest {
@@ -168,7 +173,15 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
 
   // Default the rollback select to the most recent held version.
   useEffect(() => {
-    if (req?.mode === "rollback" && !chosenVersion && candidates.length > 0) {
+    if (req?.mode !== "rollback") return;
+    // Seed it, and RECONCILE it after a stale re-read: the candidate list is
+    // rebuilt from the refreshed log, and a selection no longer in it left the
+    // select displaying a version the header was not talking about.
+    if (candidates.length === 0) {
+      if (chosenVersion) setChosenVersion("");
+      return;
+    }
+    if (!chosenVersion || !candidates.includes(chosenVersion)) {
       setChosenVersion(candidates[0]);
     }
   }, [req?.mode, chosenVersion, candidates]);
@@ -178,6 +191,10 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
     if (!req || !currentVersion || !toVersion || currentVersion === toVersion) {
       setDiff(null);
       setDiffError(null);
+      // AND THE IMPACT BANNER. Without this a "nothing to move" state rendered
+      // under a "Data already collected" warning left over from the previous
+      // target, which is a warning about a promotion that is not happening.
+      setImpact("");
       return;
     }
     let cancelled = false;
@@ -249,7 +266,8 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
       fromVersion: currentVersion,
       toVersion,
       sourceLabel: source.label,
-      mode: req.mode,
+      // The DIRECTION, so the confirm says OLDER exactly when the move is.
+      mode: movesBackwards ? "rollback" : "promote",
     });
     // Fails CLOSED: a dialog that cannot be shown is a refusal, never consent.
     const ok = await confirmAsync(confirmText.message, {
@@ -335,10 +353,24 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
     borderTop: "1px solid var(--border-default)",
   };
 
-  const isRollback = req?.mode === "rollback";
+  /**
+   * WHICH DIRECTION THIS ACTUALLY MOVES — computed from the versions, not from
+   * the button that opened the window.
+   *
+   * `req.mode` is a UI intent: which picker to show. It was also driving the
+   * title, the amber box, the confirm text and the footer, so the two could
+   * disagree with what the backend was about to record. Both directions were
+   * reachable: `heldVersions` includes the version an environment was rolled
+   * back FROM, so "Roll back…" could confirm a forward move as "an OLDER
+   * version"; and promoting a rolled-back `test` into a newer `prod` showed the
+   * plain promote confirm although every prod subscriber saw a downgrade.
+   */
+  const movesBackwards = isRollback(currentVersion ?? "", toVersion);
+  /** Which PICKER to show. The direction is `movesBackwards`. */
+  const rollbackMode = req?.mode === "rollback";
   const title = result
     ? "Done"
-    : isRollback
+    : movesBackwards
       ? `Roll back ${req?.packageName ?? ""} ${req?.environment ?? ""}`
       : `Promote ${req?.packageName ?? ""} to ${req?.environment ?? ""}`;
 
@@ -392,7 +424,7 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
                 <strong>{target.name}</strong>:{" "}
                 {currentVersion ? `v${currentVersion}` : "nothing promoted yet"} → {" "}
                 {toVersion ? `v${toVersion}` : "—"}
-                {!isRollback && source.label ? ` (from ${source.label})` : ""}
+                {!rollbackMode && source.label ? ` (from ${source.label})` : ""}
               </div>
               <div style={{ ...mutedStyle, marginTop: 2 }}>
                 No files are copied. {target.name} is a pointer to a version that already
@@ -400,7 +432,7 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
               </div>
             </div>
 
-            {isRollback && (
+            {rollbackMode && (
               <div style={{ marginBottom: 10 }}>
                 <label style={{ display: "block", marginBottom: 4 }}>
                   Roll back to a version {target.name} has run before:
@@ -423,7 +455,11 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
               </div>
             )}
 
-            {isRollback && (
+            {/* THE WARNING FOLLOWS THE MOVE, not the button. A "Promote →" that
+                happens to go backwards is exactly as much of a downgrade for
+                that environment's subscribers as one reached through the
+                rollback picker. */}
+            {movesBackwards && (
               <div style={warnBoxStyle}>
                 Everyone subscribed to {target.name} will be offered an <strong>older</strong>{" "}
                 version at their next refresh, and their preview will say so. Cells they
@@ -501,7 +537,7 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
           <>
             <button onClick={onClose}>Cancel</button>
             <button onClick={() => void handlePromote()} disabled={blocked}>
-              {promoting ? "Working…" : isRollback ? "Roll back…" : "Promote…"}
+              {promoting ? "Working…" : movesBackwards ? "Roll back…" : "Promote…"}
             </button>
           </>
         )}

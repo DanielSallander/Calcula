@@ -88,10 +88,17 @@ export function EditPipelineDialog({ onClose, data }: DialogProps) {
     void load();
   }, [load]);
 
-  const validation = pipelineEditValidation(names);
+  // NORMALISE ONCE, for every use. Validation and the request already trimmed
+  // while the unchanged check, the removal set and the per-row lookup did not —
+  // so a trailing space enabled Save, showed the destructive "Remove prod
+  // (v1.2.0)" confirm, and then sent an identical list that `set_pipeline`
+  // signed as a no-op record, advancing the sequence and making a colleague's
+  // open dialog stale.
+  const trimmed = names.map((n) => n.trim());
+  const validation = pipelineEditValidation(trimmed);
   const original = info?.environments.map((e) => e.name) ?? [];
   const unchanged =
-    names.length === original.length && names.every((n, i) => n === original[i]);
+    trimmed.length === original.length && trimmed.every((n, i) => n === original[i]);
 
   const setAt = (i: number, value: string) =>
     setNames((prev) => prev.map((n, j) => (j === i ? value : n)));
@@ -114,7 +121,7 @@ export function EditPipelineDialog({ onClose, data }: DialogProps) {
     // here: its subscribers are pinned to a name that will stop resolving, and
     // they find out at their next refresh rather than now.
     const removed = info.environments.filter(
-      (e) => !names.includes(e.name) && e.version,
+      (e) => !trimmed.includes(e.name) && e.version,
     );
     if (removed.length > 0) {
       const list = removed.map((e) => `${e.name} (v${e.version})`).join(", ");
@@ -135,7 +142,7 @@ export function EditPipelineDialog({ onClose, data }: DialogProps) {
       const next = await setEnvironments({
         registryPath: req.registryPath,
         packageName: req.packageName,
-        environments: names.map((n) => n.trim()),
+        environments: trimmed,
         // The revision this edit was built on: the number of signed records the
         // load saw. A colleague's promotion or pipeline change since then makes
         // it stale, and the backend refuses rather than overwriting them.
@@ -256,7 +263,7 @@ export function EditPipelineDialog({ onClose, data }: DialogProps) {
             )}
 
             {names.map((name, i) => {
-              const held = info.environments.find((e) => e.name === name);
+              const held = info.environments.find((e) => e.name === name.trim());
               return (
                 <div
                   key={i}

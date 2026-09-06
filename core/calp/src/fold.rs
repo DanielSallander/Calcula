@@ -86,13 +86,25 @@ pub fn fold_submissions(
 
     // (3) Grid collapse per slot; model events pass through uncollapsed.
     let mut current: Vec<WritebackSubmission> = Vec::new();
-    let mut grid_slots: HashMap<(String, String, u32, u32), WritebackSubmission> = HashMap::new();
+    // THE ENVIRONMENT IS PART OF THE SLOT.
+    //
+    // Submissions are stored per VERSION, and an environment is a pointer to a
+    // version — so right after a linear promotion both environments name the
+    // same version and land in the same tree. Without the environment in this
+    // key, one installation answering the same cell in test and in prod loses
+    // the older answer HERE, before any reader's `visible_in` filter can see it:
+    // the event is still on disk and invisible to everyone. Which of the two
+    // survived depended only on which was newer, so a stale test value could
+    // shadow a real production one.
+    let mut grid_slots: HashMap<(String, String, String, u32, u32), WritebackSubmission> =
+        HashMap::new();
     for event in normalized.drain(..) {
         if event.model_key.is_some() {
             current.push(event);
             continue;
         }
         let slot = (
+            event.environment.clone(),
             event.submitter.id.clone(),
             event.region_id.clone(),
             event.cell_row,

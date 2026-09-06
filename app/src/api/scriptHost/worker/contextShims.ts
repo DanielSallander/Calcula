@@ -1226,6 +1226,12 @@ function buildCapsShim(rt: WorkerRuntime): {
       environment?: string | null,
       followLine?: boolean,
     ): Promise<unknown>;
+    inspect(
+      registry: string,
+      packageName: string,
+      versionPin: string | null,
+      environment?: string | null,
+    ): Promise<unknown>;
     refreshPreview(): Promise<unknown>;
     refreshApply(): Promise<unknown>;
   };
@@ -1584,13 +1590,15 @@ function buildCapsShim(rt: WorkerRuntime): {
       async inspect(
         registry: string,
         packageName: string,
-        versionPin: string,
+        versionPin: string | null,
         environment?: string | null,
       ) {
         return call(rt, "cap.pkgInspect", [
           registry,
           packageName,
-          versionPin,
+          // COALESCED, like pull. A null forwarded verbatim dies at serde with
+          // a type error instead of the validator's sentence.
+          versionPin ?? "",
           environment ?? null,
         ]);
       },

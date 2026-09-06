@@ -420,7 +420,15 @@ pub fn pull_with_options(
     sheet_id_mode: SheetIdMode,
 ) -> Result<PullResult, CalpError> {
     let resolved =
-        crate::environments::resolve_target(registry, &request.package_name, &request.target)?;
+        crate::environments::resolve_target_via(
+            registry,
+            &request.package_name,
+            &request.target,
+            // THE PIN, NOT THE WORKSPACE. This decides which version a
+            // subscriber receives, so it must not accept the workspace's own
+            // account of who may promote — a share-writer can author that.
+            crate::environments::PromotionTrust::Pinned { scope, profile_dir },
+        )?;
     let version_str = resolved.to_string();
     let pkg = request.package_name.as_str();
     let ver = version_str.as_str();
@@ -871,6 +879,7 @@ pub fn pull_with_options(
         // landed vs was skipped on collision).
         objects: Vec::new(),
         detached_sheets: Vec::new(),
+        upstream_removed_sheets: Vec::new(),
         extra: HashMap::new(),
     };
 

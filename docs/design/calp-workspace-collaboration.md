@@ -369,21 +369,51 @@ field fails the signature rather than creating a split view.
 
 #### Threat model, stated plainly
 
-A share-writer who is not a publisher **cannot** fabricate a promotion or point
-prod at a version nobody promoted: `resolve_environment` verifies every record
-against the same authorised-key set the push gate uses (the root key of version 1
-plus the delegates in the root-signed `publishers.json`) and fails closed.
+**The anchor is the subscriber's TOFU pin, not the workspace.** This is the one
+thing an earlier draft of this section got wrong, and the correction is worth
+the space. `publishers::root_key_of` derives an application's root from the
+*lowest* entry of the **unsigned** `calp-manifest.json` version list, and reads
+that version's manifest with no signature check. Anyone who can write to the
+share can therefore plant a `0.0.1` naming their own key, sign their own
+`publishers.json` and `promotions.json` under it, and point `prod` at any
+version they like. TOFU did not catch it: TOFU checks the signature on the
+version finally *pulled*, never the pointer that chose it, and the retarget only
+ever names versions the real publisher signed.
 
-They **can** replay an older signed log, rolling prod back to a legitimately
-promoted earlier version. This is the same limit `publishers.json` already
-documents, and it is detectable with a client-side high-water mark, which v1 does
-not build. A delegate removed from `publishers.json` invalidates the promotions
-they signed until someone still authorised re-promotes — the same rule their
-published versions already follow.
+So resolution takes an explicit anchor. `environments::PromotionTrust` has two
+arms: `Workspace`, for a publisher acting on an application they can already
+write, and `Pinned { scope, profile_dir }`, which builds the authorised set from
+the key this machine pinned plus the delegates that pinned root vouches for — the
+chain `integrity::delegate_is_authorized` already walks. **Every path that
+decides what a subscriber receives passes `Pinned`**: `pull`,
+`pull_all_updates` and `compute_preview`.
 
-The subscriber's TOFU pin still guards the version that is actually pulled, so
-the worst a compromised pointer can do is offer a *differently signed, legitimate*
-version of that application.
+The honest limit: on a FIRST subscribe there is no pin yet, so the anchor falls
+back to the workspace's own account. That is TOFU's existing first-use window one
+level up — the same moment the version's signing key is accepted on sight and
+pinned — and it is what makes the attack need a subscriber who is *already*
+following the application. Every refresh after the first is anchored.
+
+A share-writer **can** still replay an older signed log, rolling prod back to a
+legitimately promoted earlier version. This is the same limit `publishers.json`
+already documents, and it is detectable with a client-side high-water mark, which
+v1 does not build.
+
+**Removing a delegate revokes what they can still decide, not the history.**
+Authorisation is checked per LOAD-BEARING record — the one whose effect survives
+into the current state, which `Environment.sequence` already names — rather than
+for every record in the log. An environment whose current pointer was set by a
+since-removed delegate comes back MARKED (`unauthorizedPointer`): the Explorer
+lists it and says so, `resolve_environment` refuses it so no subscriber follows
+it, and any current publisher promoting into it again clears the mark.
+
+Checking the whole log instead — which is what shipped first — made one
+departure fatal: every environment vanished, every environment subscriber was
+stranded, and `promote` and `set_pipeline` could not run either, because they
+load the log before their own gates. The remedy this document asserted was
+unreachable. Integrity failures (a bad signature, a sequence gap, a borrowed
+package name) remain fatal for the whole log, because they say the file has been
+edited and no part of it can be believed.
 
 #### Writeback across environments
 
@@ -580,14 +610,24 @@ any. X never saw v1.5.0. Testers' writeback submissions against test never reach
 prod's aggregates: every submission is tagged with the environment it was made
 in, and every reader that feeds a number filters on it.
 
-**Rollback.** v1.5.1 breaks a sheet nobody tested. A opens *Roll back…* on prod —
-which has only ever held v1.5.1, so there is nothing to roll back TO — and
-instead promotes test's v1.5.0 explicitly. The confirm reads *Roll "sales" prod
-back from v1.5.1 to v1.5.0? Everyone subscribed to prod will be offered v1.5.0 —
-an OLDER version — at their next refresh.* X's next preview: *sales (prod):
+**Rollback.** v1.5.1 breaks a sheet nobody tested. Prod has only ever held
+v1.5.1, so *Roll back…* on prod offers nothing: the picker lists versions this
+environment has actually run, and a version it never ran would be an untested
+promotion wearing a rollback's clothes. The rollback happens one step up the
+pipeline. A opens *Roll back…* on **test**, which has held both, and takes
+v1.5.0. Then, on the test row, *Promote → prod*.
+
+That second step moves prod BACKWARDS, and the window says so: the warning
+follows the direction of the move, not the button that opened it, so promoting
+a rolled-back test into a newer prod reads *Roll back sales prod* and confirms
+*from v1.5.1 to v1.5.0 — an OLDER version*. X's next preview: *sales (prod):
 v1.5.1 → v1.5.0 — rolled back*, in amber, overrides kept. Nothing was copied, no
 version was deleted, the line still ends at v1.5.1, and the fix, when it lands as
 v1.5.2, walks the same path: line → test → prod.
+
+The linear rule is what makes this the only route, and it is worth stating
+plainly: prod may take **what test currently holds**, or **a version prod itself
+has held**. It may never reach past test for a version of its own choosing.
 
 ## 7. Multiple developers
 
@@ -728,6 +768,46 @@ deliberately does not carry does not come back:
   the environment's own promotion history rather than semver order. The rollup
   Parquet gained an `environment` column rather than splitting into per-environment
   files, because its path is a contract a database points at.
+
+**Adversarial review and its fixes (2026-09-06).**
+
+Twelve lens finders raised 116 findings over the changed files; each survivor
+faced three independent refuters on separate lenses (does the code do this, can
+the scenario be built, is it a defect or a deliberate decision) and lived only if
+at most one refuted it. 96 confirmed, 25 refuted. Everything confirmed is fixed;
+what the fixes changed about the DESIGN is recorded above rather than only here.
+
+- **The trust anchor moved to the TOFU pin** (§2.5 threat model). Resolution now
+  takes an explicit `PromotionTrust`; every path that decides what a subscriber
+  receives passes `Pinned`.
+- **Delegate removal no longer bricks the pipeline.** Authorisation is checked
+  per load-bearing record, so an affected environment is marked and refused
+  rather than the whole log being invalidated — and the documented remedy
+  (re-promote) now runs, with a test that performs it.
+- **`HttpWorkspace::read_application_artifact` exists.** It inherited the trait
+  default `Ok(None)`, so over HTTP every application had no environments and no
+  delegates: the follow-line gate could not fire and delegate-signed versions
+  could not verify.
+- **Two writeback readers carried forward by semver**, not by the environment's
+  held versions: `rebuild_gather_cache` (so a rollback silently dropped that
+  environment's own submissions from every `=GATHER()` total while the dashboard
+  still counted them) and `reconcile_writeback_layer_internal`.
+- **The submission fold keyed grid slots without the environment**, so one person
+  answering the same cell in test and in prod lost the older answer before any
+  reader's filter could see it.
+- **An upstream-removed sheet is tombstoned with its identity** and re-adopted in
+  place on roll-forward, instead of sharing the reason-less list with user
+  detach — which froze the tab forever and stripped its publish exclusion.
+- **`cap.pkgBrowse` and `cap.pkgInspect` were dead** since the vocabulary rename:
+  they sent action names `Action::parse` does not accept, and were refused before
+  the audited capability check so the denial was not even recorded. A drift guard
+  now asserts every action string the host sends is one the gateway parses.
+- **Promote/rollback presentation follows the DIRECTION of the move**, not the
+  button that opened the window; §6.1's walkthrough was also narrating a
+  promotion the linear gate refuses.
+- **Six source-text guards were green under their own named sabotage** and are
+  now argument- and expression-precise; the follow-line gate had no test at all.
+  Verified by running each sabotage.
 
 **Not built yet.**
 

@@ -754,13 +754,18 @@ sheets it mixed.
 ### 2.ac Environments (Dev → Test → Prod), release one — what shipped 2026-09-05 left open
 
 Environments shipped as named pointers on one development line:
-`docs/design/calp-workspace-collaboration.md` §2.5 is the as-built record. Two of the
-three rows below are limits the design states out loud rather than defects, and are
-here so nobody re-derives them; the third is a follow-on the owner deferred.
+`docs/design/calp-workspace-collaboration.md` §2.5 is the as-built record.
+
+**An adversarial review on 2026-09-06 raised 116 findings, confirmed 96 through
+three independent refuters each, and every confirmed finding is fixed** — see the
+"Adversarial review and its fixes" block in §10 of that document. One row below
+is CLOSED by it; the rest are limits the design states out loud rather than
+defects, and a follow-on the owner deferred.
 
 | item | verified at |
 |---|---|
-| **A replayed promotion log is undetectable to a client.** A share-writer who is not a publisher cannot FABRICATE a promotion — every record is verified against the push gate's authorised-key set and the fold fails closed — but they can restore an older signed log, rolling `prod` back to a version that was legitimately promoted at some point. This is the same limit `publishers.json` already documents for delegate removal, and the same fix applies: a monotonic revision plus a CLIENT-SIDE high-water mark makes it detectable rather than silent. Not built, because the mark has to live somewhere a share-writer cannot reach, and where that is depends on whether the subscriber's TOFU store is the right home. | `core/calp/src/environments.rs` (`load_verified_log`), §2.5 "Threat model" |
+| **CLOSED 2026-09-06 — the anchor was the WORKSPACE, which a share-writer authors.** The row below claimed fabrication was already impossible. It was not: `publishers::root_key_of` derives an application's root from the lowest entry of the UNSIGNED manifest listing and that version's manifest read with no signature check, so anyone with write access could plant a `0.0.1` naming their own key, sign their own `publishers.json` and `promotions.json` under it, and retarget `prod` at will — TOFU never caught it, because TOFU checks the version finally pulled, not the pointer that chose it. Resolution now takes an explicit `environments::PromotionTrust`, and every path deciding what a subscriber receives passes `Pinned { scope, profile_dir }`, building the authorised set from this machine's pin plus the delegates that pinned root vouches for. The first subscribe still falls back to the workspace, which is TOFU's own first-use window one level up. | `core/calp/src/environments.rs` (`PromotionTrust`, `authorized_keys_via`), `core/calp/src/signing.rs` (`pinned_publisher_key`), `pull.rs:423`, `refresh.rs` |
+| **A replayed promotion log is still undetectable to a client.** A share-writer cannot fabricate a promotion — the fold now verifies against the PINNED root and fails closed — but they can restore an older signed log, rolling `prod` back to a version that was legitimately promoted at some point. This is the same limit `publishers.json` already documents for delegate removal, and the same fix applies: a monotonic revision plus a CLIENT-SIDE high-water mark makes it detectable rather than silent. Not built, because the mark has to live somewhere a share-writer cannot reach, and where that is depends on whether the subscriber's TOFU store is the right home. | `core/calp/src/environments.rs` (`load_verified_log`), §2.5 "Threat model" |
 | **Per-environment promotion permissions do not exist.** Any authorised publisher may promote to any environment — the owner's call, and the right default for a small team, since every promotion is signed and attributed either way. "Only Alice may promote to prod" needs a second, separately-signed list and a UI for it, and would want to answer what happens when the only person on that list leaves. | `core/calp/src/environments.rs` (`require_authorized`), §7 |
 | **A "draft" push, off the line, does not exist.** Every push lands at the head, so a developer who wants to share work-in-progress with one colleague has no way that does not move the line. Deferred deliberately: promotion has to be a pointer move, which needs linear history, and an off-line branch needs a headless version-to-version merge — the state-agnostic evaluator that §2.aa closed as too large. | §2.5 "One shared development line" |
 
@@ -788,7 +793,7 @@ delivered, and one doc-drift row found on the way. Every row was verified agains
 
 ---
 
-### 2.ac Consent for distributed code at the MOUNT boundary (filed 2026-09-03)
+### 2.ad Consent for distributed code at the MOUNT boundary (filed 2026-09-03)
 
 The forms work added an unforgeable `MountAdmission` so no new mount route can skip the
 distributed-consent gate. Auditing what that gate actually ASKED turned up a class of defect wider

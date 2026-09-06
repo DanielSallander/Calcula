@@ -1306,6 +1306,17 @@ export interface EnvironmentPointer {
   /** Display name of the promoter. Not verified; `promoterKey` is. */
   promotedBy: string;
   promoterKey: string;
+  /**
+   * The record that set this pointer was signed by a key the application no
+   * longer authorises.
+   *
+   * The entry is still LISTED so a publisher can see it and repair it by
+   * promoting again; resolution refuses it, so no subscriber follows a pointer
+   * nobody currently vouches for. Checking authorisation per LOAD-BEARING
+   * record rather than per log is what keeps one departure from erasing an
+   * application's whole pipeline.
+   */
+  unauthorizedPointer?: boolean;
   /** Whether THIS computer holds the key that last moved this pointer. */
   isYou: boolean;
   sequence: number;
@@ -2056,6 +2067,13 @@ export interface WritebackRegionEntry {
   sheetId: string;
   sheetIndex: number;
   regionId: string;
+  /**
+   * The application this region belongs to.
+   *
+   * A workbook can subscribe to several, and their environments are unrelated —
+   * so any surface offering an environment picker has to scope it to this.
+   */
+  packageName?: string;
   rowStart: number;
   rowEnd: number;
   colStart: number;
@@ -2390,6 +2408,15 @@ export function setSubmissionState(
   newState: "approved" | "rejected" | "submitted",
   reason?: string | null,
   submissionId?: string | null,
+  /**
+   * Review a row from a stream other than the one this workbook follows,
+   * matching the dashboard's environment picker.
+   *
+   * Without it, approving a row shown "in test" answered "No submission found",
+   * because the command filtered by the workbook's OWN environment while the
+   * list it was reviewing did not.
+   */
+  environment?: string | null,
 ): Promise<void> {
   return invokeBackend("calp_set_submission_state", {
     regionId,
@@ -2399,6 +2426,7 @@ export function setSubmissionState(
     newState,
     reason: reason ?? null,
     submissionId: submissionId ?? null,
+    environment: environment ?? null,
   });
 }
 
@@ -2448,15 +2476,21 @@ export function loadRegionSubmissions(
 
 /** Export every submission for a region as CSV text (publisher data-collection
  * output). The caller saves the returned string as a .csv file. */
-export function exportRegionSubmissionsCsv(regionId: string): Promise<string> {
-  return invokeBackend("calp_export_region_submissions_csv", { regionId });
+export function exportRegionSubmissionsCsv(
+  regionId: string,
+  environment?: string | null,
+): Promise<string> {
+  return invokeBackend("calp_export_region_submissions_csv", { regionId, environment });
 }
 
 /** Export every submission for a region as Parquet bytes (typed, columnar —
  * directly readable by DuckDB / Snowflake / Spark / pandas / Polars). The caller
  * saves the returned bytes as a .parquet file. */
-export function exportRegionSubmissionsParquet(regionId: string): Promise<number[]> {
-  return invokeBackend("calp_export_region_submissions_parquet", { regionId });
+export function exportRegionSubmissionsParquet(
+  regionId: string,
+  environment?: string | null,
+): Promise<number[]> {
+  return invokeBackend("calp_export_region_submissions_parquet", { regionId, environment });
 }
 
 /** Whether the auto-materialized Parquet rollup is enabled for the application
@@ -2480,8 +2514,11 @@ export interface RegionResponseStatus {
 }
 
 /** Who has responded vs. who is still expected for a region. */
-export function regionResponseStatus(regionId: string): Promise<RegionResponseStatus> {
-  return invokeBackend("calp_region_response_status", { regionId });
+export function regionResponseStatus(
+  regionId: string,
+  environment?: string | null,
+): Promise<RegionResponseStatus> {
+  return invokeBackend("calp_region_response_status", { regionId, environment });
 }
 
 // ============================================================================

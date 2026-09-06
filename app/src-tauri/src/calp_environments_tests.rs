@@ -359,9 +359,28 @@ fn every_value_feeding_reader_filters_by_environment() {
     // dispatcher returns the cached map, and the cache is where the workspace is
     // actually read.
     let gather = body_of(CALP_SRC, "pub(crate) fn rebuild_gather_cache(");
+    // THE ARGUMENT, not just the call. Counting `visible_in(` alone let the
+    // regression through that mattered most: both filters were present and
+    // correct while the VERSION SET beside them was still the semver rule, so a
+    // rollback silently dropped the environment's own submissions from every
+    // total. A guard that cannot see which versions are walked is not guarding
+    // the thing that broke.
     assert!(
         gather.matches("visible_in(").count() >= 2,
         "GATHER reads the resolved version AND the carried-forward ones; both filter",
+    );
+    assert_eq!(
+        gather.matches("Some(&environment)").count(),
+        2,
+        "both filters must name the owning subscription's environment",
+    );
+    assert!(
+        gather.contains("carry_forward_versions("),
+        "GATHER must carry forward over the environment's HELD versions",
+    );
+    assert!(
+        !gather.contains("older_package_versions("),
+        "the strictly-lower-semver rule drops an environment's own submissions after a rollback",
     );
 
     for (name, src) in [
@@ -393,11 +412,20 @@ fn the_grid_readers_and_the_lifecycle_filter_too() {
     for signature in [
         "fn registry_has_own_submission(",
         "fn load_region_current_submissions(",
+        "fn reconcile_writeback_layer_internal(",
     ] {
         let body = body_of(CALP_SRC, signature);
         assert!(
             body.contains("visible_in("),
             "{signature} must filter submissions by environment",
+        );
+        assert!(
+            body.contains("carry_forward_versions("),
+            "{signature} must carry forward over the environment's held versions",
+        );
+        assert!(
+            !body.contains("older_package_versions("),
+            "{signature} must not use the strictly-lower-semver rule",
         );
     }
 }
@@ -475,4 +503,45 @@ fn held_versions_are_folded_in_exactly_one_place() {
         !held_closure.contains("PromotionEvent::Promote {"),
         "the app crate must not re-fold the promotion log to answer this",
     );
+}
+
+/// THE FOLLOW-LINE GATE FAILS CLOSED.
+///
+/// `environments(...).unwrap_or_default()` collapsed a tampered log, an
+/// unreadable one, and a transport that cannot serve one at all into "this
+/// application has no environments" — so a bare-pin subscribe was admitted onto
+/// the development line with no refusal and no notice, which is the one outcome
+/// the gate exists to prevent. The core module states the rule it broke: "no
+/// log" and "a log I could not trust" must not behave alike.
+///
+/// This was the one confirmed finding with no test at all: the sabotage below
+/// ran green against the whole app suite.
+///
+/// SABOTAGE: `let envs = calp::environments::environments(..).unwrap_or_default();`
+#[test]
+fn the_follow_line_gate_refuses_when_it_cannot_read_the_pipeline() {
+    let body = body_of(CALP_SRC, "pub fn calp_pull(");
+    // The gate region: from the follow-line branch to its refusal.
+    const START: &str = "if !params.follow_line {";
+    let gate = body
+        .split(START)
+        .nth(1)
+        .expect("the follow-line gate is gone")
+        .split("SubscriptionTarget::Line(")
+        .next()
+        .unwrap();
+
+    assert!(
+        gate.contains("match calp::environments::environments("),
+        "the gate must MATCH on the result so an unreadable pipeline is a refusal",
+    );
+    assert!(
+        !gate.contains("unwrap_or_default"),
+        "defaulting the read away is exactly how this gate failed open",
+    );
+    assert!(
+        gate.contains("CALP_PULL_ENVIRONMENT_UNKNOWN"),
+        "a pipeline that cannot be read must refuse by name",
+    );
+    assert!(gate.contains("CALP_PULL_ENVIRONMENT_REQUIRED"));
 }

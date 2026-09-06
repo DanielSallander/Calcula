@@ -772,11 +772,41 @@ pub fn script_distribution(
 /// versions and registry locations only — never cell values, never submitted
 /// answers. This is the line a user reads afterwards to answer "what did that
 /// script send, and to whom?", so the registry location is deliberately in it.
+/// How the audit line names what a pull or inspect is following.
+///
+/// An environment subscription carries an EMPTY pin, so the two must be read
+/// together or the line says nothing at all.
+fn target_label(version_pin: &str, environment: &str) -> String {
+    if !environment.is_empty() {
+        return format!("env:{environment}");
+    }
+    if version_pin.is_empty() {
+        return "(follows the line)".to_string();
+    }
+    format!("@{version_pin}")
+}
+
 fn audit_detail(
     act: Action,
     p: &serde_json::Map<String, Value>,
     state: &AppState,
 ) -> String {
+    // The two refresh actions name nothing in their payload, so they need the
+    // subscription list; everything else is payload-derived and shared with the
+    // test through `audit_detail_from_payload`.
+    if matches!(act, Action::RefreshPreview | Action::RefreshApply) {
+        return format!("{} — {}", act.as_str(), subscribed_packages_summary(state));
+    }
+    audit_detail_from_payload(act, p)
+}
+
+/// The audit line for every action whose detail comes entirely from the PAYLOAD.
+///
+/// Split out so the test exercises the production formatter. It used to hold a
+/// private copy of this match, which is a second source of truth that drifts
+/// silently — and had: the copy never learned that a pull can name an
+/// environment, so it would have kept asserting the old format forever.
+fn audit_detail_from_payload(act: Action, p: &serde_json::Map<String, Value>) -> String {
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let registry = s("registryPath");
     match act {
@@ -787,27 +817,29 @@ fn audit_detail(
             s("version"),
             registry
         ),
+        // WHICH STREAM, in the audit line. A scripted environment subscribe
+        // sends an EMPTY pin, so without this it read `pull — sales @ <- C:/ws`
+        // and was indistinguishable from a deliberate development-line pull —
+        // the audit trail could not answer the one question environments exist
+        // to make answerable.
         Action::Pull => format!(
-            "{} — {} @{} <- {}",
+            "{} — {} {} <- {}",
             act.as_str(),
             s("packageName"),
-            s("versionPin"),
+            target_label(&s("versionPin"), &s("environment")),
             registry
         ),
         Action::InspectPackage => format!(
-            "{} — {} @{} <- {}",
+            "{} — {} {} <- {}",
             act.as_str(),
             s("packageName"),
-            s("versionPin"),
+            target_label(&s("versionPin"), &s("environment")),
             registry
         ),
         Action::NextVersion => {
             format!("{} — {} <- {}", act.as_str(), s("packageName"), registry)
         }
         Action::BrowseRegistry => format!("{} — {}", act.as_str(), registry),
-        Action::RefreshPreview | Action::RefreshApply => {
-            format!("{} — {}", act.as_str(), subscribed_packages_summary(state))
-        }
         _ => act.as_str().to_string(),
     }
 }
@@ -915,7 +947,7 @@ fn dispatch(
             let registry_path = registry_location(p)?;
             let package_name: String = field(p, "packageName")?;
             let version_pin: String = field(p, "versionPin")?;
-            let environment: Option<String> = field(p, "environment").unwrap_or(None);
+            let environment: Option<String> = field(p, "environment")?;
             let inspection = calp_cmds::calp_inspect_application(
                 registry_path,
                 package_name,
@@ -1467,6 +1499,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         };
         assert!(calp::dev_mode::is_dev_subscription(&dev));
@@ -1482,6 +1515,7 @@ mod tests {
             data_source_configs: Vec::new(),
             objects: Vec::new(),
             detached_sheets: Vec::new(),
+            upstream_removed_sheets: Vec::new(),
             extra: Default::default(),
         };
         assert!(!calp::dev_mode::is_dev_subscription(&real));
@@ -1652,29 +1686,11 @@ mod tests {
     /// exercises the payload-derived branches, which are the ones carrying the
     /// "what and where" the audit requirement is about.
     fn audit_detail_for_test(act: Action, p: &serde_json::Map<String, Value>) -> String {
-        let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("");
-        let registry = s("registryPath");
-        match act {
-            Action::Publish | Action::PublishModel => format!(
-                "{} — {} v{} -> {}",
-                act.as_str(),
-                s("packageName"),
-                s("version"),
-                registry
-            ),
-            Action::Pull | Action::InspectPackage => format!(
-                "{} — {} @{} <- {}",
-                act.as_str(),
-                s("packageName"),
-                s("versionPin"),
-                registry
-            ),
-            Action::NextVersion => {
-                format!("{} — {} <- {}", act.as_str(), s("packageName"), registry)
-            }
-            Action::BrowseRegistry => format!("{} — {}", act.as_str(), registry),
-            _ => act.as_str().to_string(),
-        }
+        // THE PRODUCTION FORMATTER. This used to be a private copy of the
+        // match, which is a second source of truth: it never learned that a
+        // pull can name an environment, so it would have kept asserting the
+        // old format forever.
+        audit_detail_from_payload(act, p)
     }
 
     #[test]

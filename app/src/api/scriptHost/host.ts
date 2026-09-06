@@ -6425,7 +6425,13 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_distribution", {
         scriptId: definition.id,
-        action: "listApplicationsInWorkspace",
+        // THE WIRE NAME, which is a contract and not a vocabulary choice.
+        // The rename to the application/workspace vocabulary moved this to
+        // "listApplicationsInWorkspace", which `Action::parse` does not accept —
+        // so the verb was refused as an unknown action BEFORE the audited
+        // capability check, and the denial was not even recorded. Dead since
+        // the rename.
+        action: "browseRegistry",
         payload: { registryPath: registry },
       });
     }
@@ -6439,7 +6445,9 @@ async function executeImpl(mw: MountedWorker, method: string, args: unknown[]): 
       const { invokeBackend } = await import("../backend");
       return invokeBackend("script_distribution", {
         scriptId: definition.id,
-        action: "inspectApplication",
+        // The wire name. See `cap.pkgBrowse` above: the vocabulary rename
+        // broke this verb the same way.
+        action: "inspectPackage",
         payload: {
           registryPath: registry,
           packageName,

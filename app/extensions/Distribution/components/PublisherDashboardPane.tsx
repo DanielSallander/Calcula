@@ -90,7 +90,10 @@ export function PublisherDashboardPane(): React.ReactElement {
     try {
       const [subs, st, rp] = await Promise.all([
         loadRegionSubmissions(regionId, viewingRef.current),
-        regionResponseStatus(regionId).catch(() => null),
+        // THE SAME STREAM THE LIST IS SHOWING. Unscoped, a publisher following
+        // prod who viewed test read "5 respondents · in test" directly above
+        // "0 of 5 expected responded".
+        regionResponseStatus(regionId, viewingRef.current).catch(() => null),
         getWritebackRollup(regionId).catch(() => false),
       ]);
       setSubmissions(subs);
@@ -116,11 +119,18 @@ export function PublisherDashboardPane(): React.ReactElement {
   // gets no picker.
   useEffect(() => {
     let cancelled = false;
+    // THE SELECTED REGION'S OWN APPLICATION, not every subscription's. The
+    // union offered streams the region's application does not have, and picking
+    // one produced an empty inbox with no explanation.
     getSubscriptionTrust()
       .then((rows) => {
         if (cancelled) return;
+        const owner = regions.find((r) => r.regionId === selected);
+        const mine = owner
+          ? rows.filter((r) => r.packageName === owner.packageName)
+          : [];
         const names = new Set<string>();
-        for (const r of rows) {
+        for (const r of mine) {
           for (const e of r.availableEnvironments ?? []) names.add(e);
         }
         setEnvironments([...names]);
@@ -131,7 +141,8 @@ export function PublisherDashboardPane(): React.ReactElement {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, regions]);
 
   useEffect(() => {
     if (selected) void loadSubs(selected);
@@ -192,6 +203,10 @@ export function PublisherDashboardPane(): React.ReactElement {
           newState,
           reason,
           s.submissionId,
+          // THE STREAM THE ROW CAME FROM. Reviewing a row shown under another
+          // environment used to fail closed with "No submission found", because
+          // the command filtered by the workbook's own while the list did not.
+          viewingRef.current,
         );
         if (selected) await loadSubs(selected);
       } catch (e: unknown) {
@@ -210,7 +225,7 @@ export function PublisherDashboardPane(): React.ReactElement {
     if (!selected) return;
     setError(null);
     try {
-      const csv = await exportRegionSubmissionsCsv(selected);
+      const csv = await exportRegionSubmissionsCsv(selected, viewingRef.current);
       await saveCsvReport(csv, `${selected}-submissions.csv`);
     } catch (e: unknown) {
       setError(String(e));
@@ -221,7 +236,7 @@ export function PublisherDashboardPane(): React.ReactElement {
     if (!selected) return;
     setError(null);
     try {
-      const bytes = await exportRegionSubmissionsParquet(selected);
+      const bytes = await exportRegionSubmissionsParquet(selected, viewingRef.current);
       await saveParquetReport(bytes, `${selected}-submissions.parquet`);
     } catch (e: unknown) {
       setError(String(e));
