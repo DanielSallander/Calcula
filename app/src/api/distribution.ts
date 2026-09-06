@@ -3229,6 +3229,14 @@ export interface InspectorModelWriteback {
 
 export interface InspectorRegionStats {
   regionId: string;
+  /**
+   * The stream these were submitted in; empty = the development line.
+   *
+   * Stats are grouped by (region, environment), so a region with responses in
+   * two streams produces two rows. Rendering them without this column shows two
+   * identical-looking rows for the same region.
+   */
+  environment: string;
   submissionCount: number;
   submitterCount: number;
   approved: number;
@@ -3238,6 +3246,8 @@ export interface InspectorRegionStats {
 
 export interface InspectorSubmissionDetail {
   regionId: string;
+  /** The stream this was submitted in; empty = the development line. */
+  environment: string;
   submitterName: string;
   cellRow: number;
   cellCol: number;

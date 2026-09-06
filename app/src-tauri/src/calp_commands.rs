@@ -5885,10 +5885,26 @@ pub fn calp_subscription_trust(
             // — and can tell a line-following subscription that a pipeline has
             // appeared since it was made. Best-effort: an unverifiable log must
             // not cost the trust answer beside it.
-            info.available_environments =
-                calp::environments::environments(registry.as_ref(), &sub.package_name)
-                    .map(|envs| envs.into_iter().map(|e| e.name).collect())
-                    .unwrap_or_default();
+            // THE PINNED ANCHOR, and only environments that can actually be
+            // switched TO. This is a menu of moves: an empty environment refuses
+            // the switch, and one whose pointer is no longer vouched for refuses
+            // to resolve, so offering either arms a control whose only outcome
+            // is a refusal.
+            info.available_environments = calp::environments::environments_via(
+                registry.as_ref(),
+                &sub.package_name,
+                calp::environments::PromotionTrust::Pinned {
+                    scope: &scope,
+                    profile_dir: &calcula_profile_dir(),
+                },
+            )
+            .map(|envs| {
+                envs.into_iter()
+                    .filter(|e| e.version.is_some() && !e.unauthorized_pointer)
+                    .map(|e| e.name)
+                    .collect()
+            })
+            .unwrap_or_default();
             match calp::integrity::verify_and_load_manifest_via(
                 registry.as_ref(),
                 &sub.package_name,

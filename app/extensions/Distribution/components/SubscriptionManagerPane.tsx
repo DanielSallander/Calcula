@@ -471,7 +471,13 @@ export function SubscriptionManagerPane(): React.ReactElement {
                   </div>
                 )}
 
-                {availableEnvironments.length > 0 && (
+                {/* THE ESCAPE HATCH IS ALWAYS THERE FOR AN ENVIRONMENT
+                    SUBSCRIPTION. Gating the whole control on the offered list
+                    hid it exactly when it was needed: an unverifiable or emptied
+                    pipeline reports no environments, so a subscriber stranded on
+                    one had no way back to the development line — and the refusal
+                    they were reading points them at this pane. */}
+                {(availableEnvironments.length > 0 || followsEnvironment) && (
                   <div style={{ ...styles.meta, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                     <span>Follow</span>
                     <select
@@ -480,6 +486,17 @@ export function SubscriptionManagerPane(): React.ReactElement {
                       onChange={(e) => void handleSwitchEnvironment(s, e.target.value || null)}
                     >
                       <option value="">the development line</option>
+                      {/* THE ONE IT IS ON, even when that is no longer on
+                          offer. Without this the select falls back to the first
+                          option and a stranded subscription reads as though it
+                          follows the development line, which is the opposite of
+                          its problem. */}
+                      {followsEnvironment &&
+                        !availableEnvironments.includes(s.environment as string) && (
+                          <option value={s.environment as string}>
+                            {s.environment} (unavailable)
+                          </option>
+                        )}
                       {availableEnvironments.map((name) => (
                         <option key={name} value={name}>
                           {name}

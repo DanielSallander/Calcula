@@ -235,6 +235,28 @@ impl SheetProvenance {
 
         let mut by_index = HashMap::new();
         for (index, sid) in sheet_ids.iter().enumerate() {
+            // A SHEET THE UPSTREAM VERSION DROPPED KEEPS ITS PROVENANCE. It is
+            // still the publisher's content and a later version can bring it
+            // back; treating it as unowned lost the badge, the delete guard and
+            // the publish exclusion at once.
+            if let Some((sub, removed)) = subs.upstream_removed_sheet(*sid) {
+                by_index.insert(
+                    index,
+                    SheetOrigin {
+                        package_name: sub.package_name.clone(),
+                        registry_url: sub.registry_url.clone(),
+                        resolved_version: sub.resolved_version.clone(),
+                        environment: sub.environment.clone(),
+                        sheet_name: sheet_names
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| removed.local_name.clone()),
+                        local_sheet_id: removed.local_sheet_id,
+                        package_sheet_id: removed.package_sheet_id,
+                    },
+                );
+                continue;
+            }
             if let Some((sub, sheet)) = subs.subscribed_sheet(*sid) {
                 by_index.insert(
                     index,

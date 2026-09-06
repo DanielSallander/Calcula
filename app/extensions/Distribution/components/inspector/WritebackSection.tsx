@@ -155,6 +155,7 @@ export function WritebackSection({
                     <thead>
                       <tr>
                         <th style={thStyle}>Region</th>
+                        <th style={thStyle}>Environment</th>
                         <th style={thStyle}>Submissions</th>
                         <th style={thStyle}>Submitters</th>
                         <th style={thStyle}>Approved</th>
@@ -163,9 +164,19 @@ export function WritebackSection({
                       </tr>
                     </thead>
                     <tbody>
+                      {/* KEYED BY BOTH, because the stats are grouped by both.
+                          Two environments sit on one version right after a
+                          linear promotion, so a region can legitimately appear
+                          twice — and did, indistinguishably, when this column
+                          was missing. */}
                       {data.regionStats.map((s) => (
-                        <tr key={s.regionId}>
+                        <tr key={`${s.regionId}\u0000${s.environment}`}>
                           <td style={{ ...tdStyle, fontSize: 11 }}>{s.regionId}</td>
+                          <td style={tdStyle}>
+                            {s.environment || (
+                              <span style={mutedStyle}>development line</span>
+                            )}
+                          </td>
                           <td style={tdStyle}>{s.submissionCount}</td>
                           <td style={tdStyle}>{s.submitterCount}</td>
                           <td style={tdStyle}>{s.approved}</td>
@@ -202,6 +213,7 @@ export function WritebackSection({
                 <thead>
                   <tr>
                     <th style={thStyle}>Submitter</th>
+                    <th style={thStyle}>Environment</th>
                     <th style={thStyle}>Where</th>
                     <th style={thStyle}>Value</th>
                     <th style={thStyle}>State</th>
@@ -213,6 +225,11 @@ export function WritebackSection({
                   {data.submissions.map((s, i) => (
                     <tr key={i}>
                       <td style={tdStyle}>{s.submitterName}</td>
+                      <td style={tdStyle}>
+                        {s.environment || (
+                          <span style={mutedStyle}>development line</span>
+                        )}
+                      </td>
                       <td style={tdStyle}>
                         {s.modelKey
                           ? `key [${s.modelKey.join(", ")}]`

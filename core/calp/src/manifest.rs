@@ -785,6 +785,27 @@ impl SubscriptionManifest {
                 .map(|s| (sub, s))
         })
     }
+
+    /// The subscription that materialized a sheet the UPSTREAM version has since
+    /// dropped, and the tombstone recording it.
+    ///
+    /// STILL THE PUBLISHER'S CONTENT. A version removing a sheet does not hand
+    /// it to the subscriber: the cells are the publisher's, they were never
+    /// edited into being local, and a later version can bring the sheet back.
+    /// Reporting no provenance for it dropped the tab's badge, its delete guard
+    /// and — the sharp one — its publish exclusion, so the publisher's own sheet
+    /// could be republished inside the subscriber's application as theirs.
+    pub fn upstream_removed_sheet(
+        &self,
+        local_sheet_id: SheetId,
+    ) -> Option<(&Subscription, &UpstreamRemovedSheet)> {
+        self.subscriptions.iter().find_map(|sub| {
+            sub.upstream_removed_sheets
+                .iter()
+                .find(|s| s.local_sheet_id == local_sheet_id)
+                .map(|s| (sub, s))
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
