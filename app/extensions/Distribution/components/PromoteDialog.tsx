@@ -52,7 +52,14 @@ export interface PromoteRequest {
   registryPath: string;
   packageName: string;
   environment: string;
-  mode: "promote" | "rollback";
+  /**
+   * `repair` re-promotes the version the environment ALREADY holds.
+   *
+   * That is not a no-op: it replaces a pointer whose promoter has since been
+   * removed from the publisher list with one signed by somebody who may publish
+   * today, which is the only way to make subscribers follow it again.
+   */
+  mode: "promote" | "rollback" | "repair";
 }
 
 function readRequest(data: unknown): PromoteRequest | null {
@@ -69,7 +76,8 @@ function readRequest(data: unknown): PromoteRequest | null {
     registryPath: d.registryPath,
     packageName: d.packageName,
     environment: d.environment,
-    mode: d.mode === "rollback" ? "rollback" : "promote",
+    mode:
+      d.mode === "rollback" ? "rollback" : d.mode === "repair" ? "repair" : "promote",
   };
 }
 
@@ -168,8 +176,14 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
     info && target
       ? promotionSource(info.environments, info.headVersion, target.name)
       : { label: "", version: "" };
+  // A REPAIR TARGETS THE POINTER'S OWN VERSION. Nothing moves; what changes is
+  // who signed the record that put it there.
   const toVersion =
-    req?.mode === "rollback" ? chosenVersion : source.version;
+    req?.mode === "rollback"
+      ? chosenVersion
+      : req?.mode === "repair"
+        ? (currentVersion ?? "")
+        : source.version;
 
   // Default the rollback select to the most recent held version.
   useEffect(() => {
@@ -260,15 +274,33 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
 
   const handlePromote = async () => {
     if (!req || !target || !toVersion) return;
-    const confirmText = describePromotion({
-      packageName: req.packageName,
-      environment: target.name,
-      fromVersion: currentVersion,
-      toVersion,
-      sourceLabel: source.label,
-      // The DIRECTION, so the confirm says OLDER exactly when the move is.
-      mode: movesBackwards ? "rollback" : "promote",
-    });
+    // A REPAIR IS ITS OWN SENTENCE. `describePromotion` compares two versions,
+    // and here they are the same one — it would say "promote prod from v1.5.0 to
+    // v1.5.0", which describes nothing the user is doing.
+    const confirmText = repairMode
+      ? {
+          title: `Re-establish ${req.packageName} ${target.name}`,
+          message:
+            `Re-promote v${toVersion} into "${target.name}"?\n\n` +
+            `The version does not change. What changes is the signature on the ` +
+            `pointer: it is currently signed by a key that is no longer allowed to ` +
+            `publish this application, so subscribers refuse to follow it. Signing ` +
+            `it with your key makes them follow it again.`,
+          okLabel: "Re-promote",
+          kind: "info" as const,
+        }
+      : describePromotion({
+          packageName: req.packageName,
+          environment: target.name,
+          fromVersion: currentVersion,
+          toVersion,
+          // IN ROLLBACK MODE THE VERSION COMES FROM THIS ENVIRONMENT'S OWN
+          // HISTORY, not from the source the pipeline would normally draw on —
+          // attributing it to `test` when `test` does not hold it is false.
+          sourceLabel: rollbackMode ? `${target.name}'s own history` : source.label,
+          // The DIRECTION, so the confirm says OLDER exactly when the move is.
+          mode: movesBackwards ? "rollback" : "promote",
+        });
     // Fails CLOSED: a dialog that cannot be shown is a refusal, never consent.
     const ok = await confirmAsync(confirmText.message, {
       title: confirmText.title,
@@ -368,16 +400,26 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
   const movesBackwards = isRollback(currentVersion ?? "", toVersion);
   /** Which PICKER to show. The direction is `movesBackwards`. */
   const rollbackMode = req?.mode === "rollback";
+  /**
+   * Re-signing the pointer at the version it already holds. Not a move, so it is
+   * neither a promotion nor a rollback, and the same-version guard below must
+   * not treat it as "nothing to do".
+   */
+  const repairMode = req?.mode === "repair" && (target?.unauthorizedPointer ?? false);
   const title = result
     ? "Done"
-    : movesBackwards
-      ? `Roll back ${req?.packageName ?? ""} ${req?.environment ?? ""}`
-      : `Promote ${req?.packageName ?? ""} to ${req?.environment ?? ""}`;
+    : repairMode
+      ? `Re-establish ${req?.packageName ?? ""} ${req?.environment ?? ""}`
+      : movesBackwards
+        ? `Roll back ${req?.packageName ?? ""} ${req?.environment ?? ""}`
+        : `Promote ${req?.packageName ?? ""} to ${req?.environment ?? ""}`;
 
   const blocked =
     !target ||
     !toVersion ||
-    toVersion === currentVersion ||
+    // A REPAIR IS THE ONE CASE WHERE SAME-VERSION IS THE POINT. Everywhere else
+    // it means the pipeline has nothing to move and the button must be inert.
+    (toVersion === currentVersion && !repairMode) ||
     promoting ||
     !(info?.youMayPromote ?? false) ||
     !(info?.writable ?? false);
@@ -419,18 +461,40 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
 
         {!result && !loading && target && (
           <>
-            <div style={{ marginBottom: 10, lineHeight: 1.5 }}>
-              <div>
-                <strong>{target.name}</strong>:{" "}
-                {currentVersion ? `v${currentVersion}` : "nothing promoted yet"} → {" "}
-                {toVersion ? `v${toVersion}` : "—"}
-                {!rollbackMode && source.label ? ` (from ${source.label})` : ""}
+            {repairMode ? (
+              <div style={{ marginBottom: 10, lineHeight: 1.5 }}>
+                <div>
+                  <strong>{target.name}</strong>: stays at{" "}
+                  {currentVersion ? `v${currentVersion}` : "—"}
+                </div>
+                <div style={{ ...mutedStyle, marginTop: 2 }}>
+                  Nothing moves and no files are copied. The pointer is re-signed with
+                  your key, so subscribers of {target.name} will follow it again.
+                </div>
               </div>
-              <div style={{ ...mutedStyle, marginTop: 2 }}>
-                No files are copied. {target.name} is a pointer to a version that already
-                exists in the workspace.
+            ) : (
+              <div style={{ marginBottom: 10, lineHeight: 1.5 }}>
+                <div>
+                  <strong>{target.name}</strong>:{" "}
+                  {currentVersion ? `v${currentVersion}` : "nothing promoted yet"} → {" "}
+                  {toVersion ? `v${toVersion}` : "—"}
+                  {!rollbackMode && source.label ? ` (from ${source.label})` : ""}
+                </div>
+                <div style={{ ...mutedStyle, marginTop: 2 }}>
+                  No files are copied. {target.name} is a pointer to a version that
+                  already exists in the workspace.
+                </div>
               </div>
-            </div>
+            )}
+
+            {repairMode && (
+              <div style={warnBoxStyle}>
+                The key that last promoted {target.name} is no longer in this
+                application&rsquo;s publisher list, so every subscriber refuses to follow
+                the pointer. Re-promoting the same version signs it with your key and
+                restores it. No subscriber sees a version change.
+              </div>
+            )}
 
             {rollbackMode && (
               <div style={{ marginBottom: 10 }}>
@@ -537,7 +601,13 @@ export function PromoteDialog({ onClose, data }: DialogProps) {
           <>
             <button onClick={onClose}>Cancel</button>
             <button onClick={() => void handlePromote()} disabled={blocked}>
-              {promoting ? "Working…" : movesBackwards ? "Roll back…" : "Promote…"}
+              {promoting
+                ? "Working…"
+                : repairMode
+                  ? "Re-promote…"
+                  : movesBackwards
+                    ? "Roll back…"
+                    : "Promote…"}
             </button>
           </>
         )}

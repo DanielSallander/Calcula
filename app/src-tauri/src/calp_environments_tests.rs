@@ -66,7 +66,7 @@ fn the_workspace_mutators_construct_no_document_effect() {
 #[test]
 fn the_subscription_switch_verifies_before_it_dirties() {
     let body = body_of(ENV_SRC, "pub fn calp_set_subscription_environment(");
-    let resolve = at(&body, "resolve_target(", "the target resolution");
+    let resolve = at(&body, "resolve_target_via(", "the target resolution");
     let effect = at(&body, "DocumentEffect::mutates(", "the effect");
     assert!(
         resolve < effect,
@@ -517,7 +517,7 @@ fn held_versions_are_folded_in_exactly_one_place() {
 /// This was the one confirmed finding with no test at all: the sabotage below
 /// ran green against the whole app suite.
 ///
-/// SABOTAGE: `let envs = calp::environments::environments(..).unwrap_or_default();`
+/// SABOTAGE: `let envs = calp::environments::environments_via(..).unwrap_or_default();`
 #[test]
 fn the_follow_line_gate_refuses_when_it_cannot_read_the_pipeline() {
     let body = body_of(CALP_SRC, "pub fn calp_pull(");
@@ -532,7 +532,7 @@ fn the_follow_line_gate_refuses_when_it_cannot_read_the_pipeline() {
         .unwrap();
 
     assert!(
-        gate.contains("match calp::environments::environments("),
+        gate.contains("match calp::environments::environments_via("),
         "the gate must MATCH on the result so an unreadable pipeline is a refusal",
     );
     assert!(
@@ -544,4 +544,90 @@ fn the_follow_line_gate_refuses_when_it_cannot_read_the_pipeline() {
         "a pipeline that cannot be read must refuse by name",
     );
     assert!(gate.contains("CALP_PULL_ENVIRONMENT_REQUIRED"));
+}
+
+/// EVERY SURFACE ARBITRATES WITH THE SAME RULE.
+///
+/// The cross-version winner is decided in two commands and again in the BI feed.
+/// The first attempt at this compared `(updated_at, id)` as raw STRINGS while
+/// `fold::cmp_timestamps` — which `merge_lenient_submissions` and the fold both
+/// use — PARSES the RFC3339 value and only falls back to bytes when a parse
+/// fails. The two disagree whenever a timestamp's spelling differs:
+/// `2026-01-01T10:00:00+02:00` is 08:00Z and therefore OLDER than
+/// `2026-01-01T09:00:00Z`, but sorts LATER as a string. Those values arrive from
+/// other machines and other builds, so their spelling is not this process's to
+/// assume — and a disagreement here is the same defect the arbitration was added
+/// to fix, one layer down.
+///
+/// SABOTAGE: compare `(a.updated_at.as_str(), a.id.as_str())` tuples again.
+#[test]
+fn cross_version_arbitration_uses_the_crates_own_ordering() {
+    for signature in [
+        "pub fn calp_set_submission_state(",
+        "fn load_region_current_submissions(",
+    ] {
+        let body = body_of(CALP_SRC, signature);
+        assert!(
+            body.contains("cmp_timestamps("),
+            "{signature} must arbitrate with fold::cmp_timestamps",
+        );
+        assert!(
+            !body.contains("updated_at.as_str()"),
+            "{signature} must not compare timestamps as raw strings",
+        );
+    }
+}
+
+/// EVERY SUBSCRIBER-FACING RESOLUTION USES THE **PINNED** ANCHOR.
+///
+/// `PromotionTrust::Workspace` asks the workspace who may promote; `Pinned` asks
+/// the key this machine already agreed to trust for this application. On a
+/// share anyone can write to, the first answer is the attacker's: `root_key_of`
+/// derives the root from the LOWEST entry of the UNSIGNED manifest listing, so
+/// planting a `0.0.1` that names your own key makes every promotion you sign
+/// look authorised. TOFU never catches the retarget, because it checks the
+/// signature on the version finally pulled and never the pointer that chose it.
+///
+/// The core test `the_anchor_is_the_pin_not_the_workspaces_own_account` proves
+/// the mechanism. This proves the CALL SITES use it — which is the half that
+/// actually shipped wrong, and the half a core test cannot see. Every one of
+/// these five is a surface a subscriber acts on: what Review promises, what the
+/// preview offers, what Apply refuses to strand, what the switch accepts, and
+/// what the pull finally fetches. Two of them disagreeing is the
+/// two-surfaces-disagree failure this feature has already produced once.
+///
+/// SABOTAGE: change any one of them back to `resolve_target(` /
+/// `resolve_environment(` / `environments(` — the `Workspace`-anchored wrappers.
+#[test]
+fn every_subscriber_facing_resolution_is_anchored_on_the_pin() {
+    let sites: [(&str, &str); 6] = [
+        (CALP_SRC, "pub fn calp_pull("),
+        (CALP_SRC, "pub fn calp_inspect_application("),
+        (CALP_SRC, "pub fn calp_refresh_preview("),
+        (CALP_SRC, "pub fn calp_refresh_apply("),
+        (CALP_SRC, "pub fn calp_subscription_trust("),
+        (ENV_SRC, "pub fn calp_set_subscription_environment("),
+    ];
+    for (src, signature) in sites {
+        let body = body_of(src, signature);
+        assert!(
+            body.contains("PromotionTrust::Pinned"),
+            "{signature} resolves for a subscriber, so it must anchor on this \
+             machine's pin, not on the workspace's own account of who may promote",
+        );
+        assert!(
+            !body.contains("PromotionTrust::Workspace"),
+            "{signature} must not mix anchors — two answers in one command is \
+             worse than the wrong one",
+        );
+        // The `Workspace`-anchored convenience wrappers, by exact call shape so
+        // the `_via` forms beside them do not match.
+        for wrapper in ["resolve_target(", "resolve_environment(", "environments::environments("] {
+            assert!(
+                !body.contains(wrapper),
+                "{signature} calls `{wrapper}`, which is anchored on the workspace. \
+                 Use the `_via` form with `PromotionTrust::Pinned`.",
+            );
+        }
+    }
 }

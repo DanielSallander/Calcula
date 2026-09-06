@@ -395,16 +395,29 @@ function EnvironmentsCard({
                   <td style={tdStyle}>{h.at}</td>
                   <td style={tdStyle}>
                     {h.by || "—"} ({h.key.slice(0, 12)}…)
+                    {!h.authorized && (
+                      <span
+                        style={{ color: "#b45309", fontWeight: 600, marginLeft: 6 }}
+                        title="This key is not in the application's root-signed publisher list, so this promotion carries no authority."
+                      >
+                        not an authorised publisher
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
           <div style={{ ...mutedStyle, fontSize: 11.5, marginTop: 6, lineHeight: 1.5 }}>
-            Every row above is signed by the key beside it and verified against the
-            application&rsquo;s authorised publishers. A promotion moves a pointer; it
-            copies nothing, so the version an environment names is bit-for-bit the one
-            published under that number.
+            Every row above is signed by the key beside it, so no row has been edited
+            since it was written. A row marked{" "}
+            <span style={{ color: "#b45309", fontWeight: 600 }}>
+              not an authorised publisher
+            </span>{" "}
+            was signed by a key that is not in the application&rsquo;s root-signed
+            publisher list, and the pointer it set is refused. A promotion moves a
+            pointer; it copies nothing, so the version an environment names is
+            bit-for-bit the one published under that number.
           </div>
         </>
       )}

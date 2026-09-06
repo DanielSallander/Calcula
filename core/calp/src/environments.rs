@@ -445,6 +445,34 @@ fn fold(log: &PromotionLog, package: &str) -> Result<Vec<Environment>, CalpError
 /// a version the environment demonstrably held rather than merely one that is
 /// older. Survives a remove-and-re-add: the history is the log's, not the
 /// current entry's.
+/// `versions_held`, counting only records signed by a key the application
+/// currently authorises.
+///
+/// The promote gate uses THIS one. `versions_held` folds an integrity-checked
+/// but not authorisation-checked log, so an unauthorised record could claim any
+/// version as one this environment had held — and "a version it has held" is
+/// the single documented way to step around linear order. Narrowing it costs a
+/// removed delegate's era as rollback targets, which is the same conservative
+/// direction `mark_unauthorized_pointers` already takes for the pointer itself.
+pub fn versions_held_authorized(
+    log: &PromotionLog,
+    environment: &str,
+    authorized_keys: &[String],
+) -> Vec<String> {
+    let filtered = PromotionLog {
+        format_version: log.format_version,
+        package_name: log.package_name.clone(),
+        promotions: log
+            .promotions
+            .iter()
+            .filter(|s| authorized_keys.iter().any(|k| *k == s.record.key))
+            .cloned()
+            .collect(),
+        extra: log.extra.clone(),
+    };
+    versions_held(&filtered, environment)
+}
+
 pub fn versions_held(log: &PromotionLog, environment: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for signed in &log.promotions {
@@ -470,6 +498,56 @@ pub fn versions_held(log: &PromotionLog, environment: &str) -> Vec<String> {
 
 /// The keys allowed to promote this application: the same set the push gate
 /// consults, so "who may publish" and "who may promote" cannot drift apart.
+/// The authorised set anchored on one key this machine has agreed to.
+///
+/// The pin is trusted by definition; the question is whether it is the
+/// application's ROOT or one of its delegates, because only the root's list
+/// names the whole set.
+///
+///   * The list verifies under the pin, or there is no list — the pin IS the
+///     root. Strongest case: the set is the pin plus the delegates it vouches
+///     for, and the workspace's own account of who the root is never enters.
+///   * The list does NOT verify under the pin — the pin is a delegate. We then
+///     have to ask the workspace who the root is, and accept it ONLY if the
+///     root-signed list vouches for the very key we pinned. That is weaker: a
+///     share-writer who plants a root and lists our pinned key would be
+///     believed. It is exactly the guarantee `integrity::delegate_is_authorized`
+///     already gives a delegate-pinned subscriber for VERSIONS, so environments
+///     are no weaker than the content they point at — and the alternative,
+///     refusing outright, bricks every co-publishing subscriber.
+///   * Nothing vouches for the pin — refuse by returning an empty set. Every
+///     pointer is then marked and resolution fails closed.
+fn authorized_from_pin(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+    pinned: &str,
+) -> Result<Vec<String>, CalpError> {
+    match crate::publishers::load_verified(registry, package, pinned) {
+        // The pin is the root.
+        Ok(Some(list)) => {
+            let mut keys = vec![pinned.to_string()];
+            keys.extend(list.authorized_keys.iter().map(|k| k.key.clone()));
+            Ok(keys)
+        }
+        Ok(None) => Ok(vec![pinned.to_string()]),
+        // The pin is not the root. Ask the workspace, and believe it only if its
+        // root vouches for the key we actually pinned.
+        Err(_) => {
+            let Some(root) = crate::publishers::root_key_of(registry, package)? else {
+                return Ok(Vec::new());
+            };
+            match crate::publishers::load_verified(registry, package, &root)? {
+                Some(list) if list.allows(pinned) => {
+                    let mut keys = vec![root];
+                    keys.extend(list.authorized_keys.iter().map(|k| k.key.clone()));
+                    Ok(keys)
+                }
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+}
+
 /// WHOSE WORD DECIDES who may have written this log.
 ///
 /// THE ANSWER IS DIFFERENT FOR A PUBLISHER AND A SUBSCRIBER, and conflating them
@@ -512,15 +590,17 @@ fn authorized_keys_via(
         },
         PromotionTrust::Pinned { scope, profile_dir } => {
             match crate::signing::pinned_publisher_key(profile_dir, scope, package)? {
-                Some(root) => {
-                    let mut keys = vec![root.clone()];
-                    if let Some(list) =
-                        crate::publishers::load_verified(registry, package, &root)?
-                    {
-                        keys.extend(list.authorized_keys.iter().map(|k| k.key.clone()));
-                    }
-                    keys
-                }
+                // THE PIN IS NOT NECESSARILY THE ROOT. TOFU pins whatever key
+                // signed the FIRST version this machine pulled
+                // (`integrity.rs`: `pin_publisher(.., &manifest.publisher_key)`),
+                // and on an application with co-publishers that is routinely a
+                // DELEGATE. Treating the pin as the root asked
+                // `publishers::load_verified` to check a root-signed list
+                // against a delegate's key: it answered PublisherListInvalid,
+                // the `?` propagated, and every environment refresh failed
+                // permanently for exactly the delegated deployment this feature
+                // exists to support.
+                Some(pinned) => authorized_from_pin(registry, package, &pinned)?,
                 // NO PIN YET: this is a FIRST subscribe, and there is nothing to
                 // anchor to because this machine has never agreed to trust
                 // anyone for this application. Falling back to the workspace's
@@ -628,6 +708,22 @@ pub fn promotion_history(
     })
 }
 
+/// The keys entitled to promote this application right now: the root key of the
+/// head version, plus every delegate in the root-signed publisher list.
+///
+/// Exposed because a reader that DISPLAYS history must be able to say which
+/// records still stand. `promotion_history` returns records whose signature
+/// verified against the key each record names — that proves the record was not
+/// edited, NOT that its signer was ever entitled to promote. A history table
+/// that renders both alike tells the user a stranger's promotion was legitimate.
+pub fn authorized_promoter_keys(
+    registry: &dyn WorkspaceTransport,
+    package: &str,
+) -> Result<Vec<String>, CalpError> {
+    let (keys, _head, _root) = authorized_keys_via(registry, package, PromotionTrust::Workspace)?;
+    Ok(keys)
+}
+
 /// Every version an environment has EVER held, newest first.
 ///
 /// From the signed log, never from the version listing. Two readers need this
@@ -716,13 +812,31 @@ pub fn resolve_environment_via(
     // publisher can repair it; resolution must not follow it, because nobody the
     // application currently authorises has said this is the version to serve.
     if entry.unauthorized_pointer {
-        return Err(CalpError::PromotionLogInvalid {
-            package: package.to_string(),
-            reason: format!(
+        // TWO DIFFERENT CAUSES, TWO DIFFERENT REMEDIES. A pointer set by a
+        // de-authorised key is repaired by promoting again. But the WHOLE LIST
+        // is marked when the last record to define the pipeline was signed by
+        // such a key — and no amount of promoting clears that, because the
+        // marking is about who said these environments exist. Saying
+        // "re-promote" there sent people round a loop that could not end.
+        let pipeline_is_the_problem = envs.iter().all(|e| e.unauthorized_pointer)
+            && envs.iter().any(|e| e.version.is_none() || e.promoter_key != entry.promoter_key);
+        let reason = if pipeline_is_the_problem {
+            format!(
+                "the last change to this application's environment LIST was signed by a key \
+                 that is no longer allowed to publish it, so which environments exist is not \
+                 vouched for. Any current publisher can save the pipeline again from the \
+                 Application Explorer to re-establish it"
+            )
+        } else {
+            format!(
                 "'{environment}' was last promoted by a key that is no longer allowed to \
                  publish this application, so where it points is not vouched for. Any \
                  current publisher can promote into '{environment}' again to re-establish it"
-            ),
+            )
+        };
+        return Err(CalpError::PromotionLogInvalid {
+            package: package.to_string(),
+            reason,
         });
     }
     SemVer::parse(version).map_err(|_| CalpError::PromotionLogInvalid {
@@ -911,7 +1025,14 @@ pub fn promote(
     // blocked by the very condition it repairs.
     let log = load_verified_log(registry, package)?
         .unwrap_or_else(|| new_log(package));
-    let envs = fold(&log, package)?;
+    let mut envs = fold(&log, package)?;
+    // MARK BEFORE DECIDING. The linear rule takes what the PREVIOUS environment
+    // holds, so a pointer set by a key nobody authorises would be promoted
+    // onward — and the record carrying it forward IS signed by a current
+    // publisher, so it comes back clean and every subscriber follows it. Reading
+    // the state without marking made the write path the one place that
+    // laundered an unvouched pointer.
+    mark_unauthorized_pointers(&mut envs, &log, &keys);
 
     let Some(index) = envs.iter().position(|e| e.name == environment) else {
         return Err(CalpError::EnvironmentNotFound {
@@ -977,7 +1098,17 @@ pub fn promote(
     let _ = source_label;
     let target_str = target.to_string();
 
-    if current.as_deref() == Some(target_str.as_str()) {
+    // A NO-OP ON THE VERSION IS NOT A NO-OP ON THE AUTHORITY.
+    //
+    // Re-promoting the version an environment already holds is exactly the
+    // repair for a pointer whose last promoter has since been removed from the
+    // publisher list: the pointer stands, subscribers refuse to follow it, and
+    // the only fix is a fresh record signed by someone who may publish TODAY.
+    // Refusing it as a no-op made that repair unreachable — the UI's own warning
+    // told the user to promote again, and the backend answered
+    // `EnvironmentAlreadyAt` — which is worse than the defect, because the
+    // remedy the product names does not exist.
+    if current.as_deref() == Some(target_str.as_str()) && !envs[index].unauthorized_pointer {
         return Err(CalpError::EnvironmentAlreadyAt {
             package: package.to_string(),
             environment: environment.to_string(),
@@ -1008,12 +1139,33 @@ pub fn promote(
         });
     }
 
+    // AND THE SOURCE MUST BE VOUCHED FOR. Promoting out of an environment whose
+    // own pointer nobody currently authorises would launder it: the new record
+    // is signed by a publisher, so the result reads as legitimate.
+    if index > 0 && envs[index - 1].unauthorized_pointer {
+        return Err(CalpError::PromotionLogInvalid {
+            package: package.to_string(),
+            reason: format!(
+                "'{}' points at a version last promoted by a key that is no longer allowed \
+                 to publish this application, so it cannot be promoted onward. Re-promote \
+                 into '{}' first to re-establish it",
+                envs[index - 1].name,
+                envs[index - 1].name
+            ),
+        });
+    }
+
     // LINEAR DISCIPLINE. The first environment draws from anywhere on the line;
     // the rest take what the environment before them holds. A version this
     // environment has HELD before is always allowed — that is a rollback, and
     // refusing it would mean the only way back from a bad release is another
     // release.
-    let held = versions_held(&log, environment);
+    //
+    // HELD BY AN AUTHORISED RECORD. `versions_held` folds the log, which is
+    // integrity-checked but not authorisation-checked, so an unauthorised
+    // record could otherwise claim any version as "held" and widen this escape
+    // hatch — the one place linearity can be stepped around.
+    let held = versions_held_authorized(&log, environment, &keys);
     let allowed_by_position = if index == 0 {
         true
     } else {
@@ -1691,6 +1843,136 @@ mod tests {
         let repaired = environments(&reg, "app").unwrap();
         assert!(!repaired[0].unauthorized_pointer, "re-promoting must clear the mark");
         assert_eq!(resolve_environment(&reg, "app", "prod").unwrap().to_string(), "1.1.0");
+    }
+
+    /// THE REPAIR IS RE-PROMOTING THE SAME VERSION, and the no-op guard used to
+    /// refuse exactly that.
+    ///
+    /// The test above repairs by promoting a NEWER version, which needs one to
+    /// exist. In the common case — a de-authorised pointer on an environment
+    /// sitting at the head — there is no newer version, and the only remedy is a
+    /// fresh signature over the version already there. `EnvironmentAlreadyAt`
+    /// refused it as "nothing to do", so the product's own warning ("promote
+    /// again to re-establish it") named a remedy the backend would not perform.
+    ///
+    /// Nothing about the promotion is a no-op: the version does not move, the
+    /// SIGNER does, and that is the entire question a subscriber asks.
+    ///
+    /// SABOTAGE: drop `&& !envs[index].unauthorized_pointer` from the no-op gate.
+    #[test]
+    fn a_de_authorised_pointer_is_repaired_by_re_promoting_the_same_version() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let delegate_prof = TempDir::new().unwrap();
+        // ONE version only. This is the case the other test cannot reach.
+        let reg = published(&dir, prof.path(), &[(1, 0, 0)]);
+        let root = keypair(&prof);
+        let delegate = keypair(&delegate_prof);
+
+        let mut list = crate::publishers::PublisherList {
+            format_version: 1,
+            package_name: "app".to_string(),
+            root_key: root.public_key_hex(),
+            revision: 1,
+            updated_at: NOW.to_string(),
+            authorized_keys: vec![crate::publishers::AuthorizedKey {
+                key: delegate.public_key_hex(),
+                name: "delegate".to_string(),
+                added_at: NOW.to_string(),
+            }],
+            extra: std::collections::HashMap::new(),
+        };
+        crate::publishers::write_signed(&reg, &list, &root).unwrap();
+        pipeline(&reg, &root, &["prod"]);
+        promote(&reg, "app", "prod", None, None, &delegate, NOW).unwrap();
+
+        // The root removes the delegate. The pointer is now unfollowable.
+        list.revision = 2;
+        list.authorized_keys.clear();
+        crate::publishers::write_signed(&reg, &list, &root).unwrap();
+        assert!(environments(&reg, "app").unwrap()[0].unauthorized_pointer);
+        assert!(resolve_environment(&reg, "app", "prod").is_err());
+
+        // THE REMEDY: the same version, a current publisher's signature.
+        let result = promote(&reg, "app", "prod", Some(SemVer::new(1, 0, 0)), None, &root, NOW)
+            .expect("re-promoting the held version must repair the pointer");
+        assert_eq!(result.to, "1.0.0");
+        assert_eq!(result.from.as_deref(), Some("1.0.0"), "nothing moved");
+
+        let repaired = environments(&reg, "app").unwrap();
+        assert!(!repaired[0].unauthorized_pointer, "the mark must clear");
+        assert_eq!(resolve_environment(&reg, "app", "prod").unwrap().to_string(), "1.0.0");
+
+        // AND THE GUARD STILL HOLDS EVERYWHERE ELSE. Now that the pointer is
+        // vouched for, promoting it to what it already holds is a no-op again.
+        match promote(&reg, "app", "prod", Some(SemVer::new(1, 0, 0)), None, &root, NOW) {
+            Err(CalpError::EnvironmentAlreadyAt { .. }) => {}
+            other => panic!("a healthy pointer must still refuse a no-op, got {other:?}"),
+        }
+    }
+
+    /// A DE-AUTHORISED **PIPELINE** RECORD MARKS EVERY ENVIRONMENT.
+    ///
+    /// The pipeline record decides which environments exist at all, so a
+    /// stranger who can write one chooses the names — and a subscriber pointed
+    /// at a name that record invented is following the stranger, whoever signed
+    /// the promotion into it. The per-environment check alone would clear each
+    /// pointer individually and miss that the LIST is the forgery.
+    ///
+    /// SABOTAGE: delete the latest-Pipeline branch of
+    /// `mark_unauthorized_pointers` and keep only the per-environment one.
+    #[test]
+    fn a_de_authorised_pipeline_record_marks_every_environment() {
+        let dir = TempDir::new().unwrap();
+        let prof = TempDir::new().unwrap();
+        let delegate_prof = TempDir::new().unwrap();
+        let reg = published(&dir, prof.path(), &[(1, 0, 0)]);
+        let root = keypair(&prof);
+        let delegate = keypair(&delegate_prof);
+
+        let mut list = crate::publishers::PublisherList {
+            format_version: 1,
+            package_name: "app".to_string(),
+            root_key: root.public_key_hex(),
+            revision: 1,
+            updated_at: NOW.to_string(),
+            authorized_keys: vec![crate::publishers::AuthorizedKey {
+                key: delegate.public_key_hex(),
+                name: "delegate".to_string(),
+                added_at: NOW.to_string(),
+            }],
+            extra: std::collections::HashMap::new(),
+        };
+        crate::publishers::write_signed(&reg, &list, &root).unwrap();
+
+        // The DELEGATE defines the pipeline; the ROOT promotes into it. Every
+        // pointer is therefore signed by a key that is still authorised, so only
+        // the pipeline record can be at fault.
+        let seq = reg.get_application_manifest("app").unwrap().promotion_sequence;
+        set_pipeline(&reg, "app", &["test".to_string(), "prod".to_string()], seq, &delegate, NOW)
+            .unwrap();
+        promote(&reg, "app", "test", None, None, &root, NOW).unwrap();
+        promote(&reg, "app", "prod", None, None, &root, NOW).unwrap();
+        for e in environments(&reg, "app").unwrap() {
+            assert!(!e.unauthorized_pointer, "{} is fine while the delegate stands", e.name);
+        }
+
+        // The root removes the delegate, invalidating the record that decided
+        // these two names exist.
+        list.revision = 2;
+        list.authorized_keys.clear();
+        crate::publishers::write_signed(&reg, &list, &root).unwrap();
+
+        let envs = environments(&reg, "app").unwrap();
+        assert_eq!(envs.len(), 2);
+        for e in &envs {
+            assert!(
+                e.unauthorized_pointer,
+                "'{}' was promoted by the root, but the LIST it belongs to was not",
+                e.name
+            );
+        }
+        assert!(resolve_environment(&reg, "app", "prod").is_err());
     }
 
     /// THE TRUST ANCHOR IS THIS MACHINE'S PIN, not the workspace's own account

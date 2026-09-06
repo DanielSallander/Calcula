@@ -136,21 +136,19 @@ pub fn strip_workspace_marker(location: &str) -> String {
 /// Are these two location strings the same workspace, for the purpose of a UI
 /// prefill or a REFUSAL gate?
 ///
-/// Compares the user's own spelling, case-insensitively and ignoring a trailing
-/// separator: the same share reached as `\\srv\reports` and `\\srv\reports\` is
-/// one share.
+/// USE THIS, NOT a bare `workspace_scope(..).id`, on a refusal path — but for
+/// the failure mode, not the comparison. `workspace_scope` returns `Err` for a
+/// location it cannot open, and a gate that refuses on a match reads that `Err`
+/// as "not a match", so it OPENS on malformed input. This function asks the
+/// scope question when both sides answer it, and falls back to a comparison
+/// that cannot fail when either does not.
 ///
-/// USE THIS, NOT `workspace_scope(..).id`, on a refusal path. `workspace_scope`
-/// returns `Err` for a location it cannot open — and in a gate that refuses, an
-/// `Err` resolves to "not a match", i.e. the gate OPENS on malformed input.
-/// Trailing-separator and case folding has no failure mode. Where workspace
-/// IDENTITY is the question (which pin does this belong to?), scope ids remain
-/// the right answer.
+/// The fallback compares the user's own spelling, case-insensitively and
+/// ignoring a trailing separator: the same share reached as `\\srv\reports` and
+/// `\\srv\reports\` is one share. It is deliberately loose, because for a
+/// location nothing can open, refusing to compare is worse than comparing
+/// loosely.
 ///
-/// ONE COPY. `WorkingCopyLink::targets` had a private `norm` closure doing
-/// exactly this, and the push gate's subscriber check had no comparison at all —
-/// it matched on the application NAME alone, so a push to YOUR `sales` was
-/// refused because you subscribe to somebody else's `sales`.
 /// THE SCOPE DECIDES, when both locations can be scoped. `workspace_scope`
 /// already folds the `workspace.calcula` marker, the scheme and the separators
 /// into one identity, and that identity is what the pin store keys on — so two
@@ -160,9 +158,10 @@ pub fn strip_workspace_marker(location: &str) -> String {
 /// subscribed twice to one application then had first-match lookups resolving
 /// the wrong row and its sheets materialized twice.
 ///
-/// The trimmed-and-lowercased fallback is kept for locations that cannot be
-/// scoped at all, where refusing to compare would be worse than comparing
-/// loosely.
+/// ONE COPY. `WorkingCopyLink::targets` had a private `norm` closure doing
+/// exactly this, and the push gate's subscriber check had no comparison at all —
+/// it matched on the application NAME alone, so a push to YOUR `sales` was
+/// refused because you subscribe to somebody else's `sales`.
 pub fn same_workspace(a: &str, b: &str) -> bool {
     if let (Ok(x), Ok(y)) = (workspace_scope(a), workspace_scope(b)) {
         return x.id == y.id;
@@ -689,5 +688,45 @@ mod tests {
         assert_eq!(naive_unc, "server/share/reg");
         assert_eq!(id("file://server/share/reg"), r"\\server\share\reg");
         assert_ne!(id(naive_unc), r"\\server\share\reg");
+    }
+
+    /// `same_workspace` ANSWERS THE SCOPE'S QUESTION when both sides can be
+    /// scoped, and keeps a comparison that cannot fail when either cannot.
+    ///
+    /// Both halves matter and only the fallback was covered. A string compare
+    /// alone let `C:/ws` and `C:\ws\workspace.calcula` past the
+    /// already-subscribed gate as two workspaces, so a workbook subscribed twice
+    /// to one application and materialized its sheets twice; scope ids alone
+    /// would make an unopenable location match nothing, opening every gate that
+    /// refuses on a match.
+    ///
+    /// SABOTAGE: delete the `workspace_scope` branch, or delete the `norm`
+    /// fallback and return `false` when either side fails to scope.
+    #[test]
+    fn the_marker_file_and_its_directory_are_one_workspace() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().to_string_lossy().to_string();
+        let marker = format!("{}\\workspace.calcula", base.trim_end_matches(['/', '\\']));
+        std::fs::write(&marker, b"{}").unwrap();
+
+        // THE SCOPE BRANCH: two spellings a raw compare would call different.
+        assert!(
+            same_workspace(&base, &marker),
+            "the pointer file and its directory are one pin scope, so they are \
+             one workspace here too",
+        );
+        assert!(same_workspace(&base.replace('\\', "/"), &marker));
+
+        // AND TWO REAL DIRECTORIES STAY DIFFERENT.
+        let other = TempDir::new().unwrap();
+        assert!(!same_workspace(&base, &other.path().to_string_lossy()));
+
+        // THE FALLBACK BRANCH: neither of these can be scoped (an HTTP URL with
+        // userinfo is refused), so the loose compare answers — and a gate that
+        // refuses on a match still closes.
+        let bad = "https://user@host/ws";
+        assert!(workspace_scope(bad).is_err(), "the fixture must be unscopable");
+        assert!(same_workspace(bad, "HTTPS://USER@HOST/ws/"));
+        assert!(!same_workspace(bad, "https://user@host/other"));
     }
 }

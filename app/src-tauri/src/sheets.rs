@@ -209,6 +209,12 @@ pub(crate) struct SheetOrigin {
     /// and every diff row is named by — so anything that has to line a local
     /// sheet up against published content needs this and not `local_sheet_id`.
     pub package_sheet_id: identity::SheetId,
+    /// The UPSTREAM version this workbook is on no longer publishes this sheet.
+    ///
+    /// It keeps its provenance — still the publisher's content, and a later
+    /// version can bring it back — but nothing refreshes it meanwhile, so any
+    /// surface that says "refreshed from the workspace" has to say otherwise.
+    pub upstream_removed: bool,
 }
 
 /// Which local sheet INDICES came from a subscribed `.calp` application.
@@ -253,6 +259,7 @@ impl SheetProvenance {
                             .unwrap_or_else(|| removed.local_name.clone()),
                         local_sheet_id: removed.local_sheet_id,
                         package_sheet_id: removed.package_sheet_id,
+                        upstream_removed: true,
                     },
                 );
                 continue;
@@ -271,6 +278,10 @@ impl SheetProvenance {
                             .unwrap_or_else(|| sheet.local_name.clone()),
                         local_sheet_id: sheet.local_sheet_id,
                         package_sheet_id: sheet.package_sheet_id,
+                        // A LIVE subscribed sheet. The tombstone branch above
+                        // claims this index first, so reaching here means the
+                        // publisher still ships it.
+                        upstream_removed: false,
                     },
                 );
             }

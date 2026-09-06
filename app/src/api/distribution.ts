@@ -1342,6 +1342,15 @@ export interface PromotionHistoryEntry {
   by: string;
   key: string;
   isYou: boolean;
+  /**
+   * Whether the signer is STILL entitled to promote this application.
+   *
+   * A verified signature proves only that the record was not edited. A record
+   * signed by a key that never was, or no longer is, in the root-signed
+   * publisher list verifies exactly as cleanly — and the pointer it set is
+   * refused. Render the two differently.
+   */
+  authorized: boolean;
   isRollback: boolean;
 }
 
@@ -1534,6 +1543,8 @@ export function pushMergeApply(): Promise<MergeApplyResponse> {
 export function diffWorkingCopy(params?: {
   registryPath?: string;
   packageName?: string;
+  /** The workspace it was subscribed from; two teams may publish the same name. */
+  registryUrl?: string;
   baseVersion?: string;
   /**
    * Sheets the comparison covers. Omitted means "the publish default".
@@ -1759,6 +1770,14 @@ export function detach(): Promise<void> {
 
 /** Where one sheet came from, when it did not come from you. */
 export interface SheetProvenanceInfo {
+  /**
+   * The version this workbook is on no longer publishes this sheet.
+   *
+   * It keeps its provenance — the content is still the publisher's, and a later
+   * version can bring it back in place — but nothing refreshes it meanwhile, so
+   * a surface promising refreshes has to say otherwise.
+   */
+  upstreamRemoved?: boolean;
   /**
    * TRUE workbook index. Shifts on insert/delete/move, so a consumer caching it
    * must re-read when the sheet list changes.
@@ -2074,6 +2093,8 @@ export interface WritebackRegionEntry {
    * so any surface offering an environment picker has to scope it to this.
    */
   packageName?: string;
+  /** The workspace it was subscribed from; two teams may publish the same name. */
+  registryUrl?: string;
   rowStart: number;
   rowEnd: number;
   colStart: number;

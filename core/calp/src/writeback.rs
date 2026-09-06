@@ -695,6 +695,7 @@ impl WritebackIndex {
                     // Filled by the app command from the owning subscription;
                     // the flat index has no idea which application it came from.
                     package_name: None,
+                    registry_url: None,
                     sheet_id,
                     sheet_index,
                     region_id,
@@ -754,6 +755,12 @@ pub struct WritebackRegionEntry {
     /// region's application does not have.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_name: Option<String>,
+    /// The workspace that application was subscribed from. Two teams may each
+    /// publish the same NAME to their own share, and their environments are
+    /// unrelated, so a picker scoped by name alone re-creates the union it was
+    /// scoped to remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_url: Option<String>,
     /// Submission deadline (ISO 8601) for an `until_deadline` region, surfaced
     /// so the subscriber UI can show a countdown / overdue state.
     #[serde(default, skip_serializing_if = "Option::is_none")]

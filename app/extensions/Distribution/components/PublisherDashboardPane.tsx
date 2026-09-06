@@ -125,9 +125,15 @@ export function PublisherDashboardPane(): React.ReactElement {
     getSubscriptionTrust()
       .then((rows) => {
         if (cancelled) return;
+        // Matched on application AND workspace: two teams may each publish
+        // `sales` to their own share, and their environments are unrelated.
         const owner = regions.find((r) => r.regionId === selected);
         const mine = owner
-          ? rows.filter((r) => r.packageName === owner.packageName)
+          ? rows.filter(
+              (r) =>
+                r.packageName === owner.packageName &&
+                (!owner.registryUrl || r.registryUrl === owner.registryUrl),
+            )
           : [];
         const names = new Set<string>();
         for (const r of mine) {
@@ -148,6 +154,14 @@ export function PublisherDashboardPane(): React.ReactElement {
     if (selected) void loadSubs(selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewing]);
+
+  // A REGION FROM ANOTHER APPLICATION RESETS THE STREAM. `viewing` survived a
+  // region switch, so a picker scoped to the new region's application no longer
+  // offered the old value — the control vanished while the filter it set stayed
+  // on, and the inbox silently showed nothing with no way to say why.
+  useEffect(() => {
+    setViewing(null);
+  }, [selected]);
 
   // Hold a submission watch while this pane is open, and refresh when it says
   // answers arrived. The watch is refcounted and demand-driven: opening this

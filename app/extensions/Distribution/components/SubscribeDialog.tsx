@@ -961,8 +961,22 @@ export function SubscribeDialog({ onClose }: DialogProps) {
 
       <div style={fieldStyle}>
         <label>Application Name</label>
-        <input style={inputStyle} value={packageName} onChange={(e) => setPackageName(e.target.value)}
-          placeholder="sales-report" />
+        {/* TYPING A NAME CLEARS THE TARGET. The environment was picked for a
+            DIFFERENT application: carrying it over sends one application's
+            stream name with another's name, which the backend refuses with
+            "no environment called prod" — a confusing failure for a field the
+            user believes they just filled in correctly. Same for the
+            deliberate-line flag: it was a choice about the other application. */}
+        <input
+          style={inputStyle}
+          value={packageName}
+          onChange={(e) => {
+            setPackageName(e.target.value);
+            setEnvironment(null);
+            setLineChosen(false);
+          }}
+          placeholder="sales-report"
+        />
       </div>
       {/* THE TARGET, in one line, whatever produced it. Radio, chip, or typed
           pin all end up here, and a subscriber should be able to read what they

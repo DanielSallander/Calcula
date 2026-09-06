@@ -95,6 +95,12 @@ export function EditPipelineDialog({ onClose, data }: DialogProps) {
   // signed as a no-op record, advancing the sequence and making a colleague's
   // open dialog stale.
   const trimmed = names.map((n) => n.trim());
+  /**
+   * Something in this pipeline is no longer vouched for, so re-signing the list
+   * unchanged is a real repair rather than a no-op.
+   */
+  const needsResigning =
+    !!info?.problem || (info?.environments ?? []).some((e) => e.unauthorizedPointer);
   const validation = pipelineEditValidation(trimmed);
   const original = info?.environments.map((e) => e.name) ?? [];
   const unchanged =
@@ -316,6 +322,13 @@ export function EditPipelineDialog({ onClose, data }: DialogProps) {
               subscribers of the old name are told it is gone.
             </div>
 
+            {needsResigning && unchanged && !validation && (
+              <div style={warnBoxStyle}>
+                Part of this pipeline was last changed by a key that is no longer allowed to
+                publish this application, so subscribers refuse to follow it. Saving this
+                list unchanged re-signs it with your key and re-establishes it.
+              </div>
+            )}
             {validation && <div style={warnBoxStyle}>{validation}</div>}
             {error && <div style={{ ...errorTextStyle, marginTop: 8 }}>{error}</div>}
           </>
@@ -335,7 +348,12 @@ export function EditPipelineDialog({ onClose, data }: DialogProps) {
                 loading ||
                 !info ||
                 validation !== null ||
-                unchanged ||
+                // AN UNCHANGED LIST IS SAVEABLE WHILE SOMETHING IS UNVOUCHED.
+                // Re-signing the same pipeline is the ONLY repair when the last
+                // record to define it was signed by a key that has since been
+                // removed — and blocking it on "nothing changed" is what made
+                // that state unrecoverable in the app.
+                (unchanged && !needsResigning) ||
                 !info.youMayPromote ||
                 !info.writable
               }

@@ -1427,6 +1427,72 @@ mod tests {
         );
     }
 
+    /// A SHEET THE PUBLISHER DROPS IS TOMBSTONED WITH ITS IDENTITY, SEPARATELY
+    /// FROM A USER DETACH.
+    ///
+    /// Both used to share the reason-less `detached_sheets` list, so a sheet the
+    /// publisher removed became indistinguishable from one the subscriber had
+    /// claimed — and the retain that keeps a detached sheet out of the ledger
+    /// kept this one out forever. After a rollback across a sheet-adding version
+    /// the roll-forward left the tab on screen with stale numbers, no badge, no
+    /// delete guard and no publish exclusion.
+    ///
+    /// The identity in the tombstone is the whole point: a returning version
+    /// re-adopts the grid IN PLACE instead of appending `Sales (2)` beside it.
+    ///
+    /// SABOTAGE: push into `detached_sheets` instead, or drop
+    /// `SubscriptionManifest::upstream_removed_sheet`.
+    #[test]
+    fn an_upstream_removed_sheet_keeps_its_identity_and_its_provenance() {
+        let dir = TempDir::new().unwrap();
+        let mut sub = env_subscription(&dir, Some("prod"), "", "1.0.0");
+        let package_id = SheetId::from_bytes(identity::generate_uuid_v7());
+        let local_id = SheetId::from_bytes(identity::generate_uuid_v7());
+        sub.sheets.push(SubscribedSheet {
+            package_sheet_id: package_id,
+            local_sheet_id: local_id,
+            local_name: "Sales".to_string(),
+            extra: Default::default(),
+        });
+
+        // The publisher drops it. This is NOT a user detach.
+        sub.upstream_removed_sheets
+            .push(crate::manifest::UpstreamRemovedSheet {
+                package_sheet_id: package_id,
+                local_sheet_id: local_id,
+                local_name: "Sales".to_string(),
+                removed_at_version: "1.1.0".to_string(),
+                extra: Default::default(),
+            });
+        sub.sheets.clear();
+        assert!(
+            sub.detached_sheets.is_empty(),
+            "an upstream removal must never look like a user detach",
+        );
+
+        // Provenance still answers for it, so the tab badge, the delete guard
+        // and the publish exclusion all still apply to the publisher's content.
+        let manifest = crate::manifest::SubscriptionManifest {
+            format_version: 1,
+            subscriptions: vec![sub.clone()],
+            extra: Default::default(),
+        };
+        assert!(
+            manifest.upstream_removed_sheet(local_id).is_some(),
+            "a dropped sheet keeps its provenance",
+        );
+        assert!(manifest.subscribed_sheet(local_id).is_none());
+
+        // And the identity is exactly what a returning version re-adopts. The
+        // OWNING subscription comes back with it, because the materializer needs
+        // to know which application is re-adopting the grid.
+        let (owner, back) = manifest.upstream_removed_sheet(local_id).unwrap();
+        assert_eq!(owner.package_name, sub.package_name);
+        assert_eq!(back.local_sheet_id, local_id);
+        assert_eq!(back.package_sheet_id, package_id);
+        assert_eq!(back.local_name, "Sales");
+    }
+
     /// A DEV subscription never reaches environment resolution: it points at a
     /// local `.cala` file, and there is no workspace to resolve a name against.
     ///

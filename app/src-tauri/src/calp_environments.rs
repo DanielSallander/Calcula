@@ -51,6 +51,14 @@ pub struct EnvironmentInfo {
     pub promoter_key: String,
     /// Whether THIS computer holds the key that last moved this pointer.
     pub is_you: bool,
+    /// The record that set this pointer was signed by a key the application no
+    /// longer authorises.
+    ///
+    /// Carried to the UI so the Explorer can name the environment and offer the
+    /// repair. Without this field the whole marking was invisible: the core
+    /// computed it, resolution refused on it, and the user saw an environment
+    /// that looked healthy while every subscriber's refresh failed.
+    pub unauthorized_pointer: bool,
     pub sequence: u64,
     /// Every version this environment has held, newest first — the rollback
     /// candidates, computed from the whole signed log rather than from
@@ -75,6 +83,15 @@ pub struct PromotionHistoryEntry {
     pub by: String,
     pub key: String,
     pub is_you: bool,
+    /// Whether the signer of this record is STILL entitled to promote.
+    ///
+    /// A verified signature only proves the record was not edited after signing.
+    /// A record signed by a key that was never in the root-signed publisher
+    /// list, or has since been removed from it, verifies exactly as cleanly —
+    /// and the pointer it set is refused by `mark_unauthorized_pointers`. The
+    /// history table must not present the two alike, or the audit trail that
+    /// exists to name a stranger's promotion is what launders it.
+    pub authorized: bool,
     /// True when this entry moved an environment BACKWARDS.
     pub is_rollback: bool,
 }
@@ -221,6 +238,7 @@ fn to_infos(
                 && calp::signing::profile_holds_publisher_key(profile, &e.promoter_key)
                     .unwrap_or(false),
             promoter_key: e.promoter_key.clone(),
+            unauthorized_pointer: e.unauthorized_pointer,
             sequence: e.sequence,
             held_versions: log_held(&e.name)
                 .into_iter()
@@ -241,6 +259,12 @@ fn read_environments(
         Err(e) => return (Vec::new(), Vec::new(), e.to_string()),
     };
     let history = calp::environments::promotion_history(registry, package_name).unwrap_or_default();
+
+    // Who may promote TODAY. A record's signature verifying says only that
+    // nobody edited it; it says nothing about whether its signer was ever
+    // entitled to promote. Resolved once for the whole table.
+    let authorized_keys =
+        calp::environments::authorized_promoter_keys(registry, package_name).unwrap_or_default();
 
     // Rollback candidates per environment.
     //
@@ -297,6 +321,7 @@ fn read_environments(
                 by: r.by.clone(),
                 is_you: calp::signing::profile_holds_publisher_key(profile, &r.key)
                     .unwrap_or(false),
+                authorized: !r.key.is_empty() && authorized_keys.iter().any(|k| k == &r.key),
                 key: r.key.clone(),
                 is_rollback,
             }
@@ -668,7 +693,7 @@ pub fn calp_set_subscription_environment(
 ) -> Result<(), String> {
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
 
-    let (registry, _scope) = crate::calp_registry::open_workspace_scoped(&params.registry_url)
+    let (registry, scope) = crate::calp_registry::open_workspace_scoped(&params.registry_url)
         .map_err(|e| e.to_string())?;
 
     // The target must RESOLVE before anything is written. A switch to an
@@ -686,8 +711,20 @@ pub fn calp_set_subscription_environment(
             })?,
         ),
     };
-    calp::environments::resolve_target(registry.as_ref(), &params.package_name, &target)
-        .map_err(|e| e.to_string())?;
+    // THE ANCHOR THE REFRESH WILL USE. This gate exists so a switch that the
+    // next refresh would refuse is refused HERE instead. Asked against the
+    // workspace's own account it answers a different question than the refresh
+    // does, and accepts exactly the switch it was written to catch.
+    calp::environments::resolve_target_via(
+        registry.as_ref(),
+        &params.package_name,
+        &target,
+        calp::environments::PromotionTrust::Pinned {
+            scope: &scope,
+            profile_dir: &crate::calp_commands::calcula_profile_dir(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
     // EVERY REFUSAL FIRST, then the effect. `DocumentEffect::mutates` dirties
     // AT CONSTRUCTION, so building it before the not-subscribed check marked a

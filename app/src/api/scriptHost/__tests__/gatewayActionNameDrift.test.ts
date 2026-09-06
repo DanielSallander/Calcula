@@ -23,7 +23,31 @@ import { describe, it, expect } from "vitest";
 const APP_ROOT = path.resolve(__dirname, "../../../..");
 const read = (rel: string): string => fs.readFileSync(path.join(APP_ROOT, rel), "utf8");
 
-const HOST = read("src/api/scriptHost/host.ts");
+/**
+ * EVERY SENDER, not just host.ts.
+ *
+ * The first version of this guard read one file, so the distributed-extension
+ * worker path — which sends the same action literals — was unguarded by a test
+ * whose own header claims the invariant universally.
+ */
+const SENDERS = [
+  "src/api/scriptHost/host.ts",
+  "src/api/scriptHost/extensionWorkerHost.ts",
+  "src/api/scriptHost/worker/contextShims.ts",
+].filter((rel) => fs.existsSync(path.join(APP_ROOT, rel)));
+
+/**
+ * Comments stripped before scanning. The widened literal match reads every
+ * quoted word in an invoke block, and these files EXPLAIN the dead verbs by
+ * name, so an unstripped scan reports the sentence describing the bug as the
+ * bug itself.
+ */
+const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+const HOST = SENDERS.map((rel) => stripComments(read(rel))).join(
+  "\n/* --- next sender --- */\n",
+);
 const DIST_GATEWAY = read("src-tauri/src/scripting/distribution_gateway.rs");
 const WRITEBACK_GATEWAY = read("src-tauri/src/scripting/writeback_gateway.rs");
 
@@ -44,8 +68,12 @@ function acceptedActions(rust: string): Set<string> {
  */
 function sentActions(command: string): string[] {
   const out: string[] = [];
-  for (const m of HOST.matchAll(new RegExp(`invokeBackend[^;]*?"${command}"[\\s\\S]{0,600}?\\}\\);`, "g"))) {
-    for (const a of m[0].matchAll(/action:\s*"([A-Za-z][A-Za-z0-9]*)"/g)) {
+  for (const m of HOST.matchAll(new RegExp(`invokeBackend[^;]*?"${command}"[\\s\\S]{0,1200}?\\}\\);`, "g"))) {
+    // EVERY LITERAL IN THE BLOCK, including both arms of a ternary. Several
+    // actions are chosen with `action: method === "x" ? "a" : "b"`, and a
+    // pattern anchored on `action:\s*"` saw neither arm — five of the eleven
+    // distribution verbs were unguarded by a guard that reported success.
+    for (const a of m[0].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)) {
       out.push(a[1]);
     }
   }
@@ -62,8 +90,27 @@ describe("scripted gateway action names", () => {
     const sent = sentActions("script_distribution");
     expect(sent.length, "the host must still send distribution actions").toBeGreaterThan(4);
 
-    const unknown = sent.filter((a) => !accepted.has(a));
+    // A literal in the block that LOOKS like an action name but is not one (a
+    // payload key, a capability id) would be a false positive, so only
+    // camelCase words that no payload key uses are judged. The check that
+    // matters is the reverse: every accepted name the block mentions must be
+    // spelled the way Rust parses it, and any word that is close-but-wrong —
+    // the vocabulary rename's failure mode — is caught because it is neither
+    // accepted nor a known payload key.
+    const PAYLOAD_KEYS = new Set([
+      "script_distribution", "script_writeback", "scriptId", "action", "payload",
+      "registryPath", "packageName", "versionPin", "environment", "followLine",
+      "sheetIndices", "bump", "registryUrl", "regionId", "submitterId",
+      "cellRow", "cellCol", "newState", "reason", "submissionId", "writebackId",
+      "value", "modelKey", "row", "col", "sheetId", "spec", "version", "kind",
+    ]);
+    const unknown = sent.filter((a) => !accepted.has(a) && !PAYLOAD_KEYS.has(a));
     expect(unknown, `these actions are not in Action::parse: ${unknown.join(", ")}`).toEqual([]);
+
+    // And the two the vocabulary rename broke are covered by name, in whichever
+    // sender they appear.
+    expect(sent).toContain("browseRegistry");
+    expect(sent).toContain("inspectPackage");
   });
 
   it("the writeback gateway accepts every action the host sends it", () => {

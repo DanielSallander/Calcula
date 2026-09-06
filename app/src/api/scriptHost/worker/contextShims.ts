@@ -1218,7 +1218,6 @@ function buildCapsShim(rt: WorkerRuntime): {
     listRegistries(): Promise<unknown[]>;
     listSubscriptions(): Promise<unknown>;
     browse(registry: string): Promise<unknown[]>;
-    inspect(registry: string, packageName: string, versionPin: string): Promise<unknown>;
     pull(
       registry: string,
       packageName: string,

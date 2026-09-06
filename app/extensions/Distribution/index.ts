@@ -283,8 +283,13 @@ function activate(context: ExtensionContext): void {
               ? `, following its "${entry.environment}" environment — it moves when ` +
                 `${entry.environment} is promoted, not when a version is pushed`
               : "") +
-            `. It is refreshed from the workspace, your edits on it are kept as ` +
-            `overrides, and it is left out of a publish unless you tick it deliberately.`,
+            (entry.upstreamRemoved
+              ? `. That application's current version NO LONGER PUBLISHES this sheet, so ` +
+                `nothing refreshes it — it is kept as it was. A later version bringing it ` +
+                `back updates this tab in place. It stays out of your publishes; detach it ` +
+                `to make it yours.`
+              : `. It is refreshed from the workspace, your edits on it are kept as ` +
+                `overrides, and it is left out of a publish unless you tick it deliberately.`),
         };
       },
     }),

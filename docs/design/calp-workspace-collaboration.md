@@ -809,6 +809,42 @@ what the fixes changed about the DESIGN is recorded above rather than only here.
   now argument- and expression-precise; the follow-line gate had no test at all.
   Verified by running each sabotage.
 
+**Second review, scoped to those fixes (2026-09-06).**
+
+The fixes above added the trust anchor, the load-bearing authorisation check, the
+tombstone and the timestamp arbitration, and none of that had faced a pass. A
+second review scoped to the fix diff confirmed 48 findings, **44 of them
+introduced by the fixes** — a worse ratio than the code they repaired, which is
+the argument for reviewing a large fix diff as its own change.
+
+- **The pin is not the root key.** `integrity.rs` pins whatever signed the FIRST
+  version this machine pulled, which on a co-published application is routinely a
+  DELEGATE. The `Pinned` arm asked `publishers::load_verified` to check a
+  root-signed list against a delegate's key, got `PublisherListInvalid`, and
+  propagated it — every environment refresh permanently broken for exactly the
+  delegated deployment the feature exists to serve. `authorized_from_pin` now
+  accepts the pin as either root or delegate. A refuter reproduced this live.
+- **`promote` folded without marking**, so a legitimate publisher promoting from
+  an unvouched SOURCE laundered that pointer onward.
+- **A de-authorised pipeline editor marked everything, unrecoverably**, and the
+  remedy the code and the UI both name did not exist: `EnvironmentAlreadyAt`
+  refused re-promoting the version an environment already holds, which is the
+  only repair available when there is nothing newer on the line. The no-op gate
+  now exempts an unvouched pointer, and the Explorer carries a **Re-promote**
+  button — previously the row offered no reachable control at all.
+- **Promotion history was rendered as verified.** A record's signature proves it
+  was not edited; it says nothing about whether the signer may promote. Entries
+  now carry `authorized` and unauthorised ones are named in the table.
+- **The anchor was applied unevenly.** Review, the stranded-subscription
+  pre-check, the environment switch and the follow-line gate still resolved
+  against the workspace's own account, so they answered a different question than
+  the pull. A source-text guard now pins all six call sites.
+- **Tombstone re-adoption was core-only** — the app-layer materializer still
+  appended a second grid and desynced the ledger.
+- **Cross-version arbitration compared timestamps as raw strings** while the
+  crate's own `fold::cmp_timestamps` parses them, so
+  `2026-01-01T10:00:00+02:00` (08:00Z) sorted after `2026-01-01T09:00:00Z`.
+
 **Not built yet.**
 
 - **Per-object artifacts.** Charts, controls, slicers and the rest still travel

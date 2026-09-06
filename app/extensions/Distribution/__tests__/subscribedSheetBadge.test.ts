@@ -160,6 +160,10 @@ describe("working-copy sheets carry a DIFFERENT mark", () => {
       // both read it, and undefined vs null there would be a difference with
       // no meaning behind it.
       environment: null,
+      // Normalised the same way, and for the same reason: the badge, the delete
+      // guard and the publish exclusion all read it, and a sheet the publisher
+      // has dropped must keep answering for all three.
+      upstreamRemoved: false,
       role: "subscribed",
     });
     expect(provenanceForSheetId("APP-SHEET-1")).toEqual({
@@ -167,6 +171,7 @@ describe("working-copy sheets carry a DIFFERENT mark", () => {
       registryUrl: "C:\\shared\\ws",
       resolvedVersion: "1.4.0",
       environment: null,
+      upstreamRemoved: false,
       role: "workingCopy",
     });
   });

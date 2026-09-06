@@ -198,3 +198,71 @@ describe("a line subscription is never re-targeted behind the user's back", () =
     );
   });
 });
+
+/**
+ * THE REPAIR FOR A DE-AUTHORISED POINTER IS REACHABLE.
+ *
+ * When the key that last promoted an environment is removed from the
+ * application's publisher list, the pointer stands and every subscriber refuses
+ * to follow it. The only remedy is a fresh record signed by somebody who may
+ * publish today — and when there is nothing newer on the line, that means
+ * re-promoting the version the environment ALREADY holds.
+ *
+ * Both halves shipped broken and neither was visible from the other. The
+ * backend refused the same-version promotion as `EnvironmentAlreadyAt`, and the
+ * row offered no control that could reach it: "Promote → next" moves the
+ * environment AFTER this one, and "Roll back…" only renders once this
+ * environment has held two versions. So the common case — a de-authorised
+ * pointer on a freshly promoted environment — displayed a warning telling the
+ * user to promote again, under two buttons that could not.
+ *
+ * A product that names a remedy it will not perform is worse than one that
+ * names none, so this is guarded on both sides: the core test
+ * `a_de_authorised_pointer_is_repaired_by_re_promoting_the_same_version` proves
+ * the backend performs it, and these prove the button exists and reaches it.
+ */
+const ENVS_SECTION = code(read("extensions/Distribution/components/EnvironmentsSection.tsx"));
+const PROMOTE = code(read("extensions/Distribution/components/PromoteDialog.tsx"));
+
+describe("a de-authorised pointer can be repaired from the row that reports it", () => {
+  it("offers its own control, not one of the two that cannot reach it", () => {
+    // SABOTAGE: delete the `env.unauthorizedPointer && env.version` button.
+    expect(ENVS_SECTION).toContain('promote(env.name, "repair")');
+    expect(ENVS_SECTION).toContain("{env.unauthorizedPointer && env.version && (");
+  });
+
+  it("the dialog treats same-version as the point, not as nothing to do", () => {
+    // Everywhere else `toVersion === currentVersion` means the pipeline has
+    // nothing to move and the footer must be inert. A repair is the one case
+    // where it is exactly what the user asked for.
+    // SABOTAGE: drop `&& !repairMode` from the blocked expression.
+    expect(PROMOTE).toContain("(toVersion === currentVersion && !repairMode)");
+    expect(PROMOTE).toContain('req?.mode === "repair"');
+  });
+
+  it("targets the pointer's own version rather than the pipeline source", () => {
+    // Taking the natural source's version would turn the repair into a
+    // promotion — moving subscribers to a version nobody asked to ship.
+    // SABOTAGE: fall through to `source.version` in repair mode.
+    expect(PROMOTE).toContain('req?.mode === "repair"\n        ? (currentVersion ?? "")');
+  });
+
+  it("confirms in its own words, because the two versions are the same one", () => {
+    // `describePromotion` compares two versions; here they are identical, so it
+    // would say "promote prod from v1.5.0 to v1.5.0" — a sentence describing
+    // nothing the user is doing, in front of a signing decision.
+    // SABOTAGE: hand a repair to `describePromotion`.
+    expect(PROMOTE).toContain("const confirmText = repairMode");
+    expect(PROMOTE).toContain("The version does not change.");
+  });
+
+  it("only claims a repair when the pointer actually needs one", () => {
+    // `mode` is a request from the caller. Whether the pointer is unvouched for
+    // is a fact from the backend, and the fact decides — otherwise a stale panel
+    // could ask for a repair the backend then refuses as a no-op.
+    // SABOTAGE: `const repairMode = req?.mode === "repair";`
+    expect(PROMOTE).toContain(
+      'const repairMode = req?.mode === "repair" && (target?.unauthorizedPointer ?? false);',
+    );
+  });
+});

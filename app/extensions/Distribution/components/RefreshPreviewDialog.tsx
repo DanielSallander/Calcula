@@ -788,10 +788,17 @@ function EnvironmentSwitcher({
     };
   }, [registryUrl, packageName, environments]);
 
-  // Default to the LAST — production by convention.
+  // Default to the LAST — production by convention — but never to the one that
+  // just refused. Pre-arming the stranded environment offered a "Use prod"
+  // whose only outcome was the same refusal the card is reporting.
   useEffect(() => {
-    if (!choice && options.length > 0) setChoice(options[options.length - 1]);
-  }, [choice, options]);
+    const usable = options.filter((o) => o !== current);
+    if (usable.length === 0) {
+      if (choice) setChoice("");
+      return;
+    }
+    if (!choice || !usable.includes(choice)) setChoice(usable[usable.length - 1]);
+  }, [choice, options, current]);
 
   const apply = async (target: string | null) => {
     setBusy(key);
@@ -819,18 +826,20 @@ function EnvironmentSwitcher({
 
   return (
     <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-      {options.length > 0 ? (
+      {options.filter((o) => o !== current).length > 0 ? (
         <>
           <select
             value={choice}
             onChange={(e) => setChoice(e.target.value)}
             disabled={busy !== null}
           >
-            {options.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
+            {options
+              .filter((o) => o !== current)
+              .map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
           </select>
           <button onClick={() => void apply(choice)} disabled={busy !== null || !choice}>
             {busy === key ? "Switching…" : `Use ${choice}`}

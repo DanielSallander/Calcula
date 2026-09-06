@@ -50,8 +50,13 @@ fn cmp_review_events(a: &ReviewEvent, b: &ReviewEvent) -> Ordering {
 ///    `Submitted` ("the publisher approved what they saw, not what came
 ///    later").
 /// 3. Grid events (`model_key == None`) collapse to one record per slot
-///    `(submitter, region, row, col)`: the newest `(updated_at, id)` wins.
-///    Older events remain on disk as history but are not current.
+///    `(environment, submitter, region, row, col)`: the newest
+///    `(updated_at, id)` wins. Older events remain on disk as history but are
+///    not current. The ENVIRONMENT is part of the slot because submissions are
+///    stored per version and an environment is a pointer to a version, so two
+///    environments naming the same version land in one tree — without it, one
+///    installation answering the same cell in test and in prod loses the older
+///    answer here, before any reader's filter can see it.
 /// 4. Model-keyed events are NEVER collapsed — every submission is a record
 ///    (multi-user collection keeps everything; masterData "newest approved
 ///    wins" is resolved downstream over the approved subset).
@@ -416,4 +421,32 @@ mod tests {
         let ids: Vec<&str> = folded.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["s3", "s1", "s2"], "(region, row, col) ordering");
     }
+
+    /// TWO ENVIRONMENTS, ONE SLOT, BOTH KEPT.
+    ///
+    /// Submissions are stored per VERSION and an environment is a pointer to
+    /// a version, so right after a linear promotion both environments name the
+    /// same version and land in one tree. Without the environment in the slot
+    /// key one installation answering the same cell in test and in prod lost
+    /// the older answer HERE, before any reader's filter could see it: the
+    /// event stayed on disk and was invisible to everyone.
+    ///
+    /// Every other fixture in this file uses an empty environment, so the key
+    /// change was untested until now.
+    ///
+    /// SABOTAGE: drop `event.environment` from the slot tuple.
+    #[test]
+    fn one_submitter_answering_in_two_environments_keeps_both() {
+        let mut test_env = event("s-a", "r1", 0, 0, "u1", "2026-01-01T10:00:00Z", 1.0);
+        test_env.environment = "test".to_string();
+        let mut prod_env = event("s-b", "r1", 0, 0, "u1", "2026-01-01T09:00:00Z", 2.0);
+        prod_env.environment = "prod".to_string();
+
+        let folded = fold_submissions(vec![test_env, prod_env], &[]);
+        assert_eq!(folded.len(), 2, "one slot per environment, not one overall");
+        let mut envs: Vec<&str> = folded.iter().map(|s| s.environment.as_str()).collect();
+        envs.sort();
+        assert_eq!(envs, vec!["prod", "test"]);
+    }
+
 }

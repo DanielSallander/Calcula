@@ -137,7 +137,13 @@ export function SubscriptionDiffDialog({ onClose, data }: DialogProps) {
           (r) =>
             r.role === "subscribed" &&
             r.packageName === req.packageName &&
-            r.registryUrl === req.registryUrl,
+            r.registryUrl === req.registryUrl &&
+            // A SHEET THE PUBLISHER HAS DROPPED IS NOT PART OF THIS COMPARISON.
+            // It still belongs to the application — that is what keeps its badge,
+            // its delete guard and its publish exclusion — but the version being
+            // compared against no longer contains it, so every cell on it would
+            // be reported as a local change the subscriber made.
+            !r.upstreamRemoved,
         );
         setSheetCount(mine.length);
         if (mine.length === 0) {

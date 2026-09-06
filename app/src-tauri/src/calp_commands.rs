@@ -3585,7 +3585,19 @@ pub fn calp_pull(
                 // one outcome the gate exists to prevent. The core module says
                 // it in as many words: "no log" and "a log I could not trust"
                 // must not behave alike.
-                match calp::environments::environments(&registry, &params.package_name) {
+                // AND THE PINNED ANCHOR, like the pull two dozen lines below.
+                // This gate NAMES the environments back to the user as the
+                // choice they should make instead; resolved against the
+                // workspace's own account it would recite names invented by
+                // whoever last wrote to the share.
+                match calp::environments::environments_via(
+                    &registry,
+                    &params.package_name,
+                    calp::environments::PromotionTrust::Pinned {
+                        scope: &scope,
+                        profile_dir: &calcula_profile_dir(),
+                    },
+                ) {
                     Ok(envs) if envs.is_empty() => {}
                     Ok(envs) => {
                         return Err(format!(
@@ -5559,7 +5571,8 @@ pub fn calp_inspect_application(
     let target = match (&environment, has_pin) {
         (Some(env), true) => {
             return Err(format!(
-                "CALP_INSPECT_TARGET_AMBIGUOUS: this asks for both an environment ('{}') and                  a version pin ('{}'). Pick one.",
+                "CALP_INSPECT_TARGET_AMBIGUOUS: this asks for both an environment ('{}') \
+                 and a version pin ('{}'). Pick one.",
                 env,
                 version_pin.trim()
             ));
@@ -5569,8 +5582,22 @@ pub fn calp_inspect_application(
             VersionPin::parse(&version_pin).map_err(|e| e.to_string())?,
         ),
     };
-    let resolved = calp::environments::resolve_target(registry.as_ref(), &package_name, &target)
-        .map_err(|e| e.to_string())?;
+    // THE ANCHOR THE PULL WILL USE. Inspect is the Review step of the subscribe
+    // flow, so it must answer the question the pull is about to answer. Resolved
+    // against the workspace's own account, Review would name a version the pull
+    // then refuses — the two-surfaces-disagree failure this feature has already
+    // produced once. On a FIRST contact there is no pin, and the `Pinned` arm
+    // falls back to the workspace's claim, so first-contact review is unchanged.
+    let resolved = calp::environments::resolve_target_via(
+        registry.as_ref(),
+        &package_name,
+        &target,
+        calp::environments::PromotionTrust::Pinned {
+            scope: &scope,
+            profile_dir: &calcula_profile_dir(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
     let version = resolved.to_string();
 
     // S5 phase 2: read the manifest bytes ONCE, verify the Ed25519 signature +
@@ -6968,13 +6995,25 @@ pub fn calp_refresh_apply(
                 continue;
             }
             let Some(env) = &sub.environment else { continue };
-            let Ok((registry, _scope)) =
+            let Ok((registry, scope)) =
                 crate::calp_registry::open_workspace_scoped(&sub.registry_url)
             else {
                 continue; // Unreachable workspace is a different failure, reported below.
             };
-            if calp::environments::resolve_environment(registry.as_ref(), &sub.package_name, env)
-                .is_err()
+            // THE SAME ANCHOR THE PREVIEW AND THE PULL USE. Resolved against the
+            // workspace's own account instead, this door would open and shut on
+            // a different question than the dialog's — refusing a refresh the
+            // preview offered, or waving through one it had blocked.
+            if calp::environments::resolve_environment_via(
+                registry.as_ref(),
+                &sub.package_name,
+                env,
+                calp::environments::PromotionTrust::Pinned {
+                    scope: &scope,
+                    profile_dir: &calcula_profile_dir(),
+                },
+            )
+            .is_err()
             {
                 stranded.push(format!("'{}' ({})", sub.package_name, env));
             }
@@ -7151,15 +7190,34 @@ pub fn calp_refresh_apply(
                 let remap = shared_styles.merge_remap(&local_styles);
                 grid.remap_style_indices(&remap);
 
-                if old_package_ids.contains(&pulled.package_sheet_id) {
+                // A SHEET COMING BACK FROM A TOMBSTONE IS AN UPDATE, NOT AN
+                // ADDITION. `apply_refresh` restores its local id in the ledger,
+                // but this block decides new-vs-updated from `sub.sheets`, which
+                // no longer holds it — so the returner was APPENDED under a
+                // fresh id and renamed `Sales (2)` while the ledger pointed at
+                // the old tab this refresh never wrote. The subscribed badge sat
+                // on stale content and the fresh copy, owned by nobody, landed
+                // in the default publish selection.
+                let returning_local_id = sub
+                    .upstream_removed_sheets
+                    .iter()
+                    .find(|s| s.package_sheet_id == pulled.package_sheet_id)
+                    .map(|s| s.local_sheet_id);
+
+                if old_package_ids.contains(&pulled.package_sheet_id)
+                    || returning_local_id.is_some()
+                {
                     // Updated sheet — replace the existing grid in-place.
-                    if let Some(pos) = sub.sheets.iter()
-                        .position(|s| s.package_sheet_id == pulled.package_sheet_id)
-                    {
+                    let local_sid = sub
+                        .sheets
+                        .iter()
+                        .find(|s| s.package_sheet_id == pulled.package_sheet_id)
+                        .map(|s| s.local_sheet_id)
+                        .or(returning_local_id);
+                    if let Some(local_sid) = local_sid {
                         // The local sheet index in the workbook equals the
                         // position of the subscribed sheet in the global sheet list.
                         // We track it via the local_sheet_id stored at subscription time.
-                        let local_sid = sub.sheets[pos].local_sheet_id;
                         if let Some(grid_idx) = sheet_ids.iter().position(|id| *id == local_sid) {
                             grids[grid_idx] = grid;
                             all_cw[grid_idx] = pulled.sheet.column_widths.clone();
@@ -8601,6 +8659,10 @@ pub struct SheetProvenanceInfo {
     /// inherited the answer. Now the application's sheets sit beside the
     /// author's own in one workbook, so the answer varies by tab again.
     pub role: String,
+    /// The version this workbook is on no longer publishes this sheet. It keeps
+    /// its provenance, but nothing refreshes it until a version brings it back.
+    #[serde(default)]
+    pub upstream_removed: bool,
 }
 
 /// `SheetProvenanceInfo::role` for a sheet pulled from a subscribed application.
@@ -8654,6 +8716,11 @@ pub(crate) fn sheet_provenance_rows(state: &AppState) -> Result<Vec<SheetProvena
                     registry_url: o.registry_url.clone(),
                     resolved_version: o.resolved_version.clone(),
                     environment: o.environment.clone(),
+                    // CARRIED FROM THE ORIGIN, never re-derived. The tab badge,
+                    // the delete guard and the publish exclusion all read this
+                    // row, and a sheet the publisher has dropped must keep
+                    // answering for all three until the user detaches it.
+                    upstream_removed: o.upstream_removed,
                     role: SHEET_ROLE_SUBSCRIBED.to_string(),
                 });
             }
@@ -8673,6 +8740,10 @@ pub(crate) fn sheet_provenance_rows(state: &AppState) -> Result<Vec<SheetProvena
                 registry_url: l.registry_url.clone(),
                 resolved_version: l.base_version.clone(),
                 environment: None,
+                // A WORKING COPY'S OWN SHEET. It comes from the application this
+                // workbook is editing, not from a subscription, so there is no
+                // upstream that could have removed it.
+                upstream_removed: false,
                 role: SHEET_ROLE_WORKING_COPY.to_string(),
             })
         })
@@ -8723,6 +8794,11 @@ pub(crate) fn detach_sheet_inner(
 
     let (sub_index, package_sheet_id, package_name) = {
         let subs = &*pending;
+        // A SHEET THE UPSTREAM VERSION DROPPED IS ALSO DETACHABLE. It keeps its
+        // provenance — it is still the publisher's content and a later version
+        // can bring it back — so the delete guard refuses it and names detach as
+        // the remedy. Looking only at `sub.sheets` made that remedy refuse too,
+        // and the tab could then be neither deleted nor detached.
         let found = subs
             .subscriptions
             .iter()
@@ -8732,6 +8808,12 @@ pub(crate) fn detach_sheet_inner(
                     .iter()
                     .find(|s| s.local_sheet_id == local_sid)
                     .map(|s| (i, s.package_sheet_id, sub.package_name.clone()))
+                    .or_else(|| {
+                        sub.upstream_removed_sheets
+                            .iter()
+                            .find(|s| s.local_sheet_id == local_sid)
+                            .map(|s| (i, s.package_sheet_id, sub.package_name.clone()))
+                    })
             });
         found.ok_or_else(|| {
             format!(
@@ -8749,6 +8831,10 @@ pub(crate) fn detach_sheet_inner(
     let subscription_removed = {
         let sub = &mut subs.subscriptions[sub_index];
         sub.sheets.retain(|s| s.local_sheet_id != local_sid);
+        // Detaching CLAIMS the sheet, which outranks the tombstone: a version
+        // bringing it back must not re-adopt a sheet the user made theirs.
+        sub.upstream_removed_sheets
+            .retain(|s| s.local_sheet_id != local_sid);
         if !sub.detached_sheets.contains(&package_sheet_id) {
             sub.detached_sheets.push(package_sheet_id);
         }
@@ -9277,9 +9363,20 @@ pub fn calp_get_writeback_regions(
     // deadline countdown. The flat index carries no schema; the declarations do.
     // Which application each region belongs to, so a surface with more than one
     // subscription can scope itself to the right one.
-    for e in entries.iter_mut() {
-        if let Ok(owner) = owning_subscription_for_region(&state, &e.region_id) {
-            e.package_name = Some(owner.package_name);
+    //
+    // FROM THE LEDGER, NOT PER REGION FROM THE WORKSPACE.
+    // `owning_subscription_for_region` opens the workspace and verifies a signed
+    // manifest; calling it once per region turned a cheap, frequently-rendered
+    // read into N workspace opens and N Ed25519 verifications — while this
+    // function holds `writeback_index` and `sheet_ids`. The subscription ledger
+    // already records which sheet each subscription materialized, and a region
+    // names its sheet, so the answer is in memory.
+    if let Ok(subs) = state.subscriptions.read() {
+        for e in entries.iter_mut() {
+            if let Some((sub, _)) = subs.subscribed_sheet(e.sheet_id) {
+                e.package_name = Some(sub.package_name.clone());
+                e.registry_url = Some(sub.registry_url.clone());
+            }
         }
     }
 
@@ -10298,8 +10395,12 @@ fn reconcile_writeback_layer_internal(
         let mut versions = vec![resolved_version.clone()];
         versions.extend(older);
 
-        let mut seen: std::collections::HashSet<(String, u32, u32)> =
-            std::collections::HashSet::new();
+        // THE NEWEST RECORD ACROSS VERSIONS, by timestamp. First-seen-wins
+        // assumed the version list ran newest-first, which stopped being true
+        // when this switched to `carry_forward_versions`: after a rollback the
+        // list is the pointer's version followed by HIGHER ones it held, so the
+        // head is the lowest. The contributor then kept seeing a stale state
+        // while the dashboard, on the same data, showed the current one.
         for version in &versions {
             let Ok(subs) = registry
                 .load_current_submissions_by(&package_name, version, &own.id)
@@ -10315,8 +10416,12 @@ fn reconcile_writeback_layer_internal(
                     continue;
                 }
                 let key = (s.region_id.clone(), s.cell_row, s.cell_col);
-                // First-seen wins => newest version's record is authoritative.
-                if seen.insert(key.clone()) {
+                let newer = by_slot.get(&key).is_none_or(|cur| {
+                    calp::fold::cmp_timestamps(&s.updated_at, &cur.updated_at)
+                        .then_with(|| s.id.cmp(&cur.id))
+                        .is_gt()
+                });
+                if newer {
                     by_slot.insert(key, s);
                 }
             }
@@ -12905,9 +13010,19 @@ pub fn calp_set_submission_state(
         if let Some(s) = submissions.into_iter().find(|s| {
             s.region_id == region_id && s.cell_row == cell_row && s.cell_col == cell_col
         }) {
+            // THE CRATE'S OWN ORDERING, not a string compare. `cmp_timestamps`
+            // PARSES the RFC3339 values and only falls back to bytes when a
+            // parse fails, which is what makes `2026-01-01T10:00:00+02:00`
+            // (08:00Z) correctly older than `2026-01-01T09:00:00Z` — a raw
+            // string compare calls it newer. These values arrive from other
+            // machines and other builds, so their spelling is not this process's
+            // to assume. Using a different rule here would recreate exactly the
+            // defect this arbitration was added to fix: two surfaces disagreeing
+            // about which submission is current.
             let newer = found.as_ref().is_none_or(|(_, cur)| {
-                (s.updated_at.as_str(), s.id.as_str())
-                    > (cur.updated_at.as_str(), cur.id.as_str())
+                calp::fold::cmp_timestamps(&s.updated_at, &cur.updated_at)
+                    .then_with(|| s.id.cmp(&cur.id))
+                    .is_gt()
             });
             if newer {
                 found = Some((version.clone(), s));
@@ -12973,9 +13088,20 @@ pub fn calp_set_submission_state(
             .unwrap_or_default();
         audit.record(
             calp::audit::AuditEvent::WritebackReviewed,
+            // THE ENVIRONMENT IS PART OF WHAT WAS REVIEWED. The dashboard's
+            // picker lets a publisher approve a stream other than the one this
+            // workbook follows, and two environments can hold submissions for
+            // the same region and cell — so a line naming only the cell cannot
+            // say which decision was made, and the trail stops answering the
+            // question it exists for.
             &format!(
-                "{} {}'s submission for region {} cell ({}, {})",
-                new_state, submitter_id, region_id, cell_row, cell_col
+                "{} {}'s submission for region {} cell ({}, {}) in {}",
+                new_state,
+                submitter_id,
+                region_id,
+                cell_row,
+                cell_col,
+                if reviewing.is_empty() { "the development line" } else { reviewing.as_str() },
             ),
             &user,
             &now,
@@ -13089,8 +13215,12 @@ fn load_region_current_submissions(
                         v.insert(s);
                     }
                     std::collections::hash_map::Entry::Occupied(mut o) => {
-                        let newer = (s.updated_at.as_str(), s.id.as_str())
-                            > (o.get().updated_at.as_str(), o.get().id.as_str());
+                        // See `calp_set_submission_state`: the crate's parsing
+                        // comparison, so this list and the review command and
+                        // the BI feed all pick the same record.
+                        let newer = calp::fold::cmp_timestamps(&s.updated_at, &o.get().updated_at)
+                            .then_with(|| s.id.cmp(&o.get().id))
+                            .is_gt();
                         if newer {
                             o.insert(s);
                         }
@@ -13819,7 +13949,17 @@ pub(crate) fn merge_lenient_submissions(
             );
             match slots.get(&key) {
                 Some(&i) => {
-                    if candidate.updated_at > submissions[i].updated_at {
+                    // THE CRATE'S PARSING COMPARISON, so this agrees with the
+                    // dashboard, the review command and the fold. A raw string
+                    // `>` reads `10:00:00+02:00` (08:00Z) as later than
+                    // `09:00:00Z`, and these values arrive from other machines.
+                    let newer = calp::fold::cmp_timestamps(
+                        &candidate.updated_at,
+                        &submissions[i].updated_at,
+                    )
+                    .then_with(|| candidate.id.cmp(&submissions[i].id))
+                    .is_gt();
+                    if newer {
                         submissions[i] = candidate;
                     }
                 }

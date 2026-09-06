@@ -52,6 +52,8 @@ export interface SheetProvenanceEntry {
    * that ignored it would leave every tab claiming the old stream.
    */
   environment?: string | null;
+  /** Upstream no longer publishes it; nothing refreshes it until it returns. */
+  upstreamRemoved?: boolean;
   role: SheetProvenanceRole;
 }
 
@@ -165,6 +167,7 @@ export async function refreshSubscribedSheets(): Promise<boolean> {
         registryUrl: row.registryUrl,
         resolvedVersion: row.resolvedVersion,
         environment: row.environment ?? null,
+        upstreamRemoved: row.upstreamRemoved === true,
         role: row.role,
       };
       // A ROW WITH NO ID IS DROPPED, not indexed by position instead. Every
@@ -190,7 +193,10 @@ export async function refreshSubscribedSheets(): Promise<boolean> {
     // this, switching a subscription from prod to test returns `false` here —
     // "nothing to repaint" — and every tab keeps naming the environment the
     // workbook no longer follows.
-    (a?.environment ?? null) === (b?.environment ?? null);
+    (a?.environment ?? null) === (b?.environment ?? null) &&
+    // The tooltip says something different for a dropped sheet, so a change here
+    // has to repaint.
+    (a?.upstreamRemoved ?? false) === (b?.upstreamRemoved ?? false);
   const sameById =
     nextById.size === byId.size && [...nextById].every(([k, v]) => same(byId.get(k), v));
 

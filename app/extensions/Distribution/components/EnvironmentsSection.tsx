@@ -112,7 +112,7 @@ export function EnvironmentsSection() {
   const mayPromote = (info?.youMayPromote ?? false) && (info?.writable ?? false);
   const pipeline = envs.map((e) => e.name);
 
-  const promote = (environment: string, mode: "promote" | "rollback") => {
+  const promote = (environment: string, mode: "promote" | "rollback" | "repair") => {
     showDialog(PROMOTE_DIALOG_ID, {
       registryPath: link.registryUrl,
       packageName: link.packageName,
@@ -229,12 +229,32 @@ export function EnvironmentsSection() {
             {env.unauthorizedPointer && (
               <div style={warnBoxStyle}>
                 The key that last promoted {env.name} is no longer allowed to publish this
-                application, so subscribers refuse to follow this pointer. Promote into{" "}
-                {env.name} again to re-establish it.
+                application, so subscribers refuse to follow this pointer. Re-promote the
+                same version to sign it with your key.
               </div>
             )}
 
             <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {/* THE REPAIR, AS ITS OWN CONTROL. Neither of the two buttons
+                  beside it can reach this state: "Promote → next" moves the
+                  environment AFTER this one, and "Roll back…" only appears once
+                  this environment has held two versions — so the common case of
+                  a de-authorised pointer on a freshly promoted environment
+                  offered no way out at all, under a warning telling the user to
+                  promote again. */}
+              {env.unauthorizedPointer && env.version && (
+                <button
+                  onClick={() => promote(env.name, "repair")}
+                  disabled={!mayPromote}
+                  title={
+                    !mayPromote
+                      ? "Only a publisher of this application can promote."
+                      : `Re-sign ${env.name}'s pointer at v${env.version} with your key.`
+                  }
+                >
+                  Re-promote v{env.version}
+                </button>
+              )}
               {after && (
                 <button
                   onClick={() => promote(after, "promote")}
