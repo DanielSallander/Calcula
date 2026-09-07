@@ -2658,6 +2658,29 @@ export type {
 } from "./scriptAssistantService";
 
 // ============================================================================
+// AI Completion Service (IoC: ask a model one question, get one answer)
+// ============================================================================
+// Request-shaped rather than job-shaped: a formula or a classification is a few
+// hundred tokens the caller waits for, not minutes of work it walks away from.
+// A feature reaches a model through this and stays ignorant of which extension
+// owns the provider registry, the model choice and the credential slots.
+
+export {
+  registerAiCompletionProvider,
+  hasAiCompletionProvider,
+  getAiCompletionProvider,
+  requireAiCompletionProvider,
+  resetAiCompletionProvider,
+} from "./aiCompletionService";
+
+export type {
+  AiCompletionProvider,
+  AiCompletionRequest,
+  AiCompletionResult,
+  AiResponseSchema,
+} from "./aiCompletionService";
+
+// ============================================================================
 // Chart Mark Registry (IoC for built-in + extension chart types)
 // ============================================================================
 

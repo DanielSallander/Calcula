@@ -169,10 +169,18 @@ the run that produced the number.
 schema on, context on, retrieval 3, no repair rounds. Every proposal graded by
 the engine.
 
-| model | passed | median | p90 | prompt tokens |
-|---|---|---|---|---|
-| llama3.2:1b | 0/60 (0.0%) | 4.1 s | 14.5 s | 458 |
-| qwen2.5-coder:1.5b | 22/60 (36.7%) | 15.0 s | 18.5 s | 458 |
+| model | cell | passed | median | prompt tokens | vs baseline |
+|---|---|---|---|---|---|
+| llama3.2:1b | baseline | 0/60 (0.0%) | 4.1 s | 458 | — |
+| qwen2.5-coder:1.5b | baseline | 22/60 (36.7%) | 15.0 s | 458 | — |
+| qwen2.5-coder:1.5b | no retrieval | 8/60 (13.3%) | 15.6 s | 419 | p = 0.0005, worse |
+| qwen2.5-coder:1.5b | no context | 19/60 (31.7%) | 15.1 s | 392 | p = 0.375, n.s. |
+| qwen2.5-coder:1.5b | lean schema | 22/60 (36.7%) | 18.1 s | 458 | p = 1.0, n.s. |
+| qwen2.5-coder:1.5b | one repair round | 22/60 (36.7%) | 30.5 s | 458 | p = 1.0, n.s. |
+
+Latency for the last four cells was measured while other work ran on the same
+machine and is not comparable to the baseline's. Pass rates are unaffected:
+grading does not depend on timing.
 
 **Model choice dominates everything else measured so far.** At the same
 parameter scale, a coder-tuned model goes from nothing to better than a third.
@@ -198,6 +206,58 @@ guards 4/5, running totals 3/5, then conditional aggregation, text assembly and
 percentages at 2/5, lookup, text extraction, ranking and statistics at 1/5, and
 dates and dynamic arrays at 0/5.
 
+**Retrieval earns its tokens, decisively.** This was the open question the plan
+named, and the answer is not close.
+
+| | retrieval 3 | retrieval 0 |
+|---|---|---|
+| passed | 22/60 (36.7%) | 8/60 (13.3%) |
+| mean prompt tokens | 458 | 419 |
+
+Paired over the same 60 tasks: 7 both, 37 neither, 15 broken by removing
+retrieval, 1 fixed, **McNemar exact p = 0.0005**. Three worked examples very
+nearly triple the pass rate for 39 tokens, which is under a tenth of a second of
+prompt processing even on the slowest model measured.
+
+The tasks retrieval rescues are the ones where imitation is exactly the right
+strategy: two-condition aggregation, anchored running totals, percent-of-total,
+zero-padded text assembly, four-band grading. These are shapes a small model
+recognises when shown one and guesses at otherwise.
+
+This result also retro-justifies the three retrieval defects fixed before the
+run. Without them the retriever returned `CUBEMEMBERPROPERTY` and `MATCH` for a
+conditional-sum request, and measuring THAT would have concluded retrieval was
+worthless.
+
+**The context block: a positive trend, not a proven one.** Removing the
+~66-token region description cost 5 points (36.7% to 31.7%), breaking 4 tasks and
+fixing 1, McNemar exact p = 0.375. That is the direction one would hope for and
+it is NOT significant at this corpus size. Keep the block, because it is cheap
+and the trend favours it, but do not claim it is proven; settle it on the larger
+corpus if it ever matters.
+
+**A repair round bought nothing and doubled the wait.** This is the result that
+most contradicts what the design expected.
+
+| | one shot | one repair round |
+|---|---|---|
+| passed | 22/60 | 22/60 |
+| median latency | 15.0 s | 30.5 s |
+
+Paired: 1 fixed, 1 broken, McNemar exact p = 1.0.
+
+The reason is visible in the per-task data and is worth more than the totals. Of
+the 38 tasks that got a second round, the model returned a **byte-identical
+formula 30 times**. At temperature 0, shown its own wrong answer and the engine's
+specific complaint, it mostly repeats itself. Only 8 formulas changed at all.
+
+That is the same failure the script-authoring loop found and named
+`STALLED_AFTER_REPEATS`, rediscovered independently on a different surface. The
+runner now detects it: a repair round that returns the previous formula retires
+the task instead of spending another generation. For M1, the lesson is that a
+repair loop needs the stall check before it needs more rounds, and that
+verification feedback is not automatically actionable by a small model.
+
 **Full schema versus lean schema: no difference.** Removing the free-text
 `assumptions` array changed the pass rate not at all (22/60 both ways) and was
 not faster. Paired over the same 60 tasks: 21 both, 37 neither, 1 each way,
@@ -217,9 +277,11 @@ the one intervention that addresses the failure mode directly. Ollama's
 OpenAI-compatible endpoint has no grammar field; the llama.cpp server does. That
 is an independent argument for the bundled runtime the owner already chose.
 
-**A repair round is likely to pay.** The 1.5B's remaining failures are 18 wrong
-values and 8 error results — outcomes the grader can describe back to the model
-in one sentence. `--repair 1` is the next cell to run.
+**A repair round does NOT pay, which the measurement had to say out loud.** The
+prediction here was that the 1.5B's 18 wrong values and 8 error results were
+exactly what a grader could describe back usefully. They were not: the model
+returned the same formula 30 times out of 38. Spend the effort on retrieval and
+on the grammar instead, and keep a repair round only behind a stall check.
 
 **Latency needs attention before this ships.** A 15 second median is too slow to
 feel like a feature, and most of it is decode spent on prose nobody reads: 52 of

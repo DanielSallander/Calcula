@@ -65,6 +65,20 @@ export interface ModelProfile {
    * recovers a textual call, so `false` is a warning, never a lock-out.
    */
   emitsNativeToolCalls?: boolean;
+  /**
+   * Whether the runtime honours a JSON Schema on the reply.
+   *
+   * OPTIONAL, and undefined means "not measured" rather than "no" — the same
+   * distinction `emitsNativeToolCalls` draws, and for the same reason: a probe
+   * that could not reach the endpoint must not be recorded as a capability the
+   * model lacks.
+   *
+   * ADVISORY, never a lock-out. A false here costs quality, not function: a
+   * reply that ignores the schema is still parsed by the tolerant extractor and
+   * still verified by the engine, so the answer is as trustworthy either way —
+   * only the rate of usable replies changes.
+   */
+  honorsSchema?: boolean;
   /** ISO date, so a stale profile can be re-run rather than trusted forever. */
   measuredAt: string;
 }
@@ -159,7 +173,16 @@ export function describeProfile(profile: ModelProfile): string {
       ? " Fewer than half its probe replies came back as a fenced code block: expect prose mixed in " +
         "with the script. Calcula extracts the code either way."
       : "";
-  return `${planFor(profile).rationale}${speed}${toolCalls}${fencing}`;
+  // Same rule as the tool-call sentence: stated only when MEASURED false, never
+  // inferred from an absent field. Worded as a quality note rather than a
+  // warning, because it is one — the formula assistant's answer is verified by
+  // the engine whether or not the reply arrived in the shape it asked for.
+  const schema =
+    profile.honorsSchema === false
+      ? " It ignored a reply schema in the probe: expect formula suggestions to be extracted from " +
+        "free text. They are checked by Calcula's engine either way."
+      : "";
+  return `${planFor(profile).rationale}${speed}${toolCalls}${fencing}${schema}`;
 }
 
 const PROBE_SYSTEM = [

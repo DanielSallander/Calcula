@@ -16,6 +16,7 @@ import { AuthorStatusItem } from "./components/AuthorStatusItem";
 import { aiChatBackend } from "./lib/aiChatBackend";
 import { registerJobViewOpener } from "./lib/jobFocus";
 import { buildScriptAssistant } from "./lib/scriptAssistant";
+import { installCompletionProvider } from "./lib/completionProvider";
 
 const AI_CHAT_PANE_ID = "ai-chat";
 const AI_CHAT_LLM_PANE_ID = "ai-chat-llm";
@@ -92,6 +93,12 @@ function activate(context: ExtensionContext): void {
   // every AI backend command is window-guarded to the MAIN window, and the
   // editor is a separate window that activates no extensions at all.
   cleanupFns.push(registerScriptAssistantProvider(buildScriptAssistant()));
+
+  // The request-shaped seam, for features that want one answer rather than a
+  // background job — the formula assistant first. Registered here for the same
+  // reason as the one above: this extension owns the model selection, the
+  // credential slots and the capability that lets the backend command run.
+  cleanupFns.push(installCompletionProvider());
 
   // Add menu item under Developer menu
   context.ui.menus.registerItem("developer", {

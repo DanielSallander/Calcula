@@ -302,6 +302,7 @@ const state = tasks.map((task) => {
     rounds: 0,
     localized: false,
     finishReason: "",
+    stalled: false,
     error: "",
     passed: false,
     why: "",
@@ -314,7 +315,7 @@ console.log(
 );
 
 for (let round = 0; round <= repairRounds; round++) {
-  const pending = state.filter((s) => !s.passed && !s.error);
+  const pending = state.filter((s) => !s.passed && !s.error && !s.stalled);
   if (pending.length === 0) break;
   if (round > 0) console.log(`[formula-eval] repair round ${round}: ${pending.length} task(s)`);
 
@@ -347,6 +348,19 @@ for (let round = 0; round <= repairRounds; round++) {
             },
           ];
         }
+        continue;
+      }
+      // STALL DETECTION, and it is not an optimisation.
+      //
+      // Measured: of 38 tasks given a repair round, qwen2.5-coder:1.5b returned
+      // a BYTE-IDENTICAL formula 30 times. At temperature 0, shown its own
+      // answer and the engine's specific complaint, it mostly repeats itself.
+      // A second identical round buys nothing and costs a full generation, so
+      // the task is retired instead. The script-authoring loop reached the same
+      // conclusion independently (`STALLED_AFTER_REPEATS`).
+      if (round > 0 && s.formula && proposal.formula === s.formula) {
+        s.stalled = true;
+        s.why = "the repair round returned a byte-identical formula";
         continue;
       }
       s.formula = proposal.formula;
@@ -408,6 +422,7 @@ const summary = {
   localizedReplies: ran.filter((s) => s.localized).length,
   noFormulaReplies: ran.filter((s) => !s.formula).length,
   truncatedReplies: ran.filter((s) => s.finishReason === "length").length,
+  stalledRepairs: ran.filter((s) => s.stalled).length,
   wallClockSec: Math.round((Date.now() - started) / 1000),
 };
 
@@ -422,6 +437,11 @@ if (summary.noFormulaReplies) {
 }
 if (summary.localizedReplies) {
   console.log(`[formula-eval] ${summary.localizedReplies} reply/replies used a locale separator`);
+}
+if (summary.stalledRepairs) {
+  console.log(
+    `[formula-eval] ${summary.stalledRepairs} repair round(s) returned the same formula and were retired.`,
+  );
 }
 if (summary.truncatedReplies) {
   console.log(
@@ -459,4 +479,8 @@ if (jsonOut && typeof jsonOut === "string") {
   console.log(`[formula-eval] per-task results written to ${jsonOut}`);
 }
 
-process.exit(summary.errored > 0 ? 1 : 0);
+// `process.exitCode`, not `process.exit()`. Exiting outright while stdout is
+// still draining trips a libuv assertion on Windows
+// ("!(handle->flags & UV_HANDLE_CLOSING)") and can truncate the last lines of a
+// run that took a quarter of an hour to produce.
+process.exitCode = summary.errored > 0 ? 1 : 0;

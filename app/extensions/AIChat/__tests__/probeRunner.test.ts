@@ -24,10 +24,14 @@ const { TOOLS } = await import("../lib/chatTools");
  *   2. carrying the real surface — does it accept OUR tool schemas?
  *   3. one trivial tool, "call it" — does it emit a NATIVE tool call, or write
  *      one as text? (The failure a user hit on 2026-08-22.)
+ *   4. a trivial reply SCHEMA    — does it honour structured output? This is
+ *      what decides how the formula assistant asks it for anything.
  */
-const PREFLIGHTS = 3;
+const PREFLIGHTS = 4;
 /** The index of the native-tool-call probe among them. */
 const TOOL_CALL_PROBE = 2;
+/** The index of the reply-schema probe among them. */
+const SCHEMA_PROBE = 3;
 
 /** What `probeRunner` posts to `ai_chat_complete`, as far as these tests read it. */
 interface CompleteArgs {
@@ -108,6 +112,20 @@ describe("the probe drives the real provider command", () => {
     // measure something else entirely — a model that answers by calling
     // get_sheet_summary instead of emitting a fenced script is not a model that
     // failed the task. The tool surface is proved separately, below.
+    expect(args.request.tools).toEqual([]);
+  });
+
+  it("measures whether the model honours a reply schema", async () => {
+    // Asked with a SCHEMA and no tools, because the two capabilities are
+    // independent: a runtime can emit native tool calls and ignore
+    // `response_format`, or the reverse. Bundling them into one probe would
+    // report a verdict about whichever happened to fail first.
+    await runProbe({ providerId: "ollama", model: "qwen" });
+    const args = argsOf(SCHEMA_PROBE);
+    const schema = (args.request as { responseSchema?: { name?: string; schema?: unknown } })
+      .responseSchema;
+    expect(schema, "the schema probe must actually send a schema").toBeTruthy();
+    expect(schema?.name).toBe("probe_answer");
     expect(args.request.tools).toEqual([]);
   });
 

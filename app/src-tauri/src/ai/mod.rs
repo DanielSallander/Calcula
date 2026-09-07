@@ -371,10 +371,14 @@ pub async fn ai_chat_complete(
     let raw: Value = serde_json::from_str(&text)
         .map_err(|e| format!("Parsing the {} response failed: {}", def.label, e))?;
 
-    match def.kind {
-        ProviderKind::Anthropic => wire::anthropic_parse_response(&raw),
-        ProviderKind::OpenAiCompat => wire::openai_parse_response(&raw),
-    }
+    let parsed = match def.kind {
+        ProviderKind::Anthropic => wire::anthropic_parse_response(&raw)?,
+        ProviderKind::OpenAiCompat => wire::openai_parse_response(&raw)?,
+    };
+    // A schema-constrained request to Anthropic comes back as a forced TOOL
+    // CALL. Unwrapping it here means a caller reads JSON text whichever vendor
+    // answered, and needs to know nothing about the difference.
+    Ok(wire::normalize_schema_response(&request, parsed))
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +620,9 @@ pub async fn ai_chat_complete_stream(
         return Err(message);
     }
 
-    let response = acc.finish();
+    // Normalized BEFORE the Done event, so a streamed schema reply and a
+    // buffered one are the same shape to every listener.
+    let response = wire::normalize_schema_response(&request, acc.finish());
     emit(&stream::StreamEvent::Done { response: response.clone() });
     Ok(response)
 }

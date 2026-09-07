@@ -11,15 +11,28 @@ vi.mock("../components/ChatPanel", () => ({
 // Mock @api/contract (needed for type imports but not actual runtime)
 vi.mock("@api/contract", () => ({}));
 
-// The script-assistant seam. Doubled here so activation can be observed without
-// dragging in the real job store, which the lifecycle tests do not exercise.
+// The two AI seams this extension registers. Doubled here so activation can be
+// observed without dragging in the real job store or the backend, neither of
+// which the lifecycle tests exercise.
+//
+// NOTE FOR WHOEVER ADDS THE THIRD: this is a TOTAL mock of `@api`, so every
+// symbol `index.ts` imports must appear below or activation dies with "No X
+// export is defined on the @api mock" — which reads as a broken extension
+// rather than as a stale double. Adding `registerAiCompletionProvider` broke
+// all nine lifecycle tests exactly that way.
 const unregisterAssistant = vi.fn();
 const registerScriptAssistantProvider = vi.fn(() => unregisterAssistant);
+const unregisterCompletion = vi.fn();
+const registerAiCompletionProvider = vi.fn(() => unregisterCompletion);
 vi.mock("@api", () => ({
   IconServer: () => null,
   IconAIChat: () => null,
   registerScriptAssistantProvider: (...a: unknown[]) =>
     (registerScriptAssistantProvider as unknown as (...x: unknown[]) => unknown)(...a),
+  registerAiCompletionProvider: (...a: unknown[]) =>
+    (registerAiCompletionProvider as unknown as (...x: unknown[]) => unknown)(...a),
+  getSetting: () => "",
+  setSetting: () => undefined,
 }));
 
 // We need to test the extension module's activate/deactivate cycle.

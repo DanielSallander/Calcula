@@ -19,7 +19,7 @@ import { getSetting, setSetting } from "@api";
 import { probeModel, describeProfile, planFor, type ModelProfile } from "@api/scriptHost/modelProfile";
 import { aiChatBackend } from "./aiChatBackend";
 import { TOOLS } from "./chatTools";
-import type { ChatResponse, ChatToolDef } from "./aiTypes";
+import type { ChatBlock, ChatResponse, ChatToolDef, ResponseSchema } from "./aiTypes";
 
 const EXT_ID = "calcula.ai-chat";
 const PROFILE_PREFIX = "profile:";
@@ -118,6 +118,7 @@ async function preflight(
   tools: ChatToolDef[],
   message = "ready?",
   system = "Reply with the single word: ready.",
+  responseSchema?: ResponseSchema,
 ): Promise<ChatResponse> {
   if (opts.isCancelled?.()) throw new Error("cancelled");
   return aiChatBackend.invoke<ChatResponse>("ai_chat_complete", {
@@ -128,9 +129,61 @@ async function preflight(
       messages: [{ role: "user", content: [{ type: "text", text: message }] }],
       tools,
       maxTokens: PREFLIGHT_MAX_TOKENS,
+      ...(responseSchema ? { responseSchema } : {}),
     },
     baseUrlOverride: opts.baseUrl || null,
   });
+}
+
+/**
+ * The smallest schema that can tell whether a runtime honours one at all.
+ *
+ * Deliberately trivial: one required string field. A model that cannot manage
+ * this is not going to manage a formula proposal, and a model that CAN tells us
+ * nothing more by managing something bigger.
+ */
+const SCHEMA_CANARY: ResponseSchema = {
+  name: "probe_answer",
+  schema: {
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"],
+    additionalProperties: false,
+  },
+};
+
+/**
+ * Does this runtime honour a JSON Schema on the reply?
+ *
+ * The two failure kinds are kept apart, and the distinction is the point. A
+ * transport error means the question could not be ASKED, and is reported as
+ * `undefined` — recording it as `false` would blame the model for the network.
+ * A reply that arrives and is not the requested shape is a real `false`.
+ */
+async function probeSchemaSupport(opts: RunProbeOptions): Promise<boolean | undefined> {
+  let text: string;
+  try {
+    const resp = await preflight(
+      opts,
+      [],
+      "What is 2+2? Put the answer in the answer field, as text.",
+      "You are being tested for structured-output support. Reply with JSON only.",
+      SCHEMA_CANARY,
+    );
+    text = resp.blocks
+      .filter((b): b is Extract<ChatBlock, { type: "text" }> => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+  } catch {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof (parsed as { answer?: unknown })?.answer === "string";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -230,6 +283,10 @@ export async function runProbe(opts: RunProbeOptions): Promise<ModelProfile> {
   // run's dozen, and because a user who abandons a slow probe should still have
   // learned the one thing that decides whether the chat works at all.
   const emitsNativeToolCalls = await probeNativeToolCall(opts);
+  // One more cheap completion, for the same reason: whether this runtime honours
+  // a reply schema decides how the formula assistant asks it for anything, and
+  // it costs a fraction of the canary run to find out.
+  const honorsSchema = await probeSchemaSupport(opts);
 
   const profile = await probeModel({
     providerId: opts.providerId,
@@ -241,8 +298,11 @@ export async function runProbe(opts: RunProbeOptions): Promise<ModelProfile> {
   // Merged rather than passed in: `probeModel` has only a text `CompleteFn` and
   // structurally cannot observe a tool call. Omitted entirely when undecided, so
   // `describeProfile` can tell "measured false" from "never measured".
-  const merged: ModelProfile =
-    emitsNativeToolCalls === undefined ? profile : { ...profile, emitsNativeToolCalls };
+  const merged: ModelProfile = {
+    ...profile,
+    ...(emitsNativeToolCalls === undefined ? {} : { emitsNativeToolCalls }),
+    ...(honorsSchema === undefined ? {} : { honorsSchema }),
+  };
   writeProfile(merged);
   return merged;
 }

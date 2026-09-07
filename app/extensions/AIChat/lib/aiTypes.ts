@@ -48,6 +48,38 @@ export interface ChatRequest {
   maxTokens?: number;
   /** Sampling temperature. Omitted from the wire when undefined. */
   temperature?: number;
+  /**
+   * A JSON Schema the reply must conform to.
+   *
+   * Rendered per vendor by the Rust wire: a `response_format` on an
+   * OpenAI-compatible endpoint, a single FORCED TOOL on Anthropic. Either way
+   * the reply arrives as JSON text, so a caller here never branches on vendor.
+   *
+   * Use it for a request that wants a SHAPE — a formula proposal, an intent
+   * classification — never for conversation.
+   */
+  responseSchema?: ResponseSchema;
+  /**
+   * A GBNF grammar, for runtimes that accept one (llama.cpp's own server).
+   *
+   * Constrains the CONTENT rather than the envelope, so a grammar-constrained
+   * formula cannot be syntactically invalid. Ollama's compatible endpoint has no
+   * such field and ignores it; set this only where the model profile says it is
+   * honoured.
+   */
+  grammar?: string;
+}
+
+/** Mirrors `ResponseSchema` in `app/src-tauri/src/ai/wire.rs`. */
+export interface ResponseSchema {
+  /**
+   * Names the schema for OpenAI and the forced tool for Anthropic. Keep it
+   * stable: it is how the Rust side finds the reply to unwrap.
+   */
+  name: string;
+  schema: Record<string, unknown>;
+  /** OpenAI's strict mode. Ignored elsewhere. */
+  strict?: boolean;
 }
 
 /**

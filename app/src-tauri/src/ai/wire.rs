@@ -115,6 +115,79 @@ pub struct ChatRequest {
     /// for `formatSelectedCellsBackgroundColor` instead.
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// A JSON Schema the reply must conform to.
+    ///
+    /// WHY IT EXISTS. A formula, an intent classification and an insight
+    /// narration are all requests for a SHAPE, not for prose, and a small local
+    /// model asked for prose will happily wrap the answer in three sentences of
+    /// preamble. Measured against Ollama 0.33.1 on 2026-09-07, a 1B model
+    /// returned a conforming object for a schema-constrained request and
+    /// unrelated well-formed JSON for a bare `{"type":"json_object"}` — so this
+    /// carries the SCHEMA or nothing, never the loose mode.
+    ///
+    /// Both vendors are served, differently: OpenAI-compatible endpoints take a
+    /// `response_format`, and Anthropic has no such field, so the schema becomes
+    /// a single forced tool whose input is unwrapped back into text by
+    /// [`normalize_schema_response`]. A caller therefore sees JSON text either
+    /// way and needs to know nothing about the vendor.
+    #[serde(default)]
+    pub response_schema: Option<ResponseSchema>,
+    /// A GBNF grammar, for runtimes that accept one.
+    ///
+    /// Stronger than a JSON schema and answers a different failure: a schema
+    /// constrains the ENVELOPE, a grammar constrains the CONTENT, so a
+    /// grammar-constrained formula cannot be syntactically invalid at all. That
+    /// matters here — measured on the eval corpus, 11 of 60 formulas from a 1.5B
+    /// coder model failed to PARSE, and 36 of 60 from a 1B.
+    ///
+    /// Only llama.cpp's own server implements it; Ollama's OpenAI-compatible
+    /// endpoint has no such field and ignores the extra key. Callers set this
+    /// only for providers whose profile says it is honoured.
+    #[serde(default)]
+    pub grammar: Option<String>,
+}
+
+/// A named JSON Schema for a constrained reply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponseSchema {
+    /// Names the schema for OpenAI and names the forced TOOL for Anthropic, so
+    /// the two renderings cannot drift apart.
+    pub name: String,
+    pub schema: Value,
+    /// OpenAI's strict mode. Ignored by every other runtime.
+    #[serde(default)]
+    pub strict: bool,
+}
+
+/// Unwrap a forced-tool reply back into JSON text.
+///
+/// Anthropic cannot be told "reply with this shape", only "call this tool", so a
+/// schema-constrained request there comes back as a `tool_use` block whose input
+/// IS the answer. Every caller would otherwise have to know that, and would have
+/// to know it per vendor. Applied on both the buffered and streamed paths.
+///
+/// A reply that carries no matching tool use is returned untouched: the model
+/// declined, or the runtime ignored the constraint, and either way inventing a
+/// result here would be worse than passing on what actually arrived.
+pub fn normalize_schema_response(req: &ChatRequest, resp: ChatResponse) -> ChatResponse {
+    let Some(schema) = req.response_schema.as_ref() else {
+        return resp;
+    };
+    let input = resp.blocks.iter().find_map(|b| match b {
+        ChatBlock::ToolUse { name, input, .. } if name == &schema.name => Some(input.clone()),
+        _ => None,
+    });
+    match input {
+        Some(value) => ChatResponse {
+            blocks: vec![ChatBlock::Text {
+                text: serde_json::to_string(&value).unwrap_or_default(),
+            }],
+            stop_reason: StopReason::EndTurn,
+            model: resp.model,
+        },
+        None => resp,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +258,23 @@ pub fn anthropic_request_body(req: &ChatRequest) -> Value {
                 })
                 .collect(),
         );
+    }
+    // A schema becomes one FORCED tool. Anthropic has no `response_format`, and
+    // `tool_choice` is the only way to say "the reply must be this shape". The
+    // tool is appended to whatever tools the caller already sent rather than
+    // replacing them, so a request cannot silently lose its tool surface.
+    if let Some(schema) = &req.response_schema {
+        let mut tools = match body.get("tools").and_then(|t| t.as_array()) {
+            Some(existing) => existing.clone(),
+            None => Vec::new(),
+        };
+        tools.push(json!({
+            "name": schema.name,
+            "description": "Return the answer in this exact shape.",
+            "input_schema": schema.schema,
+        }));
+        body["tools"] = Value::Array(tools);
+        body["tool_choice"] = json!({ "type": "tool", "name": schema.name });
     }
     body
 }
@@ -307,6 +397,22 @@ pub fn openai_request_body(req: &ChatRequest) -> Value {
     });
     if let Some(t) = req.temperature {
         body["temperature"] = json!(t);
+    }
+    if let Some(schema) = &req.response_schema {
+        body["response_format"] = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema.name,
+                "schema": schema.schema,
+                "strict": schema.strict,
+            },
+        });
+    }
+    // llama.cpp's own server field. Every other runtime ignores an unknown key
+    // (verified against Ollama), so sending it is safe where it is not honoured
+    // — but a caller should still set it only where the profile says it is.
+    if let Some(grammar) = &req.grammar {
+        body["grammar"] = json!(grammar);
     }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(
@@ -444,6 +550,8 @@ mod tests {
             }],
             max_tokens: Some(1234),
             temperature: Some(0.0),
+            response_schema: None,
+            grammar: None,
         }
     }
 
@@ -499,6 +607,8 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             temperature: None,
+            response_schema: None,
+            grammar: None,
         });
         assert_eq!(echoed["messages"][0]["content"][0]["signature"], json!("sig"));
     }
@@ -619,6 +729,109 @@ mod tests {
         let parsed = openai_parse_response(&raw).unwrap();
         assert_eq!(parsed.stop_reason, StopReason::EndTurn);
         assert_eq!(parsed.blocks, vec![ChatBlock::Text { text: "42".into() }]);
+    }
+
+    fn schema_request() -> ChatRequest {
+        let mut req = sample_request();
+        req.tools.clear();
+        req.response_schema = Some(ResponseSchema {
+            name: "calcula_formula_proposal".into(),
+            schema: json!({
+                "type": "object",
+                "properties": { "formula": { "type": "string" } },
+                "required": ["formula"],
+                "additionalProperties": false,
+            }),
+            strict: true,
+        });
+        req
+    }
+
+    #[test]
+    fn a_schema_becomes_a_response_format_on_an_openai_endpoint() {
+        let body = openai_request_body(&schema_request());
+        assert_eq!(body["response_format"]["type"], json!("json_schema"));
+        assert_eq!(
+            body["response_format"]["json_schema"]["name"],
+            json!("calcula_formula_proposal")
+        );
+        assert_eq!(body["response_format"]["json_schema"]["strict"], json!(true));
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"]["required"][0],
+            json!("formula")
+        );
+        // Omitted entirely when unset, so a runtime that rejects an unknown key
+        // is never handed one.
+        assert!(openai_request_body(&sample_request()).get("response_format").is_none());
+    }
+
+    #[test]
+    fn a_schema_becomes_one_forced_tool_on_anthropic() {
+        // Anthropic has no `response_format`. The only way to demand a shape is
+        // to offer exactly one tool and require it.
+        let body = anthropic_request_body(&schema_request());
+        assert_eq!(body["tool_choice"], json!({ "type": "tool", "name": "calcula_formula_proposal" }));
+        assert_eq!(body["tools"][0]["name"], json!("calcula_formula_proposal"));
+        assert_eq!(body["tools"][0]["input_schema"]["required"][0], json!("formula"));
+        assert!(anthropic_request_body(&sample_request()).get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn the_forced_tool_does_not_displace_the_callers_own_tools() {
+        // A request that carries both a tool surface and a schema must keep the
+        // surface; dropping it would silently disarm the caller's tools.
+        let mut req = sample_request();
+        req.response_schema = schema_request().response_schema;
+        let body = anthropic_request_body(&req);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2, "the caller's tool plus the forced one");
+        assert_eq!(tools[0]["name"], json!("read_cell_range"));
+        assert_eq!(tools[1]["name"], json!("calcula_formula_proposal"));
+    }
+
+    #[test]
+    fn a_forced_tool_reply_is_normalized_back_to_json_text() {
+        // So a caller never has to know which vendor answered.
+        let req = schema_request();
+        let resp = ChatResponse {
+            blocks: vec![ChatBlock::ToolUse {
+                id: "t1".into(),
+                name: "calcula_formula_proposal".into(),
+                input: json!({ "formula": "=SUM(A1:A3)" }),
+            }],
+            stop_reason: StopReason::ToolUse,
+            model: "m".into(),
+        };
+        let out = normalize_schema_response(&req, resp);
+        assert_eq!(out.stop_reason, StopReason::EndTurn);
+        match &out.blocks[0] {
+            ChatBlock::Text { text } => {
+                assert_eq!(serde_json::from_str::<Value>(text).unwrap()["formula"], json!("=SUM(A1:A3)"));
+            }
+            other => panic!("expected text, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_reply_with_no_matching_tool_use_passes_through_untouched() {
+        // The model declined, or the runtime ignored the constraint. Inventing a
+        // result here would be worse than reporting what arrived.
+        let req = schema_request();
+        let resp = ChatResponse {
+            blocks: vec![ChatBlock::Text { text: "I cannot do that".into() }],
+            stop_reason: StopReason::EndTurn,
+            model: "m".into(),
+        };
+        let out = normalize_schema_response(&req, resp.clone());
+        assert_eq!(out.blocks, resp.blocks);
+    }
+
+    #[test]
+    fn a_grammar_reaches_the_openai_body_and_is_omitted_when_unset() {
+        let mut req = sample_request();
+        req.grammar = Some("root ::= \"=\" [A-Z]+".into());
+        assert_eq!(openai_request_body(&req)["grammar"], json!("root ::= \"=\" [A-Z]+"));
+        assert!(openai_request_body(&sample_request()).get("grammar").is_none());
     }
 
     #[test]
