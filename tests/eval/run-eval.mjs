@@ -22,11 +22,12 @@
 // The provider must be one `ai_providers_list` knows, and its key (if any) must
 // already be stored — this script never asks for or handles a secret.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { createRequire } from "node:module";
+import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
+
+import { bundleAppModules } from "./lib/appBundle.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "../..");
@@ -63,71 +64,19 @@ if (!providerId || !model) {
 // Load the app's own scorer + prompt assembler
 // ---------------------------------------------------------------------------
 
-/**
- * Bundle the TypeScript modules the product uses, rather than porting them.
- *
- * Same trick (and same reason) as gen-script-typings.mjs: Node cannot import the
- * .ts sources directly and adding a loader for one script is a dependency for no
- * gain.
- */
-async function loadAppModules() {
-  // esbuild lives in app/node_modules, and this script runs from tests/, so it
-  // is resolved from the app's package rather than from here. Imported lazily so
-  // the usage message above works in a checkout with no npm install.
-  const appRequire = createRequire(path.join(appRoot, "package.json"));
-  const { build } = await import(pathToFileURL(appRequire.resolve("esbuild")).href);
-
-  const cacheRoot = path.join(appRoot, "node_modules", ".cache");
-  // Sweep bundle dirs leaked by crashed runs: the exit handler cannot fire on
-  // a SIGKILL or a task-manager kill, pids recycle, and nothing else reclaims
-  // them. Anything older than an hour is not a concurrent run.
-  try {
-    for (const entry of readdirSync(cacheRoot)) {
-      if (!entry.startsWith("calcula-eval-")) continue;
-      const dir = path.join(cacheRoot, entry);
-      if (Date.now() - statSync(dir).mtimeMs > 60 * 60 * 1000) {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    }
-  } catch {
-    /* a missing cache dir or a locked stale dir is not worth failing the run */
-  }
-  const outDir = path.join(cacheRoot, `calcula-eval-${process.pid}`);
-  mkdirSync(outDir, { recursive: true });
-  const outfile = path.join(outDir, "eval.mjs");
-  const entry = path.join(outDir, "entry.ts");
-  writeFileSync(
-    entry,
-    [
-      `export * from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptEval/index.ts").replace(/\\/g, "/"))};`,
-      `export { runTaskOutcome } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptEval/harness.ts").replace(/\\/g, "/"))};`,
-      `export { buildSurfacePrompt } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptPrompt/index.ts").replace(/\\/g, "/"))};`,
-      `export { authorScript } from ${JSON.stringify(path.join(appRoot, "src/api/scriptHost/scriptAuthoring/index.ts").replace(/\\/g, "/"))};`,
-    ].join("\n"),
-    "utf8",
-  );
-  await build({
-    entryPoints: [entry],
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    target: "node20",
-    outfile,
-    logLevel: "silent",
-  });
-  const mod = await import(`file://${outfile.replace(/\\/g, "/")}`);
-  // The bundle stays on disk for the grading subprocesses; removed at exit.
-  process.on("exit", () => {
-    try {
-      rmSync(outDir, { recursive: true, force: true });
-    } catch {
-      /* a transient lock on a temp dir is not worth failing the run over */
-    }
-  });
-  return { mod, bundlePath: outfile };
-}
-
-const { mod: appModules, bundlePath } = await loadAppModules();
+// The bundler moved to `lib/appBundle.mjs` when a second runner needed it; the
+// bundle it produces (and the exit-time cleanup) is unchanged. This run's bundle
+// path is still handed to the grading subprocesses below.
+const { mod: appModules, bundlePath } = await bundleAppModules({
+  appRoot,
+  tag: "script",
+  exports: [
+    { from: "src/api/scriptHost/scriptEval/index.ts", names: "*" },
+    { from: "src/api/scriptHost/scriptEval/harness.ts", names: ["runTaskOutcome"] },
+    { from: "src/api/scriptHost/scriptPrompt/index.ts", names: ["buildSurfacePrompt"] },
+    { from: "src/api/scriptHost/scriptAuthoring/index.ts", names: ["authorScript"] },
+  ],
+});
 const { scoreCandidate, gradeOutcome, extractScript, summarize, referenceSource, buildSurfacePrompt, authorScript } =
   appModules;
 

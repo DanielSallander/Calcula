@@ -31,11 +31,12 @@
 //          node scripts/gen-formula-patterns.mjs --emit     # write the generated artifact
 //          node scripts/gen-formula-patterns.mjs --check    # fail if the artifact is stale
 
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { gradeJobs, resolveGrader } from "../../tests/eval/lib/grader.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -359,34 +360,14 @@ function verify(patterns) {
     })),
   };
 
-  const stdout = execFileSync(
-    "cargo",
-    [
-      "run",
-      "-q",
-      "-p",
-      "calcula-format",
-      "--example",
-      "eval-formulas",
-      "--release",
-    ],
-    {
-      cwd: path.join(REPO, "core"),
-      input: JSON.stringify(request),
-      encoding: "utf8",
-      maxBuffer: 256 * 1024 * 1024,
-      // The grader needs no environment; a scrubbed one also keeps a stray
-      // CARGO_TARGET_DIR from silently sending the build somewhere else.
-      env: { ...process.env },
-    },
-  );
-
-  const parsed = JSON.parse(stdout);
-  if (parsed.version !== 1) {
-    throw new Error(
-      `the grader answered with response version ${parsed.version}; this script understands 1`,
-    );
-  }
+  // Resolve and RUN the built binary rather than shelling out to cargo. Cargo
+  // would build into whatever `CARGO_TARGET_DIR` happens to say, which is
+  // nothing in a plain shell — and then into the in-repo tree, which is
+  // Dropbox-synced and known-corrupt. It would also need a linker, and Git
+  // Bash's `link` shadows MSVC's. See tests/eval/lib/grader.mjs.
+  const grader = resolveGrader({ repo: REPO });
+  console.log(`[patterns] grader: ${grader.exe}`);
+  const parsed = gradeJobs(request, grader);
   const byId = new Map(parsed.results.map((r) => [r.id, r]));
   return { byId, summary: parsed.summary };
 }
