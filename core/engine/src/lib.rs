@@ -164,6 +164,11 @@ pub mod row_visibility;
 pub mod style;
 pub mod text_cmp;
 pub mod theme;
+/// What the text a person TYPES into a cell becomes. Lives here rather than in
+/// the app so that everything which must AGREE with the product — notably the
+/// offline formula grader under `core/` — runs the same ladder instead of a
+/// second implementation that would drift.
+pub mod typed_entry;
 pub mod undo;
 /// Which built-ins are VOLATILE (recalculate on every worksheet change, not
 /// only on F9) and whether a stored AST calls one. Its own file rather than a
@@ -211,6 +216,10 @@ pub use theme::{
     ThemeColor, ThemeColorSlot, ThemeColors, ThemeDefinition, ThemeFonts, Tint,
 };
 pub use evaluator::MultiSheetContext;
+pub use typed_entry::{
+    entry_format_at, is_text_format, parse_cell_input, parse_cell_input_in_format,
+    parse_cell_input_invariant, parse_cell_input_invariant_in_format, parse_cell_input_with_format,
+};
 pub use undo::{UndoStack, Transaction, CellChange, UndoMergeRegion, GridSnapshot};
 
 #[cfg(test)]

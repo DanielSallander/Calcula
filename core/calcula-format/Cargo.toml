@@ -7,6 +7,10 @@ description = "Calcula native file format (.cala) - ZIP-based structured JSON"
 
 [dependencies]
 engine = { path = "../engine" }
+# Formula parsing for the offline grader (src/ai/formula_verify.rs). Not a new
+# transitive dependency: `engine` already depends on `parser` and re-exports its
+# `Expression`, so this only makes an existing edge direct.
+parser = { path = "../parser" }
 identity = { path = "../identity" }
 persistence = { path = "../persistence" }
 calcula-crypto = { path = "../calcula-crypto" }

@@ -943,6 +943,7 @@ dependencies = [
  "calcula-crypto",
  "engine",
  "identity",
+ "parser",
  "persistence",
  "serde",
  "serde_json",
