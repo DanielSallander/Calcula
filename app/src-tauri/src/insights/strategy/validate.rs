@@ -449,9 +449,17 @@ pub fn validate(facts: &ModelFacts, doc: &StrategyDoc) -> Vec<Finding> {
             && fys[0..2].parse::<u32>().map(|m| (1..=12).contains(&m)).unwrap_or(false)
             && fys[3..5].parse::<u32>().map(|d| (1..=31).contains(&d)).unwrap_or(false);
         if !ok {
-            // Not cosmetic: every period bucket in every fact is derived from
-            // this, so a malformed value mis-labels the whole report rather than
-            // failing loudly.
+            // Refused at the door because a malformed value here would
+            // mis-label a whole report rather than fail loudly, once anything
+            // reads it.
+            //
+            // NOTHING READS IT YET. An earlier version of this comment said
+            // "every period bucket in every fact is derived from this", which
+            // was not true when it was written: `fiscal_year_start` has no
+            // consumer outside this check — the planner buckets by cadence and
+            // never asks where the fiscal year starts. Keeping the format check
+            // is right (a value stored malformed is a trap for whoever wires it
+            // up), but the reason had to stop overstating itself.
             out.push(Finding::error(
                 "malformed-fiscal-year-start",
                 "model.fiscalYearStart".into(),
@@ -654,17 +662,54 @@ pub fn validate(facts: &ModelFacts, doc: &StrategyDoc) -> Vec<Finding> {
                     ),
                 ));
             }
-            if let Some(role) = doc.role_of(col) {
-                if matches!(role, Role::Key | Role::Label | Role::Ignore)
-                    && !in_a_hierarchy(facts, doc, col)
-                {
+            // A LABEL IS NOT AN ANALYSIS DIMENSION, AND A KEY NEVER WAS.
+            //
+            // A label is what a reader recognises ONE ROW by, so breaking a
+            // measure down by it produces one fact per record: a report that is
+            // technically true and completely useless. The role arm below has
+            // refused `label` from the start; what is added here is the table's
+            // `labelColumn` POINTER, which says the same thing about a column
+            // the document never gave a role of its own.
+            //
+            // The pointer is the WEAKER of the two declarations and is treated
+            // that way. `role` is a statement about one column; `labelColumn` is
+            // written by `infer` from a NAME HEURISTIC (`label_score`: does the
+            // last word read as "name"), and refusing a document outright on a
+            // name heuristic is the confident-wrong this layer exists to avoid.
+            // So an explicit `analysis`, `filter` or `hierarchy` role on the same
+            // column WINS: that is a person stating, with the data in front of
+            // them, that this column really is an axis - the cardinality call
+            // nothing in this codebase can make on its own.
+            let is_label_column = doc
+                .tables
+                .get(&col.table)
+                .and_then(|t| t.label_column.as_deref())
+                == Some(col.column.as_str());
+            let refusal: Option<String> = match doc.role_of(col) {
+                Some(role) if matches!(role, Role::Key | Role::Label | Role::Ignore) => {
+                    Some(format!(
+                        "'{col}' is declared as a {} column",
+                        serde_json::to_string(&role).unwrap_or_default().trim_matches('"')
+                    ))
+                }
+                None if is_label_column => Some(format!(
+                    "'{col}' is the label column of table '{}' - what a reader recognises one \
+                     of its rows by - and the document declares no role of its own for it",
+                    col.table
+                )),
+                _ => None,
+            };
+            // A hierarchy level is an axis whoever declared the hierarchy said
+            // was one, in the document or in the model, and that outranks both
+            // spellings above - exactly as it already did for the role alone.
+            if let Some(reason) = refusal {
+                if !in_a_hierarchy(facts, doc, col) {
                     out.push(Finding::error(
                         "analysis-dimension-role",
                         p,
                         format!(
-                            "'{col}' is declared as a {} column, so breaking '{measure}' down by \
-                             it produces one row per record rather than an insight",
-                            serde_json::to_string(&role).unwrap_or_default().trim_matches('"')
+                            "{reason}, so breaking '{measure}' down by it produces one row per \
+                             record rather than an insight"
                         ),
                     ));
                 }
@@ -1069,6 +1114,114 @@ mod tests {
             .push(col("Sales", "InvoiceId"));
         let findings = validate(&facts(), &doc);
         assert!(codes(&findings, Severity::Error).contains(&"analysis-dimension-role"));
+    }
+
+    #[test]
+    fn an_analysis_dimension_that_is_a_label_is_refused_by_role_and_by_the_tables_label_pointer() {
+        // A label is what a reader recognises ONE ROW by. Breaking a measure
+        // down by it produces one fact per record - true, and useless - so the
+        // two roles are mutually exclusive by definition.
+
+        // (a) The ROLE says label.
+        let mut by_role = clean_doc();
+        by_role.tables.get_mut("Dim").unwrap().columns.insert(
+            "Dept".into(),
+            ColumnStrategy {
+                role: Role::Label,
+                priority: None,
+            },
+        );
+        by_role
+            .measures
+            .get_mut("Returns")
+            .unwrap()
+            .analysis_dimensions
+            .push(col("Dim", "Dept"));
+        let f = validate(&facts(), &by_role)
+            .into_iter()
+            .find(|f| f.code == "analysis-dimension-role")
+            .expect("a label-role column must be refused as a breakdown");
+        assert_eq!(f.severity, Severity::Error);
+        assert!(
+            f.message.contains("Dim[Dept]") && f.message.contains("label"),
+            "the finding must name the column and the role: {}",
+            f.message
+        );
+
+        // (b) The table's `labelColumn` POINTER says it, with no per-column role
+        // anywhere - the ordinary shape of a hand-written document, and the case
+        // the role arm alone could not see.
+        let mut by_pointer = clean_doc();
+        by_pointer.tables.get_mut("Dim").unwrap().label_column = Some("Dept".into());
+        by_pointer.tables.get_mut("Dim").unwrap().columns.remove("Dept");
+        by_pointer
+            .measures
+            .get_mut("Returns")
+            .unwrap()
+            .analysis_dimensions
+            .push(col("Dim", "Dept"));
+        let f = validate(&facts(), &by_pointer)
+            .into_iter()
+            .find(|f| f.code == "analysis-dimension-role")
+            .expect("the declared labelColumn must be refused as a breakdown");
+        assert_eq!(f.severity, Severity::Error);
+        assert!(
+            f.message.contains("Dim[Dept]") && f.message.contains("label column"),
+            "the finding must name the column and say what makes it a label: {}",
+            f.message
+        );
+    }
+
+    #[test]
+    fn an_explicit_analysis_role_outranks_the_tables_label_pointer() {
+        // THE DELIBERATE NARROWING, and the reason for it. `labelColumn` is
+        // written by inference from a NAME HEURISTIC - "does the last word read
+        // as 'name'" - while a per-column `role` is a person's statement made
+        // with the data in front of them. Refusing a whole document because a
+        // heuristic disagrees with a human would be the confident-wrong this
+        // layer exists to avoid, and it would refuse the checked-in star fixture,
+        // where `Product[Name]` is both the label column and a declared analysis
+        // axis over a handful of products.
+        let mut doc = clean_doc();
+        doc.tables.get_mut("Dim").unwrap().label_column = Some("Dept".into());
+        // `Dept` keeps its `role: analysis` from `clean_doc`.
+        doc.measures
+            .get_mut("Returns")
+            .unwrap()
+            .analysis_dimensions
+            .push(col("Dim", "Dept"));
+        assert!(
+            !codes(&validate(&facts(), &doc), Severity::Error)
+                .contains(&"analysis-dimension-role"),
+            "a declared analysis role is a human decision and outranks the pointer"
+        );
+    }
+
+    #[test]
+    fn a_label_column_that_a_hierarchy_names_is_still_a_legitimate_breakdown() {
+        // Whoever declared the hierarchy said this column is an axis, and that
+        // outranks both spellings of "label" - exactly as it already did for the
+        // role on its own.
+        let mut doc = clean_doc();
+        doc.tables.get_mut("Dim").unwrap().label_column = Some("Dept".into());
+        doc.tables.get_mut("Dim").unwrap().columns.remove("Dept");
+        doc.measures
+            .get_mut("Returns")
+            .unwrap()
+            .analysis_dimensions
+            .push(col("Dim", "Dept"));
+        // Without the hierarchy: refused.
+        assert!(codes(&validate(&facts(), &doc), Severity::Error)
+            .contains(&"analysis-dimension-role"));
+
+        // With one the MODEL declares: accepted.
+        let mut with_hierarchy = facts();
+        with_hierarchy.tables.get_mut("Dim").unwrap().hierarchies = vec![vec!["Dept".into()]];
+        assert!(
+            !codes(&validate(&with_hierarchy, &doc), Severity::Error)
+                .contains(&"analysis-dimension-role"),
+            "a level the model declares is a level"
+        );
     }
 
     #[test]

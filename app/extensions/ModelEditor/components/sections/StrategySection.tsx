@@ -67,6 +67,33 @@
 //          no direction inference. One implementation decides, and it is the
 //          Rust resolver. The preview is best-effort: a failure is SILENT, the
 //          tab keeps working without inheritance, and it never gates an edit.
+//
+//          (8) THE BULK CONFIRM CANNOT LAUNDER A WARNING. `Confirm` is the
+//          signal a HUMAN vouched for a value, and the decomposition engine
+//          trusts it downstream. `Confirm all` used to convert every proposal
+//          into reviewed truth in one click, findings included — the one
+//          gesture in this tab that could turn a warning into a confirmation
+//          without anybody reading it. It now SKIPS any row carrying a finding
+//          (and any `empty` row, for the same reason per-row Confirm is
+//          disabled on those), and SAYS how many it skipped and why: a silent
+//          skip is its own lie when the button is called "Confirm all". The
+//          skip also has to stay VISIBLE, which is why this one write does not
+//          clear the findings the way every other edit does — the badges are
+//          the evidence for the sentence. Per-row Confirm is untouched: a
+//          person looking at one warned row and confirming it anyway has made
+//          a decision; the bulk gesture has not.
+//
+//          (9) THE MODEL BLOCK IS AUTHORABLE. `ModelStrategy` carries
+//          `defaultTimeAxis`, `fiscalYearStart`, `reportingCurrency` and
+//          `priority`, and none of them had a control anywhere — so the axis
+//          every time-series fact is computed against could only ever be the
+//          one inference guessed from the marked date table. The axis is a
+//          <select> over the model's own columns for the same reason a scope
+//          column is (see (4)): a typo there is not a broken axis, it is an
+//          axis that silently disables every time fact. `fiscalYearStart` is
+//          `MM-DD` and is refused at the keystroke that commits it rather than
+//          at Save, because a fiscal year START RECURS — the commonest wrong
+//          answer is a full date.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ModelOverview, ModelTableInfo } from "@api";
@@ -97,7 +124,6 @@ import {
   UNITS,
   aggregationDimensionOptions,
   compareColumnsByRole,
-  confirmAll,
   emptyStrategyDoc,
   entryState,
   findingsAtPath,
@@ -133,6 +159,7 @@ import type {
   EntryState,
   Finding,
   Materiality,
+  ModelStrategy,
   Role,
   Rule,
   Scope,
@@ -318,6 +345,224 @@ export function buildRuleFromDraft(
     ok: true,
     rule: { id, measure: draft.measure, scope, set, note: note === "" ? undefined : note },
   };
+}
+
+// ===========================================================================
+// Confirm all — the bulk gesture, and the two things it refuses to confirm
+// ===========================================================================
+
+/** What one `Confirm all` actually did, in the terms the person who pressed
+ *  it needs to hear them. */
+export interface BulkConfirm {
+  doc: StrategyDoc;
+  /** Rows this click marked as agreed by a human. */
+  confirmed: number;
+  /** Rows left unconfirmed BECAUSE they carry a finding. */
+  warned: number;
+  /** Rows left unconfirmed because they state nothing to agree to. */
+  empty: number;
+}
+
+/**
+ * Confirm every measure and table entry EXCEPT the ones a human still has to
+ * read.
+ *
+ * Two exclusions, for two different reasons:
+ *
+ * A row with a FINDING is the whole point. `reviewed` is what the
+ * decomposition engine reads as "a person vouched for this", so a bulk gesture
+ * that swept a warned row into it would turn the validator's objection into a
+ * human's endorsement — the one place in this tab where that conversion is
+ * possible. Per-row Confirm still takes a warned row, because there the person
+ * is looking at the warning while they press it.
+ *
+ * A row in the `empty` state is excluded for the reason per-row Confirm is
+ * already disabled on one: confirming an entry with no values states nothing.
+ * (`entryState` also refuses to PAINT such a row confirmed, so the old bulk
+ * confirm was writing `reviewed: true` into rows the grid then kept drawing as
+ * "not set" — a flag with no reader.)
+ *
+ * Findings are matched with `findingsAtPath`, the same function that renders
+ * the badge on the row, so what the skip means and what the row shows cannot
+ * drift apart.
+ */
+export function confirmAllUnwarned(
+  doc: StrategyDoc,
+  measures: string[],
+  tables: string[],
+  findings: Finding[],
+): BulkConfirm {
+  let next = doc;
+  const counted = { confirmed: 0, warned: 0, empty: 0 };
+
+  const consider = (
+    path: string,
+    entry: { reviewed: boolean },
+    state: EntryState,
+    apply: (d: StrategyDoc) => StrategyDoc,
+  ): void => {
+    // Already agreed: nothing to do and nothing to report. Counting it as a
+    // fresh confirmation would inflate the number the message stands on.
+    if (entry.reviewed) return;
+    if (state === "empty") {
+      counted.empty += 1;
+      return;
+    }
+    if (findingsAtPath(findings, path).length > 0) {
+      counted.warned += 1;
+      return;
+    }
+    next = apply(next);
+    counted.confirmed += 1;
+  };
+
+  for (const name of measures) {
+    const entry = measureEntry(doc, name);
+    consider(measurePath(name), entry, entryState(entry, measureHasValues(entry)), (d) =>
+      withMeasure(d, name, { reviewed: true }),
+    );
+  }
+  for (const name of tables) {
+    const entry = tableEntry(doc, name);
+    consider(tablePath(name), entry, entryState(entry, tableHasValues(entry)), (d) =>
+      withTable(d, name, { reviewed: true }),
+    );
+  }
+  return { doc: next, ...counted };
+}
+
+/**
+ * What the tab says after a bulk confirm.
+ *
+ * It always leads with the number confirmed, even when that number is zero —
+ * "Confirmed 0 rows." beside two skip sentences is the honest reading of a
+ * click that looked like it did everything.
+ */
+export function describeBulkConfirm(result: BulkConfirm): string {
+  const rows = (n: number): string => `${n} row${n === 1 ? "" : "s"}`;
+  const parts = [`Confirmed ${rows(result.confirmed)}.`];
+  if (result.warned > 0) {
+    parts.push(
+      `Skipped ${rows(result.warned)} carrying a finding — read the finding and confirm that row itself.`,
+    );
+  }
+  if (result.empty > 0) {
+    parts.push(
+      `Skipped ${result.empty} empty row${result.empty === 1 ? "" : "s"} — an entry with no values states nothing to agree to.`,
+    );
+  }
+  return parts.join(" ");
+}
+
+// ===========================================================================
+// The model-wide block
+// ===========================================================================
+
+/**
+ * Immutably replace part of the model-wide block.
+ *
+ * The sibling of `withMeasure` / `withTable`: the panel never builds a
+ * `StrategyDoc` inline, so there is one place that decides what a model-level
+ * edit does to the rest of the document. Unlike those two it does NOT stamp a
+ * `source` — `ModelStrategy` has no `reviewed`/`source` pair, because there are
+ * no rows here to confirm one by one.
+ */
+export function withModel(doc: StrategyDoc, patch: Partial<ModelStrategy>): StrategyDoc {
+  return { ...doc, model: { ...(doc.model ?? {}), ...patch } };
+}
+
+/** One group of columns in the time-axis picker. */
+export interface TimeAxisGroup {
+  label: string;
+  refs: string[];
+}
+
+/** Is this column's type one a time series can be plotted against? */
+function isDateish(dataType: string): boolean {
+  // The backend sends `format!("{:?}", data_type)`, so the two temporal
+  // variants of engine-core's `DataType` arrive as exactly these words. This
+  // is ORDERING ONLY, never a decision: a type this misses lands in the last
+  // group and is still pickable, which is the difference between this and the
+  // frontend inference ladder that was deleted for matching `dataType` against
+  // exact strings and quietly mis-classifying every `Decimal(38, 10)` column.
+  const t = dataType.trim().toLowerCase();
+  return t === "date" || t === "timestamp";
+}
+
+/**
+ * Every column the model has, ordered so the plausible time axes come first.
+ *
+ * PREFERENCE, NOT A FILTER. The validator errors on an axis that is not a
+ * column at all and only WARNS when the axis sits outside the marked date
+ * table — a model with no marked date table, or one whose time axis genuinely
+ * lives on the fact table, is a real model and must be authorable here. So the
+ * marked date table leads, date-typed columns elsewhere follow, and everything
+ * else is still on offer underneath.
+ *
+ * The first group is the whole marked date table rather than its date-TYPED
+ * columns, because that is the rule the validator actually applies (it compares
+ * the axis's table, not its type) and because a calendar's key column is
+ * routinely an integer — filtering by type would demote the very column
+ * inference itself picks first.
+ */
+export function timeAxisGroups(overview: ModelOverview): TimeAxisGroup[] {
+  const dateType = new Map<string, string>();
+  for (const t of overview.tables) {
+    for (const c of t.columns) dateType.set(`${t.name}[${c.name}]`, c.dataType);
+  }
+  // The same universe the scope editor picks from — one spelling of "the
+  // model's columns", so the two pickers cannot come to disagree about it.
+  const all = modelColumnRefs(overview);
+  const marked = overview.dateTable;
+  const inDateTable = (ref: string): boolean =>
+    marked !== null && ref.startsWith(`${marked}[`);
+
+  const groups: TimeAxisGroup[] = [
+    { label: `marked date table — ${marked ?? ""}`, refs: all.filter(inDateTable) },
+    {
+      label: "date-typed columns elsewhere",
+      refs: all.filter((r) => !inDateTable(r) && isDateish(dateType.get(r) ?? "")),
+    },
+    {
+      label: "every other column",
+      refs: all.filter((r) => !inDateTable(r) && !isDateish(dateType.get(r) ?? "")),
+    },
+  ];
+  return groups.filter((g) => g.refs.length > 0);
+}
+
+const FISCAL_YEAR_START_HINT =
+  "MM-DD — 04-01 for an April fiscal year. Leave empty for the calendar year.";
+
+/**
+ * Read a fiscal year start, or say why it is not one.
+ *
+ * A fiscal year start RECURS, so it carries no year: `2026-04-01` is the
+ * commonest wrong answer and it is wrong in a way nothing downstream can
+ * notice, because every period bucket in every fact is derived from this and a
+ * malformed value mis-labels the report rather than failing.
+ *
+ * The month/day ranges mirror the Rust validator
+ * (`insights/strategy/validate.rs`) EXACTLY, `02-31` included. That is
+ * deliberate: the backend is the authority, and a tab that refused something
+ * Save would have accepted would be a second, stricter rule nobody wrote down.
+ * This copy exists only to say so at the keystroke rather than at Save.
+ */
+export function parseFiscalYearStart(
+  text: string,
+): { ok: true; value: string | undefined } | { ok: false; error: string } {
+  const raw = text.trim();
+  if (raw === "") return { ok: true, value: undefined };
+  const parts = /^(\d{2})-(\d{2})$/.exec(raw);
+  const month = parts ? Number(parts[1]) : NaN;
+  const day = parts ? Number(parts[2]) : NaN;
+  if (!parts || month < 1 || month > 12 || day < 1 || day > 31) {
+    return {
+      ok: false,
+      error: `'${raw}' is not a fiscal year start. Write MM-DD — a fiscal year starts on the same day every year, so it carries no year (04-01, not 2026-04-01).`,
+    };
+  }
+  return { ok: true, value: raw };
 }
 
 // ===========================================================================
@@ -792,6 +1037,241 @@ function ReviewedCell({
 }
 
 // ===========================================================================
+// The model-wide panel
+// ===========================================================================
+
+/**
+ * `fiscalYearStart`, with the refusal where the typing happened.
+ *
+ * Same commit-on-blur discipline as `SpecInput` — an unreadable value keeps the
+ * typed text rather than reverting, because a value that vanishes reads as
+ * "accepted". It is a separate component because the refusal here is a SENTENCE
+ * ("a fiscal year carries no year"), and a sentence does not fit in the red
+ * border and tooltip a dense grid cell has room for.
+ */
+function FiscalYearStartField({
+  value,
+  disabled,
+  onCommit,
+}: {
+  value: string;
+  disabled: boolean;
+  onCommit: (value: string | undefined) => void;
+}): React.ReactElement {
+  const [text, setText] = useState(value);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setText(value);
+    setError(null);
+  }, [value]);
+  const commit = (raw: string): void => {
+    const parsed = parseFiscalYearStart(raw);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    setError(null);
+    onCommit(parsed.value);
+  };
+  return (
+    <>
+      <input
+        data-testid="model-fiscal-year-start"
+        style={{ ...styles.input, borderColor: error ? "#a4262c" : "#ccc" }}
+        value={text}
+        disabled={disabled}
+        placeholder="04-01"
+        title={FISCAL_YEAR_START_HINT}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit((e.target as HTMLInputElement).value);
+        }}
+      />
+      {error !== null && (
+        <div
+          data-testid="model-fiscal-year-start-error"
+          style={{ color: "#a4262c", fontSize: 11, marginTop: 2 }}
+        >
+          {error}
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The four model-wide fields, above the grids they set the defaults for.
+ *
+ * `defaultTimeAxis` leads because it is the load-bearing one: it is the axis
+ * every time-series fact is computed against, and until this panel existed the
+ * only way it could be set was whatever inference guessed from the marked date
+ * table.
+ *
+ * NOTHING HERE SHOWS AN INHERITED VALUE the way a measure cell does, and that
+ * is a limit rather than an oversight: `strategyPreview` resolves MEASURES, so
+ * there is no model-level resolved answer to read. The only other source would
+ * be a second call to the drafting op purely to display its guess — a second
+ * inference in the loop, which is the thing property (3) and the deleted
+ * frontend inferrer both exist to prevent. The empty option therefore says that
+ * inference decides, without pretending to know what it will decide.
+ */
+function ModelPanel({
+  doc,
+  overview,
+  findings,
+  disabled,
+  onEdit,
+}: {
+  doc: StrategyDoc;
+  overview: ModelOverview;
+  findings: Finding[];
+  disabled: boolean;
+  onEdit: (doc: StrategyDoc) => void;
+}): React.ReactElement {
+  const model = doc.model ?? {};
+  const groups = useMemo(() => timeAxisGroups(overview), [overview]);
+  const axis = model.defaultTimeAxis ?? "";
+  // An axis the model no longer has must stay SELECTED and say so. A <select>
+  // whose value matches no option silently renders as blank, which would read
+  // as "nobody set an axis" and would erase the setting on the next edit —
+  // exactly the orphan case the measures grid spells out rather than hides.
+  const axisIsOrphan = axis !== "" && !groups.some((g) => g.refs.includes(axis));
+  const priority = model.priority ?? [];
+
+  return (
+    <section data-testid="model-panel">
+      <div style={styles.sectionHeader}>
+        <span style={{ ...styles.sectionTitle, fontSize: 13 }}>Model</span>
+        <RowFindings findings={findingsAtPath(findings, "model")} />
+      </div>
+      <div
+        style={{
+          ...styles.card,
+          display: "flex",
+          gap: 12,
+          flexWrap: "wrap",
+          alignItems: "flex-start",
+        }}
+      >
+        <Field
+          label="Default time axis"
+          hint="The column every time-series fact is computed against."
+          flex={2}
+        >
+          <select
+            data-testid="model-default-time-axis"
+            style={{ ...styles.input, minWidth: 220 }}
+            disabled={disabled}
+            value={axis}
+            title="Picked from the model's own columns — a typed name would be an axis that silently disables every time fact."
+            onChange={(e) =>
+              onEdit(
+                withModel(doc, {
+                  defaultTimeAxis: e.target.value === "" ? undefined : e.target.value,
+                }),
+              )
+            }
+          >
+            <option value="">(none — inference picks one from the marked date table)</option>
+            {axisIsOrphan && (
+              <option value={axis}>{axis} — not a column in this model</option>
+            )}
+            {groups.map((g) => (
+              <optgroup key={g.label} label={g.label}>
+                {g.refs.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <FieldFindings findings={findingsAtPath(findings, "model.defaultTimeAxis")} />
+        </Field>
+
+        <Field label="Fiscal year start" hint={FISCAL_YEAR_START_HINT} flex={1}>
+          <FiscalYearStartField
+            value={model.fiscalYearStart ?? ""}
+            disabled={disabled}
+            onCommit={(fiscalYearStart) => onEdit(withModel(doc, { fiscalYearStart }))}
+          />
+          <FieldFindings findings={findingsAtPath(findings, "model.fiscalYearStart")} />
+        </Field>
+
+        <Field label="Reporting currency" hint="A short code — SEK, EUR." flex={1}>
+          <input
+            data-testid="model-reporting-currency"
+            style={styles.input}
+            disabled={disabled}
+            value={model.reportingCurrency ?? ""}
+            placeholder="SEK"
+            onChange={(e) =>
+              onEdit(
+                withModel(doc, {
+                  reportingCurrency: e.target.value === "" ? undefined : e.target.value,
+                }),
+              )
+            }
+          />
+        </Field>
+
+        <Field
+          label="Priority"
+          hint="Measure names, most important first. Ranking ties break by this order."
+          flex={2}
+        >
+          {/* READ-ONLY on purpose: reordering is a drag-and-drop list this panel
+              does not have. Showing the order is what makes it reviewable, and
+              clearing it is the one edit that needs no ordering gesture. */}
+          <div data-testid="model-priority" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {priority.length === 0 ? (
+              <span style={{ ...styles.muted, fontSize: 12 }}>
+                (no order — ranking breaks its own ties)
+              </span>
+            ) : (
+              <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+                {priority.map((name, i) => (
+                  <li key={`${name}-${String(i)}`}>{name}</li>
+                ))}
+              </ol>
+            )}
+            <button
+              style={styles.smallBtn}
+              disabled={disabled || priority.length === 0}
+              title="Drop the priority order entirely. Reordering it is not built here — clear it, or edit the order elsewhere."
+              onClick={() => onEdit(withModel(doc, { priority: undefined }))}
+            >
+              Clear order
+            </button>
+          </div>
+          <FieldFindings findings={findingsAtPath(findings, "model.priority")} />
+        </Field>
+      </div>
+    </section>
+  );
+}
+
+/** The findings a model field carries, spelled out — there is no row here to
+ *  hang a badge on, and the panel has the width to say them. */
+function FieldFindings({ findings }: { findings: Finding[] }): React.ReactElement | null {
+  if (findings.length === 0) return null;
+  return (
+    <div style={{ fontSize: 11, marginTop: 2 }}>
+      {findings.map((f, i) => (
+        <div
+          key={`${f.code}-${String(i)}`}
+          data-finding-severity={f.severity}
+          style={{ color: f.severity === "error" ? "#a4262c" : "#7a5b00" }}
+        >
+          {f.code}: {f.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ===========================================================================
 // The section
 // ===========================================================================
 
@@ -916,18 +1396,26 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
     };
   }, [connectionId, doc]);
 
+  /** Install a new working draft. The ONE write path for a local edit: it
+   *  remembers the draft for this connection so leaving the tab does not
+   *  discard it. */
+  const applyDraft = useCallback(
+    (next: StrategyDoc, opts: { keepFindings: boolean; status: string | null }) => {
+      unsavedDrafts.set(connectionId, next);
+      setDoc(next);
+      if (!opts.keepFindings) setFindings([]);
+      setStatus(opts.status);
+    },
+    [connectionId],
+  );
+
   /** Every local edit goes through here. Findings are cleared, because a
    *  finding describes the document that produced it and an edited document
    *  has not been judged yet — a stale error would keep Save locked over a
    *  problem the user just fixed. */
   const edit = useCallback(
-    (next: StrategyDoc) => {
-      unsavedDrafts.set(connectionId, next);
-      setDoc(next);
-      setFindings([]);
-      setStatus(null);
-    },
-    [connectionId],
+    (next: StrategyDoc) => applyDraft(next, { keepFindings: false, status: null }),
+    [applyDraft],
   );
 
   const columnRefs = useMemo(() => modelColumnRefs(overview), [overview]);
@@ -1024,14 +1512,21 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
 
   const onConfirmAll = useCallback(() => {
     if (!doc) return;
-    edit(
-      confirmAll(
-        doc,
-        overview.measures.map((m) => m.name),
-        overview.tables.map((t) => t.name),
-      ),
+    const result = confirmAllUnwarned(
+      doc,
+      overview.measures.map((m) => m.name),
+      overview.tables.map((t) => t.name),
+      findings,
     );
-  }, [doc, edit, overview]);
+    // KEEPS THE FINDINGS, alone among the edits. They are the evidence for the
+    // sentence this write puts on screen — clearing them would leave "skipped 3
+    // rows carrying a finding" above a grid where nothing is warned any more,
+    // which is a worse lie than the silent skip it replaced. Confirming a row
+    // can only retire an unreviewed-entry warning, never raise a new finding,
+    // so what survives here is at worst stale in the safe direction and
+    // Validate refreshes it.
+    applyDraft(result.doc, { keepFindings: true, status: describeBulkConfirm(result) });
+  }, [doc, findings, applyDraft, overview]);
 
   if (loading || !doc) {
     return (
@@ -1090,6 +1585,13 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
+        <ModelPanel
+          doc={doc}
+          overview={overview}
+          findings={findings}
+          disabled={disabled}
+          onEdit={edit}
+        />
         <MeasuresGrid
           doc={doc}
           overview={overview}
@@ -1202,7 +1704,12 @@ function MeasuresGrid({
     <section>
       <div style={styles.sectionHeader}>
         <span style={{ ...styles.sectionTitle, fontSize: 13 }}>Measures</span>
-        <button style={styles.smallBtn} disabled={disabled} onClick={onConfirmAll}>
+        <button
+          style={styles.smallBtn}
+          disabled={disabled}
+          title="Confirm every measure and table that is ready — rows carrying a finding are left for you to read, and rows that state nothing have nothing to agree to."
+          onClick={onConfirmAll}
+        >
           Confirm all
         </button>
       </div>

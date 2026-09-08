@@ -6282,10 +6282,21 @@ pub async fn bi_model_strategy(
                 run_inline_tests(&facts, &doc)
             } else {
                 let mut all = validate(&facts, &doc);
+                // THE PATH IS AN ANCHOR, NOT A LABEL. The Strategy tab attaches
+                // a finding to the row whose `rulePath(index)` it matches —
+                // `rules[2]`, by POSITION. This spelled it `rules['some-id']`,
+                // which matches no row, so an overlap conflict blocked Save
+                // while appearing next to nothing: the one finding class whose
+                // whole value is pointing at two specific rules was the one
+                // that pointed at neither. Every other rule finding in
+                // `validate.rs` already uses the index.
+                let index_of = |id: &str| doc.rules.iter().position(|r| r.id == id);
                 all.extend(check_overlaps(&doc).into_iter().map(|c| Finding {
                     severity: Severity::Error,
                     code: "rule-overlap".to_string(),
-                    path: format!("rules['{}']", c.rule_a),
+                    path: index_of(&c.rule_a)
+                        .map(|i| format!("rules[{i}]"))
+                        .unwrap_or_else(|| "rules".to_string()),
                     message: c.message(),
                 }));
                 all.extend(run_inline_tests(&facts, &doc));

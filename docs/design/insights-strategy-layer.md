@@ -303,6 +303,17 @@ Three things must be true before this is built, and all three are why it is not 
    rename must **re-key** the strategy document rather than fall back.
 2. **A rule that sets an invariant attribute inside an audience must be refused** by the overlap
    checker — a load-bearing guard, not a lint, proved by a sabotage that reds that one assertion.
+
+   Only two of the four invariants can even be written today, and that is worth knowing before the
+   guard is built. `AttributeSet` carries `direction`, `target`, `materiality`, `cadence`,
+   `aggregation`, `suppress` and `rankWeight` — so `unit` and `neverSliceBy` are **structurally
+   unsettable by any rule**, and no guard is needed for them in either kind of scope. `direction`
+   and `aggregation` ARE settable, deliberately: a scoped direction override is what the rules
+   layer is *for* (headcount rising is the plan in the department that is building out). The guard
+   must therefore distinguish the two kinds of scope rather than the two attributes — the same
+   `direction` override that is correct inside a COLUMN scope is the one thing an AUDIENCE scope
+   may never carry, because a column scope narrows *which facts*, and an audience scope would
+   change *what the same fact means to different readers*.
 3. **Nothing selects an audience today.** There is no "view as" anywhere in the product, so an
    overlay would have no way to apply.
 

@@ -29,6 +29,10 @@
 //          non-calendar dimension: a `Decimal` `size` on dim_product could be
 //          six values or a million, so it stays undeclared. The calendar is
 //          exempt because a marked date table declares what its columns are.
+//          It is also why `INFER_ANALYSIS_DIMENSIONS` is currently `false`: the
+//          ranking below is correct about REACHABILITY and about USAGE and blind
+//          to the one thing that separates an axis from an identifier, and an
+//          expensive attribute guessed blind is worse than one left empty.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
@@ -39,10 +43,38 @@ use regex::Regex;
 use super::resolve::ModelFacts;
 use super::types::{
     Additivity, AggregationSpec, Cadence, ColumnStrategy, Direction, EntrySource, MeasureStrategy,
-    ModelStrategy, QualifiedColumn, Role, StrategyDoc, TableKind, TableStrategy, Target,
+    ModelStrategy, QualifiedColumn, Role, StrategyDoc, TableKind, TableStrategy, Target, Unit,
     STRATEGY_DOC_VERSION,
 };
 use crate::insights::usage::UsageIndex;
+
+/// Whether a draft PROPOSES analysis dimensions at all. THE ONE PLACE THIS
+/// POLICY IS DECIDED — flip this constant and nothing else.
+///
+/// SPLIT THE INFERRED ATTRIBUTES BY THE COST OF BEING WRONG. `direction`,
+/// `unit`, `cadence` and a column's `role` are CHEAP: a wrong one is visibly
+/// wrong at a glance and costs one dropdown to fix, so they are guessed freely.
+/// `analysisDimensions`, `neverSliceBy` and `materiality` are EXPENSIVE: a wrong
+/// value there does not LOOK wrong. It steers the decomposition search, and the
+/// output is a plausible-sounding explanation of the wrong thing — the Quick
+/// Insights failure this whole layer exists to prevent — with a person's Confirm
+/// already on it.
+///
+/// `materiality` and `neverSliceBy` were already left unset for exactly this
+/// reason. `analysisDimensions` was not, and it is ranked WITHOUT CARDINALITY:
+/// this codebase keeps no per-column statistics at all (see the module header),
+/// so the ranking cannot tell a country column with six members from a customer
+/// full-name column with a million. Empty degrades to "no decomposition offered
+/// for this measure", which is honest, visibly incomplete, and reported as a
+/// note by `plan_dimensions`; a wrong list degrades to a confident irrelevant
+/// explanation nobody can see is wrong.
+///
+/// FLIP IT BACK TO `true` WHEN PER-COLUMN DISTINCT COUNTS EXIST. Nothing else
+/// about `analysis_dimensions_for` is wrong — it excludes keys, labels,
+/// machinery and anything the executor cannot join in one hop, and it ranks by
+/// this workbook's own usage. It is missing the one signal that separates an
+/// axis from an identifier, and this switch is what says so out loud.
+pub const INFER_ANALYSIS_DIMENSIONS: bool = false;
 
 /// How many analysis dimensions one measure's draft offers.
 ///
@@ -117,7 +149,11 @@ fn machinery_name_pattern() -> &'static Regex {
 /// WORD BOUNDARIES ARE THE WHOLE POINT. A substring match makes "Costa Rica
 /// Sales" a cost measure and "Bidding" a key — the exact class of confident
 /// nonsense that makes a draft worse than a blank form.
-fn words(text: &str) -> Vec<String> {
+///
+/// `pub(super)` so facts.rs's unit lexicon splits names the SAME way. A second
+/// splitter would drift, and the first symptom of the drift would be one surface
+/// calling a measure a cost and another not.
+pub(super) fn words(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -156,13 +192,13 @@ fn words(text: &str) -> Vec<String> {
 /// The plural is handled by ADDING an `s` rather than stripping one, because
 /// stripping turns "costs" into "cost" correctly but also invites the reverse
 /// mistakes that word boundaries were introduced to prevent.
-fn has_term(words: &[String], term: &str) -> bool {
+pub(super) fn has_term(words: &[String], term: &str) -> bool {
     words
         .iter()
         .any(|w| w == term || (w.len() == term.len() + 1 && w.starts_with(term) && w.ends_with('s')))
 }
 
-fn has_phrase(words: &[String], phrase: &[&str]) -> bool {
+pub(super) fn has_phrase(words: &[String], phrase: &[&str]) -> bool {
     if phrase.len() > words.len() {
         return false;
     }
@@ -389,6 +425,44 @@ fn join_columns(model: &DataModel) -> BTreeSet<QualifiedColumn> {
     out
 }
 
+/// Column names that name something a row has ITS OWN of: contact details,
+/// address parts, external identifiers, free text.
+///
+/// Not "high cardinality" in general — that needs a distinct count. These are
+/// the shapes whose cardinality is knowable FROM THE NAME, because one per row
+/// is what the thing IS. A country column and an email column are both strings
+/// on a dimension; only one of them is an axis, and this is the half of that
+/// distinction a name can carry.
+const ONE_PER_ROW_WORDS: &[&str] = &[
+    // contact
+    "email", "mail", "epost", "phone", "telephone", "tel", "mobile", "fax", "telefon",
+    // address parts (NOT city / region / country / state — those are axes)
+    "address", "addr", "adress", "street", "gata", "zip", "postnummer",
+    // external identifiers
+    "sku", "barcode", "ean", "isbn", "guid", "uuid", "url", "uri", "link", "slug",
+    // free text
+    "note", "notes", "comment", "comments", "remark", "kommentar",
+];
+
+/// Forms that `words()` splits apart and so cannot match word-by-word.
+/// `PostCode` becomes ["post", "code"], neither of which may be listed alone.
+const ONE_PER_ROW_JOINED: &[&str] = &["postcode", "zipcode", "postalcode"];
+
+/// Does this column name say "one of these per row"?
+///
+/// WORD EQUALITY, never substring. A substring test makes "Streetlight
+/// Category" an address part and "Emailing Segment" a contact detail — the same
+/// class of confident nonsense that the direction lexicon's "Costa Rica Sales"
+/// case exists to prevent.
+fn is_one_per_row_shaped(column: &str) -> bool {
+    let w = words(column);
+    if w.iter().any(|word| ONE_PER_ROW_WORDS.contains(&word.as_str())) {
+        return true;
+    }
+    let joined: String = w.concat();
+    ONE_PER_ROW_JOINED.contains(&joined.as_str())
+}
+
 /// How well a column name reads as a table's display label. Higher is better;
 /// `None` means it does not read as one at all.
 fn label_score(table: &str, column: &str) -> Option<u32> {
@@ -517,6 +591,28 @@ fn infer_table(
             Some(Role::Filter)
         } else if label_column.as_deref() == Some(column.name()) {
             Some(Role::Label)
+        } else if is_one_per_row_shaped(column.name()) {
+            // ONE VALUE PER ROW BY NAME, so never an axis.
+            //
+            // MEASURED, not assumed. `calibration_tests.rs` runs `infer` over a
+            // realistic wide customer dimension and, without this arm, promoted
+            // EIGHT of eleven columns to `analysis` — Email, Phone, two address
+            // lines and PostCode among them — against a design ceiling of four.
+            // Grouping revenue by email address is one fact per customer.
+            //
+            // `label_score` does not catch these: it only picks the single
+            // display label, and it fires on a trailing "name"/"title". These
+            // are a different shape — contact details, address parts, external
+            // identifiers and free text — and they share only that a row has its
+            // own one.
+            //
+            // This is a NAME heuristic standing in for cardinality, and it is
+            // the narrow kind: WORD EQUALITY, never substring, so "Streetlight
+            // Category" keeps its axis while "Street" loses one. It is
+            // deliberately small and it is deliberately not clever — the real
+            // fix is a distinct count (open-items §2.AI.6), and every guess here
+            // ships `reviewed: false` for a person who can see the data.
+            Some(Role::Ignore)
         } else if matches!(kind, Some(TableKind::Dimension))
             && matches!(
                 column.data_type(),
@@ -614,9 +710,24 @@ fn analysis_dimensions_for(
             continue;
         };
         for (column, entry) in &strategy.columns {
-            if entry.role == Role::Analysis {
-                candidates.push(QualifiedColumn::new(table_name, column));
+            if entry.role != Role::Analysis {
+                continue;
             }
+            // A LABEL IS NEVER AN AXIS, WHATEVER ROLE IT ENDED UP WITH.
+            //
+            // A label is what a reader recognises ONE ROW by, so breaking a
+            // measure down by it produces one fact per record: technically true,
+            // completely useless, and validate.rs refuses the pairing. Usually
+            // the role check above is enough, because the label column takes
+            // `Role::Label`. It is NOT enough when an arm above the label arm
+            // claims the same column first: a `Month Name` on a dimension
+            // carrying `DateRole::Month` comes back `Analysis` and is still the
+            // table's declared `labelColumn`. Proposing it would cost a person a
+            // round trip to a refusal, which is worse than not proposing it.
+            if strategy.label_column.as_deref() == Some(column.as_str()) {
+                continue;
+            }
+            candidates.push(QualifiedColumn::new(table_name, column));
         }
     }
 
@@ -665,6 +776,45 @@ fn infer_default_time_axis(model: &DataModel, facts: &ModelFacts) -> Option<Qual
         return None;
     }
     Some(QualifiedColumn::new(date_table, first.name()))
+}
+
+/// Which measures lead a report, when the workbook has not said.
+///
+/// USAGE WINS OUTRIGHT WHEN THERE IS ANY. A workbook's own pivots and saved
+/// layouts are evidence about what this team looks at, and no heuristic beats
+/// evidence. `ranked_measures` is empty only when the workbook reports nothing —
+/// a freshly imported model, or one whose reports live somewhere else — and it
+/// was empty that left `model.priority` empty, `MeasureStrategy::priority`
+/// unset (it is an override, and inventing one per measure would fight this
+/// list) and therefore the report generator with NOTHING to order its KPIs by.
+///
+/// THIS IS A SEED, NOT A JUDGEMENT. It is written `reviewed: false` like every
+/// other inferred value and it is a list a person reorders in one drag. The
+/// order it seeds: a measure with a KPI defined against it is by definition one
+/// somebody already cared enough about to state a goal for, so those come first;
+/// everything else follows in the model's own DECLARATION order, which is stable
+/// across re-drafts and is the order the author themself wrote the model in.
+/// Declaration order rather than alphabetical order is the point — an
+/// alphabetical list would be a ranking nobody chose, wearing the same clothes as
+/// one somebody did.
+fn seed_priority(model: &DataModel, facts: &ModelFacts, usage: &UsageIndex) -> Vec<String> {
+    let observed = usage.ranked_measures();
+    if !observed.is_empty() {
+        return observed;
+    }
+    let has_kpi = |name: &str| facts.measures.get(name).is_some_and(|m| m.kpi.is_some());
+    let mut with_kpi: Vec<String> = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
+    for measure in model.measures() {
+        let name = measure.name().to_string();
+        if has_kpi(&name) {
+            with_kpi.push(name);
+        } else {
+            rest.push(name);
+        }
+    }
+    with_kpi.extend(rest);
+    with_kpi
 }
 
 /// `MM-DD` for the first day of the fiscal year, from the model's declared
@@ -718,9 +868,13 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
             MeasureStrategy {
                 direction: Some(infer_direction(measure, kpi_direction)),
                 aggregation: Some(infer_aggregation(model, facts, measure)),
-                // The unit comes from facts.rs and is NOT re-derived here. Two
-                // readings of one format string that disagree is a bug that
-                // presents as a number off by a hundred in one surface only.
+                // THE UNIT IS DECIDED IN ONE PLACE, `facts.rs`, and read here.
+                // It resolves the name lexicon and the format string together
+                // (`infer_unit`), which matters because `MeasureFacts.unit` is
+                // also the RESOLVER's base layer — so a model with no strategy
+                // document at all gets the same answer the draft would. A second
+                // lexicon here would fix only the drafted document, and would be
+                // a second source of truth that drifts on the first edit.
                 unit: mf.and_then(|m| m.unit),
                 // The model's own KPI is the only target inference can defend.
                 // A literal would be a number nobody supplied.
@@ -730,10 +884,19 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
                 // movements, so it stays absent.
                 materiality: None,
                 cadence: Some(usage.cadence_for(name).unwrap_or(Cadence::Monthly)),
+                // A PER-MEASURE priority is an OVERRIDE of `model.priority`, and
+                // seeding one here would fight the list `seed_priority` writes
+                // below - two rankings, one silently winning.
                 priority: None,
-                analysis_dimensions: analysis_dimensions_for(
-                    model, facts, &tables, usage, name, fact_table,
-                ),
+                // Empty while `INFER_ANALYSIS_DIMENSIONS` is off. The call is
+                // still written out rather than deleted, because a deleted
+                // function is not a reversible decision: this is the switch, and
+                // the ranking behind it stays compiled, tested and ready.
+                analysis_dimensions: if INFER_ANALYSIS_DIMENSIONS {
+                    analysis_dimensions_for(model, facts, &tables, usage, name, fact_table)
+                } else {
+                    Vec::new()
+                },
                 // DELIBERATELY EMPTY. "Never slice revenue by employee name" is
                 // a statement about sensitivity or meaning that no part of the
                 // model records. Inference cannot have an opinion here.
@@ -758,7 +921,7 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
             // but a model whose measures carry two different codes has a real
             // reporting-currency question that a scrape would paper over.
             reporting_currency: None,
-            priority: usage.ranked_measures(),
+            priority: seed_priority(model, facts, usage),
         },
         measures,
         tables,
@@ -783,6 +946,31 @@ mod tests {
 
     fn no_usage() -> UsageIndex {
         UsageIndex::default()
+    }
+
+    /// What the ranking WOULD offer for a measure, called directly.
+    ///
+    /// `INFER_ANALYSIS_DIMENSIONS` is off, so `infer` writes an empty list and a
+    /// test that read `doc.measures[m].analysis_dimensions` would pass no matter
+    /// what the ranking did. Going through this helper keeps every rule the
+    /// ranking enforces - one hop only, no keys, no labels, no machinery - under
+    /// test while the switch is off, which is what makes flipping it back a
+    /// decision rather than a leap.
+    fn offered_dimensions(model: &DataModel, measure: &str) -> Vec<QualifiedColumn> {
+        let facts = facts_from_model(model);
+        let doc = infer(&facts, model, &no_usage());
+        let fact_table = facts
+            .measures
+            .get(measure)
+            .and_then(|m| m.fact_table.clone());
+        analysis_dimensions_for(
+            model,
+            &facts,
+            &doc.tables,
+            &no_usage(),
+            measure,
+            fact_table.as_deref(),
+        )
     }
 
     /// Sales (fact) -> Product (leaf dimension), Sales -> Date (marked
@@ -1049,6 +1237,49 @@ mod tests {
     }
 
     #[test]
+    fn an_integer_formatted_revenue_is_currency_and_not_a_count() {
+        // THE REPORTED CASE. `unit_from_format` reads `#,##0` as `Count`,
+        // because an integer-only format is what a tally wears — and also what
+        // most currency measures wear. So a measure named Revenue inferred as a
+        // COUNT, which is a wrong word in front of a reader.
+        let model = a_star_with(vec![
+            sum_measure("Revenue", "Sales", "Amount").with_format_string("#,##0"),
+            sum_measure("Order Count", "Sales", "Qty").with_format_string("#,##0"),
+            sum_measure("Margin Percent", "Sales", "Amount").with_format_string("#,##0"),
+            // An EXPLICIT format still wins outright: whoever wrote the `%`
+            // meant it, whatever the name says.
+            sum_measure("Revenue Share", "Sales", "Amount").with_format_string("0.0%"),
+            // ...and so does an explicit currency, over a name that says count.
+            sum_measure("Headcount Cost", "Sales", "Amount").with_format_string("[$SEK-41d] #,##0"),
+        ]);
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        let unit = |m: &str| doc.measures[m].unit;
+
+        assert_eq!(unit("Revenue"), Some(Unit::Currency), "the name breaks the tie");
+        assert_eq!(unit("Order Count"), Some(Unit::Count), "and it can still be a count");
+        // "Margin Percent" carries both a currency term and a percent term; the
+        // more specific one is the answer.
+        assert_eq!(unit("Margin Percent"), Some(Unit::Percent));
+        assert_eq!(unit("Revenue Share"), Some(Unit::Percent), "explicit % wins");
+        assert_eq!(unit("Headcount Cost"), Some(Unit::Currency), "explicit currency wins");
+    }
+
+    #[test]
+    fn a_contact_or_address_column_is_not_offered_as_a_breakdown() {
+        // Measured in `calibration_tests.rs`: without this the wide customer
+        // dimension promoted 8 of 11 columns to `analysis`, Email and both
+        // address lines among them. Word equality, never substring — the
+        // positive controls are the point.
+        for name in ["Email", "Phone", "AddressLine1", "PostCode", "Notes", "SKU"] {
+            assert!(is_one_per_row_shaped(name), "{name} names one value per row");
+        }
+        for name in ["Country", "City", "Segment", "Streetlight Category", "Region"] {
+            assert!(!is_one_per_row_shaped(name), "{name} is a perfectly good axis");
+        }
+    }
+
+    #[test]
     fn a_cost_measure_is_lower_is_better_and_costa_rica_sales_is_not() {
         let model = a_star_with(vec![
             sum_measure("Support Cost", "Sales", "Amount"),
@@ -1161,17 +1392,13 @@ mod tests {
             !Role::Key.may_scope(),
             "the role only means something because a key cannot scope"
         );
+        let offered = offered_dimensions(&model, "Revenue");
         assert!(
-            !doc.measures["Revenue"]
-                .analysis_dimensions
-                .contains(&QualifiedColumn::new("Product", "ProductKey")),
-            "a join column must never be offered as a breakdown: {:?}",
-            doc.measures["Revenue"].analysis_dimensions
+            !offered.contains(&QualifiedColumn::new("Product", "ProductKey")),
+            "a join column must never be offered as a breakdown: {offered:?}"
         );
         // Positive control: the ordinary attribute beside it IS offered.
-        assert!(doc.measures["Revenue"]
-            .analysis_dimensions
-            .contains(&QualifiedColumn::new("Product", "Category")));
+        assert!(offered.contains(&QualifiedColumn::new("Product", "Category")));
     }
 
     #[test]
@@ -1218,9 +1445,7 @@ mod tests {
         // executor refuses it. Offering Country[Region] would promise a
         // breakdown that cannot be computed.
         let model = a_snowflake();
-        let facts = facts_from_model(&model);
-        let doc = infer(&facts, &model, &no_usage());
-        let dims = &doc.measures["Revenue"].analysis_dimensions;
+        let dims = offered_dimensions(&model, "Revenue");
         assert!(
             !dims.contains(&QualifiedColumn::new("Country", "Region")),
             "a two-hop attribute must not be offered: {dims:?}"
@@ -1390,15 +1615,14 @@ mod tests {
                 date.columns
             );
         }
-        // ...and it reaches the measure as an offered breakdown, which is the
-        // outcome the missing role was costing.
+        // ...and it reaches the RANKING as an offered breakdown, which is the
+        // outcome the missing role was costing. (The draft itself writes no
+        // dimensions at all while `INFER_ANALYSIS_DIMENSIONS` is off; the role is
+        // what the switch would restore, so the role is what is asserted here.)
+        let offered = offered_dimensions(&model, "Revenue");
         assert!(
-            doc.measures["Revenue"]
-                .analysis_dimensions
-                .iter()
-                .any(|c| c.table == "BI.dim_date"),
-            "{:?}",
-            doc.measures["Revenue"].analysis_dimensions
+            offered.iter().any(|c| c.table == "BI.dim_date"),
+            "{offered:?}"
         );
     }
 
@@ -1521,6 +1745,193 @@ mod tests {
             None,
             "an untouched entry must stay distinguishable from a guessed one"
         );
+    }
+
+    #[test]
+    fn a_draft_offers_no_analysis_dimensions_while_infer_analysis_dimensions_is_off() {
+        // THE POLICY, PINNED. `analysisDimensions` is an EXPENSIVE attribute -
+        // a wrong entry does not look wrong, it steers the decomposition search
+        // and comes back as a confident explanation of the wrong thing - and it
+        // is ranked with no column statistics anywhere in this codebase to tell
+        // a country column from a full-name column. Empty is the honest answer
+        // until those exist.
+        //
+        // Flipping `INFER_ANALYSIS_DIMENSIONS` to `true` REDS THIS TEST. That is
+        // the point: the switch is one line, and acknowledging it is one line.
+        // Bound rather than asserted inline: an assertion on a constant is a
+        // clippy lint, and the constant is exactly what this test is about.
+        let switch = INFER_ANALYSIS_DIMENSIONS;
+        assert!(
+            !switch,
+            "INFER_ANALYSIS_DIMENSIONS is on: per-column distinct counts must exist \
+             before a draft may propose a decomposition, and this test is where that \
+             is acknowledged"
+        );
+        let model = a_star_with(vec![
+            sum_measure("Revenue", "Sales", "Amount"),
+            sum_measure("Units", "Sales", "Qty"),
+        ]);
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        for (name, m) in &doc.measures {
+            assert!(
+                m.analysis_dimensions.is_empty(),
+                "'{name}' was drafted with dimensions: {:?}",
+                m.analysis_dimensions
+            );
+        }
+        // ...and the ranking is still alive, still correct, and still tested:
+        // this is a switched-off decision, not a deleted one.
+        assert!(offered_dimensions(&model, "Revenue")
+            .contains(&QualifiedColumn::new("Product", "Category")));
+        // The two attributes that were ALREADY withheld for the same reason.
+        assert!(doc.measures["Revenue"].never_slice_by.is_empty());
+        assert_eq!(doc.measures["Revenue"].materiality, None);
+    }
+
+    /// A dimension whose display column ALSO carries a date role, which is the
+    /// one shape where the label column comes back with `Role::Analysis`.
+    fn a_dimension_whose_label_is_also_a_date_part() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("PeriodKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Period",
+                    vec![
+                        Column::new("PeriodKey", DataType::Int64),
+                        Column::new("Month Name", DataType::String)
+                            .with_date_role(DateRole::Month),
+                        Column::new("Segment", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Period",
+                "Sales",
+                "PeriodKey",
+                "Period",
+                "PeriodKey",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the label-is-also-a-date-part fixture builds")
+    }
+
+    #[test]
+    fn a_tables_label_column_is_never_offered_as_a_breakdown_even_when_its_role_says_analysis() {
+        // A label is what a reader recognises ONE ROW by, so a measure broken
+        // down by it produces one fact per record - and validate.rs refuses the
+        // pairing. A proposal a validator later refuses still costs a person a
+        // confusing round trip, so it must not be made in the first place.
+        //
+        // The role check alone does not cover this: the date-role arm sits ABOVE
+        // the label arm, so `Period[Month Name]` comes back `Analysis` while
+        // still being the table's declared `labelColumn`.
+        let model = a_dimension_whose_label_is_also_a_date_part();
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        let period = &doc.tables["Period"];
+        assert_eq!(period.label_column.as_deref(), Some("Month Name"));
+        assert_eq!(
+            period.columns["Month Name"].role,
+            Role::Analysis,
+            "the fixture only bites while the date-role arm claims this column first"
+        );
+
+        let offered = offered_dimensions(&model, "Revenue");
+        assert!(
+            !offered.contains(&QualifiedColumn::new("Period", "Month Name")),
+            "the label column must not be offered: {offered:?}"
+        );
+        // Positive control: the ordinary attribute on the same table still is,
+        // so the exclusion is about the label and not about the table.
+        assert!(
+            offered.contains(&QualifiedColumn::new("Period", "Segment")),
+            "{offered:?}"
+        );
+    }
+
+    /// Three measures declared in a deliberately NON-alphabetical order, the
+    /// second of them carrying a KPI.
+    fn three_measures_one_with_a_kpi() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("Qty", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_measure(sum_measure("Zeta", "Sales", "Amount"))
+            .add_measure(sum_measure("Alpha", "Sales", "Qty"))
+            .add_measure(sum_measure("Beta", "Sales", "Amount"))
+            .add_kpi(Kpi::new("Alpha KPI", "Alpha", KpiTarget::Constant(10.0)))
+            .build()
+            .expect("the priority fixture builds")
+    }
+
+    #[test]
+    fn a_workbook_with_no_pivots_still_gets_a_priority_seeded_kpi_first_then_declaration_order() {
+        // `usage.ranked_measures()` is empty on a model whose workbook has no
+        // pivots, saved layouts or slicers - a freshly imported model - and an
+        // empty `model.priority` leaves the report generator with nothing to
+        // order its KPIs by at all.
+        let model = three_measures_one_with_a_kpi();
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        assert_eq!(
+            doc.model.priority,
+            vec!["Alpha".to_string(), "Zeta".to_string(), "Beta".to_string()],
+            "KPI first, then the order the model declares them in"
+        );
+        // Both halves of that claim have teeth in this fixture: alphabetical
+        // order would have put Beta second, and declaration order alone would
+        // have put Zeta first.
+        assert_eq!(
+            model.measures().iter().map(|m| m.name()).collect::<Vec<_>>(),
+            vec!["Zeta", "Alpha", "Beta"]
+        );
+        // The seed is a model-wide LIST. Per-measure `priority` is an override of
+        // it and stays unset, or the two would rank against each other.
+        for (name, m) in &doc.measures {
+            assert_eq!(m.priority, None, "'{name}' got an invented per-measure rank");
+        }
+        // A seed is still a guess: it is stamped and left unreviewed like the
+        // rest of the draft.
+        assert!(doc.measures.values().all(|m| !m.reviewed));
+    }
+
+    #[test]
+    fn what_the_workbook_actually_reports_beats_the_seeded_order() {
+        // Evidence outranks a heuristic. One pivot on Beta and Beta leads, KPI
+        // or no KPI - which is also why the seed only ever fills a VACUUM.
+        use crate::insights::usage::{ObservedObject, UsageObjectKind};
+        let model = three_measures_one_with_a_kpi();
+        let facts = facts_from_model(&model);
+        let usage = UsageIndex::build(
+            &[ObservedObject {
+                kind: UsageObjectKind::BiPivot,
+                saved: false,
+                measures: vec!["Beta".to_string()],
+                columns: vec![QualifiedColumn::new("Sales", "Qty")],
+            }],
+            &model,
+        );
+        let doc = infer(&facts, &model, &usage);
+        assert_eq!(doc.model.priority, vec!["Beta".to_string()]);
     }
 
     #[test]

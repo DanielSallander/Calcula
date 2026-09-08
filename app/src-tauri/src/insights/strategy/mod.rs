@@ -22,6 +22,10 @@
 //          being discovered by a reader who wonders why one region says the
 //          opposite of another.
 
+/// Role inference measured across differently-shaped models. Tests only — it is
+/// the harness for retuning the thresholds when column statistics land.
+#[cfg(test)]
+mod calibration_tests;
 pub mod facts;
 /// The checked-in fixtures, run against the real resolver. Tests only.
 #[cfg(test)]

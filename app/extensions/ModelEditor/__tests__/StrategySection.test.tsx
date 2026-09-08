@@ -29,6 +29,14 @@
 //          KPI's answer into the document, which is the exact drift this
 //          feature exists to prevent.
 //
+//          THE BULK-CONFIRM TESTS ASSERT THE SKIP *AND* THE SENTENCE. The
+//          defect was not that `Confirm all` crashed — it confirmed everything,
+//          findings included, which is the one gesture here that can turn the
+//          validator's objection into a human's endorsement. So the assertions
+//          are: the warned row stays unconfirmed, the unwarned ones do not, the
+//          warning is STILL ON SCREEN afterwards, and the status says how many
+//          were skipped and why. A silent skip would satisfy the first three.
+//
 //          A CONTROL IS CHANGED THROUGH THE PROTOTYPE SETTER. React patches
 //          `value` on the element instance to track it, so `el.value = x`
 //          updates the tracker too and the change event is then dropped as a
@@ -344,6 +352,19 @@ async function change(el: HTMLSelectElement | HTMLInputElement, value: string): 
   });
 }
 
+/** Type into a text field and LEAVE it, which is what commits one.
+ *
+ *  The blur goes out as `focusout`. React maps `onBlur` to the native
+ *  focusout event, which bubbles to the root listener; a plain `blur` event
+ *  does not bubble, never reaches React, and the commit under test would
+ *  simply never run — a test that then "passes" because nothing happened. */
+async function commitText(el: HTMLInputElement, value: string): Promise<void> {
+  await change(el, value);
+  await act(async () => {
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+}
+
 /** The document the last Save actually sent. */
 function lastSaved(): StrategyDoc {
   const calls = vi.mocked(strategySet).mock.calls;
@@ -462,7 +483,7 @@ describe("the row state", () => {
     expect(strategySet).not.toHaveBeenCalled();
   });
 
-  it("Confirm all confirms every measure AND every table, still without writing", async () => {
+  it("Confirm all confirms the measures AND the tables that say something, still without writing", async () => {
     await mount();
     await click(button("Confirm all"));
     expect(measureRow("Profit").getAttribute("data-unconfirmed")).toBe("false");
@@ -470,6 +491,248 @@ describe("the row state", () => {
       container.querySelector('tr[data-strategy-path="tables[\'Dim\']"]')?.getAttribute("data-unconfirmed"),
     ).toBe("false");
     expect(strategySet).not.toHaveBeenCalled();
+
+    // Sales has no entry at all, so there is nothing there to agree to: the
+    // bulk confirm leaves it alone rather than minting `{reviewed: true}` for
+    // a row the grid then keeps drawing as "not set".
+    await click(button("Save"));
+    expect(lastSaved().tables?.Sales).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Confirm all — the one gesture that could launder a warning
+// ---------------------------------------------------------------------------
+
+describe("Confirm all", () => {
+  /** Both measures say something and neither is confirmed, so the only thing
+   *  separating them in these cases is the finding. */
+  const TWO_UNCONFIRMED: StrategyDoc = {
+    version: 1,
+    measures: {
+      Returns: { direction: "lowerIsBetter", reviewed: false },
+      Profit: { direction: "higherIsBetter", reviewed: false },
+    },
+    tables: { Dim: { kind: "dimension", reviewed: false } },
+  };
+
+  const PROFIT_WARNING: Finding = {
+    severity: "warning",
+    code: "direction-contradicts-usage",
+    path: "measures['Profit'].direction",
+    message: "'Profit' is declared higherIsBetter, but every pivot sorts it the other way",
+  };
+
+  /** Load findings the way a person does — Validate, then look. */
+  async function validated(doc: StrategyDoc, findings: Finding[]): Promise<void> {
+    vi.mocked(strategyGet).mockResolvedValue(doc);
+    vi.mocked(strategyValidate).mockResolvedValue({ written: false, findings });
+    await mount();
+    await click(button("Validate"));
+  }
+
+  it("leaves a row carrying a finding unconfirmed, and says how many it skipped", async () => {
+    await validated(TWO_UNCONFIRMED, [PROFIT_WARNING]);
+    await click(button("Confirm all"));
+
+    // The warned row is exactly where it was. Confirm is what the
+    // decomposition engine reads as "a human vouched for this", and a bulk
+    // click is not a human reading a warning.
+    expect(measureRow("Profit").getAttribute("data-unconfirmed")).toBe("true");
+    // ...and it is STILL VISIBLY WARNED. A skip whose evidence has been wiped
+    // off the screen is its own kind of lie.
+    expect(measureRow("Profit").textContent).toContain("warning");
+
+    const status = byTestId("strategy-status").textContent ?? "";
+    expect(status).toContain("Confirmed 2 rows.");
+    expect(status).toContain("Skipped 1 row carrying a finding");
+    expect(strategySet).not.toHaveBeenCalled();
+  });
+
+  it("still confirms the rows nothing is wrong with", async () => {
+    await validated(TWO_UNCONFIRMED, [PROFIT_WARNING]);
+    await click(button("Confirm all"));
+
+    expect(measureRow("Returns").getAttribute("data-unconfirmed")).toBe("false");
+    expect(
+      container.querySelector('tr[data-strategy-path="tables[\'Dim\']"]')?.getAttribute("data-unconfirmed"),
+    ).toBe("false");
+
+    // And the skip is a skip, not a rollback: what it did confirm is what Save
+    // sends, with the warned row still unreviewed.
+    await click(button("Save"));
+    expect(lastSaved().measures?.Returns.reviewed).toBe(true);
+    expect(lastSaved().measures?.Profit.reviewed).toBe(false);
+  });
+
+  it("skips an entry with no values, for the reason per-row Confirm is disabled on one", async () => {
+    await validated(
+      {
+        version: 1,
+        measures: {
+          Profit: { reviewed: false },
+          Returns: { direction: "lowerIsBetter", reviewed: false },
+        },
+      },
+      [],
+    );
+    await click(button("Confirm all"));
+
+    const empty = measureRow("Profit");
+    expect(empty.getAttribute("data-strategy-state")).toBe("empty");
+    expect(empty.getAttribute("data-unconfirmed")).toBe("true");
+    expect(byTestId("strategy-status").textContent).toContain("empty row");
+
+    await click(button("Save"));
+    expect(lastSaved().measures?.Profit.reviewed).toBe(false);
+    expect(lastSaved().measures?.Returns.reviewed).toBe(true);
+  });
+
+  it("leaves per-row Confirm alone — a person reading one warned row may still confirm it", async () => {
+    await validated(TWO_UNCONFIRMED, [PROFIT_WARNING]);
+
+    const confirm = button("Confirm", measureRow("Profit"));
+    expect(confirm.disabled).toBe(false);
+    await click(confirm);
+
+    expect(measureRow("Profit").getAttribute("data-unconfirmed")).toBe("false");
+    await click(button("Save"));
+    expect(lastSaved().measures?.Profit.reviewed).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The model-wide panel
+// ---------------------------------------------------------------------------
+
+describe("the model panel", () => {
+  function axisSelect(): HTMLSelectElement {
+    return byTestId<HTMLSelectElement>("model-default-time-axis");
+  }
+
+  it("edits the time axis through the document helper, and writes nothing until Save", async () => {
+    await mount();
+
+    // A picker over the model's own columns, never free text: a typo here is
+    // not a broken axis, it is an axis that silently disables every time fact.
+    expect(axisSelect().tagName).toBe("SELECT");
+    await change(axisSelect(), "Sales[DeptKey]");
+    await change(byTestId<HTMLInputElement>("model-reporting-currency"), "SEK");
+    expect(strategySet).not.toHaveBeenCalled();
+
+    await click(button("Save"));
+    expect(lastSaved().model?.defaultTimeAxis).toBe("Sales[DeptKey]");
+    expect(lastSaved().model?.reportingCurrency).toBe("SEK");
+    // The rest of the document is untouched by a model-level edit.
+    expect(lastSaved().measures?.Returns.direction).toBe("lowerIsBetter");
+  });
+
+  it("offers the marked date table's columns first without hiding the others", async () => {
+    const withCalendar = overview();
+    withCalendar.tables = [
+      ...withCalendar.tables,
+      table("Calendar", [
+        ["Day", "Date"],
+        ["MonthName", "String"],
+      ]),
+    ];
+    withCalendar.dateTable = "Calendar";
+    await mount(ctxFor(withCalendar));
+
+    const groups = [...axisSelect().querySelectorAll("optgroup")];
+    expect(groups[0].getAttribute("label")).toContain("Calendar");
+    // The WHOLE date table, not its date-typed columns alone: the validator
+    // compares the axis's TABLE, and a calendar's key column is routinely an
+    // integer.
+    expect([...groups[0].querySelectorAll("option")].map((o) => o.value)).toEqual([
+      "Calendar[Day]",
+      "Calendar[MonthName]",
+    ]);
+    // A PREFERENCE, not a filter. The validator only WARNS about an axis
+    // outside the marked date table, so a model whose time axis really does
+    // live on the fact table must still be authorable here.
+    expect([...axisSelect().querySelectorAll("option")].map((o) => o.value)).toContain(
+      "Sales[Amount]",
+    );
+  });
+
+  it("refuses a fiscal year start that is not MM-DD, and says why", async () => {
+    await mount();
+    const field = byTestId<HTMLInputElement>("model-fiscal-year-start");
+
+    // The commonest wrong answer: a fiscal year start RECURS, so it carries no
+    // year — and nothing downstream could notice, because every period bucket
+    // is derived from this.
+    await commitText(field, "2026-04-01");
+    const message = byTestId("model-fiscal-year-start-error").textContent ?? "";
+    expect(message).toContain("MM-DD");
+    expect(message).toContain("2026-04-01");
+    // Refused means NOT WRITTEN — and the typed text stays, because a value
+    // that silently reverts reads as accepted.
+    expect(field.value).toBe("2026-04-01");
+    await click(button("Save"));
+    expect(lastSaved().model?.fiscalYearStart).toBeUndefined();
+  });
+
+  it("takes an MM-DD fiscal year start", async () => {
+    await mount();
+    await commitText(byTestId<HTMLInputElement>("model-fiscal-year-start"), "04-01");
+    expect(container.querySelector('[data-testid="model-fiscal-year-start-error"]')).toBeNull();
+
+    await click(button("Save"));
+    expect(lastSaved().model?.fiscalYearStart).toBe("04-01");
+  });
+
+  it("shows the priority order and can clear it, without pretending to reorder it", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      ...MIXED_DOC,
+      model: { priority: ["Profit", "Returns"] },
+    });
+    await mount();
+
+    const list = byTestId("model-priority");
+    expect([...list.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      "Profit",
+      "Returns",
+    ]);
+
+    await click(button("Clear order", list));
+    expect(list.querySelectorAll("li").length).toBe(0);
+    await click(button("Save"));
+    expect(lastSaved().model?.priority).toBeUndefined();
+  });
+
+  it("renders a model finding beside the field it names", async () => {
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        {
+          severity: "error",
+          code: "unknown-column",
+          path: "model.defaultTimeAxis",
+          message: "the default time axis 'Gone[Day]' is not a column in the model",
+        },
+      ],
+    });
+    await mount();
+    await click(button("Validate"));
+
+    const panel = byTestId("model-panel");
+    expect(panel.textContent).toContain("unknown-column");
+    expect(panel.textContent).toContain("is not a column in the model");
+  });
+
+  it("keeps an axis the model no longer has selected, and says it is gone", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      ...MIXED_DOC,
+      model: { defaultTimeAxis: "Gone[Day]" },
+    });
+    await mount();
+
+    // A <select> whose value matches no option renders blank, which would read
+    // as "nobody set an axis" and erase the setting on the next edit.
+    expect(axisSelect().value).toBe("Gone[Day]");
+    expect(axisSelect().textContent).toContain("not a column in this model");
   });
 });
 

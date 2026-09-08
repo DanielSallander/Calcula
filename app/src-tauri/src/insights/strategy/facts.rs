@@ -12,8 +12,8 @@
 //          THE BASE LAYER IS BUILT HERE. Everything `AttrSource::Base` and
 //          `AttrSource::Inferred` later claims comes from what this file
 //          extracts — the KPI's target and its bands' STATUSES, the unit implied
-//          by a format string, which table is the calendar, which columns exist,
-//          which hierarchies the model declares.
+//          by a format string AND by the measure's name, which table is the
+//          calendar, which columns exist, which hierarchies the model declares.
 //          Extracting one of them wrongly does not produce an error; it
 //          produces a confidently wrong favourability, which is why each
 //          derivation below states what it assumes.
@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bi_engine::{Cardinality, DataModel, KpiStatus, KpiTarget};
 
+use super::infer::{has_phrase, has_term, words};
 use super::resolve::{BandStatus, KpiBand, KpiFacts, MeasureFacts, ModelFacts, TableFacts};
 use super::types::{QualifiedColumn, TableKind, Unit};
 
@@ -124,7 +125,7 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
             measure.name().to_string(),
             MeasureFacts {
                 fact_table: Some(measure.table().to_string()),
-                unit: measure.format_string().and_then(unit_from_format),
+                unit: infer_unit(measure.name(), measure.format_string()),
                 kpi: kpis.get(measure.name()).cloned(),
             },
         );
@@ -169,16 +170,12 @@ fn classify_table(name: &str, date_table: Option<&str>, from_side: bool, to_side
     }
 }
 
-/// The unit a number-format string implies.
+/// The part of a format string that carries meaning rather than decoration.
 ///
-/// Deliberately conservative. `Other` means "we could not tell", and the
-/// downstream effect of `Other` is that a sentence says the bare number — which
-/// is never wrong, only less helpful. Guessing `Percent` at a format that is not
-/// one produces a sentence that is off by a factor of a hundred.
-fn unit_from_format(format: &str) -> Option<Unit> {
-    // A literal escaped percent (`\%`) or one inside quotes is decoration, not a
-    // scale factor. Strip both before looking, or `#,##0" %"` reads as percent
-    // and the value is reported a hundred times too small.
+/// A literal escaped percent (`\%`) or one inside quotes is decoration, not a
+/// scale factor. Strip both before looking, or `#,##0" %"` reads as percent and
+/// the value is reported a hundred times too small.
+fn significant_of(format: &str) -> String {
     let mut significant = String::with_capacity(format.len());
     let mut chars = format.chars();
     let mut in_quotes = false;
@@ -192,18 +189,52 @@ fn unit_from_format(format: &str) -> Option<Unit> {
             _ => significant.push(c),
         }
     }
+    significant
+}
 
+/// The unit a format string states OUTRIGHT: a literal `%`, a currency bracket
+/// or a currency symbol.
+///
+/// This is the half of the format reading that OUTRANKS the name lexicon.
+/// Somebody typed those characters; a name is a label the same person chose for
+/// a different purpose, and it does not get to overrule a written `%`.
+fn explicit_unit_from_format(format: &str) -> Option<Unit> {
+    let significant = significant_of(format);
     if significant.contains('%') {
         return Some(Unit::Percent);
     }
     // `[$SEK-41d]` and friends: the engine carries the currency inside a bracket
     // section, and a bare currency symbol is the older spelling.
     let lower = significant.to_ascii_lowercase();
-    if lower.contains("[$") || significant.contains('$') || significant.contains('€') || significant.contains('£') || lower.contains("kr") {
+    if lower.contains("[$")
+        || significant.contains('$')
+        || significant.contains('€')
+        || significant.contains('£')
+        || lower.contains("kr")
+    {
         return Some(Unit::Currency);
     }
+    None
+}
+
+/// The unit a number-format string implies, reading the format ALONE.
+///
+/// Deliberately conservative. `None` means "we could not tell", and the
+/// downstream effect is that a sentence says the bare number — which is never
+/// wrong, only less helpful. Guessing `Percent` at a format that is not one
+/// produces a sentence that is off by a factor of a hundred.
+fn unit_from_format(format: &str) -> Option<Unit> {
+    if let Some(explicit) = explicit_unit_from_format(format) {
+        return Some(explicit);
+    }
+    let significant = significant_of(format);
     // An integer format with no decimal separator is a count often enough to be
     // worth saying, and being wrong costs only a rounding style in a sentence.
+    //
+    // THIS IS THE AMBIGUOUS CASE, and it is where the name gets a vote:
+    // `#,##0` is what a whole-krona Revenue measure is formatted with just as
+    // often as a row count, and reading it as a count made a measure named
+    // Revenue infer as a COUNT.
     if !significant.is_empty()
         && significant.chars().all(|c| matches!(c, '#' | '0' | ',' | ' ' | '_' | '-' | '(' | ')'))
         && !significant.contains('.')
@@ -211,6 +242,97 @@ fn unit_from_format(format: &str) -> Option<Unit> {
         return Some(Unit::Count);
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// The name lexicon
+// ---------------------------------------------------------------------------
+
+/// Terms whose presence in a measure NAME means the number is money. Bilingual,
+/// for the same reason infer.rs's direction lexicon is: a Swedish model is the
+/// normal case here.
+const CURRENCY_NAME_TERMS: &[&str] = &[
+    "revenue",
+    "sales",
+    "cost",
+    "price",
+    "amount",
+    "margin",
+    "profit",
+    "spend",
+    "intäkt",
+    "omsättning",
+    "kostnad",
+    "pris",
+    "belopp",
+];
+
+/// Terms whose presence means the number is a proportion.
+///
+/// "margin percent" needs no phrase entry of its own: `percent` is a term here,
+/// and percent is CHECKED BEFORE currency, so a measure named "Margin Percent"
+/// answers Percent rather than being claimed by the `margin` above.
+const PERCENT_NAME_TERMS: &[&str] = &["rate", "share", "ratio", "percent", "andel", "andelen"];
+
+/// Terms whose presence means the number is a count. `headcount` is spelled out
+/// because the word-boundary rule is exactly what stops `count` from matching
+/// inside it — the same discipline that keeps "Costa Rica Sales" out of the cost
+/// lexicon.
+const COUNT_NAME_TERMS: &[&str] = &["count", "antal", "headcount"];
+
+/// Phrases whose presence means a count, matched as CONSECUTIVE words.
+const COUNT_NAME_PHRASES: &[&[&str]] = &[&["number", "of"]];
+
+/// The unit a measure's NAME implies, or `None` when it says nothing.
+///
+/// Word boundaries, via the same splitter `infer_direction` uses: a substring
+/// match makes "Costa Rica Sales" a cost measure and "Shareholder" a percentage.
+///
+/// ORDER: percent, then count, then currency. Percent leads because it is the
+/// most specific vocabulary and the most expensive to lose - a ratio reported as
+/// money is a sentence off by the magnitude of the base. Count leads currency so
+/// that "Order Count" and "Sales Count" answer Count rather than being claimed by
+/// the broad money vocabulary, which is the widest list here and would otherwise
+/// swallow them.
+fn unit_from_name(name: &str) -> Option<Unit> {
+    let words = words(name);
+    if PERCENT_NAME_TERMS.iter().any(|t| has_term(&words, t)) {
+        return Some(Unit::Percent);
+    }
+    if COUNT_NAME_TERMS.iter().any(|t| has_term(&words, t))
+        || COUNT_NAME_PHRASES.iter().any(|p| has_phrase(&words, p))
+    {
+        return Some(Unit::Count);
+    }
+    if CURRENCY_NAME_TERMS.iter().any(|t| has_term(&words, t)) {
+        return Some(Unit::Currency);
+    }
+    None
+}
+
+/// The unit of one measure, from its format and its name.
+///
+/// THE PRECEDENCE IS THE WHOLE DESIGN, and it runs in this order:
+///
+/// 1. An EXPLICIT format signal - a literal `%`, a currency bracket or symbol.
+///    A person who wrote the format meant it, and no name may overrule it: a
+///    measure called "Revenue Share" formatted `0.0%` is a percentage.
+/// 2. The NAME lexicon. It decides only where the format was AMBIGUOUS or
+///    absent, which is exactly the case that produced the defect: `#,##0` on a
+///    measure named Revenue was read as a COUNT, because an integer format is
+///    the only thing the format reading had left to say.
+/// 3. The format's ambiguous reading (integer-only means a count), for a name
+///    that says nothing either way.
+///
+/// The DESCRIPTION is deliberately not consulted, unlike in `infer_direction`. A
+/// name is the label the author chose for this number; a description is prose
+/// ABOUT it, and it routinely mentions other quantities ("number of orders where
+/// the amount exceeds...") that would answer for the measure itself.
+fn infer_unit(name: &str, format: Option<&str>) -> Option<Unit> {
+    if let Some(explicit) = format.and_then(explicit_unit_from_format) {
+        return Some(explicit);
+    }
+    unit_from_name(name).or_else(|| format.and_then(unit_from_format))
 }
 
 #[cfg(test)]
@@ -427,5 +549,80 @@ mod tests {
     fn a_format_that_says_nothing_useful_returns_no_unit_rather_than_guessing() {
         assert_eq!(unit_from_format("0.000"), None);
         assert_eq!(unit_from_format("General"), None);
+    }
+
+    // --- the name lexicon ----------------------------------------------------
+
+    #[test]
+    fn a_revenue_measure_formatted_as_a_plain_integer_is_currency_and_not_a_count() {
+        // THE DEFECT. `#,##0` is what a whole-krona money measure is formatted
+        // with, and reading the format alone answered COUNT for a measure named
+        // Revenue - visible in the Strategy tab as "Revenue: count".
+        assert_eq!(infer_unit("Revenue", Some("#,##0")), Some(Unit::Currency));
+        assert_eq!(
+            unit_from_format("#,##0"),
+            Some(Unit::Count),
+            "the format reading itself is unchanged; the NAME is what breaks the tie"
+        );
+        // ...and a name that says nothing still lets the ambiguous format answer.
+        assert_eq!(infer_unit("Widgets", Some("#,##0")), Some(Unit::Count));
+    }
+
+    #[test]
+    fn an_explicit_format_signal_outranks_the_name() {
+        // A person who wrote a `%` meant it. The name may only decide where the
+        // format was ambiguous, or it would silently rescale a real percentage.
+        assert_eq!(infer_unit("Revenue Share", Some("0.0%")), Some(Unit::Percent));
+        assert_eq!(infer_unit("Revenue", Some("0.0%")), Some(Unit::Percent));
+        assert_eq!(
+            infer_unit("Order Count", Some("[$SEK-41d] #,##0")),
+            Some(Unit::Currency)
+        );
+        // The DECORATIVE percent is not an explicit signal, so the name still
+        // answers - and does not turn `#,##0" %"` into a rescaled percentage.
+        assert_eq!(infer_unit("Revenue", Some("#,##0\" %\"")), Some(Unit::Currency));
+    }
+
+    #[test]
+    fn the_name_lexicon_matches_whole_words_in_both_languages() {
+        // The substring trap, the same one infer.rs's direction lexicon carries:
+        // "Costa" must not read as "cost", and "Shareholder" must not read as
+        // "share".
+        assert_eq!(infer_unit("Costa Rica Sales", None), Some(Unit::Currency));
+        assert_eq!(infer_unit("Shareholder", None), None);
+        assert_eq!(infer_unit("Omsättning", None), Some(Unit::Currency));
+        assert_eq!(infer_unit("Antal Ordrar", None), Some(Unit::Count));
+        assert_eq!(infer_unit("Andel Nordics", None), Some(Unit::Percent));
+        // A name with no term at all says nothing, and a measure with neither a
+        // name term nor a format is left with no unit rather than a guess.
+        assert_eq!(infer_unit("Widgets", None), None);
+    }
+
+    #[test]
+    fn percent_outranks_currency_and_count_outranks_currency_in_the_name() {
+        // "Margin Percent" carries both a money word and a proportion word; the
+        // ORDER is what decides, and it is the order that costs least when wrong.
+        assert_eq!(infer_unit("Margin Percent", None), Some(Unit::Percent));
+        assert_eq!(infer_unit("Margin", None), Some(Unit::Currency));
+        assert_eq!(infer_unit("Sales Count", None), Some(Unit::Count));
+        assert_eq!(infer_unit("Number of Orders", None), Some(Unit::Count));
+        // ...and "headcount" is its own term, because word boundaries mean
+        // "count" does not match inside it.
+        assert_eq!(infer_unit("Headcount", None), Some(Unit::Count));
+    }
+
+    #[test]
+    fn a_measures_name_reaches_the_facts_the_resolver_reads() {
+        // End to end: the lexicon is only worth anything if it survives the
+        // crossing into `ModelFacts`, which is what the whole strategy layer
+        // resolves against.
+        let model = a_small_star();
+        let facts = facts_from_model(&model);
+        assert_eq!(
+            facts.measures["Revenue"].unit,
+            Some(Unit::Currency),
+            "the fixture measure carries no format string at all, so the name is \
+             the only thing that can answer"
+        );
     }
 }

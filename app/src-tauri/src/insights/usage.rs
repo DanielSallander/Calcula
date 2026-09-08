@@ -177,9 +177,16 @@ impl UsageIndex {
 
     /// Measures this workbook actually reports, most looked at first.
     ///
-    /// Only measures with evidence appear. A model-wide priority list that
-    /// simply restated every measure in alphabetical order would be a ranking
+    /// Only measures with EVIDENCE appear, and that is the whole contract: this
+    /// function reports what the workbook looks at and invents nothing. A list
+    /// that restated every measure in alphabetical order would be a ranking
     /// nobody asked for, silently breaking ties in the insights engine.
+    ///
+    /// An EMPTY answer is therefore meaningful rather than a gap, and `infer`
+    /// treats it that way: it seeds `model.priority` itself when this is empty
+    /// (`seed_priority`), from KPI membership and the model's declaration
+    /// order — never alphabetical, for exactly the reason above. Evidence still
+    /// wins outright whenever there is any.
     pub fn ranked_measures(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .pairings
@@ -841,9 +848,20 @@ mod tests {
 
     #[test]
     fn a_measure_the_workbook_never_reports_gets_no_cadence_and_no_priority() {
-        // The absence matters: `infer` falls back to Monthly for the cadence and
-        // writes NO model-wide priority at all, rather than inventing a ranking
-        // out of alphabetical order.
+        // The absence matters, and what `infer` does with it has CHANGED: it
+        // falls back to Monthly for the cadence, and it now SEEDS a model-wide
+        // priority rather than leaving it empty (`seed_priority` in infer.rs) —
+        // measures carrying a KPI first, then the model's own DECLARATION order.
+        //
+        // The objection this comment used to record still stands and is
+        // answered rather than ignored: an ALPHABETICAL ranking would be an
+        // order nobody chose wearing the clothes of one somebody did.
+        // Declaration order is the author's, and without any seed the report
+        // generator had nothing to lead with at all.
+        //
+        // What is asserted here is unchanged: `UsageIndex` itself invents
+        // nothing. The seed lives in `infer`, and usage wins outright whenever
+        // it has anything to say.
         let usage = UsageIndex::default();
         assert_eq!(usage.cadence_for("Revenue"), None);
         assert!(usage.ranked_measures().is_empty());

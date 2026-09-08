@@ -913,6 +913,29 @@ pub fn plan_dimensions(
     let mut plan = DimensionPlan::default();
     let reachable = fact_table.map(|t| facts.directly_related_tables(t));
 
+    // NO DIMENSIONS AT ALL IS THE COMMON CASE, AND IT MUST NOT BE SILENT.
+    //
+    // Inference deliberately leaves `analysisDimensions` empty (see
+    // `INFER_ANALYSIS_DIMENSIONS` in `strategy/infer.rs`): with no column
+    // statistics it cannot tell a country column from a full-name column, and a
+    // wrong breakdown surfaces as a confident explanation of the wrong thing
+    // rather than as a visibly wrong field. Empty is the honest answer.
+    //
+    // But it is only honest if somebody is TOLD. Every other way a dimension can
+    // fall out of this loop pushes a note; an empty list pushed none, because
+    // the loop never ran — so the measure simply had no breakdown section and
+    // nothing said why. That is the "a section is not there and nobody knows to
+    // ask" failure this function's own header warns about, reached through the
+    // one path the header did not cover.
+    if resolved.analysis_dimensions.is_empty() {
+        plan.notes.push(format!(
+            "{} was not broken down by anything: its strategy declares no analysis dimensions. \
+             Add one in the Model Editor's Strategy tab to see where a movement came from.",
+            resolved.measure
+        ));
+        return plan;
+    }
+
     for dimension in &resolved.analysis_dimensions {
         if resolved.never_slice_by.contains(dimension) {
             // A deliberate exclusion, not a failure. It is named in the
@@ -2220,6 +2243,27 @@ mod tests {
         let note = &plan.notes[0];
         assert!(note.contains("Supplier[Country]"), "{}", note);
         assert!(note.contains("not directly related"), "{}", note);
+    }
+
+    #[test]
+    fn a_measure_with_no_analysis_dimensions_says_so_instead_of_silently_having_no_breakdown() {
+        // The DEFAULT state now that inference leaves the list empty. Every
+        // other way a dimension falls out of the plan pushes a note; the empty
+        // list pushed none, because the loop never ran — so the measure had no
+        // breakdown and nothing said why. Honest-but-invisible is the failure
+        // this layer exists to prevent, and it was reachable through the one
+        // path with no note in it.
+        let r = resolved("Revenue");
+        assert!(r.analysis_dimensions.is_empty(), "the fixture must start empty");
+        let plan = plan_dimensions(&r, &star_facts(), Some("Sales"));
+
+        assert!(plan.dimensions.is_empty());
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        let note = &plan.notes[0];
+        assert!(note.contains("Revenue"), "the note names the measure: {note}");
+        // ...and it says what to DO, because "no analysis dimensions" is a
+        // sentence only somebody who already knows this layer can act on.
+        assert!(note.contains("Strategy tab"), "the note says where to fix it: {note}");
     }
 
     #[test]
