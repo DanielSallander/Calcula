@@ -914,10 +914,47 @@ generators that disagreed — the weak TypeScript one is DELETED and both the ta
 call the Rust op.
 
 STILL OPEN, and each needs a decision rather than work:
-* **A numeric axis on a non-calendar dimension.** A `Decimal` column that is really an analysis
-  axis on, say, `dim_product` still infers as `ignore`. The marked-date-table rule rescues the
-  calendar; nothing rescues this, because it needs the column statistics of 2.AI.3. A person can
-  set the role by hand, which is the honest fallback.
+* **PER-COLUMN DISTINCT COUNTS ARE THE BINDING CONSTRAINT, and the whole layer's usefulness is
+  coupled to them.** This was filed below as one gap among several; it is not. Reviewed
+  2026-09-08:
+  - `INFER_ANALYSIS_DIMENSIONS` (`strategy/infer.rs`) is `false`, and its recorded flip-back
+    condition is verbatim *"FLIP IT BACK TO `true` WHEN PER-COLUMN DISTINCT COUNTS EXIST."* So
+    while there are none, **every measure of every model needs its decomposition hand-authored** —
+    and authoring effort was always the binding constraint on this layer. The cost analysis that
+    recommended deferring statistics did not surface that coupling; it should have.
+  - The stand-in is a NAME LEXICON, and a name lexicon generalises exactly as far as its naming
+    conventions do. Two heuristics share one defect: `words()` cannot split an all-lowercase
+    concatenated token, so on an imported schema spelled `emailaddress` / `fullname` neither
+    `is_one_per_row_shaped` nor `label_score` fires — the address is offered as a breakdown axis
+    and the table gets no label column at all. It is also English-plus-Swedish only.
+  - A `Decimal` column that is really an axis on `dim_product` still infers as `ignore` for the
+    same missing signal. A person can set the role by hand, which is the honest fallback.
+  Cardinality is the one signal that is convention-independent and language-independent. Treat
+  this as the item that unblocks the others, not as a peer of them.
+
+  **HOW TO BUILD IT, and a reversal.** An earlier costing here concluded distinct-count was
+  unaffordable on DirectQuery. That was an artefact of the entry point measured, not of the layer.
+  `distinct_members` (`bi/cube.rs`) builds a `QueryRequest`, which REQUIRES a measure, so on a
+  dimension column it joins to the fact table — fact-scale, and twelve columns is twelve
+  serialised round trips. The connector layer has a measure-free path:
+  `Connector::fetch_data(&FetchRequest)`, with `AggregateFunction::CountDistinct` rendering as
+  `COUNT(DISTINCT "c") AS "n"`. Twelve columns become **one statement, one round trip, one lock
+  acquisition, dimension-scale**. The target resolves through `SourceRegistry::binding_for` with no
+  fact table involved. There is no host command for it yet — this is roughly forty new lines, not a
+  reuse.
+  - Guard it on connector capability. CSV/Parquet/InMemory connectors IGNORE aggregates and return
+    the whole table, so column 0 would be read as a count — a silently wrong number. Those tables
+    are resident anyway and the count comes from `engine.cache()` with no query at all.
+  - **Do NOT lean on Arrow dictionary encoding as a cardinality proxy, in either direction.** It
+    looked like a free signal and is not: the uniqueness ratio is computed over a PREFIX of at most
+    `string_sample_size` = 8192 rows, so for any larger table "50% unique" degenerates into "more
+    than 4096 distinct values in the first 8192 rows" — an effective threshold of 0.04% on a
+    10M-row table. A 5,000-store `store_code` column is left un-encoded despite being a textbook
+    axis, and a join-key-correlated column can be encoded while being globally high-cardinality.
+    Two further holes: `disk_cache.rs` restores an IPC file without re-optimising, and
+    `dictionary_encode_strings: false` is settable at runtime through the public
+    `Engine::set_optimizer_config`. Encoded means "low-cardinality in the first 8192 rows", which
+    is not the question being asked.
 * **`date_role` is not authorable from Calcula.** No host command, no CLI option, no column-form
   field, so the "read what the author declared" arm only ever fires for a model imported from
   elsewhere. Exposing it is a small host-only change and is not done.

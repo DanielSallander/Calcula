@@ -448,20 +448,96 @@ const ONE_PER_ROW_WORDS: &[&str] = &[
 /// `PostCode` becomes ["post", "code"], neither of which may be listed alone.
 const ONE_PER_ROW_JOINED: &[&str] = &["postcode", "zipcode", "postalcode"];
 
+/// Terms strong enough to be matched at the START or the END of a name that
+/// `words()` could not split at all.
+///
+/// THIS IS THE CONCATENATED CONVENTION, and it is the one the harness caught
+/// this lexicon failing. `words("emailaddress")` is a SINGLE token, so the
+/// `email` entry above — which matches whole words — never fired, and an email
+/// column on a `dim_customer` written in concatenated lowercase came back an
+/// analysis axis. `postalcode` looked fine only because it happens to be in the
+/// joined list verbatim; nothing general was working.
+///
+/// PREFIX-OR-SUFFIX, NEVER SUBSTRING, AND ONLY ON A SINGLE TOKEN. Both halves of
+/// that are load-bearing:
+///
+///   * A substring test would make `HeadphoneCategory` a contact detail. It does
+///     not fire here, because that name splits into two tokens and this rule
+///     only runs on names that did not split at all.
+///   * Even on a single token, an anchored match is what saves
+///     `headphonecategory`: `phone` is neither its start nor its end.
+///
+/// WHAT IS DELIBERATELY ABSENT. `street`, because `Streetlight` is one token
+/// that starts with it and would lose its axis; and every term shorter than four
+/// letters, because a three-letter suffix matches by accident (`mean` ends with
+/// `ean`). The residual known false positive is a column named exactly
+/// `Headphone` or `Microphone`, which loses an axis it should have kept — a cost
+/// paid in a withheld breakdown, never in a false statement, and one a person
+/// corrects in the dropdown every entry here ships `reviewed: false` for.
+const ONE_PER_ROW_STRONG: &[&str] = &[
+    "email",
+    "epost",
+    "mail",
+    "phone",
+    "telefon",
+    "address",
+    "adress",
+    "addr",
+    "postal",
+    "postnummer",
+    "barcode",
+];
+
 /// Does this column name say "one of these per row"?
 ///
-/// WORD EQUALITY, never substring. A substring test makes "Streetlight
+/// WORD EQUALITY FIRST, never substring. A substring test makes "Streetlight
 /// Category" an address part and "Emailing Segment" a contact detail — the same
 /// class of confident nonsense that the direction lexicon's "Costa Rica Sales"
-/// case exists to prevent.
+/// case exists to prevent. The anchored single-token rule below is the one
+/// concession, and it is bounded by `ONE_PER_ROW_STRONG`'s own comment.
+///
+/// A NAME HEURISTIC GENERALISES EXACTLY AS FAR AS ITS NAMING CONVENTIONS DO, AND
+/// THIS ONE IS A STOPGAP. It reads English and Swedish, in PascalCase,
+/// snake_case and concatenated lowercase, and it is beaten by ABBREVIATIONS:
+/// `cust_nm` is a customer name only to somebody who already knows the schema,
+/// and no word list can be widened to cover `nm`, `dsc`, `ln1` and their
+/// dialects without matching things that are not those. `calibration_tests.rs`
+/// measures exactly that — the abbreviated fixture is in there to SHOW the miss
+/// rather than to be papered over.
+///
+/// THE REAL FIX IS A PER-COLUMN DISTINCT COUNT (`INFER_ANALYSIS_DIMENSIONS`,
+/// open-items §2.AI.6). Cardinality is what actually separates an axis from an
+/// identifier, it is language-neutral and convention-neutral, and every rule in
+/// this function is standing in for it until it exists.
 fn is_one_per_row_shaped(column: &str) -> bool {
     let w = words(column);
     if w.iter().any(|word| ONE_PER_ROW_WORDS.contains(&word.as_str())) {
         return true;
     }
     let joined: String = w.concat();
-    ONE_PER_ROW_JOINED.contains(&joined.as_str())
+    if ONE_PER_ROW_JOINED.contains(&joined.as_str()) {
+        return true;
+    }
+    // Only a name the splitter could not split: see `ONE_PER_ROW_STRONG`.
+    w.len() == 1
+        && ONE_PER_ROW_STRONG
+            .iter()
+            .any(|t| w[0].len() > t.len() && (w[0].starts_with(t) || w[0].ends_with(t)))
 }
+
+/// Words that make a column the thing a reader recognises a ROW by.
+const LABEL_HEAD_WORDS: &[&str] = &["name", "namn", "title", "label", "description"];
+
+/// The heads that also have to be recognised at the END of a single unsplittable
+/// token, for the same concatenated convention `ONE_PER_ROW_STRONG` exists for:
+/// `words("fullname")` and `words("kundnamn")` are one token each, so the
+/// head-noun test has nothing to look at unless it looks inside.
+///
+/// Only the two `name` spellings. `title`/`label`/`description` are left out
+/// because their anchored matches are the ones that go wrong (`subtitle` is a
+/// label, `pricelabel` is not a row's name), and a wrong LABEL costs the table
+/// its real display column.
+const LABEL_JOINED_HEADS: &[&str] = &["name", "namn"];
 
 /// How well a column name reads as a table's display label. Higher is better;
 /// `None` means it does not read as one at all.
@@ -469,18 +545,34 @@ fn label_score(table: &str, column: &str) -> Option<u32> {
     let table_words = words(table);
     let column_words = words(column);
     let last = column_words.last()?.as_str();
-    let is_name = matches!(last, "name" | "namn" | "title" | "label" | "description");
-    if !is_name {
-        return None;
-    }
     // "Product Name" on table "Product" beats a bare "Name", which beats
     // "Description" — the more the column restates the table, the more
     // confidently it is the thing a reader recognises a row by.
-    let restates_table = column_words.len() > 1
-        && table_words
+    let (head, restates_table) = if LABEL_HEAD_WORDS.contains(&last) {
+        (
+            last,
+            column_words.len() > 1
+                && table_words
+                    .iter()
+                    .any(|t| column_words.iter().take(column_words.len() - 1).any(|c| c == t)),
+        )
+    } else if column_words.len() == 1 {
+        let head = LABEL_JOINED_HEADS
             .iter()
-            .any(|t| column_words.iter().take(column_words.len() - 1).any(|c| c == t));
-    Some(match (restates_table, last) {
+            .copied()
+            .find(|h| last.len() > h.len() && last.ends_with(h))?;
+        // `kundnamn` restates `Kund` exactly the way `Product Name` restates
+        // `Product`; the only difference is that nothing separates the two
+        // words, which is a spelling convention and not a weaker claim.
+        let stem = &last[..last.len() - head.len()];
+        (
+            head,
+            table_words.iter().any(|t| stem.starts_with(t.as_str())),
+        )
+    } else {
+        return None;
+    };
+    Some(match (restates_table, head) {
         (true, "name" | "namn") => 3,
         (false, "name" | "namn") => 2,
         _ => 1,
@@ -753,6 +845,12 @@ fn analysis_dimensions_for(
 // ---------------------------------------------------------------------------
 
 /// The column a time series should be plotted against.
+///
+/// THE DATE TABLE MAY ITSELF BE A GUESS. `facts.date_table` is the marked table
+/// when the author marked one and `facts.rs`'s inferred calendar when nobody
+/// did, which is what gives an ordinary imported star schema a time axis at all.
+/// The provenance rides along in `facts.calendar_source` and the planner says so
+/// (`plan_time_axis` in model.rs); nothing about the choice below changes.
 ///
 /// The date table's declared date KEY if it has one, else its declared day
 /// column, else its only `Date`-typed column. "Only" is load-bearing: two
@@ -1622,6 +1720,85 @@ mod tests {
         let offered = offered_dimensions(&model, "Revenue");
         assert!(
             offered.iter().any(|c| c.table == "BI.dim_date"),
+            "{offered:?}"
+        );
+    }
+
+    /// The same warehouse calendar as above with the mark TAKEN OFF, which is
+    /// what an imported star schema actually arrives as: `mark_date_table` is
+    /// builder-only and no host command sets it.
+    fn an_unmarked_warehouse_calendar() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("DateKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_date",
+                    vec![
+                        Column::new("date_key", DataType::Int64),
+                        Column::new("full_date", DataType::Date),
+                        Column::new("year", DataType::Decimal(38, 10)),
+                        Column::new("quarter", DataType::Decimal(38, 10)),
+                        Column::new("month", DataType::Decimal(38, 10)),
+                        Column::new("day", DataType::Decimal(38, 10)),
+                        Column::new("week_of_year", DataType::Decimal(38, 10)),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Date",
+                "Sales",
+                "DateKey",
+                "dim_date",
+                "date_key",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the unmarked warehouse calendar fixture builds")
+    }
+
+    #[test]
+    fn an_unmarked_calendar_still_produces_a_time_axis_and_its_five_part_roles() {
+        // THE WHOLE CASCADE, END TO END, and every step of it used to be dead on
+        // a model nobody had marked: no `date_table` meant no default time axis
+        // (so no trend, seasonality or change-point fact had anything to compute
+        // against), no `TableKind::Calendar` (so the role ladder's calendar arm
+        // never fired), and `Decimal` calendar parts falling through the
+        // String|Int allowlist to NO ROLE AT ALL.
+        let model = an_unmarked_warehouse_calendar();
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+
+        assert_eq!(facts.tables["dim_date"].kind, Some(TableKind::Calendar));
+        assert_eq!(
+            doc.model.default_time_axis,
+            Some(QualifiedColumn::new("dim_date", "full_date")),
+            "the calendar's only Date-typed column is the axis"
+        );
+        for column in ["year", "quarter", "month", "day", "week_of_year"] {
+            assert_eq!(
+                doc.tables["dim_date"].columns.get(column).map(|c| c.role),
+                Some(Role::Analysis),
+                "'{column}' is a calendar attribute: {:?}",
+                doc.tables["dim_date"].columns
+            );
+        }
+        // The key stays a key, which is what keeps it usable as the axis.
+        assert_eq!(doc.tables["dim_date"].columns["date_key"].role, Role::Key);
+        // ...and the parts reach the ranking as offered breakdowns, which is the
+        // outcome the missing calendar was costing.
+        let offered = offered_dimensions(&model, "Revenue");
+        assert!(
+            offered.iter().any(|c| c.table == "dim_date"),
             "{offered:?}"
         );
     }

@@ -214,6 +214,129 @@ fn fixtures() -> Vec<(&'static str, DataModel)> {
     //    columns must not become axes — they are what the measures aggregate.
     let fact_only = build(vec![sales_table()], vec![], measures(), false);
 
+    // 7-10. THE SAME CUSTOMER DIMENSION IN FOUR NAMING CONVENTIONS.
+    //
+    // Fixtures 1-6 are all PascalCase, which is one convention out of several
+    // and happens to be the one `words()` splits perfectly. A name lexicon
+    // generalises exactly as far as its naming conventions do, so a harness that
+    // samples one convention is passing its own exam: `words("emailaddress")` is
+    // a single token, so the `email` entry never matches, while `postalcode`
+    // looked fine only because it is in the joined list verbatim.
+    //
+    // The four below are the conventions real imported schemas actually use.
+    // They are deliberately the SAME dimension each time — a customer with a
+    // name, contact details, an address and three genuine axes — so the only
+    // thing that varies between their rows in the table is the spelling.
+
+    // 7. CONCATENATED LOWERCASE. No separator and no case change anywhere, so
+    //    `words()` cannot split a single one of these names.
+    let concatenated = build(
+        vec![
+            sales_table(),
+            t(
+                "Customer",
+                vec![
+                    Column::new("customerkey", DataType::Int64),
+                    Column::new("fullname", DataType::String),
+                    Column::new("emailaddress", DataType::String),
+                    Column::new("phonenumber", DataType::String),
+                    Column::new("addressline1", DataType::String),
+                    Column::new("postalcode", DataType::String),
+                    Column::new("stateprovince", DataType::String),
+                    Column::new("city", DataType::String),
+                    Column::new("country", DataType::String),
+                    Column::new("segment", DataType::String),
+                    Column::new("createdat", DataType::Date),
+                ],
+            ),
+        ],
+        vec![rel("Sales_Customer", "CustomerKey", "Customer", "customerkey")],
+        measures(),
+        false,
+    );
+
+    // 8. SNAKE_CASE. `words()` splits it cleanly, so this one is the CONTROL:
+    //    it shows how much of the gap is the lexicon and how much is the
+    //    splitter.
+    let snake = build(
+        vec![
+            sales_table(),
+            t(
+                "Customer",
+                vec![
+                    Column::new("customer_key", DataType::Int64),
+                    Column::new("full_name", DataType::String),
+                    Column::new("email_address", DataType::String),
+                    Column::new("phone_number", DataType::String),
+                    Column::new("address_line_1", DataType::String),
+                    Column::new("postal_code", DataType::String),
+                    Column::new("state_province", DataType::String),
+                    Column::new("city", DataType::String),
+                    Column::new("country", DataType::String),
+                    Column::new("segment", DataType::String),
+                ],
+            ),
+        ],
+        vec![rel("Sales_Customer", "CustomerKey", "Customer", "customer_key")],
+        measures(),
+        false,
+    );
+
+    // 9. ABBREVIATIONS, the convention a warehouse built on a mainframe extract
+    //    uses. This is the one the lexicon is EXPECTED to lose ground on, and it
+    //    is here to be honest about that rather than to be fixed by contorting
+    //    the word list: `cust_nm` is a name only to somebody who already knows.
+    let abbreviated = build(
+        vec![
+            sales_table(),
+            t(
+                "Customer",
+                vec![
+                    Column::new("cust_key", DataType::Int64),
+                    Column::new("cust_nm", DataType::String),
+                    Column::new("email_addr", DataType::String),
+                    Column::new("phone_no", DataType::String),
+                    Column::new("addr1", DataType::String),
+                    Column::new("addr2", DataType::String),
+                    Column::new("city", DataType::String),
+                    Column::new("ctry", DataType::String),
+                    Column::new("seg", DataType::String),
+                    Column::new("created_at", DataType::Date),
+                    Column::new("updated_at", DataType::Date),
+                ],
+            ),
+        ],
+        vec![rel("Sales_Customer", "CustomerKey", "Customer", "cust_key")],
+        measures(),
+        false,
+    );
+
+    // 10. SWEDISH, concatenated the way Swedish compounds are written. A Swedish
+    //     model is the normal case for this product, not an edge case, and every
+    //     other lexicon in this layer is already bilingual — this one was not.
+    let swedish = build(
+        vec![
+            sales_table(),
+            t(
+                "Kund",
+                vec![
+                    Column::new("kund_id", DataType::Int64),
+                    Column::new("kundnamn", DataType::String),
+                    Column::new("epostadress", DataType::String),
+                    Column::new("telefonnummer", DataType::String),
+                    Column::new("gatuadress", DataType::String),
+                    Column::new("postnummer", DataType::String),
+                    Column::new("ort", DataType::String),
+                    Column::new("land", DataType::String),
+                    Column::new("kundsegment", DataType::String),
+                ],
+            ),
+        ],
+        vec![rel("Sales_Kund", "CustomerKey", "Kund", "kund_id")],
+        measures(),
+        false,
+    );
+
     vec![
         ("wide label-heavy dimension", wide),
         ("narrow dimension", narrow),
@@ -221,6 +344,10 @@ fn fixtures() -> Vec<(&'static str, DataModel)> {
         ("junk dimension (flags)", junk),
         ("degenerate dimension (key only)", degenerate),
         ("fact table, no dimension", fact_only),
+        ("concatenated lowercase names", concatenated),
+        ("snake_case names", snake),
+        ("abbreviated names", abbreviated),
+        ("swedish names", swedish),
     ]
 }
 
@@ -376,6 +503,94 @@ fn a_fact_tables_own_numeric_columns_are_never_axes() {
     let lone_sales = &tally(&lone)["Sales"];
     assert_eq!(lone_sales.kind, Some(TableKind::Other));
     assert_eq!(lone_sales.counts.get("analysis"), None, "{:?}", lone_sales.counts);
+}
+
+/// One table's columns and the role each was given, by fixture name prefix.
+fn roles(fixture: &str, table: &str) -> BTreeMap<String, String> {
+    let model = fixtures()
+        .into_iter()
+        .find(|(n, _)| n.starts_with(fixture))
+        .unwrap_or_else(|| panic!("no fixture named '{fixture}'"))
+        .1;
+    let facts = facts_from_model(&model);
+    let doc = infer(&facts, &model, &UsageIndex::default());
+    doc.tables[table]
+        .columns
+        .iter()
+        .map(|(c, cs)| (c.clone(), role_key(cs.role).to_string()))
+        .collect()
+}
+
+#[test]
+fn the_name_lexicon_reads_four_naming_conventions_and_names_the_one_it_still_loses() {
+    // THE SAME DIMENSION IN FOUR SPELLINGS. Fixtures 1-6 are all PascalCase,
+    // which `words()` splits perfectly, so the lexicon was passing its own exam:
+    // `words("emailaddress")` is ONE token, and the `email` entry — matched by
+    // word equality — never fired on it.
+    //
+    // Each assertion below names the convention it is about, so a future
+    // widening (or a regression) says which one moved.
+    let concatenated = roles("concatenated", "Customer");
+    for column in ["emailaddress", "phonenumber", "addressline1", "postalcode"] {
+        assert_eq!(
+            concatenated.get(column).map(String::as_str),
+            Some("ignore"),
+            "concatenated lowercase: {column} is one per row: {concatenated:?}"
+        );
+    }
+    assert_eq!(concatenated.get("fullname").map(String::as_str), Some("label"));
+    // THE NEGATIVE CONTROLS. These are genuine axes and the anchored match must
+    // leave them alone — `stateprovince` is not an address part just because an
+    // address has a state in it.
+    for column in ["stateprovince", "city", "country", "segment"] {
+        assert_eq!(
+            concatenated.get(column).map(String::as_str),
+            Some("analysis"),
+            "concatenated lowercase: {column} is an axis: {concatenated:?}"
+        );
+    }
+
+    // snake_case already worked: the splitter does the whole job there. It is in
+    // the harness as the CONTROL that separates a splitter problem from a
+    // lexicon problem.
+    let snake = roles("snake_case", "Customer");
+    assert_eq!(snake.get("email_address").map(String::as_str), Some("ignore"));
+    assert_eq!(snake.get("full_name").map(String::as_str), Some("label"));
+    assert_eq!(snake.get("state_province").map(String::as_str), Some("analysis"));
+
+    let swedish = roles("swedish", "Kund");
+    for column in ["epostadress", "telefonnummer", "gatuadress", "postnummer"] {
+        assert_eq!(
+            swedish.get(column).map(String::as_str),
+            Some("ignore"),
+            "swedish: {column} is one per row: {swedish:?}"
+        );
+    }
+    assert_eq!(swedish.get("kundnamn").map(String::as_str), Some("label"));
+    for column in ["ort", "land", "kundsegment"] {
+        assert_eq!(
+            swedish.get(column).map(String::as_str),
+            Some("analysis"),
+            "swedish: {column} is an axis: {swedish:?}"
+        );
+    }
+
+    // THE HONEST MISS, ASSERTED SO IT IS VISIBLE. `addr1` is reachable (the
+    // `addr` term anchors at the start of a token nothing can split), but
+    // `cust_nm` is a customer NAME only to somebody who already knows the
+    // schema. No word list covers `nm`, `dsc` and their dialects without also
+    // matching things that are not those, so this stays wrong until per-column
+    // distinct counts land (open-items §2.AI.6) — and stays asserted, so fixing
+    // it is a deliberate act rather than a surprise.
+    let abbreviated = roles("abbreviated", "Customer");
+    assert_eq!(abbreviated.get("addr1").map(String::as_str), Some("ignore"));
+    assert_eq!(abbreviated.get("phone_no").map(String::as_str), Some("ignore"));
+    assert_eq!(
+        abbreviated.get("cust_nm").map(String::as_str),
+        Some("analysis"),
+        "the abbreviation defeats the lexicon, and the table says so rather than \
+         the lexicon being contorted to cover it: {abbreviated:?}"
+    );
 }
 
 #[test]

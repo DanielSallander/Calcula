@@ -192,14 +192,40 @@ pub struct TableFacts {
     pub hierarchies: Vec<Vec<String>>,
 }
 
+/// Where a `ModelFacts`'s calendar came from.
+///
+/// THE DISTINCTION IS THE WHOLE POINT OF CARRYING IT. A declared date table is
+/// the model author's own statement about what time means in this model; an
+/// inferred one is `facts.rs` reading column names and guessing. Both drive the
+/// same time axis, the same trend facts and the same seasonality claims, so a
+/// reader who cannot tell them apart is being handed a guess wearing a
+/// declaration's clothes — which is the "honest and invisible" failure the
+/// planner's notes exist to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CalendarSource {
+    /// `mark_date_table`: somebody said so.
+    Declared,
+    /// `infer_date_table` in facts.rs: nobody said so and the shape fit.
+    Inferred,
+}
+
 /// Everything the resolver needs from the semantic model, and nothing more.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelFacts {
     pub measures: BTreeMap<String, MeasureFacts>,
     pub tables: BTreeMap<String, TableFacts>,
-    /// The table marked as the date table, if any.
+    /// The calendar: the table the model MARKED, or the one `facts.rs` inferred
+    /// when nobody marked one.
     pub date_table: Option<String>,
+    /// Which of those two it was. `None` exactly when `date_table` is `None`.
+    ///
+    /// Separate from `date_table` rather than folded into it because every
+    /// existing reader wants only the NAME, and every one of them would have had
+    /// to learn about provenance to keep asking the same question.
+    #[serde(default)]
+    pub calendar_source: Option<CalendarSource>,
     /// Relationship endpoints, as column pairs. Direction is irrelevant to
     /// reachability, so they are stored unordered.
     pub relationships: Vec<(QualifiedColumn, QualifiedColumn)>,
@@ -805,6 +831,7 @@ mod tests {
                 ),
             ]),
             date_table: None,
+            calendar_source: None,
             relationships: vec![(col("Sales", "DeptKey"), col("Dim", "DeptKey"))],
         }
     }

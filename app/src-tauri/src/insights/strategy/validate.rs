@@ -987,6 +987,9 @@ mod tests {
                 ),
             ]),
             date_table: None,
+            // No calendar at all, so no provenance for one either: the two
+            // fields are absent together or present together.
+            calendar_source: None,
             relationships: vec![(col("Sales", "DeptKey"), col("Dim", "DeptKey"))],
         }
     }

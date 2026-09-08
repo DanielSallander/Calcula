@@ -17,26 +17,39 @@
 //          Extracting one of them wrongly does not produce an error; it
 //          produces a confidently wrong favourability, which is why each
 //          derivation below states what it assumes.
+//
+//          ONE OF THOSE DERIVATIONS IS NOW A GUESS, AND IT SAYS SO.
+//          `mark_date_table` is builder-only, so an ordinary imported star
+//          schema arrives with no calendar at all — and without one there is no
+//          default time axis, no `TableKind::Calendar` and no role for a
+//          `Decimal` month column, which switches off the whole time-series half
+//          of the engine in silence. `infer_date_table` fills that in when the
+//          shape is unmistakable and REFUSES when two tables qualify;
+//          `ModelFacts::calendar_source` carries whether the answer was declared
+//          or guessed, and the planner announces the difference.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bi_engine::{Cardinality, DataModel, KpiStatus, KpiTarget};
+use bi_engine::{Cardinality, DataModel, DataType, DateRole, KpiStatus, KpiTarget};
 
 use super::infer::{has_phrase, has_term, words};
-use super::resolve::{BandStatus, KpiBand, KpiFacts, MeasureFacts, ModelFacts, TableFacts};
+use super::resolve::{
+    BandStatus, CalendarSource, KpiBand, KpiFacts, MeasureFacts, ModelFacts, TableFacts,
+};
 use super::types::{QualifiedColumn, TableKind, Unit};
 
 /// Read a model into the facts the strategy layer resolves against.
 pub fn facts_from_model(model: &DataModel) -> ModelFacts {
-    let mut facts = ModelFacts {
-        date_table: model.date_table().map(|t| t.to_string()),
-        ..ModelFacts::default()
-    };
+    let mut facts = ModelFacts::default();
 
     // --- relationships ------------------------------------------------------
     // Only ACTIVE relationships. An inactive one exists for a `USERELATIONSHIP`
     // that the insights planner never issues, so treating it as reachable would
     // offer the user a breakdown the engine would refuse to compute.
+    //
+    // READ BEFORE THE CALENDAR, because the calendar inference below needs to
+    // know which tables are the FROM side of a relationship: a table filters
+    // flow out of is the grain of the model, and a grain is never a calendar.
     let mut is_from: BTreeSet<&str> = BTreeSet::new();
     let mut is_to: BTreeSet<&str> = BTreeSet::new();
     for rel in model.relationships() {
@@ -57,6 +70,21 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
             ));
         }
     }
+
+    // --- the calendar -------------------------------------------------------
+    // A DECLARATION ALWAYS WINS AND IS NEVER OVERRIDDEN. `mark_date_table` is
+    // the author saying which table time runs along, and no heuristic here may
+    // second-guess it — not even on a model where another table looks more like
+    // a calendar than the marked one does.
+    let (date_table, calendar_source) = match model.date_table() {
+        Some(declared) => (Some(declared.to_string()), Some(CalendarSource::Declared)),
+        None => match infer_date_table(model, &is_from) {
+            Some(guessed) => (Some(guessed), Some(CalendarSource::Inferred)),
+            None => (None, None),
+        },
+    };
+    facts.date_table = date_table;
+    facts.calendar_source = calendar_source;
 
     // --- tables -------------------------------------------------------------
     for table in model.tables() {
@@ -145,6 +173,114 @@ fn band_status(status: KpiStatus) -> BandStatus {
         KpiStatus::AtRisk => BandStatus::AtRisk,
         KpiStatus::OnTrack => BandStatus::OnTrack,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Which table is the calendar
+// ---------------------------------------------------------------------------
+
+/// Words that name a PART of a calendar, matched by WORD EQUALITY through the
+/// same splitter the rest of the lexicons use.
+///
+/// Bilingual for the same reason every other lexicon in this layer is: a Swedish
+/// model is the normal case here, not an edge case. The joined spellings
+/// (`dayofweek`, `weekofyear`, `monthname`) are listed because `words()` cannot
+/// split a name that carries no case change, space or separator.
+const CALENDAR_PART_WORDS: &[&str] = &[
+    "year",
+    "quarter",
+    "month",
+    "week",
+    "day",
+    "dayofweek",
+    "weekday",
+    "monthname",
+    "dayname",
+    "weekofyear",
+    "år",
+    "kvartal",
+    "månad",
+    "vecka",
+    "dag",
+];
+
+/// How many of a table's columns must read as calendar parts before it can be
+/// guessed as the calendar.
+///
+/// TWO, because one is an ordinary attribute. A customer dimension carrying a
+/// `BirthYear` is not a calendar; a table carrying a year AND a month is one
+/// shape and one shape only. It is the cheapest guard against the failure mode
+/// that matters — a WRONGLY chosen calendar is worse than none, because every
+/// trend, change point and seasonality fact in the run is then computed against
+/// an axis that is not time.
+const MIN_CALENDAR_PART_COLUMNS: usize = 2;
+
+/// Does this column name read as a calendar part?
+fn names_a_calendar_part(column: &str) -> bool {
+    let w = words(column);
+    CALENDAR_PART_WORDS.iter().any(|t| has_term(&w, t))
+}
+
+/// The table that IS a calendar on a model whose author never marked one.
+///
+/// WHY THIS EXISTS AT ALL. `mark_date_table` is builder-only; an ordinary
+/// imported star schema arrives with no mark, and without a `date_table` the
+/// whole time-series half of the engine is switched off in silence: there is no
+/// default time axis, so trend, seasonality and change-point facts have nothing
+/// to compute against; `classify_table` never answers `Calendar`, so the role
+/// ladder's calendar arm never fires; and `year`/`quarter`/`month`/`day` fall
+/// through the String|Int allowlist to no role at all when a warehouse types
+/// them `Decimal`. One rule here unlocks all of it.
+///
+/// THE DETECTION IS DELIBERATELY CONSERVATIVE, and every clause below is a
+/// refusal rather than a preference:
+///
+///   * NEVER A FACT TABLE. A table filters flow OUT of is the grain of the
+///     model, and a fact table with an order-date column is exactly the thing a
+///     laxer rule would seize on.
+///   * IT MUST ACTUALLY CARRY A DATE. A `Date`/`Timestamp` column, or a column
+///     the author declared `DateKey`. A table of month names and years with no
+///     date in it cannot be a time axis.
+///   * IT MUST READ AS A CALENDAR, in at least `MIN_CALENDAR_PART_COLUMNS` of
+///     its column names.
+///   * AMBIGUITY REFUSES. Two qualifying tables (a role-playing order-date and
+///     ship-date pair, say) means the choice is a business decision. Picking one
+///     silently is the confident-wrong this layer exists to avoid, so it infers
+///     NOTHING and the model keeps no calendar at all.
+///
+/// Everything it does infer is stamped `CalendarSource::Inferred`, and the
+/// planner says so out loud when it plots a series against it.
+fn infer_date_table(model: &DataModel, is_from: &BTreeSet<&str>) -> Option<String> {
+    let mut found: Option<String> = None;
+    for table in model.tables() {
+        let name = table.name();
+        if is_from.contains(name) {
+            continue;
+        }
+        let carries_a_date = table.columns().iter().any(|c| {
+            matches!(c.data_type(), DataType::Date | DataType::Timestamp)
+                || c.date_role() == Some(DateRole::DateKey)
+        });
+        if !carries_a_date {
+            continue;
+        }
+        let parts = table
+            .columns()
+            .iter()
+            .filter(|c| names_a_calendar_part(c.name()))
+            .count();
+        if parts < MIN_CALENDAR_PART_COLUMNS {
+            continue;
+        }
+        if found.is_some() {
+            // A SECOND CANDIDATE ENDS THE SEARCH OUTRIGHT. Returning the first
+            // would make the answer depend on table declaration order, which is
+            // the worst possible way to decide what time means in a report.
+            return None;
+        }
+        found = Some(name.to_string());
+    }
+    found
 }
 
 /// What a table is FOR, from its position in the relationship graph.
@@ -609,6 +745,269 @@ mod tests {
         // ...and "headcount" is its own term, because word boundaries mean
         // "count" does not match inside it.
         assert_eq!(infer_unit("Headcount", None), Some(Unit::Count));
+    }
+
+    // --- which table is the calendar ----------------------------------------
+
+    /// A warehouse `dim_date`: a surrogate key, one real date, and calendar
+    /// parts typed `Decimal(38,10)` the way a star schema imported from a
+    /// database actually types them. NOTHING marks it.
+    ///
+    /// `mark_date_table` is builder-only and no host command sets it, so this —
+    /// not the marked star above — is what an ordinary imported model looks like.
+    fn an_unmarked_warehouse_calendar() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("DateKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_date",
+                    vec![
+                        Column::new("date_key", DataType::Int64),
+                        Column::new("full_date", DataType::Date),
+                        Column::new("year", DataType::Decimal(38, 10)),
+                        Column::new("quarter", DataType::Decimal(38, 10)),
+                        Column::new("month", DataType::Decimal(38, 10)),
+                        Column::new("day", DataType::Decimal(38, 10)),
+                        Column::new("week_of_year", DataType::Decimal(38, 10)),
+                        Column::new("month_name", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Date",
+                "Sales",
+                "DateKey",
+                "dim_date",
+                "date_key",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the unmarked warehouse calendar fixture builds")
+    }
+
+    #[test]
+    fn an_unmarked_warehouse_date_table_is_inferred_and_stamped_as_a_guess() {
+        let facts = facts_from_model(&an_unmarked_warehouse_calendar());
+        assert_eq!(facts.date_table.as_deref(), Some("dim_date"));
+        assert_eq!(facts.calendar_source, Some(CalendarSource::Inferred));
+        // ...and the classification cascades from it: without this the table
+        // would be an ordinary Dimension and the role ladder's calendar arm
+        // would never fire.
+        assert_eq!(facts.tables["dim_date"].kind, Some(TableKind::Calendar));
+    }
+
+    #[test]
+    fn a_declared_date_table_wins_even_when_another_table_looks_more_like_one() {
+        // `Kalender` carries a date and one calendar word; `dim_date` carries a
+        // date and six. The heuristic would prefer `dim_date` and it does not
+        // get a vote: a mark is the author's own statement.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("DateKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Kalender",
+                    vec![
+                        Column::new("datum", DataType::Date),
+                        Column::new("år", DataType::Int32),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_date",
+                    vec![
+                        Column::new("date_key", DataType::Int64),
+                        Column::new("full_date", DataType::Date),
+                        Column::new("year", DataType::Int32),
+                        Column::new("quarter", DataType::Int32),
+                        Column::new("month", DataType::Int32),
+                        Column::new("day", DataType::Int32),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Date",
+                "Sales",
+                "DateKey",
+                "dim_date",
+                "date_key",
+            ))
+            .mark_date_table("Kalender")
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the declared-vs-better-looking fixture builds");
+        let facts = facts_from_model(&model);
+        assert_eq!(facts.date_table.as_deref(), Some("Kalender"));
+        assert_eq!(facts.calendar_source, Some(CalendarSource::Declared));
+        assert_eq!(facts.tables["dim_date"].kind, Some(TableKind::Dimension));
+    }
+
+    #[test]
+    fn two_candidate_calendars_infer_neither_rather_than_picking_one() {
+        // A role-playing pair: order date and ship date, both shaped exactly
+        // like a calendar. WHICH ONE time runs along is a business decision, and
+        // answering it from table declaration order would be the confident-wrong
+        // this whole layer exists to avoid.
+        let mut builder = DataModel::builder().add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("Amount", DataType::Float64),
+                    Column::new("OrderDateKey", DataType::Int64),
+                    Column::new("ShipDateKey", DataType::Int64),
+                ],
+            )
+            .unwrap(),
+        );
+        for name in ["dim_order_date", "dim_ship_date"] {
+            builder = builder.add_table(
+                Table::new(
+                    name,
+                    vec![
+                        Column::new("date_key", DataType::Int64),
+                        Column::new("full_date", DataType::Date),
+                        Column::new("year", DataType::Int32),
+                        Column::new("month", DataType::Int32),
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        let model = builder
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Order",
+                "Sales",
+                "OrderDateKey",
+                "dim_order_date",
+                "date_key",
+            ))
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Ship",
+                "Sales",
+                "ShipDateKey",
+                "dim_ship_date",
+                "date_key",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the role-playing fixture builds");
+        let facts = facts_from_model(&model);
+        assert_eq!(facts.date_table, None, "ambiguity refuses");
+        assert_eq!(facts.calendar_source, None);
+        assert_eq!(facts.tables["dim_order_date"].kind, Some(TableKind::Dimension));
+    }
+
+    #[test]
+    fn a_fact_table_carrying_a_date_and_calendar_names_is_never_the_calendar() {
+        // The trap a laxer rule falls into: a wide fact table often carries an
+        // order date AND denormalised year/month columns. Filters flow OUT of
+        // it, which is what makes it the grain rather than an axis.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("order_date", DataType::Date),
+                        Column::new("year", DataType::Int32),
+                        Column::new("month", DataType::Int32),
+                        Column::new("ProductKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Product",
+                    vec![
+                        Column::new("ProductKey", DataType::Int64),
+                        Column::new("Category", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Product",
+                "Sales",
+                "ProductKey",
+                "Product",
+                "ProductKey",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the denormalised fact fixture builds");
+        let facts = facts_from_model(&model);
+        assert_eq!(facts.date_table, None);
+        assert_eq!(facts.tables["Sales"].kind, Some(TableKind::Fact));
+    }
+
+    #[test]
+    fn a_dimension_with_a_date_but_no_calendar_vocabulary_is_not_the_calendar() {
+        // The other half of the conservatism: a customer dimension has a
+        // `created_at` and is not a calendar. One calendar-ish column would not
+        // be enough either — `MIN_CALENDAR_PART_COLUMNS` is two.
+        let model = a_small_star();
+        assert_eq!(facts_from_model(&model).date_table.as_deref(), Some("Date"));
+
+        let unmarked = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("CustomerKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Customer",
+                    vec![
+                        Column::new("CustomerKey", DataType::Int64),
+                        Column::new("Segment", DataType::String),
+                        Column::new("BirthYear", DataType::Int32),
+                        Column::new("created_at", DataType::Date),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Customer",
+                "Sales",
+                "CustomerKey",
+                "Customer",
+                "CustomerKey",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the customer-dimension fixture builds");
+        let facts = facts_from_model(&unmarked);
+        assert_eq!(
+            facts.date_table, None,
+            "one year column is an attribute, not a calendar"
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //          strategy they trust. Three grids (measures, tables+columns, rules),
 //          a findings strip, and the four actions: Validate, Run tests, Save,
 //          Infer.
-// CONTEXT: Six properties are the design, not decoration.
+// CONTEXT: Eleven properties are the design, not decoration.
 //
 //          (1) THE ROW STATE IS FOUR-VALUED, NOT TWO. `reviewed` alone cannot
 //          tell a row nobody has touched from a row a machine guessed, so both
@@ -94,6 +94,38 @@
 //          `MM-DD` and is refused at the keystroke that commits it rather than
 //          at Save, because a fiscal year START RECURS — the commonest wrong
 //          answer is a full date.
+//
+//          (10) TWO OF THOSE FOUR FIELDS ARE STORED AND READ BY NOTHING, AND
+//          SAY SO ON SCREEN. `reportingCurrency` has no consumer anywhere;
+//          `fiscalYearStart` has none outside its own format check — the
+//          planner buckets by cadence and never asks where the fiscal year
+//          starts. Someone will type SEK into an ordinary-looking box and
+//          reasonably expect a downstream effect, so each of the two carries a
+//          VISIBLE note (`NotYetConsulted`) rather than a tooltip: a tooltip is
+//          not a promise anyone reads before typing. Both stay EDITABLE — the
+//          value is stored, travels with the model, and matters the moment
+//          something reads it, so disabling would discard authored intent and
+//          buy nothing. `defaultTimeAxis` and `priority` carry no note because
+//          both are read. This is the same overstatement that was just taken
+//          out of the Rust validator's comment (`insights/strategy/validate.rs`
+//          used to claim "every period bucket in every fact is derived from
+//          this"), reappearing somewhere a user can see it; when one of these
+//          fields acquires a reader, DELETE its note — a stale "nothing reads
+//          this" is the same lie pointed the other way.
+//
+//          (11) THE RULES SECTION HAS TO INVITE ITS OWN ACTION. `Add rule` was
+//          a `smallBtn` beside a 13px heading and the empty state read "No
+//          rules. A rule annotates facts in a scope; it never generates one." —
+//          theory with no call to action. A reviewer read that, missed the
+//          button entirely, and concluded rules could not be authored at all;
+//          nobody then exercised the rules path, and a 100% path mismatch in
+//          its findings went unnoticed. Undiscoverable UI and untested code are
+//          the same territory. So the empty state names what a rule DOES in
+//          concrete terms and carries the action itself, and a disabled add
+//          control states WHY in the same place (`addRuleBlockedReason`) — a
+//          read-only subscribed model and a document that has not loaded are
+//          different answers, and a grey button with no sentence is what made
+//          this invisible in the first place.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ModelOverview, ModelTableInfo } from "@api";
@@ -538,9 +570,13 @@ const FISCAL_YEAR_START_HINT =
  * Read a fiscal year start, or say why it is not one.
  *
  * A fiscal year start RECURS, so it carries no year: `2026-04-01` is the
- * commonest wrong answer and it is wrong in a way nothing downstream can
- * notice, because every period bucket in every fact is derived from this and a
- * malformed value mis-labels the report rather than failing.
+ * commonest wrong answer. Nothing reads the field yet (see property (10)), so
+ * today a malformed value is a stored trap rather than a wrong report — which
+ * is exactly why the check earns its keep: the trap springs on whoever wires
+ * the field up, long after the person who typed it has gone. This comment used
+ * to say "every period bucket in every fact is derived from this"; it was not
+ * true, and it is the overstatement the field's own on-screen note exists to
+ * stop repeating.
  *
  * The month/day ranges mirror the Rust validator
  * (`insights/strategy/validate.rs`) EXACTLY, `02-31` included. That is
@@ -1101,6 +1137,39 @@ function FiscalYearStartField({
 }
 
 /**
+ * The exact sentence a stored-but-unread field says about itself.
+ *
+ * "Saved" and "nothing reads it" both have to be in it. Half of that sentence
+ * on its own is a new lie in the other direction: "nothing reads this" alone
+ * reads as "typing here is pointless", and the value IS kept, travels with the
+ * model, and is the thing whoever wires the feature up will find waiting.
+ */
+const NOT_YET_CONSULTED =
+  "Saved with the strategy and carried with the model — but nothing reads it yet, so setting it changes no insight today.";
+
+/**
+ * The visible note on a control whose value is stored and consulted by nothing.
+ *
+ * See property (10). It is a `<div>` under the input rather than a `title`
+ * because a tooltip is not a promise anybody reads before typing, and the whole
+ * objection here is that an ordinary-looking box quietly promises a downstream
+ * effect it does not have. `field` is the document key, so the marker a test
+ * enumerates is the same string the field is called in `ModelStrategy` — a note
+ * that outlived its field would then be findable rather than merely wrong.
+ */
+function NotYetConsulted({ field }: { field: keyof ModelStrategy }): React.ReactElement {
+  return (
+    <div
+      data-testid={`model-not-consulted-${field}`}
+      data-inert-field={field}
+      style={{ fontSize: 11, color: "#7a5b00", marginTop: 2 }}
+    >
+      {NOT_YET_CONSULTED}
+    </div>
+  );
+}
+
+/**
  * The four model-wide fields, above the grids they set the defaults for.
  *
  * `defaultTimeAxis` leads because it is the load-bearing one: it is the axis
@@ -1196,6 +1265,10 @@ function ModelPanel({
             disabled={disabled}
             onCommit={(fiscalYearStart) => onEdit(withModel(doc, { fiscalYearStart }))}
           />
+          {/* Editable, and honest about being inert — property (10). The format
+              is still refused at the keystroke, because a value stored
+              malformed is a trap for whoever eventually reads it. */}
+          <NotYetConsulted field="fiscalYearStart" />
           <FieldFindings findings={findingsAtPath(findings, "model.fiscalYearStart")} />
         </Field>
 
@@ -1214,6 +1287,10 @@ function ModelPanel({
               )
             }
           />
+          {/* This is the field the objection was actually about: somebody types
+              SEK here and reasonably expects a currency to appear downstream.
+              Nothing anywhere reads `reportingCurrency`. */}
+          <NotYetConsulted field="reportingCurrency" />
         </Field>
 
         <Field
@@ -1421,6 +1498,15 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   const columnRefs = useMemo(() => modelColumnRefs(overview), [overview]);
   const errorCount = findings.filter((f) => f.severity === "error").length;
   const disabled = readOnly || busy || doc === null;
+  // Computed from the SAME three inputs `disabled` is, so the sentence and the
+  // grey cannot come apart: a control that is dead for a reason nobody states
+  // is what made the Rules section read as unbuilt (property (11)).
+  const addRuleBlocked = addRuleBlockedReason({
+    readOnly,
+    readOnlyReason: overview.readOnlyReason,
+    loaded: doc !== null,
+    busy,
+  });
 
   const run = useCallback(
     async (what: string, fn: (d: StrategyDoc) => Promise<void>) => {
@@ -1616,6 +1702,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           findings={findings}
           selectedPath={selectedPath}
           disabled={disabled}
+          blockedReason={addRuleBlocked}
           onAdd={() => setEditing({ original: null })}
           onEditRule={(rule) => setEditing({ original: rule })}
           onDelete={(id) => edit(withoutRule(doc, id))}
@@ -2411,11 +2498,79 @@ function describeScope(scope: Scope | undefined): string {
     .join("; ");
 }
 
+/**
+ * What a rule is FOR, in the terms of the thing a person came here to do.
+ *
+ * The old empty state said "A rule annotates facts in a scope; it never
+ * generates one." — true, and unactionable: it names a category, not a job, and
+ * a reader who does not already know what a scope is learns nothing from it.
+ * The clause about not GENERATING facts survives because it is the one thing
+ * people get wrong about rules, but it now comes after the job rather than
+ * instead of it.
+ */
+const RULE_INVITATION =
+  "A rule scopes one answer to part of the model: a direction, a target, a materiality or a " +
+  "cadence that applies only to certain members of a column, or only from a certain date — " +
+  "leaving every other slice as it was. It annotates the facts inside that scope; it never " +
+  "generates one.";
+
+/**
+ * Why `Add rule` is grey, or null when it is not.
+ *
+ * A disabled control with no sentence beside it is what let a reviewer conclude
+ * rules could not be authored at all (property (11)), so the answer has to be
+ * specific: a read-only model is a DIFFERENT problem from a document that has
+ * not arrived, and only one of the two is going to fix itself.
+ *
+ * `readOnlyReason` is preferred over any sentence written here, because the
+ * host already knows why this model refuses edits (a subscribed copy is the
+ * usual answer, not the only one) and a second guess in this file would be a
+ * second source of truth that drifts from the banner above it.
+ */
+export function addRuleBlockedReason(opts: {
+  readOnly: boolean;
+  readOnlyReason: string | null;
+  loaded: boolean;
+  busy: boolean;
+}): string | null {
+  // Order matters: an unloaded document is also `disabled`, and answering
+  // "read-only" for it would send someone to look for a subscription that is
+  // not there.
+  if (!opts.loaded) {
+    return "The strategy has not loaded yet — Add rule wakes up as soon as this model's strategy arrives.";
+  }
+  if (opts.readOnly) {
+    const reason = (opts.readOnlyReason ?? "").trim();
+    return reason === ""
+      ? "This model is read-only — it is a subscribed copy, so its rules are authored where the model is published, not here."
+      : `This model is read-only, so rules cannot be authored here: ${reason}`;
+  }
+  if (opts.busy) {
+    return "Another strategy action is still running — Add rule comes back when it finishes.";
+  }
+  return null;
+}
+
+/** The sentence under a disabled add control. Rendered in ONE place at a time —
+ *  beside whichever add control the section is currently showing — so a test
+ *  that finds two of these has found a duplicated explanation. */
+function AddRuleBlocked({ reason }: { reason: string }): React.ReactElement {
+  return (
+    <div
+      data-testid="rules-add-blocked"
+      style={{ fontSize: 11, color: "#7a5b00", marginTop: 4 }}
+    >
+      {reason}
+    </div>
+  );
+}
+
 function RulesGrid({
   doc,
   findings,
   selectedPath,
   disabled,
+  blockedReason,
   onAdd,
   onEditRule,
   onDelete,
@@ -2424,19 +2579,32 @@ function RulesGrid({
   findings: Finding[];
   selectedPath: string | null;
   disabled: boolean;
+  /** Why the add control is grey, or null when it is live. */
+  blockedReason: string | null;
   onAdd: () => void;
   onEditRule: (rule: Rule) => void;
   onDelete: (id: string) => void;
 }): React.ReactElement {
   const rules = doc.rules ?? [];
+  const empty = rules.length === 0;
   return (
     <section>
       <div style={styles.sectionHeader}>
         <span style={{ ...styles.sectionTitle, fontSize: 13 }}>Rules</span>
-        <button style={styles.smallBtn} disabled={disabled} onClick={onAdd}>
+        <button
+          style={styles.smallBtn}
+          disabled={disabled}
+          title={blockedReason ?? RULE_INVITATION}
+          onClick={onAdd}
+        >
           Add rule
         </button>
       </div>
+      {/* When the grid is empty the explanation belongs beside the empty
+          state's own button, which is the add control a person is actually
+          looking at. Never both — one sentence, wherever the live affordance
+          is. */}
+      {blockedReason !== null && !empty && <AddRuleBlocked reason={blockedReason} />}
       <div style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>
@@ -2449,12 +2617,28 @@ function RulesGrid({
             </tr>
           </thead>
           <tbody>
-            {rules.length === 0 && (
+            {empty && (
               <tr>
                 <td style={styles.td} colSpan={6}>
-                  <span style={styles.muted}>
-                    No rules. A rule annotates facts in a scope; it never generates one.
-                  </span>
+                  {/* The action lives HERE as well as in the header. The header
+                      button is an 11px control beside a 13px heading; a reader
+                      who has just been told what a rule is for should not have
+                      to go and find it. */}
+                  <div data-testid="rules-empty" style={{ maxWidth: 720 }}>
+                    <div style={{ fontSize: 12, color: "#444", marginBottom: 6 }}>
+                      No rules yet. {RULE_INVITATION}
+                    </div>
+                    <button
+                      data-testid="rules-empty-add"
+                      style={styles.btn}
+                      disabled={disabled}
+                      title={blockedReason ?? RULE_INVITATION}
+                      onClick={onAdd}
+                    >
+                      Add the first rule
+                    </button>
+                    {blockedReason !== null && <AddRuleBlocked reason={blockedReason} />}
+                  </div>
                 </td>
               </tr>
             )}

@@ -37,6 +37,22 @@
 //          warning is STILL ON SCREEN afterwards, and the status says how many
 //          were skipped and why. A silent skip would satisfy the first three.
 //
+//          THE INERT-FIELD TESTS ENUMERATE, THEY DO NOT SPOT-CHECK. Two of the
+//          four model fields are stored and read by nothing, and the assertion
+//          is on the WHOLE set of marked fields rather than on the two being
+//          present — a note that survives its field acquiring a reader is the
+//          same overstatement pointed the other way, and only an equality
+//          catches that.
+//
+//          THE RULES TESTS EXIST BECAUSE A REVIEWER MISSED THE BUTTON. The
+//          "Add rule" control was there all along; the empty state was a
+//          sentence of theory with no call to action, so the rules path went
+//          unexercised and a 100% path mismatch in its findings went unnoticed.
+//          The assertions are therefore on DISCOVERABILITY — the empty state
+//          offers the action and names what a rule does — and on a disabled
+//          control explaining itself, which a `.disabled === true` assertion
+//          alone would never have noticed was missing.
+//
 //          A CONTROL IS CHANGED THROUGH THE PROTOTYPE SETTER. React patches
 //          `value` on the element instance to track it, so `el.value = x`
 //          updates the tracker too and the change event is then dropped as a
@@ -81,6 +97,7 @@ import {
 } from "../lib/strategyBackend";
 import {
   StrategySection,
+  addRuleBlockedReason,
   buildRuleFromDraft,
   emptyRuleDraft,
   forgetUnsavedDrafts,
@@ -661,8 +678,9 @@ describe("the model panel", () => {
     const field = byTestId<HTMLInputElement>("model-fiscal-year-start");
 
     // The commonest wrong answer: a fiscal year start RECURS, so it carries no
-    // year — and nothing downstream could notice, because every period bucket
-    // is derived from this.
+    // year. Nothing reads the field yet, so what a malformed value buys today
+    // is a stored trap that springs on whoever wires it up — which is the
+    // reason to refuse it at the keystroke rather than at Save.
     await commitText(field, "2026-04-01");
     const message = byTestId("model-fiscal-year-start-error").textContent ?? "";
     expect(message).toContain("MM-DD");
@@ -681,6 +699,45 @@ describe("the model panel", () => {
 
     await click(button("Save"));
     expect(lastSaved().model?.fiscalYearStart).toBe("04-01");
+  });
+
+  it("marks exactly the two fields nothing reads yet, and neither of the two that are read", async () => {
+    await mount();
+
+    // An EQUALITY, not two presence checks. `defaultTimeAxis` and `priority`
+    // are both consulted, so a note on either of them would be a fresh lie; and
+    // when one of these two fields finally acquires a reader, its note has to
+    // go, which only an exhaustive assertion notices.
+    const marked = [...container.querySelectorAll("[data-inert-field]")]
+      .map((el) => el.getAttribute("data-inert-field"))
+      .sort();
+    expect(marked).toEqual(["fiscalYearStart", "reportingCurrency"]);
+  });
+
+  it("says the inert value is SAVED as well as unread, in visible text rather than a tooltip", async () => {
+    await mount();
+    const note = byTestId("model-not-consulted-reportingCurrency");
+
+    // Both halves. "Nothing reads this" alone reads as "typing here is
+    // pointless", and the value is in fact stored and carried with the model.
+    expect(note.textContent).toContain("Saved");
+    expect(note.textContent).toContain("nothing reads it yet");
+    // On screen, not hidden in a title: a tooltip is not a promise anyone reads
+    // before typing, which is the entire objection this note answers.
+    expect((note.textContent ?? "").trim().length).toBeGreaterThan(0);
+    expect(note.tagName).not.toBe("INPUT");
+  });
+
+  it("leaves an inert field fully editable, because the value still travels with the model", async () => {
+    await mount();
+    const field = byTestId<HTMLInputElement>("model-reporting-currency");
+
+    // Disabling would discard authored intent to buy nothing: the day something
+    // reads `reportingCurrency`, the SEK somebody typed has to be there.
+    expect(field.disabled).toBe(false);
+    await change(field, "SEK");
+    await click(button("Save"));
+    expect(lastSaved().model?.reportingCurrency).toBe("SEK");
   });
 
   it("shows the priority order and can clear it, without pretending to reorder it", async () => {
@@ -1238,6 +1295,105 @@ describe("the columns grid", () => {
     await change(role, "analysis");
     expect(byTestId("ignored-summary-Sales").textContent).toContain("1 ignored column");
     expect(columnRow("Sales", "Amount")).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The rules section — discoverable, or the path goes untested
+// ---------------------------------------------------------------------------
+
+describe("the rules section with no rules in it", () => {
+  it("invites the action and names what a rule DOES, rather than defining one", async () => {
+    await mount();
+    const emptyState = byTestId("rules-empty");
+    const text = emptyState.textContent ?? "";
+
+    // Concrete things a person can want, not a category. The old sentence —
+    // "A rule annotates facts in a scope; it never generates one." — is true
+    // and teaches nobody what to do with the feature.
+    expect(text).toContain("direction");
+    expect(text).toContain("target");
+    expect(text).toContain("materiality");
+    // The clause people actually get wrong survives; it just no longer stands
+    // in for the invitation.
+    expect(text).toContain("never generates one");
+  });
+
+  it("carries the action itself, so the 11px header button is not the only way in", async () => {
+    await mount();
+
+    const add = byTestId<HTMLButtonElement>("rules-empty-add", byTestId("rules-empty"));
+    expect(add.disabled).toBe(false);
+    await click(add);
+
+    // It opens the same editor the header button opens — the invitation is the
+    // real action, not a label pointing at one somewhere else.
+    expect(container.textContent).toContain("New rule");
+    expect(button("Add scope column")).not.toBeNull();
+  });
+
+  it("explains a grey add control instead of only greying it out", async () => {
+    await mount(ctxFor(overview(), true));
+
+    expect(byTestId<HTMLButtonElement>("rules-empty-add").disabled).toBe(true);
+    expect(button("Add rule").disabled).toBe(true);
+    // THE POINT. A reviewer read a grey button with no sentence beside it and
+    // concluded rules could not be authored at all; nobody then exercised the
+    // rules path, and a 100% path mismatch in its findings went unnoticed.
+    const why = byTestId("rules-add-blocked").textContent ?? "";
+    expect(why).toContain("read-only");
+    expect(why).toContain("subscribed");
+    // One sentence, beside the control a person is looking at — not one under
+    // the heading and another in the empty state saying the same thing.
+    expect(container.querySelectorAll('[data-testid="rules-add-blocked"]').length).toBe(1);
+  });
+
+  it("prefers the host's own read-only reason over a guess made here", async () => {
+    const subscribed = overview();
+    subscribed.readOnlyReason = "this model came from the 'Nordics KPIs' application";
+    await mount(ctxFor(subscribed, true));
+
+    // The banner above already knows why this model refuses edits. A second
+    // sentence invented in the Strategy tab would be a second source of truth
+    // that drifts from it.
+    expect(byTestId("rules-add-blocked").textContent).toContain("Nordics KPIs");
+  });
+
+  it("says nothing at all when the add control is live", async () => {
+    await mount();
+    expect(container.querySelector('[data-testid="rules-add-blocked"]')).toBeNull();
+  });
+});
+
+describe("why Add rule is grey", () => {
+  const LIVE = { readOnly: false, readOnlyReason: null, loaded: true, busy: false };
+
+  it("distinguishes a read-only model from a document that has not arrived", async () => {
+    const notLoaded = addRuleBlockedReason({ ...LIVE, loaded: false });
+    const readOnly = addRuleBlockedReason({ ...LIVE, readOnly: true });
+
+    expect(notLoaded).not.toBe(readOnly);
+    // One of the two fixes itself in a second; the other never will, and
+    // sending someone to look for a subscription that is not there is the worse
+    // of the two wrong answers.
+    expect(notLoaded).toContain("has not loaded");
+    expect(readOnly).toContain("read-only");
+  });
+
+  it("answers 'not loaded' first for a read-only model that has not loaded either", async () => {
+    expect(addRuleBlockedReason({ readOnly: true, readOnlyReason: null, loaded: false, busy: false })).toBe(
+      addRuleBlockedReason({ ...LIVE, loaded: false }),
+    );
+  });
+
+  it("names the running action rather than the model when the tab is merely busy", async () => {
+    const busy = addRuleBlockedReason({ ...LIVE, busy: true });
+    expect(busy).toContain("still running");
+    expect(busy).not.toContain("read-only");
+  });
+
+  it("is null when nothing is in the way, so a live control carries no apology", async () => {
+    expect(addRuleBlockedReason(LIVE)).toBeNull();
   });
 });
 

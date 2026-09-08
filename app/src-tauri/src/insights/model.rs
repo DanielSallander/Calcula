@@ -46,6 +46,7 @@ use insights::narrate::number;
 use insights::types::{AppliedAttr, AttrSource as CoreAttrSource, FactKind, Subject};
 use insights::{narrate, timeseries};
 
+use super::strategy::resolve::CalendarSource;
 use super::strategy::{
     Additivity, Attribute, AttrSource, Direction, Materiality, ModelFacts, QualifiedColumn,
     ResolvedMeasure, StrategyDoc, Target,
@@ -868,27 +869,82 @@ pub fn choose_measures(
     chosen
 }
 
-/// The column the analysis walks time along.
+/// What came of choosing a time axis: the column, and what had to be said aloud
+/// about how it was chosen.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TimeAxisPlan {
+    pub axis: Option<QualifiedColumn>,
+    pub notes: Vec<String>,
+}
+
+/// The column the analysis walks time along, and the note that choice owes the
+/// reader.
 ///
 /// `defaultTimeAxis` wins when the model really has that column. Otherwise the
-/// marked date table's own date column. When neither exists there is NO time
-/// axis, and the caller must say so in `notes` rather than ordering the rows by
-/// whatever came back and calling the result a trend.
+/// date table's own date column. When neither exists there is NO time axis, and
+/// the caller must say so in `notes` rather than ordering the rows by whatever
+/// came back and calling the result a trend.
+///
+/// A GUESSED CALENDAR IS ANNOUNCED, and that is the reason this returns a plan
+/// rather than a column. `facts.rs` infers a date table on a model whose author
+/// never marked one — an ordinary imported star schema — which is what makes
+/// trend, seasonality and change-point facts possible there at all. But every
+/// one of those facts is then computed against an axis NOBODY DECLARED, and a
+/// guess that drives the whole time half of a report while looking exactly like
+/// a declaration is the same failure `plan_dimensions` pushes its empty-
+/// dimensions note to prevent: honest, and invisible. So the axis is reported
+/// with its provenance whenever the calendar under it was inferred — including
+/// when the axis itself came from `defaultTimeAxis`, because a drafted document
+/// copies the inferred calendar's column straight into that field.
+pub fn plan_time_axis(
+    doc: &StrategyDoc,
+    facts: &ModelFacts,
+    date_columns: &[QualifiedColumn],
+) -> TimeAxisPlan {
+    let axis = doc
+        .model
+        .default_time_axis
+        .as_ref()
+        .filter(|declared| facts.has_column(declared))
+        .cloned()
+        .or_else(|| {
+            let date_table = facts.date_table.as_deref()?;
+            date_columns
+                .iter()
+                .find(|c| c.table == date_table && facts.has_column(c))
+                .cloned()
+        });
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(axis) = axis.as_ref() {
+        let on_the_calendar = facts.date_table.as_deref() == Some(axis.table.as_str());
+        if on_the_calendar && facts.calendar_source == Some(CalendarSource::Inferred) {
+            notes.push(format!(
+                "Time runs along {}, and nobody said it should: no table in this model is marked \
+                 as its date table, so {} was guessed to be the calendar from its column names. \
+                 Every trend, change point and seasonality claim below rests on that guess. Mark \
+                 the date table in the Model Editor to make it a decision.",
+                axis, axis.table
+            ));
+        }
+    }
+    TimeAxisPlan { axis, notes }
+}
+
+/// The axis alone, for a caller that has no `notes` to put the provenance in.
+///
+/// WHAT THIS DROPS. `plan_time_axis` is the whole function; this is the half of
+/// it that answers "which column", and it silently discards the half that says
+/// where the calendar came from. `run_model_insights` in `model_commands.rs` is
+/// the one production caller and it HAS a `notes` vector two lines above the
+/// call — it should take the plan and `notes.extend(plan.notes)`, exactly as it
+/// already does for `plan_dimensions`. Until it does, a guessed calendar drives
+/// a real report without saying so.
 pub fn choose_time_axis(
     doc: &StrategyDoc,
     facts: &ModelFacts,
     date_columns: &[QualifiedColumn],
 ) -> Option<QualifiedColumn> {
-    if let Some(declared) = doc.model.default_time_axis.as_ref() {
-        if facts.has_column(declared) {
-            return Some(declared.clone());
-        }
-    }
-    let date_table = facts.date_table.as_deref()?;
-    date_columns
-        .iter()
-        .find(|c| c.table == date_table && facts.has_column(c))
-        .cloned()
+    plan_time_axis(doc, facts, date_columns).axis
 }
 
 /// What came of planning one measure's dimensions.
@@ -2341,6 +2397,83 @@ mod tests {
             choose_time_axis(&doc, &star_facts(), &[QualifiedColumn::new("Date", "Date")]),
             Some(QualifiedColumn::new("Date", "Month"))
         );
+    }
+
+    #[test]
+    fn a_time_axis_resting_on_a_guessed_calendar_is_announced() {
+        // A GUESS THAT DRIVES EVERY TIME FACT MUST NOT LOOK LIKE A DECLARATION.
+        // `facts.rs` infers a date table on a model nobody marked, which is what
+        // gives an imported star schema a time axis at all - and every trend,
+        // change point and seasonality claim in the run then rests on it.
+        let mut facts = star_facts();
+        facts.calendar_source = Some(CalendarSource::Inferred);
+        let doc = StrategyDoc {
+            version: 1,
+            ..StrategyDoc::default()
+        };
+        let plan = plan_time_axis(&doc, &facts, &[QualifiedColumn::new("Date", "Date")]);
+        assert_eq!(plan.axis, Some(QualifiedColumn::new("Date", "Date")));
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        assert!(
+            plan.notes[0].contains("guessed") && plan.notes[0].contains("Date"),
+            "the note must name the guess and the table: {}",
+            plan.notes[0]
+        );
+
+        // ...and the guess is still a guess when it arrives through a DRAFTED
+        // `defaultTimeAxis`, which is exactly how it reaches a saved document:
+        // `infer_default_time_axis` copies the inferred calendar's column there.
+        let drafted = StrategyDoc {
+            version: 1,
+            model: ModelStrategy {
+                default_time_axis: Some(QualifiedColumn::new("Date", "Month")),
+                ..ModelStrategy::default()
+            },
+            ..StrategyDoc::default()
+        };
+        let plan = plan_time_axis(&drafted, &facts, &[]);
+        assert_eq!(plan.axis, Some(QualifiedColumn::new("Date", "Month")));
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+    }
+
+    #[test]
+    fn a_declared_calendar_earns_no_note_and_neither_does_no_calendar_at_all() {
+        // THE OTHER DIRECTION, and it is the half that decides whether the note
+        // is worth reading: a note on every run is a note nobody reads.
+        let mut facts = star_facts();
+        facts.calendar_source = Some(CalendarSource::Declared);
+        let doc = StrategyDoc {
+            version: 1,
+            ..StrategyDoc::default()
+        };
+        let plan = plan_time_axis(&doc, &facts, &[QualifiedColumn::new("Date", "Date")]);
+        assert_eq!(plan.axis, Some(QualifiedColumn::new("Date", "Date")));
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+
+        // An axis that is not ON the calendar says nothing about the calendar,
+        // however the calendar was arrived at.
+        let mut guessed = star_facts();
+        guessed.calendar_source = Some(CalendarSource::Inferred);
+        let off_calendar = StrategyDoc {
+            version: 1,
+            model: ModelStrategy {
+                default_time_axis: Some(QualifiedColumn::new("Sales", "Date")),
+                ..ModelStrategy::default()
+            },
+            ..StrategyDoc::default()
+        };
+        let plan = plan_time_axis(&off_calendar, &guessed, &[]);
+        assert_eq!(plan.axis, Some(QualifiedColumn::new("Sales", "Date")));
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
+
+        // And with no calendar there is no axis and still no note: saying THAT
+        // is the caller's own "this model has no time axis" line.
+        let mut none = star_facts();
+        none.date_table = None;
+        none.calendar_source = None;
+        let plan = plan_time_axis(&doc, &none, &[QualifiedColumn::new("Date", "Date")]);
+        assert_eq!(plan.axis, None);
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
     }
 
     // -- provenance and determinism ----------------------------------------

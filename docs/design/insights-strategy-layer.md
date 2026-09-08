@@ -228,7 +228,12 @@ per measure will not be filled in. So the product is **inference plus confirm-th
   A semi-additive balance becomes last-value on the date dimension. Unknown defaults to
   **non-additive**, deliberately: a wrong "additive" produces a wrong share claim, while a wrong
   "non-additive" merely withholds one. The safe default is the one that says less.
-- **Unit** from `format_string`.
+- **Unit** from `format_string` first, then the name. An integer-only format like `#,##0` is what a
+  currency measure wears about as often as a tally does, so reading it as a count made a measure
+  named *Revenue* infer as `Count`. An explicit signal — a `%`, a currency bracket — still wins
+  outright; the name only breaks the tie the format left. It is decided in **one** place,
+  `facts.rs`, because `MeasureFacts.unit` is also the resolver's base layer: a second lexicon in
+  `infer` would have fixed the drafted document and not the model that has no document at all.
 - **Table kind and column roles** from relationship participation and declared metadata — not from
   cardinality, which does not exist. Keys are detected from join conditions; a `sort_by_column`
   target such as the `MonthNumber` behind `MonthName` is marked `ignore`, because it is machinery
@@ -239,6 +244,27 @@ per measure will not be filled in. So the product is **inference plus confirm-th
 The Strategy tab shows inferred values in an unreviewed style with per-row Confirm and Confirm-all,
 the validator's findings inline, and the inline tests with pass/fail. The CLI covers the same ground
 for people who prefer typing.
+
+### What a name heuristic can and cannot carry
+
+Several of the rules above are name lexicons, and it is worth being explicit about the ceiling they
+share, because it is not obvious from any one of them.
+
+**A name heuristic generalises exactly as far as its naming conventions do.** They are written and
+tested against one spelling — `PascalCase`, usually, because that is how a hand-built fixture reads
+— and an imported SQL schema arrives in another. The word splitter cannot break an all-lowercase
+run, so `emailaddress` is one token: `email` does not match it, and neither does `name` match
+`fullname`. Two independent rules fail together on the same input, and the symptom is not an error
+but a plausible-looking draft in which a customer's address is offered as a breakdown axis and the
+table has no display label at all. Add a fixture per convention before trusting any of them, and
+keep the lexicons bilingual because a Swedish model is the normal case here.
+
+**And a name is a proxy for the thing that actually decides.** Whether a column is an axis is a
+question about CARDINALITY: `Country` and `FullName` are both strings on a dimension, and only the
+distinct count separates them in general. The lexicons are a stopgap for a signal this codebase does
+not keep — see `INFER_ANALYSIS_DIMENSIONS` and `docs/design/open-items.md` §2.AI.6. Cardinality is
+the one signal that is independent of both naming convention and language, which is why every
+lexicon here carries a comment pointing at it rather than pretending to be the answer.
 
 ## 10. Usage mining
 

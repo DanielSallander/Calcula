@@ -113,14 +113,26 @@ fn strategy_doc(model: &bi_engine::DataModel, notes: &mut Vec<String>) -> Strate
     }
 }
 
-/// Candidate time-axis columns of the marked date table, best first.
+/// Candidate time-axis columns of the calendar, best first.
 ///
 /// A column the model tagged `DateKey` is the model author's own answer. Failing
 /// that, the first `Date`/`Timestamp`-typed column in declaration order — which
 /// is a guess, but a guess about which column holds dates, not about what
 /// "good" means.
-fn date_axis_candidates(model: &bi_engine::DataModel) -> Vec<QualifiedColumn> {
-    let Some(table_name) = model.date_table() else {
+///
+/// THE CALENDAR COMES FROM `facts`, NOT FROM `model.date_table()` DIRECTLY.
+/// Most models never call `mark_date_table`, and reading the declaration alone
+/// returned an empty candidate list for every one of them — so a model with no
+/// strategy document got no time axis at all, and the entire time-series half of
+/// the engine went quiet with nothing said. `facts.date_table` is the
+/// declaration falling back to an INFERRED calendar, and `plan_time_axis` emits
+/// a note whenever the one it used was inferred. The guess is allowed precisely
+/// because it announces itself.
+fn date_axis_candidates(
+    model: &bi_engine::DataModel,
+    facts: &ModelFacts,
+) -> Vec<QualifiedColumn> {
+    let Some(table_name) = facts.date_table.as_deref() else {
         return Vec::new();
     };
     let Ok(table) = model.table(table_name) else {
@@ -263,7 +275,15 @@ pub async fn run_model_insights(
     let doc = strategy_doc(&base, &mut notes);
     let facts: ModelFacts = facts_from_model(&base);
 
-    let axis = model::choose_time_axis(&doc, &facts, &date_axis_candidates(&base));
+    // TAKE THE PLAN, NOT JUST THE ANSWER. `plan_time_axis` returns the axis AND
+    // the note it owes the reader — that the calendar was GUESSED, when nobody
+    // marked one. Calling `choose_time_axis` here would drop that note and let a
+    // guessed calendar carry every trend, change point and seasonality claim in
+    // the report without saying so, which is the same honest-but-invisible
+    // failure `plan_dimensions` already has a note for two calls below.
+    let axis_plan = model::plan_time_axis(&doc, &facts, &date_axis_candidates(&base, &facts));
+    notes.extend(axis_plan.notes);
+    let axis = axis_plan.axis;
     if axis.is_none() {
         notes.push(
             "This model has no time axis: neither the strategy document's defaultTimeAxis nor a \
@@ -843,11 +863,15 @@ mod tests {
             .build()
             .expect("the fixture model builds");
 
-        let candidates = date_axis_candidates(&model);
+        let candidates = date_axis_candidates(&model, &facts_from_model(&model));
         assert_eq!(candidates[0], QualifiedColumn::new("Date", "Date"));
         assert!(candidates.contains(&QualifiedColumn::new("Date", "Snapshot")));
 
-        // ...and with no marked date table there is no axis to guess at.
+        // ...and with no calendar at all — no mark AND nothing that reads like
+        // one — there is no axis to guess at. This used to assert "no MARK
+        // means no candidates", which is no longer the rule: `facts.date_table`
+        // now falls back to an inferred calendar, and a single-column Sales
+        // table qualifies as nothing.
         let unmarked = bi_engine::DataModel::builder()
             .add_table(
                 bi_engine::Table::new(
@@ -859,7 +883,61 @@ mod tests {
             .add_measure(bi_engine::sum_measure("Revenue", "Sales", "Amount"))
             .build()
             .unwrap();
-        assert!(date_axis_candidates(&unmarked).is_empty());
+        let unmarked_facts = facts_from_model(&unmarked);
+        assert!(unmarked_facts.date_table.is_none(), "nothing here reads as a calendar");
+        assert!(date_axis_candidates(&unmarked, &unmarked_facts).is_empty());
+    }
+
+    #[test]
+    fn an_unmarked_but_recognisable_calendar_supplies_an_axis_and_says_it_guessed() {
+        // THE CASCADE, at the planner's own boundary. Most models never call
+        // `mark_date_table`, and until `date_axis_candidates` read the FACTS
+        // rather than the declaration, every one of them got an empty candidate
+        // list — no axis, so no trend, no change point, no seasonality, and
+        // nothing said about why.
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![
+                        bi_engine::Column::new("Amount", bi_engine::DataType::Float64),
+                        bi_engine::Column::new("OrderDate", bi_engine::DataType::Date),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                bi_engine::Table::new(
+                    "dim_date",
+                    vec![
+                        bi_engine::Column::new("OrderDate", bi_engine::DataType::Date),
+                        bi_engine::Column::new("year", bi_engine::DataType::Decimal(38, 10)),
+                        bi_engine::Column::new("quarter", bi_engine::DataType::Decimal(38, 10)),
+                        bi_engine::Column::new("month", bi_engine::DataType::Decimal(38, 10)),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(bi_engine::Relationship::many_to_one(
+                "Sales_Date", "Sales", "OrderDate", "dim_date", "OrderDate",
+            ))
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the unmarked-calendar fixture builds");
+
+        let facts = facts_from_model(&model);
+        assert_eq!(facts.date_table.as_deref(), Some("dim_date"), "the calendar is inferred");
+
+        let candidates = date_axis_candidates(&model, &facts);
+        assert_eq!(candidates, vec![QualifiedColumn::new("dim_date", "OrderDate")]);
+
+        // ...and the guess ANNOUNCES ITSELF. A note here is the whole licence
+        // for guessing at all.
+        let plan = model::plan_time_axis(&StrategyDoc::default(), &facts, &candidates);
+        assert_eq!(plan.axis, Some(QualifiedColumn::new("dim_date", "OrderDate")));
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        assert!(plan.notes[0].contains("dim_date"), "{}", plan.notes[0]);
+        assert!(plan.notes[0].contains("guessed"), "{}", plan.notes[0]);
     }
 
     #[test]
