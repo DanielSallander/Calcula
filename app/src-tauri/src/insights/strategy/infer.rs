@@ -25,6 +25,10 @@
 //          query per column. Inference must not do that — it runs on every
 //          model open — so ranking uses declared metadata and observed usage
 //          only, and the draft is confirmed by a person who CAN see the data.
+//          The one place that absence still bites is a NUMERIC axis on a
+//          non-calendar dimension: a `Decimal` `size` on dim_product could be
+//          six values or a million, so it stays undeclared. The calendar is
+//          exempt because a marked date table declares what its columns are.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
@@ -34,7 +38,7 @@ use regex::Regex;
 
 use super::resolve::ModelFacts;
 use super::types::{
-    Additivity, AggregationSpec, Cadence, ColumnStrategy, Direction, MeasureStrategy,
+    Additivity, AggregationSpec, Cadence, ColumnStrategy, Direction, EntrySource, MeasureStrategy,
     ModelStrategy, QualifiedColumn, Role, StrategyDoc, TableKind, TableStrategy, Target,
     STRATEGY_DOC_VERSION,
 };
@@ -178,19 +182,19 @@ fn says_higher_is_better(words: &[String]) -> bool {
 
 /// Which way is good, from the measure's name and description.
 ///
-/// A KPI OUTRANKS THE LEXICON. A model KPI is a declared target with status
-/// bands, and bands can express nothing but "closer to target as the number
-/// grows" — so a measure carrying one has already been declared higher-is-better
-/// by whoever authored it. Inferring `lowerIsBetter` under ascending bands would
-/// produce a document validate.rs REFUSES, which is a worse outcome than a base
-/// value the reviewer flips.
+/// A KPI OUTRANKS THE LEXICON, when the KPI says anything at all. A model KPI's
+/// band STATUSES run bad-to-good or good-to-bad as the ratio grows, and that is
+/// a declaration by whoever authored the model — one validate.rs refuses to
+/// contradict. So a KPI that states an ordering decides this outright, and one
+/// that states none (a single band, or a flat or non-monotonic status sequence)
+/// leaves the lexicon to answer.
 ///
 /// On a name that says both ("Cost of Sales"), lower wins: the cost noun is the
 /// head of that phrase far more often than not, and being wrong in the cautious
 /// direction is what the rest of this file does too.
-fn infer_direction(measure: &Measure, has_kpi: bool) -> Direction {
-    if has_kpi {
-        return Direction::HigherIsBetter;
+fn infer_direction(measure: &Measure, kpi_direction: Option<Direction>) -> Direction {
+    if let Some(d) = kpi_direction {
+        return d;
     }
     let name_words = words(measure.name());
     // The description is checked SEPARATELY rather than concatenated: joining
@@ -368,15 +372,6 @@ fn infer_aggregation(model: &DataModel, facts: &ModelFacts, measure: &Measure) -
 // Table kinds and column roles
 // ---------------------------------------------------------------------------
 
-/// Do a dimension's ordinary attribute columns belong on an axis?
-///
-/// A calendar's Month/Year columns are analysis axes just as a dimension's are;
-/// a fact table's own columns are the measures' raw material, and a bridge's are
-/// join machinery.
-fn is_dimension_like(kind: Option<TableKind>) -> bool {
-    matches!(kind, Some(TableKind::Dimension) | Some(TableKind::Calendar))
-}
-
 /// Every column any relationship joins on.
 ///
 /// Taken from the MODEL rather than from `ModelFacts`, which carries only the
@@ -431,6 +426,7 @@ fn infer_table(
         return TableStrategy {
             kind,
             reviewed: false,
+            source: Some(EntrySource::Inferred),
             ..Default::default()
         };
     };
@@ -443,18 +439,21 @@ fn infer_table(
         .filter_map(|c| c.sort_by_column())
         .collect();
 
-    let hierarchies: Vec<Vec<String>> = model
-        .hierarchies_for_table(table_name)
+    // Through the FACTS seam, not `model.hierarchies_for_table`. facts.rs claims
+    // in its own header to be the only file that knows both shapes, and this
+    // reaching straight into `DataModel` made that claim false — which is how a
+    // second, drifting reading of the model gets started.
+    let hierarchies: Vec<Vec<String>> = facts
+        .tables
+        .get(table_name)
+        .map(|t| t.hierarchies.clone())
+        .unwrap_or_default();
+    let hierarchy_levels: BTreeSet<&str> = hierarchies
         .iter()
-        .map(|h| h.levels().iter().map(|l| l.column().to_string()).collect())
-        .collect();
-    let hierarchy_levels: BTreeSet<&str> = model
-        .hierarchies_for_table(table_name)
-        .iter()
-        .flat_map(|h| h.levels().iter().map(|l| l.column()))
+        .flat_map(|h| h.iter().map(String::as_str))
         .collect();
 
-    let dimension_like = is_dimension_like(kind);
+    let is_calendar = matches!(kind, Some(TableKind::Calendar));
 
     // The label column is chosen once for the table, so exactly one column can
     // carry `Label`; the runners-up stay ordinary analysis attributes.
@@ -494,16 +493,41 @@ fn infer_table(
             Some(Role::Ignore)
         } else if hierarchy_levels.contains(column.name()) {
             Some(Role::Hierarchy)
+        } else if column.date_role().is_some() || is_calendar {
+            // A CALENDAR ATTRIBUTE, WHATEVER ITS DATA TYPE.
+            //
+            // `BI.dim_date` in a real warehouse types year/quarter/month/day as
+            // `Decimal(38,10)`, and the data-type allowlist below admits only
+            // String/Int32/Int64 — so the calendar's entire decomposition axis
+            // fell out of the draft as `ignore` and no fact was ever broken down
+            // by month. There is no cardinality anywhere in this codebase to
+            // lean on, and neither branch here needs one: `date_role` is the
+            // author's own declaration of what the column is, and on the MARKED
+            // date table a column that is not a key and not machinery is a
+            // calendar attribute by definition — that is what a date table IS.
+            //
+            // THE PLACEMENT IS THE RULE. Above Key, the date table's own date
+            // key (which carries `DateRole::DateKey`) would come back Analysis
+            // instead of Key and stop being usable as the default time axis;
+            // above Ignore, every ETL stamp and sort-order helper on the
+            // calendar would be offered as a breakdown. Both are pinned by
+            // `the_calendar_arm_sits_below_key_and_below_ignore`.
+            Some(Role::Analysis)
         } else if matches!(column.data_type(), DataType::Boolean) {
             Some(Role::Filter)
         } else if label_column.as_deref() == Some(column.name()) {
             Some(Role::Label)
-        } else if dimension_like
+        } else if matches!(kind, Some(TableKind::Dimension))
             && matches!(
                 column.data_type(),
                 DataType::String | DataType::Int32 | DataType::Int64
             )
         {
+            // A NON-CALENDAR dimension still needs the allowlist: a `Decimal`
+            // `size` on dim_product may be an axis with six values or a
+            // continuous measurement with a million, and nothing in the model
+            // says which. That distinction needs column statistics the engine
+            // does not keep, so it stays undeclared rather than guessed.
             Some(Role::Analysis)
         } else {
             // No rule fires: a fact table's Amount column, a date-typed column
@@ -529,6 +553,7 @@ fn infer_table(
         columns,
         hierarchies,
         reviewed: false,
+        source: Some(EntrySource::Inferred),
     }
 }
 
@@ -679,7 +704,11 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
     for measure in model.measures() {
         let name = measure.name();
         let mf = facts.measures.get(name);
-        let has_kpi = mf.and_then(|m| m.kpi.as_ref()).is_some();
+        let kpi = mf.and_then(|m| m.kpi.as_ref());
+        let has_kpi = kpi.is_some();
+        // The direction the KPI's band statuses state, if they state one. A KPI
+        // whose bands say nothing leaves the lexicon to answer.
+        let kpi_direction = kpi.and_then(|k| k.direction());
         let fact_table = mf
             .and_then(|m| m.fact_table.as_deref())
             .filter(|t| !t.is_empty());
@@ -687,7 +716,7 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
         measures.insert(
             name.to_string(),
             MeasureStrategy {
-                direction: Some(infer_direction(measure, has_kpi)),
+                direction: Some(infer_direction(measure, kpi_direction)),
                 aggregation: Some(infer_aggregation(model, facts, measure)),
                 // The unit comes from facts.rs and is NOT re-derived here. Two
                 // readings of one format string that disagree is a bug that
@@ -711,6 +740,11 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
                 never_slice_by: Vec::new(),
                 context: None,
                 reviewed: false,
+                // A MACHINE GUESSED THIS. `reviewed: false` alone cannot tell
+                // that apart from an entry a person typed and has not signed
+                // off, nor from one nobody has ever touched - and the Strategy
+                // tab was badging all three the same.
+                source: Some(EntrySource::Inferred),
             },
         );
     }
@@ -1040,30 +1074,78 @@ mod tests {
         assert_eq!(dir("Bidding"), Direction::Neutral);
     }
 
-    #[test]
-    fn a_kpi_forces_higher_is_better_as_the_base() {
-        // The measure is named "Cost", so the lexicon alone would say lower. A
-        // KPI's status bands can express nothing but higher-is-better, and
-        // validate.rs REFUSES lowerIsBetter over ascending bands — so a draft
-        // that ignored the KPI would produce a document nobody can save.
-        let model = DataModel::builder()
+    /// One measure named `Support Cost`, with whatever KPI bands are handed in.
+    fn a_cost_measure_with_bands(bands: Vec<StatusBand>) -> DataModel {
+        let mut kpi = Kpi::new("Cost KPI", "Support Cost", KpiTarget::Constant(100.0));
+        for band in bands {
+            kpi = kpi.with_status_band(band);
+        }
+        DataModel::builder()
             .add_table(
                 Table::new("Sales", vec![Column::new("Amount", DataType::Float64)]).unwrap(),
             )
             .add_measure(sum_measure("Support Cost", "Sales", "Amount"))
-            .add_kpi(
-                Kpi::new("Cost KPI", "Support Cost", KpiTarget::Constant(100.0))
-                    .with_status_band(StatusBand::new(0.8, KpiStatus::OffTrack))
-                    .with_status_band(StatusBand::new(1.0, KpiStatus::OnTrack)),
-            )
+            .add_kpi(kpi)
             .build()
-            .unwrap();
+            .unwrap()
+    }
+
+    #[test]
+    fn a_kpi_whose_bands_improve_upward_outranks_a_lower_is_better_name() {
+        // The measure is named "Cost", so the lexicon alone would say lower. This
+        // KPI's statuses improve as the ratio grows, which is the model author
+        // saying higher is better — and validate.rs refuses a draft that
+        // contradicts it, so a draft that ignored the KPI could not be saved.
+        let model = a_cost_measure_with_bands(vec![
+            StatusBand::new(0.8, KpiStatus::OffTrack),
+            StatusBand::new(1.0, KpiStatus::OnTrack),
+        ]);
         let facts = facts_from_model(&model);
         let doc = infer(&facts, &model, &no_usage());
         assert_eq!(
             doc.measures["Support Cost"].direction,
             Some(Direction::HigherIsBetter)
         );
+        assert_eq!(doc.measures["Support Cost"].target, Some(Target::Kpi));
+    }
+
+    #[test]
+    fn a_kpi_whose_bands_worsen_upward_drafts_lower_is_better() {
+        // The other half, which the old "a KPI means higher is better" premise
+        // made unreachable: ASCENDING thresholds (the engine accepts no other
+        // order) with WORSENING statuses is a lower-is-better declaration.
+        let model = a_cost_measure_with_bands(vec![
+            StatusBand::new(0.8, KpiStatus::OnTrack),
+            StatusBand::new(1.0, KpiStatus::OffTrack),
+        ]);
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        assert_eq!(
+            doc.measures["Support Cost"].direction,
+            Some(Direction::LowerIsBetter)
+        );
+        // ...and the draft it produces is one validate.rs accepts, which is the
+        // whole reason inference must agree with the KPI.
+        let findings = crate::insights::strategy::validate(&facts, &doc);
+        assert!(
+            !findings.iter().any(|f| f.code == "direction-contradicts-kpi"),
+            "the draft must be savable: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_kpi_that_states_no_ordering_leaves_the_lexicon_to_answer() {
+        // One band states a status but no ordering. The name is what is left.
+        let model = a_cost_measure_with_bands(vec![StatusBand::new(1.0, KpiStatus::OnTrack)]);
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        assert_eq!(
+            doc.measures["Support Cost"].direction,
+            Some(Direction::LowerIsBetter),
+            "'Cost' is what decides when the KPI declines to"
+        );
+        // The target still comes from the KPI: having no ORDERING does not mean
+        // having no GOAL.
         assert_eq!(doc.measures["Support Cost"].target, Some(Target::Kpi));
     }
 
@@ -1224,6 +1306,220 @@ mod tests {
         assert_eq!(
             doc.model.default_time_axis,
             Some(QualifiedColumn::new("Date", "Date"))
+        );
+    }
+
+    /// The shape a real warehouse date table has: numeric calendar parts, an ETL
+    /// stamp, a sort helper.
+    ///
+    /// THE TWO VARIANTS DIFFER IN TYPE AS WELL AS IN ROLE, and that is the
+    /// finding rather than a convenience. The engine REFUSES a `date_role` on a
+    /// `Decimal` column of a MARKED date table ("must be an integer or string
+    /// type"), so `Decimal(38,10)` year/quarter/month/day — exactly the columns
+    /// the String/Int allowlist dropped — are the columns that cannot carry the
+    /// declaration either. Fix (a), the declared `date_role`, therefore cannot
+    /// reach them at all; only "it is on the marked date table" can.
+    fn a_warehouse_calendar(with_date_roles: bool) -> DataModel {
+        let part = |name: &str, role: DateRole| {
+            if with_date_roles {
+                Column::new(name, DataType::Int64).with_date_role(role)
+            } else {
+                Column::new(name, DataType::Decimal(38, 10))
+            }
+        };
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("Date", DataType::Date),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "BI.dim_date",
+                    vec![
+                        Column::new("Date", DataType::Date).with_date_role(DateRole::DateKey),
+                        part("year", DateRole::Year),
+                        part("quarter", DateRole::Quarter),
+                        part("month", DateRole::Month),
+                        part("day", DateRole::Day),
+                        Column::new("month_name", DataType::String).with_sort_by("month"),
+                        Column::new("etl_batch", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Date",
+                "Sales",
+                "Date",
+                "BI.dim_date",
+                "Date",
+            ))
+            .mark_date_table("BI.dim_date")
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the warehouse calendar fixture builds")
+    }
+
+    #[test]
+    fn a_numeric_calendar_column_is_an_analysis_axis_whatever_its_data_type() {
+        // Decimal(38,10) year/quarter/month/day is what `BI.dim_date` actually
+        // looks like. The String/Int allowlist dropped every one of them to
+        // `ignore`, and with them the calendar's whole decomposition axis.
+        // `false`: NO date roles anywhere, which is what a model authored inside
+        // Calcula looks like - `date_role` is builder-only and no host command
+        // sets it. So being on the marked date table is the only thing that can
+        // answer here.
+        let model = a_warehouse_calendar(false);
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        let date = &doc.tables["BI.dim_date"];
+        // `month` is deliberately absent from this list: it is `month_name`'s
+        // sort-order target, so machinery claims it first. The placement test
+        // below is where that is pinned.
+        for column in ["year", "quarter", "day"] {
+            assert_eq!(
+                date.columns.get(column).map(|c| c.role),
+                Some(Role::Analysis),
+                "'{column}' is a calendar attribute: {:?}",
+                date.columns
+            );
+        }
+        // ...and it reaches the measure as an offered breakdown, which is the
+        // outcome the missing role was costing.
+        assert!(
+            doc.measures["Revenue"]
+                .analysis_dimensions
+                .iter()
+                .any(|c| c.table == "BI.dim_date"),
+            "{:?}",
+            doc.measures["Revenue"].analysis_dimensions
+        );
+    }
+
+    #[test]
+    fn a_declared_date_role_makes_a_column_an_axis_even_off_the_marked_table() {
+        // The author's own declaration, honoured on its own. The date table here
+        // is NOT marked, so the marked-table branch cannot be what answers.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("PeriodKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Period",
+                    vec![
+                        Column::new("PeriodKey", DataType::Int64),
+                        Column::new("fiscal_year", DataType::Decimal(38, 10))
+                            .with_date_role(DateRole::Year),
+                        Column::new("size", DataType::Decimal(38, 10)),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Period",
+                "Sales",
+                "PeriodKey",
+                "Period",
+                "PeriodKey",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .unwrap();
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        assert_eq!(facts.tables["Period"].kind, Some(TableKind::Dimension));
+        assert_eq!(doc.tables["Period"].columns["fiscal_year"].role, Role::Analysis);
+        // THE NEGATIVE CONTROL, and the limit stated in this file's header: a
+        // Decimal column on an ordinary dimension with no date role stays
+        // undeclared, because deciding whether it is an axis needs the column
+        // statistics the engine does not keep.
+        assert!(
+            !doc.tables["Period"].columns.contains_key("size"),
+            "a numeric non-calendar column must stay undeclared: {:?}",
+            doc.tables["Period"].columns
+        );
+    }
+
+    #[test]
+    fn the_calendar_arm_sits_below_key_and_below_ignore() {
+        // PLACEMENT, not outcome. Move the calendar arm above Key and the date
+        // table's own key column becomes Analysis, which takes the default time
+        // axis with it; move it above Ignore and the ETL stamp and the sort-order
+        // helper become offered breakdowns.
+        for with_date_roles in [false, true] {
+            let model = a_warehouse_calendar(with_date_roles);
+            let facts = facts_from_model(&model);
+            let doc = infer(&facts, &model, &no_usage());
+            let date = &doc.tables["BI.dim_date"];
+
+            assert_eq!(
+                date.columns["Date"].role,
+                Role::Key,
+                "the date key is a JOIN column and stays Key even though it \
+                 carries DateRole::DateKey (dateRoles={with_date_roles})"
+            );
+            assert_eq!(
+                doc.model.default_time_axis,
+                Some(QualifiedColumn::new("BI.dim_date", "Date")),
+                "and the default time axis still finds it"
+            );
+            assert_eq!(
+                date.columns["etl_batch"].role,
+                Role::Ignore,
+                "machinery on the calendar is still machinery"
+            );
+            assert_eq!(
+                date.columns["month"].role,
+                Role::Ignore,
+                "the sort-order TARGET of month_name is machinery, and stays so \
+                 even carrying DateRole::Month (dateRoles={with_date_roles}) - \
+                 that is the arm sitting BELOW Ignore"
+            );
+            // Positive control: the column that sorts by it is still an axis.
+            assert_eq!(date.columns["month_name"].role, Role::Analysis);
+        }
+    }
+
+    #[test]
+    fn every_entry_a_draft_writes_is_stamped_inferred() {
+        // `reviewed: false` says "nobody has signed this off"; it cannot say WHO
+        // wrote it. The editor sets `authored`, and an entry nobody has touched
+        // has no source at all.
+        let model = a_star_with(vec![sum_measure("Revenue", "Sales", "Amount")]);
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        for (name, m) in &doc.measures {
+            assert_eq!(
+                m.source,
+                Some(EntrySource::Inferred),
+                "measure '{name}' is unstamped"
+            );
+        }
+        for (name, t) in &doc.tables {
+            assert_eq!(
+                t.source,
+                Some(EntrySource::Inferred),
+                "table '{name}' is unstamped"
+            );
+        }
+        assert_eq!(
+            MeasureStrategy::default().source,
+            None,
+            "an untouched entry must stay distinguishable from a guessed one"
         );
     }
 

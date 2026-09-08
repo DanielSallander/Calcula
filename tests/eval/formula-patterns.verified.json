@@ -40,6 +40,7 @@
         "number": 2500
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "2500"
     },
     {
@@ -77,6 +78,7 @@
         "number": 60.00000000000001
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "60.00000000000001"
     },
     {
@@ -114,6 +116,7 @@
         "number": 90
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "90"
     },
     {
@@ -151,6 +154,7 @@
         "text": "$B$3"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "$B$3"
     },
     {
@@ -212,6 +216,7 @@
         "text": "Yes"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Yes"
     },
     {
@@ -273,6 +278,7 @@
         "text": "No"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "No"
     },
     {
@@ -334,6 +340,7 @@
         "text": "No"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "No"
     },
     {
@@ -371,6 +378,7 @@
         "number": 1994
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1994"
     },
     {
@@ -408,6 +416,7 @@
         "number": 42
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "42"
     },
     {
@@ -445,6 +454,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -478,6 +488,7 @@
         "text": "10, 20, 30"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "10, 20, 30"
     },
     {
@@ -515,6 +526,7 @@
         "number": 30.000000000000004
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "30.000000000000004"
     },
     {
@@ -552,6 +564,7 @@
         "number": 90
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "90"
     },
     {
@@ -594,6 +607,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "36.86989764584402"
     },
     {
@@ -643,6 +657,7 @@
         "number": 45
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45"
     },
     {
@@ -692,6 +707,7 @@
         "number": 135
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "135"
     },
     {
@@ -756,6 +772,7 @@
         "number": 41675
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "41675"
     },
     {
@@ -828,6 +845,7 @@
         "number": 95000
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "95000"
     },
     {
@@ -924,6 +942,7 @@
         "number": 43500
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "43500"
     },
     {
@@ -969,6 +988,7 @@
         "text": "FF"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FF"
     },
     {
@@ -1014,6 +1034,7 @@
         "text": "1010"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1010"
     },
     {
@@ -1059,6 +1080,7 @@
         "text": "00001010"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "00001010"
     },
     {
@@ -1096,6 +1118,7 @@
         "number": 0.9816664285779081
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9816664285779081"
     },
     {
@@ -1133,6 +1156,7 @@
         "number": 0.3299257276923872
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.3299257276923872"
     },
     {
@@ -1170,6 +1194,7 @@
         "number": 1.3607565094909924
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.3607565094909924"
     },
     {
@@ -1207,6 +1232,7 @@
         "number": -0.0013662839226045165
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-0.0013662839226045165"
     },
     {
@@ -1236,6 +1262,7 @@
         "number": 0.7667200000000027
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.7667200000000027"
     },
     {
@@ -1265,6 +1292,7 @@
         "number": 0.3405842787490292
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.3405842787490292"
     },
     {
@@ -1297,6 +1325,7 @@
         "number": 100
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "100"
     },
     {
@@ -1329,6 +1358,7 @@
         "text": "00FB"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "00FB"
     },
     {
@@ -1361,6 +1391,7 @@
         "display": "011"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "011"
     },
     {
@@ -1422,6 +1453,7 @@
         "number": 0.8449980959967328
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.8449980959967328"
     },
     {
@@ -1451,6 +1483,7 @@
         "number": 0.2050781250000007
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.2050781250000007"
     },
     {
@@ -1504,6 +1537,7 @@
         "number": 58
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "58"
     },
     {
@@ -1544,6 +1578,7 @@
         "number": 9
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "9"
     },
     {
@@ -1584,6 +1619,7 @@
         "number": 16
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "16"
     },
     {
@@ -1624,6 +1660,7 @@
         "number": 29
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "29"
     },
     {
@@ -1664,6 +1701,7 @@
         "number": 4
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "4"
     },
     {
@@ -1704,6 +1742,7 @@
         "number": 20
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "20"
     },
     {
@@ -1749,6 +1788,7 @@
         "number": 45
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45"
     },
     {
@@ -1794,6 +1834,7 @@
         "number": 60
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "60"
     },
     {
@@ -1839,6 +1880,7 @@
         "number": 15
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "15"
     },
     {
@@ -1876,6 +1918,7 @@
         "text": ""
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": ""
     },
     {
@@ -1913,6 +1956,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -1958,6 +2002,7 @@
         "text": "A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "A"
     },
     {
@@ -2003,6 +2048,7 @@
         "text": "a"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "a"
     },
     {
@@ -2048,6 +2094,7 @@
         "text": "$"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "$"
     },
     {
@@ -2077,6 +2124,7 @@
         "number": 2.5728686564881463e+28
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "25728686564881463000000000000"
     },
     {
@@ -2106,6 +2154,7 @@
         "number": 0.9499633729134137
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9499633729134137"
     },
     {
@@ -2135,6 +2184,7 @@
         "number": 167.2650922371132
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "167.2650922371132"
     },
     {
@@ -2164,6 +2214,7 @@
         "number": 167.2650922371132
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "167.2650922371132"
     },
     {
@@ -2265,6 +2316,7 @@
         "number": 0.4843222188948081
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.4843222188948081"
     },
     {
@@ -2302,6 +2354,7 @@
         "text": "Q1-Jan to Mar"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Q1-Jan to Mar"
     },
     {
@@ -2339,6 +2392,7 @@
         "text": "Q3-Jul to Sep"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Q3-Jul to Sep"
     },
     {
@@ -2368,6 +2422,7 @@
         "text": "(text with embedded control characters)"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "(text with embedded control characters)"
     },
     {
@@ -2413,6 +2468,7 @@
         "number": 65
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "65"
     },
     {
@@ -2458,6 +2514,7 @@
         "number": 97
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "97"
     },
     {
@@ -2503,6 +2560,7 @@
         "number": 72
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "72"
     },
     {
@@ -2548,6 +2606,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -2593,6 +2652,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -2638,6 +2698,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -2675,6 +2736,7 @@
         "number": 4
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "4"
     },
     {
@@ -2715,6 +2777,7 @@
         "number": 120
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "120"
     },
     {
@@ -2755,6 +2818,7 @@
         "text": "3+4i"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3+4i"
     },
     {
@@ -2804,6 +2868,7 @@
         "text": "John Smith"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "John Smith"
     },
     {
@@ -2853,6 +2918,7 @@
         "text": "Maria Garcia"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Maria Garcia"
     },
     {
@@ -2906,6 +2972,7 @@
         "number": 0.6929519127335031
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.6929519127335031"
     },
     {
@@ -2959,6 +3026,7 @@
         "number": 1.7883922649259336
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.7883922649259336"
     },
     {
@@ -2988,6 +3056,7 @@
         "number": 328.0839895013123
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "328.0839895013123"
     },
     {
@@ -3065,6 +3134,7 @@
         "number": 0.9946266402723094
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9946266402723094"
     },
     {
@@ -3105,6 +3175,7 @@
         "number": 50
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "50.000000000000014"
     },
     {
@@ -3173,6 +3244,7 @@
         "number": 3
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -3214,6 +3286,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3278,6 +3351,7 @@
         "number": 2
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -3350,6 +3424,7 @@
         "number": 3
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -3446,6 +3521,7 @@
         "number": 2
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -3511,6 +3587,7 @@
         "number": 37
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "37"
     },
     {
@@ -3576,6 +3653,7 @@
         "number": 180
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "180"
     },
     {
@@ -3641,6 +3719,7 @@
         "number": 143
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "143"
     },
     {
@@ -3710,6 +3789,7 @@
         "number": 6
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "6"
     },
     {
@@ -3779,6 +3859,7 @@
         "number": 8
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "8"
     },
     {
@@ -3804,6 +3885,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3829,6 +3911,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3854,6 +3937,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3879,6 +3963,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3904,6 +3989,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3929,6 +4015,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3950,6 +4037,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -3971,6 +4059,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4004,6 +4093,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4037,6 +4127,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4070,6 +4161,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4103,6 +4195,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4136,6 +4229,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4165,6 +4259,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4194,6 +4289,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4223,6 +4319,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4252,6 +4349,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4273,6 +4371,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4294,6 +4393,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4331,6 +4431,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4368,6 +4469,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4405,6 +4507,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -4458,6 +4561,7 @@
         "number": -11933.189179112618
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-11933.189179112618"
     },
     {
@@ -4511,6 +4615,7 @@
         "number": -2456.023424553548
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-2456.023424553548"
     },
     {
@@ -4572,6 +4677,7 @@
         "number": 45823
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45823"
     },
     {
@@ -4633,6 +4739,7 @@
         "number": 46023
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "46023"
     },
     {
@@ -4702,6 +4809,7 @@
         "number": 34
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "34"
     },
     {
@@ -4771,6 +4879,7 @@
         "number": 417
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "417"
     },
     {
@@ -4840,6 +4949,7 @@
         "number": 12693
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "12693"
     },
     {
@@ -4909,6 +5019,7 @@
         "number": 9
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "9"
     },
     {
@@ -4978,6 +5089,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -5023,6 +5135,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -5068,6 +5181,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -5113,6 +5227,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -5150,6 +5265,7 @@
         "number": 20
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "20"
     },
     {
@@ -5187,6 +5303,7 @@
         "number": 28
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "28"
     },
     {
@@ -5227,6 +5344,7 @@
         "number": 180
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "180"
     },
     {
@@ -5316,6 +5434,7 @@
         "number": -31500
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-31500"
     },
     {
@@ -5405,6 +5524,7 @@
         "number": -51345
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-51345"
     },
     {
@@ -5494,6 +5614,7 @@
         "number": -83692.35
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-83692.35"
     },
     {
@@ -5583,6 +5704,7 @@
         "number": -136418.5305
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-136418.5305"
     },
     {
@@ -5672,6 +5794,7 @@
         "number": -222362.20471499997
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-222362.20471499997"
     },
     {
@@ -5761,6 +5884,7 @@
         "number": 32000
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "32000"
     },
     {
@@ -5850,6 +5974,7 @@
         "number": 19200
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "19200"
     },
     {
@@ -5939,6 +6064,7 @@
         "number": 11520
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "11520"
     },
     {
@@ -6028,6 +6154,7 @@
         "number": 6912
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "6912"
     },
     {
@@ -6117,6 +6244,7 @@
         "number": 2368
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2368"
     },
     {
@@ -6149,6 +6277,7 @@
         "display": "1100100"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "1100100"
     },
     {
@@ -6181,6 +6310,7 @@
         "text": "00FF"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "00FF"
     },
     {
@@ -6213,6 +6343,7 @@
         "display": "72"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "72"
     },
     {
@@ -6258,6 +6389,7 @@
         "number": 255
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "255"
     },
     {
@@ -6303,6 +6435,7 @@
         "number": 10
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "10"
     },
     {
@@ -6348,6 +6481,7 @@
         "number": 1295
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1295"
     },
     {
@@ -6393,6 +6527,7 @@
         "number": 3.141592653589793
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3.141592653589793"
     },
     {
@@ -6438,6 +6573,7 @@
         "number": 180
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "180"
     },
     {
@@ -6483,6 +6619,7 @@
         "number": 1.5707963267948966
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.5707963267948966"
     },
     {
@@ -6528,6 +6665,7 @@
         "number": 90
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "90"
     },
     {
@@ -6573,6 +6711,7 @@
         "number": 57.29577951308232
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "57.29577951308232"
     },
     {
@@ -6622,6 +6761,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -6671,6 +6811,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0"
     },
     {
@@ -6716,6 +6857,7 @@
         "text": "$1,234.57"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "$1,234.57"
     },
     {
@@ -6761,6 +6903,7 @@
         "text": "$1,234.6"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "$1,234.6"
     },
     {
@@ -6806,6 +6949,7 @@
         "text": "($99.50)"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "($99.50)"
     },
     {
@@ -6871,6 +7015,7 @@
         "number": 2.171875
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2.171875"
     },
     {
@@ -6932,6 +7077,7 @@
         "number": 1.00375
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.00375"
     },
     {
@@ -6997,6 +7143,7 @@
         "number": 1.9600000000000009
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.9600000000000009"
     },
     {
@@ -7058,6 +7205,7 @@
         "number": 1.3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.3"
     },
     {
@@ -7111,6 +7259,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -7192,6 +7341,7 @@
         "number": 8.294581142823407
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "8.294581142823407"
     },
     {
@@ -7237,6 +7387,7 @@
         "number": 45762
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45762"
     },
     {
@@ -7282,6 +7433,7 @@
         "number": 45716
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45716"
     },
     {
@@ -7327,6 +7479,7 @@
         "number": 45762
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45762"
     },
     {
@@ -7356,6 +7509,7 @@
         "number": 0.06167781186449828
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.06167781186449828"
     },
     {
@@ -7409,6 +7563,7 @@
         "number": 45688
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45688"
     },
     {
@@ -7462,6 +7617,7 @@
         "number": 45716
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45716"
     },
     {
@@ -7515,6 +7671,7 @@
         "number": 45351
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45351"
     },
     {
@@ -7568,6 +7725,7 @@
         "number": 45747
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45747"
     },
     {
@@ -7597,6 +7755,7 @@
         "number": 0.8427006897475899
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.8427006897475899"
     },
     {
@@ -7626,6 +7785,7 @@
         "number": 0.8427006897475899
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.8427006897475899"
     },
     {
@@ -7655,6 +7815,7 @@
         "number": 0.15729931025241006
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.15729931025241006"
     },
     {
@@ -7684,6 +7845,7 @@
         "number": 0.15729931025241006
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.15729931025241006"
     },
     {
@@ -7721,6 +7883,7 @@
         "error": "#DIV/0!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#DIV/0!"
     },
     {
@@ -7758,6 +7921,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -7795,6 +7959,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -7832,6 +7997,7 @@
         "number": 7
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "7"
     },
     {
@@ -7877,6 +8043,7 @@
         "text": "€1,234.57"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "€1,234.57"
     },
     {
@@ -7922,6 +8089,7 @@
         "text": "€1,234.6"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "€1,234.6"
     },
     {
@@ -7967,6 +8135,7 @@
         "text": "(€99.50)"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "(€99.50)"
     },
     {
@@ -8004,6 +8173,7 @@
         "number": 8
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "8"
     },
     {
@@ -8041,6 +8211,7 @@
         "number": 12
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -8102,6 +8273,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -8163,6 +8335,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -8224,6 +8397,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -8274,6 +8448,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "5986.086815609051"
     },
     {
@@ -8303,6 +8478,7 @@
         "number": 0.6321205588285577
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.6321205588285577"
     },
     {
@@ -8332,6 +8508,7 @@
         "number": 0.012622708649845271
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.012622708649845271"
     },
     {
@@ -8361,6 +8538,7 @@
         "number": 0.9565149593408901
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9565149593408901"
     },
     {
@@ -8390,6 +8568,7 @@
         "number": 10000
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "10000"
     },
     {
@@ -8419,6 +8598,7 @@
         "number": 10000
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "10000"
     },
     {
@@ -8496,6 +8676,7 @@
         "number": 0.7133026753046221
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.7133026753046221"
     },
     {
@@ -8541,6 +8722,7 @@
         "number": 120
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "120"
     },
     {
@@ -8586,6 +8768,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -8631,6 +8814,7 @@
         "number": 3628800
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3628800"
     },
     {
@@ -8660,6 +8844,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -8696,6 +8881,7 @@
         "text": "No matches"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "No matches"
     },
     {
@@ -8733,6 +8919,7 @@
         "number": 5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "5"
     },
     {
@@ -8770,6 +8957,7 @@
         "number": 6
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "6"
     },
     {
@@ -8799,6 +8987,7 @@
         "number": 0.9729550745276566
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9729550745276566"
     },
     {
@@ -8828,6 +9017,7 @@
         "number": 0.7500196542319052
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.7500196542319052"
     },
     {
@@ -8873,6 +9063,7 @@
         "text": "1,234.57"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1,234.57"
     },
     {
@@ -8918,6 +9109,7 @@
         "text": "1234.57"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1234.57"
     },
     {
@@ -8963,6 +9155,7 @@
         "text": "1,235"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1,235"
     },
     {
@@ -9000,6 +9193,7 @@
         "number": 7.5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "7.5"
     },
     {
@@ -9037,6 +9231,7 @@
         "number": 12
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -9122,6 +9317,7 @@
         "number": 209.43830691390727
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "209.43830691390727"
     },
     {
@@ -9199,6 +9395,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -9284,6 +9481,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -9369,6 +9567,7 @@
         "number": 209.43830691390727
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "209.43830691390727"
     },
     {
@@ -9446,6 +9645,7 @@
         "number": 205
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "205"
     },
     {
@@ -9475,6 +9675,7 @@
         "number": 6
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "6"
     },
     {
@@ -9504,6 +9705,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -9557,6 +9759,7 @@
         "number": 1168.02
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1168.02"
     },
     {
@@ -9586,6 +9789,7 @@
         "number": -4.716562899359819e+28
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-47165628993598190000000000000"
     },
     {
@@ -9615,6 +9819,7 @@
         "number": 151.01960323391341
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "151.01960323391341"
     },
     {
@@ -9652,6 +9857,7 @@
         "number": 23.99999999999996
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "23.99999999999996"
     },
     {
@@ -9689,6 +9895,7 @@
         "number": 1.772453850905515
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.772453850905515"
     },
     {
@@ -9718,6 +9925,7 @@
         "number": 12.801827480081474
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "12.801827480081474"
     },
     {
@@ -9747,6 +9955,7 @@
         "number": 0.47724993711274366
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.47724993711274366"
     },
     {
@@ -9787,6 +9996,7 @@
         "number": 12
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -9836,6 +10046,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -9885,6 +10096,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0"
     },
     {
@@ -9974,6 +10186,7 @@
         "text": ""
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": ""
     },
     {
@@ -10063,6 +10276,7 @@
         "text": "OK"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "OK"
     },
     {
@@ -10152,6 +10366,7 @@
         "text": ""
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": ""
     },
     {
@@ -10241,6 +10456,7 @@
         "text": "OK"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "OK"
     },
     {
@@ -10334,6 +10550,7 @@
         "text": ""
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": ""
     },
     {
@@ -10423,6 +10640,7 @@
         "text": "OK"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "OK"
     },
     {
@@ -10496,6 +10714,7 @@
         "number": 100
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "100"
     },
     {
@@ -10569,6 +10788,7 @@
         "number": 100
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "100"
     },
     {
@@ -10642,6 +10862,7 @@
         "number": 100
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "100"
     },
     {
@@ -10715,6 +10936,7 @@
         "number": 20
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "20"
     },
     {
@@ -10788,6 +11010,7 @@
         "number": 20
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "20"
     },
     {
@@ -10861,6 +11084,7 @@
         "number": 20
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "20"
     },
     {
@@ -10914,6 +11138,7 @@
         "number": 1728.000000000004
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1728.000000000004"
     },
     {
@@ -10946,6 +11171,7 @@
         "display": "11111111"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "11111111"
     },
     {
@@ -10978,6 +11204,7 @@
         "number": 165
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "165"
     },
     {
@@ -11010,6 +11237,7 @@
         "display": "37"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "37"
     },
     {
@@ -11055,6 +11283,7 @@
         "number": 14
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "14"
     },
     {
@@ -11100,6 +11329,7 @@
         "number": 9
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "9"
     },
     {
@@ -11145,6 +11375,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0"
     },
     {
@@ -11182,6 +11413,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -11251,6 +11483,7 @@
         "number": 0.04417678264645297
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.04417678264645297"
     },
     {
@@ -11300,6 +11533,7 @@
         "text": "Pass"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Pass"
     },
     {
@@ -11349,6 +11583,7 @@
         "text": "Fail"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Fail"
     },
     {
@@ -11398,6 +11633,7 @@
         "text": "N/A - No units"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "N/A - No units"
     },
     {
@@ -11447,6 +11683,7 @@
         "number": 40
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "40"
     },
     {
@@ -11508,6 +11745,7 @@
         "text": "Not found"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Not found"
     },
     {
@@ -11553,6 +11791,7 @@
         "text": "A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "A"
     },
     {
@@ -11598,6 +11837,7 @@
         "text": "C"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "C"
     },
     {
@@ -11643,6 +11883,7 @@
         "text": "F"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "F"
     },
     {
@@ -11675,6 +11916,7 @@
         "number": 5
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "5"
     },
     {
@@ -11707,6 +11949,7 @@
         "number": 4
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "4"
     },
     {
@@ -11736,6 +11979,7 @@
         "number": 0.9272952180016122
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9272952180016122"
     },
     {
@@ -11768,6 +12012,7 @@
         "text": "3-4i"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3-4i"
     },
     {
@@ -11797,6 +12042,7 @@
         "text": "0.8337300251311491-0.9888977057628651i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.8337300251311491-0.9888977057628651i"
     },
     {
@@ -11826,6 +12072,7 @@
         "text": "0.8337300251311491+0.9888977057628651i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.8337300251311491+0.9888977057628651i"
     },
     {
@@ -11855,6 +12102,7 @@
         "text": "0.2176215618544027-0.8680141428959249i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.2176215618544027-0.8680141428959249i"
     },
     {
@@ -11884,6 +12132,7 @@
         "text": "0.6215180171704285-0.30393100162842646i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.6215180171704285-0.30393100162842646i"
     },
     {
@@ -11913,6 +12162,7 @@
         "text": "0.30393100162842646-0.6215180171704285i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.30393100162842646-0.6215180171704285i"
     },
     {
@@ -11942,6 +12192,7 @@
         "text": "1.4686939399158851+2.2873552871788423i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.4686939399158851+2.2873552871788423i"
     },
     {
@@ -11971,6 +12222,7 @@
         "text": "1.6094379124341003+0.9272952180016122i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.6094379124341003+0.9272952180016122i"
     },
     {
@@ -12000,6 +12252,7 @@
         "text": "0.6989700043360187+0.4027191962733731i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.6989700043360187+0.4027191962733731i"
     },
     {
@@ -12029,6 +12282,7 @@
         "text": "2.321928094887362+1.3378042124509761i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2.321928094887362+1.3378042124509761i"
     },
     {
@@ -12069,6 +12323,7 @@
         "text": "27+11i"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "27+11i"
     },
     {
@@ -12101,6 +12356,7 @@
         "number": 3
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -12130,6 +12386,7 @@
         "text": "0.4983370305551868+0.591083841721045i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.4983370305551868+0.591083841721045i"
     },
     {
@@ -12159,6 +12416,7 @@
         "text": "0.4983370305551868-0.591083841721045i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.4983370305551868-0.591083841721045i"
     },
     {
@@ -12188,6 +12446,7 @@
         "text": "1.2984575814159773+0.6349639147847361i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.2984575814159773+0.6349639147847361i"
     },
     {
@@ -12217,6 +12476,7 @@
         "text": "0.6349639147847361+1.2984575814159773i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.6349639147847361+1.2984575814159773i"
     },
     {
@@ -12246,6 +12506,7 @@
         "text": "1.0986841134678098+0.45508986056222733i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.0986841134678098+0.45508986056222733i"
     },
     {
@@ -12286,6 +12547,7 @@
         "text": "8+i"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "8+i"
     },
     {
@@ -12326,6 +12588,7 @@
         "text": "8+i"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "8+i"
     },
     {
@@ -12355,6 +12618,7 @@
         "text": "0.27175258531951174+1.0839233273386946i"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.27175258531951174+1.0839233273386946i"
     },
     {
@@ -12427,6 +12691,7 @@
         "number": 19000
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "19000"
     },
     {
@@ -12460,6 +12725,7 @@
         "number": 100
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "100"
     },
     {
@@ -12497,6 +12763,7 @@
         "number": 37
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "37"
     },
     {
@@ -12534,6 +12801,7 @@
         "number": -3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-3"
     },
     {
@@ -12611,6 +12879,7 @@
         "number": 79
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "79"
     },
     {
@@ -12672,6 +12941,7 @@
         "number": -50
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-50"
     },
     {
@@ -12841,6 +13111,7 @@
         "error": "#NUM!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#NUM!"
     },
     {
@@ -13006,6 +13277,7 @@
         "error": "#NUM!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#NUM!"
     },
     {
@@ -13175,6 +13447,7 @@
         "error": "#NUM!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#NUM!"
     },
     {
@@ -13216,6 +13489,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -13257,6 +13531,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -13298,6 +13573,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -13343,6 +13619,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -13388,6 +13665,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -13433,6 +13711,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -13478,6 +13757,7 @@
         "error": "#DIV/0!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#DIV/0!"
     },
     {
@@ -13523,6 +13803,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -13568,6 +13849,7 @@
         "error": "#REF!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#REF!"
     },
     {
@@ -13613,6 +13895,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -13658,6 +13941,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -13711,6 +13995,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -13764,6 +14049,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -13817,6 +14103,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -13870,6 +14157,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -13915,6 +14203,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -13960,6 +14249,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14005,6 +14295,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14050,6 +14341,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14103,6 +14395,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14156,6 +14449,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14209,6 +14503,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14262,6 +14557,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14307,6 +14603,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14352,6 +14649,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14397,6 +14695,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14442,6 +14741,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14487,6 +14787,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14532,6 +14833,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14581,6 +14883,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14630,6 +14933,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14679,6 +14983,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14728,6 +15033,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14781,6 +15087,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14834,6 +15141,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14887,6 +15195,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -14940,6 +15249,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -14972,6 +15282,7 @@
         "number": 1
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -15017,6 +15328,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -15062,6 +15374,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -15107,6 +15420,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -15148,6 +15462,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -15189,6 +15504,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -15230,6 +15546,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -15339,6 +15656,7 @@
         "number": 124000
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "124000"
     },
     {
@@ -15448,6 +15766,7 @@
         "number": 110800
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "110800"
     },
     {
@@ -15557,6 +15876,7 @@
         "number": 95200
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "95200"
     },
     {
@@ -15597,6 +15917,7 @@
         "number": 36
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "36"
     },
     {
@@ -15634,6 +15955,7 @@
         "text": "ELC"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "ELC"
     },
     {
@@ -15671,6 +15993,7 @@
         "text": "MEC"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "MEC"
     },
     {
@@ -15712,6 +16035,7 @@
         "number": 11
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "11"
     },
     {
@@ -15753,6 +16077,7 @@
         "number": 5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "5"
     },
     {
@@ -15794,6 +16119,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0"
     },
     {
@@ -15826,6 +16152,7 @@
         "number": 6
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "6"
     },
     {
@@ -15870,6 +16197,7 @@
         "text": "Over budget"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "Over budget"
     },
     {
@@ -15912,6 +16240,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "312.5"
     },
     {
@@ -15954,6 +16283,7 @@
         "tolerance": 0.00005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "0.4054651081081644"
     },
     {
@@ -15999,6 +16329,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -16044,6 +16375,7 @@
         "number": 10
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "10"
     },
     {
@@ -16089,6 +16421,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -16121,6 +16454,7 @@
         "number": 90
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "90"
     },
     {
@@ -16150,6 +16484,7 @@
         "number": 0.03908351124680265
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.03908351124680265"
     },
     {
@@ -16179,6 +16514,7 @@
         "number": 3.9952559322898735
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3.9952559322898735"
     },
     {
@@ -16216,6 +16552,7 @@
         "text": "john.smith@example.com"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "john.smith@example.com"
     },
     {
@@ -16253,6 +16590,7 @@
         "text": "mixed case text"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "mixed case text"
     },
     {
@@ -16305,6 +16643,7 @@
         "number": 3
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -16369,6 +16708,7 @@
         "number": 410
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "410"
     },
     {
@@ -16465,6 +16805,7 @@
         "number": 58000
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "58000"
     },
     {
@@ -16546,6 +16887,7 @@
         "number": 8.092274285681373
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "8.092274285681373"
     },
     {
@@ -16602,6 +16944,7 @@
         "number": 88
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "88"
     },
     {
@@ -16639,6 +16982,7 @@
         "text": "2024"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2024"
     },
     {
@@ -16676,6 +17020,7 @@
         "text": "2023"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2023"
     },
     {
@@ -16740,6 +17085,7 @@
         "number": 10950
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "10950"
     },
     {
@@ -16836,6 +17182,7 @@
         "number": 3
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -16873,6 +17220,7 @@
         "number": 30
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "30"
     },
     {
@@ -16910,6 +17258,7 @@
         "number": 5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "5"
     },
     {
@@ -16979,6 +17328,7 @@
         "number": 0.0625220116777323
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.0625220116777323"
     },
     {
@@ -17016,6 +17366,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -17053,6 +17404,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -17121,6 +17473,7 @@
         "number": 4
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "4"
     },
     {
@@ -17158,6 +17511,7 @@
         "number": 8
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "8"
     },
     {
@@ -17195,6 +17549,7 @@
         "number": 12
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -17240,6 +17595,7 @@
         "number": 5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "5"
     },
     {
@@ -17285,6 +17641,7 @@
         "number": 13.5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "13.5"
     },
     {
@@ -17330,6 +17687,7 @@
         "number": -6
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-6"
     },
     {
@@ -17375,6 +17733,7 @@
         "number": 42
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "42"
     },
     {
@@ -17420,6 +17779,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -17465,6 +17825,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0"
     },
     {
@@ -17518,6 +17879,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -17571,6 +17933,7 @@
         "error": "#N/A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#N/A"
     },
     {
@@ -17624,6 +17987,7 @@
         "number": 0.12395856317644742
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.12395856317644742"
     },
     {
@@ -17661,6 +18025,7 @@
         "number": 27
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "27"
     },
     {
@@ -17714,6 +18079,7 @@
         "number": 10
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "10"
     },
     {
@@ -17767,6 +18133,7 @@
         "number": 9
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "9"
     },
     {
@@ -17796,6 +18163,7 @@
         "number": 0.06002100341773442
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.06002100341773442"
     },
     {
@@ -17825,6 +18193,7 @@
         "number": 0.9087887152305422
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9087887152305422"
     },
     {
@@ -17854,6 +18223,7 @@
         "number": 42.00010261667221
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "42.00010261667221"
     },
     {
@@ -17883,6 +18253,7 @@
         "number": 0.9750021738917761
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9750021738917761"
     },
     {
@@ -17912,6 +18283,7 @@
         "number": 1.959963986120195
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.959963986120195"
     },
     {
@@ -17961,6 +18333,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -18010,6 +18383,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -18083,6 +18457,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -18152,6 +18527,7 @@
         "number": 116.76446146667917
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "116.76446146667917"
     },
     {
@@ -18189,6 +18565,7 @@
         "number": 1234.56
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1234.56"
     },
     {
@@ -18226,6 +18603,7 @@
         "number": 9876543.21
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "9876543.21"
     },
     {
@@ -18258,6 +18636,7 @@
         "display": "1111"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "1111"
     },
     {
@@ -18290,6 +18669,7 @@
         "number": 100
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "100"
     },
     {
@@ -18322,6 +18702,7 @@
         "text": "3A"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "3A"
     },
     {
@@ -18367,6 +18748,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -18412,6 +18794,7 @@
         "number": 5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "5"
     },
     {
@@ -18457,6 +18840,7 @@
         "number": -3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-3"
     },
     {
@@ -18514,6 +18898,7 @@
         "number": 80
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "80"
     },
     {
@@ -18575,6 +18960,7 @@
         "text": "Yes"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Yes"
     },
     {
@@ -18636,6 +19022,7 @@
         "text": "No"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "No"
     },
     {
@@ -18697,6 +19084,7 @@
         "text": "Yes"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Yes"
     },
     {
@@ -18770,6 +19158,7 @@
         "number": 0.13553665228404393
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.13553665228404393"
     },
     {
@@ -18839,6 +19228,7 @@
         "number": 165.34054113030945
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "165.34054113030945"
     },
     {
@@ -18916,6 +19306,7 @@
         "number": 0.9847982464479191
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9847982464479191"
     },
     {
@@ -19001,6 +19392,7 @@
         "number": 50500
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "50500"
     },
     {
@@ -19086,6 +19478,7 @@
         "number": 55000
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "55000"
     },
     {
@@ -19171,6 +19564,7 @@
         "number": 60000
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "60000"
     },
     {
@@ -19256,6 +19650,7 @@
         "number": 65600
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "65600"
     },
     {
@@ -19301,6 +19696,7 @@
         "number": 720
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "720"
     },
     {
@@ -19346,6 +19742,7 @@
         "number": 81
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "81"
     },
     {
@@ -19383,6 +19780,7 @@
         "number": 0.3989422804014327
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.3989422804014327"
     },
     {
@@ -19420,6 +19818,7 @@
         "number": 0.24197072451914337
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.24197072451914337"
     },
     {
@@ -19469,6 +19868,7 @@
         "number": 78.53981633974483
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "78.53981633974483"
     },
     {
@@ -19518,6 +19918,7 @@
         "number": 314.1592653589793
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "314.1592653589793"
     },
     {
@@ -19623,6 +20024,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-0"
     },
     {
@@ -19732,6 +20134,7 @@
         "number": 339.55902415773124
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "339.55902415773124"
     },
     {
@@ -19761,6 +20164,7 @@
         "number": 0.1403738958142805
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.1403738958142805"
     },
     {
@@ -19811,6 +20215,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "16288.94626777442"
     },
     {
@@ -19872,6 +20277,7 @@
         "number": -254.21937451555715
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-254.21937451555715"
     },
     {
@@ -19949,6 +20355,7 @@
         "number": 0.75
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.75"
     },
     {
@@ -19994,6 +20401,7 @@
         "text": "John Smith"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "John Smith"
     },
     {
@@ -20039,6 +20447,7 @@
         "text": "New York City"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "New York City"
     },
     {
@@ -20084,6 +20493,7 @@
         "text": "123 Main Street"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "123 Main Street"
     },
     {
@@ -20157,6 +20567,7 @@
         "number": 0.10544214593746569
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.10544214593746569"
     },
     {
@@ -20226,6 +20637,7 @@
         "number": 227287.9696114834
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "227287.9696114834"
     },
     {
@@ -20323,6 +20735,7 @@
         "number": 1.8
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.8"
     },
     {
@@ -20420,6 +20833,7 @@
         "number": 2.8
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2.8"
     },
     {
@@ -20517,6 +20931,7 @@
         "number": 3.45
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3.45"
     },
     {
@@ -20614,6 +21029,7 @@
         "number": 4.375
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "4.375"
     },
     {
@@ -20711,6 +21127,7 @@
         "number": 6
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "6"
     },
     {
@@ -20756,6 +21173,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -20801,6 +21219,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -20846,6 +21265,7 @@
         "number": -3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-3"
     },
     {
@@ -20895,6 +21315,7 @@
         "number": 0.7853981633974483
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.7853981633974483"
     },
     {
@@ -20944,6 +21365,7 @@
         "number": 0.7071067811865475
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.7071067811865475"
     },
     {
@@ -20993,6 +21415,7 @@
         "number": 1.5707963267948966
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.5707963267948966"
     },
     {
@@ -21042,6 +21465,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -21095,6 +21519,7 @@
         "number": 3.5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3.5"
     },
     {
@@ -21148,6 +21573,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -21201,6 +21627,7 @@
         "number": 3.5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3.5"
     },
     {
@@ -21254,6 +21681,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -21307,6 +21735,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -21360,6 +21789,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -21413,6 +21843,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -21466,6 +21897,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -21551,6 +21983,7 @@
         "number": 4
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "4"
     },
     {
@@ -21636,6 +22069,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -21721,6 +22155,7 @@
         "number": 5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "5"
     },
     {
@@ -21806,6 +22241,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -21891,6 +22327,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -21964,6 +22401,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -22033,6 +22471,7 @@
         "number": 0.06310091807391555
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.06310091807391555"
     },
     {
@@ -22070,6 +22509,7 @@
         "text": "--0045"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "--0045"
     },
     {
@@ -22107,6 +22547,7 @@
         "text": "--1122"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "--1122"
     },
     {
@@ -22152,6 +22593,7 @@
         "text": "*******"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "*******"
     },
     {
@@ -22197,6 +22639,7 @@
         "text": "****"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "****"
     },
     {
@@ -22242,6 +22685,7 @@
         "text": "**********"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "**********"
     },
     {
@@ -22279,6 +22723,7 @@
         "text": "pdf"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "pdf"
     },
     {
@@ -22316,6 +22761,7 @@
         "text": "xlsx"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "xlsx"
     },
     {
@@ -22353,6 +22799,7 @@
         "text": "CDXCIX"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "CDXCIX"
     },
     {
@@ -22390,6 +22837,7 @@
         "text": "MMXXIII"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "MMXXIII"
     },
     {
@@ -22435,6 +22883,7 @@
         "number": 3456.79
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3456.79"
     },
     {
@@ -22480,6 +22929,7 @@
         "number": 3457
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3457"
     },
     {
@@ -22525,6 +22975,7 @@
         "number": 3500
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3500"
     },
     {
@@ -22557,6 +23008,7 @@
         "number": 24
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "24"
     },
     {
@@ -22589,6 +23041,7 @@
         "number": 12
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -22634,6 +23087,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -22679,6 +23133,7 @@
         "number": 3
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "3"
     },
     {
@@ -22724,6 +23179,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -22765,6 +23221,7 @@
         "number": 4
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "4"
     },
     {
@@ -22838,6 +23295,7 @@
         "number": 174345522712.5559
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "174345522712.5559"
     },
     {
@@ -22907,6 +23365,7 @@
         "number": 0.02048015364945277
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.02048015364945277"
     },
     {
@@ -22984,6 +23443,7 @@
         "number": 0.9993391528862113
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9993391528862113"
     },
     {
@@ -23029,6 +23489,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -23074,6 +23535,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -23119,6 +23581,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -23156,6 +23619,7 @@
         "number": 45
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45"
     },
     {
@@ -23193,6 +23657,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0"
     },
     {
@@ -23254,6 +23719,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -23315,6 +23781,7 @@
         "number": -1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-1"
     },
     {
@@ -23376,6 +23843,7 @@
         "number": 0
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0"
     },
     {
@@ -23421,6 +23889,7 @@
         "number": 0.49999999999999994
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.49999999999999994"
     },
     {
@@ -23466,6 +23935,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -23511,6 +23981,7 @@
         "number": 1.2246467991473532e-16
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.00000000000000012246467991473532"
     },
     {
@@ -23571,6 +24042,7 @@
         "number": 15000
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "15000"
     },
     {
@@ -23648,6 +24120,7 @@
         "number": 21
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "21"
     },
     {
@@ -23757,6 +24230,7 @@
         "number": 38900
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "38900"
     },
     {
@@ -23866,6 +24340,7 @@
         "number": 39800
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "39800"
     },
     {
@@ -23975,6 +24450,7 @@
         "number": 41500
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "41500"
     },
     {
@@ -24007,6 +24483,7 @@
         "number": 25
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "25"
     },
     {
@@ -24036,6 +24513,7 @@
         "number": 1.5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1.5"
     },
     {
@@ -24077,6 +24555,7 @@
         "number": 4.949747468305833
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "4.949747468305833"
     },
     {
@@ -24118,6 +24597,7 @@
         "number": 5.715476066494082
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "5.715476066494082"
     },
     {
@@ -24171,6 +24651,7 @@
         "number": 1313.3925536563697
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1313.3925536563697"
     },
     {
@@ -24228,6 +24709,7 @@
         "number": 0.268741924943285
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.268741924943285"
     },
     {
@@ -24305,6 +24787,7 @@
         "number": 0.47714428286071314
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.47714428286071314"
     },
     {
@@ -24342,6 +24825,7 @@
         "text": "44941"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "44941"
     },
     {
@@ -24379,6 +24863,7 @@
         "text": "Q1-Q2, Q3-Q4"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Q1-Q2, Q3-Q4"
     },
     {
@@ -24432,6 +24917,7 @@
         "number": 450
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "450"
     },
     {
@@ -24496,6 +24982,7 @@
         "number": 75200
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "75200"
     },
     {
@@ -24568,6 +25055,7 @@
         "number": 5000
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "5000"
     },
     {
@@ -24664,6 +25152,7 @@
         "number": 9800
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "9800"
     },
     {
@@ -24709,6 +25198,7 @@
         "text": "Monday"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Monday"
     },
     {
@@ -24754,6 +25244,7 @@
         "text": "Thursday"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Thursday"
     },
     {
@@ -24799,6 +25290,7 @@
         "text": "Weekend"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Weekend"
     },
     {
@@ -24836,6 +25328,7 @@
         "number": 8333.333333333334
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "8333.333333333334"
     },
     {
@@ -24873,6 +25366,7 @@
         "number": 6666.666666666667
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "6666.666666666667"
     },
     {
@@ -24902,6 +25396,7 @@
         "number": 0.024505803246312352
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.024505803246312352"
     },
     {
@@ -24931,6 +25426,7 @@
         "number": 0.04109813198467649
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.04109813198467649"
     },
     {
@@ -24960,6 +25456,7 @@
         "number": 0.9607818798764419
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.9607818798764419"
     },
     {
@@ -24989,6 +25486,7 @@
         "number": 2.0859634472461765
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2.0859634472461765"
     },
     {
@@ -25018,6 +25516,7 @@
         "number": -1.7247182429112478
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "-1.7247182429112478"
     },
     {
@@ -25095,6 +25594,7 @@
         "number": 0.00876965945832553
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.00876965945832553"
     },
     {
@@ -25140,6 +25640,7 @@
         "text": "Hello"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Hello"
     },
     {
@@ -25185,6 +25686,7 @@
         "text": ""
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": ""
     },
     {
@@ -25230,6 +25732,7 @@
         "text": ""
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": ""
     },
     {
@@ -25283,6 +25786,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -25325,6 +25829,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "35.01037691048548"
     },
     {
@@ -25387,6 +25892,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "97.31666666666666"
     },
     {
@@ -25428,6 +25934,7 @@
         "text": "$1,234,567.80"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "$1,234,567.80"
     },
     {
@@ -25469,6 +25976,7 @@
         "text": "15.6%"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "15.6%"
     },
     {
@@ -25507,10 +26015,11 @@
       "statedResult": "",
       "expect": {
         "kind": "text",
-        "text": "Invoice dated September 7, 2026"
+        "text": "Invoice dated September 8, 2026"
       },
       "oracle": "engine",
-      "engineDisplay": "Invoice dated September 7, 2026"
+      "volatile": true,
+      "engineDisplay": "Invoice dated September 8, 2026"
     },
     {
       "id": "TEXTAFTER#1",
@@ -25542,6 +26051,7 @@
         "text": "example.com"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "example.com"
     },
     {
@@ -25574,6 +26084,7 @@
         "text": "John"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "John"
     },
     {
@@ -25614,6 +26125,7 @@
         "text": "Apple, Banana, Cherry"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "Apple, Banana, Cherry"
     },
     {
@@ -25659,6 +26171,7 @@
         "text": "Red-Blue-Green"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Red-Blue-Green"
     },
     {
@@ -25704,6 +26217,7 @@
         "text": "Red--Blue--Green"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "Red--Blue--Green"
     },
     {
@@ -25752,6 +26266,7 @@
         "text": "John Smith"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "John Smith"
     },
     {
@@ -25792,6 +26307,7 @@
         "text": "AB12XY"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "AB12XY"
     },
     {
@@ -25829,6 +26345,7 @@
         "number": 0.5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.5"
     },
     {
@@ -25866,6 +26383,7 @@
         "number": 0.6875
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.6875"
     },
     {
@@ -25911,6 +26429,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -25956,6 +26475,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -26001,6 +26521,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -26051,10 +26572,11 @@
       "statedResult": "",
       "expect": {
         "kind": "number",
-        "number": 46272
+        "number": 46273
       },
       "oracle": "engine",
-      "engineDisplay": "46272"
+      "volatile": true,
+      "engineDisplay": "46273"
     },
     {
       "id": "TODAY#1.B4",
@@ -26104,10 +26626,11 @@
       "statedResult": "",
       "expect": {
         "kind": "number",
-        "number": 13233
+        "number": 13234
       },
       "oracle": "engine",
-      "engineDisplay": "13233"
+      "volatile": true,
+      "engineDisplay": "13234"
     },
     {
       "id": "TODAY#1.B5",
@@ -26160,6 +26683,7 @@
         "number": 36
       },
       "oracle": "engine",
+      "volatile": true,
       "engineDisplay": "36"
     },
     {
@@ -26189,6 +26713,7 @@
         "text": "&nbsp;&nbsp;&nbsp;Hello&nbsp;&nbsp;&nbsp;World&nbsp;&nbsp;"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "&nbsp;&nbsp;&nbsp;Hello&nbsp;&nbsp;&nbsp;World&nbsp;&nbsp;"
     },
     {
@@ -26218,6 +26743,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -26255,6 +26781,7 @@
         "number": 8
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "8"
     },
     {
@@ -26292,6 +26819,7 @@
         "number": 7
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "7"
     },
     {
@@ -26345,6 +26873,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -26398,6 +26927,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -26451,6 +26981,7 @@
         "number": 4
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "4"
     },
     {
@@ -26504,6 +27035,7 @@
         "number": 16
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "16"
     },
     {
@@ -26541,6 +27073,7 @@
         "text": "A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "A"
     },
     {
@@ -26578,6 +27111,7 @@
         "text": "€"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "€"
     },
     {
@@ -26615,6 +27149,7 @@
         "number": 65
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "65"
     },
     {
@@ -26652,6 +27187,7 @@
         "number": 72
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "72"
     },
     {
@@ -26689,6 +27225,7 @@
         "text": "JOHN SMITH"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "JOHN SMITH"
     },
     {
@@ -26726,6 +27263,7 @@
         "text": "ORDER-4521A"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "ORDER-4521A"
     },
     {
@@ -26771,6 +27309,7 @@
         "number": 1234.56
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1234.56"
     },
     {
@@ -26816,6 +27355,7 @@
         "number": 0.75
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.75"
     },
     {
@@ -26861,6 +27401,7 @@
         "error": "#VALUE!"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "#VALUE!"
     },
     {
@@ -26898,6 +27439,7 @@
         "text": "100"
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "100"
     },
     {
@@ -26935,6 +27477,7 @@
         "text": "\"Hello\""
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "\"Hello\""
     },
     {
@@ -26976,6 +27519,7 @@
         "number": 24.5
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "24.5"
     },
     {
@@ -27017,6 +27561,7 @@
         "number": 32.666666666666664
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "32.666666666666664"
     },
     {
@@ -27070,6 +27615,7 @@
         "number": 37720
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "37720"
     },
     {
@@ -27119,6 +27665,7 @@
         "number": 221875
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "221875"
     },
     {
@@ -27156,6 +27703,7 @@
         "number": 4000
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "4000"
     },
     {
@@ -27193,6 +27741,7 @@
         "number": 7840
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "7840"
     },
     {
@@ -27242,6 +27791,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -27291,6 +27841,7 @@
         "number": 7
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "7"
     },
     {
@@ -27340,6 +27891,7 @@
         "number": 2
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -27389,6 +27941,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -27450,6 +28003,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -27511,6 +28065,7 @@
         "number": 1
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "1"
     },
     {
@@ -27572,6 +28127,7 @@
         "number": 12
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -27633,6 +28189,7 @@
         "number": 12
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -27694,6 +28251,7 @@
         "number": 53
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "53"
     },
     {
@@ -27755,6 +28313,7 @@
         "number": 53
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "53"
     },
     {
@@ -27784,6 +28343,7 @@
         "number": 0.3588196115700454
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.3588196115700454"
     },
     {
@@ -27821,6 +28381,7 @@
         "number": 45303
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45303"
     },
     {
@@ -27874,6 +28435,7 @@
         "number": 45733
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45733"
     },
     {
@@ -27927,6 +28489,7 @@
         "number": 45734
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "45734"
     },
     {
@@ -27988,6 +28551,7 @@
         "number": 0.1877376216509523
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.1877376216509523"
     },
     {
@@ -28054,6 +28618,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "0.5"
     },
     {
@@ -28118,6 +28683,7 @@
         "text": "Not found"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "Not found"
     },
     {
@@ -28198,6 +28764,7 @@
         "text": "C"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "C"
     },
     {
@@ -28262,6 +28829,7 @@
         "text": "Sales"
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "Sales"
     },
     {
@@ -28364,6 +28932,7 @@
         "tolerance": 0.005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "12"
     },
     {
@@ -28468,6 +29037,7 @@
         "number": 90000
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "90000"
     },
     {
@@ -28540,6 +29110,7 @@
         "number": 45
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "45"
     },
     {
@@ -28624,6 +29195,7 @@
         "number": 300
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "300"
     },
     {
@@ -28664,6 +29236,7 @@
         "number": 2
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "2"
     },
     {
@@ -28725,6 +29298,7 @@
         "number": 997.2029674365012
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "997.2029674365012"
     },
     {
@@ -28786,6 +29360,7 @@
         "boolean": true
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "TRUE"
     },
     {
@@ -28847,6 +29422,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -28908,6 +29484,7 @@
         "boolean": false
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "FALSE"
     },
     {
@@ -28945,6 +29522,7 @@
         "number": 2025
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2025"
     },
     {
@@ -28982,6 +29560,7 @@
         "number": 2023
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "2023"
     },
     {
@@ -29019,6 +29598,7 @@
         "number": 0.4972677595628415
       },
       "oracle": "engine",
+      "volatile": false,
       "engineDisplay": "0.4972677595628415"
     },
     {
@@ -29105,6 +29685,7 @@
         "tolerance": 0.00005
       },
       "oracle": "doc",
+      "volatile": false,
       "engineDisplay": "0.055131636443084886"
     }
   ],

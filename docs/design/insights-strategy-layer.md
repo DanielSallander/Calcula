@@ -98,13 +98,26 @@ related to the measure's fact table, and a snowflaked attribute is reported as
 `unreachable-in-v1` rather than silently skipped. A user who asks why their subcategory breakdown is
 missing gets an answer instead of an absence.
 
-**Column roles have to be inferred.** There is no `is_key`, no table kind, and no column statistics
-anywhere in the engine. So roles are inferred from relationship participation, data type,
-`is_hidden`, the date table, `sort_by_column`, name patterns and a computed cardinality; statistics
-are computed host-side over the cached Arrow batch, with a grouped-query fallback for DirectQuery
-and a generation-keyed cache. `date_role` and `default_aggregation` exist on the engine's `Column`
-but are unreachable from the app, so they get exposed — the date axis should be *declared*, not
-guessed, when someone has already declared it.
+**Column roles have to be inferred, and with less to go on than this document first claimed.**
+There is no `is_key`, no table kind, and **no column statistics anywhere in the engine or the app**.
+An earlier draft of this section described inference as using "a computed cardinality" with
+host-side Arrow statistics and a grouped-query fallback. None of that was built, and it should not
+be read as a description of the code: inference runs on every model open, and one grouped query per
+column is not something it may do.
+
+So roles come from declared metadata only — relationship participation, data type, `is_hidden`,
+the marked date table, `sort_by_column`, `date_role` and name patterns — and everything it produces
+is written `reviewed: false` for a person who *can* see the data to confirm.
+
+The absence bites in a specific place, found by review on 2026-09-08. A real warehouse's
+`dim_date` carries `year`, `quarter`, `month` and `day` as `Decimal`. They are unambiguously
+analysis axes, and an inference that admits an axis only on a data-type allowlist discarded all
+four — the calendar's entire decomposition axis, gone, with no statistic available to rescue it.
+The fix is to read what the author already declared rather than to measure: a column with a
+`date_role` is a calendar attribute, and on the **marked date table** any non-key, non-machinery
+column is one whatever its storage type, because that is what a date table is. A numeric axis on
+some *other* dimension — a `Decimal` size on `dim_product` — is still lost, and that one does need
+statistics that do not exist.
 
 **There is no per-object annotation slot.** `Measure` and `Column` drop unknown JSON fields on load
 (hand-written `Deserialize`, no `flatten`, no `extra`). Adding one would be an engine format change.
@@ -150,9 +163,18 @@ to. A company-level fact has an empty scope point; a fact about department A has
 
 Layering is **base → strategy → rules**, attribute by attribute:
 
-- **Base** is derived from the model itself. A KPI supplies the target and, because KPI bands can
-  only express higher-is-better, a higher-is-better base direction. `format_string` supplies the
-  unit. The measure's AST supplies the aggregation. The date table supplies the axis.
+- **Base** is derived from the model itself. A KPI supplies the target and, from the ordering of its
+  band **statuses**, the direction. `format_string` supplies the unit. The measure's AST supplies
+  the aggregation. The date table supplies the axis.
+
+  This paragraph used to say that KPI bands "can only express higher-is-better", and the code
+  believed it: `KpiFacts` kept each band's threshold and threw its status away, then read goodness
+  off the *threshold* ordering. But the engine validates that thresholds are strictly ascending, so
+  that test was true for every KPI a valid model can hold. Every KPI said higher-is-better, a
+  correctly authored churn KPI was **refused** as contradicting itself, and the lower-is-better
+  branch was unreachable code. Goodness lives in the status sequence — `OffTrack → OnTrack` as the
+  ratio grows is higher-is-better, `OnTrack → OffTrack` is lower-is-better, and anything else
+  yields no direction rather than a guess.
 - **Strategy** is the measure's own entry.
 - **Rules** apply where their scope contains the fact's scope point.
 
@@ -207,11 +229,12 @@ per measure will not be filled in. So the product is **inference plus confirm-th
   **non-additive**, deliberately: a wrong "additive" produces a wrong share claim, while a wrong
   "non-additive" merely withholds one. The safe default is the one that says less.
 - **Unit** from `format_string`.
-- **Table kind and column roles** from relationship participation and cardinality. Keys are detected
-  from join conditions; a `sort_by_column` target such as the `MonthNumber` behind `MonthName` is
-  marked `ignore`, because it is machinery rather than an analysis axis.
-- **Analysis dimensions** ranked by how the workbook actually uses them (§10), then by how close the
-  cardinality is to something a person can read.
+- **Table kind and column roles** from relationship participation and declared metadata — not from
+  cardinality, which does not exist. Keys are detected from join conditions; a `sort_by_column`
+  target such as the `MonthNumber` behind `MonthName` is marked `ignore`, because it is machinery
+  rather than an analysis axis; a column on the marked date table is a calendar attribute.
+- **Analysis dimensions** ranked by how the workbook actually uses them (§10), then by declaration
+  order.
 
 The Strategy tab shows inferred values in an unreviewed style with per-row Confirm and Confirm-all,
 the validator's findings inline, and the inline tests with pass/fail. The CLI covers the same ground
@@ -233,16 +256,75 @@ declaration in the signed manifest, its own consent sentence, and small-count su
 it is the one telemetry-shaped thing in a product that is otherwise local by construction, and it
 should be designed as such rather than slipped in.
 
-## 11. Honest limits
+## 11. Audience overlays — designed, deliberately not built
+
+Different readers want different reports from the same model. The shape this takes is **one base
+strategy plus audience overlays**, never N independent strategy documents, and the split is the
+whole design.
+
+**Invariant, never audience-scoped:** `direction`, `aggregation`, `unit`, `neverSliceBy`. These are
+facts about the measure, not about the reader. Churn is lower-is-better for everyone. If direction
+could vary by audience, the same number would be favourable in one person's report and unfavourable
+in another's, and when those two people meet, the product has manufactured a disagreement — a
+serious failure for a tool whose pitch is a verifiable single source of truth. A case that seems to
+need direction to vary by audience is one measure where there should be two.
+
+**Legitimately audience-scoped:** `priority`, measure inclusion, `analysisDimensions` ordering,
+`materiality`, `cadence`, and `context` prose. A regional manager wants Region first; a CFO cares
+about 100k and a team lead about 5k.
+
+### Why this does not reuse `Scope`, and does reuse perspectives
+
+The obvious implementation — `scope: { audience: "Sales" }` — **cannot be spelled**. A `Scope` key
+is a `QualifiedColumn` validated to name a real model column, so an audience key is rejected by the
+validator before it reaches the resolver, and forcing it through a synthetic table would also
+mis-rank it in the overlap checker, where specificity counts constrained columns.
+
+So audience is a **sibling of scope on `Rule`, one rung above it** — still one document, one
+validator, one write gate, one `AttributeSet` payload, so an overlay still structurally cannot
+introduce a number. `check_overlaps` buckets by `(measure, attribute, audience)`, so two audiences
+never collide with each other, and an audience-tagged rule beats an untagged one at equal
+specificity. `AttrSource` grows an audience arm so the resolved output can still answer "who
+decided this, and for whom".
+
+**The audience names come from the model's perspectives.** A `Perspective` is `{ name, tables,
+columns, measures, description }` — a finite, declared, named subset of model objects, authored
+through a real command, a CLI verb and a Model Editor section. That is exactly the enumerable list
+the overlap checker needs, it already means "who is this for", and it already answers one of the
+audience-scoped attributes outright: *measure inclusion* is what a perspective is. Two parallel
+taxonomies for "who is this for" would diverge, so there will be one.
+
+Three things must be true before this is built, and all three are why it is not built yet:
+
+1. **Perspectives fail OPEN.** An unknown or renamed perspective name currently filters nothing —
+   correct for hiding fields, and wrong for judging favourability, because an overlay that silently
+   vanishes leaves the report rendering and saying the opposite of what its audience agreed. An
+   audience name validated against perspectives must therefore be a hard error, and a perspective
+   rename must **re-key** the strategy document rather than fall back.
+2. **A rule that sets an invariant attribute inside an audience must be refused** by the overlap
+   checker — a load-bearing guard, not a lint, proved by a sabotage that reds that one assertion.
+3. **Nothing selects an audience today.** There is no "view as" anywhere in the product, so an
+   overlay would have no way to apply.
+
+**And the sequencing is the real reason.** Overlays on top of a base strategy nobody has authored
+are worth nothing; authoring effort was always the binding constraint on this layer. §9 exists to
+make the base fillable. That comes first.
+
+## 12. Honest limits
 
 - **Snowflaked attributes are unreachable** in v1 and say so. The fix is an engine project.
 - **Statistics on DirectQuery models** cost one query per column. They are lazy, cached, and
   visibly "computing" rather than silently slow.
 - **Queries serialise per connection**, so a long DirectQuery run blocks other BI work on the same
   model. The planner is bounded and cancellable.
-- **KPI bands only express higher-is-better.** The strategy adds direction, and a lower-is-better
-  direction over ascending KPI bands is a validation error naming both — but a KPI-authored model
-  may need its bands revisited.
+- **A KPI's direction is inferred from its band statuses, which nothing validates.** The engine does
+  not compute status at all, and it constrains only the thresholds, so a KPI whose statuses run
+  `OnTrack → AtRisk → OffTrack` is legal, authorable in the KPIs tab today, and means lower is
+  better. The strategy layer reads that sequence; a non-monotonic one yields no direction. A
+  strategy `direction` that contradicts the sequence is a validation error naming both.
+- **A numeric axis on a non-calendar dimension is still lost.** Declared metadata rescues the date
+  table; a `Decimal` column that is really an axis on some other dimension needs the column
+  statistics this codebase does not have. It falls to `ignore`, and a person has to say otherwise.
 - **Narration stays deterministic until M6.** A model writes no sentence in this feature. When one
   does, it will be structurally checked: every sentence tagged with the fact ids it covers, and a
   sentence citing a number that is not in its cited facts is dropped.

@@ -3,13 +3,16 @@
 //          strategy they trust. Three grids (measures, tables+columns, rules),
 //          a findings strip, and the four actions: Validate, Run tests, Save,
 //          Infer.
-// CONTEXT: Four properties are the design, not decoration.
+// CONTEXT: Six properties are the design, not decoration.
 //
-//          (1) CONFIRMED vs INFERRED IS THE TAB. An entry with
-//          `reviewed: false` is a machine's guess and renders muted with an
-//          "inferred" chip; a confirmed one renders plainly. That contrast is
-//          the whole reason this surface exists, so the styling is derived
-//          from `reviewed` in ONE place (`rowTone`) rather than sprinkled.
+//          (1) THE ROW STATE IS FOUR-VALUED, NOT TWO. `reviewed` alone cannot
+//          tell a row nobody has touched from a row a machine guessed, so both
+//          rendered identically and every row offered a Confirm button over an
+//          empty "—". Confirming nothing is a no-op that teaches people to
+//          click Confirm without reading. The state comes from `entryState`
+//          (empty | inferred | authored | confirmed) and becomes a look in ONE
+//          place (`rowTone` + `ReviewedCell`). `data-unconfirmed` still mirrors
+//          `reviewed` exactly — it is a different axis, and tests read both.
 //
 //          (2) NOTHING WRITES UNTIL SAVE. Every edit lands in local state.
 //          Save calls `op: "set"`, and a REFUSED write comes back
@@ -18,28 +21,72 @@
 //          refusal as a thrown error would report success and discard the
 //          reasons in the same breath.
 //
-//          (3) THE SCOPE EDITOR CANNOT TAKE A TYPED COLUMN NAME. The column is
+//          (3) INFER-FIRST, NEVER A BLANK FORM. A model with no stored
+//          strategy opens on the backend's inferred draft (`op: "infer"`, which
+//          walks the measure ASTs and the workbook's own usage) so the first
+//          view is a draft to correct. It is a DRAFT: nothing is auto-saved,
+//          and a stored document is never auto-inferred over or merged into.
+//          The tab unmounts on every section switch, so a naive auto-infer on
+//          each mount would silently throw away confirmations the user had not
+//          saved — `unsavedDrafts` remembers the working draft per connection
+//          and is consulted ONLY on the no-stored-document path.
+//
+//          (4) THE SCOPE EDITOR CANNOT TAKE A TYPED COLUMN NAME. The column is
 //          a <select> over the model's own columns, and `buildRuleFromDraft`
 //          re-checks every scope column against the model before the rule is
 //          accepted. A typo in a scope is not a broken rule — it is a rule that
 //          silently NEVER FIRES, which looks exactly like a rule that was never
 //          needed.
 //
-//          (4) INFER DISCARDS. It replaces the draft wholesale, including
+//          (5) INFER DISCARDS. It replaces the draft wholesale, including
 //          unconfirmed edits, so it asks first with `confirmAsync` and AWAITS
 //          the answer (the Tauri shim returns a Promise; an un-awaited
 //          `if (!confirm(...))` tests `!Promise` and never fires).
+//
+//          (6) AGGREGATION IS PER DIMENSION. Additivity is not a flat enum:
+//          headcount is additive over Department and last-value over Date. The
+//          cell was a bare <select> that wrote `{ default: v }`, and because
+//          `withMeasure` merges shallowly that REPLACED the whole spec and
+//          destroyed any `byDimension` map — invisible before it was destroyed,
+//          because the cell only ever showed `.default`. No `AggregationSpec`
+//          literal is constructed in this file any more; every write goes
+//          through `withAggregationDefault` / `withAggregationException`.
+//
+//          (7) AN EMPTY CELL IS NOT AN ABSENT ANSWER. The grid used to render
+//          the RAW DOCUMENT, so a measure whose direction and target are
+//          already fully determined by the model's own KPI showed two blank
+//          dropdowns — which reads as "nobody has decided this" and invites a
+//          person to type a SECOND answer beside the KPI's. That is the drift a
+//          reviewer sees when they say the strategy layer duplicates the KPI.
+//          The resolver has always read the KPI as its base layer; `preview`
+//          (`strategyPreview`) hands back what each measure actually resolves
+//          to plus each attribute's `source`, and an empty control shows that
+//          value greyed, NAMING the KPI or rule it came from. Choosing a real
+//          option is what writes a literal — the explicit override. NOTHING
+//          here re-derives a resolved value: no band ordering, no KPI lookup,
+//          no direction inference. One implementation decides, and it is the
+//          Rust resolver. The preview is best-effort: a failure is SILENT, the
+//          tab keeps working without inheritance, and it never gates an edit.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ModelOverview } from "@api";
+import type { ModelOverview, ModelTableInfo } from "@api";
 import { confirmAsync } from "@api/dialogs";
 import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { Chevron } from "../treeKit";
 import {
   strategyGet,
+  strategyInfer,
+  strategyPreview,
   strategyRunTests,
   strategySet,
   strategyValidate,
+} from "../../lib/strategyBackend";
+import type {
+  Applied,
+  AttrSource,
+  ResolvedMeasure,
+  StrategyPreviewMeasure,
 } from "../../lib/strategyBackend";
 import {
   ADDITIVITIES,
@@ -48,14 +95,18 @@ import {
   ROLES,
   TABLE_KINDS,
   UNITS,
+  aggregationDimensionOptions,
+  compareColumnsByRole,
   confirmAll,
   emptyStrategyDoc,
+  entryState,
   findingsAtPath,
+  formatAggregationSpec,
   formatMaterialitySpec,
   formatTargetSpec,
   hasErrors,
-  inferStrategyDraft,
   measureEntry,
+  measureHasValues,
   measurePath,
   modelColumnRefs,
   modelHasColumn,
@@ -63,7 +114,10 @@ import {
   parseTargetSpec,
   rulePath,
   tableEntry,
+  tableHasValues,
   tablePath,
+  withAggregationDefault,
+  withAggregationException,
   withColumn,
   withMeasure,
   withRule,
@@ -73,8 +127,10 @@ import {
 import type {
   AttributeSet,
   Additivity,
+  AggregationSpec,
   Cadence,
   Direction,
+  EntryState,
   Finding,
   Materiality,
   Role,
@@ -86,6 +142,33 @@ import type {
   Target,
   Unit,
 } from "../../lib/strategyTypes";
+
+// ===========================================================================
+// The per-connection working draft
+// ===========================================================================
+
+/**
+ * The unsaved draft for each connection.
+ *
+ * The tab is unmounted on every section switch, so without this the mount
+ * effect would re-infer and the user's unsaved confirmations would vanish
+ * between two clicks with no message and no undo. A STORED document always
+ * wins — this is read only when the model has none, and is never merged over
+ * one.
+ */
+const unsavedDrafts = new Map<string, StrategyDoc>();
+
+/** Drop every remembered draft. Exists so a test can start from a cold cache;
+ *  the map is module state and would otherwise leak between cases. */
+export function forgetUnsavedDrafts(): void {
+  unsavedDrafts.clear();
+}
+
+const DRAFT_STATUS =
+  "No stored strategy — this is an inferred draft. Nothing is written until you press Save.";
+const RESUMED_STATUS =
+  "Showing your unsaved draft — nothing is written until you press Save.";
+const NO_DRAFT_STATUS = "This model has no strategy yet — Infer proposes a draft.";
 
 // ===========================================================================
 // Rule drafts (the modal's editable shape) and the guard that accepts one
@@ -238,35 +321,270 @@ export function buildRuleFromDraft(
 }
 
 // ===========================================================================
+// Inheritance — reading what the RESOLVER decided, never deciding it here
+// ===========================================================================
+
+/** How long an edit rests before the preview is re-fetched. */
+const PREVIEW_DEBOUNCE_MS = 300;
+
+/** The rule id, when a rule is what decided this attribute. */
+export function sourceRuleId(source: AttrSource): string | null {
+  return typeof source === "object" && "rule" in source ? source.rule : null;
+}
+
+/** The KPI name, when a model KPI is what supplied this attribute. */
+export function sourceKpiName(source: AttrSource): string | null {
+  return typeof source === "object" && "kpi" in source ? source.kpi : null;
+}
+
+/**
+ * The source as a short token, for the "why" list: `attribute: value (source)`.
+ *
+ * A KPI and a rule are NAMED. "inherited" is not an answer anybody can go and
+ * check; "KPI 'Margin % KPI'" is one they can open.
+ */
+export function sourceLabel(source: AttrSource): string {
+  const kpi = sourceKpiName(source);
+  if (kpi !== null) return kpi === "" ? "the model's KPI" : `KPI '${kpi}'`;
+  const rule = sourceRuleId(source);
+  if (rule !== null) return `rule '${rule}'`;
+  return source as "base" | "inferred" | "strategy";
+}
+
+/**
+ * The source as a phrase for a control that is showing an inherited value.
+ *
+ * The empty-KPI case is real rather than defensive: the resolver stamps
+ * `Kpi(name)` from an `Option`, so a KPI with no name arrives as `{"kpi": ""}`
+ * and "from KPI ''" would read as a bug in the tab rather than a gap in the
+ * model.
+ */
+export function inheritedFrom(source: AttrSource): string {
+  const kpi = sourceKpiName(source);
+  if (kpi !== null) return kpi === "" ? "from the model's KPI" : `from KPI '${kpi}'`;
+  const rule = sourceRuleId(source);
+  if (rule !== null) return `from rule '${rule}'`;
+  switch (source) {
+    case "base":
+      return "from the model";
+    case "inferred":
+      return "inferred from the model";
+    default:
+      return "from this measure's entry";
+  }
+}
+
+/**
+ * What an empty control says instead of a blank: the value it already
+ * inherits, and where from — "higherIsBetter — from KPI 'Margin % KPI'".
+ *
+ * `null` when nothing is inherited, which is the only case where a blank is
+ * the truth.
+ */
+export function inheritedOption<T>(
+  applied: Applied<T> | undefined,
+  format: (value: T) => string,
+): string | null {
+  if (applied === undefined) return null;
+  const text = format(applied.value);
+  if (text === "") return null;
+  return `${text} — ${inheritedFrom(applied.source)}`;
+}
+
+/**
+ * What an EMPTY control should say — or null when the document itself carries
+ * the value, in which case the control shows the document, which is what it
+ * edits.
+ */
+export function inheritedFor<T>(
+  carried: T | undefined,
+  applied: Applied<T> | undefined,
+  format: (value: T) => string,
+): string | null {
+  if (carried !== undefined) return null;
+  return inheritedOption(applied, format);
+}
+
+/**
+ * The rule that OVERRIDES a value the document carries, if there is one.
+ *
+ * Only meaningful where the document states something: a rule that supplied an
+ * absent value is already named in the inherited note, and saying it twice in
+ * two spellings is how one of them comes to be wrong.
+ */
+export function overridingRule<T>(
+  carried: T | undefined,
+  applied: Applied<T> | undefined,
+): string | null {
+  if (carried === undefined || applied === undefined) return null;
+  return sourceRuleId(applied.source);
+}
+
+/**
+ * The whole resolved measure, one attribute per line, with provenance.
+ *
+ * The SUPPRESSIONS are here because "no favourability here, because rule X
+ * disagrees" is the single most confusing thing the engine can do, and this
+ * tooltip is the only place a person can learn it. A suppressed attribute has
+ * no value to show anywhere else — that is what suppression means.
+ */
+export function whyLines(resolved: ResolvedMeasure): string[] {
+  const lines: string[] = [];
+  function add<T>(
+    attribute: string,
+    applied: Applied<T> | undefined,
+    format: (value: T) => string,
+  ): void {
+    if (applied === undefined) return;
+    const text = format(applied.value);
+    lines.push(`${attribute}: ${text === "" ? "(none)" : text} (${sourceLabel(applied.source)})`);
+  }
+  add("direction", resolved.direction, (d) => d);
+  add("aggregation", resolved.aggregation, (a) => formatAggregationSpec(a));
+  add("unit", resolved.unit, (u) => u);
+  add("target", resolved.target, (t) => formatTargetSpec(t));
+  add("materiality", resolved.materiality, (m) => formatMaterialitySpec(m));
+  add("cadence", resolved.cadence, (c) => c);
+  add("priority", resolved.priority, (p) => String(p));
+  add("rankWeight", resolved.rankWeight, (w) => String(w));
+  if (resolved.analysisDimensions.length > 0) {
+    lines.push(`analysis dimensions: ${resolved.analysisDimensions.join(", ")}`);
+  }
+  if (resolved.neverSliceBy.length > 0) {
+    lines.push(`never slice by: ${resolved.neverSliceBy.join(", ")}`);
+  }
+  if (resolved.suppressedKinds.length > 0) {
+    lines.push(`suppressed fact kinds: ${resolved.suppressedKinds.join(", ")}`);
+  }
+  for (const s of resolved.suppressions) {
+    lines.push(`${s.attribute}: WITHHELD by rule '${s.rule}' — ${s.reason}`);
+  }
+  if (lines.length === 0) {
+    lines.push("Nothing is decided for this measure — not by the model, not by the strategy.");
+  }
+  return lines;
+}
+
+/** The per-row "why": everything the resolver decided, as a tooltip.
+ *
+ *  Deliberately NOT a popover. The question it answers ("where did this number
+ *  come from?") is asked while looking at one cell, and a panel that has to be
+ *  opened and closed is a worse answer than one that is already there. */
+function WhyCell({
+  measure,
+  resolved,
+}: {
+  measure: string;
+  resolved: ResolvedMeasure;
+}): React.ReactElement {
+  return (
+    <span
+      data-testid={`why-${measure}`}
+      title={`What ${measure} resolves to today, and who decided each part:\n\n${whyLines(
+        resolved,
+      ).join("\n")}`}
+      style={{
+        marginLeft: 6,
+        fontSize: 11,
+        color: "#2f6fce",
+        borderBottom: "1px dotted #2f6fce",
+        cursor: "help",
+      }}
+    >
+      why
+    </span>
+  );
+}
+
+/**
+ * The marker on a cell whose value is NOT what applies.
+ *
+ * The document carries a value here, but the resolver reports a scoped rule
+ * decided this attribute — so the cell is showing something the rule overrides.
+ * Without the marker the two disagree in silence.
+ */
+function RuleOverrideMark({
+  measure,
+  attribute,
+  ruleId,
+}: {
+  measure: string;
+  attribute: string;
+  ruleId: string;
+}): React.ReactElement {
+  return (
+    <span
+      data-testid={`rule-override-${attribute}-${measure}`}
+      style={{ marginLeft: 4 }}
+      title={`rule '${ruleId}' decides ${attribute} for ${measure}, so what this cell says is not what applies where that rule reaches.`}
+    >
+      <Badge tone="warn">rule</Badge>
+    </span>
+  );
+}
+
+// ===========================================================================
 // Small presentation helpers
 // ===========================================================================
 
-/** The ONE place `reviewed` becomes a look. Muted + an "inferred" chip. */
-function rowTone(reviewed: boolean): React.CSSProperties {
-  return reviewed
-    ? { color: "#222", background: "transparent" }
-    : { color: "#8a8a8a", background: "#fbfaf5", fontStyle: "italic" };
+/**
+ * The ONE place a row state becomes a look.
+ *
+ * Only `inferred` is muted-and-italic, because only an inferred row is a
+ * machine's sentence. `empty` is quiet but upright — there is nothing there to
+ * doubt — and `authored` reads as plainly as `confirmed`, since the words are
+ * the user's own; the difference between them is the badge, not the type.
+ */
+function rowTone(state: EntryState): React.CSSProperties {
+  switch (state) {
+    case "inferred":
+      return { color: "#8a8a8a", background: "#fbfaf5", fontStyle: "italic" };
+    case "empty":
+      return { color: "#9a9a9a", background: "transparent" };
+    default:
+      return { color: "#222", background: "transparent" };
+  }
 }
 
 const cellStyle: React.CSSProperties = { ...styles.td, whiteSpace: "nowrap" };
 
 const smallInput: React.CSSProperties = { ...styles.input, fontSize: 12, padding: "2px 4px" };
 
+/**
+ * A picker whose EMPTY option carries the inherited value rather than a dash.
+ *
+ * `inherited` is the resolver's answer for this attribute, already formatted
+ * ("higherIsBetter — from KPI 'Margin % KPI'"). A blank where a KPI has already
+ * decided the answer is what invites a person to type a competing one, so the
+ * empty option shows what is in force and reads as greyed. Choosing a real
+ * option is the explicit override — and only that writes to the document.
+ */
 function selectOf<T extends string>(
   value: T | "",
   options: readonly T[],
   onChange: (v: T | "") => void,
   disabled: boolean,
   width = 128,
+  inherited: string | null = null,
 ): React.ReactElement {
+  const showingInherited = value === "" && inherited !== null;
   return (
     <select
-      style={{ ...smallInput, width }}
+      style={{
+        ...smallInput,
+        width,
+        ...(showingInherited ? { color: "#6a6a6a", fontStyle: "italic" } : {}),
+      }}
       value={value}
       disabled={disabled}
+      title={
+        inherited === null
+          ? undefined
+          : `Inherited: ${inherited}. Picking a value here overrides it in the document.`
+      }
       onChange={(e) => onChange(e.target.value as T | "")}
     >
-      <option value="">—</option>
+      <option value="">{inherited ?? "—"}</option>
       {options.map((o) => (
         <option key={o} value={o}>
           {o}
@@ -289,13 +607,20 @@ function SpecInput<T>({
   onCommit,
   disabled,
   placeholder,
+  hint,
   width = 118,
 }: {
   value: string;
   parse: (text: string) => { ok: true; value: T | undefined } | { ok: false; error: string };
   onCommit: (value: T | undefined) => void;
   disabled: boolean;
+  /** What an EMPTY field says. The inherited value when there is one, so the
+   *  cell answers "what applies here?" rather than showing a blank. */
   placeholder: string;
+  /** The accepted spellings, for the tooltip. Separate from `placeholder`
+   *  because when the placeholder is carrying an inherited value the format
+   *  hint still has to reach the person who is about to type over it. */
+  hint?: string;
   width?: number;
 }): React.ReactElement {
   const [text, setText] = useState(value);
@@ -314,7 +639,7 @@ function SpecInput<T>({
       value={text}
       disabled={disabled}
       placeholder={placeholder}
-      title={error ?? placeholder}
+      title={error ?? (hint === undefined ? placeholder : `${placeholder}\n${hint}`)}
       onChange={(e) => setText(e.target.value)}
       onBlur={(e) => {
         const parsed = parse(e.target.value);
@@ -335,14 +660,22 @@ function ColumnRefList({
   options,
   onChange,
   disabled,
+  title,
+  addLabel = "add column…",
 }: {
   refs: string[];
   options: string[];
   onChange: (refs: string[]) => void;
   disabled: boolean;
+  /** What the list MEANS. A column list's name rarely carries its purpose. */
+  title?: string;
+  addLabel?: string;
 }): React.ReactElement {
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center", minWidth: 220 }}>
+    <div
+      title={title}
+      style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center", minWidth: 220 }}
+    >
       {refs.map((r) => (
         <span
           key={r}
@@ -374,7 +707,7 @@ function ColumnRefList({
           if (!refs.includes(e.target.value)) onChange([...refs, e.target.value]);
         }}
       >
-        <option value="">add column…</option>
+        <option value="">{addLabel}</option>
         {options
           .filter((o) => !refs.includes(o))
           .map((o) => (
@@ -401,35 +734,50 @@ function RowFindings({ findings }: { findings: Finding[] }): React.ReactElement 
   );
 }
 
-/** Confirmed / inferred, with the Confirm action beside it. */
+/**
+ * The row's state, with the Confirm action beside it.
+ *
+ * An `empty` row keeps the button but DISABLES it: confirming a row that says
+ * nothing agrees to nothing, and a live Confirm over four "—" cells is how a
+ * person learns to confirm without reading. The title says why rather than
+ * leaving a dead control unexplained.
+ */
 function ReviewedCell({
-  reviewed,
+  state,
   onConfirm,
   disabled,
   label,
 }: {
-  reviewed: boolean;
+  state: EntryState;
   onConfirm: () => void;
   disabled: boolean;
   label: string;
 }): React.ReactElement {
+  if (state === "confirmed") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <Badge tone="ok">confirmed</Badge>
+      </div>
+    );
+  }
+  const empty = state === "empty";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      {reviewed ? (
-        <Badge tone="ok">confirmed</Badge>
-      ) : (
-        <>
-          <Badge tone="warn">inferred</Badge>
-          <button
-            style={styles.smallBtn}
-            disabled={disabled}
-            title={`Confirm ${label} — mark it as agreed by a human`}
-            onClick={onConfirm}
-          >
-            Confirm
-          </button>
-        </>
-      )}
+      {empty && <Badge tone="neutral">not set</Badge>}
+      {state === "inferred" && <Badge tone="warn">inferred</Badge>}
+      {state === "authored" && <Badge tone="neutral">set by you</Badge>}
+      <button
+        style={styles.smallBtn}
+        disabled={disabled || empty}
+        title={
+          empty
+            ? `Nothing to confirm — the strategy says nothing about ${label} yet. Set a value, or press Infer for a draft.`
+            : `Confirm ${label} — mark it as agreed by a human`
+        }
+        onClick={onConfirm}
+      >
+        Confirm
+      </button>
     </div>
   );
 }
@@ -448,45 +796,133 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   const [status, setStatus] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ original: Rule | null } | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  /** What each measure RESOLVES to, by measure name. Empty until the preview
+   *  arrives, and empty forever if it never does — inheritance is an extra the
+   *  grid can do without, never a precondition for editing. */
+  const [preview, setPreview] = useState<Map<string, StrategyPreviewMeasure>>(() => new Map());
 
   // A slow load for a connection the user has already left must not install
   // its document over the newer one.
   const loadSeq = useRef(0);
+  /** The load this connection's FIRST preview was fetched for. The first one
+   *  is immediate — the grid's first paint is exactly where a blank cell would
+   *  mislead — and only later document edits are debounced. */
+  const previewedSeq = useRef(-1);
   useEffect(() => {
     const seq = ++loadSeq.current;
     setLoading(true);
     setDoc(null);
     setFindings([]);
     setStatus(null);
-    void strategyGet(connectionId)
-      .then((stored) => {
+    // Another model's inheritance is worse than none: it would name a KPI this
+    // model does not have.
+    setPreview(new Map());
+
+    void (async (): Promise<void> => {
+      let next: StrategyDoc = emptyStrategyDoc();
+      let note: string | null = null;
+      try {
+        const stored = await strategyGet(connectionId);
         if (loadSeq.current !== seq) return;
-        setDoc(stored ?? emptyStrategyDoc());
-        setStatus(stored ? null : "This model has no strategy yet — Infer proposes a draft.");
-      })
-      .catch((err: unknown) => {
+        if (stored) {
+          // A stored document is the authority. It is never auto-inferred over
+          // and a draft is never merged into it.
+          unsavedDrafts.delete(connectionId);
+          next = stored;
+        } else {
+          const remembered = unsavedDrafts.get(connectionId);
+          if (remembered) {
+            // Coming BACK to the tab. Re-inferring here would discard whatever
+            // the user confirmed before they switched sections.
+            next = remembered;
+            note = RESUMED_STATUS;
+          } else {
+            try {
+              next = await strategyInfer(connectionId);
+              if (loadSeq.current !== seq) return;
+              unsavedDrafts.set(connectionId, next);
+              note = DRAFT_STATUS;
+            } catch {
+              // A draft that could not be built is not an error condition — the
+              // tab still works, it just opens empty and says so.
+              next = emptyStrategyDoc();
+              note = NO_DRAFT_STATUS;
+            }
+          }
+        }
+      } catch (err: unknown) {
         if (loadSeq.current !== seq) return;
-        setDoc(emptyStrategyDoc());
+        next = emptyStrategyDoc();
         reportError(err);
-      })
-      .finally(() => {
-        if (loadSeq.current === seq) setLoading(false);
-      });
+      }
+      if (loadSeq.current !== seq) return;
+      setDoc(next);
+      setStatus(note);
+      setLoading(false);
+    })();
   }, [connectionId, reportError]);
+
+  /**
+   * Keep the inheritance in step with the document being edited.
+   *
+   * The IN-MEMORY document is what is previewed, so raising a materiality shows
+   * its effect before Save rather than after — that is the whole point of
+   * sending a payload at all. Debounced, because every keystroke that commits a
+   * spec produces a new document.
+   *
+   * A failure is SILENT and total: the catch swallows it, the map stays as it
+   * was, and every control falls back to the blank it showed before this
+   * existed. Nothing here can block or refuse an edit.
+   */
+  useEffect(() => {
+    if (doc === null) return undefined;
+    // The SAME guard the mount effect uses: a preview for a connection the user
+    // has already left must not overwrite the newer one.
+    const seq = loadSeq.current;
+    let cancelled = false;
+    const fetchPreview = (): void => {
+      void (async (): Promise<void> => {
+        try {
+          const result = await strategyPreview(connectionId, doc);
+          if (cancelled || loadSeq.current !== seq) return;
+          const next = new Map<string, StrategyPreviewMeasure>();
+          for (const m of result.measures) next.set(m.measure, m);
+          setPreview(next);
+        } catch {
+          // Deliberately silent. The tab works without inheritance; a toast for
+          // a decoration would train people to dismiss the ones that matter.
+        }
+      })();
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (previewedSeq.current === seq) {
+      timer = setTimeout(fetchPreview, PREVIEW_DEBOUNCE_MS);
+    } else {
+      previewedSeq.current = seq;
+      fetchPreview();
+    }
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [connectionId, doc]);
 
   /** Every local edit goes through here. Findings are cleared, because a
    *  finding describes the document that produced it and an edited document
    *  has not been judged yet — a stale error would keep Save locked over a
    *  problem the user just fixed. */
-  const edit = useCallback((next: StrategyDoc) => {
-    setDoc(next);
-    setFindings([]);
-    setStatus(null);
-  }, []);
+  const edit = useCallback(
+    (next: StrategyDoc) => {
+      unsavedDrafts.set(connectionId, next);
+      setDoc(next);
+      setFindings([]);
+      setStatus(null);
+    },
+    [connectionId],
+  );
 
   const columnRefs = useMemo(() => modelColumnRefs(overview), [overview]);
   const errorCount = findings.filter((f) => f.severity === "error").length;
-  const warningCount = findings.length - errorCount;
   const disabled = readOnly || busy || doc === null;
 
   const run = useCallback(
@@ -541,6 +977,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
         setFindings(result.findings);
         // A refusal RESOLVES. Reporting success here on anything but
         // `written === true` is the bug this branch exists to prevent.
+        if (result.written) unsavedDrafts.delete(connectionId);
         setStatus(
           result.written
             ? `Saved${result.findings.length > 0 ? ` with ${result.findings.length} warning(s)` : ""}.`
@@ -550,6 +987,8 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
     [run, connectionId],
   );
 
+  // The button and the mount-time draft call the SAME backend inference, so
+  // the two can never disagree about what "inferred" means here.
   const onInfer = useCallback(async () => {
     // AWAITED: the Tauri shim returns a Promise, so an un-awaited confirm is
     // always truthy and the draft would be replaced without asking.
@@ -558,10 +997,21 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
         "Every entry comes back unconfirmed, and edits you have not saved are discarded.",
     );
     if (!agreed) return;
-    setDoc(inferStrategyDraft(overview));
-    setFindings([]);
-    setStatus("Inferred a fresh draft — nothing is written until you press Save.");
-  }, [overview]);
+    setBusy(true);
+    setStatus(null);
+    try {
+      const drafted = await strategyInfer(connectionId);
+      unsavedDrafts.set(connectionId, drafted);
+      setDoc(drafted);
+      setFindings([]);
+      setStatus("Inferred a fresh draft — nothing is written until you press Save.");
+    } catch (err: unknown) {
+      reportError(err);
+      setStatus("Infer failed.");
+    } finally {
+      setBusy(false);
+    }
+  }, [connectionId, reportError]);
 
   const onConfirmAll = useCallback(() => {
     if (!doc) return;
@@ -623,7 +1073,11 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
 
       <div style={{ ...styles.hint, display: "flex", gap: 10, alignItems: "center" }}>
         <span>Nothing is written until you press Save.</span>
-        {status && <span style={{ color: "#444" }}>{status}</span>}
+        {status && (
+          <span data-testid="strategy-status" style={{ color: "#444" }}>
+            {status}
+          </span>
+        )}
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -631,6 +1085,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           doc={doc}
           overview={overview}
           findings={findings}
+          preview={preview}
           selectedPath={selectedPath}
           columnRefs={columnRefs}
           disabled={disabled}
@@ -676,10 +1131,39 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
 // Measures grid
 // ===========================================================================
 
+const MEASURE_HEADERS = [
+  "measure",
+  "direction",
+  "aggregation",
+  "unit",
+  "target",
+  "materiality",
+  "cadence",
+  "priority",
+  "analysis dimensions",
+  "never slice by",
+  "reviewed",
+];
+
+/** The accepted spellings for the two spec cells.
+ *
+ *  Constants because the placeholder is no longer always the hint: an empty
+ *  cell shows what it INHERITS instead, and the format then has to reach the
+ *  tooltip. Two spellings of one grammar drift. */
+const TARGET_HINT = "1000 | kpi | measure:Budget | band:0.8,1.2";
+const MATERIALITY_HINT = "1000 | 2%";
+
+const NEVER_SLICE_TITLE =
+  "Columns this measure must never be broken down by — a slice that is structurally valid but " +
+  "semantically misleading (an average sliced by a key, a headcount sliced by an order line). " +
+  "The engine cannot detect these, and inference deliberately proposes none, so this list only " +
+  "ever comes from a person.";
+
 function MeasuresGrid({
   doc,
   overview,
   findings,
+  preview,
   selectedPath,
   columnRefs,
   disabled,
@@ -689,12 +1173,22 @@ function MeasuresGrid({
   doc: StrategyDoc;
   overview: ModelOverview;
   findings: Finding[];
+  preview: Map<string, StrategyPreviewMeasure>;
   selectedPath: string | null;
   columnRefs: string[];
   disabled: boolean;
   onEdit: (doc: StrategyDoc) => void;
   onConfirmAll: () => void;
 }): React.ReactElement {
+  /** The measure whose aggregation editor is open, or null. */
+  const [aggregating, setAggregating] = useState<string | null>(null);
+
+  // Entries naming a measure the model no longer has. They come from the
+  // preview because the grid iterates the MODEL's measures — which is exactly
+  // why an orphan was invisible until now, in a document where it is the one
+  // thing that needs doing.
+  const orphans = [...preview.values()].filter((p) => !p.inModel && p.hasEntry);
+
   return (
     <section>
       <div style={styles.sectionHeader}>
@@ -707,19 +1201,8 @@ function MeasuresGrid({
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>
             <tr>
-              {[
-                "measure",
-                "direction",
-                "aggregation",
-                "unit",
-                "target",
-                "materiality",
-                "cadence",
-                "priority",
-                "analysis dimensions",
-                "reviewed",
-              ].map((h) => (
-                <th key={h} style={styles.th}>
+              {MEASURE_HEADERS.map((h) => (
+                <th key={h} style={styles.th} title={h === "never slice by" ? NEVER_SLICE_TITLE : undefined}>
                   {h}
                 </th>
               ))}
@@ -728,28 +1211,51 @@ function MeasuresGrid({
           <tbody>
             {overview.measures.length === 0 && (
               <tr>
-                <td style={styles.td} colSpan={10}>
+                <td style={styles.td} colSpan={MEASURE_HEADERS.length}>
                   <span style={styles.muted}>This model has no measures.</span>
                 </td>
               </tr>
             )}
             {overview.measures.map((m) => {
               const entry = measureEntry(doc, m.name);
+              const state = entryState(entry, measureHasValues(entry));
               const path = measurePath(m.name);
               const rowFindings = findingsAtPath(findings, path);
+              // The resolver's answer for this measure — absent when no preview
+              // has arrived, which every cell below treats as "show a blank",
+              // exactly as the grid behaved before inheritance existed.
+              const resolved = preview.get(m.name)?.resolved;
+              const inh = {
+                direction: inheritedFor(entry.direction, resolved?.direction, (d) => d),
+                unit: inheritedFor(entry.unit, resolved?.unit, (u) => u),
+                cadence: inheritedFor(entry.cadence, resolved?.cadence, (c) => c),
+                target: inheritedFor(entry.target, resolved?.target, (t) => formatTargetSpec(t)),
+                materiality: inheritedFor(entry.materiality, resolved?.materiality, (v) =>
+                  formatMaterialitySpec(v),
+                ),
+              };
+              const ruled = {
+                direction: overridingRule(entry.direction, resolved?.direction),
+                unit: overridingRule(entry.unit, resolved?.unit),
+                cadence: overridingRule(entry.cadence, resolved?.cadence),
+                target: overridingRule(entry.target, resolved?.target),
+                materiality: overridingRule(entry.materiality, resolved?.materiality),
+              };
               return (
                 <tr
                   key={m.name}
                   data-strategy-path={path}
                   data-unconfirmed={entry.reviewed ? "false" : "true"}
+                  data-strategy-state={state}
                   style={{
-                    ...rowTone(entry.reviewed),
+                    ...rowTone(state),
                     outline: selectedPath === path ? "2px solid #2f6fce" : "none",
                   }}
                 >
                   <td style={cellStyle}>
                     <strong>{m.name}</strong> <span style={styles.hint}>{m.table}</span>{" "}
                     <RowFindings findings={rowFindings} />
+                    {resolved && <WhyCell measure={m.name} resolved={resolved} />}
                   </td>
                   <td style={cellStyle}>
                     {selectOf<Direction>(
@@ -757,20 +1263,24 @@ function MeasuresGrid({
                       DIRECTIONS,
                       (v) => onEdit(withMeasure(doc, m.name, { direction: v === "" ? undefined : v })),
                       disabled,
+                      128,
+                      inh.direction,
+                    )}
+                    {ruled.direction !== null && (
+                      <RuleOverrideMark
+                        measure={m.name}
+                        attribute="direction"
+                        ruleId={ruled.direction}
+                      />
                     )}
                   </td>
                   <td style={cellStyle}>
-                    {selectOf<Additivity>(
-                      entry.aggregation?.default ?? "",
-                      ADDITIVITIES,
-                      (v) =>
-                        onEdit(
-                          withMeasure(doc, m.name, {
-                            aggregation: v === "" ? undefined : { default: v },
-                          }),
-                        ),
-                      disabled,
-                    )}
+                    <AggregationCell
+                      measure={m.name}
+                      spec={entry.aggregation}
+                      disabled={disabled}
+                      onOpen={() => setAggregating(m.name)}
+                    />
                   </td>
                   <td style={cellStyle}>
                     {selectOf<Unit>(
@@ -779,12 +1289,17 @@ function MeasuresGrid({
                       (v) => onEdit(withMeasure(doc, m.name, { unit: v === "" ? undefined : v })),
                       disabled,
                       98,
+                      inh.unit,
+                    )}
+                    {ruled.unit !== null && (
+                      <RuleOverrideMark measure={m.name} attribute="unit" ruleId={ruled.unit} />
                     )}
                   </td>
                   <td style={cellStyle}>
                     <SpecInput<Target>
                       value={formatTargetSpec(entry.target)}
-                      placeholder="1000 | kpi | measure:Budget | band:0.8,1.2"
+                      placeholder={inh.target ?? TARGET_HINT}
+                      hint={TARGET_HINT}
                       disabled={disabled}
                       parse={(t) => {
                         const r = parseTargetSpec(t);
@@ -792,11 +1307,15 @@ function MeasuresGrid({
                       }}
                       onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
                     />
+                    {ruled.target !== null && (
+                      <RuleOverrideMark measure={m.name} attribute="target" ruleId={ruled.target} />
+                    )}
                   </td>
                   <td style={cellStyle}>
                     <SpecInput<Materiality>
                       value={formatMaterialitySpec(entry.materiality)}
-                      placeholder="1000 | 2%"
+                      placeholder={inh.materiality ?? MATERIALITY_HINT}
+                      hint={MATERIALITY_HINT}
                       disabled={disabled}
                       width={90}
                       parse={(t) => {
@@ -805,6 +1324,13 @@ function MeasuresGrid({
                       }}
                       onCommit={(materiality) => onEdit(withMeasure(doc, m.name, { materiality }))}
                     />
+                    {ruled.materiality !== null && (
+                      <RuleOverrideMark
+                        measure={m.name}
+                        attribute="materiality"
+                        ruleId={ruled.materiality}
+                      />
+                    )}
                   </td>
                   <td style={cellStyle}>
                     {selectOf<Cadence>(
@@ -813,6 +1339,14 @@ function MeasuresGrid({
                       (v) => onEdit(withMeasure(doc, m.name, { cadence: v === "" ? undefined : v })),
                       disabled,
                       104,
+                      inh.cadence,
+                    )}
+                    {ruled.cadence !== null && (
+                      <RuleOverrideMark
+                        measure={m.name}
+                        attribute="cadence"
+                        ruleId={ruled.cadence}
+                      />
                     )}
                   </td>
                   <td style={cellStyle}>
@@ -835,14 +1369,25 @@ function MeasuresGrid({
                       refs={entry.analysisDimensions ?? []}
                       options={columnRefs}
                       disabled={disabled}
+                      title="Columns worth breaking this measure down by."
                       onChange={(refs) =>
                         onEdit(withMeasure(doc, m.name, { analysisDimensions: refs }))
                       }
                     />
                   </td>
+                  <td style={styles.td} data-testid={`never-slice-${m.name}`}>
+                    <ColumnRefList
+                      refs={entry.neverSliceBy ?? []}
+                      options={columnRefs}
+                      disabled={disabled}
+                      title={NEVER_SLICE_TITLE}
+                      addLabel="never slice by…"
+                      onChange={(refs) => onEdit(withMeasure(doc, m.name, { neverSliceBy: refs }))}
+                    />
+                  </td>
                   <td style={cellStyle}>
                     <ReviewedCell
-                      reviewed={entry.reviewed}
+                      state={state}
                       disabled={disabled}
                       label={m.name}
                       onConfirm={() => onEdit(withMeasure(doc, m.name, { reviewed: true }))}
@@ -851,16 +1396,296 @@ function MeasuresGrid({
                 </tr>
               );
             })}
+            {/* Orphans last, and NOT as editable rows: an entry whose measure
+                the model no longer has is the thing to clean up, and offering
+                dropdowns over it invites someone to keep tending a row that can
+                never resolve to anything. */}
+            {orphans.map((p) => (
+              <tr
+                key={`orphan-${p.measure}`}
+                data-strategy-path={measurePath(p.measure)}
+                data-strategy-orphan="true"
+                style={{ color: "#7a5b00", background: "#fffaf0" }}
+              >
+                <td style={cellStyle}>
+                  <strong>{p.measure}</strong>{" "}
+                  <Badge tone="warn">not in the model</Badge>{" "}
+                  <RowFindings findings={findingsAtPath(findings, measurePath(p.measure))} />
+                </td>
+                <td style={styles.td} colSpan={MEASURE_HEADERS.length - 1}>
+                  The strategy has an entry for &lsquo;{p.measure}&rsquo;, but this model has no
+                  such measure — it was renamed or deleted. Nothing here can apply to anything;
+                  remove the entry, or bring the measure back under its old name.
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
+
+      {aggregating !== null && (
+        <AggregationEditor
+          measure={aggregating}
+          overview={overview}
+          doc={doc}
+          disabled={disabled}
+          onClose={() => setAggregating(null)}
+          onEdit={onEdit}
+        />
+      )}
     </section>
+  );
+}
+
+// ===========================================================================
+// Aggregation — the collapsed cell and its editor
+// ===========================================================================
+
+/**
+ * The collapsed cell.
+ *
+ * It shows the WHOLE spec, exceptions included ("additive (Date: last value)"),
+ * because the previous cell showed only `.default` — so a per-dimension
+ * exception was invisible right up to the moment an edit destroyed it.
+ */
+function AggregationCell({
+  measure,
+  spec,
+  disabled,
+  onOpen,
+}: {
+  measure: string;
+  spec: AggregationSpec | undefined;
+  disabled: boolean;
+  onOpen: () => void;
+}): React.ReactElement {
+  const text = formatAggregationSpec(spec);
+  return (
+    <button
+      data-testid={`aggregation-${measure}`}
+      style={{ ...styles.smallBtn, minWidth: 128, textAlign: "left" }}
+      disabled={disabled}
+      title={`Additivity of ${measure}: the default, plus any per-dimension exception`}
+      onClick={onOpen}
+    >
+      {text === "" ? "—" : text}
+    </button>
+  );
+}
+
+/**
+ * The per-dimension additivity editor.
+ *
+ * Additivity is a property of the measure PER DIMENSION — headcount is additive
+ * over Department and last-value over Date — so a flat enum forces a wrong
+ * answer on exactly the semi-additive measures that most need a right one. The
+ * dimension picker is a closed list from the model: a typo would produce an
+ * exception the engine never looks up, which reads as "the exception did not
+ * apply" rather than as a mistake.
+ */
+function AggregationEditor({
+  measure,
+  overview,
+  doc,
+  disabled,
+  onClose,
+  onEdit,
+}: {
+  measure: string;
+  overview: ModelOverview;
+  doc: StrategyDoc;
+  disabled: boolean;
+  onClose: () => void;
+  onEdit: (doc: StrategyDoc) => void;
+}): React.ReactElement {
+  const [newDimension, setNewDimension] = useState("");
+  const [newValue, setNewValue] = useState<Additivity>("lastValue");
+
+  const spec = measureEntry(doc, measure).aggregation;
+  // The dimensions on offer depend on where the measure LIVES — its own table
+  // plus the tables one active relationship away from it.
+  const measureTable = overview.measures.find((m) => m.name === measure)?.table ?? "";
+  const dimensionOptions = aggregationDimensionOptions(overview, measureTable);
+  // Dimension order, not insertion order — the same order the collapsed cell
+  // prints, so the two readings of one spec cannot disagree.
+  const exceptions = Object.entries(spec?.byDimension ?? {}).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const taken = new Set(exceptions.map(([d]) => d));
+
+  /** The ONE write path. No `AggregationSpec` literal is built in this file. */
+  const write = (next: AggregationSpec | undefined): void =>
+    onEdit(withMeasure(doc, measure, { aggregation: next }));
+
+  const onSetDefault = (value: Additivity | undefined): void =>
+    write(withAggregationDefault(spec, value));
+  const onSetException = (dimension: string, value: Additivity | undefined): void =>
+    write(withAggregationException(spec, dimension, value));
+
+  return (
+    <Modal
+      title={`Aggregation: ${measure}`}
+      width={520}
+      onClose={onClose}
+      footer={
+        <button style={styles.primaryBtn} onClick={onClose}>
+          Close
+        </button>
+      }
+    >
+      <Field
+        label="Default"
+        hint="How this measure aggregates unless a dimension below says otherwise. Clearing it erases the exceptions too — an exception needs something to be an exception TO."
+      >
+        <select
+          data-testid="aggregation-default"
+          style={styles.input}
+          disabled={disabled}
+          value={spec?.default ?? ""}
+          onChange={(e) =>
+            onSetDefault(e.target.value === "" ? undefined : (e.target.value as Additivity))
+          }
+        >
+          <option value="">—</option>
+          {ADDITIVITIES.map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <div style={styles.field}>
+        <label style={styles.label}>Exceptions</label>
+        <div style={styles.hint}>
+          A dimension this measure does NOT aggregate the default way. A balance is additive across
+          Department and last-value across Date; naming only one of the two answers is what makes a
+          semi-additive measure lie.
+        </div>
+        {spec === undefined && (
+          <div style={{ ...styles.hint, marginTop: 4 }}>
+            Set a default first — an exception is a departure FROM one, and the stored shape has no
+            way to hold the second without the first.
+          </div>
+        )}
+        {spec !== undefined && exceptions.length === 0 && (
+          <div style={{ ...styles.hint, marginTop: 4 }}>
+            No exceptions — the default applies over every dimension.
+          </div>
+        )}
+        {exceptions.map(([dimension, value]) => (
+          <div
+            key={dimension}
+            data-testid="aggregation-exception"
+            style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}
+          >
+            <span style={{ ...styles.input, flex: 2, minWidth: 0, background: "#f6f7f8" }}>
+              {dimension}
+            </span>
+            <select
+              aria-label={`Additivity over ${dimension}`}
+              style={{ ...styles.input, width: 150 }}
+              disabled={disabled}
+              value={value}
+              onChange={(e) => onSetException(dimension, e.target.value as Additivity)}
+            >
+              {ADDITIVITIES.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+            <button
+              style={styles.smallBtn}
+              disabled={disabled}
+              title={`Remove the ${dimension} exception`}
+              onClick={() => onSetException(dimension, undefined)}
+            >
+              &times;
+            </button>
+          </div>
+        ))}
+
+        <div
+          style={{
+            display: spec === undefined ? "none" : "flex",
+            gap: 6,
+            alignItems: "center",
+            marginTop: 8,
+          }}
+        >
+          <select
+            aria-label="Exception dimension"
+            data-testid="aggregation-new-dimension"
+            style={{ ...styles.input, flex: 2, minWidth: 0 }}
+            disabled={disabled}
+            value={newDimension}
+            onChange={(e) => setNewDimension(e.target.value)}
+          >
+            <option value="">(add a dimension…)</option>
+            {dimensionOptions
+              .filter((d) => !taken.has(d))
+              .map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+          </select>
+          <select
+            aria-label="Exception additivity"
+            style={{ ...styles.input, width: 150 }}
+            disabled={disabled}
+            value={newValue}
+            onChange={(e) => setNewValue(e.target.value as Additivity)}
+          >
+            {ADDITIVITIES.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+          <button
+            style={styles.smallBtn}
+            disabled={disabled || newDimension === ""}
+            onClick={() => {
+              onSetException(newDimension, newValue);
+              setNewDimension("");
+            }}
+          >
+            Add exception
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
 // ===========================================================================
 // Tables + columns grid
 // ===========================================================================
+
+type ModelColumn = ModelTableInfo["columns"][number];
+
+/**
+ * Order a table's columns by what they are FOR, then by name.
+ *
+ * `BI.dim_customer` renders eleven columns, and after inference ten of them are
+ * `ignore`; model order gives the one column that carries a decision the same
+ * eleventh of the screen as the ten that carry none.
+ */
+function orderedColumns(
+  columns: ModelColumn[],
+  roleOf: (name: string) => Role | undefined,
+): ModelColumn[] {
+  // `compareColumnsByRole` owns both the role order and the name tiebreak, so
+  // the CLI can print this same order without a second opinion about it.
+  return [...columns].sort((a, b) =>
+    compareColumnsByRole(
+      { name: a.name, role: roleOf(a.name) },
+      { name: b.name, role: roleOf(b.name) },
+    ),
+  );
+}
 
 function TablesGrid({
   doc,
@@ -877,6 +1702,17 @@ function TablesGrid({
   disabled: boolean;
   onEdit: (doc: StrategyDoc) => void;
 }): React.ReactElement {
+  /** Tables whose ignored columns are currently disclosed. Same idiom as the
+   *  other sections' trees (a Set of names + `Chevron`). */
+  const [showIgnored, setShowIgnored] = useState<Set<string>>(new Set());
+  const toggleIgnored = (name: string): void =>
+    setShowIgnored((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
   return (
     <section>
       <div style={styles.sectionHeader}>
@@ -896,14 +1732,62 @@ function TablesGrid({
           <tbody>
             {overview.tables.map((t) => {
               const entry = tableEntry(doc, t.name);
+              const state = entryState(entry, tableHasValues(entry));
               const path = tablePath(t.name);
+              const roleOf = (name: string): Role | undefined => entry.columns?.[name]?.role;
+              const ordered = orderedColumns(t.columns, roleOf);
+              // An UNSET column is not an ignored one: nobody has said it is
+              // uninteresting, so hiding it would hide the whole grid of a model
+              // whose draft failed to build.
+              const ignored = ordered.filter((c) => roleOf(c.name) === "ignore");
+              const shown = ordered.filter((c) => roleOf(c.name) !== "ignore");
+              const open = showIgnored.has(t.name);
+              const columnRow = (c: ModelColumn): React.ReactElement => {
+                const col = entry.columns?.[c.name];
+                return (
+                  <tr key={`${t.name}.${c.name}`} data-strategy-path={`${path}.columns['${c.name}']`}>
+                    <td style={{ ...cellStyle, paddingLeft: 28 }}>
+                      {c.name} <span style={styles.hint}>{c.dataType}</span>
+                    </td>
+                    <td style={cellStyle}>
+                      {selectOf<Role>(
+                        col?.role ?? "",
+                        ROLES,
+                        (v) =>
+                          onEdit(withColumn(doc, t.name, c.name, { role: v === "" ? "ignore" : v })),
+                        disabled,
+                        112,
+                      )}
+                    </td>
+                    <td style={cellStyle}>
+                      <input
+                        type="number"
+                        style={{ ...smallInput, width: 62 }}
+                        disabled={disabled}
+                        value={col?.priority !== undefined ? String(col.priority) : ""}
+                        onChange={(e) =>
+                          onEdit(
+                            withColumn(doc, t.name, c.name, {
+                              role: col?.role ?? "ignore",
+                              priority:
+                                e.target.value === "" ? undefined : Number(e.target.value),
+                            }),
+                          )
+                        }
+                      />
+                    </td>
+                    <td style={cellStyle} />
+                  </tr>
+                );
+              };
               return (
                 <React.Fragment key={t.name}>
                   <tr
                     data-strategy-path={path}
                     data-unconfirmed={entry.reviewed ? "false" : "true"}
+                    data-strategy-state={state}
                     style={{
-                      ...rowTone(entry.reviewed),
+                      ...rowTone(state),
                       outline: selectedPath === path ? "2px solid #2f6fce" : "none",
                     }}
                   >
@@ -943,51 +1827,33 @@ function TablesGrid({
                     </td>
                     <td style={cellStyle}>
                       <ReviewedCell
-                        reviewed={entry.reviewed}
+                        state={state}
                         disabled={disabled}
                         label={t.name}
                         onConfirm={() => onEdit(withTable(doc, t.name, { reviewed: true }))}
                       />
                     </td>
                   </tr>
-                  {t.columns.map((c) => {
-                    const col = entry.columns?.[c.name];
-                    return (
-                      <tr key={`${t.name}.${c.name}`} data-strategy-path={`${path}.columns['${c.name}']`}>
-                        <td style={{ ...cellStyle, paddingLeft: 28 }}>
-                          {c.name} <span style={styles.hint}>{c.dataType}</span>
-                        </td>
-                        <td style={cellStyle}>
-                          {selectOf<Role>(
-                            col?.role ?? "",
-                            ROLES,
-                            (v) =>
-                              onEdit(withColumn(doc, t.name, c.name, { role: v === "" ? "ignore" : v })),
-                            disabled,
-                            112,
-                          )}
-                        </td>
-                        <td style={cellStyle}>
-                          <input
-                            type="number"
-                            style={{ ...smallInput, width: 62 }}
-                            disabled={disabled}
-                            value={col?.priority !== undefined ? String(col.priority) : ""}
-                            onChange={(e) =>
-                              onEdit(
-                                withColumn(doc, t.name, c.name, {
-                                  role: col?.role ?? "ignore",
-                                  priority:
-                                    e.target.value === "" ? undefined : Number(e.target.value),
-                                }),
-                              )
-                            }
-                          />
-                        </td>
-                        <td style={cellStyle} />
-                      </tr>
-                    );
-                  })}
+                  {shown.map(columnRow)}
+                  {ignored.length > 0 && (
+                    <tr data-testid={`ignored-summary-${t.name}`}>
+                      <td style={{ ...cellStyle, paddingLeft: 28 }} colSpan={4}>
+                        {/* A DISCLOSURE, not a filter: the summary is always
+                            visible so a count that changes is legible, and the
+                            columns behind it stay fully editable. */}
+                        <button
+                          style={{ ...styles.smallBtn, display: "inline-flex", alignItems: "center", gap: 4 }}
+                          title="Columns marked 'ignore' — still editable, just not in the way of the ones that carry a decision"
+                          onClick={() => toggleIgnored(t.name)}
+                        >
+                          <Chevron open={open} />
+                          {open ? "hide " : "show "}
+                          {ignored.length} ignored column{ignored.length === 1 ? "" : "s"}
+                        </button>
+                      </td>
+                    </tr>
+                  )}
+                  {open && ignored.map(columnRow)}
                 </React.Fragment>
               );
             })}
@@ -1008,7 +1874,9 @@ function describeSet(set: AttributeSet): string {
   if (set.target !== undefined) parts.push(`target=${formatTargetSpec(set.target)}`);
   if (set.materiality !== undefined) parts.push(`materiality=${formatMaterialitySpec(set.materiality)}`);
   if (set.cadence) parts.push(`cadence=${set.cadence}`);
-  if (set.aggregation) parts.push(`aggregation=${set.aggregation.default}`);
+  // The WHOLE spec: a rule that sets a per-dimension exception must not read
+  // here as though it set only the default.
+  if (set.aggregation) parts.push(`aggregation=${formatAggregationSpec(set.aggregation)}`);
   if (set.suppress && set.suppress.length > 0) parts.push(`suppress=${set.suppress.join(",")}`);
   if (set.rankWeight !== undefined) parts.push(`rankWeight=${set.rankWeight}`);
   return parts.length === 0 ? "(nothing — the rule has no effect)" : parts.join(", ");

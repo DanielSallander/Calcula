@@ -900,6 +900,37 @@ disagrees with `functions/*.md` on: `TEXTBEFORE` returning `#N/A` where the doc 
 `ODDLPRICE`/`ODDLYIELD` returning `#NUM!`. Each needs a reproduction against the documented
 example before it is a ledger entry rather than a corpus expectation; none has one yet.
 
+**2.AI.6 — What the 2026-09-08 Strategy-editor review found, and what is left.** The review raised
+eight points about the authoring surface. Six were UI defects and are fixed; two were questions
+whose answers changed the design.
+
+CLOSED: the `inferred` badge on a row with no values (it now reads "not set" with Confirm
+disabled, and a row the user typed reads "set by you"); the blank form (the tab drafts from the
+BACKEND inferrer on first open); undifferentiated column rows (ordered by role, `ignore` behind a
+disclosure that names the count); `aggregation` as a flat enum (a per-dimension editor, and the
+silent destruction of `byDimension` on every dropdown change is gone); `neverSliceBy` absent from
+the tab (present everywhere else, so the CLI was the only way to set it); and the two draft
+generators that disagreed — the weak TypeScript one is DELETED and both the tab and the CLI now
+call the Rust op.
+
+STILL OPEN, and each needs a decision rather than work:
+* **A numeric axis on a non-calendar dimension.** A `Decimal` column that is really an analysis
+  axis on, say, `dim_product` still infers as `ignore`. The marked-date-table rule rescues the
+  calendar; nothing rescues this, because it needs the column statistics of 2.AI.3. A person can
+  set the role by hand, which is the honest fallback.
+* **`date_role` is not authorable from Calcula.** No host command, no CLI option, no column-form
+  field, so the "read what the author declared" arm only ever fires for a model imported from
+  elsewhere. Exposing it is a small host-only change and is not done.
+* **The CLI cannot set `aggregation` at all.** `modelOptions.ts` has `analysisdims` and
+  `neverslice` but no `aggregation` key, so the field that decides whether the engine may claim a
+  share of a total is settable only from the tab and the inferrer.
+* **Audience overlays** are designed (`docs/design/insights-strategy-layer.md` §11) and
+  deliberately not built. Perspectives supply the name list; the mechanism is a sibling of `Scope`,
+  not a member of it, because a `Scope` key is a validated `QualifiedColumn` and `audience` cannot
+  be spelled as one. Three preconditions block it, the sharpest being that perspectives FAIL OPEN —
+  an unknown name filters nothing, which is right for hiding fields and wrong for judging
+  favourability.
+
 **2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) waits for the
 release decision; the fetch script makes bundle-vs-download a build-time switch. M4 (intent router)
 and M6 (Tier-1 narration, Swedish, grammars) keep their designs and their seams — `factsJson`

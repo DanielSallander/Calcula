@@ -83,6 +83,20 @@ struct VerifiedPattern {
     target: String,
     formula: String,
     expect: Expectation,
+    /// Does this pattern's answer depend on WHEN it runs, or on chance?
+    ///
+    /// `=TODAY()` verified on one day reds every build after midnight, and
+    /// `RANDBETWEEN` never settles at all. Such a pattern still ships and is
+    /// still run — the guard just asks whether it EVALUATES rather than what to.
+    /// A volatile pattern that starts returning an error is still caught, which
+    /// is the half worth catching; a test that fails at midnight is one people
+    /// learn to ignore, and it takes the other 578 down with it.
+    ///
+    /// `#[serde(default)]` so a library generated before the flag existed still
+    /// parses — those simply claim to be stable, which is what they were treated
+    /// as anyway.
+    #[serde(default)]
+    volatile: bool,
 }
 
 fn cells_of(cells: &[CorpusCell], what: &str, id: &str) -> Vec<FixtureCell> {
@@ -115,6 +129,71 @@ fn run(
     let result = &outcome.results[0];
     let verdict = compare(result, expect, outcome.converged);
     (verdict.matched, verdict.reason)
+}
+
+/// Does a volatile pattern still parse and evaluate to something that is not an
+/// error? The most that can honestly be asked of `=TODAY()` in a checked-in
+/// library.
+fn evaluates_without_error(p: &VerifiedPattern) -> (bool, String) {
+    let fixture = cells_of(&p.fixture, "fixture of", &p.id);
+    let (row, col) = parse_a1(&p.target)
+        .unwrap_or_else(|| panic!("pattern {}: target {:?} is not an A1 address", p.id, p.target));
+    let jobs = vec![FormulaJob { row, col, formula: p.formula.clone() }];
+    let outcome = evaluate_fixture(&fixture, &jobs, "Sheet1");
+    if let Some(reason) = outcome.refused {
+        return (false, format!("refused: {}", reason));
+    }
+    let result = &outcome.results[0];
+    if let Some(parse_error) = &result.parse_error {
+        return (false, format!("did not parse: {}", parse_error));
+    }
+    if let Some(error) = &result.error {
+        return (false, format!("evaluated to the error {}", error));
+    }
+    (true, String::new())
+}
+
+#[test]
+fn a_volatile_pattern_is_checked_for_evaluating_and_not_for_a_recorded_answer() {
+    // The guard this exists to keep honest: `=TODAY()` verified on one day must
+    // not red the build on the next. Both halves are asserted, because a flag
+    // that silently disabled the check would be worse than the midnight failure.
+    let library: PatternFile = serde_json::from_str(PATTERNS_JSON).expect("the library parses");
+    let volatile: Vec<&VerifiedPattern> = library.verified.iter().filter(|p| p.volatile).collect();
+    assert!(
+        !volatile.is_empty(),
+        "no pattern is marked volatile, so this guard is testing nothing — the docs carry \
+         TODAY/NOW examples and the generator is supposed to flag them"
+    );
+    for p in &volatile {
+        let (ok, reason) = evaluates_without_error(p);
+        assert!(ok, "{} [{}]: {}", p.id, p.formula, reason);
+    }
+
+    // AND THE FLAG AGREES WITH THE FORMULA, in both directions. This is the part
+    // that keeps the weaker assertion from becoming a place to hide a failure: a
+    // pattern flagged volatile must really call a volatile function, and one
+    // that calls one must be flagged.
+    //
+    // Deliberately NOT "at least one volatile pattern currently fails the strict
+    // check" — that was the first version of this assertion and it was the same
+    // bug wearing a different hat: it holds only on a day the library was not
+    // generated, so it would have gone red today and green tomorrow.
+    const VOLATILE_FNS: [&str; 5] = ["TODAY(", "NOW(", "RAND(", "RANDBETWEEN(", "RANDARRAY("];
+    let calls_volatile = |formula: &str| {
+        let upper = formula.to_uppercase().replace(' ', "");
+        VOLATILE_FNS.iter().any(|f| upper.contains(f))
+    };
+    for p in &library.verified {
+        assert_eq!(
+            p.volatile,
+            calls_volatile(&p.formula),
+            "{}: the volatile flag ({}) disagrees with the formula {:?}",
+            p.id,
+            p.volatile,
+            p.formula
+        );
+    }
 }
 
 #[test]
@@ -216,6 +295,21 @@ fn every_shipped_pattern_still_reproduces_its_recorded_result() {
     );
     let mut failures = Vec::new();
     for p in &library.verified {
+        if p.volatile {
+            // Asked what it CAN answer: does it still evaluate? Comparing a
+            // recorded value would be comparing against the day the library was
+            // generated. An error here is still a real failure — this is not a
+            // skip, it is a weaker assertion applied where the strong one is
+            // meaningless.
+            let (evaluated, reason) = evaluates_without_error(p);
+            if !evaluated {
+                failures.push(format!(
+                    "  {} [volatile]: {}\n     {}",
+                    p.id, p.formula, reason
+                ));
+            }
+            continue;
+        }
         let (matched, reason) = run(&p.fixture, &p.target, &p.formula, &p.expect, &p.id);
         if !matched {
             failures.push(format!("  {}: {}\n     {}", p.id, p.formula, reason));

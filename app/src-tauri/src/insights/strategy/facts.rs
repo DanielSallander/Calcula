@@ -11,17 +11,18 @@
 //
 //          THE BASE LAYER IS BUILT HERE. Everything `AttrSource::Base` and
 //          `AttrSource::Inferred` later claims comes from what this file
-//          extracts — the KPI's target and band ordering, the unit implied by a
-//          format string, which table is the calendar, which columns exist.
+//          extracts — the KPI's target and its bands' STATUSES, the unit implied
+//          by a format string, which table is the calendar, which columns exist,
+//          which hierarchies the model declares.
 //          Extracting one of them wrongly does not produce an error; it
 //          produces a confidently wrong favourability, which is why each
 //          derivation below states what it assumes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bi_engine::{Cardinality, DataModel, KpiTarget};
+use bi_engine::{Cardinality, DataModel, KpiStatus, KpiTarget};
 
-use super::resolve::{KpiFacts, MeasureFacts, ModelFacts, TableFacts};
+use super::resolve::{BandStatus, KpiBand, KpiFacts, MeasureFacts, ModelFacts, TableFacts};
 use super::types::{QualifiedColumn, TableKind, Unit};
 
 /// Read a model into the facts the strategy layer resolves against.
@@ -70,6 +71,15 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
                     is_to.contains(name),
                 )),
                 columns,
+                // The model's own hierarchies, level order preserved. Validation
+                // reads them from HERE rather than from the strategy document's
+                // copy, so a document nobody has run inference over still gets
+                // its hierarchy levels recognised as scopable.
+                hierarchies: model
+                    .hierarchies_for_table(name)
+                    .iter()
+                    .map(|h| h.levels().iter().map(|l| l.column().to_string()).collect())
+                    .collect(),
                 // Members are DATA, not schema. Filling this in means running a
                 // grouped query per column, which the strategy layer must not
                 // do on every validation. The resolver reads an absent entry as
@@ -94,7 +104,16 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
                     // validator from comparing against a value it invented.
                     KpiTarget::Measure(_) => None,
                 },
-                bands: kpi.status_bands().iter().map(|b| b.threshold).collect(),
+                // THE STATUS COMES ACROSS WITH THE THRESHOLD. The threshold order
+                // is validated ascending by the engine's own builder, so a
+                // strategy layer that carried thresholds alone could only ever
+                // conclude "higher is better" - including for a churn KPI whose
+                // every band says the opposite.
+                bands: kpi
+                    .status_bands()
+                    .iter()
+                    .map(|b| KpiBand::new(b.threshold, band_status(b.status)))
+                    .collect(),
             },
         );
     }
@@ -112,6 +131,19 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
     }
 
     facts
+}
+
+/// The engine's `KpiStatus` in the strategy layer's own vocabulary.
+///
+/// Written as a total match rather than a `From` on a foreign type: a new status
+/// level in the engine must be a COMPILE ERROR here, because a status silently
+/// folded into the wrong bucket flips a direction.
+fn band_status(status: KpiStatus) -> BandStatus {
+    match status {
+        KpiStatus::OffTrack => BandStatus::OffTrack,
+        KpiStatus::AtRisk => BandStatus::AtRisk,
+        KpiStatus::OnTrack => BandStatus::OnTrack,
+    }
 }
 
 /// What a table is FOR, from its position in the relationship graph.
@@ -184,8 +216,10 @@ fn unit_from_format(format: &str) -> Option<Unit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::types::Direction;
     use bi_engine::{
-        sum_measure, Column, DataType, Kpi, KpiStatus, Relationship, StatusBand, Table,
+        sum_measure, Column, DataType, Hierarchy, HierarchyLevel, Kpi, Relationship, StatusBand,
+        Table,
     };
 
     /// Sales -> Product (many-to-one), Sales -> Date (many-to-one), Date marked.
@@ -301,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kpis_target_and_band_order_reach_the_resolver() {
+    fn a_kpis_target_and_band_statuses_reach_the_resolver() {
         let model = a_small_star_with(Some(
             Kpi::new("Revenue KPI", "Revenue", KpiTarget::Constant(1000.0))
                 .with_status_band(StatusBand::new(0.8, KpiStatus::OffTrack))
@@ -311,8 +345,52 @@ mod tests {
         let facts = facts_from_model(&model);
         let kpi = facts.measures["Revenue"].kpi.as_ref().expect("the KPI is indexed by its base measure");
         assert_eq!(kpi.target, Some(1000.0));
-        // Ascending bands are what make `lowerIsBetter` a contradiction here.
-        assert!(kpi.ratio_ascending(), "{:?}", kpi.bands);
+        assert_eq!(
+            kpi.bands,
+            vec![
+                KpiBand::new(0.8, BandStatus::OffTrack),
+                KpiBand::new(0.95, BandStatus::AtRisk),
+                KpiBand::new(1.0, BandStatus::OnTrack),
+            ],
+            "the STATUS has to survive the crossing; the threshold alone says nothing"
+        );
+        assert_eq!(kpi.direction(), Some(Direction::HigherIsBetter));
+    }
+
+    #[test]
+    fn a_kpi_whose_bands_worsen_upward_crosses_as_lower_is_better() {
+        // The engine refuses non-ascending THRESHOLDS, so this is what a churn
+        // KPI has to look like: thresholds up, statuses down. Reading thresholds
+        // alone reported higherIsBetter for exactly this shape.
+        let model = a_small_star_with(Some(
+            Kpi::new("Churn KPI", "Revenue", KpiTarget::Constant(0.05))
+                .with_status_band(StatusBand::new(0.5, KpiStatus::OnTrack))
+                .with_status_band(StatusBand::new(0.8, KpiStatus::AtRisk))
+                .with_status_band(StatusBand::new(1.0, KpiStatus::OffTrack)),
+        ));
+        let facts = facts_from_model(&model);
+        let kpi = facts.measures["Revenue"].kpi.as_ref().unwrap();
+        assert_eq!(kpi.direction(), Some(Direction::LowerIsBetter));
+    }
+
+    #[test]
+    fn the_models_own_hierarchies_reach_the_facts_in_level_order() {
+        // Validation reads hierarchy membership from here, so a level the model
+        // declares is scopable even in a document that has no `hierarchies` of
+        // its own.
+        let model = a_small_star().with_hierarchies(vec![Hierarchy::new(
+            "Calendar",
+            "Date",
+            vec![HierarchyLevel::new("Month"), HierarchyLevel::new("Date")],
+        )]);
+        let facts = facts_from_model(&model);
+        assert_eq!(
+            facts.tables["Date"].hierarchies,
+            vec![vec!["Month".to_string(), "Date".to_string()]],
+            "coarse-to-fine, in the order the engine declares the levels"
+        );
+        assert!(facts.tables["Product"].hierarchies.is_empty());
+        assert!(facts.in_a_hierarchy(&QualifiedColumn::new("Date", "Month")));
     }
 
     #[test]

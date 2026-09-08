@@ -246,6 +246,22 @@ impl Role {
     }
 }
 
+/// Who put this entry here.
+///
+/// `reviewed` answers "has a person signed this off"; it cannot tell a machine's
+/// guess from a person's statement from an entry nobody has ever filled in. The
+/// Strategy tab was showing an "inferred" badge next to a Confirm button on rows
+/// where every value was absent, so Confirm did nothing and taught people to
+/// click it without reading. An absent `source` is the third state: untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EntrySource {
+    /// Written by `infer`, from the model and the workbook's own usage.
+    Inferred,
+    /// Typed by a person.
+    Authored,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TableKind {
@@ -474,6 +490,9 @@ pub struct MeasureStrategy {
     /// validator warns until someone looks at it.
     #[serde(default)]
     pub reviewed: bool,
+    /// Who wrote this entry. Absent means nobody has - see `EntrySource`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EntrySource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,10 +514,18 @@ pub struct TableStrategy {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub columns: BTreeMap<String, ColumnStrategy>,
     /// Coarse-to-fine column chains, e.g. `[["Country", "Region", "City"]]`.
+    ///
+    /// A COPY of the model's own hierarchies when `infer` wrote it, and a place
+    /// to state one the model does not declare otherwise. Validation reads the
+    /// UNION of this and `TableFacts::hierarchies`, so neither source can hide a
+    /// level from the other.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hierarchies: Vec<Vec<String>>,
     #[serde(default)]
     pub reviewed: bool,
+    /// Who wrote this entry. Absent means nobody has - see `EntrySource`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EntrySource>,
 }
 
 /// A scoped override. It ANNOTATES facts; it cannot generate one.
@@ -800,6 +827,32 @@ mod tests {
         let json = serde_json::to_string(&doc).unwrap();
         let back: StrategyDoc = serde_json::from_str(&json).unwrap();
         assert_eq!(back, doc);
+    }
+
+    #[test]
+    fn an_entry_source_is_optional_on_the_wire_and_absent_means_untouched() {
+        // A document written before `source` existed must still parse under
+        // `deny_unknown_fields`, and an entry nobody has written must be
+        // distinguishable from one a machine guessed.
+        let doc: StrategyDoc = serde_json::from_str(
+            r#"{"version":1,"measures":{"Revenue":{"reviewed":true}},"tables":{"Dim":{}}}"#,
+        )
+        .unwrap();
+        assert_eq!(doc.measures["Revenue"].source, None);
+        assert_eq!(doc.tables["Dim"].source, None);
+
+        let mut stamped = MeasureStrategy::default();
+        stamped.source = Some(EntrySource::Inferred);
+        assert_eq!(
+            serde_json::to_string(&stamped).unwrap(),
+            r#"{"reviewed":false,"source":"inferred"}"#
+        );
+        // ...and an absent source writes NO key at all, so "untouched" is a state
+        // the JSON can express rather than one it fakes with a default.
+        assert_eq!(
+            serde_json::to_string(&MeasureStrategy::default()).unwrap(),
+            r#"{"reviewed":false}"#
+        );
     }
 
     #[test]

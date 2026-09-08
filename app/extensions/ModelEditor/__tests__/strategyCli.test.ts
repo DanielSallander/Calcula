@@ -31,6 +31,8 @@ import type {
 
 vi.mock("../lib/strategyBackend", () => ({
   strategyGet: vi.fn(),
+  strategyInfer: vi.fn(),
+  strategySuggestions: vi.fn(),
   strategyValidate: vi.fn(),
   strategyRunTests: vi.fn(),
   strategySet: vi.fn(),
@@ -46,6 +48,7 @@ vi.mock("@api/dialogs", () => ({
 import { confirmAsync } from "@api/dialogs";
 import {
   strategyGet,
+  strategyInfer,
   strategyRunTests,
   strategySet,
   strategyValidate,
@@ -197,6 +200,33 @@ async function run(text: string, readOnly = false): Promise<{ ok: boolean; outpu
 
 const WRITTEN = { written: true, findings: [] as Finding[] };
 
+/**
+ * The draft the BACKEND returns from `op: "infer"`.
+ *
+ * Deliberately unlike anything a frontend heuristic could have produced: Sales
+ * is a `bridge`, and `Amount` — a numeric column the deleted TypeScript ladder
+ * could not classify at all, because it compared `dataType` against exact
+ * strings while the backend sends `Decimal(38, 10)` — comes back as `analysis`.
+ * If the CLI ever computes its own draft again, these assertions fail.
+ */
+function inferredDraft(): StrategyDoc {
+  return {
+    version: 1,
+    measures: {
+      Returns: { direction: "lowerIsBetter", unit: "count", reviewed: false, source: "inferred" },
+    },
+    tables: {
+      Sales: {
+        kind: "bridge",
+        labelColumn: "Amount",
+        columns: { Amount: { role: "analysis" } },
+        reviewed: false,
+        source: "inferred",
+      },
+    },
+  };
+}
+
 /** The document handed to `strategySet` by the Nth write. */
 function writtenDoc(nth = 0): StrategyDoc {
   return vi.mocked(strategySet).mock.calls[nth][1];
@@ -205,6 +235,7 @@ function writtenDoc(nth = 0): StrategyDoc {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(strategyGet).mockResolvedValue(null);
+  vi.mocked(strategyInfer).mockResolvedValue(inferredDraft());
   vi.mocked(strategySet).mockResolvedValue(WRITTEN);
   vi.mocked(strategyValidate).mockResolvedValue({ written: false, findings: [] });
   vi.mocked(strategyRunTests).mockResolvedValue({ written: false, findings: [] });
@@ -253,7 +284,37 @@ describe("set measure … <strategy options>", () => {
       priority: 3,
       analysisDimensions: ["Dim[Dept]"],
       reviewed: true,
+      // A person typed every one of these at the command line, so the entry
+      // must stop claiming a machine guessed it. `source` is what the tab's
+      // badge reads to tell an authored row from an inferred one.
+      source: "authored",
     });
+  });
+
+  it("does not re-author an entry that is only being confirmed", async () => {
+    // `reviewed=true` says a human AGREED with the values; it does not say a
+    // human WROTE them. Stamping `authored` here would erase the very
+    // distinction the Strategy tab exists to show — and un-confirming the row
+    // afterwards would then show "authored" about a machine's guess.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      measures: { Returns: { direction: "higherIsBetter", reviewed: false, source: "inferred" } },
+    });
+    await run("set measure [Returns] reviewed=true");
+    expect(writtenDoc().measures?.Returns).toEqual({
+      direction: "higherIsBetter",
+      reviewed: true,
+      source: "inferred",
+    });
+  });
+
+  it("round-trips neverslice into neverSliceBy, which inference never fills in", async () => {
+    // The inferrer deliberately leaves `neverSliceBy` empty — "never break this
+    // down by employee" is a policy, not something a model can be read off. So
+    // the only two ways it can ever be set are this verb and the Strategy tab,
+    // and a break here silently removes half of them.
+    await run("set measure [Returns] neverslice=Sales[Id],Dim[Dept]");
+    expect(writtenDoc().measures?.Returns?.neverSliceBy).toEqual(["Sales[Id]", "Dim[Dept]"]);
   });
 
   it("resolves a bare analysis-dimension name and refuses one the model lacks", async () => {
@@ -281,6 +342,10 @@ describe("set column … role= / priority=", () => {
   it("stores a role against the column inside its table", async () => {
     await run("set column Dim[Dept] role=analysis priority=1");
     expect(writtenDoc().tables?.Dim?.columns?.Dept).toEqual({ role: "analysis", priority: 1 });
+    // The column map is part of what the TABLE entry says, so classifying a
+    // column authors the table entry too — it can no longer claim the whole
+    // classification was a machine's.
+    expect(writtenDoc().tables?.Dim?.source).toBe("authored");
   });
 
   it("refuses a priority-only edit on a column that has no entry yet", async () => {
@@ -474,6 +539,17 @@ describe("infer strategy", () => {
     expect(output).toContain("UNREVIEWED");
   });
 
+  it("prints the draft the BACKEND inferred rather than a second opinion of its own", async () => {
+    const { ok, output } = await run("infer strategy");
+    expect(ok).toBe(true);
+    expect(strategyInfer).toHaveBeenCalledWith("conn-1");
+    // Sales is the from-side of the only relationship, so any frontend
+    // heuristic worth the name would call it a fact. The backend called it a
+    // bridge, and the backend is the one inference.
+    expect(output).toContain("bridge");
+    expect(output).toContain("lowerIsBetter");
+  });
+
   it("--apply ASKS first and does nothing when the answer is no", async () => {
     // The Tauri shape: confirmAsync resolves to false. A synchronous `false`
     // double would pass even if the code never awaited the answer.
@@ -485,22 +561,19 @@ describe("infer strategy", () => {
     expect(output).toContain("Cancelled");
   });
 
-  it("--apply replaces the document when the answer is yes", async () => {
+  it("--apply writes the backend's draft through unchanged when the answer is yes", async () => {
     vi.mocked(confirmAsync).mockReturnValue(Promise.resolve(true));
     const { ok } = await run("infer strategy --apply");
     expect(ok).toBe(true);
     expect(strategySet).toHaveBeenCalledTimes(1);
-    const written = writtenDoc();
-    // Sales is the from-side of the only relationship; Dim is looked up.
-    expect(written.tables?.Sales?.kind).toBe("fact");
-    expect(written.tables?.Dim?.kind).toBe("dimension");
-    // A relationship endpoint is a key, and a key never becomes the label.
-    expect(written.tables?.Dim?.columns?.DeptKey?.role).toBe("key");
-    expect(written.tables?.Dim?.columns?.Dept?.role).toBe("analysis");
-    expect(written.tables?.Dim?.labelColumn).toBe("Dept");
-    // Inference is a draft, not an answer.
-    expect(written.measures?.Returns?.reviewed).toBe(false);
-    expect(Object.values(written.tables ?? {}).every((t) => !t.reviewed)).toBe(true);
+    // Byte for byte what `op: "infer"` returned. The CLI is a courier here: it
+    // does not re-classify, re-order or "improve" the draft on the way past,
+    // because a second opinion applied silently is how the two generators
+    // disagreed in the first place.
+    expect(writtenDoc()).toEqual(inferredDraft());
+    // Inference is a draft, not an answer — and it stays one on the way in.
+    expect(writtenDoc().measures?.Returns?.reviewed).toBe(false);
+    expect(Object.values(writtenDoc().tables ?? {}).every((t) => !t.reviewed)).toBe(true);
   });
 
   it("refuses an argument that is not --apply rather than reading it as a preview", async () => {

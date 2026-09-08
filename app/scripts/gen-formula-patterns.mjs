@@ -529,6 +529,19 @@ function main() {
     }
   };
 
+  // Functions whose answer depends on WHEN or on chance, not on the fixture.
+  //
+  // A pattern calling one of these cannot carry a recorded result: the library
+  // is checked into git and the guard re-runs it forever, so `=TODAY()` verified
+  // on 2026-09-07 reds every build from 2026-09-08 onward. That is a test people
+  // learn to ignore, which costs more than the coverage it was buying.
+  //
+  // They still ship, and the guard still runs them — it just asserts that they
+  // EVALUATE rather than what to. A volatile pattern that starts returning an
+  // error is still caught, which is the part worth catching.
+  const VOLATILE = /\b(TODAY|NOW|RAND|RANDBETWEEN|RANDARRAY)\s*\(/i;
+  const isVolatile = (formula) => VOLATILE.test(formula);
+
   const verified = [];
   const mismatches = [];
   const errored = [];
@@ -552,7 +565,7 @@ function main() {
       // THE DOC MADE A CLAIM. Agreement is the strongest evidence available —
       // a human wrote the answer and the engine independently reproduced it.
       if (cell.verdict && cell.verdict.matched) {
-        verified.push({ ...p, expect: p.stated, oracle: "doc", engineDisplay: cell.outcome.display });
+        verified.push({ ...p, expect: p.stated, oracle: "doc", volatile: isVolatile(p.formula), engineDisplay: cell.outcome.display });
       } else if (p.statedResult.trim() === cell.outcome.display) {
         // THE TYPED COMPARISON DISAGREED BUT THE RENDERING IS IDENTICAL. This is
         // a classification error on this script's side, not a disagreement about
@@ -563,6 +576,7 @@ function main() {
           ...p,
           expect: { kind: "display", display: cell.outcome.display },
           oracle: "doc",
+          volatile: isVolatile(p.formula),
           engineDisplay: cell.outcome.display,
         });
       } else {
@@ -590,7 +604,7 @@ function main() {
       });
       continue;
     }
-    verified.push({ ...p, expect: derived, oracle: "engine", engineDisplay: cell.outcome.display });
+    verified.push({ ...p, expect: derived, oracle: "engine", volatile: isVolatile(p.formula), engineDisplay: cell.outcome.display });
   }
 
   console.log(

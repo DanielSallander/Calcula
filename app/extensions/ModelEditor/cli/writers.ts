@@ -41,6 +41,7 @@ import { confirmAsync } from "@api/dialogs";
 import { printFindings } from "./readers";
 import {
   strategyGet,
+  strategyInfer,
   strategyRunTests,
   strategySet,
 } from "../lib/strategyBackend";
@@ -51,7 +52,6 @@ import {
   UNITS,
   emptyStrategyDoc,
   formatTargetSpec,
-  inferStrategyDraft,
   parseMaterialitySpec,
   parseScopeSpec,
   parseTargetSpec,
@@ -2174,11 +2174,17 @@ function inferApplyFlag(cmd: Command): boolean {
   return apply;
 }
 
-/** `infer strategy [--apply]` — propose a draft, and only replace on --apply. */
+/** `infer strategy [--apply]` — propose a draft, and only replace on --apply.
+ *
+ *  The draft comes from the BACKEND (`op: "infer"`), which is the only place
+ *  inference lives. It is a read, so the preview costs a round trip and writes
+ *  nothing; the CLI and the Strategy tab therefore propose the SAME document,
+ *  which they did not while a weaker copy of the heuristic lived in the
+ *  frontend. */
 async function runInferStrategy(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
   if (cmd.kind !== "strategy") fail("Usage: infer strategy [--apply]", cmd.line);
   const apply = inferApplyFlag(cmd);
-  const draft = inferStrategyDraft(s.overview);
+  const draft = await strategyInfer(s.connectionId);
   const measures = Object.entries(draft.measures ?? {});
   const tables = Object.entries(draft.tables ?? {});
 

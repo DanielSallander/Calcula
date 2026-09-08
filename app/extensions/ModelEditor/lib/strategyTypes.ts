@@ -18,21 +18,27 @@
 //          character for character, including the refusal of a bracket inside
 //          the column name.
 //
-//          (3) INFERENCE IS A DRAFT, NEVER AN ANSWER. `inferStrategyDraft`
-//          reproduces the reasoning `facts.rs` uses to build the base layer —
-//          KPI band ordering, the unit a format string implies, a table's
-//          position in the relationship graph — and stamps every entry
-//          `reviewed: false`. The whole point of the Strategy tab is that a
-//          person can see at a glance which of these a machine guessed; an
-//          inferred entry that arrived marked reviewed would erase exactly
-//          that distinction.
+//          (3) INFERENCE IS A DRAFT, NEVER AN ANSWER — AND IT HAPPENS ONCE,
+//          IN RUST. This file used to carry a second inference ladder
+//          (`inferStrategyDraft`) beside `insights/strategy/infer.rs`. Two
+//          heuristics that disagree about what a column is FOR is a guarantee
+//          of drift, and this one was measurably the worse: it matched
+//          `dataType` against exact strings, but the backend sends
+//          `format!("{:?}", data_type)`, so every `Decimal(38, 10)` column
+//          matched nothing and fell through to `ignore`. It is gone. The
+//          drafting op is `strategyInfer` (`strategyBackend.ts`), and what it
+//          returns is still stamped `reviewed: false` — a person confirms it
+//          row by row.
+//
+//          (4) WHO SAID SO IS A SEPARATE AXIS FROM WHETHER ANYONE AGREED.
+//          `reviewed` answers "has a human confirmed this?"; `source` answers
+//          "did a machine guess these values or did a person type them?". The
+//          badge needs both, plus a third fact neither field carries — whether
+//          the entry says ANYTHING at all — because a measure the document
+//          never mentions and a measure a machine guessed at are not the same
+//          row. `entryState` is the one place that ladder is decided.
 
-import type {
-  ModelColumnInfo,
-  ModelOverview,
-  ModelRelationshipInfo,
-  ModelTableInfo,
-} from "@api";
+import type { ModelOverview } from "@api";
 
 // ---------------------------------------------------------------------------
 // Enumerations (mirrors of the Rust `rename_all = "camelCase"` unit enums)
@@ -131,6 +137,12 @@ export type Scope = Record<string, ScopeValue>;
 
 export interface AggregationSpec {
   default: Additivity;
+  /**
+   * Additivity EXCEPTIONS, keyed the way the engine looks them up: it tries
+   * `Table[Column]` first, then a bare column name, then a bare table name. A
+   * semi-additive balance is the case this exists for — additive over product
+   * and region, last-value over the date table.
+   */
   byDimension?: Record<string, Additivity>;
 }
 
@@ -161,6 +173,15 @@ export interface ModelStrategy {
   priority?: string[];
 }
 
+/**
+ * Who put the VALUES in an entry.
+ *
+ * Absent on a document written before the field existed, which is why every
+ * reader treats "absent" as `inferred` — the only way a pre-`source` entry got
+ * its values was the drafting op.
+ */
+export type StrategySource = "inferred" | "authored";
+
 export interface MeasureStrategy {
   direction?: Direction;
   aggregation?: AggregationSpec;
@@ -177,6 +198,8 @@ export interface MeasureStrategy {
   context?: string;
   /** Has a human confirmed this entry? A generated draft is `false`. */
   reviewed: boolean;
+  /** Where the values came from. Absent means the drafting op wrote them. */
+  source?: StrategySource;
 }
 
 export interface ColumnStrategy {
@@ -191,6 +214,8 @@ export interface TableStrategy {
   columns?: Record<string, ColumnStrategy>;
   hierarchies?: string[][];
   reviewed: boolean;
+  /** Where the values came from. Absent means the drafting op wrote them. */
+  source?: StrategySource;
 }
 
 export interface Rule {
@@ -598,27 +623,54 @@ export function columnEntry(
   return doc.tables?.[table]?.columns?.[column];
 }
 
-/** Immutably replace one measure entry. */
+/**
+ * Does this patch AUTHOR anything?
+ *
+ * Confirming an entry (`reviewed: true`) is a human act, but it does not make
+ * the values human-written: the whole point of the tab is that a person can
+ * agree with a machine's guess and still see it was a guess. So a patch that
+ * touches only `reviewed` (or restates `source` itself) leaves the origin
+ * alone; anything that changes, adds or CLEARS a value re-stamps it. Clearing
+ * counts — deleting a guessed target is a decision a person made.
+ */
+function patchAuthorsValues(patch: object): boolean {
+  return Object.keys(patch).some((key) => key !== "reviewed" && key !== "source");
+}
+
+/**
+ * Immutably replace one measure entry, re-stamping `source` when the patch
+ * touches a value. A row a person typed must never keep claiming a machine
+ * guessed it — that is the lie the badge exists to prevent.
+ */
 export function withMeasure(
   doc: StrategyDoc,
   name: string,
   patch: Partial<MeasureStrategy>,
 ): StrategyDoc {
   const current = measureEntry(doc, name);
-  return { ...doc, measures: { ...(doc.measures ?? {}), [name]: { ...current, ...patch } } };
+  const authored: Partial<MeasureStrategy> = patchAuthorsValues(patch)
+    ? { source: "authored", ...patch }
+    : patch;
+  return { ...doc, measures: { ...(doc.measures ?? {}), [name]: { ...current, ...authored } } };
 }
 
-/** Immutably replace one table entry. */
+/** Immutably replace one table entry. Re-stamps `source` like `withMeasure`. */
 export function withTable(
   doc: StrategyDoc,
   name: string,
   patch: Partial<TableStrategy>,
 ): StrategyDoc {
   const current = tableEntry(doc, name);
-  return { ...doc, tables: { ...(doc.tables ?? {}), [name]: { ...current, ...patch } } };
+  const authored: Partial<TableStrategy> = patchAuthorsValues(patch)
+    ? { source: "authored", ...patch }
+    : patch;
+  return { ...doc, tables: { ...(doc.tables ?? {}), [name]: { ...current, ...authored } } };
 }
 
-/** Immutably replace one column entry inside its table. */
+/** Immutably replace one column entry inside its table.
+ *
+ *  It writes through `withTable`, so setting a column's role also stamps the
+ *  TABLE entry `authored` — the column map is part of what that entry says. */
 export function withColumn(
   doc: StrategyDoc,
   table: string,
@@ -653,179 +705,296 @@ export function confirmAll(doc: StrategyDoc, measures: string[], tables: string[
 }
 
 // ---------------------------------------------------------------------------
-// Inference — the draft a person then confirms
+// The three-state badge — what an entry SAYS, and who said it
 // ---------------------------------------------------------------------------
 
 /**
- * The unit a number-format string implies.
+ * Every field of a measure entry that carries an actual VALUE.
  *
- * A port of `unit_from_format` (facts.rs), traps included: an escaped or quoted
- * percent sign is DECORATION, and reading `#,##0" %"` as a percent reports the
- * value a hundred times too small.
+ * `reviewed` and `source` are metadata ABOUT the entry, not things it says, so
+ * they are absent here on purpose. This list is enumerated rather than derived
+ * from `Object.keys` because a key count cannot tell an empty array from a
+ * value, and because a field added to `MeasureStrategy` and forgotten here
+ * would make `measureHasValues` quietly answer "empty" about a row that says
+ * something. `strategyTypes.test.ts` pins the list against
+ * `Required<MeasureStrategy>` in both directions.
  */
-export function unitFromFormat(format: string | null): Unit | undefined {
-  if (!format) return undefined;
-  let significant = "";
-  let inQuotes = false;
-  for (let i = 0; i < format.length; i++) {
-    const c = format[i];
-    if (c === "\\") {
-      i += 1;
-      continue;
-    }
-    if (c === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (inQuotes) continue;
-    significant += c;
-  }
-  if (significant.includes("%")) return "percent";
-  const lower = significant.toLowerCase();
-  if (
-    lower.includes("[$") ||
-    significant.includes("$") ||
-    significant.includes("€") ||
-    significant.includes("£") ||
-    lower.includes("kr")
-  ) {
-    return "currency";
-  }
-  if (
-    significant !== "" &&
-    [...significant].every((c) => "#0, _-()".includes(c)) &&
-    !significant.includes(".")
-  ) {
-    return "count";
-  }
-  return undefined;
-}
+export const MEASURE_VALUE_FIELDS = [
+  "direction",
+  "aggregation",
+  "unit",
+  "target",
+  "materiality",
+  "cadence",
+  "priority",
+  "analysisDimensions",
+  "neverSliceBy",
+  "context",
+] as const;
 
-/** Do the bands run bad -> good as the number grows? (`KpiFacts::ratio_ascending`) */
-function bandsAscending(bands: number[]): boolean {
-  return bands.length >= 2 && bands.every((b, i) => i === 0 || bands[i - 1] < b);
-}
+/** The same list for a table entry. See `MEASURE_VALUE_FIELDS`. */
+export const TABLE_VALUE_FIELDS = ["kind", "labelColumn", "columns", "hierarchies"] as const;
 
-function bandsDescending(bands: number[]): boolean {
-  return bands.length >= 2 && bands.every((b, i) => i === 0 || bands[i - 1] > b);
-}
-
-/** A table's position in the relationship graph (`classify_table` in facts.rs). */
-function classifyTable(
-  table: ModelTableInfo,
-  dateTable: string | null,
-  relationships: ModelRelationshipInfo[],
-): TableKind {
-  if (dateTable === table.name) return "calendar";
-  const active = relationships.filter((r) => r.active);
-  const fromSide = active.some((r) => r.fromTable === table.name);
-  // Only a to-ONE endpoint makes the far side a lookup: a many-to-many
-  // relationship has no dimension side, and calling one of its ends a dimension
-  // is how a bridge table ends up offered as an analysis axis.
-  const toSide = active.some(
-    (r) =>
-      r.toTable === table.name &&
-      (r.cardinality === "manyToOne" || r.cardinality === "oneToOne"),
+/** Does this measure entry state anything at all? */
+export function measureHasValues(e: MeasureStrategy): boolean {
+  return (
+    e.direction !== undefined ||
+    e.aggregation !== undefined ||
+    e.unit !== undefined ||
+    e.target !== undefined ||
+    e.materiality !== undefined ||
+    e.cadence !== undefined ||
+    e.priority !== undefined ||
+    (e.analysisDimensions?.length ?? 0) > 0 ||
+    (e.neverSliceBy?.length ?? 0) > 0 ||
+    (e.context ?? "").trim() !== ""
   );
-  if (fromSide && !toSide) return "fact";
-  if (!fromSide && toSide) return "dimension";
-  if (fromSide && toSide) return "bridge";
-  return "other";
 }
 
-const TEXT_TYPES = new Set(["String", "Utf8", "Text"]);
-const DATE_TYPES = new Set(["Date", "Date32", "Date64", "Timestamp", "DateTime"]);
-
-function isTextColumn(c: ModelColumnInfo): boolean {
-  return TEXT_TYPES.has(c.dataType);
-}
-
-function isDateColumn(c: ModelColumnInfo): boolean {
-  return DATE_TYPES.has(c.dataType) || c.dataType.startsWith("Timestamp");
+/** Does this table entry state anything at all? */
+export function tableHasValues(e: TableStrategy): boolean {
+  return (
+    e.kind !== undefined ||
+    (e.labelColumn ?? "") !== "" ||
+    Object.keys(e.columns ?? {}).length > 0 ||
+    (e.hierarchies?.length ?? 0) > 0
+  );
 }
 
 /**
- * Guess one column's role.
+ * What the row's badge says.
  *
- * Deliberately conservative in ONE direction: a column it cannot place becomes
- * `ignore`, which only withholds a breakdown. Guessing `analysis` on an invoice
- * id produces one fact per record — a report that is technically true and
- * completely useless — so the doubt resolves towards saying less.
+ * `empty` — the document does not mention this measure or table, or mentions
+ *   it and states nothing. `measureEntry`/`tableEntry` hand back
+ *   `{ reviewed: false }` for a name the document never mentions, so without
+ *   this state a never-set row and a machine-guessed row render identically.
+ * `inferred` — values a machine proposed and nobody has agreed to yet.
+ * `authored` — values a person typed and has not (or no longer) confirmed.
+ * `confirmed` — a human said yes.
  */
-function inferRole(
-  table: ModelTableInfo,
-  column: ModelColumnInfo,
-  relationshipColumns: Set<string>,
-  dateTable: string | null,
-): Role {
-  if (relationshipColumns.has(`${table.name}[${column.name}]`)) return "key";
-  const lower = column.name.toLowerCase();
-  if (lower === "id" || lower.endsWith("id") || lower.endsWith("key") || lower.endsWith("code")) {
-    return "key";
+export type EntryState = "empty" | "inferred" | "authored" | "confirmed";
+
+/** The metadata half of an entry — the part `entryState` reads. */
+export interface ReviewableEntry {
+  reviewed: boolean;
+  source?: StrategySource;
+}
+
+/**
+ * Decide a row's badge from its metadata plus whether it says anything.
+ *
+ * EMPTY BEATS CONFIRMED, and that ordering is the point: `confirmAll` marks
+ * every measure and table NAME reviewed, including the ones the document never
+ * gave a value to. If `reviewed` won, a bulk confirm would paint "confirmed"
+ * across rows that state nothing — a claim that someone agreed to a strategy
+ * nobody wrote. Confirming an empty row states nothing, so it still reads
+ * empty.
+ *
+ * An absent `source` reads as `inferred`: a document written before the field
+ * existed can only have got its values from the drafting op.
+ */
+export function entryState(e: ReviewableEntry, hasValues: boolean): EntryState {
+  if (!hasValues) return "empty";
+  if (e.reviewed) return "confirmed";
+  return e.source === "authored" ? "authored" : "inferred";
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation — a default PLUS its exceptions
+// ---------------------------------------------------------------------------
+
+/** Human wording for an additivity, for a cell that has one line to say it in. */
+export const ADDITIVITY_LABELS: Record<Additivity, string> = {
+  additive: "additive",
+  nonAdditive: "non-additive",
+  lastValue: "last value",
+  firstValue: "first value",
+  average: "average",
+  max: "max",
+  min: "min",
+};
+
+/**
+ * Change the default additivity, KEEPING the per-dimension exceptions.
+ *
+ * This is a data-loss fix. The editor used to write
+ * `aggregation: v === "" ? undefined : { default: v }`, and because
+ * `withMeasure` merges shallowly that REPLACED the whole spec — so picking a
+ * default silently deleted `byDimension`. The Rust inferrer writes exactly
+ * that map for a semi-additive balance (`{ <date table>: lastValue }`), and
+ * the collapsed cell never showed it, so the map was invisible before it was
+ * destroyed.
+ *
+ * Clearing the default (`next === undefined`) still drops the whole spec, and
+ * that is not an oversight: `AggregationSpec.default` is REQUIRED on the Rust
+ * side, so an exception list with nothing to be an exception TO cannot be
+ * represented at all. Clearing is a deliberate, user-initiated erase; the
+ * silent one was the bug.
+ */
+export function withAggregationDefault(
+  spec: AggregationSpec | undefined,
+  next: Additivity | undefined,
+): AggregationSpec | undefined {
+  if (next === undefined) return undefined;
+  if (spec === undefined) return { default: next };
+  return { ...spec, default: next };
+}
+
+/**
+ * Add, change or remove ONE per-dimension exception.
+ *
+ * Removing the last exception leaves `byDimension` ABSENT rather than `{}`:
+ * an empty map and a missing one mean the same thing to the reader but not to
+ * a diff, and a document that gains a `"byDimension": {}` every time someone
+ * opens the editor is a document nobody can review.
+ *
+ * With no spec there is nothing to make an exception to — the Rust type
+ * requires a default — so this returns `undefined` rather than inventing
+ * `additive` as one. Fabricating a default nobody chose is the same class of
+ * lie this file's other helpers exist to prevent; the caller offers the
+ * exception control only once a default is set.
+ */
+export function withAggregationException(
+  spec: AggregationSpec | undefined,
+  dimension: string,
+  additivity: Additivity | undefined,
+): AggregationSpec | undefined {
+  if (spec === undefined) return undefined;
+  const key = dimension.trim();
+  if (key === "") return spec;
+  const next: Record<string, Additivity> = { ...(spec.byDimension ?? {}) };
+  if (additivity === undefined) delete next[key];
+  else next[key] = additivity;
+  if (Object.keys(next).length === 0) {
+    const { byDimension: _dropped, ...rest } = spec;
+    return rest;
   }
-  if (dateTable === table.name && isDateColumn(column)) return "hierarchy";
-  if (isTextColumn(column)) return "analysis";
-  return "ignore";
+  return { ...spec, byDimension: next };
+}
+
+/** How many exceptions a collapsed cell spells out before it summarises. */
+const AGGREGATION_EXCEPTIONS_SHOWN = 2;
+
+/**
+ * The collapsed cell text: `""`, `"additive"`, or
+ * `"additive (Date: last value)"`.
+ *
+ * The exceptions are IN the summary because the bug they caused was that they
+ * were not: a cell showing only `.default` gave no hint that anything else was
+ * stored, so nobody could tell that editing the default was about to throw
+ * something away. Exceptions are listed in dimension order (never insertion
+ * order — a cell whose text depends on which key was typed first cannot be
+ * asserted on), at most two, then `+N more`.
+ */
+export function formatAggregationSpec(spec: AggregationSpec | undefined): string {
+  if (spec === undefined) return "";
+  const base = ADDITIVITY_LABELS[spec.default] ?? spec.default;
+  const exceptions = Object.entries(spec.byDimension ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  if (exceptions.length === 0) return base;
+  const shown = exceptions
+    .slice(0, AGGREGATION_EXCEPTIONS_SHOWN)
+    .map(([dim, add]) => `${dim}: ${ADDITIVITY_LABELS[add] ?? add}`);
+  const hidden = exceptions.length - shown.length;
+  if (hidden > 0) shown.push(`+${hidden} more`);
+  return `${base} (${shown.join(", ")})`;
 }
 
 /**
- * Build the unreviewed draft the Strategy tab shows before anyone confirms it.
+ * The dimensions a measure's aggregation may carry an exception for.
  *
- * Everything here is a GUESS and is stamped `reviewed: false`, including the
- * entries it is most confident about. The tab's contrast between confirmed and
- * inferred is the product; a draft that arrived pre-confirmed would delete it.
+ * A CLOSED list, and that is the requirement rather than a convenience: the
+ * engine resolves `byDimension` by trying `Table[Column]`, then a bare column,
+ * then a bare table, and a key that matches none of those is not an error
+ * anywhere — it is an exception that never applies. A typo must therefore be
+ * unreachable from the UI.
+ *
+ * It offers the bare TABLE spelling, which is what a person means by "over
+ * Date": the measure's own table plus every table one active relationship away
+ * from it, in either direction (a fact table is usually the from-side, but a
+ * header/detail pair puts it on the other end). Names not in the model are
+ * dropped — a relationship endpoint that names no table cannot be offered.
  */
-export function inferStrategyDraft(overview: ModelOverview): StrategyDoc {
-  const doc: StrategyDoc = { version: STRATEGY_DOC_VERSION };
-
-  const relationshipColumns = new Set<string>();
+export function aggregationDimensionOptions(
+  overview: ModelOverview,
+  measureTable: string,
+): string[] {
+  const known = new Set(overview.tables.map((t) => t.name));
+  const neighbours = new Set<string>();
   for (const rel of overview.relationships) {
     if (!rel.active) continue;
-    for (const cond of rel.conditions) {
-      relationshipColumns.add(`${rel.fromTable}[${cond.fromColumn}]`);
-      relationshipColumns.add(`${rel.toTable}[${cond.toColumn}]`);
-    }
+    if (rel.fromTable === measureTable && known.has(rel.toTable)) neighbours.add(rel.toTable);
+    if (rel.toTable === measureTable && known.has(rel.fromTable)) neighbours.add(rel.fromTable);
   }
+  neighbours.delete(measureTable);
+  const rest = [...neighbours].sort((a, b) => a.localeCompare(b));
+  // The measure's own table leads: "over the fact grain" is the exception a
+  // person reaches for first, and burying it alphabetically hides it.
+  return known.has(measureTable) ? [measureTable, ...rest] : rest;
+}
 
-  const tables: Record<string, TableStrategy> = {};
-  for (const table of overview.tables) {
-    const columns: Record<string, ColumnStrategy> = {};
-    for (const column of table.columns) {
-      columns[column.name] = {
-        role: inferRole(table, column, relationshipColumns, overview.dateTable),
-      };
-    }
-    // The label column is what a reader recognises a row by, so a key never
-    // qualifies however text-like its name is.
-    const label = table.columns.find(
-      (c) => isTextColumn(c) && columns[c.name].role !== "key",
-    );
-    tables[table.name] = {
-      kind: classifyTable(table, overview.dateTable, overview.relationships),
-      labelColumn: label?.name,
-      columns,
-      reviewed: false,
-    };
-  }
-  doc.tables = tables;
+// ---------------------------------------------------------------------------
+// Role ordering — how a table's columns are disclosed
+// ---------------------------------------------------------------------------
 
-  const kpiByMeasure = new Map(overview.kpis.map((k) => [k.baseMeasure, k]));
-  const measures: Record<string, MeasureStrategy> = {};
-  for (const measure of overview.measures) {
-    const kpi = kpiByMeasure.get(measure.name);
-    const bands = kpi?.statusBands.map((b) => b.threshold) ?? [];
-    let direction: Direction | undefined;
-    if (bandsAscending(bands)) direction = "higherIsBetter";
-    else if (bandsDescending(bands)) direction = "lowerIsBetter";
-    measures[measure.name] = {
-      direction,
-      unit: unitFromFormat(measure.formatString),
-      // A model KPI already states the goal; inheriting it beats inventing one.
-      target: kpi ? { type: "kpi" as const } : undefined,
-      reviewed: false,
-    };
-  }
-  doc.measures = measures;
+/**
+ * Roles most-useful-first.
+ *
+ * A table can have a hundred columns and a reader wants three of them: the
+ * ones a report can be broken down by. So the two roles that may SCOPE a rule
+ * lead, `label` (what a row is recognised by) follows, and `key`/`ignore` —
+ * the columns that exist for the model's plumbing rather than for a reader —
+ * sink to the bottom. Order lives here, not in the component, so the CLI can
+ * print the same order later without a second opinion about what matters.
+ */
+export const ROLE_DISPLAY_ORDER: readonly Role[] = [
+  "analysis",
+  "hierarchy",
+  "filter",
+  "label",
+  "key",
+  "ignore",
+];
 
-  return doc;
+/** A column as the disclosure sorts it: a name, and the role the document gave
+ *  it (absent when the document has no entry for that column at all). */
+export interface RoleSortableColumn {
+  name: string;
+  role?: Role;
+}
+
+/** Where a role sits in `ROLE_DISPLAY_ORDER`. An unclassified column ranks
+ *  after every classified one, `ignore` included: "nobody has said what this is
+ *  for" is a weaker claim than "not worth breaking down by", and that
+ *  unclassified tail is exactly what a person opens a table to triage. */
+function roleRank(role: Role | undefined): number {
+  if (role === undefined) return ROLE_DISPLAY_ORDER.length;
+  const at = ROLE_DISPLAY_ORDER.indexOf(role);
+  return at < 0 ? ROLE_DISPLAY_ORDER.length : at;
+}
+
+/** Order two roles by `ROLE_DISPLAY_ORDER` alone. */
+export function compareRoles(a: Role | undefined, b: Role | undefined): number {
+  return roleRank(a) - roleRank(b);
+}
+
+/**
+ * Sort by `ROLE_DISPLAY_ORDER`, then by name.
+ *
+ * It takes EITHER a column (`{ name, role }`) or a bare `Role`, and that is a
+ * deliberate accommodation rather than a leftover: the same ordering is needed
+ * both where the caller has whole columns to sort and where it has already
+ * projected them down to roles and breaks its own name ties. Two spellings of
+ * one order beat two orders. Given bare roles there is no name to fall back on,
+ * so ties come back 0 and the caller's own tiebreak decides.
+ */
+export function compareColumnsByRole(
+  a: Role | RoleSortableColumn,
+  b: Role | RoleSortableColumn,
+): number {
+  const roleOf = (x: Role | RoleSortableColumn): Role | undefined =>
+    typeof x === "string" ? x : x.role;
+  const byRole = compareRoles(roleOf(a), roleOf(b));
+  if (byRole !== 0) return byRole;
+  if (typeof a === "string" || typeof b === "string") return 0;
+  return a.name.localeCompare(b.name);
 }

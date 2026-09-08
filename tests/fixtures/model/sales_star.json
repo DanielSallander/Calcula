@@ -400,7 +400,7 @@
             "status": "OnTrack"
           }
         ],
-        "description": "Margin percent against a 35% goal. Bands are ASCENDING on the base/target ratio, which is the higher-is-better shape KPIs can express — see plan C6."
+        "description": "Margin percent against a 35% goal. The band STATUSES run OffTrack -> AtRisk -> OnTrack as the base/target ratio grows, which is what makes this measure higher-is-better. (The thresholds ascend too, but the engine forces that on every KPI, so threshold order says nothing — an earlier version of this fixture claimed it did.)"
       }
     ]
   },

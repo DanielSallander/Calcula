@@ -1202,6 +1202,24 @@ pub async fn bi_model_upsert_measure(
             }
             None => edited,
         };
+        // The strategy document keys measures BY NAME, so a rename that stops
+        // here orphans the entry and the measure silently loses its direction
+        // and materiality. Re-keyed inside THIS closure so it is one undo step
+        // with the rename and cannot half-apply.
+        //
+        // The comparison is exact, unlike `renamed_from` above: the document's
+        // map keys are exact strings, so "revenue" -> "Revenue" orphans an
+        // entry even though the model treats it as the same measure.
+        let edited = match orig.as_deref().filter(|o| *o != new_name.trim()) {
+            Some(old_name) => rekey_stored_strategy(
+                edited,
+                &ModelRename::Measure {
+                    from: old_name.to_string(),
+                    to: new_name.trim().to_string(),
+                },
+            ),
+            None => edited,
+        };
         Ok(edited)
     })
     .await?;
@@ -3023,6 +3041,30 @@ pub async fn bi_model_upsert_model_column(
                 None => ctx.push(c),
             },
         }
+        // A rename must carry the strategy document with it: `analysisDimensions`,
+        // `neverSliceBy`, every rule/period/test scope key, the table entry's own
+        // column map, its `labelColumn`, its hierarchies and any `byDimension`
+        // key all name this column BY STRING. Same closure as the edit, so it is
+        // one undo step.
+        //
+        // Only a rename WITHIN the table is handled. Moving a column to another
+        // table is a different operation on the document (the entry has to move
+        // between table sections, and the destination may already declare a
+        // column of that name), and guessing at it would be worse than the
+        // orphan warning the validator already raises.
+        let strategy_rename = original_name.as_deref().and_then(|orig| {
+            let original_table = orig_calc
+                .map(|i| base.calculated_columns()[i].table().to_string())
+                .or_else(|| orig_ctx.map(|i| base.context_columns()[i].table().to_string()))?;
+            (orig != trimmed && original_table.eq_ignore_ascii_case(table.trim())).then(|| {
+                ModelRename::Column {
+                    table: original_table,
+                    from: orig.to_string(),
+                    to: trimmed.to_string(),
+                }
+            })
+        });
+
         let edited = base.with_calculated_columns(calc).with_context_columns(ctx);
         edited.validate().map_err(|e| {
             if flipped {
@@ -3043,7 +3085,10 @@ pub async fn bi_model_upsert_model_column(
                 format!("{}", e)
             }
         })?;
-        Ok(edited)
+        Ok(match &strategy_rename {
+            Some(rename) => rekey_stored_strategy(edited, rename),
+            None => edited,
+        })
     })
     .await
 }
@@ -4873,18 +4918,35 @@ pub async fn bi_model_upsert_context_column(
         }
 
         let mut cols = base.context_columns().to_vec();
+        // Captured BEFORE the store is rewritten: the strategy document keys
+        // this column by the table it lives on, and after `cols[idx] = cc` the
+        // original's table is gone. Same closure as the edit, so the rename and
+        // the re-key are one undo step. A move to another table is left alone
+        // for the reason given in `bi_model_upsert_model_column`.
+        let mut strategy_rename: Option<ModelRename> = None;
         match original_name.as_deref() {
             Some(orig) => {
                 let Some(idx) = cols.iter().position(|c| c.name() == orig) else {
                     return Err(format!("Context column '{}' not found", orig));
                 };
+                let original_table = cols[idx].table().to_string();
+                if orig != trimmed && original_table.eq_ignore_ascii_case(table.trim()) {
+                    strategy_rename = Some(ModelRename::Column {
+                        table: original_table,
+                        from: orig.to_string(),
+                        to: trimmed.to_string(),
+                    });
+                }
                 cols[idx] = cc;
             }
             None => cols.push(cc),
         }
         let edited = base.with_context_columns(cols);
         edited.validate().map_err(|e| format!("{}", e))?;
-        Ok(edited)
+        Ok(match &strategy_rename {
+            Some(rename) => rekey_stored_strategy(edited, rename),
+            None => edited,
+        })
     })
     .await
 }
@@ -5723,16 +5785,363 @@ pub async fn bi_model_extension_data(
 /// Where the strategy document lives inside the model.
 ///
 /// One key, in the `calcula.` namespace the generic extension-data writer now
-/// refuses, so this command is the ONLY way the document can change. That is
-/// the property the whole layer rests on: a strategy file either passed the
-/// validator, the overlap checker and its own inline tests, or it is not in the
-/// model.
+/// refuses, so `bi_model_strategy` is the only way the document's CONTENT can
+/// change. That is the property the whole layer rests on: a strategy file
+/// either passed the validator, the overlap checker and its own inline tests,
+/// or it is not in the model.
+///
+/// `rekey_stored_strategy` below is the one other writer, and it is not an
+/// exception to that property: it only rewrites NAMES the model itself just
+/// renamed, so the document it leaves behind says exactly what the validated
+/// one said about exactly the same objects.
 pub const STRATEGY_EXTENSION_KEY: &str = "calcula.strategy";
+
+use crate::insights::strategy::{
+    AggregationSpec, ModelFacts, QualifiedColumn, ResolvedMeasure, Scope, StrategyDoc, Target,
+};
+
+/// A rename that has just happened in the model, in the vocabulary the strategy
+/// document is keyed by.
+///
+/// The document names model objects by STRING at a dozen sites — map keys, list
+/// elements, scope keys, and three interchangeable spellings of a `byDimension`
+/// entry. It has no ids, deliberately: it is hand-authored and hand-reviewed, and
+/// a file of uuids is neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelRename {
+    Measure {
+        from: String,
+        to: String,
+    },
+    /// A column renamed inside one table. The table name is unchanged.
+    Column {
+        table: String,
+        from: String,
+        to: String,
+    },
+    Table {
+        from: String,
+        to: String,
+    },
+}
+
+/// The measure name after this rename, or `None` when the rename misses it.
+///
+/// EXACT equality, never a substring: renaming `Revenue` must not touch
+/// `Revenue Growth`, and a `replace()` here would rewrite it to
+/// `Net Revenue Growth` silently.
+fn renamed_measure_name(name: &str, rename: &ModelRename) -> Option<String> {
+    match rename {
+        ModelRename::Measure { from, to } if name == from => Some(to.clone()),
+        _ => None,
+    }
+}
+
+/// The qualified column after this rename, or `None` when the rename misses it.
+///
+/// A table rename moves every column of that table, which is why both variants
+/// are handled here rather than at each call site.
+fn renamed_qualified_column(
+    col: &QualifiedColumn,
+    rename: &ModelRename,
+) -> Option<QualifiedColumn> {
+    match rename {
+        ModelRename::Column { table, from, to } if col.table == *table && col.column == *from => {
+            Some(QualifiedColumn::new(table.clone(), to.clone()))
+        }
+        ModelRename::Table { from, to } if col.table == *from => {
+            Some(QualifiedColumn::new(to.clone(), col.column.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// One `byDimension` key after this rename.
+///
+/// `is_additive_over` (`app/src-tauri/src/insights/model.rs`) looks a dimension
+/// up under THREE spellings — `Table[Column]`, the bare column name, then the
+/// bare table name — so all three orphan on a rename and all three are rewritten
+/// here. A bare key is genuinely ambiguous between a column and a table; matching
+/// it against either is the same best effort the reader already makes.
+fn renamed_by_dimension_key(key: &str, rename: &ModelRename) -> Option<String> {
+    use std::str::FromStr;
+    if let Ok(qc) = QualifiedColumn::from_str(key) {
+        return renamed_qualified_column(&qc, rename).map(|q| q.to_string());
+    }
+    match rename {
+        ModelRename::Column { from, to, .. } if key == from => Some(to.clone()),
+        ModelRename::Table { from, to } if key == from => Some(to.clone()),
+        _ => None,
+    }
+}
+
+fn rekeyed_scope(scope: &Scope, rename: &ModelRename) -> Scope {
+    scope
+        .iter()
+        .map(|(col, value)| {
+            (
+                renamed_qualified_column(col, rename).unwrap_or_else(|| col.clone()),
+                value.clone(),
+            )
+        })
+        .collect()
+}
+
+fn rekey_aggregation(spec: &mut AggregationSpec, rename: &ModelRename) {
+    spec.by_dimension = std::mem::take(&mut spec.by_dimension)
+        .into_iter()
+        .map(|(key, additivity)| {
+            (
+                renamed_by_dimension_key(&key, rename).unwrap_or(key),
+                additivity,
+            )
+        })
+        .collect();
+}
+
+/// A `Target::Measure { ref }` points at another measure BY NAME, and the
+/// validator refuses a dangling one — so a rename that skipped it would turn a
+/// working document into a refused one on the next save.
+fn rekey_target(target: &mut Target, rename: &ModelRename) {
+    if let Target::Measure { r#ref } = target {
+        if let Some(renamed) = renamed_measure_name(r#ref, rename) {
+            *r#ref = renamed;
+        }
+    }
+}
+
+/// Rewrite every place a strategy document names a model object, after that
+/// object was renamed.
+///
+/// WHY THIS IS A PURE FUNCTION rather than a few lines inside each rename
+/// command: a rename that misses one site does not fail. It orphans the entry,
+/// the validator downgrades to a WARNING nobody is looking at, and the measure
+/// silently stops carrying the direction and materiality it has had since the
+/// day it was written — so the report keeps rendering, and quietly stops saying
+/// a fall is bad. That failure is invisible by construction, which is exactly
+/// the kind that has to be pinned by a test with no model, no connection and no
+/// Tauri window in the way.
+///
+/// Every comparison below is EXACT string equality. Nothing here does substring
+/// replacement, so renaming `Revenue` leaves `Revenue Growth` alone.
+pub fn strategy_doc_after_rename(doc: &StrategyDoc, rename: &ModelRename) -> StrategyDoc {
+    let mut out = doc.clone();
+
+    // --- model-wide defaults ---
+    if let Some(axis) = out.model.default_time_axis.as_mut() {
+        if let Some(renamed) = renamed_qualified_column(axis, rename) {
+            *axis = renamed;
+        }
+    }
+    for name in out.model.priority.iter_mut() {
+        if let Some(renamed) = renamed_measure_name(name, rename) {
+            *name = renamed;
+        }
+    }
+
+    // --- measure entries (the map KEY is the measure name) ---
+    out.measures = std::mem::take(&mut out.measures)
+        .into_iter()
+        .map(|(name, mut entry)| {
+            for col in entry.analysis_dimensions.iter_mut() {
+                if let Some(renamed) = renamed_qualified_column(col, rename) {
+                    *col = renamed;
+                }
+            }
+            for col in entry.never_slice_by.iter_mut() {
+                if let Some(renamed) = renamed_qualified_column(col, rename) {
+                    *col = renamed;
+                }
+            }
+            if let Some(agg) = entry.aggregation.as_mut() {
+                rekey_aggregation(agg, rename);
+            }
+            if let Some(target) = entry.target.as_mut() {
+                rekey_target(target, rename);
+            }
+            let key = renamed_measure_name(&name, rename).unwrap_or(name);
+            (key, entry)
+        })
+        .collect();
+
+    // --- table entries (the map KEY is the table name; everything INSIDE one
+    // is a bare column name, so it moves only when this very table's column
+    // was the one renamed) ---
+    out.tables = std::mem::take(&mut out.tables)
+        .into_iter()
+        .map(|(table_name, mut entry)| {
+            if let ModelRename::Column { table, from, to } = rename {
+                if *table == table_name {
+                    entry.columns = std::mem::take(&mut entry.columns)
+                        .into_iter()
+                        .map(|(col, strategy)| {
+                            (if col == *from { to.clone() } else { col }, strategy)
+                        })
+                        .collect();
+                    if entry.label_column.as_deref() == Some(from.as_str()) {
+                        entry.label_column = Some(to.clone());
+                    }
+                    for chain in entry.hierarchies.iter_mut() {
+                        for col in chain.iter_mut() {
+                            if col == from {
+                                *col = to.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            let key = match rename {
+                ModelRename::Table { from, to } if table_name == *from => to.clone(),
+                _ => table_name,
+            };
+            (key, entry)
+        })
+        .collect();
+
+    // --- rules ---
+    for rule in out.rules.iter_mut() {
+        if let Some(renamed) = renamed_measure_name(&rule.measure, rename) {
+            rule.measure = renamed;
+        }
+        rule.scope = rekeyed_scope(&rule.scope, rename);
+        if let Some(agg) = rule.set.aggregation.as_mut() {
+            rekey_aggregation(agg, rename);
+        }
+        if let Some(target) = rule.set.target.as_mut() {
+            rekey_target(target, rename);
+        }
+    }
+
+    // --- period annotations ---
+    for period in out.periods.iter_mut() {
+        if let Some(measure) = period.measure.as_mut() {
+            if let Some(renamed) = renamed_measure_name(measure, rename) {
+                *measure = renamed;
+            }
+        }
+        period.scope = rekeyed_scope(&period.scope, rename);
+    }
+
+    // --- inline tests ---
+    for test in out.tests.iter_mut() {
+        if let Some(renamed) = renamed_measure_name(&test.measure, rename) {
+            test.measure = renamed;
+        }
+        test.scope = rekeyed_scope(&test.scope, rename);
+    }
+
+    out
+}
+
+/// Rewrite the model's stored strategy document for a rename, returning the
+/// model to install.
+///
+/// Call this INSIDE the same `apply_model_edit` closure as the rename itself, so
+/// the two land as one undo step and cannot half-apply — a model whose measure
+/// is renamed but whose strategy still names the old one is precisely the broken
+/// state this exists to prevent.
+///
+/// A model with NO strategy document is returned untouched, not merely
+/// unchanged: it does not gain an extension-data key, and it pays nothing beyond
+/// one map lookup. That is the common case.
+fn rekey_stored_strategy(model: bi_engine::DataModel, rename: &ModelRename) -> bi_engine::DataModel {
+    let Some(stored) = model.extension_data().get(STRATEGY_EXTENSION_KEY) else {
+        return model;
+    };
+    // A document that no longer parses is LEFT ALONE. It got here past the
+    // validator, so this means the schema moved under it; dropping or guessing
+    // at hand-authored work to fix a key would be a far worse trade than an
+    // orphaned entry, which is at least a warning someone can act on.
+    let Ok(doc) = serde_json::from_value::<StrategyDoc>(stored.clone()) else {
+        return model;
+    };
+    let rekeyed = strategy_doc_after_rename(&doc, rename);
+    if rekeyed == doc {
+        return model;
+    }
+    let Ok(value) = serde_json::to_value(&rekeyed) else {
+        return model;
+    };
+    let mut data = model.extension_data().clone();
+    data.insert(STRATEGY_EXTENSION_KEY.to_string(), value);
+    model.with_extension_data(data)
+}
+
+/// What one measure actually resolves to, with every attribute's provenance.
+///
+/// The Strategy tab renders the raw document, so a measure whose direction and
+/// target are fully determined by the model's own KPI shows two EMPTY dropdowns
+/// — and a reviewer looking at that concludes the layer duplicates the KPI and
+/// will drift from it. It does not: the resolver already reads the KPI as its
+/// base layer and stamps `AttrSource::Kpi(name)` on what it takes. This is that
+/// answer, handed to the tab so it can grey an inherited value and say where it
+/// came from instead of showing a blank.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyPreviewMeasure {
+    pub measure: String,
+    /// Does the document carry its own entry for this measure? An attribute's
+    /// `source` says where its VALUE came from; this says whether the row the
+    /// tab would edit exists at all.
+    pub has_entry: bool,
+    /// Does the MODEL know this measure? False means an orphan entry the
+    /// validator is already warning about — shown so it can be cleaned up, not
+    /// presented as an editable measure.
+    pub in_model: bool,
+    /// Every attribute, its resolved value and its `source`, exactly as the
+    /// resolver produced them. Not re-shaped here: a second rendering of
+    /// provenance is a second thing to keep true.
+    pub resolved: ResolvedMeasure,
+}
+
+/// Resolve every measure the model or the document knows, at the EMPTY scope
+/// point.
+///
+/// The empty point is the measure "in general" — nothing fixed, nothing
+/// enumerated as rolled up — which is what a Strategy tab row is about. A scoped
+/// rule's effect belongs on the rule's own row, not smuggled into the measure's.
+fn strategy_preview(facts: &ModelFacts, doc: &StrategyDoc) -> Vec<StrategyPreviewMeasure> {
+    use crate::insights::strategy::{resolve, ScopePoint};
+
+    // The model's measures UNION the document's. An entry whose measure no
+    // longer exists must stay visible — it is the thing a person has to fix, and
+    // dropping it here would hide the orphan the validator is warning about.
+    let mut names: std::collections::BTreeSet<String> = facts.measures.keys().cloned().collect();
+    names.extend(doc.measures.keys().cloned());
+
+    let point = ScopePoint::default();
+    names
+        .into_iter()
+        .map(|name| StrategyPreviewMeasure {
+            resolved: resolve(facts, doc, &name, &point),
+            has_entry: doc.measures.contains_key(&name),
+            in_model: facts.measures.contains_key(&name),
+            measure: name,
+        })
+        .collect()
+}
+
+/// The refusal for an op `bi_model_strategy` does not have.
+///
+/// A function rather than an inline `format!` so the list of ops has ONE
+/// spelling: an op added to the match and forgotten here is a command whose own
+/// error message denies it exists.
+fn unknown_strategy_op(op: &str) -> String {
+    format!(
+        "Unknown strategy op '{}' \
+         (expected get|preview|set|validate|runTests|infer|suggestions|delete)",
+        op
+    )
+}
 
 /// Read, validate and write the model's strategy document.
 ///
 /// `op`:
 /// * `get` — the document as stored, or `null`. Works on any model.
+/// * `preview` — every measure resolved at the EMPTY scope point, with each
+///   attribute's provenance, so the tab can show what a measure already
+///   inherits. Read-only, and works on a package-subscribed model: a subscriber
+///   should be able to see WHY a report says a rise is bad.
 /// * `validate` — findings for the document in `payload` (or the stored one).
 /// * `runTests` — just the inline-test findings, for the Strategy tab's list.
 /// * `set` — validate, check overlaps, run the inline tests, then write. Any
@@ -5799,6 +6208,32 @@ pub async fn bi_model_strategy(
             let facts = crate::insights::strategy::facts_from_model(&base);
             let doc = crate::insights::strategy::infer(&facts, &base, &usage);
             serde_json::to_value(&doc).map_err(|e| e.to_string())
+        }
+
+        // What each measure ACTUALLY resolves to today, and who decided each
+        // attribute. A READ: no DocumentEffect, no `editable_base` — it reads
+        // `base` for the same reason `get` does.
+        "preview" => {
+            // The document comes from the PAYLOAD when the tab supplies one, so
+            // an unsaved edit can be previewed. Seeing what raising materiality
+            // does BEFORE saving it is the entire point.
+            let doc: StrategyDoc = match payload.or(stored) {
+                Some(v) if !v.is_null() => match parse(&v) {
+                    Ok(d) => d,
+                    Err(f) => {
+                        return Ok(serde_json::json!({
+                            "measures": Vec::<StrategyPreviewMeasure>::new(),
+                            "findings": vec![f],
+                        }))
+                    }
+                },
+                _ => StrategyDoc::default(),
+            };
+            let measures = strategy_preview(&facts_from_model(&base), &doc);
+            Ok(serde_json::json!({
+                "measures": serde_json::to_value(&measures).map_err(|e| e.to_string())?,
+                "findings": Vec::<Finding>::new(),
+            }))
         }
 
         // What the workbook's own pivots, filters and layouts say about how this
@@ -5925,10 +6360,7 @@ pub async fn bi_model_strategy(
             Ok(serde_json::json!({ "written": true, "findings": Vec::<Finding>::new() }))
         }
 
-        other => Err(format!(
-            "Unknown strategy op '{}' (expected get|set|validate|runTests|infer|suggestions|delete)",
-            other
-        )),
+        other => Err(unknown_strategy_op(other)),
     }
 }
 
@@ -11282,5 +11714,577 @@ mod tests {
         )
         .unwrap();
         assert!(upsert_writeback_column_model(&writeback_host_model(), None, bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod strategy_tests {
+    use super::{
+        rekey_stored_strategy, strategy_doc_after_rename, strategy_preview, unknown_strategy_op,
+        ModelRename, STRATEGY_EXTENSION_KEY,
+    };
+    use crate::insights::strategy::*;
+    use std::collections::BTreeMap;
+
+    fn scope_on(table: &str, column: &str, member: &str) -> Scope {
+        let mut scope = Scope::new();
+        scope.insert(
+            QualifiedColumn::new(table, column),
+            ScopeValue::Members(vec![member.to_string()]),
+        );
+        scope
+    }
+
+    /// A document that names a model object at EVERY site the re-keyer has to
+    /// reach, so one rename can be checked against all of them at once. A test
+    /// per site would let a new site be added with no test at all.
+    fn doc_naming_everything() -> StrategyDoc {
+        let mut doc = StrategyDoc::default();
+        doc.model.default_time_axis = Some(QualifiedColumn::new("Date", "Date"));
+        doc.model.priority = vec!["Revenue".into(), "Revenue Growth".into()];
+
+        doc.measures.insert(
+            "Revenue".into(),
+            MeasureStrategy {
+                direction: Some(Direction::HigherIsBetter),
+                materiality: Some(Materiality::Relative { value: 0.02 }),
+                // Every spelling `is_additive_over` accepts.
+                aggregation: Some(AggregationSpec {
+                    default: Additivity::Additive,
+                    by_dimension: BTreeMap::from([
+                        ("Geo[Region]".to_string(), Additivity::Additive),
+                        ("Region".to_string(), Additivity::LastValue),
+                        ("Geo".to_string(), Additivity::Average),
+                    ]),
+                }),
+                analysis_dimensions: vec![
+                    QualifiedColumn::new("Geo", "Region"),
+                    QualifiedColumn::new("Geo", "Region Code"),
+                ],
+                never_slice_by: vec![QualifiedColumn::new("Geo", "Region")],
+                ..Default::default()
+            },
+        );
+        // A second measure whose NAME CONTAINS the first. Nothing below may
+        // touch it.
+        doc.measures.insert(
+            "Revenue Growth".into(),
+            MeasureStrategy {
+                target: Some(Target::Measure {
+                    r#ref: "Revenue".into(),
+                }),
+                ..Default::default()
+            },
+        );
+
+        doc.tables.insert(
+            "Geo".into(),
+            TableStrategy {
+                kind: Some(TableKind::Dimension),
+                label_column: Some("Region".into()),
+                columns: BTreeMap::from([
+                    (
+                        "Region".to_string(),
+                        ColumnStrategy {
+                            role: Role::Analysis,
+                            priority: None,
+                        },
+                    ),
+                    (
+                        "Region Code".to_string(),
+                        ColumnStrategy {
+                            role: Role::Key,
+                            priority: None,
+                        },
+                    ),
+                ]),
+                hierarchies: vec![vec!["Region".into(), "City".into()]],
+                reviewed: true,
+                // Hand-built by this test, so it is neither inferred nor typed
+                // by a person in the editor - `None` is the honest third state.
+                source: None,
+            },
+        );
+
+        doc.rules.push(Rule {
+            id: "r1".into(),
+            measure: "Revenue".into(),
+            scope: scope_on("Geo", "Region", "Nordics"),
+            set: AttributeSet {
+                target: Some(Target::Measure {
+                    r#ref: "Revenue".into(),
+                }),
+                aggregation: Some(AggregationSpec {
+                    default: Additivity::Additive,
+                    by_dimension: BTreeMap::from([(
+                        "Geo[Region]".to_string(),
+                        Additivity::LastValue,
+                    )]),
+                }),
+                ..Default::default()
+            },
+            note: None,
+        });
+        doc.periods.push(PeriodAnnotation {
+            id: "p1".into(),
+            measure: Some("Revenue".into()),
+            scope: scope_on("Geo", "Region", "Nordics"),
+            note: "ERP cutover.".into(),
+        });
+        doc.tests.push(StrategyTest {
+            measure: "Revenue".into(),
+            scope: scope_on("Geo", "Region", "Nordics"),
+            given: TestGiven {
+                delta: -1.0,
+                ..Default::default()
+            },
+            expect: TestExpect {
+                status: ExpectedStatus::Unfavourable,
+                decided_by: None,
+            },
+        });
+        doc
+    }
+
+    #[test]
+    fn renaming_a_measure_rewrites_every_place_the_strategy_document_names_it() {
+        let before = doc_naming_everything();
+        let after = strategy_doc_after_rename(
+            &before,
+            &ModelRename::Measure {
+                from: "Revenue".into(),
+                to: "Net revenue".into(),
+            },
+        );
+
+        assert!(after.measures.contains_key("Net revenue"), "the entry re-keys");
+        assert!(
+            !after.measures.contains_key("Revenue"),
+            "the old key must not survive alongside the new one"
+        );
+        // The entry's CONTENT rides along; a rename that re-keyed an empty
+        // entry would lose the direction just as silently as no rename at all.
+        assert_eq!(
+            after.measures["Net revenue"].direction,
+            Some(Direction::HigherIsBetter)
+        );
+        assert_eq!(after.model.priority[0], "Net revenue");
+        assert_eq!(after.rules[0].measure, "Net revenue");
+        assert_eq!(after.periods[0].measure.as_deref(), Some("Net revenue"));
+        assert_eq!(after.tests[0].measure, "Net revenue");
+        // A `target: {type: measure, ref}` is checked by the validator, so a
+        // rename that skipped it would turn a valid document into a refused one.
+        assert_eq!(
+            after.measures["Revenue Growth"].target,
+            Some(Target::Measure {
+                r#ref: "Net revenue".into()
+            })
+        );
+        assert_eq!(
+            after.rules[0].set.target,
+            Some(Target::Measure {
+                r#ref: "Net revenue".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_measure_whose_name_merely_contains_the_renamed_one_is_untouched() {
+        let after = strategy_doc_after_rename(
+            &doc_naming_everything(),
+            &ModelRename::Measure {
+                from: "Revenue".into(),
+                to: "Net revenue".into(),
+            },
+        );
+        // Substring replacement would have produced "Net revenue Growth" here,
+        // silently renaming a measure nobody renamed.
+        assert!(after.measures.contains_key("Revenue Growth"));
+        assert_eq!(after.model.priority[1], "Revenue Growth");
+    }
+
+    #[test]
+    fn renaming_a_column_rewrites_every_qualified_reference_and_the_tables_section() {
+        let after = strategy_doc_after_rename(
+            &doc_naming_everything(),
+            &ModelRename::Column {
+                table: "Geo".into(),
+                from: "Region".into(),
+                to: "Territory".into(),
+            },
+        );
+        let territory = QualifiedColumn::new("Geo", "Territory");
+
+        assert_eq!(after.measures["Revenue"].analysis_dimensions[0], territory);
+        assert_eq!(after.measures["Revenue"].never_slice_by[0], territory);
+        assert!(after.rules[0].scope.contains_key(&territory));
+        assert!(after.periods[0].scope.contains_key(&territory));
+        assert!(after.tests[0].scope.contains_key(&territory));
+
+        let geo = &after.tables["Geo"];
+        assert!(geo.columns.contains_key("Territory"));
+        assert!(!geo.columns.contains_key("Region"));
+        assert_eq!(
+            geo.columns["Territory"].role,
+            Role::Analysis,
+            "the column's declared role must ride along with its key"
+        );
+        assert_eq!(geo.label_column.as_deref(), Some("Territory"));
+        assert_eq!(geo.hierarchies[0][0], "Territory");
+
+        // All three `byDimension` spellings orphan on a rename, so all three
+        // move: the qualified one and the bare COLUMN one. The bare TABLE name
+        // is not a column and must stay put.
+        let agg = after.measures["Revenue"].aggregation.as_ref().unwrap();
+        assert_eq!(agg.by_dimension["Geo[Territory]"], Additivity::Additive);
+        assert_eq!(agg.by_dimension["Territory"], Additivity::LastValue);
+        assert_eq!(agg.by_dimension["Geo"], Additivity::Average);
+        assert!(!agg.by_dimension.contains_key("Geo[Region]"));
+        assert!(!agg.by_dimension.contains_key("Region"));
+        assert_eq!(
+            after.rules[0]
+                .set
+                .aggregation
+                .as_ref()
+                .unwrap()
+                .by_dimension["Geo[Territory]"],
+            Additivity::LastValue,
+            "a RULE's byDimension keys orphan exactly like a measure's"
+        );
+    }
+
+    #[test]
+    fn a_column_whose_name_merely_contains_the_renamed_one_is_untouched() {
+        let after = strategy_doc_after_rename(
+            &doc_naming_everything(),
+            &ModelRename::Column {
+                table: "Geo".into(),
+                from: "Region".into(),
+                to: "Territory".into(),
+            },
+        );
+        assert_eq!(
+            after.measures["Revenue"].analysis_dimensions[1],
+            QualifiedColumn::new("Geo", "Region Code"),
+            "substring replacement would have made this 'Territory Code'"
+        );
+        assert!(after.tables["Geo"].columns.contains_key("Region Code"));
+    }
+
+    #[test]
+    fn a_column_rename_on_another_table_leaves_every_qualified_reference_alone() {
+        // Renaming `Sales[Region]` says nothing about `Geo[Region]`. Every
+        // reference that NAMES its table is therefore untouched: the table
+        // section (whose bare column names belong to that table), the qualified
+        // dimensions, and the scope keys.
+        let before = doc_naming_everything();
+        let after = strategy_doc_after_rename(
+            &before,
+            &ModelRename::Column {
+                table: "Sales".into(),
+                from: "Region".into(),
+                to: "Territory".into(),
+            },
+        );
+        assert_eq!(after.tables, before.tables);
+        assert_eq!(
+            after.measures["Revenue"].analysis_dimensions,
+            before.measures["Revenue"].analysis_dimensions
+        );
+        assert_eq!(after.rules[0].scope, before.rules[0].scope);
+        let agg = after.measures["Revenue"].aggregation.as_ref().unwrap();
+        assert_eq!(agg.by_dimension["Geo[Region]"], Additivity::Additive);
+
+        // THE ONE EXCEPTION, and it is the document's own ambiguity rather than
+        // a bug: a BARE `byDimension` key names no table, and `is_additive_over`
+        // matches it against any column with that name — including
+        // `Sales[Region]`. Either choice loses something: rewriting it drops the
+        // entry for `Geo[Region]`, leaving it drops the entry for the column the
+        // user just renamed and is looking at. It follows the rename, because
+        // that is the user's evident intent and because an author who needs the
+        // two kept apart can say so by writing the qualified form — which the
+        // assertion above shows is honoured exactly.
+        assert_eq!(agg.by_dimension["Territory"], Additivity::LastValue);
+        assert!(!agg.by_dimension.contains_key("Region"));
+    }
+
+    #[test]
+    fn renaming_a_table_moves_the_table_entry_and_every_qualified_reference() {
+        let after = strategy_doc_after_rename(
+            &doc_naming_everything(),
+            &ModelRename::Table {
+                from: "Geo".into(),
+                to: "Geography".into(),
+            },
+        );
+
+        assert!(after.tables.contains_key("Geography"));
+        assert!(!after.tables.contains_key("Geo"));
+        assert_eq!(
+            after.tables["Geography"].label_column.as_deref(),
+            Some("Region"),
+            "the columns inside the entry are unaffected by a TABLE rename"
+        );
+        assert_eq!(
+            after.measures["Revenue"].analysis_dimensions[0],
+            QualifiedColumn::new("Geography", "Region")
+        );
+        assert!(after.rules[0]
+            .scope
+            .contains_key(&QualifiedColumn::new("Geography", "Region")));
+
+        let agg = after.measures["Revenue"].aggregation.as_ref().unwrap();
+        assert_eq!(agg.by_dimension["Geography[Region]"], Additivity::Additive);
+        assert_eq!(
+            agg.by_dimension["Geography"],
+            Additivity::Average,
+            "the bare TABLE spelling moves with the table"
+        );
+        assert_eq!(
+            agg.by_dimension["Region"],
+            Additivity::LastValue,
+            "the bare COLUMN spelling is not a table name and stays put"
+        );
+    }
+
+    #[test]
+    fn renaming_the_time_axis_column_follows_it_into_the_model_defaults() {
+        let after = strategy_doc_after_rename(
+            &doc_naming_everything(),
+            &ModelRename::Column {
+                table: "Date".into(),
+                from: "Date".into(),
+                to: "Calendar Date".into(),
+            },
+        );
+        assert_eq!(
+            after.model.default_time_axis,
+            Some(QualifiedColumn::new("Date", "Calendar Date"))
+        );
+    }
+
+    // --- the model wrapper --------------------------------------------------
+
+    fn model_with_a_kpi() -> bi_engine::DataModel {
+        bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![
+                        bi_engine::Column::new("region", bi_engine::DataType::String),
+                        bi_engine::Column::new("amount", bi_engine::DataType::Float64),
+                    ],
+                )
+                .unwrap()
+                .with_storage_mode(bi_engine::StorageMode::InMemory),
+            )
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "amount"))
+            .add_kpi(
+                bi_engine::Kpi::new(
+                    "Revenue vs plan",
+                    "Revenue",
+                    bi_engine::KpiTarget::Constant(1_000_000.0),
+                )
+                // Ascending thresholds running bad -> good: the canonical
+                // "higher is better" shape.
+                .with_status_band(bi_engine::StatusBand::new(0.0, bi_engine::KpiStatus::OffTrack))
+                .with_status_band(bi_engine::StatusBand::new(0.9, bi_engine::KpiStatus::AtRisk))
+                .with_status_band(bi_engine::StatusBand::new(1.0, bi_engine::KpiStatus::OnTrack)),
+            )
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_model_with_no_strategy_document_is_left_exactly_as_it_was_by_a_rename() {
+        // The COMMON case. It must not pay for the feature, and above all must
+        // not acquire an extension-data key it never had - that key is what
+        // makes a model carry a strategy at all.
+        let model = model_with_a_kpi();
+        assert!(model.extension_data().is_empty(), "precondition");
+        let after = rekey_stored_strategy(
+            model.clone(),
+            &ModelRename::Measure {
+                from: "Revenue".into(),
+                to: "Net revenue".into(),
+            },
+        );
+        assert!(
+            after.extension_data().is_empty(),
+            "a model with no strategy document must not grow one"
+        );
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&model).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_rename_rewrites_the_stored_strategy_document_in_place() {
+        let doc = doc_naming_everything();
+        let mut data = BTreeMap::new();
+        data.insert(
+            STRATEGY_EXTENSION_KEY.to_string(),
+            serde_json::to_value(&doc).unwrap(),
+        );
+        let model = model_with_a_kpi().with_extension_data(data);
+
+        let after = rekey_stored_strategy(
+            model,
+            &ModelRename::Measure {
+                from: "Revenue".into(),
+                to: "Net revenue".into(),
+            },
+        );
+        let stored: StrategyDoc =
+            serde_json::from_value(after.extension_data()[STRATEGY_EXTENSION_KEY].clone()).unwrap();
+        assert!(stored.measures.contains_key("Net revenue"));
+        assert_eq!(stored.rules[0].measure, "Net revenue");
+    }
+
+    #[test]
+    fn a_rename_the_document_never_mentions_leaves_the_stored_value_identical() {
+        let doc = doc_naming_everything();
+        let mut data = BTreeMap::new();
+        data.insert(
+            STRATEGY_EXTENSION_KEY.to_string(),
+            serde_json::to_value(&doc).unwrap(),
+        );
+        let model = model_with_a_kpi().with_extension_data(data.clone());
+        let after = rekey_stored_strategy(
+            model,
+            &ModelRename::Measure {
+                from: "Headcount".into(),
+                to: "Employees".into(),
+            },
+        );
+        assert_eq!(
+            after.extension_data()[STRATEGY_EXTENSION_KEY],
+            data[STRATEGY_EXTENSION_KEY]
+        );
+    }
+
+    #[test]
+    fn an_unparseable_stored_strategy_document_is_left_alone_rather_than_dropped() {
+        // Hand-authored work is not thrown away to fix a key. An orphan is a
+        // warning someone can act on; a deleted document is not recoverable.
+        let junk =
+            serde_json::json!({ "version": 1, "measures": { "Revenue": { "direktion": "x" } } });
+        let mut data = BTreeMap::new();
+        data.insert(STRATEGY_EXTENSION_KEY.to_string(), junk.clone());
+        let after = rekey_stored_strategy(
+            model_with_a_kpi().with_extension_data(data),
+            &ModelRename::Measure {
+                from: "Revenue".into(),
+                to: "Net revenue".into(),
+            },
+        );
+        assert_eq!(after.extension_data()[STRATEGY_EXTENSION_KEY], junk);
+    }
+
+    // --- preview ------------------------------------------------------------
+
+    #[test]
+    fn a_measure_with_a_kpi_and_no_strategy_entry_previews_the_kpi_as_its_source() {
+        // THE WHOLE POINT: the Strategy tab used to render two empty dropdowns
+        // here, and a reviewer reading that concluded the layer duplicates the
+        // KPI. It does not - the resolver already reads the KPI as its base
+        // layer, and this is how the tab can say so.
+        let facts = facts_from_model(&model_with_a_kpi());
+        let preview = strategy_preview(&facts, &StrategyDoc::default());
+
+        let revenue = preview
+            .iter()
+            .find(|m| m.measure == "Revenue")
+            .expect("the model's measure must appear even with an empty document");
+        assert!(!revenue.has_entry);
+        assert!(revenue.in_model);
+
+        let kpi = AttrSource::Kpi("Revenue vs plan".to_string());
+        let target = revenue.resolved.target.as_ref().expect("target inherited");
+        assert_eq!(target.value, Target::Literal { value: 1_000_000.0 });
+        assert_eq!(target.source, kpi);
+        let direction = revenue
+            .resolved
+            .direction
+            .as_ref()
+            .expect("direction inherited");
+        assert_eq!(direction.value, Direction::HigherIsBetter);
+        assert_eq!(
+            direction.source, kpi,
+            "provenance must name the KPI, so the tab can write 'from KPI: <name>'"
+        );
+    }
+
+    #[test]
+    fn a_measure_with_a_strategy_entry_previews_the_entrys_value_sourced_to_the_strategy() {
+        let mut doc = StrategyDoc::default();
+        doc.measures.insert(
+            "Revenue".into(),
+            MeasureStrategy {
+                direction: Some(Direction::LowerIsBetter),
+                target: Some(Target::Literal { value: 42.0 }),
+                ..Default::default()
+            },
+        );
+        let facts = facts_from_model(&model_with_a_kpi());
+        let preview = strategy_preview(&facts, &doc);
+        let revenue = preview.iter().find(|m| m.measure == "Revenue").unwrap();
+
+        assert!(revenue.has_entry);
+        assert_eq!(
+            revenue.resolved.direction.as_ref().unwrap().source,
+            AttrSource::Strategy,
+            "the document's own answer wins over the KPI, and says so"
+        );
+        assert_eq!(
+            revenue.resolved.direction.as_ref().unwrap().value,
+            Direction::LowerIsBetter
+        );
+        assert_eq!(
+            revenue.resolved.target.as_ref().unwrap().value,
+            Target::Literal { value: 42.0 }
+        );
+        assert_eq!(
+            revenue.resolved.target.as_ref().unwrap().source,
+            AttrSource::Strategy
+        );
+    }
+
+    #[test]
+    fn the_preview_still_lists_a_document_entry_whose_measure_the_model_has_lost() {
+        // Dropping it would hide the orphan the validator is warning about -
+        // precisely the row a person has to open in order to fix it.
+        let mut doc = StrategyDoc::default();
+        doc.measures.insert("Ghost".into(), MeasureStrategy::default());
+        let preview = strategy_preview(&facts_from_model(&model_with_a_kpi()), &doc);
+
+        let ghost = preview
+            .iter()
+            .find(|m| m.measure == "Ghost")
+            .expect("an orphan entry must still be listed");
+        assert!(ghost.has_entry);
+        assert!(!ghost.in_model);
+    }
+
+    #[test]
+    fn an_unknown_strategy_op_names_every_op_the_command_does_have() {
+        let message = unknown_strategy_op("frobnicate");
+        assert!(message.contains("frobnicate"), "got {message}");
+        for op in [
+            "get",
+            "preview",
+            "set",
+            "validate",
+            "runTests",
+            "infer",
+            "suggestions",
+            "delete",
+        ] {
+            assert!(
+                message.contains(op),
+                "the refusal must list '{op}'; said: {message}"
+            );
+        }
     }
 }

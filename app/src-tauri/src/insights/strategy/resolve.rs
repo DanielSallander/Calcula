@@ -57,7 +57,54 @@ pub struct MeasureFacts {
     pub kpi: Option<KpiFacts>,
 }
 
-/// A model KPI: a goal and the band thresholds around it.
+/// How good a KPI band says the ratio is. Mirrors the engine's `KpiStatus`
+/// without importing it, for the reason in this file's header: nothing here may
+/// pull `bi_engine` into the test binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BandStatus {
+    OffTrack,
+    AtRisk,
+    OnTrack,
+}
+
+impl BandStatus {
+    /// Rank on the bad -> good axis. Comparing these across consecutive bands is
+    /// the ONLY thing in a KPI that says which way is good.
+    fn goodness(self) -> u8 {
+        match self {
+            BandStatus::OffTrack => 0,
+            BandStatus::AtRisk => 1,
+            BandStatus::OnTrack => 2,
+        }
+    }
+
+    /// The wire spelling, for a validation message that has to quote a band.
+    pub fn label(self) -> &'static str {
+        match self {
+            BandStatus::OffTrack => "offTrack",
+            BandStatus::AtRisk => "atRisk",
+            BandStatus::OnTrack => "onTrack",
+        }
+    }
+}
+
+/// One band of a KPI's status scale: a ratio at or above `threshold` carries
+/// `status` until the next band's threshold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KpiBand {
+    pub threshold: f64,
+    pub status: BandStatus,
+}
+
+impl KpiBand {
+    pub fn new(threshold: f64, status: BandStatus) -> Self {
+        Self { threshold, status }
+    }
+}
+
+/// A model KPI: a goal and the status bands around it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KpiFacts {
@@ -68,21 +115,58 @@ pub struct KpiFacts {
     #[serde(default)]
     pub name: String,
     pub target: Option<f64>,
-    /// Band thresholds in the order the model declares them.
-    pub bands: Vec<f64>,
+    /// Threshold AND status, in the order the model declares them.
+    ///
+    /// THE STATUS IS THE SIGNAL, NOT THE THRESHOLD. The engine's builder refuses
+    /// a KPI whose thresholds do not ascend (`Kpi::with_status_band`), so
+    /// "do the thresholds ascend?" is true of every KPI that exists and answers
+    /// nothing. Which way is good is carried entirely by whether the statuses run
+    /// offTrack -> onTrack or onTrack -> offTrack as the ratio grows.
+    pub bands: Vec<KpiBand>,
 }
 
 impl KpiFacts {
-    /// Do the bands run bad -> good as the number grows?
+    /// Which way the bands say is good, or `None` when they do not say.
     ///
-    /// This is what makes `lowerIsBetter` on such a measure a contradiction
-    /// rather than a preference, and validate.rs refuses the pair.
-    pub fn ratio_ascending(&self) -> bool {
-        self.bands.len() >= 2 && self.bands.windows(2).all(|w| w[0] < w[1])
+    /// A single band states no ordering; a flat sequence (every band onTrack)
+    /// states no ordering; a sequence that goes up and then down again states two
+    /// contradictory orderings. All three yield NO direction, because a guess
+    /// here is exactly a confidently backwards "which is worse" sentence.
+    pub fn direction(&self) -> Option<Direction> {
+        if self.bands.len() < 2 {
+            return None;
+        }
+        // Sorted by threshold rather than trusted in declaration order: the
+        // engine validates the ascent, but a `ModelFacts` can also be built by
+        // hand, and "as the ratio grows" must mean the ratio and not the order
+        // somebody happened to type.
+        let mut bands: Vec<&KpiBand> = self.bands.iter().collect();
+        bands.sort_by(|a, b| a.threshold.partial_cmp(&b.threshold).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut rises = false;
+        let mut falls = false;
+        for w in bands.windows(2) {
+            let (a, b) = (w[0].status.goodness(), w[1].status.goodness());
+            if b > a {
+                rises = true;
+            } else if b < a {
+                falls = true;
+            }
+        }
+        match (rises, falls) {
+            (true, false) => Some(Direction::HigherIsBetter),
+            (false, true) => Some(Direction::LowerIsBetter),
+            _ => None,
+        }
     }
 
-    pub fn ratio_descending(&self) -> bool {
-        self.bands.len() >= 2 && self.bands.windows(2).all(|w| w[0] > w[1])
+    /// The bands as `0.9:atRisk`, for a finding that must quote them.
+    pub fn band_summary(&self) -> String {
+        self.bands
+            .iter()
+            .map(|b| format!("{}:{}", b.threshold, b.status.label()))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -96,6 +180,16 @@ pub struct TableFacts {
     /// coverage" rather than as "no members".
     #[serde(default)]
     pub members: BTreeMap<String, Vec<String>>,
+    /// The MODEL's own hierarchies on this table, coarse-to-fine, in the order
+    /// the engine declares their levels.
+    ///
+    /// `TableStrategy::hierarchies` is a COPY of this that `infer` writes. The
+    /// copy is the only one validate.rs used to be able to see, so a rule scoped
+    /// on a real hierarchy level in a document nobody had run inference over was
+    /// refused for having a role that "cannot scope" - a refusal of a document
+    /// that was right.
+    #[serde(default)]
+    pub hierarchies: Vec<Vec<String>>,
 }
 
 /// Everything the resolver needs from the semantic model, and nothing more.
@@ -120,6 +214,18 @@ impl ModelFacts {
         self.tables
             .get(&col.table)
             .map(|t| t.columns.contains(&col.column))
+            .unwrap_or(false)
+    }
+
+    /// Does a MODEL hierarchy on the column's table name it?
+    ///
+    /// The mirror of `StrategyDoc::in_a_hierarchy`. Validation asks both, because
+    /// a level the model declares is a level whether or not the strategy document
+    /// has caught up with it.
+    pub fn in_a_hierarchy(&self, col: &QualifiedColumn) -> bool {
+        self.tables
+            .get(&col.table)
+            .map(|t| t.hierarchies.iter().any(|h| h.iter().any(|c| c == &col.column)))
             .unwrap_or(false)
     }
 
@@ -478,15 +584,9 @@ pub fn resolve(
     // only layer that can answer it with an object they can go and look at.
     let kpi = mf.and_then(|m| m.kpi.as_ref());
     let kpi_source = || AttrSource::Kpi(kpi.map(|k| k.name.clone()).unwrap_or_default());
-    let mut direction = kpi.and_then(|k| {
-        if k.ratio_ascending() {
-            Some(Applied::new(Direction::HigherIsBetter, kpi_source()))
-        } else if k.ratio_descending() {
-            Some(Applied::new(Direction::LowerIsBetter, kpi_source()))
-        } else {
-            None
-        }
-    });
+    let mut direction = kpi
+        .and_then(|k| k.direction())
+        .map(|d| Applied::new(d, kpi_source()));
     let mut target = kpi
         .and_then(|k| k.target)
         .map(|v| Applied::new(Target::Literal { value: v }, kpi_source()));
@@ -688,6 +788,7 @@ mod tests {
                         kind: Some(TableKind::Fact),
                         columns: BTreeSet::from(["DeptKey".to_string(), "Amount".to_string()]),
                         members: BTreeMap::new(),
+                        hierarchies: Vec::new(),
                     },
                 ),
                 (
@@ -699,6 +800,7 @@ mod tests {
                             "Dept".to_string(),
                             vec!["Refunds".to_string(), "Retail".to_string()],
                         )]),
+                        hierarchies: Vec::new(),
                     },
                 ),
             ]),
@@ -916,7 +1018,11 @@ mod tests {
                 kpi: Some(KpiFacts {
                     name: "Margin KPI".into(),
                     target: Some(0.4),
-                    bands: vec![0.1, 0.25, 0.4],
+                    bands: vec![
+                        KpiBand::new(0.1, BandStatus::OffTrack),
+                        KpiBand::new(0.25, BandStatus::AtRisk),
+                        KpiBand::new(0.4, BandStatus::OnTrack),
+                    ],
                 }),
             },
         );
@@ -947,7 +1053,10 @@ mod tests {
         facts.measures.get_mut("Returns").unwrap().kpi = Some(KpiFacts {
             name: "Returns KPI".into(),
             target: None,
-            bands: vec![0.1, 0.2],
+            bands: vec![
+                KpiBand::new(0.1, BandStatus::OffTrack),
+                KpiBand::new(0.2, BandStatus::OnTrack),
+            ],
         });
         let doc = doc_with_refunds_rule();
         let r = resolve(&facts, &doc, "Returns", &ScopePoint::fixing([(col("Dim", "Dept"), "Retail")]));
@@ -995,6 +1104,118 @@ mod tests {
             facts.reachable_tables("Orphan"),
             BTreeSet::from(["Orphan".to_string()])
         );
+    }
+
+    fn kpi_with(bands: Vec<KpiBand>) -> KpiFacts {
+        KpiFacts {
+            name: "K".into(),
+            target: Some(1.0),
+            bands,
+        }
+    }
+
+    #[test]
+    fn a_kpi_whose_statuses_worsen_as_the_ratio_grows_says_lower_is_better() {
+        // A churn KPI: the closer the ratio gets to the ceiling, the worse it is.
+        // The THRESHOLDS still ascend - the engine's builder refuses any KPI whose
+        // thresholds do not - so reading the thresholds could only ever answer
+        // "higher is better", which is how every churn KPI used to.
+        let churn = kpi_with(vec![
+            KpiBand::new(0.5, BandStatus::OnTrack),
+            KpiBand::new(0.8, BandStatus::AtRisk),
+            KpiBand::new(1.0, BandStatus::OffTrack),
+        ]);
+        assert_eq!(churn.direction(), Some(Direction::LowerIsBetter));
+
+        let revenue = kpi_with(vec![
+            KpiBand::new(0.5, BandStatus::OffTrack),
+            KpiBand::new(0.9, BandStatus::AtRisk),
+            KpiBand::new(1.0, BandStatus::OnTrack),
+        ]);
+        assert_eq!(revenue.direction(), Some(Direction::HigherIsBetter));
+    }
+
+    #[test]
+    fn a_kpi_that_states_no_ordering_yields_no_direction_rather_than_a_guess() {
+        // One band names a status but no ORDERING - there is nothing to compare
+        // it against.
+        assert_eq!(
+            kpi_with(vec![KpiBand::new(0.9, BandStatus::OnTrack)]).direction(),
+            None
+        );
+        // Every band the same: the KPI colours the number and says nothing about
+        // which way is good.
+        assert_eq!(
+            kpi_with(vec![
+                KpiBand::new(0.5, BandStatus::OnTrack),
+                KpiBand::new(0.9, BandStatus::OnTrack),
+            ])
+            .direction(),
+            None
+        );
+        // Good in the middle, bad at both ends: a band-shaped goal, which is a
+        // `targetBand` a person must declare - not something to collapse into one
+        // of the two monotone answers.
+        assert_eq!(
+            kpi_with(vec![
+                KpiBand::new(0.5, BandStatus::OffTrack),
+                KpiBand::new(0.9, BandStatus::OnTrack),
+                KpiBand::new(1.2, BandStatus::OffTrack),
+            ])
+            .direction(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_band_order_that_decides_direction_is_the_ratio_and_not_the_typing_order() {
+        // Same three bands, declared worst-threshold-last. "As the ratio grows"
+        // must mean the ratio.
+        let scrambled = kpi_with(vec![
+            KpiBand::new(1.0, BandStatus::OffTrack),
+            KpiBand::new(0.5, BandStatus::OnTrack),
+            KpiBand::new(0.8, BandStatus::AtRisk),
+        ]);
+        assert_eq!(scrambled.direction(), Some(Direction::LowerIsBetter));
+    }
+
+    #[test]
+    fn a_churn_kpi_resolves_to_lower_is_better_and_names_the_kpi() {
+        // The end-to-end of the above: before status pairs reached KpiFacts this
+        // resolved to higherIsBetter, so a rise in churn read as good news.
+        let mut facts = facts();
+        facts.measures.insert(
+            "Churn".into(),
+            MeasureFacts {
+                fact_table: Some("Sales".into()),
+                unit: Some(Unit::Percent),
+                kpi: Some(KpiFacts {
+                    name: "Churn KPI".into(),
+                    target: Some(0.05),
+                    bands: vec![
+                        KpiBand::new(0.5, BandStatus::OnTrack),
+                        KpiBand::new(1.0, BandStatus::OffTrack),
+                    ],
+                }),
+            },
+        );
+        let r = resolve(&facts, &StrategyDoc::default(), "Churn", &ScopePoint::default());
+        assert_eq!(
+            r.direction,
+            Some(Applied::new(
+                Direction::LowerIsBetter,
+                AttrSource::Kpi("Churn KPI".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn a_model_hierarchy_is_visible_through_the_facts() {
+        let mut facts = facts();
+        facts.tables.get_mut("Dim").unwrap().hierarchies = vec![vec!["Dept".into()]];
+        assert!(facts.in_a_hierarchy(&col("Dim", "Dept")));
+        assert!(!facts.in_a_hierarchy(&col("Dim", "DeptKey")));
+        assert!(!facts.in_a_hierarchy(&col("Nope", "Dept")));
     }
 
     #[test]

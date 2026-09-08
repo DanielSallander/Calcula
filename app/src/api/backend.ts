@@ -5130,7 +5130,7 @@ export async function biModelExtensionDataDelete(
  */
 export function biModelStrategy<T = unknown>(
   connectionId: string,
-  op: "get" | "set" | "validate" | "runTests" | "infer" | "suggestions" | "delete",
+  op: "get" | "set" | "validate" | "runTests" | "infer" | "suggestions" | "preview" | "delete",
   payload: unknown = null,
 ): Promise<T> {
   return invoke<T>("bi_model_strategy", { connectionId, op, payload });
