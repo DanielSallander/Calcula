@@ -134,20 +134,31 @@ export interface Suppression {
  */
 export interface ResolvedMeasure {
   measure: string;
-  direction?: Applied<Direction>;
-  aggregation?: Applied<AggregationSpec>;
-  unit?: Applied<Unit>;
-  target?: Applied<Target>;
-  materiality?: Applied<Materiality>;
-  cadence?: Applied<Cadence>;
-  priority?: Applied<number>;
-  rankWeight?: Applied<number>;
+  // `| null`, NOT just optional. `ResolvedMeasure`'s `Option<Applied<T>>` fields
+  // carry NO `skip_serializing_if`, so serde writes an absent attribute as an
+  // explicit `null` rather than omitting the key. Typing these `?:` alone said
+  // "absent means undefined", every guard was written `=== undefined`, and the
+  // first measure with no KPI and no strategy entry — i.e. the first measure of
+  // any real model — crashed the whole Model Editor window on `null.value`.
+  //
+  // Read a Rust field's serde attributes before deciding what "absent" looks
+  // like on this side. `?:` is kept alongside so a later `skip_serializing_if`
+  // would not make this type wrong in the other direction.
+  direction?: Applied<Direction> | null;
+  aggregation?: Applied<AggregationSpec> | null;
+  unit?: Applied<Unit> | null;
+  target?: Applied<Target> | null;
+  materiality?: Applied<Materiality> | null;
+  cadence?: Applied<Cadence> | null;
+  priority?: Applied<number> | null;
+  rankWeight?: Applied<number> | null;
   /** Fact kinds withheld here, as the union of every rule that reaches. */
   suppressedKinds: string[];
   /** `Table[Column]` refs — a `QualifiedColumn` is one string on the wire. */
   analysisDimensions: string[];
   neverSliceBy: string[];
-  context?: string;
+  /** Also `| null` — same reason as the attributes above. */
+  context?: string | null;
   suppressions: Suppression[];
 }
 

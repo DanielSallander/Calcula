@@ -213,12 +213,31 @@ const INFERRED_DRAFT: StrategyDoc = {
   },
 };
 
-/** A resolved measure with every list field present, as the Rust struct always
- *  serializes them — a fixture that omitted one would be testing a wire shape
- *  the backend cannot produce. */
+/**
+ * A resolved measure EXACTLY as the backend serializes one.
+ *
+ * Every field is present, and an attribute nothing decided is `null` — NOT
+ * absent. `ResolvedMeasure`'s `Option<Applied<T>>` fields carry no
+ * `skip_serializing_if`, so serde writes the key with a null value.
+ *
+ * This helper used to list only the array fields and leave the attributes off,
+ * which made them `undefined`. That is not a wire shape the backend can produce,
+ * and it was the exact shape the buggy code expected — so ten tests passed while
+ * the tab crashed on the first measure of any real model, on `null.value`. A
+ * fixture that is more complete than reality tests the fixture.
+ */
 function resolvedMeasure(measure: string, over: Partial<ResolvedMeasure> = {}): ResolvedMeasure {
   return {
     measure,
+    direction: null,
+    aggregation: null,
+    unit: null,
+    target: null,
+    materiality: null,
+    cadence: null,
+    priority: null,
+    rankWeight: null,
+    context: null,
     suppressedKinds: [],
     analysisDimensions: [],
     neverSliceBy: [],
@@ -464,6 +483,35 @@ describe("an attribute the document does not state", () => {
     version: 1,
     measures: { Returns: { direction: "lowerIsBetter", reviewed: true } },
   };
+
+  it("renders a measure the resolver decided NOTHING about, instead of crashing on it", async () => {
+    // THE REGRESSION. An unannotated measure with no KPI resolves every
+    // attribute to `null`, and `null` is what crosses the wire — the resolver's
+    // Option fields do not skip when empty. The guards read `=== undefined`, so
+    // the first such measure threw `Cannot read properties of null (reading
+    // 'value')` out of `inheritedOption`, which the Model Editor's error
+    // boundary turned into "failed to start" for the whole window.
+    //
+    // Most measures of most models are exactly this shape, so this is the
+    // ordinary case rather than an edge one.
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    vi.mocked(strategyPreview).mockResolvedValue(
+      previewOf(
+        { measure: "Returns", hasEntry: false, inModel: true, resolved: resolvedMeasure("Returns") },
+        { measure: "Profit", hasEntry: false, inModel: true, resolved: resolvedMeasure("Profit") },
+      ),
+    );
+    await mount();
+    await settle();
+    // It renders at all, and the controls are simply blank — there is nothing
+    // to inherit, so there is nothing to say.
+    // The empty option is the ordinary "—" placeholder, NOT an inheritance
+    // note: an inherited one reads "<value> — from KPI '<name>'", so the word
+    // "from" is what distinguishes the two.
+    expect(directionSelect("Profit").value).toBe("");
+    expect(directionSelect("Profit").options[0].textContent).not.toContain("from");
+    expect(targetInput("Profit").placeholder).not.toContain("from");
+  });
 
   const FROM_KPI: StrategyPreviewResult = previewOf(
     inherits("Profit", {

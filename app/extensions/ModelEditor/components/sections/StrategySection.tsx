@@ -382,10 +382,16 @@ export function inheritedFrom(source: AttrSource): string {
  * the truth.
  */
 export function inheritedOption<T>(
-  applied: Applied<T> | undefined,
+  applied: Applied<T> | null | undefined,
   format: (value: T) => string,
 ): string | null {
-  if (applied === undefined) return null;
+  // `== null`, deliberately, and the same at every other site that takes an
+  // `Applied`. The resolver's `Option<Applied<T>>` fields carry no
+  // `skip_serializing_if`, so an attribute nothing decided arrives as an
+  // explicit `null`. This read `=== undefined` and crashed the Model Editor on
+  // the first measure with no KPI and no strategy entry — which is most
+  // measures of most models.
+  if (applied == null) return null;
   const text = format(applied.value);
   if (text === "") return null;
   return `${text} — ${inheritedFrom(applied.source)}`;
@@ -398,9 +404,12 @@ export function inheritedOption<T>(
  */
 export function inheritedFor<T>(
   carried: T | undefined,
-  applied: Applied<T> | undefined,
+  applied: Applied<T> | null | undefined,
   format: (value: T) => string,
 ): string | null {
+  // `carried` comes from the DOCUMENT, whose fields do skip when absent, so
+  // `undefined` is the right test for it — the asymmetry with `applied` is real
+  // and is why both spellings appear in one function.
   if (carried !== undefined) return null;
   return inheritedOption(applied, format);
 }
@@ -414,9 +423,9 @@ export function inheritedFor<T>(
  */
 export function overridingRule<T>(
   carried: T | undefined,
-  applied: Applied<T> | undefined,
+  applied: Applied<T> | null | undefined,
 ): string | null {
-  if (carried === undefined || applied === undefined) return null;
+  if (carried === undefined || applied == null) return null;
   return sourceRuleId(applied.source);
 }
 
@@ -432,10 +441,10 @@ export function whyLines(resolved: ResolvedMeasure): string[] {
   const lines: string[] = [];
   function add<T>(
     attribute: string,
-    applied: Applied<T> | undefined,
+    applied: Applied<T> | null | undefined,
     format: (value: T) => string,
   ): void {
-    if (applied === undefined) return;
+    if (applied == null) return;
     const text = format(applied.value);
     lines.push(`${attribute}: ${text === "" ? "(none)" : text} (${sourceLabel(applied.source)})`);
   }
