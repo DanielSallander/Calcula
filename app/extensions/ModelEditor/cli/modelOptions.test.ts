@@ -266,7 +266,9 @@ async function runText(
 
 const MATRIX: Array<[kind: string, verb: string, cmd: string]> = [
   ["measure", "add", 'add measure [M2] format="0.0%" formatexpr="fx" folder="KPIs" hidden=true description="d" detailrows=Sales[Id] = 1'],
-  ["measure", "set", 'set measure [Profit] format="0.0%" formatexpr="fx" folder="KPIs" hidden=true description="d" detailrows=Sales[Id]'],
+  // `set measure` addresses the measure AND its strategy entry — writers.ts
+  // routes per KEY, so this row carries both halves.
+  ["measure", "set", 'set measure [Profit] format="0.0%" formatexpr="fx" folder="KPIs" hidden=true description="d" detailrows=Sales[Id] direction=lowerIsBetter unit=currency target=1000 materiality=2% cadence=monthly priority=1 analysisdims=Sales[Region] neverslice=Sales[Id] reviewed=true'],
   ["measure", "rename", "rename measure [Profit] [P2]"],
   ["measure", "delete", "delete measure [Profit]"],
   ["table", "set", 'set table Sales displayname="S" description="d" hidden=false storage=InMemory refresh=interval:300 incremental="inc" source=Warehouse schema=public sourcetable=orders'],
@@ -275,7 +277,7 @@ const MATRIX: Array<[kind: string, verb: string, cmd: string]> = [
   ["table", "refresh", "refresh table Sales"],
   ["table", "import", "import tables public.orders schema=public"],
   ["column", "add", 'add column Sales[NewCol] type=Int64 description="d" = 1'],
-  ["column", "set", 'set column Sales[Amount] type=Float64 description="d" hidden=true format="#,0" displayname="A" sortby=Id lookup="lk"'],
+  ["column", "set", 'set column Sales[Amount] type=Float64 description="d" hidden=true format="#,0" displayname="A" sortby=Id lookup="lk" role=analysis priority=2'],
   ["column", "rename", "rename column Sales[Margin] [M2]"],
   ["column", "delete", "delete column Sales[Margin]"],
   ["relationship", "add", 'add relationship Sales[CustomerId] -> Customer[Id] cardinality=m:1 active=true propagation=auto name="R1" ops=eq'],
@@ -341,6 +343,12 @@ const MATRIX: Array<[kind: string, verb: string, cmd: string]> = [
   ["extdata", "set", 'set extdata acme.meta = {"a": 1}'],
   ["extdata", "delete", "delete extdata acme.meta"],
   ["sql", "import", "import sql BigCustomers = SELECT 1"],
+  // The insights strategy layer. `test`/`infer` take no options; `add rule`
+  // carries the whole AttributeSet a rule may set.
+  ["strategy", "test", "test strategy"],
+  ["strategy", "infer", "infer strategy --apply"],
+  ["rule", "add", 'add rule r1 measure=[Profit] scope="Sales[Region]=West" direction=lowerIsBetter target=kpi materiality=2% cadence=monthly suppress=outlier rankweight=2 note="n"'],
+  ["rule", "delete", "delete rule r1"],
 ];
 
 // `transform table` is the ONE verb whose options are not a single flat set a

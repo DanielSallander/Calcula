@@ -125,6 +125,7 @@ dependencies = [
  "engine",
  "gif",
  "identity",
+ "insights",
  "log",
  "once_cell",
  "parquet",
@@ -3477,6 +3478,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "insights"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "rustc-hash 2.1.1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

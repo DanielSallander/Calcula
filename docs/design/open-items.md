@@ -859,6 +859,55 @@ binary — a text-search census of this area reports five and is wrong).
 
 ---
 
+### 2.AI — the AI programme, opened 2026-09-07
+
+Built this session: the offline formula grader and its 97-task corpus, the formula assistant
+(`app/extensions/FormulaAssist/`), the strategy layer
+(`app/src-tauri/src/insights/strategy/`), the insights engine (`core/insights/` plus
+`app/src-tauri/src/insights/`), the Insights pane, the Strategy tab, and the two MCP analysis
+tools. Design records: `docs/design/formula-assist.md`, `docs/design/insights-strategy-layer.md`.
+
+**2.AI.1 — The formula assistant does not meet its own exit criterion, and the gap is the model.**
+The target was ≥ 90 % verified-correct at ≤ 3 s. Measured on `qwen2.5-coder:1.5b` over 97 tasks:
+**37 % at a 7 s median**. Nothing here is unsafe — the engine verifies every proposal before it is
+shown, so a wrong formula is never badged as correct — but the feature is often unhelpful. The
+levers the measurement points at, in order: grammar-constrained decoding (the llama.cpp server has
+it, Ollama's OpenAI endpoint does not), a larger local model, or a cloud provider. More prompt
+engineering is NOT one of them: retrieval already earns its tokens (`p = 0.0005`), context does
+not (`p = 0.375`), a repair round does not (`p = 1.0`, and it returned a byte-identical formula 30
+times in 38), and bounding the schema fields bought all of the latency and none of the accuracy.
+Re-run with `node tests/eval/run-formula-eval.mjs --provider ollama --model <m>` before deciding.
+
+**2.AI.2 — Multi-hop decomposition is refused, and the strategy layer reports it rather than
+hiding it.** `ModelFacts::directly_related_tables` bounds an analysis dimension to a table one
+relationship from the measure's fact table, because the query executor refuses longer paths
+(`engine-query/src/executor/pipeline/local_aggregation.rs:1923`, `detail.rs:565`,
+`pushdown/security.rs:205`). A snowflaked attribute produces an `unreachable-in-v1` warning from
+the validator and a note in the bundle. Making the executor traverse is an engine project with a
+fan-out guard at every hop; it is not scheduled.
+
+**2.AI.3 — Column statistics do not exist, so role inference uses declared metadata only.** The BI
+engine stores no cardinality, and learning that `Customer[Email]` has a million distinct values
+means one grouped query per column — which inference must not do, since it runs on every model
+open. Roles come from relationship participation, data type, `is_hidden`, `sort_by_column` and
+name patterns, every entry is written `reviewed: false`, and a person confirms them in the
+Strategy tab where the data is visible. Host-side Arrow statistics over the cached batch are the
+planned fix and are not built.
+
+**2.AI.4 — Engine gaps the formula corpus surfaced, unfiled.** The library half of the corpus
+disagrees with `functions/*.md` on: `TEXTBEFORE` returning `#N/A` where the doc expects a string,
+`XLOOKUP` with a 2-D lookup array, `TBILLPRICE` returning `#VALUE!`, and `ODDFPRICE`/`ODDFYIELD`/
+`ODDLPRICE`/`ODDLYIELD` returning `#NUM!`. Each needs a reproduction against the documented
+example before it is a ledger entry rather than a corpus expectation; none has one yet.
+
+**2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) waits for the
+release decision; the fetch script makes bundle-vs-download a build-time switch. M4 (intent router)
+and M6 (Tier-1 narration, Swedish, grammars) keep their designs and their seams — `factsJson`
+carries fact ids precisely so a later narrator can be checked for coverage. M5 (the fine-tune
+flywheel) is dropped. M7 (usage aggregates back to an application's author) needs a new manifest
+declaration, a new submission kind and a consent sentence, and is the one telemetry-shaped feature
+in a product that is otherwise local by construction.
+
 ## 3. How to keep this file honest
 
 1. **Close items here, in place**, when they are fixed — do not rely on a later section of the

@@ -94,6 +94,17 @@ pub enum AuditEvent {
     /// event the Transparency pillar exists for — without it, a user reopening a
     /// shared workbook has no way to learn that a script unprotected a sheet.
     ProtectionChanged,
+    /// A language model proposed something and the user accepted it into the
+    /// document — a formula inserted from the formula assistant, most of all.
+    ///
+    /// The user pressed the button, so this is not a record of the machine
+    /// acting alone. It is a record of WHERE THE CONTENT CAME FROM, which is a
+    /// different question and the one nobody can answer six months later by
+    /// looking at the cell. The `extra` map carries the surface, the model, the
+    /// target cell and whether Calcula's own engine verified the result before
+    /// it was offered — so an unverified suggestion that was accepted anyway is
+    /// findable rather than indistinguishable from a checked one.
+    AiAssistedEdit,
 }
 
 impl AuditEvent {
@@ -136,6 +147,12 @@ impl AuditEvent {
                 // them only when distribution auditing happens to be on would
                 // make the trail useless exactly when it matters.
                 | AuditEvent::ProtectionChanged
+                // Provenance of generated content. A workbook that never
+                // subscribed to anything has distribution auditing off, and that
+                // is exactly the workbook where a colleague later asks "did a
+                // person write this formula or did a model?". Opt-in would make
+                // the trail empty in the common case.
+                | AuditEvent::AiAssistedEdit
         )
     }
 }

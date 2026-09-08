@@ -93,6 +93,8 @@ import { chartsBackend } from "./lib/chartsBackend";
 import { registerChartRenderingApi } from "@api/rendering";
 import { registerChartParamController } from "@api/chartParams";
 import { chartParamController } from "./lib/chartParamController";
+import { registerChartDataProvider } from "@api/chartData";
+import { chartDataProvider } from "./lib/chartDataProvider";
 import { validateChartSpec, validateMergedSpec } from "./lib/chartSpecValidate";
 import type { ChartSpec } from "./types";
 import { buildSeriesFormula } from "./lib/seriesFormula";
@@ -325,6 +327,12 @@ function activate(context: ExtensionContext): void {
   // sweep chart params (e.g. the animation chart-param driver) without importing
   // Charts internals.
   registerChartParamController(chartParamController);
+
+  // Provide the resolved-series surface (IoC) so an analysis outside Charts can
+  // read a chart's ACTUAL numbers. It runs the same reader the painters use and
+  // then re-reads a plain source range TYPED, so a blank cell arrives as `null`
+  // rather than as the zero the display-string parse would substitute.
+  registerChartDataProvider(chartDataProvider);
 
   console.log("[Chart Extension] Registering...");
 
@@ -1797,6 +1805,9 @@ function deactivate(): void {
   // Withdraw the chart-render capture + param-control surfaces.
   registerChartRenderingApi(null);
   registerChartParamController(null);
+  // Withdraw the resolved-series surface too: the store is reset below, so a
+  // provider left registered would answer for charts that no longer exist.
+  registerChartDataProvider(null);
 
   // Tear down authored sandboxed marks (unregister shims + unmount workers).
   uninstallChartMarks();

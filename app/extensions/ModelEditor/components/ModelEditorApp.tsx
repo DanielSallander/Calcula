@@ -39,6 +39,7 @@ import { RelationshipsSection } from "./sections/RelationshipsSection";
 import { ConnectionsSection } from "./sections/ConnectionsSection";
 import { HierarchiesSection } from "./sections/HierarchiesSection";
 import { KpisSection } from "./sections/KpisSection";
+import { StrategySection } from "./sections/StrategySection";
 import { RolesSection } from "./sections/RolesSection";
 import { PerspectivesSection } from "./sections/PerspectivesSection";
 import { TranslationsSection } from "./sections/TranslationsSection";
@@ -69,6 +70,7 @@ type SectionId =
   | "measures"
   | "contexts"
   | "kpis"
+  | "strategy"
   | "calcGroups"
   | "globals"
   | "tableVariables"
@@ -90,6 +92,9 @@ const NAV: Array<{ id: SectionId; label: string }> = [
   { id: "measures", label: "Measures" },
   { id: "contexts", label: "Contexts" },
   { id: "kpis", label: "KPIs" },
+  // Sits directly after KPIs: a KPI states the goal, the strategy states what
+  // a movement towards it MEANS, and the tab layers on the same metadata.
+  { id: "strategy", label: "Strategy" },
   { id: "calcGroups", label: "Calculation Groups" },
   { id: "globals", label: "Calculated Tables" },
   { id: "tableVariables", label: "Table Variables" },
@@ -497,6 +502,8 @@ export function ModelEditorApp(): React.ReactElement {
         return <ContextsSection ctx={ctx} />;
       case "kpis":
         return <KpisSection ctx={ctx} />;
+      case "strategy":
+        return <StrategySection ctx={ctx} />;
       case "calcGroups":
         return <CalcGroupsSection ctx={ctx} />;
       case "globals":

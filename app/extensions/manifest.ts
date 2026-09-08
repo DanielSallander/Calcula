@@ -92,6 +92,8 @@ import ModelEditorExtension from "./ModelEditor";
 import CubeFormulasExtension from "./CubeFormulas";
 import CustomFunctionsExtension from "./CustomFunctions";
 import AIChatExtension from "./AIChat";
+import FormulaAssistExtension from "./FormulaAssist";
+import InsightsExtension from "./Insights";
 import JsonViewExtension from "./JsonView";
 import ErrorCheckingExtension from "./ErrorChecking";
 import AutoRecoverExtension from "./AutoRecover";
@@ -222,6 +224,14 @@ export const builtInExtensions: ExtensionModule[] = [
   // Custom Functions (JS UDFs) — sandboxed; can use cube.* from CubeFormulas/BI
   CustomFunctionsExtension,
   AIChatExtension,
+  // Ask for a formula in your own words; Calcula's engine checks the answer
+  // before it is offered. Loads AFTER AIChat, which owns the model selection
+  // and registers the completion provider this reads through.
+  FormulaAssistExtension,
+  // "What is going on in this data" — deterministic facts, from a range or from
+  // the semantic model. After BusinessIntelligence, whose connections it reads,
+  // and after Charts, whose context menu it contributes "Explain this chart" to.
+  InsightsExtension,
   JsonViewExtension,
   DistributionExtension,
   // Workbook Encryption (File-menu "Encrypt with Password…" + unlock dialog)

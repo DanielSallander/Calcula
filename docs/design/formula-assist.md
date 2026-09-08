@@ -289,6 +289,39 @@ feel like a feature, and most of it is decode spent on prose nobody reads: 52 of
 right ones are an explicit brevity instruction, a hard cap on the explanation, or
 stopping generation once the formula field closes.
 
+### Bounding the schema fields, measured 2026-09-07 (M1)
+
+The prediction above was tested. `maxLength` on every string field and `maxItems`
+on the array were probed against Ollama 0.33.1, accepted (HTTP 200), and honoured
+by its constrained decoder. The same 97-task corpus was then run twice on
+`qwen2.5-coder:1.5b`, paired.
+
+| | Unbounded | Bounded |
+|---|---:|---:|
+| Passed | 37 / 97 | 36 / 97 |
+| Truncated replies | 84 | **0** |
+| Replies with no formula | 1 | **0** |
+| Median latency | 19 497 ms | **7 027 ms** |
+| Wall clock | 1 929 s | **1 209 s** |
+
+McNemar exact p = 1.0 on the paired outcomes: 34 both, 58 neither, 2 fixed by
+bounding, 3 broken by it. **Correctness is unchanged and the wait is a third of
+what it was.** Truncation, which was the mechanism behind the fake 1/60 score in
+M0, is gone entirely rather than merely recovered from.
+
+Bounding only `assumptions` does NOT work — a separate probe showed the model
+moves the same padding into `explanation`. Every string field has to be bounded,
+which is why the constants sit together in `schema.ts` with that reason written
+next to them.
+
+**The exit criterion for M1 is still not met, and by a wide margin.** The target
+was ≥ 90 % verified-correct at ≤ 3 s. The measured figures are 37 % at a 7 s
+median on this CPU. That is a statement about a 1.5B model on this machine, not
+about the pipeline: the verifier means a wrong answer is never shown as right, so
+the feature is honest at 37 %, just often unhelpful. Closing the gap is a model
+and runtime question — grammar-constrained decoding, a larger local model, or a
+cloud provider — not more prompt engineering.
+
 ## 8. What M0 deliberately did not build
 
 The wire's structured-output field, the live `RegionContext` over a real sheet,

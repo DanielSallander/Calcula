@@ -577,6 +577,7 @@ export {
   biModelExtensionDataList,
   biModelExtensionDataSet,
   biModelExtensionDataDelete,
+  biModelStrategy,
   biModelFunctionCatalog,
   biModelFunctionDocs,
   biModelUndo,
@@ -2679,6 +2680,96 @@ export type {
   AiCompletionResult,
   AiResponseSchema,
 } from "./aiCompletionService";
+
+// ============================================================================
+// Formula Assist Service (IoC: ask for a formula, verified before it is shown)
+// ============================================================================
+// Carries the VERIFICATION, not just the text: a caller must be able to tell a
+// formula the engine has checked from one it has not, because the two earn
+// different UI and a seam that returned a bare string would quietly stop
+// drawing that distinction.
+
+export {
+  registerFormulaAssistProvider,
+  hasFormulaAssistProvider,
+  getFormulaAssistProvider,
+  requireFormulaAssistProvider,
+  resetFormulaAssistProvider,
+} from "./formulaAssistService";
+
+export type {
+  FormulaAssistProvider,
+  FormulaAssistRequest,
+  FormulaProposal,
+  FormulaVerification,
+} from "./formulaAssistService";
+
+// ============================================================================
+// Insights Service (IoC: deterministic facts about data)
+// ============================================================================
+// A caller asks about a range or a model and gets facts. Whether they came from
+// the model-aware path or the raw-grid fallback is REPORTED, never something a
+// caller has to branch on before asking.
+
+export {
+  registerInsightsProvider,
+  hasInsightsProvider,
+  getInsightsProvider,
+  requireInsightsProvider,
+  resetInsightsProvider,
+} from "./insightsService";
+
+export type {
+  Insight,
+  InsightBundle,
+  InsightEvidence,
+  InsightProvenance,
+  InsightsProvider,
+  ModelInsightsRequest,
+  RangeInsightsRequest,
+} from "./insightsService";
+
+// ============================================================================
+// Chat Prompt Sink (IoC: hand the chat a prepared prompt)
+// ============================================================================
+// Prefill, not auto-send. A feature that could silently start a model turn on
+// the user's behalf will eventually do it at the wrong moment.
+
+export {
+  registerChatPromptSink,
+  hasChatPromptSink,
+  openChatWithPrompt,
+  resetChatPromptSink,
+} from "./chatPromptService";
+
+export type { ChatPromptSink } from "./chatPromptService";
+
+// ============================================================================
+// Chart Data + Chart Context Menu (IoC: reach a chart without importing Charts)
+// ============================================================================
+// A chart's resolved numbers exist only in TypeScript, inside Charts. These two
+// seams let something else analyse a chart and add an item to its menu, with
+// the dependency pointing the sanctioned way.
+
+export {
+  registerChartDataProvider,
+  getChartDataProvider,
+  listChartsForData,
+  resolveChartSeries,
+  getSelectedChartId,
+  CHART_SERIES_MAX_POINTS,
+} from "./chartData";
+
+export type { ChartDataProvider, ChartDataSummary, ChartSeriesSnapshot } from "./chartData";
+
+export {
+  registerChartContextMenuContribution,
+  getChartContextMenuContributions,
+  onChartContextMenuContributionsChange,
+  resetChartContextMenuContributions,
+} from "./chartContextMenu";
+
+export type { ChartContextMenuContribution } from "./chartContextMenu";
 
 // ============================================================================
 // Chart Mark Registry (IoC for built-in + extension chart types)

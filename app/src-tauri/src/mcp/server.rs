@@ -145,6 +145,33 @@ pub struct CreateChartParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyzeRangeParams {
+    #[schemars(description = "Sheet index (0-based). Defaults to the active sheet.")]
+    #[serde(default)]
+    pub sheet_index: Option<u32>,
+    #[schemars(description = "Top row of the range (0-based, inclusive).")]
+    pub start_row: u32,
+    #[schemars(description = "Left column of the range (0-based, inclusive).")]
+    pub start_col: u32,
+    #[schemars(description = "Bottom row of the range (0-based, inclusive).")]
+    pub end_row: u32,
+    #[schemars(description = "Right column of the range (0-based, inclusive).")]
+    pub end_col: u32,
+    #[schemars(description = "Expand a single cell to the surrounding block of data before analysing. Use it when you know roughly where a table is but not its exact extent.")]
+    #[serde(default)]
+    pub expand_to_region: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyzeModelParams {
+    #[schemars(description = "The BI connection id, from list_bi_connections.")]
+    pub connection_id: String,
+    #[schemars(description = "Measure names to analyse. Leave empty to let the model's own declared priority decide, which is usually the right answer.")]
+    #[serde(default)]
+    pub measures: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct CreateNamedRangeParams {
     #[schemars(description = "The name. Must start with a letter or underscore; letters, digits, underscore, and period only; cannot be a cell reference like A1.")]
     pub name: String,
@@ -578,6 +605,57 @@ impl CalculaMcpServer {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => {
                 log_warn!("MCP", "Tool error: get_sheet_summary: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Analyse a range and get back DETERMINISTIC facts Calcula computed: trend with its r-squared, level shifts, seasonality, outliers by row, correlations, dominance, and data-quality warnings. Prefer this over reading the cells and reasoning about them yourself — these statements are checked, and a claim you derive from raw values is not. Hidden rows are excluded and large ranges are sampled; the notes say when either happened.")]
+    async fn analyze_range(
+        &self,
+        params: Parameters<AnalyzeRangeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: analyze_range r{}c{}..r{}c{} (sheet={:?} expand={})",
+            p.start_row, p.start_col, p.end_row, p.end_col, p.sheet_index, p.expand_to_region
+        );
+        let result = tools::analyze_range(
+            &self.app_handle,
+            p.sheet_index,
+            p.start_row,
+            p.start_col,
+            p.end_row,
+            p.end_col,
+            p.expand_to_region,
+        );
+        match result {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: analyze_range: {}", log_summary(&e, 200));
+                Ok(CallToolResult::error(vec![Content::text(e)]))
+            }
+        }
+    }
+
+    #[tool(description = "Analyse a BI connection's MEASURES rather than a rectangle of cells. Because a measure declares its own meaning, this can say what a column of numbers cannot: whether a movement is material, whether a rise is favourable, which of the measure's own terms drove it, and which dimension members it came from. A share of a total is only ever claimed for a measure declared additive. Use run_bi_query when you want the numbers; use this when you want to know what happened.")]
+    async fn analyze_model(
+        &self,
+        params: Parameters<AnalyzeModelParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        log_info!(
+            "MCP",
+            "Tool call: analyze_model (connection={}, measures={})",
+            p.connection_id,
+            p.measures.len()
+        );
+        let result = tools::analyze_model(&self.app_handle, p.connection_id, p.measures).await;
+        match result {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => {
+                log_warn!("MCP", "Tool error: analyze_model: {}", log_summary(&e, 200));
                 Ok(CallToolResult::error(vec![Content::text(e)]))
             }
         }

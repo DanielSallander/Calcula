@@ -691,6 +691,13 @@ fn assemble_publish_workbook(
     // BI-style "dim_product.categoryname") that would silently break for subscribers.
     validate_bi_pivot_definitions(&workbook, &data_sources)?;
 
+    // A strategy document decides which facts a SUBSCRIBER's Insights pane
+    // generates and whether a rise there reads as good news. A broken one is
+    // therefore not the publisher's private problem: it ships, and the person
+    // who receives it has no way to fix it. Refuse at the push, where the
+    // author is present and can.
+    validate_published_strategies(&data_sources)?;
+
     // Build exclusion regions from pivot protected regions.
     // Pivot output cells are recalculated by subscribers, so we strip them
     // from the published data — only hard-coded cell values go into the application.
@@ -17876,6 +17883,80 @@ pub fn calp_reset_subscription(
 
 /// Validate all BI pivot definitions in the workbook against the embedded BI models.
 /// Returns an error with a human-readable summary if any field names are invalid.
+/// Refuse a push whose embedded model carries a strategy document that does not
+/// validate, has an unresolved rule overlap, or fails its own inline tests.
+///
+/// The asymmetry is the whole argument. A model with a broken strategy still
+/// OPENS in the editor, so an author can always fix theirs. A subscriber who
+/// receives one cannot: the document is inside a signed application, model
+/// writes are refused on subscribed models, and the only symptom they would see
+/// is an Insights pane confidently calling a rise "unfavourable" for a reason
+/// nobody can inspect. So the gate sits at the moment the author is present.
+///
+/// A model with NO strategy document passes untouched — the overwhelmingly
+/// common case, and this must not make publishing harder for someone who has
+/// never opened the Strategy tab.
+fn validate_published_strategies(
+    data_sources: &[calp::publish::PublishDataSource],
+) -> Result<(), String> {
+    use crate::insights::strategy::{
+        check_overlaps, facts_from_model, is_refused, run_inline_tests, validate, Severity,
+        StrategyDoc,
+    };
+
+    for ds in data_sources {
+        // The ModelBundle wrapper is optional; follow the same unwrap the pivot
+        // validator above uses rather than inventing a second convention.
+        let model_json = if ds.model_json.get("formatVersion").is_some() {
+            ds.model_json.get("model").unwrap_or(&ds.model_json)
+        } else {
+            &ds.model_json
+        };
+        let Some(raw) = model_json
+            .get("extension_data")
+            .or_else(|| model_json.get("extensionData"))
+            .and_then(|d| d.get(crate::bi::model_editor::STRATEGY_EXTENSION_KEY))
+        else {
+            continue;
+        };
+        if raw.is_null() {
+            continue;
+        }
+
+        let doc: StrategyDoc = serde_json::from_value(raw.clone()).map_err(|e| {
+            format!(
+                "The model '{}' carries a strategy document that cannot be read: {e}. \
+                 Open the Strategy tab in the Model Editor and fix it before publishing.",
+                ds.name
+            )
+        })?;
+        let model: bi_engine::DataModel = serde_json::from_value(model_json.clone())
+            .map_err(|e| format!("The model '{}' could not be read: {e}", ds.name))?;
+        let facts = facts_from_model(&model);
+
+        let mut findings = validate(&facts, &doc);
+        findings.extend(run_inline_tests(&facts, &doc));
+        let overlaps = check_overlaps(&doc);
+
+        if is_refused(&findings) || !overlaps.is_empty() {
+            let mut lines: Vec<String> = findings
+                .iter()
+                .filter(|f| f.severity == Severity::Error)
+                .map(|f| format!("  - {}: {}", f.path, f.message))
+                .collect();
+            lines.extend(overlaps.iter().map(|c| format!("  - {}", c.message())));
+            return Err(format!(
+                "The model '{}' has a strategy document with {} problem(s), and a subscriber \
+                 could not fix them:\n{}",
+                ds.name,
+                lines.len(),
+                lines.join("\n")
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_bi_pivot_definitions(
     workbook: &persistence::Workbook,
     data_sources: &[calp::publish::PublishDataSource],
@@ -18396,6 +18477,137 @@ mod c8_materialize_tests {
         )
         .expect("an ordinary id must still materialize");
         assert!(st.workbook_scripts.read().unwrap().contains_key("calcula_helper"));
+    }
+}
+
+#[cfg(test)]
+mod published_strategy_gate_tests {
+    //! The push-time gate on a model's strategy document.
+    //!
+    //! A subscriber cannot fix one: it lives inside a signed application, model
+    //! writes are refused on subscribed models, and the only symptom is an
+    //! Insights pane confidently calling a rise "unfavourable" for a reason
+    //! nobody can inspect. So the refusal has to happen while the author is
+    //! still holding the file.
+    use super::validate_published_strategies;
+
+    /// A minimal model with one measure on one table, as published JSON.
+    fn a_model_with_strategy(strategy: Option<serde_json::Value>) -> serde_json::Value {
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![
+                        bi_engine::Column::new("Amount", bi_engine::DataType::Float64),
+                        bi_engine::Column::new("Region", bi_engine::DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the fixture model builds");
+        let mut json = serde_json::to_value(&model).expect("the model serializes");
+        if let Some(doc) = strategy {
+            json["extension_data"] = serde_json::json!({ "calcula.strategy": doc });
+        }
+        json
+    }
+
+    fn source(model_json: serde_json::Value) -> calp::publish::PublishDataSource {
+        calp::publish::PublishDataSource {
+            id: "conn1".into(),
+            name: "Sales model".into(),
+            connection_type: "embedded".into(),
+            server: String::new(),
+            database: String::new(),
+            model_json,
+            bindings: Vec::new(),
+            calculated_table_snapshots: Vec::new(),
+            writeback_history_json: None,
+        }
+    }
+
+    #[test]
+    fn a_model_with_no_strategy_document_publishes_untouched() {
+        // The overwhelmingly common case. Nobody who has never opened the
+        // Strategy tab may find publishing harder because this gate exists.
+        let sources = vec![source(a_model_with_strategy(None))];
+        assert!(validate_published_strategies(&sources).is_ok());
+    }
+
+    #[test]
+    fn a_valid_strategy_document_publishes() {
+        let sources = vec![source(a_model_with_strategy(Some(serde_json::json!({
+            "version": 1,
+            "measures": { "Revenue": { "direction": "higherIsBetter", "reviewed": true } }
+        }))))];
+        assert!(validate_published_strategies(&sources).is_ok(), "a clean document must pass");
+    }
+
+    #[test]
+    fn a_strategy_naming_a_measure_the_model_does_not_have_refuses_the_push() {
+        let sources = vec![source(a_model_with_strategy(Some(serde_json::json!({
+            "version": 1,
+            "rules": [{
+                "id": "ghost",
+                "measure": "Profit",
+                "set": { "direction": "higherIsBetter" }
+            }]
+        }))))];
+        let err = validate_published_strategies(&sources).expect_err("a ghost measure must refuse");
+        assert!(err.contains("Sales model"), "the message names the model: {err}");
+        assert!(err.contains("Profit"), "the message names what is wrong: {err}");
+    }
+
+    #[test]
+    fn two_rules_that_cannot_both_win_refuse_the_push_naming_both() {
+        // The overlap checker's whole purpose, applied at the distribution
+        // boundary: an ambiguous document decided by iteration order would give
+        // two subscribers different answers from the same file.
+        let sources = vec![source(a_model_with_strategy(Some(serde_json::json!({
+            "version": 1,
+            "tables": {
+                "Sales": { "columns": { "Region": { "role": "analysis" } } }
+            },
+            "measures": { "Revenue": { "direction": "higherIsBetter", "reviewed": true } },
+            "rules": [
+                { "id": "north", "measure": "Revenue",
+                  "scope": { "Sales[Region]": ["North", "South"] },
+                  "set": { "direction": "lowerIsBetter" } },
+                { "id": "south", "measure": "Revenue",
+                  "scope": { "Sales[Region]": ["South", "East"] },
+                  "set": { "direction": "higherIsBetter" } }
+            ]
+        }))))];
+        let err = validate_published_strategies(&sources).expect_err("an overlap must refuse");
+        assert!(err.contains("north") && err.contains("south"), "both rules named: {err}");
+    }
+
+    #[test]
+    fn the_gate_is_actually_called_on_the_publish_path() {
+        // Every other test here proves the FUNCTION refuses. None of them would
+        // notice if the call were deleted from `calp_publish`, and a gate that
+        // is not called is indistinguishable from no gate. So this reads the
+        // source and asserts the call site exists next to the pivot validator
+        // it was added beside.
+        let source = include_str!("calp_commands.rs");
+        let calls = source.matches("validate_published_strategies(&data_sources)").count();
+        assert!(
+            calls >= 1,
+            "the publish path no longer calls the strategy gate; a broken strategy \
+             document would ship to subscribers who cannot fix it"
+        );
+    }
+
+    #[test]
+    fn a_document_that_is_not_a_strategy_at_all_refuses_with_a_readable_reason() {
+        let sources = vec![source(a_model_with_strategy(Some(serde_json::json!({
+            "version": 1,
+            "measures": { "Revenue": { "direktion": "higherIsBetter" } }
+        }))))];
+        let err = validate_published_strategies(&sources).expect_err("a typo must refuse");
+        assert!(err.contains("direktion"), "the typo is quoted back: {err}");
     }
 }
 

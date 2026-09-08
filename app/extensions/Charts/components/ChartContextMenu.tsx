@@ -4,15 +4,79 @@
 //          have their own AxisContextMenu). A chart right-click must show
 //          object actions only — never the grid's cell context menu.
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useSyncExternalStore } from "react";
 import { css } from "@emotion/css";
 import type { OverlayProps } from "@api/uiTypes";
 import { emitAppEvent, showDialog } from "@api";
+import {
+  getChartContextMenuContributions,
+  onChartContextMenuContributionsChange,
+  type ChartContextMenuContribution,
+} from "@api/chartContextMenu";
 
 import { getChartById } from "../lib/chartStore";
 import { ChartEvents } from "../lib/chartEvents";
 import { CHART_DIALOG_ID } from "../manifest";
 import { isPivotDataSource } from "../types";
+
+// ============================================================================
+// Contributed items (from @api/chartContextMenu)
+// ============================================================================
+
+/**
+ * A STABLE snapshot of the contributed items.
+ *
+ * `getChartContextMenuContributions()` sorts into a fresh array on every call.
+ * `useSyncExternalStore` compares snapshots with `Object.is`, so handing it that
+ * getter directly means "changed" on every single render — React re-renders
+ * forever and the menu never paints. This repo has been bitten by exactly that
+ * before (see AIChat's `runningJobs` memoisation), so the array is built once
+ * per actual change and the same reference is returned until the registry
+ * notifies us.
+ *
+ * The cache is also invalidated on (re)subscribe: while no menu is open nothing
+ * is listening, so a contributor that registered in the meantime would otherwise
+ * be missing from the next menu.
+ */
+let cachedContributions: ChartContextMenuContribution[] = [];
+let contributionsCacheValid = false;
+
+function subscribeToContributions(onStoreChange: () => void): () => void {
+  contributionsCacheValid = false;
+  return onChartContextMenuContributionsChange(() => {
+    contributionsCacheValid = false;
+    onStoreChange();
+  });
+}
+
+function contributionsSnapshot(): ChartContextMenuContribution[] {
+  if (!contributionsCacheValid) {
+    cachedContributions = getChartContextMenuContributions();
+    contributionsCacheValid = true;
+  }
+  return cachedContributions;
+}
+
+/**
+ * Items this chart should show. A contributor's `visible` predicate is foreign
+ * code running inside our render, so a throw is treated as "not applicable"
+ * rather than being allowed to take the whole menu — and with it Delete Chart —
+ * down with it.
+ */
+function visibleFor(
+  items: readonly ChartContextMenuContribution[],
+  chartId: string,
+): ChartContextMenuContribution[] {
+  return items.filter((item) => {
+    if (!item.visible) return true;
+    try {
+      return item.visible(chartId);
+    } catch (err) {
+      console.warn(`[Charts] Context-menu contribution "${item.id}" threw in visible():`, err);
+      return false;
+    }
+  });
+}
 
 // ============================================================================
 // Styles (matches AxisContextMenu)
@@ -73,6 +137,10 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
   const menuRef = useRef<HTMLDivElement>(null);
 
   const chart = chartId != null ? getChartById(chartId) : undefined;
+
+  // Contributed items, re-read when a contributor activates or deactivates — an
+  // extension can register AFTER this menu already exists.
+  const contributions = useSyncExternalStore(subscribeToContributions, contributionsSnapshot);
 
   // Close on outside click
   useEffect(() => {
@@ -145,6 +213,26 @@ export function ChartContextMenu({ onClose, data }: OverlayProps): React.ReactEl
       <div className={styles.item} onClick={editScript}>
         Edit Script...
       </div>
+
+      {visibleFor(contributions, chartId).map((item) => (
+        <div
+          key={item.id}
+          className={styles.item}
+          onClick={() => {
+            // Close FIRST: a contribution that opens a dialog or a task pane must
+            // not have to fight this menu for the dropdown layer, and a throw
+            // from foreign code must not leave the menu stuck on screen.
+            onClose();
+            try {
+              item.onSelect(chartId);
+            } catch (err) {
+              console.warn(`[Charts] Context-menu contribution "${item.id}" threw:`, err);
+            }
+          }}
+        >
+          {item.label}
+        </div>
+      ))}
 
       <div className={styles.divider} />
 

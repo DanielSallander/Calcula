@@ -15,28 +15,67 @@ export const FORMULA_PROPOSAL_SCHEMA_NAME = "calcula_formula_proposal";
  * PORTABILITY RULES, and they are not stylistic.
  *
  * Only `type`, `properties`, `required`, `items`, `additionalProperties`,
- * `description` and STRING-valued `enum`s may appear. Ollama decodes
- * `properties.*.enum` into a Go `[]string`, so a numeric enum makes the whole
- * request fail at JSON-decode time with a 400 — the same trap the chat tool
- * surface records for `cube_kpi.property`. Nothing here uses an enum at all,
- * which is the safest version of that rule.
+ * `description`, the SIZE bounds below, and STRING-valued `enum`s may appear.
+ * Ollama decodes `properties.*.enum` into a Go `[]string`, so a numeric enum
+ * makes the whole request fail at JSON-decode time with a 400 — the same trap
+ * the chat tool surface records for `cube_kpi.property`. Nothing here uses an
+ * enum at all, which is the safest version of that rule.
+ *
+ * `maxLength` and `maxItems` were PROBED against Ollama 0.33.1 on 2026-09-07
+ * and are honoured by its constrained decoder (HTTP 200, and the reply stops
+ * at the bound). They are not decoration — see the next comment.
  */
+
+/**
+ * THE BOUNDS ARE THE FIX FOR A MEASURED FAILURE, not tidiness.
+ *
+ * Unbounded, `qwen2.5-coder:1.5b` hit the reply limit on 52 of 60 tasks —
+ * never inside the formula, always by repeating itself afterwards ("The formula
+ * assumes that the Region and Rep columns are not the same for any two rows."
+ * nine times over). A truncated reply is unterminated JSON, so the FORMULA was
+ * lost along with the padding, and the run scored 1/60 until a regex recovery
+ * was added.
+ *
+ * Bounding only `assumptions` does not work: the same probe showed the model
+ * simply moves the rambling into `explanation`. Bounding every string field
+ * does — the probe went from 600 tokens and a truncated object to 99 tokens
+ * and `finish_reason: "stop"` with `fillDown` intact.
+ *
+ * MEASURED OVER THE WHOLE CORPUS, paired, 97 tasks on the same model:
+ * truncated replies 84 -> 0, replies with no formula 1 -> 0, median latency
+ * 19 497 ms -> 7 027 ms, and the pass rate 37/97 -> 36/97 with McNemar
+ * p = 1.0. Same correctness, a third of the wait, and the truncation that
+ * once faked a 1/60 score is gone rather than recovered from.
+ *
+ * The cost is that a long explanation is cut at the bound, sometimes mid-word.
+ * That is the right trade: the explanation is a courtesy, the formula is the
+ * product, and an object that parses beats a prettier one that does not.
+ */
+const MAX_FORMULA_CHARS = 400;
+const MAX_EXPLANATION_CHARS = 240;
+const MAX_ASSUMPTION_CHARS = 140;
+const MAX_ASSUMPTIONS = 3;
+
 export const FORMULA_PROPOSAL_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
     formula: {
       type: "string",
+      maxLength: MAX_FORMULA_CHARS,
       description:
         "One spreadsheet formula in invariant syntax: comma between arguments, dot as the decimal point. May start with =.",
     },
     explanation: {
       type: "string",
-      description: "One sentence saying what the formula does.",
+      maxLength: MAX_EXPLANATION_CHARS,
+      description: "ONE short sentence, at most 25 words, saying what the formula does.",
     },
     assumptions: {
       type: "array",
-      items: { type: "string" },
-      description: "Anything you had to guess. Empty when nothing was guessed.",
+      items: { type: "string", maxLength: MAX_ASSUMPTION_CHARS },
+      maxItems: MAX_ASSUMPTIONS,
+      description:
+        "Anything you had to guess, at most three short items. Empty when nothing was guessed.",
     },
     fillDown: {
       type: "boolean",
@@ -67,10 +106,15 @@ export const FORMULA_PROPOSAL_SCHEMA_LEAN: Record<string, unknown> = {
   properties: {
     formula: {
       type: "string",
+      maxLength: MAX_FORMULA_CHARS,
       description:
         "One spreadsheet formula in invariant syntax: comma between arguments, dot as the decimal point.",
     },
-    explanation: { type: "string", description: "One short sentence." },
+    explanation: {
+      type: "string",
+      maxLength: MAX_EXPLANATION_CHARS,
+      description: "One short sentence.",
+    },
   },
   required: ["formula", "explanation"],
   additionalProperties: false,

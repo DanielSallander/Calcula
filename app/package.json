@@ -21,6 +21,8 @@
     "check:canary-tasks": "node scripts/gen-canary-tasks.mjs --check",
     "gen:formula-patterns": "node scripts/gen-formula-patterns.mjs --emit",
     "check:formula-patterns": "node scripts/gen-formula-patterns.mjs --check",
+    "gen:model-fixture": "node ../tests/fixtures/model/gen-sales-star.mjs",
+    "check:model-fixture": "node ../tests/fixtures/model/gen-sales-star.mjs --check",
     "lint": "eslint .",
     "lint:boundaries": "eslint --no-config-lookup -c eslint.config.boundaries.js .",
     "check:line-endings": "node scripts/check-line-endings.mjs",

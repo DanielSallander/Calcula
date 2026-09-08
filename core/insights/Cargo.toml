@@ -1,0 +1,17 @@
+[package]
+name = "insights"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Deterministic statistics and narration behind \"analyze this data\""
+
+[dependencies]
+# Grid/cell/locale/number-format primitives. This crate READS a Grid and formats
+# numbers with the product's own formatter, so a Swedish user sees the same
+# decimal comma in a narrated sentence as in the cell it came from.
+engine = { path = "../engine" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Grouping maps only (category -> total, row key -> first row). Every result is
+# SORTED before it leaves this crate, so the hasher never reaches the output.
+rustc-hash = "2"

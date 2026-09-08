@@ -1748,6 +1748,104 @@ pub async fn cube_members(
 }
 
 // ============================================================================
+// Insights
+// ============================================================================
+
+/// Deterministic facts about a rectangle of cells, as markdown.
+///
+/// WHY AN AI CLIENT WANTS THIS RATHER THAN THE CELLS. `get_sheet_summary` hands
+/// a model the data and lets it draw its own conclusions, which is exactly where
+/// a language model is least reliable: it will report a trend that is not there,
+/// or miss the one that is, and nothing downstream can tell the difference. This
+/// returns statements Calcula computed — a slope with its r², an outlier at a
+/// named row, a correlation with the word "association" in it — so the model's
+/// job becomes wording rather than arithmetic.
+///
+/// Read-only, so it needs no `DocumentEffect` and no AI access level beyond
+/// read: it reports on cells the caller could already have fetched.
+pub fn analyze_range(
+    handle: &AppHandle,
+    sheet_index: Option<u32>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+    expand_to_region: bool,
+) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+    let target = match sheet_index {
+        Some(i) => i as usize,
+        None => *state.active_sheet.read().map_err(|e| e.to_string())?,
+    };
+    let request = crate::insights::commands::RangeInsightsRequest {
+        sheet_index: target,
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+        expand_to_region,
+    };
+    let bundle = crate::insights::commands::analyze_range_impl(&state, &request)?;
+    Ok(insights_markdown(&bundle))
+}
+
+/// Facts about a semantic model's MEASURES, as markdown.
+///
+/// Separate from `analyze_range` because the unit of analysis is genuinely
+/// different. A measure knows its own definition, its additivity and — through
+/// the strategy document — whether a rise is good news. A column of numbers
+/// knows none of that, so this is the only path that can say "unfavourable"
+/// without guessing.
+pub async fn analyze_model(
+    handle: &AppHandle,
+    connection_id: String,
+    measures: Vec<String>,
+) -> Result<String, String> {
+    let state = handle.state::<AppState>();
+    let bi_state = handle.state::<crate::bi::types::BiState>();
+    let locale = {
+        let guard = state.locale.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
+    // Every entity id crosses IPC as a UUID string, so the MCP wire carries one
+    // too. `parse` refuses anything that is not a UUID rather than fabricating
+    // an id that would then miss every connection with a confusing message.
+    let parsed = crate::bi::types::ConnectionId::parse(&connection_id).ok_or_else(|| {
+        format!("'{connection_id}' is not a connection id — call list_bi_connections for the ids.")
+    })?;
+    let request = crate::insights::model_commands::ModelInsightsRequest {
+        connection_id: parsed,
+        measures,
+    };
+    let run =
+        crate::insights::model_commands::run_model_insights(&bi_state, &locale, &request).await?;
+    Ok(insights_markdown(&crate::insights::model::to_wire(&run)))
+}
+
+/// One bundle as the text an AI client reads.
+///
+/// The bundle already carries its own `markdown`; the notes are appended because
+/// "rows were sampled" and "this dimension is unreachable" change how much
+/// weight a reader should put on the facts above, and a model that never sees
+/// them will state the conclusion with more confidence than it has earned.
+fn insights_markdown(bundle: &crate::insights::wire::WireBundle) -> String {
+    let mut out = bundle.markdown.clone();
+    if !bundle.notes.is_empty() {
+        out.push_str("\n\nNotes:\n");
+        for note in &bundle.notes {
+            out.push_str(&format!("- {note}\n"));
+        }
+    }
+    if bundle.dropped > 0 {
+        out.push_str(&format!(
+            "\n({} further finding(s) scored below the reporting budget.)\n",
+            bundle.dropped
+        ));
+    }
+    out
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

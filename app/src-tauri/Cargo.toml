@@ -38,6 +38,10 @@ calcula-crypto = { path = "../../core/calcula-crypto" }
 calp = { path = "../../core/calp" }
 pivot-engine = { path = "../../core/pivot-engine" }
 script-engine = { path = "../../core/script-engine" }
+# Deterministic statistics and narration for the Insights pane. Depends only on
+# `engine`, deliberately: the model-aware planner that calls `bi-engine` lives in
+# THIS crate, so the statistics stay testable without a DataFusion query in sight.
+insights = { path = "../../core/insights" }
 tauri-plugin-log = "2"
 tauri-plugin-clipboard-manager = "2"
 log = "0.4"

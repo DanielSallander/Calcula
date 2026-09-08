@@ -19,7 +19,7 @@ import {
 } from "@api/distribution";
 import { confirmAsync } from "@api/dialogs";
 
-type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "protection" | "other";
+type Category = "subscription" | "override" | "writeback" | "publish" | "script" | "capability" | "protection" | "ai" | "other";
 
 /** Event id (snake_case, mirrors Rust AuditEvent) -> label + category. */
 const EVENT_META: Record<string, { label: string; category: Category }> = {
@@ -49,6 +49,11 @@ const EVENT_META: Record<string, { label: string; category: Category }> = {
   // recorded. A security boundary moving is exactly what a user needs to be
   // able to find later.
   protection_changed: { label: "Protection changed", category: "protection" },
+  // A model proposed it and the user accepted it. Always recorded, because the
+  // question "who wrote this formula" is asked long after the fact and usually
+  // in a workbook that never turned distribution auditing on. `extra` says
+  // whether the engine verified the result before it was offered.
+  ai_assisted_edit: { label: "AI-assisted edit", category: "ai" },
 };
 
 const CATEGORY_COLOR: Record<Category, { bg: string; fg: string }> = {
@@ -59,6 +64,7 @@ const CATEGORY_COLOR: Record<Category, { bg: string; fg: string }> = {
   protection: { bg: "#fce8e6", fg: "#c5221f" },
   script: { bg: "#fce8e6", fg: "#c5221f" },
   capability: { bg: "#e8eaed", fg: "#3c4043" },
+  ai: { bg: "#e0f2f1", fg: "#00695c" },
   other: { bg: "#f1f3f4", fg: "#5f6368" },
 };
 
@@ -70,6 +76,7 @@ const FILTERS: { id: Category | "all"; label: string }[] = [
   { id: "publish", label: "Publishing" },
   { id: "script", label: "Scripts" },
   { id: "capability", label: "Capabilities" },
+  { id: "ai", label: "AI" },
 ];
 
 const DEFAULT_MAX_ENTRIES = 1000;

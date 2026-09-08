@@ -435,6 +435,11 @@ describe("MCP tools — every tool is tier-classified and every gate is real", (
     cube_value: "read",
     cube_kpi: "read",
     cube_members: "read",
+    // Both report ON cells or measures the caller could already have fetched
+    // through the reads above. They compute statistics and return sentences;
+    // nothing is written, and no capability beyond read is reached.
+    analyze_range: "read",
+    analyze_model: "read",
     // --- workbook mutations ---
     set_cell_value: "mutate",
     set_cell_range: "mutate",

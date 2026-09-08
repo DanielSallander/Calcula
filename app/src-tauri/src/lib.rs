@@ -148,6 +148,10 @@ pub mod security;
 pub mod net_commands;
 pub mod file_keychain;
 pub mod ai;
+/// Deterministic analysis of a range or a semantic model, plus the strategy
+/// layer that gives a measure business direction. Read-only apart from the
+/// report-sheet writer.
+pub mod insights;
 
 pub use api_types::{CellData, StyleData, DimensionData, FormattingParams, MergedRegion};
 pub use logging::{init_log_file, get_log_path, next_seq, write_log, write_log_raw};
@@ -5024,6 +5028,13 @@ pub fn run() {
             ai::dryrun::ai_dry_run_script,
             ai::preview_eval::preview_evaluate_formulas,
             ai::tools::ai_chat_run_tool,
+            ai::audit::ai_record_accepted_edit,
+            ai::formula_context::formula_context,
+            ai::formula_verify::formula_assist_verify,
+            insights::commands::insights_analyze_range,
+            insights::commands::insights_for_series,
+            insights::model_commands::insights_analyze_model,
+            insights::model_commands::insights_create_report_sheet,
             persistence::list_virtual_files,
             persistence::read_virtual_file,
             persistence::create_virtual_file,
@@ -5234,6 +5245,7 @@ pub fn run() {
             bi::model_editor::bi_model_set_table_refresh,
             bi::model_editor::bi_model_refresh_table,
             bi::model_editor::bi_model_extension_data,
+            bi::model_editor::bi_model_strategy,
             bi::model_editor::bi_model_transform,
             bi::model_editor::bi_model_source_secrets,
             bi::macro_capture::macro_model_recording_set_armed,

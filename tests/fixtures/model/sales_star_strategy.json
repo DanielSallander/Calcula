@@ -1,0 +1,518 @@
+{
+  "version": 1,
+  "model": {
+    "defaultTimeAxis": "Date[Date]",
+    "fiscalYearStart": "01-01",
+    "reportingCurrency": "SEK",
+    "priority": [
+      "Revenue",
+      "MarginPct",
+      "Margin",
+      "Cost"
+    ]
+  },
+  "measures": {
+    "Revenue": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "currency",
+      "target": {
+        "type": "literal",
+        "value": 1500000
+      },
+      "materiality": {
+        "type": "absolute",
+        "value": 15000
+      },
+      "cadence": "monthly",
+      "priority": 1,
+      "analysisDimensions": [
+        "Product[Category]",
+        "Customer[Segment]",
+        "Geography[Region]"
+      ],
+      "neverSliceBy": [
+        "Product[Name]"
+      ],
+      "context": "Gross amount, before freight and before the annual rebate accrual.",
+      "reviewed": true
+    },
+    "Cost": {
+      "direction": "lowerIsBetter",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "currency",
+      "materiality": {
+        "type": "absolute",
+        "value": 10000
+      },
+      "cadence": "monthly",
+      "priority": 4,
+      "analysisDimensions": [
+        "Product[Category]",
+        "Customer[Segment]"
+      ],
+      "context": "Cost of goods sold. Lower is better everywhere except where a rule says otherwise.",
+      "reviewed": true
+    },
+    "Margin": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "currency",
+      "materiality": {
+        "type": "absolute",
+        "value": 8000
+      },
+      "cadence": "monthly",
+      "priority": 3,
+      "analysisDimensions": [
+        "Product[Category]",
+        "Product[Name]",
+        "Geography[Region]"
+      ],
+      "context": "Revenue less cost. Slicing by Product[Name] is allowed here and forbidden on Revenue — that asymmetry is the positive control for the never-slice-by guard.",
+      "reviewed": true
+    },
+    "MarginPct": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "nonAdditive",
+        "byDimension": {
+          "Date": "lastValue"
+        }
+      },
+      "unit": "percent",
+      "target": {
+        "type": "kpi"
+      },
+      "materiality": {
+        "type": "absolute",
+        "value": 0.005
+      },
+      "cadence": "monthly",
+      "priority": 2,
+      "analysisDimensions": [
+        "Product[Category]",
+        "Customer[Segment]",
+        "Geography[Region]"
+      ],
+      "neverSliceBy": [
+        "Customer[Name]"
+      ],
+      "context": "A ratio: it never carries a contribution share. Q1 reads structurally weak because the annual price reset lands in January.",
+      "reviewed": true
+    },
+    "Quantity": {
+      "direction": "targetBand",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "count",
+      "target": {
+        "type": "band",
+        "low": 90000,
+        "high": 140000
+      },
+      "materiality": {
+        "type": "relative",
+        "value": 0.03
+      },
+      "cadence": "monthly",
+      "priority": 5,
+      "analysisDimensions": [
+        "Product[Category]",
+        "Geography[Region]",
+        "Subcategory[SubcategoryName]"
+      ],
+      "context": "Units shipped. The band is warehouse capacity, not a sales goal: both ends are bad.",
+      "reviewed": true
+    },
+    "Customers": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "nonAdditive",
+        "byDimension": {
+          "Date": "lastValue"
+        }
+      },
+      "unit": "count",
+      "materiality": {
+        "type": "relative",
+        "value": 0.1
+      },
+      "cadence": "monthly",
+      "priority": 6,
+      "analysisDimensions": [
+        "Customer[Segment]",
+        "Geography[Region]"
+      ],
+      "context": "A distinct count: it does not sum across periods or across segments.",
+      "reviewed": false
+    }
+  },
+  "tables": {
+    "Sales": {
+      "kind": "fact",
+      "columns": {
+        "Date": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "ProductKey": {
+          "role": "key"
+        },
+        "CustomerKey": {
+          "role": "key"
+        },
+        "GeoKey": {
+          "role": "key"
+        },
+        "Amount": {
+          "role": "ignore"
+        },
+        "Cost": {
+          "role": "ignore"
+        },
+        "Quantity": {
+          "role": "ignore"
+        }
+      },
+      "reviewed": true
+    },
+    "Product": {
+      "kind": "dimension",
+      "labelColumn": "Name",
+      "columns": {
+        "ProductKey": {
+          "role": "key"
+        },
+        "Category": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "SubcategoryKey": {
+          "role": "key"
+        },
+        "Name": {
+          "role": "analysis",
+          "priority": 2
+        }
+      },
+      "reviewed": true
+    },
+    "Subcategory": {
+      "kind": "dimension",
+      "labelColumn": "SubcategoryName",
+      "columns": {
+        "SubcategoryKey": {
+          "role": "key"
+        },
+        "SubcategoryName": {
+          "role": "analysis",
+          "priority": 1
+        }
+      },
+      "reviewed": true
+    },
+    "Customer": {
+      "kind": "dimension",
+      "labelColumn": "Name",
+      "columns": {
+        "CustomerKey": {
+          "role": "key"
+        },
+        "Segment": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "Name": {
+          "role": "label"
+        }
+      },
+      "reviewed": true
+    },
+    "Geography": {
+      "kind": "dimension",
+      "labelColumn": "Country",
+      "columns": {
+        "GeoKey": {
+          "role": "key"
+        },
+        "Region": {
+          "role": "hierarchy",
+          "priority": 1
+        },
+        "Country": {
+          "role": "hierarchy",
+          "priority": 2
+        }
+      },
+      "hierarchies": [
+        [
+          "Region",
+          "Country"
+        ]
+      ],
+      "reviewed": true
+    },
+    "Date": {
+      "kind": "calendar",
+      "labelColumn": "MonthName",
+      "columns": {
+        "Date": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "Year": {
+          "role": "analysis",
+          "priority": 2
+        },
+        "Month": {
+          "role": "analysis",
+          "priority": 3
+        },
+        "MonthName": {
+          "role": "analysis",
+          "priority": 4
+        },
+        "MonthNumber": {
+          "role": "ignore"
+        }
+      },
+      "reviewed": true
+    }
+  },
+  "rules": [
+    {
+      "id": "gadgets-launch-window",
+      "measure": "Revenue",
+      "scope": {
+        "Product[Category]": [
+          "Gadgets"
+        ]
+      },
+      "set": {
+        "materiality": {
+          "type": "absolute",
+          "value": 25000
+        }
+      },
+      "note": "Gadgets ships in launch waves, so month-to-month swings under 25k are the release calendar, not news."
+    },
+    {
+      "id": "nordics-margin-floor",
+      "measure": "MarginPct",
+      "scope": {
+        "Geography[Region]": [
+          "Nordics"
+        ],
+        "Date[Date]": {
+          "from": "2025-01-01"
+        }
+      },
+      "set": {
+        "target": {
+          "type": "literal",
+          "value": 0.38
+        },
+        "materiality": {
+          "type": "absolute",
+          "value": 0.002
+        }
+      },
+      "note": "The Nordics contract floor took effect in 2025 and is stricter than the model-wide KPI target."
+    },
+    {
+      "id": "public-sector-cost-buildout",
+      "measure": "Cost",
+      "scope": {
+        "Customer[Segment]": [
+          "Public Sector"
+        ]
+      },
+      "set": {
+        "direction": "higherIsBetter"
+      },
+      "note": "Public Sector is in deliberate build-out: spend going up is the plan being executed."
+    },
+    {
+      "id": "public-sector-nordics-cost-hold",
+      "measure": "Cost",
+      "scope": {
+        "Customer[Segment]": [
+          "Public Sector"
+        ],
+        "Geography[Region]": [
+          "Nordics"
+        ]
+      },
+      "set": {
+        "direction": "lowerIsBetter"
+      },
+      "note": "The Nordics public-sector framework is already won, so the build-out exemption does not apply there. Two constrained columns beat the one-column build-out rule."
+    },
+    {
+      "id": "enterprise-margin-push",
+      "measure": "Margin",
+      "scope": {
+        "Customer[Segment]": [
+          "Enterprise"
+        ]
+      },
+      "set": {
+        "rankWeight": 1.5
+      },
+      "note": "Enterprise margin is the board metric this year; rank its facts above the rest."
+    },
+    {
+      "id": "smb-margin-watch",
+      "measure": "Margin",
+      "scope": {
+        "Customer[Segment]": [
+          "SMB"
+        ]
+      },
+      "set": {
+        "rankWeight": 1.2
+      },
+      "note": "Disjoint from enterprise-margin-push: same measure, same attribute, same column, non-overlapping members. Equal specificity is only a conflict when the scopes intersect."
+    },
+    {
+      "id": "dach-quantity-rampdown",
+      "measure": "Quantity",
+      "scope": {
+        "Geography[Region]": [
+          "DACH"
+        ]
+      },
+      "set": {
+        "direction": "lowerIsBetter"
+      },
+      "note": "DACH is being deliberately wound down to free warehouse capacity. Sets direction ONLY — materiality and the capacity band stay inherited."
+    }
+  ],
+  "periods": [
+    {
+      "id": "summer-shutdown-2025",
+      "measure": "Quantity",
+      "scope": {
+        "Date[Date]": {
+          "from": "2025-07-01",
+          "to": "2025-08-31"
+        }
+      },
+      "note": "Volumes are low because the Malmo line was down for the annual rebuild."
+    }
+  ],
+  "tests": [
+    {
+      "measure": "Cost",
+      "scope": {
+        "Customer[Segment]": [
+          "Public Sector"
+        ],
+        "Geography[Region]": [
+          "Benelux"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "favourable",
+        "decidedBy": "public-sector-cost-buildout"
+      }
+    },
+    {
+      "measure": "Cost",
+      "scope": {
+        "Customer[Segment]": [
+          "Public Sector"
+        ],
+        "Geography[Region]": [
+          "Nordics"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "unfavourable",
+        "decidedBy": "public-sector-nordics-cost-hold"
+      }
+    },
+    {
+      "measure": "Cost",
+      "scope": {
+        "Customer[Segment]": [
+          "Public Sector"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "suppressed"
+      }
+    },
+    {
+      "measure": "Cost",
+      "scope": {
+        "Customer[Segment]": [
+          "SMB"
+        ],
+        "Geography[Region]": [
+          "Benelux"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "unfavourable"
+      }
+    },
+    {
+      "measure": "Cost",
+      "scope": {
+        "Customer[Segment]": [
+          "SMB"
+        ],
+        "Geography[Region]": [
+          "Benelux"
+        ]
+      },
+      "given": {
+        "delta": 900,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "neutral"
+      }
+    },
+    {
+      "measure": "Revenue",
+      "scope": {},
+      "given": {
+        "delta": -120000,
+        "baseline": 1400000
+      },
+      "expect": {
+        "status": "unfavourable"
+      }
+    }
+  ]
+}

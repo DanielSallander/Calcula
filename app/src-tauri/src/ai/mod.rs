@@ -18,8 +18,11 @@
 //!          Local providers are loopback-only by construction (asserted in
 //!          providers.rs), so selecting one means nothing leaves the machine.
 
+pub mod audit;
 pub mod discovery;
 pub mod dryrun;
+pub mod formula_context;
+pub mod formula_verify;
 pub mod preview_eval;
 pub mod providers;
 pub mod stream;

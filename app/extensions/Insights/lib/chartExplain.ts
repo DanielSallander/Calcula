@@ -1,0 +1,114 @@
+//! FILENAME: app/extensions/Insights/lib/chartExplain.ts
+// PURPOSE: "Explain this chart" — resolve a chart's series through the Charts
+//          seam, then ask Rust for facts about those numbers.
+// CONTEXT: The seam runs the OTHER way from most of them. A chart's resolved
+//          numbers exist only in TypeScript (Rust stores the spec as an opaque
+//          string), so Charts RESOLVES and this module analyses the result. We
+//          reach it through `@api/chartData`, never by importing Charts.
+//
+//          THE `null` IN `values` IS THE POINT OF THE WHOLE ROUTE. The renderer
+//          coerces an unparseable cell to 0 to draw a bar; a blank month sent as
+//          0 makes a series look like it collapsed. `resolveChartSeries` returns
+//          `null` for "no number" and this module passes it through untouched —
+//          no `?? 0`, ever.
+//
+//          `truncated` is re-attached as a NOTE rather than dropped: the sampler
+//          runs on this side of the boundary, so Rust cannot know it happened,
+//          and a bundle that silently describes a sampled series as if it were
+//          the whole one is exactly the kind of quiet lie `notes` exists to
+//          prevent. A note is a stated limit, not a computed fact — this module
+//          still composes no sentence about the data itself.
+
+import { registerChartContextMenuContribution } from "@api/chartContextMenu";
+import {
+  CHART_SERIES_MAX_POINTS,
+  getChartDataProvider,
+  resolveChartSeries,
+} from "@api/chartData";
+import type { InsightBundle } from "@api/insightsService";
+import { analyzeSeries, type SeriesInsightsRequest } from "./backend";
+import { beginRun, completeRun, describeError, failRun } from "./store";
+
+export const EXPLAIN_CHART_CONTRIBUTION_ID = "insights.explainChart";
+export const EXPLAIN_CHART_LABEL = "Explain this chart";
+
+const TRUNCATION_NOTE =
+  "The chart had more points than the analysis cap, so the series was sampled before it was analysed.";
+
+/** Append a note without letting the frontend touch anything else in the bundle. */
+function withNote(bundle: InsightBundle, note: string): InsightBundle {
+  if (bundle.notes.includes(note)) return bundle;
+  return { ...bundle, notes: [...bundle.notes, note] };
+}
+
+/**
+ * Resolve a chart, ask for facts about it, and leave the answer in the pane.
+ *
+ * `openPane` is injected rather than imported: only `activate()` holds the
+ * `ExtensionContext` that can raise a task pane, and this module must stay
+ * callable from a test with no shell at all.
+ */
+export async function explainChart(
+  chartId: string,
+  openPane: () => void,
+): Promise<void> {
+  openPane();
+  const token = beginRun("this chart");
+
+  let snapshot;
+  try {
+    snapshot = await resolveChartSeries(chartId, CHART_SERIES_MAX_POINTS);
+  } catch (err) {
+    failRun(token, describeError(err));
+    return;
+  }
+
+  if (!snapshot) {
+    failRun(
+      token,
+      "This chart has no single set of series to explain. If it stacks several charts together, explain one of them instead.",
+    );
+    return;
+  }
+
+  const label = snapshot.title ?? snapshot.name;
+  const request: SeriesInsightsRequest = {
+    title: label,
+    categories: snapshot.categories,
+    categoryKind: snapshot.categoryKind,
+    series: snapshot.series.map((s) => ({ name: s.name, values: s.values })),
+    ...(snapshot.categoryValues === undefined
+      ? {}
+      : { categoryValues: snapshot.categoryValues }),
+  };
+
+  try {
+    const bundle = await analyzeSeries(request);
+    completeRun(
+      token,
+      snapshot.truncated ? withNote(bundle, TRUNCATION_NOTE) : bundle,
+      label,
+    );
+  } catch (err) {
+    failRun(token, describeError(err));
+  }
+}
+
+/**
+ * Contribute the item to the chart context menu.
+ *
+ * `visible` is false when no chart data provider is registered: without Charts
+ * there is nothing to resolve, and an item that always fails is worse than an
+ * item that is not there.
+ */
+export function registerChartExplain(openPane: () => void): () => void {
+  return registerChartContextMenuContribution({
+    id: EXPLAIN_CHART_CONTRIBUTION_ID,
+    label: EXPLAIN_CHART_LABEL,
+    order: 50,
+    visible: () => getChartDataProvider() !== null,
+    onSelect: (chartId: string) => {
+      void explainChart(chartId, openPane);
+    },
+  });
+}

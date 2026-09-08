@@ -5599,6 +5599,21 @@ fn validate_extension_data_key(key: &str) -> Result<(), String> {
     if key.len() > 200 {
         return Err("Extension-data key is too long (max 200 chars)".to_string());
     }
+    // The `calcula.` namespace belongs to built-in features, and each of them
+    // owns a command that validates its own shape before writing. Letting the
+    // generic writer through here would mean a script or an extension could
+    // replace `calcula.strategy` with any JSON at all, and the strategy layer
+    // would then load a document that never passed its validator — the exact
+    // "half-applied strategy file" the refusal discipline exists to prevent.
+    // The doc comment above claimed this was reserved for a long time before
+    // anything enforced it.
+    if key.starts_with("calcula.") {
+        return Err(format!(
+            "The 'calcula.' extension-data namespace is reserved for built-in features; \
+             '{}' must be written through the command that owns it",
+            key
+        ));
+    }
     let mut parts = key.splitn(2, '.');
     let vendor = parts.next().unwrap_or("");
     let feature = parts.next().unwrap_or("");
@@ -5696,6 +5711,222 @@ pub async fn bi_model_extension_data(
         }
         other => Err(format!(
             "Unknown extension-data op '{}' (expected get|list|set|delete)",
+            other
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy document (design: docs/design/insights-strategy-layer.md)
+// ---------------------------------------------------------------------------
+
+/// Where the strategy document lives inside the model.
+///
+/// One key, in the `calcula.` namespace the generic extension-data writer now
+/// refuses, so this command is the ONLY way the document can change. That is
+/// the property the whole layer rests on: a strategy file either passed the
+/// validator, the overlap checker and its own inline tests, or it is not in the
+/// model.
+pub const STRATEGY_EXTENSION_KEY: &str = "calcula.strategy";
+
+/// Read, validate and write the model's strategy document.
+///
+/// `op`:
+/// * `get` — the document as stored, or `null`. Works on any model.
+/// * `validate` — findings for the document in `payload` (or the stored one).
+/// * `runTests` — just the inline-test findings, for the Strategy tab's list.
+/// * `set` — validate, check overlaps, run the inline tests, then write. Any
+///   ERROR-severity finding refuses the whole write and returns the findings;
+///   warnings are returned alongside a successful write.
+///
+/// A refused write returns `Ok` with `{ "written": false, "findings": [...] }`
+/// rather than `Err`. The Strategy tab needs the findings to render them inline
+/// against the rows that caused them, and a string error would flatten a
+/// structured list into one sentence.
+#[tauri::command]
+pub async fn bi_model_strategy(
+    bi_state: State<'_, BiState>,
+    file_state: State<'_, FileState>,
+    connection_id: ConnectionId,
+    op: String,
+    payload: Option<serde_json::Value>,
+    window: tauri::Window,
+) -> Result<serde_json::Value, String> {
+    use crate::insights::strategy::{
+        check_overlaps, facts_from_model, is_refused, run_inline_tests, validate, Finding,
+        Severity, StrategyDoc, MAX_STRATEGY_DOC_BYTES,
+    };
+
+    crate::security::window_guard::require_label(
+        &window,
+        crate::security::window_guard::MAIN_AND_MODEL_EDITOR,
+    )?;
+
+    // Reads work on any model, including a package-subscribed one: a subscriber
+    // should be able to SEE why a report says a rise is bad, even though they
+    // cannot change it.
+    let base = {
+        let conns = bi_state.connections.lock().unwrap();
+        let conn = conns.get(&connection_id).ok_or("Connection not found")?;
+        conn.base_model
+            .clone()
+            .ok_or("This connection has no model loaded")?
+    };
+    let stored = base.extension_data().get(STRATEGY_EXTENSION_KEY).cloned();
+
+    /// Parse a document, turning a serde error into a finding rather than an
+    /// `Err`, so a typo lands in the same list as every other problem.
+    fn parse(value: &serde_json::Value) -> Result<StrategyDoc, Finding> {
+        serde_json::from_value::<StrategyDoc>(value.clone()).map_err(|e| Finding {
+            severity: Severity::Error,
+            code: "unreadable-document".to_string(),
+            path: String::new(),
+            // `deny_unknown_fields` puts the offending key in this message,
+            // which is the whole reason a typo is an error here.
+            message: format!("the strategy document could not be read: {e}"),
+        })
+    }
+
+    match op.as_str() {
+        "get" => Ok(stored.unwrap_or(serde_json::Value::Null)),
+
+        // A DRAFT, never a write. The Strategy tab shows it as unreviewed and a
+        // person confirms it row by row; applying an inferred document silently
+        // would put a machine's guess about what "good" means into a report
+        // nobody agreed to.
+        "infer" => {
+            let usage = crate::insights::usage::collect_usage_from_window(&window, &base);
+            let facts = crate::insights::strategy::facts_from_model(&base);
+            let doc = crate::insights::strategy::infer(&facts, &base, &usage);
+            serde_json::to_value(&doc).map_err(|e| e.to_string())
+        }
+
+        // What the workbook's own pivots, filters and layouts say about how this
+        // model is really used, measured against what the document declares.
+        // Suggestions, never edits.
+        "suggestions" => {
+            let usage = crate::insights::usage::collect_usage_from_window(&window, &base);
+            let doc: StrategyDoc = match payload.or(stored) {
+                Some(v) if !v.is_null() => match parse(&v) {
+                    Ok(d) => d,
+                    Err(f) => {
+                        return Ok(serde_json::json!({ "written": false, "findings": vec![f] }))
+                    }
+                },
+                _ => StrategyDoc::default(),
+            };
+            Ok(serde_json::json!({
+                "written": false,
+                "findings": crate::insights::usage::divergence_findings(&doc, &usage),
+                "usage": serde_json::to_value(&usage).map_err(|e| e.to_string())?,
+            }))
+        }
+
+        "validate" | "runTests" | "set" => {
+            let value = match payload.or(stored) {
+                Some(v) if !v.is_null() => v,
+                // Nothing to judge. An empty document is valid and says nothing,
+                // which is the correct state for a model nobody has annotated.
+                _ => {
+                    return Ok(serde_json::json!({
+                        "written": false,
+                        "findings": Vec::<Finding>::new(),
+                    }))
+                }
+            };
+
+            let doc = match parse(&value) {
+                Ok(d) => d,
+                Err(f) => {
+                    return Ok(serde_json::json!({ "written": false, "findings": vec![f] }));
+                }
+            };
+
+            let facts = facts_from_model(&base);
+            let mut findings = if op == "runTests" {
+                run_inline_tests(&facts, &doc)
+            } else {
+                let mut all = validate(&facts, &doc);
+                all.extend(check_overlaps(&doc).into_iter().map(|c| Finding {
+                    severity: Severity::Error,
+                    code: "rule-overlap".to_string(),
+                    path: format!("rules['{}']", c.rule_a),
+                    message: c.message(),
+                }));
+                all.extend(run_inline_tests(&facts, &doc));
+                all
+            };
+
+            // The size check is last because it is the least interesting reason
+            // to refuse, and a document that is also structurally wrong should
+            // say so first.
+            let serialized = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
+            if serialized.len() > MAX_STRATEGY_DOC_BYTES {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    code: "document-too-large".to_string(),
+                    path: String::new(),
+                    message: format!(
+                        "the strategy document is {} bytes across {} measures and {} rules; \
+                         the per-key quota is {} KB",
+                        serialized.len(),
+                        doc.measures.len(),
+                        doc.rules.len(),
+                        MAX_STRATEGY_DOC_BYTES / 1024
+                    ),
+                });
+            }
+
+            if op != "set" {
+                return Ok(serde_json::json!({ "written": false, "findings": findings }));
+            }
+
+            if is_refused(&findings) {
+                return Ok(serde_json::json!({ "written": false, "findings": findings }));
+            }
+
+            // Only now is a write attempted, and only now does the
+            // package-subscribed refusal apply — a subscriber asking to
+            // VALIDATE should get findings, not a permission error.
+            let _ = editable_base(&bi_state, connection_id.clone())?;
+            // Re-serialize from the PARSED document, not from the payload: that
+            // drops nothing (deny_unknown_fields already refused anything
+            // unrecognised) and guarantees what lands on disk is exactly what
+            // the validator judged.
+            let canonical = serde_json::to_value(&doc).map_err(|e| e.to_string())?;
+            apply_model_edit(&bi_state, connection_id.clone(), move |base, _calculated| {
+                let mut data = base.extension_data().clone();
+                data.insert(STRATEGY_EXTENSION_KEY.to_string(), canonical.clone());
+                Ok(base.with_extension_data(data))
+            })
+            .await?;
+            let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+            crate::log_info!(
+                "BI",
+                "model editor: strategy set ({} measures, {} rules, conn {})",
+                doc.measures.len(),
+                doc.rules.len(),
+                connection_id
+            );
+            Ok(serde_json::json!({ "written": true, "findings": findings }))
+        }
+
+        "delete" => {
+            let _ = editable_base(&bi_state, connection_id.clone())?;
+            apply_model_edit(&bi_state, connection_id.clone(), move |base, _calculated| {
+                let mut data = base.extension_data().clone();
+                if data.remove(STRATEGY_EXTENSION_KEY).is_none() {
+                    return Err("This model has no strategy document".to_string());
+                }
+                Ok(base.with_extension_data(data))
+            })
+            .await?;
+            let _ = crate::document_effect::DocumentEffect::mutates(&file_state);
+            Ok(serde_json::json!({ "written": true, "findings": Vec::<Finding>::new() }))
+        }
+
+        other => Err(format!(
+            "Unknown strategy op '{}' (expected get|set|validate|runTests|infer|suggestions|delete)",
             other
         )),
     }

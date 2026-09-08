@@ -5117,6 +5117,25 @@ export async function biModelExtensionDataDelete(
   await invoke<unknown>("bi_model_extension_data", { connectionId, op: "delete", key, value: null });
 }
 
+/**
+ * The insights STRATEGY document for a model (Model Editor > Strategy).
+ *
+ * `op: "get"` returns the stored document or null. `"set"`, `"validate"`,
+ * `"runTests"` and `"delete"` return `{ written, findings }` — and a REFUSED
+ * write is `written: false` WITH findings, never a thrown error, so a caller
+ * that treats a refusal as an exception loses the reasons for it. The generic
+ * keeps the strategy document's own types inside the owning extension
+ * (extensions/ModelEditor/lib/strategyTypes.ts), which mirrors
+ * app/src-tauri/src/insights/strategy/types.rs.
+ */
+export function biModelStrategy<T = unknown>(
+  connectionId: string,
+  op: "get" | "set" | "validate" | "runTests" | "infer" | "suggestions" | "delete",
+  payload: unknown = null,
+): Promise<T> {
+  return invoke<T>("bi_model_strategy", { connectionId, op, payload });
+}
+
 export interface FunctionDefDto {
   name: string;
   description: string;

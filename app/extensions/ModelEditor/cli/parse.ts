@@ -44,7 +44,9 @@ export type Verb =
   | "validate"
   | "import"
   | "connect"
-  | "transform";
+  | "transform"
+  | "test"
+  | "infer";
 
 /** Model-domain verbs beyond the shared core (fed to the kernel merge). */
 export const MODEL_VERB_SPECS: CliVerbSpec[] = [
@@ -57,6 +59,13 @@ export const MODEL_VERB_SPECS: CliVerbSpec[] = [
   // Listing the steps is `show table <name>`, which keeps the domain's
   // verb-granular read/write split (MODEL_READ_VERBS) honest.
   { verb: "transform", aliases: ["steps"] },
+  // The two strategy verbs. Both are OUTSIDE MODEL_READ_VERBS, so the kernel
+  // routes them to runWrite — and writers.ts answers them BEFORE its
+  // `requireWritable` gate, because `test strategy` writes nothing and
+  // `infer strategy` writes only with `--apply`. A subscriber reading a
+  // distributed report must still be able to ask why it says a rise is bad.
+  { verb: "test", aliases: ["runtests"] },
+  { verb: "infer" },
 ];
 
 /** Canonical verbs in completion/help display order (unchanged list). */
@@ -71,6 +80,8 @@ export const VERBS: Verb[] = [
   "materialize",
   "transform",
   "validate",
+  "test",
+  "infer",
   "import",
   "connect",
   "undo",
@@ -107,7 +118,9 @@ export type Kind =
   | "extdata"
   | "model"
   | "tables"
-  | "sql";
+  | "sql"
+  | "strategy"
+  | "rule";
 
 /** The model domain's kind vocabulary (canonical + aliases), as kernel
  *  contribution data. `sql` is the `import sql …` pseudo-kind. */
@@ -135,10 +148,16 @@ export const MODEL_KIND_DATA: Array<{ kind: Kind; aliases?: string[] }> = [
   { kind: "extdata", aliases: ["extensiondata"] },
   { kind: "model" },
   { kind: "sql" },
+  // The insights strategy document and one scoped override inside it.
+  { kind: "strategy" },
+  { kind: "rule" },
 ];
 
 export const MODEL_PLURAL_OVERRIDES: Record<string, string> = {
   hierarchies: "hierarchy",
+  // Regular plural stripping turns "strategies" into "strategie", which the
+  // alias table does not know.
+  strategies: "strategy",
 };
 
 /** The model domain's whole vocabulary contribution (modelDomain.ts hands the
@@ -151,7 +170,12 @@ export const MODEL_VOCABULARY_CONTRIBUTION: CliVocabularyContribution = {
 };
 
 /** Kinds shown in completion / help (canonical spellings, listable first;
- *  the `sql` pseudo-kind is deliberately not displayed). */
+ *  the `sql` pseudo-kind is deliberately not displayed).
+ *
+ *  `strategy` and `rule` are absent for the same reason `sql` is: this list is
+ *  what referenceDocs.test.ts holds to a written reference topic, and the
+ *  reference guide is not part of this change. The parser accepts them from
+ *  MODEL_KIND_DATA above either way. */
 export const KINDS: Kind[] = [
   "table",
   "column",

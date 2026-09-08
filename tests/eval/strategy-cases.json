@@ -1,0 +1,311 @@
+{
+  "$comment": [
+    "THE STRATEGY RESOLUTION CORPUS.",
+    "",
+    "Every case is one call to resolve(model, strategy, measure, scopePoint)",
+    "(plan §7.4) and one assertion over the ResolvedMeasure it returns.",
+    "Layer A: every case must pass in CI. No model, no statistics, no timing —",
+    "these are pure attribute-layering questions with one right answer each.",
+    "",
+    "Field encodings:",
+    "  model        \"sales_star\" -> tests/fixtures/model/sales_star.json (its",
+    "               .model member); an object is an inline DataModel.",
+    "  strategy     \"sales_star\" -> tests/fixtures/model/sales_star_strategy.json;",
+    "               an object is an inline strategy document.",
+    "  scopePoint   the members the fact is fixed to, as {\"Table[Column]\": \"Member\"}.",
+    "               {} is company level: nothing fixed, everything aggregated over.",
+    "  expect.directionSource",
+    "               base | inferred | strategy | kpi:<kpi name> | rule:<rule id>",
+    "               — the string form of AttrSource (plan §6.3).",
+    "  expect.suppressed",
+    "               absent means false. When true, direction still RESOLVES but",
+    "               carries no favourability, and suppressReason names the rule id",
+    "               that disagreed under aggregation.",
+    "  expect.target",
+    "               the RESOLVED target. A KPI-supplied Constant resolves to",
+    "               {type:literal,value}; a band stays {type:band,low,high}; an",
+    "               unresolved {type:kpi} reference stays as authored.",
+    "",
+    "The shape follows tests/eval/formulas.json: an object with $comment and",
+    "version, the corpus itself under one named key."
+  ],
+  "version": 1,
+  "cases": [
+    {
+      "id": "base-direction-and-target-come-from-the-kpi",
+      "why": "With no strategy entry for MarginPct at all, resolution must still answer. The model's own KPI is the base layer: its presence forces higherIsBetter (a KPI's bands are ratio-ascending, plan C6) and its Constant target becomes the resolved target. If this case fails, the strategy layer is not a layer — it is the only source, and an unauthored model gets nothing. Materiality is deliberately NOT asserted: nothing declares one here, and a resolver that invented a default would silently gate movements the author never asked it to hide.",
+      "model": "sales_star",
+      "strategy": {
+        "version": 1,
+        "model": {
+          "defaultTimeAxis": "Date[Date]",
+          "priority": [
+            "MarginPct"
+          ]
+        }
+      },
+      "measure": "MarginPct",
+      "scopePoint": {},
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "kpi:Margin % KPI",
+        "target": {
+          "type": "literal",
+          "value": 0.35
+        }
+      }
+    },
+    {
+      "id": "the-strategy-entry-overrides-the-kpi-base",
+      "why": "The same measure, now with an authored entry. Direction still reads higherIsBetter but its SOURCE must change to strategy, and materiality must be the authored 0.5pp rather than the built-in default. A resolver that reports the right value from the wrong layer passes on value equality and lies in the provenance line the pane shows the user. The authored target is the marker {type:kpi}, and resolution turns it into the KPI's actual number — otherwise every consumer would have to know to go and look it up.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "MarginPct",
+      "scopePoint": {},
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 0.005
+        },
+        "target": {
+          "type": "literal",
+          "value": 0.35
+        }
+      }
+    },
+    {
+      "id": "a-rule-overrides-the-strategy-entry-inside-its-scope",
+      "why": "Cost is lowerIsBetter everywhere by strategy, and public-sector-cost-buildout flips it inside one segment. At a scope point that fixes Customer[Segment] to Public Sector the rule applies and must win over the measure entry. This is the whole point of the rule layer: the same measure means different things in different parts of the business. The point fixes the region as well, because the shipped document also carries a more specific Nordics rule; leaving the region rolled up would be the mixed-direction case rather than this one.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Cost",
+      "scopePoint": {
+        "Customer[Segment]": "Public Sector",
+        "Geography[Region]": "Benelux"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "rule:public-sector-cost-buildout",
+        "materiality": {
+          "type": "absolute",
+          "value": 10000
+        }
+      }
+    },
+    {
+      "id": "attribute-level-inheritance-leaves-unset-attributes-alone",
+      "why": "dach-quantity-rampdown sets ONLY direction. Materiality and the capacity band must survive from the Quantity measure entry untouched. A resolver that replaces the whole attribute set when a rule fires would silently drop the 3% floor and the 90k-140k band here, and the failure would surface later as a flood of immaterial facts nobody could trace back.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Quantity",
+      "scopePoint": {
+        "Geography[Region]": "DACH"
+      },
+      "expect": {
+        "direction": "lowerIsBetter",
+        "directionSource": "rule:dach-quantity-rampdown",
+        "materiality": {
+          "type": "relative",
+          "value": 0.03
+        },
+        "target": {
+          "type": "band",
+          "low": 90000,
+          "high": 140000
+        }
+      }
+    },
+    {
+      "id": "the-most-specific-applicable-rule-wins",
+      "why": "Both Cost rules apply at {Public Sector, Nordics}: the one-column build-out rule and the two-column Nordics hold. More constrained columns wins, so the answer is lowerIsBetter. Ties cannot occur here because the overlap checker refuses them at write time (§7.5) — this case proves the ordering, not the tie-break.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Cost",
+      "scopePoint": {
+        "Customer[Segment]": "Public Sector",
+        "Geography[Region]": "Nordics"
+      },
+      "expect": {
+        "direction": "lowerIsBetter",
+        "directionSource": "rule:public-sector-nordics-cost-hold",
+        "materiality": {
+          "type": "absolute",
+          "value": 10000
+        }
+      }
+    },
+    {
+      "id": "disjoint-equal-specificity-rules-coexist-enterprise",
+      "why": "enterprise-margin-push and smb-margin-watch set the same attribute on the same measure through the same column with the same specificity. They are legal because their member lists do not intersect. At the Enterprise point exactly one of them applies and resolution is unambiguous — the overlap checker must not have refused this document.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Margin",
+      "scopePoint": {
+        "Customer[Segment]": "Enterprise"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 8000
+        }
+      }
+    },
+    {
+      "id": "disjoint-equal-specificity-rules-coexist-smb",
+      "why": "The other half of the disjoint pair. Both scope points must resolve, and neither rule may leak into the other's member — a resolver that treated 'same column, same specificity' as 'applies everywhere on that column' would answer with the wrong rank weight here and nothing else would notice.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Margin",
+      "scopePoint": {
+        "Customer[Segment]": "SMB"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 8000
+        }
+      }
+    },
+    {
+      "id": "mixed-direction-under-aggregation-suppresses-and-names-the-rule",
+      "why": "At company level nothing fixes Customer[Segment], so the total Cost figure sums Public Sector (where rising cost is the plan) together with every other segment (where it is not). There is no honest single favourability for that number, so direction is marked suppressed and the reason names public-sector-cost-buildout. Picking one — either one — would be the layer telling the user something it does not know. This is invariant 4 of §7.1. The resolved direction is ABSENT rather than present-and-flagged: a consumer that read the value without checking the flag would render a favourability the engine has just said it cannot justify.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Cost",
+      "scopePoint": {},
+      "expect": {
+        "materiality": {
+          "type": "absolute",
+          "value": 10000
+        },
+        "suppressed": true,
+        "suppressReason": "public-sector-cost-buildout"
+      }
+    },
+    {
+      "id": "lower-is-better-is-not-suppressed-when-no-rule-disagrees",
+      "why": "The positive control for the case above, and the lowerIsBetter case in its own right. Fix the segment to SMB and no Cost rule applies: direction resolves to lowerIsBetter from the strategy entry and is NOT suppressed, so a +6% cost move is reported unfavourable. Without this control, a resolver that suppressed favourability everywhere would pass the suppression case and be useless.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Cost",
+      "scopePoint": {
+        "Customer[Segment]": "SMB"
+      },
+      "expect": {
+        "direction": "lowerIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 10000
+        },
+        "suppressed": false
+      }
+    },
+    {
+      "id": "a-rule-raises-materiality-so-a-small-change-is-gated",
+      "why": "Gadgets ships in launch waves, so gadgets-launch-window raises Revenue's materiality from 15k to 25k inside that category. A 12k month-on-month move at this scope point is below the floor and must produce no Change fact. Materiality is the only thing standing between the pane and a list of noise, and it has to be scopeable or the noisiest member sets the threshold for everyone.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Revenue",
+      "scopePoint": {
+        "Product[Category]": "Gadgets"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 25000
+        }
+      }
+    },
+    {
+      "id": "outside-the-rules-scope-the-general-materiality-still-applies",
+      "why": "The control for the gating case: the same measure at a scope point the rule does not constrain keeps the strategy entry's 15k floor, so the same 12k move stays gated but a 20k move would not be. A resolver that applied a rule's materiality globally once it fired anywhere would pass the case above and fail here.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Revenue",
+      "scopePoint": {
+        "Customer[Segment]": "Enterprise"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 15000
+        }
+      }
+    },
+    {
+      "id": "a-rule-supplies-a-target-inside-a-date-range",
+      "why": "nordics-margin-floor constrains a member list AND a date range, and supplies both a target and a tighter materiality. At a Nordics point dated inside the range the contract floor of 0.38 replaces the model-wide KPI target. The date half of the scope is what makes this more than a member filter: a rule may legitimately start applying on a date.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "MarginPct",
+      "scopePoint": {
+        "Geography[Region]": "Nordics",
+        "Date[Date]": "2025-12-01"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 0.002
+        },
+        "target": {
+          "type": "literal",
+          "value": 0.38
+        }
+      }
+    },
+    {
+      "id": "before-the-date-range-the-rule-does-not-fire",
+      "why": "Same region, a date before the Nordics contract took effect. The rule must not apply, so the target falls back to the strategy entry's KPI reference and materiality to 0.5pp. The date range has to be evaluated, not merely parsed — a resolver that treated a DateRange scope value as 'always satisfied' would pass the case above and answer 2024 with a 2025 contract. The fallback target is the strategy entry's {type:kpi} marker RESOLVED to the KPI's number, which is what every consumer receives.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "MarginPct",
+      "scopePoint": {
+        "Geography[Region]": "Nordics",
+        "Date[Date]": "2024-06-01"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "absolute",
+          "value": 0.005
+        },
+        "target": {
+          "type": "literal",
+          "value": 0.35
+        }
+      }
+    },
+    {
+      "id": "an-unreviewed-entry-still-resolves",
+      "why": "Customers is the one entry left at reviewed:false, which the validator reports as a warning. A warning must not stop resolution: inference plus confirm-the-default (§7.6) means most entries are unreviewed on day one, and a layer that refused to answer until every row was confirmed would never be used at all.",
+      "model": "sales_star",
+      "strategy": "sales_star",
+      "measure": "Customers",
+      "scopePoint": {
+        "Geography[Region]": "Nordics"
+      },
+      "expect": {
+        "direction": "higherIsBetter",
+        "directionSource": "strategy",
+        "materiality": {
+          "type": "relative",
+          "value": 0.1
+        }
+      }
+    }
+  ]
+}

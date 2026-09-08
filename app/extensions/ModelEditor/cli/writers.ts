@@ -29,7 +29,7 @@ import { mutMeasures, mutOverview, requireWritable } from "./execute";
 import { isPattern, matchColumns, matchNamed, matchRelationships, matchTables, requireOne, requireTable } from "./resolve";
 import type { ColumnMatch } from "./resolve";
 import { relationshipTarget, sourceLabel } from "./readers";
-import { plural } from "./format";
+import { plural, textTable } from "./format";
 import { dataType } from "./dataTypes";
 import {
   renameStepOutput,
@@ -37,6 +37,37 @@ import {
   stepInsertPosition,
   TRANSFORM_STEP_TYPES,
 } from "./transformSteps";
+import { confirmAsync } from "@api/dialogs";
+import { printFindings } from "./readers";
+import {
+  strategyGet,
+  strategyRunTests,
+  strategySet,
+} from "../lib/strategyBackend";
+import {
+  CADENCES,
+  DIRECTIONS,
+  ROLES,
+  UNITS,
+  emptyStrategyDoc,
+  formatTargetSpec,
+  inferStrategyDraft,
+  parseMaterialitySpec,
+  parseScopeSpec,
+  parseTargetSpec,
+  resolveColumnRef,
+  withColumn,
+  withMeasure,
+  withRule,
+  withoutRule,
+} from "../lib/strategyTypes";
+import type {
+  AttributeSet,
+  ColumnStrategy,
+  MeasureStrategy,
+  Role,
+  StrategyDoc,
+} from "../lib/strategyTypes";
 
 // ---------------------------------------------------------------------------
 // Small shared helpers
@@ -307,6 +338,13 @@ function expandNamed(cmd: Command, s: CliSession): NamedTarget[] | null {
       if (pat === null) fail(`Usage: ${cmd.verb} extdata <key>`, cmd.line);
       return [{ label: `extension data ${pat}`, name: pat }];
     }
+    case "rule": {
+      // Rules live in the strategy DOCUMENT, not in the overview, so there is
+      // nothing here to expand a wildcard against. The id is taken literally
+      // and the existence check happens where the document is in hand.
+      if (pat === null) fail(`Usage: ${cmd.verb} rule <id>`, cmd.line);
+      return [{ label: `rule ${noWildcard(pat, "rule", cmd.line)}`, name: pat }];
+    }
     case "translation":
     case "model":
       return null; // handled per-verb
@@ -339,6 +377,15 @@ export function previewWriteCommand(cmd: Command, s: CliSession): WritePreview |
       return { labels: [cmd.raw.trim().split("\n")[0]], wildcard: false };
     case "connect":
       return { labels: [`connect source ${cmd.pos[0]?.text ?? ""}`], wildcard: false };
+    case "test":
+      // Running the document's own assertions writes nothing at all.
+      return null;
+    case "infer":
+      // Without --apply this only PRINTS the draft; with it, it replaces the
+      // stored strategy, which is the one thing here worth a confirm card.
+      return inferApplyFlag(cmd)
+        ? { labels: ["infer strategy --apply (replaces the stored strategy)"], wildcard: false }
+        : null;
     case "transform":
       // A pipeline is per-table state addressed by step NUMBER, so fanning a
       // reorder out over a pattern is incoherent: no wildcards, ever.
@@ -380,6 +427,20 @@ export function previewWriteCommand(cmd: Command, s: CliSession): WritePreview |
 // ---------------------------------------------------------------------------
 
 export async function runWrite(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
+  // `test strategy` and a bare `infer strategy` write NOTHING; they arrive here
+  // only because the domain's read-verb set (modelDomain.ts MODEL_READ_VERBS)
+  // lists verbs, not verb+kind pairs. Answering them before `requireWritable`
+  // is what lets a subscriber of a distributed report ask why it calls a rise
+  // bad — they can see the strategy even though they cannot change it. The
+  // writing half of `infer` takes the gate itself.
+  if (cmd.verb === "test") {
+    await runTestStrategy(cmd, s, io);
+    return;
+  }
+  if (cmd.verb === "infer") {
+    await runInferStrategy(cmd, s, io);
+    return;
+  }
   requireWritable(s, cmd.line);
   switch (cmd.verb) {
     case "add":
@@ -677,6 +738,12 @@ async function runAdd(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
   const done = (what: string): void => io.print(`Added ${what}.`, "info");
 
   switch (cmd.kind) {
+    case "rule": {
+      const id = noWildcard(primary(cmd, RULE_USAGE).text, "rule", cmd.line);
+      await addRule(cmd, s, id);
+      done(`rule ${id}`);
+      return;
+    }
     case "measure": {
       const name = noWildcard(primary(cmd, "add measure [Name] = <formula>").text, "measure", cmd.line);
       const formula = requireExpr(cmd, "add measure [Name] = <formula>");
@@ -1019,6 +1086,13 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
   switch (cmd.kind) {
     case "measure": {
       const m = o.measures.find((x) => x.name === name)!;
+      // A command that carries ONLY strategy keys must not also re-upsert the
+      // measure with its own unchanged values: that is an undo step that says
+      // nothing, and it would sit between the user and the edit they made.
+      if (isMeasureStrategyOnly(cmd)) {
+        await setMeasureStrategy(cmd, s, m.name);
+        return;
+      }
       await mutMeasures(s, () =>
         g.upsertMeasure({
           connectionId: cid,
@@ -1035,6 +1109,7 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
           hidden: optBool(cmd, "hidden") ?? null,
         }),
       );
+      if (usesAny(cmd, MEASURE_STRATEGY_KEYS)) await setMeasureStrategy(cmd, s, m.name);
       return;
     }
     case "table": {
@@ -1116,6 +1191,7 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
           }),
         );
       }
+      if (usesColumnStrategy(cmd)) await setColumnStrategy(cmd, s, `${t.name}[${c.name}]`);
       return;
     }
     case "relationship": {
@@ -1728,6 +1804,14 @@ async function runDelete(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
 
   for (const t of targets) {
     switch (cmd.kind) {
+      case "rule":
+        await mutateStrategy(s, cmd.line, (doc) => {
+          if (!(doc.rules ?? []).some((r) => r.id === t.name)) {
+            fail(`The strategy has no rule '${t.name}'`, cmd.line);
+          }
+          return withoutRule(doc, t.name);
+        });
+        break;
       case "measure":
         await mutMeasures(s, () => g.deleteMeasure(cid, t.name));
         break;
@@ -1850,4 +1934,299 @@ async function runImport(cmd: Command, s: CliSession, io: CliIo): Promise<void> 
     return;
   }
   fail("Usage: import tables <schema.table,…> | import sql <Name> = <SELECT …>", cmd.line);
+}
+
+// ---------------------------------------------------------------------------
+// Strategy (insights strategy layer)
+// ---------------------------------------------------------------------------
+//
+// EVERY WRITE HERE IS READ-MODIFY-WRITE OVER THE WHOLE DOCUMENT, because
+// `bi_model_strategy` stores the document as ONE extension-data key and
+// validates it as a whole. A refusal comes back `{ written: false, findings }`
+// on a RESOLVED promise; it is turned into a CliError here so a batched script
+// rolls back rather than reporting a write that never happened.
+
+const RULE_USAGE =
+  'add rule <id> measure=<Name> scope="Dept=A;Region=Nordics" direction=… target=… note="…"';
+
+/** Option keys that address the STRATEGY entry of a measure, not the measure. */
+const MEASURE_STRATEGY_KEYS = [
+  "direction",
+  "unit",
+  "target",
+  "materiality",
+  "cadence",
+  "priority",
+  "analysisdims",
+  "neverslice",
+  "reviewed",
+] as const;
+
+/** Option keys that address the STRATEGY entry of a column. */
+const COLUMN_STRATEGY_KEYS = ["role", "priority"] as const;
+
+function usesAny(cmd: Command, keys: readonly string[]): boolean {
+  return keys.some((k) => cmd.opts.has(k));
+}
+
+/** True when a `set measure` carries strategy keys and nothing the measure
+ *  endpoint reads — the case where a no-op `upsertMeasure` would otherwise
+ *  spend an undo step saying nothing. */
+export function isMeasureStrategyOnly(cmd: Command): boolean {
+  const modelKeys = ["format", "formatexpr", "folder", "hidden", "description", "detailrows"];
+  return usesAny(cmd, MEASURE_STRATEGY_KEYS) && !usesAny(cmd, modelKeys) && cmd.expr === null;
+}
+
+/** Does this `set column` carry strategy keys? */
+export function usesColumnStrategy(cmd: Command): boolean {
+  return usesAny(cmd, COLUMN_STRATEGY_KEYS);
+}
+
+/** Case-insensitive enum lookup that names the alternatives when it fails. */
+function oneOf<T extends string>(raw: string, values: readonly T[], what: string, line: number): T {
+  const hit = values.find((v) => v.toLowerCase() === raw.toLowerCase());
+  if (!hit) fail(`Unknown ${what} '${raw}' (${values.join(", ")})`, line);
+  return hit;
+}
+
+/** Resolve a list of `Table[Column]` option values against the MODEL. A name
+ *  the model does not have is refused here rather than stored: a strategy that
+ *  names a missing column produces a rule that silently never fires. */
+function columnRefs(cmd: Command, key: string, s: CliSession): string[] {
+  return (optList(cmd, key) ?? []).map((tok) => {
+    const resolved = resolveColumnRef(s.overview, tok.text);
+    if (!resolved.ok) fail(resolved.error, cmd.line);
+    return resolved.ref;
+  });
+}
+
+/**
+ * Read the stored document, apply one change, write it back.
+ *
+ * The refusal branch is the point: `strategySet` RESOLVES with
+ * `written: false` when the validator says no, so a caller that only
+ * try/catches would print "Updated…" over a document the backend threw away.
+ */
+async function mutateStrategy(
+  s: CliSession,
+  line: number,
+  mutate: (doc: StrategyDoc) => StrategyDoc,
+): Promise<void> {
+  const stored = await strategyGet(s.connectionId);
+  const next = mutate(stored ?? emptyStrategyDoc());
+  const result = await strategySet(s.connectionId, next);
+  if (!result.written) {
+    fail(
+      `The strategy was refused and NOTHING was written:\n${result.findings
+        .map((f) => `  ${f.severity.toUpperCase()} ${f.path || "(document)"} [${f.code}] ${f.message}`)
+        .join("\n")}`,
+      line,
+    );
+  }
+  s.hadEdits = true;
+  s.overviewDirty = true;
+}
+
+/** `set measure <name> direction=… unit=… …` — the strategy half. */
+export async function setMeasureStrategy(cmd: Command, s: CliSession, name: string): Promise<void> {
+  const line = cmd.line;
+  const patch: Partial<MeasureStrategy> = {};
+
+  const direction = optStr(cmd, "direction");
+  if (direction !== undefined) {
+    patch.direction = direction === "" ? undefined : oneOf(direction, DIRECTIONS, "direction", line);
+  }
+  const unit = optStr(cmd, "unit");
+  if (unit !== undefined) patch.unit = unit === "" ? undefined : oneOf(unit, UNITS, "unit", line);
+
+  const cadence = optStr(cmd, "cadence");
+  if (cadence !== undefined) {
+    patch.cadence = cadence === "" ? undefined : oneOf(cadence, CADENCES, "cadence", line);
+  }
+  const target = optStr(cmd, "target");
+  if (target !== undefined) {
+    const parsed = parseTargetSpec(target);
+    if (!parsed.ok) fail(parsed.error, line);
+    patch.target = parsed.target;
+  }
+  const materiality = optStr(cmd, "materiality");
+  if (materiality !== undefined) {
+    const parsed = parseMaterialitySpec(materiality);
+    if (!parsed.ok) fail(parsed.error, line);
+    patch.materiality = parsed.materiality;
+  }
+  if (cmd.opts.has("priority")) {
+    patch.priority = optStr(cmd, "priority") === "" ? undefined : optNum(cmd, "priority");
+  }
+  if (cmd.opts.has("analysisdims")) patch.analysisDimensions = columnRefs(cmd, "analysisdims", s);
+  if (cmd.opts.has("neverslice")) patch.neverSliceBy = columnRefs(cmd, "neverslice", s);
+  const reviewed = optBool(cmd, "reviewed");
+  if (reviewed !== undefined) patch.reviewed = reviewed;
+
+  await mutateStrategy(s, line, (doc) => withMeasure(doc, name, patch));
+}
+
+/** `set column <Table[Column]> role=… priority=…` — the strategy half. */
+export async function setColumnStrategy(cmd: Command, s: CliSession, ref: string): Promise<void> {
+  const line = cmd.line;
+  const [table, column] = splitQualified(ref);
+  const roleOpt = optStr(cmd, "role");
+  const patch: Partial<ColumnStrategy> = {};
+  if (roleOpt !== undefined) {
+    if (roleOpt === "") fail("role= cannot be cleared — a column entry must state a role", line);
+    patch.role = oneOf(roleOpt, ROLES, "role", line);
+  }
+  if (cmd.opts.has("priority")) {
+    patch.priority = optStr(cmd, "priority") === "" ? undefined : optNum(cmd, "priority");
+  }
+
+  await mutateStrategy(s, line, (doc) => {
+    const existing = doc.tables?.[table]?.columns?.[column];
+    // `ColumnStrategy.role` has no default on the Rust side, so an entry
+    // created by a priority-only command would not deserialize at all.
+    const role: Role | undefined = patch.role ?? existing?.role;
+    if (role === undefined) {
+      fail(`'${ref}' has no strategy entry yet — give role= as well`, line);
+    }
+    return withColumn(doc, table, column, { ...patch, role });
+  });
+}
+
+/** `add rule <id> measure=… scope=… …` (upserts by id). */
+async function addRule(cmd: Command, s: CliSession, id: string): Promise<void> {
+  const line = cmd.line;
+  const measure = optStr(cmd, "measure");
+  if (measure === undefined || measure === "") {
+    fail(`A rule needs measure=<Name>. Usage: ${RULE_USAGE}`, line);
+  }
+  if (!s.overview.measures.some((m) => m.name === measure)) {
+    fail(`'${measure}' is not a measure in this model`, line);
+  }
+
+  const scopeText = optStr(cmd, "scope") ?? "";
+  const scope = parseScopeSpec(s.overview, scopeText);
+  if (!scope.ok) fail(scope.error, line);
+
+  const set: AttributeSet = {};
+  const direction = optStr(cmd, "direction");
+  if (direction !== undefined && direction !== "") {
+    set.direction = oneOf(direction, DIRECTIONS, "direction", line);
+  }
+  const cadence = optStr(cmd, "cadence");
+  if (cadence !== undefined && cadence !== "") {
+    set.cadence = oneOf(cadence, CADENCES, "cadence", line);
+  }
+  const target = optStr(cmd, "target");
+  if (target !== undefined && target !== "") {
+    const parsed = parseTargetSpec(target);
+    if (!parsed.ok) fail(parsed.error, line);
+    set.target = parsed.target;
+  }
+  const materiality = optStr(cmd, "materiality");
+  if (materiality !== undefined && materiality !== "") {
+    const parsed = parseMaterialitySpec(materiality);
+    if (!parsed.ok) fail(parsed.error, line);
+    set.materiality = parsed.materiality;
+  }
+  const suppress = stringsOf(optList(cmd, "suppress") ?? []);
+  if (suppress.length > 0) set.suppress = suppress;
+  const rankWeight = optNum(cmd, "rankweight");
+  if (rankWeight !== undefined) set.rankWeight = rankWeight;
+  const note = optStr(cmd, "note");
+
+  await mutateStrategy(s, line, (doc) =>
+    withRule(doc, {
+      id,
+      measure,
+      scope: scope.scope,
+      set,
+      note: note === undefined || note === "" ? undefined : note,
+    }),
+  );
+}
+
+/** `test strategy` — run the document's own inline assertions. Writes nothing. */
+async function runTestStrategy(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
+  if (cmd.kind !== "strategy") fail("Usage: test strategy", cmd.line);
+  if (cmd.pos.length > 0) {
+    fail(`Unknown argument '${cmd.pos[0].text}' (usage: test strategy)`, cmd.line);
+  }
+  const doc = await strategyGet(s.connectionId);
+  if (!doc) {
+    io.print("This model has no strategy document (run 'infer strategy' to propose one).", "info");
+    return;
+  }
+  const result = await strategyRunTests(s.connectionId, doc);
+  printFindings(io, result.findings, `All ${plural((doc.tests ?? []).length, "inline test")} pass.`);
+}
+
+/** Did an `infer strategy` command carry `--apply`? Refuses anything else, so
+ *  a mistyped flag cannot silently read as "preview only". */
+function inferApplyFlag(cmd: Command): boolean {
+  let apply = false;
+  for (const tok of cmd.pos) {
+    if (tok.text.toLowerCase() === "--apply") {
+      apply = true;
+      continue;
+    }
+    fail(`Unknown argument '${tok.text}' (usage: infer strategy [--apply])`, cmd.line);
+  }
+  return apply;
+}
+
+/** `infer strategy [--apply]` — propose a draft, and only replace on --apply. */
+async function runInferStrategy(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
+  if (cmd.kind !== "strategy") fail("Usage: infer strategy [--apply]", cmd.line);
+  const apply = inferApplyFlag(cmd);
+  const draft = inferStrategyDraft(s.overview);
+  const measures = Object.entries(draft.measures ?? {});
+  const tables = Object.entries(draft.tables ?? {});
+
+  io.print(
+    textTable(
+      ["measure", "direction", "unit", "target"],
+      measures.map(([name, m]) => [
+        name,
+        m.direction ?? "",
+        m.unit ?? "",
+        m.target ? formatTargetSpec(m.target) : "",
+      ]),
+    ) || "(no measures)",
+  );
+  io.print(
+    textTable(
+      ["table", "kind", "label column", "columns"],
+      tables.map(([name, t]) => [
+        name,
+        t.kind ?? "",
+        t.labelColumn ?? "",
+        String(Object.keys(t.columns ?? {}).length),
+      ]),
+    ) || "(no tables)",
+  );
+  io.print(
+    "Every entry is UNREVIEWED — inference is a draft, not an answer. Confirm them in " +
+      "Model Editor > Strategy, or with 'set measure <Name> reviewed=true'.",
+    "info",
+  );
+
+  if (!apply) {
+    io.print("Nothing was written. Re-run with --apply to REPLACE the stored strategy.", "info");
+    return;
+  }
+
+  requireWritable(s, cmd.line);
+  // AWAITED: --apply discards the stored strategy, rules and inline tests
+  // included. confirmAsync fails CLOSED, so a dialog that cannot be shown is
+  // a refusal rather than consent.
+  const agreed = await confirmAsync(
+    "Replace the stored strategy with a freshly inferred draft?\n\n" +
+      "Every rule, inline test and confirmation in it is discarded, and every entry comes back unreviewed.",
+  );
+  if (!agreed) {
+    io.print("Cancelled — the strategy is unchanged.", "info");
+    return;
+  }
+  await mutateStrategy(s, cmd.line, () => draft);
+  io.print("Replaced the strategy with the inferred draft.", "info");
 }

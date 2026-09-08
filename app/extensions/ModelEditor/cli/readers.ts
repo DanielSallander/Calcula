@@ -14,10 +14,26 @@ import type { ValueTok } from "./lex";
 import type { Command } from "./parse";
 import type { CliIo, CliSession } from "./execute";
 import { detailBlock, plural, textTable, yesNo } from "./format";
+import { strategyGet, strategyValidate } from "../lib/strategyBackend";
+import {
+  formatMaterialitySpec,
+  formatScopeSpec,
+  formatTargetSpec,
+} from "../lib/strategyTypes";
+import type { AttributeSet, Finding, StrategyDoc } from "../lib/strategyTypes";
 import { filterNames, globToRegex, matchColumns, matchNamed, matchRelationships, matchTables, requireOne } from "./resolve";
 
 export async function runRead(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
   if (cmd.verb === "validate") {
+    // `validate strategy` judges the STRATEGY document; bare `validate` runs
+    // the engine's own model checks. The verb is declared kindless, so the
+    // target arrives as a positional rather than as `cmd.kind` — reading
+    // cmd.kind here would silently fall through to the engine check and
+    // report "Model is valid" about a document nobody looked at.
+    if (namesStrategy(cmd)) {
+      await runValidateStrategy(s, io);
+      return;
+    }
     const issues = await s.gateway.validate(s.connectionId);
     if (issues.length === 0) {
       io.print("Model is valid — no issues.", "info");
@@ -317,6 +333,10 @@ async function runShow(cmd: Command, s: CliSession, io: CliIo): Promise<void> {
         ["read-only reason", o.readOnlyReason],
       ]),
     );
+    return;
+  }
+  if (cmd.kind === "strategy") {
+    await runShowStrategy(s, io);
     return;
   }
   if (cmd.kind === "extdata") {
@@ -626,6 +646,143 @@ function printTransformPipeline(io: CliIo, t: ModelTableInfo): void {
       "info",
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy (insights strategy layer)
+// ---------------------------------------------------------------------------
+
+/** Does this kindless `validate` name the strategy document? */
+export function namesStrategy(cmd: Command): boolean {
+  const word = cmd.pos[0]?.text.toLowerCase();
+  return word === "strategy" || word === "strategies";
+}
+
+/** The stored document, or null when nobody has annotated this model. */
+async function loadStrategy(s: CliSession): Promise<StrategyDoc | null> {
+  return strategyGet(s.connectionId);
+}
+
+/** The panel renders output in a <pre>, so a plain newline is the separator. */
+const LINE_BREAK = String.fromCharCode(10);
+
+/** One finding per block: severity, where, code, then the sentence. */
+export function formatFindings(findings: Finding[]): string {
+  return findings
+    .map(
+      (f) =>
+        [
+          `${f.severity.toUpperCase()}  ${f.path === "" ? "(document)" : f.path}  [${f.code}]`,
+          `  ${f.message}`,
+        ].join(LINE_BREAK),
+    )
+    .join(LINE_BREAK);
+}
+
+/** Print `validate`/`runTests` findings, or say the document is clean. */
+export function printFindings(io: CliIo, findings: Finding[], cleanMessage: string): void {
+  if (findings.length === 0) {
+    io.print(cleanMessage, "info");
+    return;
+  }
+  const errors = findings.filter((f) => f.severity === "error").length;
+  io.print(formatFindings(findings));
+  io.print(
+    `${plural(errors, "error")}, ${plural(findings.length - errors, "warning")}` +
+      (errors > 0 ? " — the document would be refused." : ""),
+    errors > 0 ? "err" : "info",
+  );
+}
+
+async function runValidateStrategy(s: CliSession, io: CliIo): Promise<void> {
+  const doc = await loadStrategy(s);
+  if (!doc) {
+    io.print("This model has no strategy document (run 'infer strategy' to propose one).", "info");
+    return;
+  }
+  const result = await strategyValidate(s.connectionId, doc);
+  printFindings(io, result.findings, "Strategy is valid — no findings.");
+}
+
+async function runShowStrategy(s: CliSession, io: CliIo): Promise<void> {
+  const doc = await loadStrategy(s);
+  if (!doc) {
+    io.print("This model has no strategy document (run 'infer strategy' to propose one).", "info");
+    return;
+  }
+  const measures = Object.entries(doc.measures ?? {});
+  const tables = Object.entries(doc.tables ?? {});
+  const unreviewed =
+    measures.filter(([, m]) => !m.reviewed).length + tables.filter(([, t]) => !t.reviewed).length;
+  io.print(
+    detailBlock([
+      ["version", String(doc.version)],
+      ["measures", String(measures.length)],
+      ["tables", String(tables.length)],
+      ["rules", String((doc.rules ?? []).length)],
+      ["periods", String((doc.periods ?? []).length)],
+      ["inline tests", String((doc.tests ?? []).length)],
+      ["unreviewed entries", String(unreviewed)],
+      ["default time axis", doc.model?.defaultTimeAxis ?? null],
+      ["fiscal year start", doc.model?.fiscalYearStart ?? null],
+      ["reporting currency", doc.model?.reportingCurrency ?? null],
+      ["priority", (doc.model?.priority ?? []).join(", ") || null],
+    ]),
+  );
+  printTable(
+    io,
+    ["measure", "direction", "unit", "target", "materiality", "cadence", "priority", "reviewed"],
+    measures.map(([name, m]) => [
+      name,
+      m.direction ?? "",
+      m.unit ?? "",
+      formatTargetSpec(m.target),
+      formatMaterialitySpec(m.materiality),
+      m.cadence ?? "",
+      m.priority !== undefined ? String(m.priority) : "",
+      yesNo(m.reviewed),
+    ]),
+    "(no measure entries)",
+  );
+  printTable(
+    io,
+    ["table", "kind", "label column", "columns", "reviewed"],
+    tables.map(([name, t]) => [
+      name,
+      t.kind ?? "",
+      t.labelColumn ?? "",
+      String(Object.keys(t.columns ?? {}).length),
+      yesNo(t.reviewed),
+    ]),
+    "(no table entries)",
+  );
+  printTable(
+    io,
+    ["rule", "measure", "scope", "sets", "note"],
+    (doc.rules ?? []).map((r) => [
+      r.id,
+      r.measure,
+      formatScopeSpec(r.scope) || "(everywhere)",
+      describeAttributeSet(r.set),
+      r.note ?? "",
+    ]),
+    "(no rules)",
+  );
+}
+
+/** What a rule SETS, in the same `key=value` spelling `add rule` accepts. */
+function describeAttributeSet(set: AttributeSet): string {
+  const parts: string[] = [];
+  if (set.direction) parts.push(`direction=${set.direction}`);
+  if (set.target !== undefined) parts.push(`target=${formatTargetSpec(set.target)}`);
+  if (set.materiality !== undefined) {
+    parts.push(`materiality=${formatMaterialitySpec(set.materiality)}`);
+  }
+  if (set.cadence) parts.push(`cadence=${set.cadence}`);
+  if (set.aggregation) parts.push(`aggregation=${set.aggregation.default}`);
+  if (set.suppress && set.suppress.length > 0) parts.push(`suppress=${set.suppress.join(",")}`);
+  if (set.rankWeight !== undefined) parts.push(`rankweight=${set.rankWeight}`);
+  return parts.join(" ") || "(nothing)";
 }
 
 // ---------------------------------------------------------------------------

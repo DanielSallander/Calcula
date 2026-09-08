@@ -130,6 +130,60 @@ const SOURCE_PROPS: CliOptionSpec[] = [
   { key: "trustcert", type: "boolean", help: "trust the server certificate" },
 ];
 
+// ---------------------------------------------------------------------------
+// Insights strategy (app/src-tauri/src/insights/strategy) — the vocabulary the
+// Strategy tab writes, reachable from the command line by the same keys.
+//
+// The measure and column rows are APPENDED to the model-metadata rows for the
+// same kinds rather than given a kind of their own, because that is the
+// grammar: `set measure Revenue direction=lowerIsBetter` addresses the same
+// object as `set measure Revenue format="0.0"`. writers.ts routes per KEY —
+// a command carrying both edits both, each through its own endpoint.
+// ---------------------------------------------------------------------------
+
+const DIRECTION_VALUES = ["higherIsBetter", "lowerIsBetter", "targetBand", "neutral"];
+const UNIT_VALUES = ["currency", "percent", "ratio", "count", "duration", "other"];
+const CADENCE_VALUES = ["daily", "weekly", "monthly", "quarterly", "yearly"];
+const ROLE_VALUES = ["key", "analysis", "label", "filter", "hierarchy", "ignore"];
+
+const MEASURE_STRATEGY_PROPS: CliOptionSpec[] = [
+  { key: "direction", type: "enum", values: DIRECTION_VALUES, help: "which way is good (empty clears)" },
+  { key: "unit", type: "enum", values: UNIT_VALUES, help: "the measure's unit (empty clears)" },
+  {
+    key: "target",
+    type: "string",
+    help: "1000 | kpi | measure:<Name> | band:<low>,<high> (empty clears)",
+  },
+  { key: "materiality", type: "string", help: "1000 (absolute) | 2% (relative) (empty clears)" },
+  { key: "cadence", type: "enum", values: CADENCE_VALUES, help: "reporting cadence (empty clears)" },
+  { key: "priority", type: "number", help: "ranking priority; ties break by it (empty clears)" },
+  { key: "analysisdims", type: "list", help: "Table[Column] refs worth breaking this down by (replaces)" },
+  { key: "neverslice", type: "list", help: "Table[Column] refs that must never slice it (replaces)" },
+  { key: "reviewed", type: "boolean", help: "mark the entry as agreed by a human" },
+];
+
+const COLUMN_STRATEGY_PROPS: CliOptionSpec[] = [
+  {
+    key: "role",
+    type: "enum",
+    values: ROLE_VALUES,
+    help: "what the column is FOR; only analysis/filter/hierarchy may scope a rule",
+  },
+  { key: "priority", type: "number", help: "ranking priority within its table (empty clears)" },
+];
+
+const RULE_PROPS: CliOptionSpec[] = [
+  { key: "measure", type: "string", help: "the measure this rule annotates (required)" },
+  { key: "scope", type: "string", help: '"Dept=A;Region=Nordics,Baltics"; a date range is from..to' },
+  { key: "direction", type: "enum", values: DIRECTION_VALUES, help: "direction in this scope" },
+  { key: "target", type: "string", help: "1000 | kpi | measure:<Name> | band:<low>,<high>" },
+  { key: "materiality", type: "string", help: "1000 (absolute) | 2% (relative)" },
+  { key: "cadence", type: "enum", values: CADENCE_VALUES, help: "cadence in this scope" },
+  { key: "suppress", type: "list", help: "fact KINDS to withhold here (it can only take facts away)" },
+  { key: "rankweight", type: "number", help: "multiplier on this measure's ranking score here" },
+  { key: "note", type: "string", help: "prose; reaches wording only, never which facts exist" },
+];
+
 const TRANSLATION_PROPS: CliOptionSpec[] = [
   { key: "caption", type: "string", help: "translated display name (empty clears)" },
   { key: "description", type: "string", help: "translated description (empty clears)" },
@@ -144,7 +198,7 @@ const TRANSLATION_PROPS: CliOptionSpec[] = [
 export const MODEL_OPTION_TABLES: Partial<Record<Kind, CliOptionTable>> = {
   measure: {
     add: MEASURE_PROPS,
-    set: MEASURE_PROPS,
+    set: [...MEASURE_PROPS, ...MEASURE_STRATEGY_PROPS],
     rename: [],
     delete: [],
   },
@@ -188,6 +242,7 @@ export const MODEL_OPTION_TABLES: Partial<Record<Kind, CliOptionTable>> = {
       { key: "displayname", type: "string", help: "display name (empty clears)" },
       { key: "sortby", type: "string", help: "sort this column by another (empty clears)" },
       { key: "lookup", type: "string", help: "lookup-resolution expression (empty clears)" },
+      ...COLUMN_STRATEGY_PROPS,
     ],
     rename: [],
     delete: [],
@@ -317,6 +372,19 @@ export const MODEL_OPTION_TABLES: Partial<Record<Kind, CliOptionTable>> = {
   },
   sql: {
     import: [], // import sql <Name> = <SELECT …> — the query is the expr tail
+  },
+  strategy: {
+    // `show strategy` / `validate strategy` are reads and take no options, so
+    // they are absent for the same reason ls/show are absent everywhere else.
+    test: [],
+    infer: [],
+  },
+  rule: {
+    // `add rule <id>` upserts by id: an id already in the document is
+    // REPLACED, because a duplicate id is a validation ERROR (a finding names
+    // the rule that produced it, so ids have to be unique).
+    add: RULE_PROPS,
+    delete: [],
   },
 };
 
