@@ -65,8 +65,14 @@ export async function strategyGet(connectionId: string): Promise<StrategyDoc | n
  * entry comes back `reviewed: false`, because a machine's opinion about what
  * "good" means is a draft a person confirms row by row, never an answer.
  *
- * The caller decides what to do with it: the Strategy tab REPLACES its
- * unsaved draft, so it asks first.
+ * The caller decides what to do with it, and the tab has TWO uses for one call.
+ * It REPLACES an unsaved draft with this (so it asks first), and it keeps the
+ * draft to diff live against the stored document — a row confirmed last week
+ * can disagree with what inference proposes today, and the only alternative
+ * (storing a hash of the confirmed values) would need maintaining on every edit
+ * and would know nothing about documents written before it existed. That second
+ * use is why this is called even when a stored document exists, and why it must
+ * stay MODEL-ONLY: no engine lock, no query, no visible cost on load.
  */
 export async function strategyInfer(connectionId: string): Promise<StrategyDoc> {
   return biModelStrategy<StrategyDoc>(connectionId, "infer");

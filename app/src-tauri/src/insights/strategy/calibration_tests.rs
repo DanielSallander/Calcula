@@ -337,6 +337,80 @@ fn fixtures() -> Vec<(&'static str, DataModel)> {
         false,
     );
 
+    // 11. SEVERAL NAME COLUMNS ON ONE DIMENSION. Every fixture above has exactly
+    //     ONE name-ish column, which is why this harness could not see the role
+    //     ladder's label arm reading only the WINNER of the label election:
+    //     with one candidate there are no runners-up to misclassify. A contact
+    //     dimension has four, and three of them were coming back `analysis` -
+    //     "revenue by first name" is one fact per person.
+    let several_names = build(
+        vec![
+            sales_table(),
+            t(
+                "Contact",
+                vec![
+                    Column::new("ContactKey", DataType::Int64),
+                    Column::new("FirstName", DataType::String),
+                    Column::new("MiddleName", DataType::String),
+                    Column::new("LastName", DataType::String),
+                    Column::new("FullName", DataType::String),
+                    Column::new("City", DataType::String),
+                    Column::new("Country", DataType::String),
+                    Column::new("Segment", DataType::String),
+                ],
+            ),
+        ],
+        vec![rel("Sales_Contact", "CustomerKey", "Contact", "ContactKey")],
+        measures(),
+        false,
+    );
+
+    // 12. THE SAME DIMENSION IN SWEDISH, compounded the way Swedish writes it:
+    //     `fornamn` and `efternamn` are single unsplittable tokens, so only the
+    //     joined-head rule in `label_score` can see them at all.
+    let swedish_names = build(
+        vec![
+            sales_table(),
+            t(
+                "Kontakt",
+                vec![
+                    Column::new("kontakt_id", DataType::Int64),
+                    Column::new("fornamn", DataType::String),
+                    Column::new("efternamn", DataType::String),
+                    Column::new("fullstandigtnamn", DataType::String),
+                    Column::new("ort", DataType::String),
+                    Column::new("land", DataType::String),
+                    Column::new("segment", DataType::String),
+                ],
+            ),
+        ],
+        vec![rel("Sales_Kontakt", "CustomerKey", "Kontakt", "kontakt_id")],
+        measures(),
+        false,
+    );
+
+    // 13. THE COST OF DEMOTING EVERY NAME-LIKE COLUMN, as its own fixture so it
+    //     is a measured row rather than a footnote. `Category Name` on a product
+    //     dimension is a LEGITIMATE axis - grouping revenue by category name is
+    //     a perfectly good breakdown - and the rule demotes it to `label`.
+    let denormalised_names = build(
+        vec![
+            sales_table(),
+            t(
+                "Product",
+                vec![
+                    Column::new("ProductKey", DataType::Int64),
+                    Column::new("Product Name", DataType::String),
+                    Column::new("Category Name", DataType::String),
+                    Column::new("Color", DataType::String),
+                ],
+            ),
+        ],
+        vec![rel("Sales_Product", "ProductKey", "Product", "ProductKey")],
+        measures(),
+        false,
+    );
+
     vec![
         ("wide label-heavy dimension", wide),
         ("narrow dimension", narrow),
@@ -348,6 +422,9 @@ fn fixtures() -> Vec<(&'static str, DataModel)> {
         ("snake_case names", snake),
         ("abbreviated names", abbreviated),
         ("swedish names", swedish),
+        ("several name columns", several_names),
+        ("swedish name columns", swedish_names),
+        ("denormalised name-as-axis", denormalised_names),
     ]
 }
 
@@ -591,6 +668,107 @@ fn the_name_lexicon_reads_four_naming_conventions_and_names_the_one_it_still_los
         "the abbreviation defeats the lexicon, and the table says so rather than \
          the lexicon being contorted to cover it: {abbreviated:?}"
     );
+}
+
+/// The `labelColumn` a fixture's table elects, if it elects one.
+fn label_column(fixture: &str, table: &str) -> Option<String> {
+    let model = fixtures()
+        .into_iter()
+        .find(|(n, _)| n.starts_with(fixture))
+        .unwrap_or_else(|| panic!("no fixture named '{fixture}'"))
+        .1;
+    let facts = facts_from_model(&model);
+    infer(&facts, &model, &UsageIndex::default()).tables[table]
+        .label_column
+        .clone()
+}
+
+#[test]
+fn a_dimension_with_several_name_columns_makes_axes_of_none_of_them() {
+    // THE DEFECT THE HARNESS COULD NOT SEE. Every other fixture has exactly ONE
+    // name-ish column, so the label arm reading only the ELECTION WINNER
+    // (`label_column == name`) looked correct: with one candidate there are no
+    // runners-up. Give a contact dimension four and three of them fell through
+    // `is_one_per_row_shaped` - which carries no name terms - into the
+    // dimension+type allowlist and came out `analysis`.
+    //
+    // Cardinality is not what fixes this and never would have been: `FirstName`
+    // genuinely has a few hundred distinct values across ten thousand
+    // customers, so a distinct count CONFIRMS it as an axis. Only the name
+    // lexicon can demote it, which is why this matters independently of
+    // open-items §2.AI.6.
+    let contact = roles("several name columns", "Contact");
+    for column in ["FirstName", "MiddleName", "LastName", "FullName"] {
+        let role = contact.get(column).map(String::as_str);
+        assert!(
+            matches!(role, Some("label") | Some("ignore")),
+            "'{column}' is name-like and must be label-shaped, was {role:?}: {contact:?}"
+        );
+    }
+    // EXACTLY ONE of them wins the election, and it has to be the WHOLE name.
+    // Winning stays a separate, additional fact about one column - the pointer
+    // a report names a row by - and it no longer decides whether the other
+    // three are axes. A label of `FirstName` names three rows "Anna", which is
+    // the same as having no label.
+    assert_eq!(
+        label_column("several name columns", "Contact").as_deref(),
+        Some("FullName"),
+        "the whole name must beat a fragment of it"
+    );
+    // POSITIVE CONTROLS: the ordinary axes on the same table are untouched.
+    for column in ["City", "Country", "Segment"] {
+        assert_eq!(
+            contact.get(column).map(String::as_str),
+            Some("analysis"),
+            "'{column}' is a perfectly good axis: {contact:?}"
+        );
+    }
+
+    // THE SWEDISH HALF. `fornamn` and `efternamn` are single unsplittable
+    // tokens, so `words()` cannot help and only the joined-head rule sees them.
+    let swedish = roles("swedish name columns", "Kontakt");
+    for column in ["fornamn", "efternamn", "fullstandigtnamn"] {
+        let role = swedish.get(column).map(String::as_str);
+        assert!(
+            matches!(role, Some("label") | Some("ignore")),
+            "swedish: '{column}' must be label-shaped, was {role:?}: {swedish:?}"
+        );
+    }
+    assert_eq!(
+        label_column("swedish name columns", "Kontakt").as_deref(),
+        Some("fullstandigtnamn"),
+        "swedish: the whole name must beat a fragment of it"
+    );
+    for column in ["ort", "land", "segment"] {
+        assert_eq!(
+            swedish.get(column).map(String::as_str),
+            Some("analysis"),
+            "swedish: '{column}' is an axis: {swedish:?}"
+        );
+    }
+}
+
+#[test]
+fn a_denormalised_name_that_really_is_an_axis_is_demoted_too_and_the_harness_says_so() {
+    // THE PRICE OF THE RULE ABOVE, MEASURED. `Category Name` on a product
+    // dimension is a legitimate axis and this ladder calls it a label, so the
+    // breakdown is not offered. The trade is a withheld breakdown against a
+    // meaningless one, paid in a dropdown a person can change - every entry
+    // ships `reviewed: false`. It is asserted so it stays a known consequence.
+    let product = roles("denormalised name-as-axis", "Product");
+    assert_eq!(
+        label_column("denormalised name-as-axis", "Product").as_deref(),
+        Some("Product Name"),
+        "the column that restates the table still wins the election"
+    );
+    assert_eq!(
+        product.get("Category Name").map(String::as_str),
+        Some("label"),
+        "the cost of the rule: {product:?}"
+    );
+    // The axis that does not read as a name keeps its role, so the price is
+    // paid only where the lexicon actually fires.
+    assert_eq!(product.get("Color").map(String::as_str), Some("analysis"));
 }
 
 #[test]

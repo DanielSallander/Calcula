@@ -539,8 +539,33 @@ const LABEL_HEAD_WORDS: &[&str] = &["name", "namn", "title", "label", "descripti
 /// its real display column.
 const LABEL_JOINED_HEADS: &[&str] = &["name", "namn"];
 
+/// Qualifiers that make a column a FRAGMENT of the row's name rather than the
+/// name itself.
+///
+/// WITHOUT THIS THE ELECTION PICKS BY DECLARATION ORDER. `FirstName`,
+/// `MiddleName`, `LastName` and `FullName` all score alike — a trailing "name"
+/// that does not restate the table — so the fold's first-maximum tie-break
+/// hands the label to whichever was written first, and tables are written
+/// first/middle/last/full. The label of a `Contact` row came back `FirstName`,
+/// which names three rows "Anna" and is no better than having no label.
+///
+/// A fragment still scores (0, not `None`): it is label-SHAPED, so it must not
+/// become a grouping axis. It just loses to a whole name.
+///
+/// The Swedish spellings are the stems `LABEL_JOINED_HEADS` leaves behind:
+/// `words("fornamn")` is one token, so the qualifier is only visible after the
+/// head is stripped. Both `for` and `för` are listed because a column may be
+/// written either way and `words()` keeps the non-ASCII letter.
+const NAME_PART_QUALIFIERS: &[&str] = &[
+    // English
+    "first", "middle", "last", "given", "family", "sur", "maiden", "nick", "initial", "initials",
+    // Swedish
+    "for", "för", "efter", "mellan", "tilltals", "smek", "flick",
+];
+
 /// How well a column name reads as a table's display label. Higher is better;
-/// `None` means it does not read as one at all.
+/// `None` means it does not read as one at all. `0` means it reads as a PART of
+/// one — see `NAME_PART_QUALIFIERS`.
 fn label_score(table: &str, column: &str) -> Option<u32> {
     let table_words = words(table);
     let column_words = words(column);
@@ -548,13 +573,14 @@ fn label_score(table: &str, column: &str) -> Option<u32> {
     // "Product Name" on table "Product" beats a bare "Name", which beats
     // "Description" — the more the column restates the table, the more
     // confidently it is the thing a reader recognises a row by.
-    let (head, restates_table) = if LABEL_HEAD_WORDS.contains(&last) {
+    let (head, restates_table, names_a_part) = if LABEL_HEAD_WORDS.contains(&last) {
+        let qualifiers = &column_words[..column_words.len() - 1];
         (
             last,
-            column_words.len() > 1
-                && table_words
-                    .iter()
-                    .any(|t| column_words.iter().take(column_words.len() - 1).any(|c| c == t)),
+            !qualifiers.is_empty() && table_words.iter().any(|t| qualifiers.iter().any(|c| c == t)),
+            qualifiers
+                .iter()
+                .any(|q| NAME_PART_QUALIFIERS.contains(&q.as_str())),
         )
     } else if column_words.len() == 1 {
         let head = LABEL_JOINED_HEADS
@@ -568,10 +594,18 @@ fn label_score(table: &str, column: &str) -> Option<u32> {
         (
             head,
             table_words.iter().any(|t| stem.starts_with(t.as_str())),
+            // EXACT, not a prefix. `fullstandigtnamn` starts with no qualifier
+            // and must not be demoted by one that happens to share a prefix.
+            NAME_PART_QUALIFIERS.contains(&stem),
         )
     } else {
         return None;
     };
+    // A fragment of the name loses to every whole one, however the whole one is
+    // spelled — it stays label-SHAPED so it can never become an axis.
+    if names_a_part {
+        return Some(0);
+    }
     Some(match (restates_table, head) {
         (true, "name" | "namn") => 3,
         (false, "name" | "namn") => 2,
@@ -621,8 +655,13 @@ fn infer_table(
 
     let is_calendar = matches!(kind, Some(TableKind::Calendar));
 
-    // The label column is chosen once for the table, so exactly one column can
-    // carry `Label`; the runners-up stay ordinary analysis attributes.
+    // The label column is chosen once for the table, and the winner is the
+    // pointer a report names a ROW by. It no longer decides the runners-up:
+    // every name-like column is `Label` (see the ladder below), because a
+    // column that reads as a name is one fact per record whether or not it won
+    // an election. The election answers a different question — WHICH of them
+    // does a reader recognise the row by — and `NAME_PART_QUALIFIERS` keeps a
+    // fragment from winning it on declaration order alone.
     let label_column: Option<String> = if matches!(kind, Some(TableKind::Dimension)) {
         table
             .columns()
@@ -681,7 +720,40 @@ fn infer_table(
             Some(Role::Analysis)
         } else if matches!(column.data_type(), DataType::Boolean) {
             Some(Role::Filter)
-        } else if label_column.as_deref() == Some(column.name()) {
+        } else if matches!(kind, Some(TableKind::Dimension))
+            && matches!(column.data_type(), DataType::String)
+            && label_score(table_name, column.name()).is_some()
+        {
+            // A NAME-LIKE COLUMN IS LABEL-SHAPED WHETHER OR NOT IT WON.
+            //
+            // This arm used to read `label_column.as_deref() == Some(name)` -
+            // the WINNER of the label election and nobody else. Every runner-up
+            // fell past it, through `is_one_per_row_shaped` (which carries no
+            // name terms at all) and into the dimension+type allowlist, and came
+            // out `analysis`. So on any customer, employee or contact dimension,
+            // `FirstName` and `LastName` became GROUPING AXES while `FullName`
+            // became the label - and revenue broken down by first name is one
+            // fact per person wearing the clothes of a segmentation.
+            //
+            // CARDINALITY WOULD NOT HAVE SAVED THIS, which is why it is fixed
+            // here and not deferred to open-items §2.AI.6: `FirstName` really
+            // does have a few hundred distinct values across ten thousand
+            // customers, so a distinct count CONFIRMS it as an axis. Only the
+            // name lexicon can demote it.
+            //
+            // THE COST, STATED RATHER THAN HIDDEN. A denormalised `Category
+            // Name` on a product dimension scores name-like and IS a legitimate
+            // axis; this rule demotes it to `label` and its breakdown is not
+            // offered. That trade is asserted in `calibration_tests.rs` so it
+            // shows up as a fact about the ladder rather than as a surprise.
+            // It costs a withheld breakdown, never a false statement, and every
+            // entry here ships `reviewed: false` for a person to correct.
+            //
+            // The filters mirror the ELECTION's own (a dimension, a string
+            // column, not hidden and not a join - the last two are already
+            // claimed by the arms above), because the columns being demoted are
+            // exactly the ones that competed and lost. Winning stays a separate,
+            // additional fact about one column: `labelColumn`.
             Some(Role::Label)
         } else if is_one_per_row_shaped(column.name()) {
             // ONE VALUE PER ROW BY NAME, so never an axis.
@@ -953,7 +1025,14 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
         let name = measure.name();
         let mf = facts.measures.get(name);
         let kpi = mf.and_then(|m| m.kpi.as_ref());
-        let has_kpi = kpi.is_some();
+        // A KPI WITH NO NUMBER IS NOT A TARGET. `KpiFacts::target` is `None`
+        // both when the KPI declares no constant and when its goal is another
+        // MEASURE, and in both cases `{"type": "kpi"}` resolves to nothing: no
+        // target_value reaches the planner, so no variance fact is emitted and
+        // the report is silently missing the line. Drafting it anyway would also
+        // write a document validate.rs now refuses (`unresolvable-target-kpi`),
+        // and a draft that cannot be saved is worse than an empty field.
+        let has_numeric_kpi_target = kpi.is_some_and(|k| k.target.is_some());
         // The direction the KPI's band statuses state, if they state one. A KPI
         // whose bands say nothing leaves the lexicon to answer.
         let kpi_direction = kpi.and_then(|k| k.direction());
@@ -974,9 +1053,10 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
                 // lexicon here would fix only the drafted document, and would be
                 // a second source of truth that drifts on the first edit.
                 unit: mf.and_then(|m| m.unit),
-                // The model's own KPI is the only target inference can defend.
+                // The model's own KPI is the only target inference can defend,
+                // and only when the KPI carries a number to inherit.
                 // A literal would be a number nobody supplied.
-                target: has_kpi.then_some(Target::Kpi),
+                target: has_numeric_kpi_target.then_some(Target::Kpi),
                 // Materiality is a business threshold. There is nothing in the
                 // model to read it from, and a made-up floor silently hides
                 // movements, so it stays absent.
@@ -1020,6 +1100,14 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
             // reporting-currency question that a scrape would paper over.
             reporting_currency: None,
             priority: seed_priority(model, facts, usage),
+            // THE BLOCK IS A GUESS LIKE ANY OTHER ROW, and it is the guess that
+            // most needs accepting: `default_time_axis` above may be a calendar
+            // `facts.rs` INFERRED because nobody marked one, and every trend,
+            // seasonality and change-point claim in the report is computed
+            // against it. Stamped and left unreviewed, so the Strategy tab has a
+            // badge to show and a Confirm to offer here too.
+            reviewed: false,
+            source: Some(EntrySource::Inferred),
         },
         measures,
         tables,
@@ -1922,6 +2010,278 @@ mod tests {
             None,
             "an untouched entry must stay distinguishable from a guessed one"
         );
+        // THE MODEL BLOCK TOO. It had no `reviewed`/`source` at all, so its four
+        // fields could not show the badge every other row shows - and one of
+        // them, `defaultTimeAxis`, may be a calendar facts.rs GUESSED, which is
+        // exactly where a guess needs somewhere to be accepted.
+        assert!(!doc.model.reviewed, "the model block is drafted unreviewed");
+        assert_eq!(doc.model.source, Some(EntrySource::Inferred));
+        assert_eq!(
+            ModelStrategy::default().source,
+            None,
+            "an untouched block stays distinguishable from a guessed one"
+        );
+    }
+
+    #[test]
+    fn a_kpi_that_carries_no_number_does_not_draft_a_kpi_target() {
+        // `KpiFacts::target` is None both when the KPI declares no constant and
+        // when its goal is another MEASURE, and `{"type": "kpi"}` resolves to
+        // nothing in both cases: no target_value reaches the planner, so no
+        // variance fact is emitted and the report is silently missing the line.
+        // Drafting it would also write a document validate.rs now refuses.
+        let mut kpi = Kpi::new(
+            "Cost vs Budget",
+            "Support Cost",
+            KpiTarget::Measure("Budget".into()),
+        );
+        kpi = kpi.with_status_band(StatusBand::new(0.8, KpiStatus::OnTrack));
+        kpi = kpi.with_status_band(StatusBand::new(1.0, KpiStatus::OffTrack));
+        let model = DataModel::builder()
+            .add_table(
+                Table::new("Sales", vec![Column::new("Amount", DataType::Float64)]).unwrap(),
+            )
+            .add_measure(sum_measure("Support Cost", "Sales", "Amount"))
+            .add_measure(sum_measure("Budget", "Sales", "Amount"))
+            .add_kpi(kpi)
+            .build()
+            .expect("the measure-targeted KPI fixture builds");
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        assert_eq!(
+            doc.measures["Support Cost"].target, None,
+            "a KPI with no number to inherit supplies no target"
+        );
+        // The KPI still decides the DIRECTION - having no goal is not having no
+        // opinion - so the draft loses nothing it could defend.
+        assert_eq!(
+            doc.measures["Support Cost"].direction,
+            Some(Direction::LowerIsBetter)
+        );
+        // ...and the draft is one validate.rs accepts, which is the whole point.
+        assert!(
+            !crate::insights::strategy::validate(&facts, &doc)
+                .iter()
+                .any(|f| f.code == "unresolvable-target-kpi"),
+            "the draft must be savable"
+        );
+        // POSITIVE CONTROL: the same shape with a CONSTANT target does draft one.
+        let with_constant = a_cost_measure_with_bands(vec![
+            StatusBand::new(0.8, KpiStatus::OnTrack),
+            StatusBand::new(1.0, KpiStatus::OffTrack),
+        ]);
+        let constant_facts = facts_from_model(&with_constant);
+        let constant_doc = infer(&constant_facts, &with_constant, &no_usage());
+        assert_eq!(
+            constant_doc.measures["Support Cost"].target,
+            Some(Target::Kpi)
+        );
+    }
+
+    /// A contact dimension with FOUR name columns, plus three ordinary axes.
+    ///
+    /// The shape the role ladder had no fixture for: every model in this file
+    /// and in `calibration_tests.rs` had exactly ONE name-ish column, so
+    /// "the winner is the label and the runners-up are axes" could not be seen.
+    fn a_dimension_with_several_name_columns() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("ContactKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Contact",
+                    vec![
+                        Column::new("ContactKey", DataType::Int64),
+                        Column::new("FirstName", DataType::String),
+                        Column::new("MiddleName", DataType::String),
+                        Column::new("LastName", DataType::String),
+                        Column::new("FullName", DataType::String),
+                        Column::new("City", DataType::String),
+                        Column::new("Country", DataType::String),
+                        Column::new("Segment", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Contact",
+                "Sales",
+                "ContactKey",
+                "Contact",
+                "ContactKey",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the several-names fixture builds")
+    }
+
+    #[test]
+    fn a_fragment_of_a_name_still_reads_as_a_label_but_loses_to_the_whole_one() {
+        // The ordering the election depends on, asserted directly so a change
+        // to the lexicon cannot quietly reshuffle it. Every one of these is
+        // `Some`, which is what keeps them all out of `analysis`.
+        let whole = label_score("Contact", "FullName").expect("a whole name reads as a label");
+        for fragment in [
+            "FirstName",
+            "MiddleName",
+            "LastName",
+            "Surname",
+            "MaidenName",
+            "firstname",
+            "fornamn",
+            "efternamn",
+            "mellannamn",
+        ] {
+            let score = label_score("Contact", fragment)
+                .unwrap_or_else(|| panic!("'{fragment}' must still read as label-shaped"));
+            assert!(
+                score < whole,
+                "'{fragment}' scored {score}, not below the whole name's {whole}"
+            );
+        }
+        // And a whole name that merely SHARES A PREFIX with a qualifier is not
+        // a fragment: `fullstandigtnamn` begins with no entry in the list, and
+        // the joined arm matches the stem exactly for that reason.
+        assert_eq!(
+            label_score("Kontakt", "fullstandigtnamn"),
+            Some(2),
+            "the swedish whole name is not a fragment"
+        );
+        // The table-restating form still outranks everything.
+        assert_eq!(label_score("Contact", "ContactName"), Some(3));
+    }
+
+    #[test]
+    fn every_name_like_column_is_label_shaped_and_only_one_of_them_wins_the_election() {
+        // THE DEFECT. The label arm read the WINNER of the election
+        // (`label_column == name`) and nobody else, so `FirstName`,
+        // `MiddleName` and `LastName` fell through `is_one_per_row_shaped` -
+        // which carries no name terms at all - into the dimension+type
+        // allowlist and came out `analysis`. Revenue broken down by first name
+        // is one fact per person wearing the clothes of a segmentation.
+        //
+        // Cardinality would NOT have rescued it: a few hundred distinct first
+        // names across ten thousand customers is exactly what an axis looks
+        // like to a distinct count. Only the name lexicon can demote it.
+        let model = a_dimension_with_several_name_columns();
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        let contact = &doc.tables["Contact"];
+
+        for column in ["FirstName", "MiddleName", "LastName", "FullName"] {
+            assert_eq!(
+                contact.columns.get(column).map(|c| c.role),
+                Some(Role::Label),
+                "'{column}' is name-like and must not be an axis: {:?}",
+                contact.columns
+            );
+        }
+        // Winning the election stays a SEPARATE, additional fact about ONE
+        // column - which is the pointer the report uses to name a row. It has
+        // to be the WHOLE name: `FirstName` is a FRAGMENT of what a reader
+        // recognises a row by, and naming a row "Anna" when three Annas are in
+        // the table is the same defect as having no label at all.
+        //
+        // This is the half the election gets wrong on its own. All four columns
+        // score alike (a trailing "name" that does not restate the table), so
+        // the fold's first-maximum tie-break hands the label to whichever was
+        // DECLARED FIRST - reliably a fragment, since tables are written
+        // first/middle/last/full.
+        assert_eq!(
+            contact.label_column.as_deref(),
+            Some("FullName"),
+            "the whole name must beat a fragment of it: {:?}",
+            contact.label_column
+        );
+        // POSITIVE CONTROLS: the ordinary axes beside them are untouched, so the
+        // rule demotes name-like columns rather than the whole dimension.
+        for column in ["City", "Country", "Segment"] {
+            assert_eq!(
+                contact.columns.get(column).map(|c| c.role),
+                Some(Role::Analysis),
+                "'{column}' is a perfectly good axis: {:?}",
+                contact.columns
+            );
+        }
+        // ...and none of them reaches the ranking as an offered breakdown.
+        let offered = offered_dimensions(&model, "Revenue");
+        for column in ["FirstName", "MiddleName", "LastName", "FullName"] {
+            assert!(
+                !offered.contains(&QualifiedColumn::new("Contact", column)),
+                "'{column}' must not be offered: {offered:?}"
+            );
+        }
+        assert!(offered.contains(&QualifiedColumn::new("Contact", "Segment")));
+    }
+
+    #[test]
+    fn a_denormalised_name_that_really_is_an_axis_is_demoted_too_and_that_is_the_price() {
+        // THE COST OF THE RULE ABOVE, STATED RATHER THAN HIDDEN. A `Category
+        // Name` on a product dimension scores as name-like and IS a legitimate
+        // axis - grouping revenue by category name is a perfectly good
+        // breakdown - and this rule demotes it to `label`.
+        //
+        // The trade is a withheld breakdown against a meaningless one, and it is
+        // paid in a dropdown a person can change: every entry ships
+        // `reviewed: false`. It is asserted here so it reads as a known
+        // consequence rather than turning up as a surprise.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("ProductKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Product",
+                    vec![
+                        Column::new("ProductKey", DataType::Int64),
+                        Column::new("Product Name", DataType::String),
+                        Column::new("Category Name", DataType::String),
+                        Column::new("Color", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Product",
+                "Sales",
+                "ProductKey",
+                "Product",
+                "ProductKey",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the denormalised-name fixture builds");
+        let facts = facts_from_model(&model);
+        let doc = infer(&facts, &model, &no_usage());
+        let product = &doc.tables["Product"];
+        assert_eq!(
+            product.label_column.as_deref(),
+            Some("Product Name"),
+            "the column that restates the table still wins the election"
+        );
+        assert_eq!(
+            product.columns["Category Name"].role,
+            Role::Label,
+            "the cost: a real axis demoted because its name reads as a row's name"
+        );
+        // The axis that does NOT read as a name is untouched, so the price is
+        // paid only where the lexicon actually fires.
+        assert_eq!(product.columns["Color"].role, Role::Analysis);
     }
 
     #[test]

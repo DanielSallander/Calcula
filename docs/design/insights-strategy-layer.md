@@ -259,8 +259,22 @@ but a plausible-looking draft in which a customer's address is offered as a brea
 table has no display label at all. Add a fixture per convention before trusting any of them, and
 keep the lexicons bilingual because a Swedish model is the normal case here.
 
+**A RANKING IS NOT A CLASSIFIER, and using one as the other cost a whole family of columns.** The
+label score answers "which column does a reader recognise a row by" — a comparison. The role ladder
+read it as "is this column a label" — a judgement — by testing whether a column had WON the
+election, and every runner-up fell through to `analysis`. On any customer, employee or contact
+dimension that made `FirstName` and `LastName` grouping axes: revenue by first name is one fact per
+person wearing the clothes of a segmentation. Cardinality would not have rescued it — a few hundred
+first names across ten thousand customers is exactly what an axis looks like to a distinct count —
+which is why this one is a lexicon problem all the way down. The two questions are now asked
+separately: every name-like column is `Label`, and the election decides only which of them the
+report names a row by. That second question needed a lexicon of its own
+(`NAME_PART_QUALIFIERS`), because all four of `First`/`Middle`/`Last`/`Full` `Name` score alike and
+the tie broke on DECLARATION ORDER — reliably electing a fragment, since tables are written in that
+order.
+
 **And a name is a proxy for the thing that actually decides.** Whether a column is an axis is a
-question about CARDINALITY: `Country` and `FullName` are both strings on a dimension, and only the
+question about CARDINALITY: `Country` and `Segment` are both strings on a dimension, and only the
 distinct count separates them in general. The lexicons are a stopgap for a signal this codebase does
 not keep — see `INFER_ANALYSIS_DIMENSIONS` and `docs/design/open-items.md` §2.AI.6. Cardinality is
 the one signal that is independent of both naming convention and language, which is why every
@@ -365,5 +379,24 @@ make the base fillable. That comes first.
 - **Narration stays deterministic until M6.** A model writes no sentence in this feature. When one
   does, it will be structurally checked: every sentence tagged with the fact ids it covers, and a
   sentence citing a number that is not in its cited facts is dropped.
+- **Four attributes are settable and read by nothing.** `unit`, `cadence`, `fiscalYearStart` and
+  `reportingCurrency` are authored, inferred, validated and resolved, and no consumer reads them
+  (verified 2026-09-08 against `insights/model.rs`, `model_commands.rs` and `report.rs`, by
+  grepping the READERS rather than the writers). The tab labels the last two "not yet consulted";
+  the first two present as ordinary attributes and are not labelled at all. `cadence` has a
+  designed consumer — period bucketing and seasonality lag selection — that was never built. This
+  is tracked in `open-items.md` §2.AI.7 as wire-or-delete, not as a limit to live with.
+- **A `targetBand` direction decides favourability but produces no variance ROW.** The band reads
+  where the value landed, each bound's inclusivity included, so it is no longer inert. But
+  `Observation.target_value` is one number and a band is two, so a report says "inside the band"
+  through favourability and never prints "inside 90k–140k". Per-side band severity is blocked
+  behind that, and was left out rather than shipped as a field that reorders nothing.
+- **A name heuristic cannot tell a fragment from a whole name without a lexicon.** `FirstName`,
+  `MiddleName`, `LastName` and `FullName` score identically as "a trailing name that does not
+  restate the table", so the label election broke on DECLARATION ORDER and handed the label to
+  `FirstName` — a column that names three rows "Anna". `NAME_PART_QUALIFIERS` fixes the ordering
+  for two languages; a third language, or a schema that spells the whole name some other way, is
+  another lexicon entry and not a general solution. The general solution is the same missing
+  signal as everywhere else in §9.
 - **The layer is worth zero if nobody fills it in.** Inference plus confirm-the-default is the
   mitigation, and rule expressiveness is deliberately limited to keep the checker honest.

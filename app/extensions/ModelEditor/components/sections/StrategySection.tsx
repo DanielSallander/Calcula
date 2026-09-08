@@ -126,6 +126,48 @@
 //          read-only subscribed model and a document that has not loaded are
 //          different answers, and a grey button with no sentence is what made
 //          this invisible in the first place.
+//
+//          (12) A BAND DIRECTION IS A STATEMENT IN TWO HALVES. Picking
+//          `targetBand` used to produce no further input at all, so a person
+//          could assert a band-based direction with no band — and the two sit
+//          in ONE dropdown looking equally settable. The bounds go in the
+//          EXISTING target control rather than a new field, because a document
+//          holding `direction: targetBand` beside `target: 1000` has two
+//          answers and nothing saying which wins: choosing `targetBand`
+//          switches that one control into low/high mode (each bound with its
+//          own inclusivity) and CLEARS a target that is not a band, saying so
+//          in the status line rather than dropping it silently. The backend
+//          validator is what makes the incomplete state impossible; this only
+//          makes it hard to reach, and its refusal lands on the row like every
+//          other finding.
+//
+//          (13) CONFIRM IS REVERSIBLE, AND AN EDIT REVOKES IT. Confirm was
+//          one-way, and `Confirm all` makes it a one-click claim across a whole
+//          grid — an irreversible assertion a mis-click can make is a bad pair,
+//          so the CONFIRMED BADGE IS ITSELF the un-confirm control. Worse, an
+//          edit used to leave `reviewed: true` standing while re-stamping
+//          `source: "authored"`, so a confirmed row could assert a value no
+//          human had ever seen. `authoringStamp` (strategyTypes) now drops the
+//          confirmation with the same act that re-stamps the source, and
+//          Confirm / un-confirm still author nothing.
+//
+//          (14) A CONFIRMATION CAN BE OVERTAKEN BY INFERENCE. A column is
+//          added, a measure renamed, calendar detection flips — and a row
+//          confirmed last week now disagrees with what inference would propose
+//          today. The divergence is detected LIVE: the tab keeps the draft
+//          `strategyInfer` returns (model-only, no engine lock, no query) and
+//          diffs it against what the document says, so a row can say both
+//          answers and offer inference's. NOTHING IS AUTO-APPLIED. Only rows
+//          carrying a human decision are marked — an inferred row that
+//          disagrees with today's inference is a stale draft, not a decision.
+//
+//          (15) THE MODEL PANEL HAS PROVENANCE TOO. `defaultTimeAxis` shows a
+//          value guessed from a calendar that was itself guessed, and the panel
+//          had no badge to say so — the one place where a person would actually
+//          accept that guess was the one place it did not announce itself. The
+//          panel carries the same badge, Confirm and un-confirm as a row, at
+//          PANEL granularity (`ModelStrategy.reviewed` / `.source`), because
+//          there is no row here to confirm one field at a time.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ModelOverview, ModelTableInfo } from "@api";
@@ -155,6 +197,11 @@ import {
   TABLE_KINDS,
   UNITS,
   aggregationDimensionOptions,
+  bandDirectionIsIncomplete,
+  bandExistsAnywhere,
+  bandHighInclusive,
+  bandLowInclusive,
+  bandTarget,
   compareColumnsByRole,
   emptyStrategyDoc,
   entryState,
@@ -163,14 +210,21 @@ import {
   formatMaterialitySpec,
   formatTargetSpec,
   hasErrors,
+  inferenceTakePatch,
+  measureDivergences,
   measureEntry,
   measureHasValues,
   measurePath,
   modelColumnRefs,
+  modelDivergences,
+  modelEntry,
   modelHasColumn,
+  modelHasValues,
   parseMaterialitySpec,
   parseTargetSpec,
   rulePath,
+  stateIsHumanDecision,
+  tableDivergences,
   tableEntry,
   tableHasValues,
   tablePath,
@@ -178,6 +232,7 @@ import {
   withAggregationException,
   withColumn,
   withMeasure,
+  withModel,
   withRule,
   withTable,
   withoutRule,
@@ -188,9 +243,11 @@ import type {
   AggregationSpec,
   Cadence,
   Direction,
+  Divergence,
   EntryState,
   Finding,
   Materiality,
+  MeasureStrategy,
   ModelStrategy,
   Role,
   Rule,
@@ -309,6 +366,10 @@ export function ruleToDraft(rule: Rule): RuleDraft {
 export function buildRuleFromDraft(
   overview: ModelOverview,
   draft: RuleDraft,
+  /** The document the rule is going INTO. Only the band check reads it, and it
+   *  has to: whether a `targetBand` direction has a band to land on is a
+   *  question about the whole document, not about this rule alone. */
+  doc: StrategyDoc,
 ): { ok: true; rule: Rule } | { ok: false; error: string } {
   const id = draft.id.trim();
   if (id === "") return { ok: false, error: "A rule needs an id — findings name the rule that produced them." };
@@ -353,6 +414,28 @@ export function buildRuleFromDraft(
   const target = parseTargetSpec(draft.target);
   if (!target.ok) return { ok: false, error: target.error };
   if (target.target !== undefined) set.target = target.target;
+
+  // A rule that narrows a measure to a BAND direction needs a band SOMEWHERE
+  // for that direction to land on. The Rust rules loop never inspected
+  // `set.direction` at all, so this was the same silent loss of favourability
+  // as on a measure entry with no finding anywhere to say so. The measure grid
+  // makes the state hard to reach by switching its target control; the modal's
+  // target is one text field, so the refusal is here — and it is scope-blind in
+  // exactly the way the validator is, or it would refuse a rule the backend
+  // accepts, which is worse than not checking at all.
+  if (
+    set.direction === "targetBand" &&
+    set.target?.type !== "band" &&
+    !bandExistsAnywhere(doc, draft.measure, id)
+  ) {
+    return {
+      ok: false,
+      error:
+        "A targetBand direction needs a band to judge against, and measure '" +
+        draft.measure +
+        "' has none — not on its entry and not on any other rule. Write this rule's target as band:0.8,1.2 (band:[0.8,1.2) for an exclusive high bound), or give the measure a band. Without one the direction takes the measure's favourability away in this scope and puts nothing back.",
+    };
+  }
 
   const materiality = parseMaterialitySpec(draft.materiality);
   if (!materiality.ok) return { ok: false, error: materiality.error };
@@ -489,19 +572,6 @@ export function describeBulkConfirm(result: BulkConfirm): string {
 // ===========================================================================
 // The model-wide block
 // ===========================================================================
-
-/**
- * Immutably replace part of the model-wide block.
- *
- * The sibling of `withMeasure` / `withTable`: the panel never builds a
- * `StrategyDoc` inline, so there is one place that decides what a model-level
- * edit does to the rest of the document. Unlike those two it does NOT stamp a
- * `source` — `ModelStrategy` has no `reviewed`/`source` pair, because there are
- * no rows here to confirm one by one.
- */
-export function withModel(doc: StrategyDoc, patch: Partial<ModelStrategy>): StrategyDoc {
-  return { ...doc, model: { ...(doc.model ?? {}), ...patch } };
-}
 
 /** One group of columns in the time-axis picker. */
 export interface TimeAxisGroup {
@@ -944,6 +1014,148 @@ function SpecInput<T>({
   );
 }
 
+/**
+ * The target control in BAND mode: two bounds, each with its own inclusivity.
+ *
+ * It replaces the ordinary target field rather than sitting beside it (property
+ * (12)). A band and a literal are two answers to one question, and a document
+ * holding both says nothing about which applies — so there is one control, and
+ * what it edits depends on the direction.
+ *
+ * NOTHING PARTIAL IS EVER WRITTEN. A band needs both bounds to mean anything,
+ * so a half-filled pair commits `undefined` and the document simply carries no
+ * target: the incomplete state lives in the UI, where it is visible and
+ * fixable, never in the saved document, where the validator would have to catch
+ * it. The boxes are NOT cleared when that happens — the person is mid-edit, and
+ * a field that empties itself as you type is how a value that was accepted
+ * comes to look rejected.
+ */
+function BandTargetCell({
+  measure,
+  band,
+  disabled,
+  onCommit,
+}: {
+  measure: string;
+  band: Extract<Target, { type: "band" }> | undefined;
+  disabled: boolean;
+  onCommit: (target: Target | undefined) => void;
+}): React.ReactElement {
+  const [low, setLow] = useState(band === undefined ? "" : String(band.low));
+  const [high, setHigh] = useState(band === undefined ? "" : String(band.high));
+  const [lowIn, setLowIn] = useState(band === undefined ? true : bandLowInclusive(band));
+  const [highIn, setHighIn] = useState(band === undefined ? true : bandHighInclusive(band));
+
+  // Install a band that arrived from OUTSIDE this control — Infer, "Use
+  // inference", a reload. An absent band is deliberately not installed: it is
+  // what this control writes while a person is half way through typing one,
+  // and resetting the boxes then would delete the bound they had just entered.
+  useEffect(() => {
+    if (band === undefined) return;
+    setLow(String(band.low));
+    setHigh(String(band.high));
+    setLowIn(bandLowInclusive(band));
+    setHighIn(bandHighInclusive(band));
+  }, [band]);
+
+  const commit = (l: string, h: string, li: boolean, hi: boolean): void => {
+    const lowValue = Number(l.trim());
+    const highValue = Number(h.trim());
+    if (l.trim() === "" || h.trim() === "" || !Number.isFinite(lowValue) || !Number.isFinite(highValue)) {
+      onCommit(undefined);
+      return;
+    }
+    onCommit(bandTarget(lowValue, highValue, li, hi));
+  };
+
+  const boundInput = (
+    which: "low" | "high",
+    value: string,
+    setValue: (v: string) => void,
+  ): React.ReactElement => (
+    <input
+      data-testid={`band-${which}-${measure}`}
+      aria-label={`${which} bound of ${measure}'s band`}
+      style={{ ...smallInput, width: 54 }}
+      value={value}
+      disabled={disabled}
+      placeholder={which === "low" ? "0.8" : "1.2"}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={(e) =>
+        which === "low" ? commit(e.target.value, high, lowIn, highIn) : commit(low, e.target.value, lowIn, highIn)
+      }
+      onKeyDown={(e) => {
+        if (e.key !== "Enter") return;
+        const typed = (e.target as HTMLInputElement).value;
+        if (which === "low") commit(typed, high, lowIn, highIn);
+        else commit(low, typed, lowIn, highIn);
+      }}
+    />
+  );
+
+  return (
+    <div
+      data-testid={`band-${measure}`}
+      style={{ display: "flex", gap: 3, alignItems: "center" }}
+      title="The acceptable range this measure is judged against. Each bound says whether the bound itself counts as on target."
+    >
+      <select
+        data-testid={`band-low-op-${measure}`}
+        aria-label={`low bound inclusivity of ${measure}'s band`}
+        style={{ ...smallInput, width: 44 }}
+        disabled={disabled}
+        value={lowIn ? "inclusive" : "exclusive"}
+        onChange={(e) => {
+          const next = e.target.value === "inclusive";
+          setLowIn(next);
+          commit(low, high, next, highIn);
+        }}
+      >
+        <option value="inclusive">&ge;</option>
+        <option value="exclusive">&gt;</option>
+      </select>
+      {boundInput("low", low, setLow)}
+      <select
+        data-testid={`band-high-op-${measure}`}
+        aria-label={`high bound inclusivity of ${measure}'s band`}
+        style={{ ...smallInput, width: 44 }}
+        disabled={disabled}
+        value={highIn ? "inclusive" : "exclusive"}
+        onChange={(e) => {
+          const next = e.target.value === "inclusive";
+          setHighIn(next);
+          commit(low, high, lowIn, next);
+        }}
+      >
+        <option value="inclusive">&le;</option>
+        <option value="exclusive">&lt;</option>
+      </select>
+      {boundInput("high", high, setHigh)}
+    </div>
+  );
+}
+
+/**
+ * The sentence under a band that is only half stated.
+ *
+ * It mirrors the Rust validator rather than adding a rule of its own: the
+ * backend REFUSES a `targetBand` direction with no band, so this says at the
+ * keystroke what Save would otherwise say a minute later. Saying it here does
+ * not make it true — the validator does — which is why the wording points at
+ * the refusal rather than pretending to be one.
+ */
+function BandIncomplete({ measure }: { measure: string }): React.ReactElement {
+  return (
+    <div
+      data-testid={`band-incomplete-${measure}`}
+      style={{ fontSize: 11, color: "#a4262c", marginTop: 2, whiteSpace: "normal", maxWidth: 200 }}
+    >
+      A band direction needs both bounds. Until it has them this measure has no favourability and
+      no variance, and the strategy is refused on Save.
+    </div>
+  );
+}
+
 /** Chips of `Table[Column]` refs with an add-from-the-model picker. */
 function ColumnRefList({
   refs,
@@ -1025,28 +1237,112 @@ function RowFindings({ findings }: { findings: Finding[] }): React.ReactElement 
 }
 
 /**
- * The row's state, with the Confirm action beside it.
+ * What a row says today beside what inference would propose now, and the one
+ * action that resolves it.
+ *
+ * BOTH VALUES, ALWAYS. "This is out of date" is not something a person can act
+ * on; "you confirmed lowerIsBetter, inference now proposes higherIsBetter" is.
+ * The verb follows the row's state, because "you confirmed" about a row nobody
+ * ever confirmed is a small lie that costs the whole notice its credibility.
+ *
+ * There is no auto-apply and no dismiss: applying would overwrite a human
+ * decision silently, and dismissing would store a "I have seen this" flag that
+ * goes stale the next time the model changes. The divergence simply stops being
+ * true once either side is changed.
+ */
+function DivergenceNote({
+  id,
+  label,
+  state,
+  divergences,
+  disabled,
+  onTake,
+}: {
+  /** The row's own name, for the test ids. Separate from `label` because the
+   *  model block's label is a phrase and a test id is not. */
+  id: string;
+  label: string;
+  state: EntryState;
+  divergences: Divergence[];
+  disabled: boolean;
+  onTake: () => void;
+}): React.ReactElement | null {
+  if (divergences.length === 0) return null;
+  const verb = state === "confirmed" ? "You confirmed" : "You set";
+  return (
+    <div
+      data-testid={`divergence-${id}`}
+      style={{ fontSize: 11, color: "#7a5b00", marginTop: 3, whiteSpace: "normal", maxWidth: 260 }}
+    >
+      {divergences.map((d) => (
+        <div key={d.field}>
+          {/* An entry that says NOTHING about a field is the commonest half of
+              this pair — a column was added, and the confirmed row predates it.
+              "(nothing)" is the honest word for that; an empty string reads as
+              a rendering bug. */}
+          {`${verb} ${d.field} ${d.yours === "" ? "(nothing)" : `'${d.yours}'`}; inference now proposes '${d.inference}'.`}
+        </div>
+      ))}
+      <button
+        data-testid={`take-inference-${id}`}
+        style={{ ...styles.smallBtn, marginTop: 2 }}
+        disabled={disabled}
+        title={`Replace ${label}'s diverging values with what inference proposes today. The row goes back to being a proposal — nobody has confirmed the new values yet.`}
+        onClick={onTake}
+      >
+        Use inference
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The row's state, with the Confirm action beside it — and the way back.
  *
  * An `empty` row keeps the button but DISABLES it: confirming a row that says
  * nothing agrees to nothing, and a live Confirm over four "—" cells is how a
  * person learns to confirm without reading. The title says why rather than
  * leaving a dead control unexplained.
+ *
+ * A CONFIRMED row's badge IS the un-confirm control. Confirm is the claim that
+ * a human vouched for a value and `Confirm all` can make it across a whole grid
+ * in one click, so leaving no way back pairs an irreversible assertion with a
+ * gesture a mis-click can perform. Putting it on the badge rather than only in
+ * a bulk action means the way back is where the claim is.
  */
 function ReviewedCell({
+  id,
   state,
   onConfirm,
+  onUnconfirm,
   disabled,
   label,
 }: {
+  /** The row's own name, for the test ids — see `DivergenceNote`. */
+  id: string;
   state: EntryState;
   onConfirm: () => void;
+  onUnconfirm: () => void;
   disabled: boolean;
   label: string;
 }): React.ReactElement {
   if (state === "confirmed") {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <Badge tone="ok">confirmed</Badge>
+        <button
+          data-testid={`unconfirm-${id}`}
+          style={{
+            background: "none",
+            border: "none",
+            padding: 0,
+            cursor: disabled ? "default" : "pointer",
+          }}
+          disabled={disabled}
+          title={`Un-confirm ${label} — it goes back to whatever it was before a human agreed to it. The values are not changed.`}
+          onClick={onUnconfirm}
+        >
+          <Badge tone="ok">confirmed &times;</Badge>
+        </button>
       </div>
     );
   }
@@ -1179,26 +1475,39 @@ function NotYetConsulted({ field }: { field: keyof ModelStrategy }): React.React
  *
  * NOTHING HERE SHOWS AN INHERITED VALUE the way a measure cell does, and that
  * is a limit rather than an oversight: `strategyPreview` resolves MEASURES, so
- * there is no model-level resolved answer to read. The only other source would
- * be a second call to the drafting op purely to display its guess — a second
- * inference in the loop, which is the thing property (3) and the deleted
- * frontend inferrer both exist to prevent. The empty option therefore says that
- * inference decides, without pretending to know what it will decide.
+ * there is no model-level resolved answer to read. The empty option therefore
+ * says that inference decides, without pretending to know what it will decide.
+ *
+ * IT DOES CARRY PROVENANCE (property (15)). `defaultTimeAxis` shows a value
+ * guessed from a calendar that was itself guessed; the insights output already
+ * announces that guess, and until now the one place a person could actually
+ * ACCEPT it said nothing. The badge, Confirm, un-confirm and the divergence
+ * notice are the same four things a row has, at panel granularity — there is no
+ * per-field row here to confirm, and four badges over four boxes would say less
+ * than one.
  */
 function ModelPanel({
   doc,
   overview,
   findings,
+  inferredModel,
   disabled,
   onEdit,
 }: {
   doc: StrategyDoc;
   overview: ModelOverview;
   findings: Finding[];
+  /** What inference proposes for the model block TODAY, or undefined when no
+   *  draft could be built. Diffed live against the stored block. */
+  inferredModel: ModelStrategy | undefined;
   disabled: boolean;
   onEdit: (doc: StrategyDoc) => void;
 }): React.ReactElement {
-  const model = doc.model ?? {};
+  const model = modelEntry(doc);
+  const state = entryState(model, modelHasValues(model));
+  const divergences = stateIsHumanDecision(state)
+    ? modelDivergences(model, inferredModel)
+    : [];
   const groups = useMemo(() => timeAxisGroups(overview), [overview]);
   const axis = model.defaultTimeAxis ?? "";
   // An axis the model no longer has must stay SELECTED and say so. A <select>
@@ -1209,11 +1518,34 @@ function ModelPanel({
   const priority = model.priority ?? [];
 
   return (
-    <section data-testid="model-panel">
+    <section data-testid="model-panel" data-strategy-state={state}>
       <div style={styles.sectionHeader}>
         <span style={{ ...styles.sectionTitle, fontSize: 13 }}>Model</span>
         <RowFindings findings={findingsAtPath(findings, "model")} />
+        {/* The whole panel is one entry, so it confirms as one. The label is
+            "the model block" rather than a name, because the sentence a
+            disabled Confirm has to say ("the strategy says nothing about …
+            yet") needs a subject a person recognises. */}
+        <ReviewedCell
+          id="model"
+          state={state}
+          disabled={disabled}
+          label="the model block"
+          onConfirm={() => onEdit(withModel(doc, { reviewed: true }))}
+          onUnconfirm={() => onEdit(withModel(doc, { reviewed: false }))}
+        />
       </div>
+      <DivergenceNote
+        id="model"
+        label="the model block"
+        state={state}
+        divergences={divergences}
+        disabled={disabled}
+        onTake={() => {
+          if (inferredModel === undefined) return;
+          onEdit(withModel(doc, inferenceTakePatch(inferredModel, divergences)));
+        }}
+      />
       <div
         style={{
           ...styles.card,
@@ -1366,6 +1698,19 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
    *  arrives, and empty forever if it never does — inheritance is an extra the
    *  grid can do without, never a precondition for editing. */
   const [preview, setPreview] = useState<Map<string, StrategyPreviewMeasure>>(() => new Map());
+  /**
+   * What inference proposes for THIS model right now — the other half of the
+   * divergence check (property (14)).
+   *
+   * It is fetched on every load, including when a stored document exists, which
+   * is the one call the tab did not use to make. Inference is model-only (no
+   * engine lock, no query), and the alternative — a hash of the values stored
+   * at the moment of confirmation — would need maintaining on every edit, would
+   * go stale in its own way, and would say nothing at all about a document
+   * written before it existed. `null` means no draft could be built, and then
+   * no row claims a divergence.
+   */
+  const [inferred, setInferred] = useState<StrategyDoc | null>(null);
 
   // A slow load for a connection the user has already left must not install
   // its document over the newer one.
@@ -1383,37 +1728,47 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
     // Another model's inheritance is worse than none: it would name a KPI this
     // model does not have.
     setPreview(new Map());
+    setInferred(null);
 
     void (async (): Promise<void> => {
+      // ONE inference per load, started beside the read rather than after it.
+      // It has two consumers — the draft a model with no stored strategy opens
+      // on, and the live divergence check every stored row is diffed against —
+      // and asking twice would be two answers to one question as well as two
+      // round trips. A draft that cannot be built is not an error: the tab
+      // simply has no draft and no divergences.
+      const drafting = strategyInfer(connectionId).then(
+        (d) => d,
+        () => null,
+      );
       let next: StrategyDoc = emptyStrategyDoc();
       let note: string | null = null;
+      let draft: StrategyDoc | null = null;
       try {
         const stored = await strategyGet(connectionId);
         if (loadSeq.current !== seq) return;
+        draft = await drafting;
+        if (loadSeq.current !== seq) return;
         if (stored) {
           // A stored document is the authority. It is never auto-inferred over
-          // and a draft is never merged into it.
+          // and a draft is never merged into it — the draft fetched above is
+          // read ONLY to say where the two disagree.
           unsavedDrafts.delete(connectionId);
           next = stored;
         } else {
           const remembered = unsavedDrafts.get(connectionId);
           if (remembered) {
-            // Coming BACK to the tab. Re-inferring here would discard whatever
-            // the user confirmed before they switched sections.
+            // Coming BACK to the tab. Installing the draft here would discard
+            // whatever the user confirmed before they switched sections.
             next = remembered;
             note = RESUMED_STATUS;
+          } else if (draft) {
+            next = draft;
+            unsavedDrafts.set(connectionId, next);
+            note = DRAFT_STATUS;
           } else {
-            try {
-              next = await strategyInfer(connectionId);
-              if (loadSeq.current !== seq) return;
-              unsavedDrafts.set(connectionId, next);
-              note = DRAFT_STATUS;
-            } catch {
-              // A draft that could not be built is not an error condition — the
-              // tab still works, it just opens empty and says so.
-              next = emptyStrategyDoc();
-              note = NO_DRAFT_STATUS;
-            }
+            next = emptyStrategyDoc();
+            note = NO_DRAFT_STATUS;
           }
         }
       } catch (err: unknown) {
@@ -1423,6 +1778,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
       }
       if (loadSeq.current !== seq) return;
       setDoc(next);
+      setInferred(draft);
       setStatus(note);
       setLoading(false);
     })();
@@ -1489,9 +1845,16 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   /** Every local edit goes through here. Findings are cleared, because a
    *  finding describes the document that produced it and an edited document
    *  has not been judged yet — a stale error would keep Save locked over a
-   *  problem the user just fixed. */
+   *  problem the user just fixed.
+   *
+   *  `note` is for the rare edit that does something to the document BESIDES
+   *  what was asked — today only switching a direction to `targetBand`, which
+   *  clears a target that is not a band. Silent collateral damage is what the
+   *  aggregation cell's data-loss bug was made of, so the one place that does
+   *  it says so out loud. */
   const edit = useCallback(
-    (next: StrategyDoc) => applyDraft(next, { keepFindings: false, status: null }),
+    (next: StrategyDoc, note: string | null = null) =>
+      applyDraft(next, { keepFindings: false, status: note }),
     [applyDraft],
   );
 
@@ -1586,6 +1949,10 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
       const drafted = await strategyInfer(connectionId);
       unsavedDrafts.set(connectionId, drafted);
       setDoc(drafted);
+      // The divergence reference moves with the draft. Leaving the old one
+      // behind would leave rows claiming to disagree with an inference that has
+      // just been overwritten by this very one.
+      setInferred(drafted);
       setFindings([]);
       setStatus("Inferred a fresh draft — nothing is written until you press Save.");
     } catch (err: unknown) {
@@ -1675,6 +2042,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           doc={doc}
           overview={overview}
           findings={findings}
+          inferredModel={inferred?.model}
           disabled={disabled}
           onEdit={edit}
         />
@@ -1683,6 +2051,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           overview={overview}
           findings={findings}
           preview={preview}
+          inferred={inferred}
           selectedPath={selectedPath}
           columnRefs={columnRefs}
           disabled={disabled}
@@ -1693,6 +2062,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           doc={doc}
           overview={overview}
           findings={findings}
+          inferred={inferred}
           selectedPath={selectedPath}
           disabled={disabled}
           onEdit={edit}
@@ -1713,6 +2083,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
       {editing && (
         <RuleModal
           overview={overview}
+          doc={doc}
           original={editing.original}
           onClose={() => setEditing(null)}
           onSave={(rule) => {
@@ -1748,7 +2119,11 @@ const MEASURE_HEADERS = [
  *  Constants because the placeholder is no longer always the hint: an empty
  *  cell shows what it INHERITS instead, and the format then has to reach the
  *  tooltip. Two spellings of one grammar drift. */
-const TARGET_HINT = "1000 | kpi | measure:Budget | band:0.8,1.2";
+// The bracket spelling is in the hint because it is the only place the
+// exclusive form is discoverable from a text field: the measures grid gives a
+// band direction its own two-bound control, but a band on any OTHER direction,
+// and every band in a rule, is still typed.
+const TARGET_HINT = "1000 | kpi | measure:Budget | band:0.8,1.2 | band:[0.8,1.2)";
 const MATERIALITY_HINT = "1000 | 2%";
 
 const NEVER_SLICE_TITLE =
@@ -1762,6 +2137,7 @@ function MeasuresGrid({
   overview,
   findings,
   preview,
+  inferred,
   selectedPath,
   columnRefs,
   disabled,
@@ -1772,10 +2148,15 @@ function MeasuresGrid({
   overview: ModelOverview;
   findings: Finding[];
   preview: Map<string, StrategyPreviewMeasure>;
+  /** Today's inference draft, for the live divergence check. Null when none
+   *  could be built — then no row claims a disagreement. */
+  inferred: StrategyDoc | null;
   selectedPath: string | null;
   columnRefs: string[];
   disabled: boolean;
-  onEdit: (doc: StrategyDoc) => void;
+  /** `note` is shown in the status line when an edit does something besides
+   *  what was asked — see the section's `edit`. */
+  onEdit: (doc: StrategyDoc, note?: string | null) => void;
   onConfirmAll: () => void;
 }): React.ReactElement {
   /** The measure whose aggregation editor is open, or null. */
@@ -1837,6 +2218,22 @@ function MeasuresGrid({
                   formatMaterialitySpec(v),
                 ),
               };
+              // What inference proposes for this measure TODAY, diffed against
+              // what the row says. Only a row a human has a stake in can be
+              // OVERTAKEN: an inferred row that disagrees with today's
+              // inference is a stale draft, not a decision worth interrupting
+              // anyone over.
+              const proposed = inferred?.measures?.[m.name];
+              const divergences = stateIsHumanDecision(state)
+                ? measureDivergences(entry, proposed)
+                : [];
+              // Computed BEFORE the direction changes, because it is the target
+              // that is about to be cleared and its old text is what the
+              // message has to name.
+              const nonBandTarget =
+                entry.target !== undefined && entry.target.type !== "band"
+                  ? formatTargetSpec(entry.target)
+                  : "";
               const ruled = {
                 direction: overridingRule(entry.direction, resolved?.direction),
                 unit: overridingRule(entry.unit, resolved?.unit),
@@ -1864,7 +2261,24 @@ function MeasuresGrid({
                     {selectOf<Direction>(
                       entry.direction ?? "",
                       DIRECTIONS,
-                      (v) => onEdit(withMeasure(doc, m.name, { direction: v === "" ? undefined : v })),
+                      (v) => {
+                        const patch: Partial<MeasureStrategy> = {
+                          direction: v === "" ? undefined : v,
+                        };
+                        // `targetBand` and a literal target are two answers to
+                        // one question. The band goes in the SAME control, so
+                        // choosing this direction takes the other answer away
+                        // rather than leaving the document holding both with
+                        // nothing to say which wins — and says it did.
+                        const clearing = v === "targetBand" && nonBandTarget !== "";
+                        if (clearing) patch.target = undefined;
+                        onEdit(
+                          withMeasure(doc, m.name, patch),
+                          clearing
+                            ? `Cleared ${m.name}'s target '${nonBandTarget}' — a band direction is judged against a low and a high, which you now set in the target cell.`
+                            : null,
+                        );
+                      },
                       disabled,
                       128,
                       inh.direction,
@@ -1899,17 +2313,31 @@ function MeasuresGrid({
                     )}
                   </td>
                   <td style={cellStyle}>
-                    <SpecInput<Target>
-                      value={formatTargetSpec(entry.target)}
-                      placeholder={inh.target ?? TARGET_HINT}
-                      hint={TARGET_HINT}
-                      disabled={disabled}
-                      parse={(t) => {
-                        const r = parseTargetSpec(t);
-                        return r.ok ? { ok: true, value: r.target } : r;
-                      }}
-                      onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
-                    />
+                    {/* ONE control, two modes. A band direction is judged
+                        against bounds, so the target cell becomes the bounds —
+                        it does not grow a second field beside a first one that
+                        would then contradict it. */}
+                    {entry.direction === "targetBand" ? (
+                      <BandTargetCell
+                        measure={m.name}
+                        band={entry.target?.type === "band" ? entry.target : undefined}
+                        disabled={disabled}
+                        onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
+                      />
+                    ) : (
+                      <SpecInput<Target>
+                        value={formatTargetSpec(entry.target)}
+                        placeholder={inh.target ?? TARGET_HINT}
+                        hint={TARGET_HINT}
+                        disabled={disabled}
+                        parse={(t) => {
+                          const r = parseTargetSpec(t);
+                          return r.ok ? { ok: true, value: r.target } : r;
+                        }}
+                        onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
+                      />
+                    )}
+                    {bandDirectionIsIncomplete(entry) && <BandIncomplete measure={m.name} />}
                     {ruled.target !== null && (
                       <RuleOverrideMark measure={m.name} attribute="target" ruleId={ruled.target} />
                     )}
@@ -1990,10 +2418,25 @@ function MeasuresGrid({
                   </td>
                   <td style={cellStyle}>
                     <ReviewedCell
+                      id={m.name}
                       state={state}
                       disabled={disabled}
                       label={m.name}
                       onConfirm={() => onEdit(withMeasure(doc, m.name, { reviewed: true }))}
+                      onUnconfirm={() => onEdit(withMeasure(doc, m.name, { reviewed: false }))}
+                    />
+                    <DivergenceNote
+                      id={m.name}
+                      label={m.name}
+                      state={state}
+                      divergences={divergences}
+                      disabled={disabled}
+                      onTake={() => {
+                        if (proposed === undefined) return;
+                        onEdit(
+                          withMeasure(doc, m.name, inferenceTakePatch(proposed, divergences)),
+                        );
+                      }}
                     />
                   </td>
                 </tr>
@@ -2294,6 +2737,7 @@ function TablesGrid({
   doc,
   overview,
   findings,
+  inferred,
   selectedPath,
   disabled,
   onEdit,
@@ -2301,6 +2745,8 @@ function TablesGrid({
   doc: StrategyDoc;
   overview: ModelOverview;
   findings: Finding[];
+  /** Today's inference draft, for the live divergence check. */
+  inferred: StrategyDoc | null;
   selectedPath: string | null;
   disabled: boolean;
   onEdit: (doc: StrategyDoc) => void;
@@ -2336,6 +2782,10 @@ function TablesGrid({
             {overview.tables.map((t) => {
               const entry = tableEntry(doc, t.name);
               const state = entryState(entry, tableHasValues(entry));
+              const proposed = inferred?.tables?.[t.name];
+              const divergences = stateIsHumanDecision(state)
+                ? tableDivergences(entry, proposed)
+                : [];
               const path = tablePath(t.name);
               const roleOf = (name: string): Role | undefined => entry.columns?.[name]?.role;
               const ordered = orderedColumns(t.columns, roleOf);
@@ -2430,10 +2880,23 @@ function TablesGrid({
                     </td>
                     <td style={cellStyle}>
                       <ReviewedCell
+                        id={t.name}
                         state={state}
                         disabled={disabled}
                         label={t.name}
                         onConfirm={() => onEdit(withTable(doc, t.name, { reviewed: true }))}
+                        onUnconfirm={() => onEdit(withTable(doc, t.name, { reviewed: false }))}
+                      />
+                      <DivergenceNote
+                        id={t.name}
+                        label={t.name}
+                        state={state}
+                        divergences={divergences}
+                        disabled={disabled}
+                        onTake={() => {
+                          if (proposed === undefined) return;
+                          onEdit(withTable(doc, t.name, inferenceTakePatch(proposed, divergences)));
+                        }}
                       />
                     </td>
                   </tr>
@@ -2750,11 +3213,15 @@ function FindingsStrip({
 
 function RuleModal({
   overview,
+  doc,
   original,
   onClose,
   onSave,
 }: {
   overview: ModelOverview;
+  /** The document the rule joins — read only by the band check, which is a
+   *  question about the whole document rather than about this rule. */
+  doc: StrategyDoc;
   original: Rule | null;
   onClose: () => void;
   onSave: (rule: Rule) => void;
@@ -2773,7 +3240,7 @@ function RuleModal({
     }));
 
   const save = (): void => {
-    const built = buildRuleFromDraft(overview, draft);
+    const built = buildRuleFromDraft(overview, draft, doc);
     if (!built.ok) {
       setError(built.error);
       return;
@@ -2941,7 +3408,19 @@ function RuleModal({
       </div>
 
       <div style={{ display: "flex", gap: 8 }}>
-        <Field label="Target" hint="1000 | kpi | measure:Budget | band:0.8,1.2" flex={1}>
+        <Field
+          label="Target"
+          hint={
+            draft.direction === "targetBand"
+              ? // A rule that scopes a band direction must scope the band with
+                // it, or it takes the measure's favourability away in that
+                // scope and puts nothing back. `buildRuleFromDraft` refuses the
+                // rule; this says so before OK is pressed.
+                "A band is required by this direction: band:0.8,1.2 (or band:[0.8,1.2) for an exclusive high bound)"
+              : TARGET_HINT
+          }
+          flex={1}
+        >
           <input
             style={styles.input}
             value={draft.target}

@@ -968,6 +968,50 @@ STILL OPEN, and each needs a decision rather than work:
   an unknown name filters nothing, which is right for hiding fields and wrong for judging
   favourability.
 
+**2.AI.7 — What the fourth Strategy review closed, and the three things it exposed.** The review
+raised four items — a `targetBand` direction settable with no band, irreversible confirmation, the
+label score used as a classifier, and a Model panel with no provenance. All four are fixed
+(2026-09-08). What is worth recording is what the *general rule* it asked for turned up.
+
+The rule adopted: **any enum value that requires a companion field must be either unsettable
+without it or invalid with it, never quietly accepted.** A sweep of every enum-valued field in the
+strategy document found nine cases genuinely accepted in silence; eight are now errors
+(`target-band-without-band` at both the measure entry AND a rule's `set.direction`, `empty-band`,
+`unresolvable-target-kpi`, `unknown-fact-kind`, `semi-additive-without-dimension`,
+`test-needs-value`, `test-needs-baseline`, plus `unknown-measure` unified across its two sites).
+Three findings outlive it:
+
+* **Four strategy attributes are authored, inferred, validated, resolved — and READ BY NOTHING.**
+  Verified 2026-09-08 by grepping the consumers, not the writers: `ResolvedMeasure.unit`,
+  `ResolvedMeasure.cadence` (`strategy/resolve.rs:660,719`), `model.fiscal_year_start` and
+  `model.reporting_currency` (`strategy/types.rs:611,613`) have no reader in `insights/model.rs`,
+  `model_commands.rs` or `report.rs`. `TableStrategy.kind` is write-only the same way. The tab
+  labels the last two "not yet consulted"; `unit` and `cadence` present as ordinary settable
+  attributes and are not labelled at all. This is the same inert-control defect the C1 round fixed
+  for two fields and left standing for three. **Wire them or delete them — do not leave them as
+  surface.** `cadence` is the one with a designed consumer already written down (period bucketing
+  and seasonality lag selection, plan §6.4/§6.5) and never built.
+* **A band target still emits no `Variance` fact.** `Observation.target_value` is `Option<f64>`
+  (`insights/model.rs:196`) and `model_commands.rs:414-424` maps `Target::Band` to `None` — a band
+  is two numbers and does not fit. The band is no longer inert: `favourability_at`
+  (`insights/model.rs:575`) now decides a Change fact's favourability from where the value LANDED,
+  using each bound's inclusivity, at both fact sites (`model.rs:1434,1481`). But the variance ROW a
+  band deserves ("inside 90k–140k" / "above it by 12k") needs a band-shaped fact in `core/insights`
+  plus narration, which is a feature, not a fix. **Per-side band severity is blocked behind this**
+  and was deliberately not added, because a severity that reorders nothing is another inert field.
+* **`ScopeValue::DateRange` on a non-date column is mitigated, not closed.** `resolve.rs:456-459`
+  compares bounds to members as raw strings, so a date-range rule silently matches text members and
+  overrides facts it does not describe. The new `date-range-on-non-date-column` check reads the
+  column's declared MEMBERS, and `facts_from_model` deliberately leaves `TableFacts::members` empty
+  (members are data, not schema — populating them means a grouped query per column on every
+  validation), so in production the check is dormant. Closing it needs column TYPES in `ModelFacts`.
+
+The label-score fix has a stated price, asserted rather than hidden: a denormalised `Category Name`
+on a product dimension reads as name-like and is demoted to `label`, so its breakdown is not
+offered (`a_denormalised_name_that_really_is_an_axis_is_demoted_too_and_the_harness_says_so`,
+`strategy/calibration_tests.rs`). The trade is a withheld breakdown against a meaningless one, paid
+in a dropdown, on a row that ships `reviewed: false`.
+
 **2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) waits for the
 release decision; the fetch script makes bundle-vs-download a build-time switch. M4 (intent router)
 and M6 (Tier-1 narration, Swedish, grammars) keep their designs and their seams — `factsJson`

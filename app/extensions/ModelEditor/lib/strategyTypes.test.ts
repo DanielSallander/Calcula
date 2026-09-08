@@ -12,6 +12,14 @@
 //          COMPILE error until it is added, then a test failure until it is
 //          listed, then a test failure until the predicate considers it.
 //
+//          (0) AN EDIT REVOKES THE CONFIRMATION IT EDITS. `withMeasure` used
+//          to re-stamp `source: "authored"` and leave `reviewed: true`
+//          standing, so a confirmed row went on asserting a value no human had
+//          ever seen — and `reviewed` is read by the decomposition engine. The
+//          suite pins both directions: an edit drops it, and a patch that
+//          touches nothing but `reviewed`/`source` (Confirm, un-confirm) still
+//          re-authors nothing, so the round trip lands exactly where it began.
+//
 //          (2) `withAggregationDefault` exists because the editor used to
 //          write `{ default: v }` over the whole spec, and `withMeasure`
 //          merges shallowly — so choosing a default DELETED the per-dimension
@@ -23,29 +31,43 @@ import { describe, expect, it } from "vitest";
 import type { ModelOverview, ModelRelationshipInfo, ModelTableInfo } from "@api";
 import {
   MEASURE_VALUE_FIELDS,
+  MODEL_VALUE_FIELDS,
   ROLE_DISPLAY_ORDER,
   TABLE_VALUE_FIELDS,
   aggregationDimensionOptions,
+  bandDirectionIsIncomplete,
   compareColumnsByRole,
   compareRoles,
   entryState,
   formatAggregationSpec,
+  formatTargetSpec,
+  inferenceTakePatch,
+  measureDivergences,
   measureEntry,
   measureHasValues,
+  modelDivergences,
+  modelEntry,
+  modelHasValues,
+  parseTargetSpec,
+  stateIsHumanDecision,
+  tableDivergences,
   tableEntry,
   tableHasValues,
   withAggregationDefault,
   withAggregationException,
   withColumn,
   withMeasure,
+  withModel,
   withTable,
 } from "./strategyTypes";
 import type {
   AggregationSpec,
   MeasureStrategy,
+  ModelStrategy,
   Role,
   StrategyDoc,
   TableStrategy,
+  Target,
 } from "./strategyTypes";
 
 // ---------------------------------------------------------------------------
@@ -70,6 +92,17 @@ const FULL_MEASURE: Required<MeasureStrategy> = {
   analysisDimensions: ["Dim[Dept]"],
   neverSliceBy: ["Sales[Id]"],
   context: "the board reads this one first",
+  reviewed: false,
+  source: "authored",
+};
+
+/** The model block with every value field populated. Same teeth as
+ *  `FULL_MEASURE`: a field added to `ModelStrategy` stops this compiling. */
+const FULL_MODEL: Required<ModelStrategy> = {
+  defaultTimeAxis: "Date[Day]",
+  fiscalYearStart: "04-01",
+  reportingCurrency: "SEK",
+  priority: ["Revenue"],
   reviewed: false,
   source: "authored",
 };
@@ -242,6 +275,36 @@ describe("tableHasValues", () => {
   });
 });
 
+describe("modelHasValues", () => {
+  it("lists every value field of the type, and nothing that is only metadata", () => {
+    expect([...MODEL_VALUE_FIELDS].sort()).toEqual(
+      Object.keys(FULL_MODEL)
+        .filter((k) => k !== "reviewed" && k !== "source")
+        .sort(),
+    );
+  });
+
+  for (const field of MODEL_VALUE_FIELDS) {
+    it(`counts ${field} on its own as something the model block says`, () => {
+      const entry = { reviewed: false, [field]: FULL_MODEL[field] } as ModelStrategy;
+      expect(modelHasValues(entry)).toBe(true);
+    });
+  }
+
+  it("reads a block that states nothing as empty, however it is spelled", () => {
+    expect(modelHasValues({ reviewed: false })).toBe(false);
+    expect(
+      modelHasValues({ reviewed: true, defaultTimeAxis: "", reportingCurrency: "", priority: [] }),
+    ).toBe(false);
+  });
+
+  it("hands back an unconfirmed blank for a document with no model block", () => {
+    const entry = modelEntry({ version: 1 });
+    expect(entry).toEqual({ reviewed: false });
+    expect(entryState(entry, modelHasValues(entry))).toBe("empty");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The badge ladder
 // ---------------------------------------------------------------------------
@@ -322,6 +385,239 @@ describe("withMeasure / withTable / withColumn stamp who wrote the values", () =
   it("lets an explicit source in the patch win, so a restored draft stays a draft", () => {
     const next = withMeasure(inferredDoc, "Revenue", { unit: "count", source: "inferred" });
     expect(next.measures?.Revenue?.source).toBe("inferred");
+  });
+
+  it("stamps the model block the same way, and leaves it alone for a bare confirm", () => {
+    const doc: StrategyDoc = { version: 1, model: { defaultTimeAxis: "Date[Day]", reviewed: false } };
+    expect(withModel(doc, { reportingCurrency: "SEK" }).model?.source).toBe("authored");
+    expect(withModel(doc, { reviewed: true }).model?.source).toBeUndefined();
+    expect(withModel(doc, { reviewed: true }).model?.reviewed).toBe(true);
+    // A block the document never had is created rather than merged into
+    // nothing — `modelEntry` is what makes the missing case a blank.
+    expect(withModel({ version: 1 }, { reportingCurrency: "SEK" }).model).toEqual({
+      reviewed: false,
+      source: "authored",
+      reportingCurrency: "SEK",
+    });
+  });
+});
+
+describe("an edit revokes the confirmation it edits", () => {
+  const confirmedDoc: StrategyDoc = {
+    version: 1,
+    measures: { Revenue: { direction: "higherIsBetter", reviewed: true, source: "inferred" } },
+    tables: { Dim: { kind: "dimension", reviewed: true } },
+    model: { defaultTimeAxis: "Date[Day]", reviewed: true },
+  };
+
+  it("drops reviewed when a value changes, because reviewed is about VALUES", () => {
+    // THE DEFECT. The edit re-stamped `source: "authored"` and left
+    // `reviewed: true` standing, so a confirmed row went on asserting a value
+    // no human had ever seen — the same class as a `{reviewed: true}` entry
+    // with no reader, one step further along, because this flag IS read.
+    const next = withMeasure(confirmedDoc, "Revenue", { unit: "currency" });
+    expect(next.measures?.Revenue?.reviewed).toBe(false);
+    expect(next.measures?.Revenue?.source).toBe("authored");
+  });
+
+  it("drops it on a table, on a column edit, and on the model block", () => {
+    expect(withTable(confirmedDoc, "Dim", { labelColumn: "Dept" }).tables?.Dim?.reviewed).toBe(
+      false,
+    );
+    // The column map is part of what the table entry says.
+    expect(
+      withColumn(confirmedDoc, "Dim", "Dept", { role: "analysis" }).tables?.Dim?.reviewed,
+    ).toBe(false);
+    expect(withModel(confirmedDoc, { reportingCurrency: "SEK" }).model?.reviewed).toBe(false);
+  });
+
+  it("leaves it alone when the patch touches nothing but reviewed or source", () => {
+    // Un-confirm is the other direction of the same act, and neither direction
+    // may re-author: the round trip must land exactly where it started.
+    const off = withMeasure(confirmedDoc, "Revenue", { reviewed: false });
+    expect(off.measures?.Revenue?.source).toBe("inferred");
+    const on = withMeasure(off, "Revenue", { reviewed: true });
+    expect(on.measures?.Revenue).toEqual(confirmedDoc.measures?.Revenue);
+  });
+
+  it("lets one act say both things, which is how the CLI confirms what it wrote", () => {
+    // `set measure [X] unit=currency reviewed=true` is a person writing a value
+    // AND vouching for it in one command; the explicit flag wins over the
+    // stamp, or the CLI could never confirm anything it had just set.
+    const next = withMeasure(confirmedDoc, "Revenue", { unit: "currency", reviewed: true });
+    expect(next.measures?.Revenue?.reviewed).toBe(true);
+    expect(next.measures?.Revenue?.source).toBe("authored");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bands
+// ---------------------------------------------------------------------------
+
+describe("a band target", () => {
+  it("round-trips the ordinary both-inclusive band unchanged", () => {
+    const parsed = parseTargetSpec("band:0.8,1.2");
+    // NO inclusivity keys: absent means inclusive, so an existing document
+    // neither changes shape nor re-reads differently for having been opened.
+    expect(parsed.ok === true && parsed.target).toEqual({ type: "band", low: 0.8, high: 1.2 });
+    expect(formatTargetSpec({ type: "band", low: 0.8, high: 1.2 })).toBe("band:0.8,1.2");
+  });
+
+  it("reads and writes an exclusive bound as an interval bracket", () => {
+    const parsed = parseTargetSpec("band:[0.8,1.2)");
+    expect(parsed.ok === true && parsed.target).toEqual({
+      type: "band",
+      low: 0.8,
+      high: 1.2,
+      highInclusive: false,
+    });
+    expect(formatTargetSpec(parsed.ok === true ? parsed.target : undefined)).toBe("band:[0.8,1.2)");
+    expect(
+      formatTargetSpec({ type: "band", low: 0, high: 1, lowInclusive: false, highInclusive: false }),
+    ).toBe("band:(0,1)");
+  });
+
+  it("refuses an interval it cannot read rather than guessing at the bounds", () => {
+    const open = parseTargetSpec("band:[0.8,1.2");
+    expect(open.ok).toBe(false);
+    expect(open.ok === false && open.error).toContain("never closes it");
+    expect(parseTargetSpec("band:[a,b]").ok).toBe(false);
+  });
+
+  it("knows a band DIRECTION that has no band to judge against", () => {
+    // `targetBand` is the one direction that needs a second value to mean
+    // anything: with no band every favourability comes back None and the
+    // Variance fact is never emitted, silently.
+    expect(bandDirectionIsIncomplete({ direction: "targetBand" })).toBe(true);
+    expect(
+      bandDirectionIsIncomplete({ direction: "targetBand", target: { type: "literal", value: 1 } }),
+    ).toBe(true);
+    expect(
+      bandDirectionIsIncomplete({ direction: "targetBand", target: { type: "kpi" } }),
+    ).toBe(true);
+    const band: Target = { type: "band", low: 0.8, high: 1.2 };
+    expect(bandDirectionIsIncomplete({ direction: "targetBand", target: band })).toBe(false);
+    // Any other direction is complete on its own — a band is not required, and
+    // a band left over from a previous direction is not an error either.
+    expect(bandDirectionIsIncomplete({ direction: "higherIsBetter" })).toBe(false);
+    expect(bandDirectionIsIncomplete({ direction: "higherIsBetter", target: band })).toBe(false);
+    expect(bandDirectionIsIncomplete({})).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Divergence
+// ---------------------------------------------------------------------------
+
+describe("divergence between a stored decision and today's inference", () => {
+  const confirmed: MeasureStrategy = {
+    direction: "lowerIsBetter",
+    unit: "count",
+    reviewed: true,
+  };
+
+  it("reports the field, what the entry says, and what inference proposes", () => {
+    const diverged = measureDivergences(confirmed, {
+      direction: "higherIsBetter",
+      unit: "count",
+      reviewed: false,
+    });
+    // `unit` agrees, so it is not mentioned: a notice that lists everything is
+    // one nobody reads.
+    expect(diverged).toEqual([
+      { field: "direction", yours: "lowerIsBetter", inference: "higherIsBetter" },
+    ]);
+  });
+
+  it("counts a field the entry is SILENT about, which is what a new column looks like", () => {
+    const diverged = measureDivergences(confirmed, {
+      target: { type: "literal", value: 100 },
+      reviewed: false,
+    });
+    expect(diverged).toEqual([{ field: "target", yours: "", inference: "100" }]);
+  });
+
+  it("does NOT count a field inference is silent about — no opinion is not a disagreement", () => {
+    expect(measureDivergences(confirmed, { reviewed: false })).toEqual([]);
+    // Nor the absent draft: a tab that could not infer shows no divergences at
+    // all rather than claiming everything has changed.
+    expect(measureDivergences(confirmed, undefined)).toEqual([]);
+  });
+
+  it("compares structured values by content, not by key order", () => {
+    const entry: MeasureStrategy = {
+      reviewed: true,
+      aggregation: { default: "additive", byDimension: { Date: "lastValue" } },
+    };
+    expect(
+      measureDivergences(entry, {
+        reviewed: false,
+        aggregation: { byDimension: { Date: "lastValue" }, default: "additive" },
+      }),
+    ).toEqual([]);
+    const changed = measureDivergences(entry, {
+      reviewed: false,
+      aggregation: { default: "additive", byDimension: { Date: "firstValue" } },
+    });
+    expect(changed).toHaveLength(1);
+    // The exception is IN the text, because "aggregation changed" with two
+    // identical-looking defaults beside it says nothing at all.
+    expect(changed[0].yours).toContain("Date: last value");
+    expect(changed[0].inference).toContain("Date: first value");
+  });
+
+  it("reads a table entry and the model block the same way", () => {
+    expect(
+      tableDivergences({ kind: "fact", reviewed: true }, { kind: "dimension", reviewed: false }),
+    ).toEqual([{ field: "kind", yours: "fact", inference: "dimension" }]);
+    expect(
+      modelDivergences(
+        { defaultTimeAxis: "Sales[Date]", reviewed: true },
+        { defaultTimeAxis: "Calendar[Day]", reviewed: false },
+      ),
+    ).toEqual([
+      { field: "defaultTimeAxis", yours: "Sales[Date]", inference: "Calendar[Day]" },
+    ]);
+  });
+
+  it("marks only the rows a human has a stake in", () => {
+    // An inferred row that disagrees with today's inference is a stale draft;
+    // an empty one has nothing to disagree with. Neither is a decision anybody
+    // needs interrupting over.
+    expect(stateIsHumanDecision("confirmed")).toBe(true);
+    expect(stateIsHumanDecision("authored")).toBe(true);
+    expect(stateIsHumanDecision("inferred")).toBe(false);
+    expect(stateIsHumanDecision("empty")).toBe(false);
+  });
+
+  it("takes ONLY the diverging fields, and hands the row back as a proposal", () => {
+    const proposed: MeasureStrategy = {
+      direction: "higherIsBetter",
+      unit: "count",
+      cadence: "monthly",
+      reviewed: false,
+      source: "inferred",
+    };
+    const diverged = measureDivergences(confirmed, proposed);
+    const patch = inferenceTakePatch(proposed, diverged);
+    // `unit` AGREED, so it is not in the patch at all — taking inference's
+    // answer to the disagreements is not the same as overwriting the row with
+    // the whole draft. `cadence` is in it because the entry says nothing there
+    // and inference does, which is what a newly added column looks like.
+    expect(patch).toEqual({
+      direction: "higherIsBetter",
+      cadence: "monthly",
+      source: "inferred",
+      reviewed: false,
+    });
+    const applied = withMeasure(
+      { version: 1, measures: { Revenue: confirmed } },
+      "Revenue",
+      patch,
+    );
+    // The values are the machine's, so the badge must say so — and nobody has
+    // vouched for the new values yet.
+    expect(entryState(applied.measures?.Revenue ?? { reviewed: false }, true)).toBe("inferred");
   });
 });
 

@@ -53,6 +53,30 @@
 //          control explaining itself, which a `.disabled === true` assertion
 //          alone would never have noticed was missing.
 //
+//          THE BAND TESTS ASSERT THE CONTROL, NOT A SECOND FIELD. Choosing
+//          `targetBand` must switch the EXISTING target control into two
+//          bounds: a document holding `direction: targetBand` beside
+//          `target: 1000` has two answers and nothing saying which wins, so a
+//          test that merely found two new inputs would pass against exactly the
+//          shape the design refuses. The assertions are therefore that the
+//          plain target field is GONE while the bounds are present, that a
+//          half-filled band writes nothing, and that the value the switch took
+//          away is named on screen.
+//
+//          THE INFER CALL COUNT IS NO LONGER THE GUARD. Inference now runs on
+//          every load, because its draft is what a stored row is diffed against
+//          to find a confirmation inference has overtaken. So "did the tab
+//          re-infer?" is the wrong question and the tests ask the right one:
+//          was the draft INSTALLED over the stored document or over the user's
+//          unsaved one? A count assertion would have gone red for a change that
+//          costs one model-only call and installs nothing.
+//
+//          THE DIVERGENCE TESTS ASSERT BOTH VALUES AND NO AUTO-APPLY. Silently
+//          keeping a stale confirmed value and silently overwriting a human
+//          decision are both unacceptable, so the row has to say what it says
+//          AND what inference now proposes, and the document must still hold
+//          the human's answer until somebody presses the button.
+//
 //          A CONTROL IS CHANGED THROUGH THE PROTOTYPE SETTER. React patches
 //          `value` on the element instance to track it, so `el.value = x`
 //          updates the tracker too and the change event is then dropped as a
@@ -102,6 +126,8 @@ import {
   emptyRuleDraft,
   forgetUnsavedDrafts,
 } from "../components/sections/StrategySection";
+import type { RuleDraft } from "../components/sections/StrategySection";
+import { emptyStrategyDoc } from "../lib/strategyTypes";
 import type { SectionCtx } from "../components/editorShared";
 import type {
   ResolvedMeasure,
@@ -619,6 +645,361 @@ describe("Confirm all", () => {
 });
 
 // ---------------------------------------------------------------------------
+// A band direction — a statement in two halves
+// ---------------------------------------------------------------------------
+
+describe("choosing a band direction", () => {
+  function bandCell(measure: string): Element | null {
+    return container.querySelector(`[data-testid="band-${measure}"]`);
+  }
+
+  it("switches the TARGET control into two bounds, and back again", async () => {
+    await mount();
+    // Before: the ordinary target field, and no bounds anywhere.
+    expect(bandCell("Profit")).toBeNull();
+    expect(targetInput("Profit").placeholder).toContain("kpi");
+
+    await change(directionSelect("Profit"), "targetBand");
+
+    // The bounds are IN the target control, not beside it: a document holding
+    // `direction: targetBand` next to `target: 1000` has two answers and
+    // nothing saying which one wins.
+    expect(bandCell("Profit")).not.toBeNull();
+    expect(byTestId<HTMLInputElement>("band-low-Profit").tagName).toBe("INPUT");
+    expect(byTestId<HTMLInputElement>("band-high-Profit").tagName).toBe("INPUT");
+
+    await change(directionSelect("Profit"), "higherIsBetter");
+    expect(bandCell("Profit")).toBeNull();
+    expect(targetInput("Profit").placeholder).toContain("kpi");
+  });
+
+  it("writes ONE band target from the two bounds, each with its own inclusivity", async () => {
+    await mount();
+    await change(directionSelect("Profit"), "targetBand");
+    await commitText(byTestId<HTMLInputElement>("band-low-Profit"), "0.8");
+    await commitText(byTestId<HTMLInputElement>("band-high-Profit"), "1.2");
+
+    await click(button("Save"));
+    // An ordinary band writes no inclusivity keys at all — absent means
+    // inclusive, and a document that gains two keys per band just by being
+    // opened is a document nobody can review a diff of.
+    expect(lastSaved().measures?.Profit.target).toEqual({ type: "band", low: 0.8, high: 1.2 });
+
+    await change(byTestId<HTMLSelectElement>("band-high-op-Profit"), "exclusive");
+    await click(button("Save"));
+    expect(lastSaved().measures?.Profit.target).toEqual({
+      type: "band",
+      low: 0.8,
+      high: 1.2,
+      highInclusive: false,
+    });
+  });
+
+  it("writes NOTHING while only one bound is filled, and keeps the one that is", async () => {
+    await mount();
+    await change(directionSelect("Profit"), "targetBand");
+    await commitText(byTestId<HTMLInputElement>("band-low-Profit"), "0.8");
+
+    // A half band cannot be stored — `Target::Band` needs both — so the
+    // incomplete state lives in the UI where it is visible and fixable, never
+    // in the saved document where only the validator could catch it.
+    await click(button("Save"));
+    expect(lastSaved().measures?.Profit.target).toBeUndefined();
+    // ...and the bound the person typed is still on screen. A field that
+    // empties itself as you type reads as a value that was rejected.
+    expect(byTestId<HTMLInputElement>("band-low-Profit").value).toBe("0.8");
+  });
+
+  it("surfaces the validator's refusal on the row, and blocks Save with it", async () => {
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        {
+          severity: "error",
+          code: "target-band-without-band",
+          path: "measures['Profit'].direction",
+          message: "'Profit' is judged against a band but the entry declares none",
+        },
+      ],
+    });
+    await mount();
+    await change(directionSelect("Profit"), "targetBand");
+
+    // The tab says it at the keystroke; the VALIDATOR is what makes it
+    // impossible, and the wording points at that rather than pretending to be
+    // the refusal itself.
+    expect(byTestId("band-incomplete-Profit").textContent).toContain("both bounds");
+
+    await click(button("Validate"));
+    expect(measureRow("Profit").textContent).toContain("error");
+    const save = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").startsWith("Save"),
+    ) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(save.textContent).toContain("fix 1 error");
+  });
+
+  it("clears a target that is not a band, and says which value it took away", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      measures: {
+        Profit: { direction: "higherIsBetter", target: { type: "literal", value: 1000 }, reviewed: false },
+        Returns: { direction: "lowerIsBetter", reviewed: true },
+      },
+    });
+    await mount();
+    await change(directionSelect("Profit"), "targetBand");
+
+    // Silent collateral damage is what the aggregation cell's data-loss bug was
+    // made of. The one edit that touches something it was not asked to touch
+    // names the value it removed.
+    const status = byTestId("strategy-status").textContent ?? "";
+    expect(status).toContain("1000");
+    expect(status).toContain("band");
+
+    await click(button("Save"));
+    expect(lastSaved().measures?.Profit.target).toBeUndefined();
+    expect(lastSaved().measures?.Profit.direction).toBe("targetBand");
+  });
+
+  it("refuses a RULE whose band direction has no band ANYWHERE to land on", async () => {
+    // The Rust rules loop never inspected `set.direction`, so this is the same
+    // silent loss of favourability as on a measure entry, with no finding
+    // anywhere to say so. The modal's target is one text field, so the refusal
+    // is at the point the rule is built.
+    const bandless: RuleDraft = {
+      ...emptyRuleDraft(),
+      id: "r1",
+      measure: "Returns",
+      direction: "targetBand",
+    };
+    const built = buildRuleFromDraft(overview(), bandless, emptyStrategyDoc());
+    expect(built.ok).toBe(false);
+    expect(built.ok === false && built.error).toContain("band:0.8,1.2");
+
+    // SCOPE-BLIND, exactly as the validator is. A band on the measure's own
+    // entry is a band this direction can land on, so a rule that only narrows
+    // the direction is legal — refusing it here would be a stricter rule than
+    // the backend's, which is worse than not checking at all.
+    const withEntryBand = buildRuleFromDraft(overview(), bandless, {
+      version: 1,
+      measures: { Returns: { target: { type: "band", low: 0.8, high: 1.2 }, reviewed: false } },
+    });
+    expect(withEntryBand.ok).toBe(true);
+
+    // ...and a rule carrying its own band is accepted, inclusivity and all.
+    const withBand = buildRuleFromDraft(
+      overview(),
+      { ...bandless, target: "band:[0.8,1.2)" },
+      emptyStrategyDoc(),
+    );
+    expect(withBand.ok).toBe(true);
+    expect(withBand.ok === true && withBand.rule.set.target).toEqual({
+      type: "band",
+      low: 0.8,
+      high: 1.2,
+      highInclusive: false,
+    });
+  });
+
+  it("does not let the version of a rule still in the document vouch for its own edit", async () => {
+    // Editing `r1` to REMOVE its band must be refused, and it would not be if
+    // the check counted the stored copy of the very rule being replaced.
+    const stored: StrategyDoc = {
+      version: 1,
+      measures: { Returns: { reviewed: false } },
+      rules: [
+        {
+          id: "r1",
+          measure: "Returns",
+          set: { direction: "targetBand", target: { type: "band", low: 0.8, high: 1.2 } },
+        },
+      ],
+    };
+    const built = buildRuleFromDraft(
+      overview(),
+      { ...emptyRuleDraft(), id: "r1", measure: "Returns", direction: "targetBand" },
+      stored,
+    );
+    expect(built.ok).toBe(false);
+    // A DIFFERENT rule's band still counts, because it is still there.
+    const other = buildRuleFromDraft(
+      overview(),
+      { ...emptyRuleDraft(), id: "r2", measure: "Returns", direction: "targetBand" },
+      stored,
+    );
+    expect(other.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Un-confirming, and what an edit does to a confirmation
+// ---------------------------------------------------------------------------
+
+describe("un-confirming a row", () => {
+  it("is reachable from the CONFIRMED BADGE, not only from a bulk action", async () => {
+    await mount();
+    const row = measureRow("Returns");
+    expect(row.getAttribute("data-strategy-state")).toBe("confirmed");
+
+    // Confirm is a claim a human vouched for a value, and `Confirm all` can
+    // make it across a whole grid in one click. An irreversible assertion a
+    // mis-click can perform is a bad pair, so the way back is on the claim.
+    await click(byTestId("unconfirm-Returns", row));
+
+    const after = measureRow("Returns");
+    expect(after.getAttribute("data-strategy-state")).toBe("inferred");
+    expect(after.getAttribute("data-unconfirmed")).toBe("true");
+    await click(button("Save"));
+    expect(lastSaved().measures?.Returns.reviewed).toBe(false);
+    // The VALUES are untouched: un-confirming withdraws agreement, it does not
+    // edit anything.
+    expect(lastSaved().measures?.Returns.direction).toBe("lowerIsBetter");
+  });
+
+  it("neither Confirm nor un-confirm re-authors a machine's guess", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      measures: {
+        Profit: { direction: "higherIsBetter", reviewed: false, source: "inferred" },
+        Returns: { reviewed: true },
+      },
+    });
+    await mount();
+    await click(button("Confirm", measureRow("Profit")));
+    await click(byTestId("unconfirm-Profit", measureRow("Profit")));
+
+    // Round trip, back where it started. If Confirm authored, the row would
+    // come back reading "set by you" about values no person ever typed.
+    expect(measureRow("Profit").getAttribute("data-strategy-state")).toBe("inferred");
+    await click(button("Save"));
+    expect(lastSaved().measures?.Profit.source).toBe("inferred");
+    expect(lastSaved().measures?.Profit.reviewed).toBe(false);
+  });
+
+  it("EDITING a confirmed row drops the confirmation and reads 'set by you'", async () => {
+    await mount();
+    expect(measureRow("Returns").getAttribute("data-strategy-state")).toBe("confirmed");
+
+    await change(directionSelect("Returns"), "neutral");
+
+    // The defect: the edit re-stamped `source: "authored"` and left
+    // `reviewed: true` standing, so the row went on claiming a human had
+    // vouched for a value no human had ever seen.
+    const row = measureRow("Returns");
+    expect(row.getAttribute("data-strategy-state")).toBe("authored");
+    expect(row.textContent).toContain("set by you");
+    expect(row.getAttribute("data-unconfirmed")).toBe("true");
+
+    await click(button("Save"));
+    expect(lastSaved().measures?.Returns.reviewed).toBe(false);
+    expect(lastSaved().measures?.Returns.source).toBe("authored");
+  });
+
+  it("drops a TABLE's confirmation when one of its columns is re-roled", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Sales: { kind: "fact", reviewed: true, columns: { Amount: { role: "ignore" } } } },
+    });
+    await mount();
+    const tableRow = (): Element | null =>
+      container.querySelector('tr[data-strategy-path="tables[\'Sales\']"]');
+    expect(tableRow()?.getAttribute("data-strategy-state")).toBe("confirmed");
+
+    // The column map is part of what the table entry SAYS, so a column edit is
+    // an edit to the entry a person confirmed.
+    await click(byTestId("ignored-summary-Sales").querySelector("button") as HTMLButtonElement);
+    await change(
+      columnRow("Sales", "Amount")!.querySelector("select") as HTMLSelectElement,
+      "analysis",
+    );
+    expect(tableRow()?.getAttribute("data-strategy-state")).toBe("authored");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A confirmation overtaken by inference
+// ---------------------------------------------------------------------------
+
+describe("a row inference has overtaken", () => {
+  /** Returns was confirmed as lowerIsBetter; inference now says the opposite. */
+  async function diverging(): Promise<void> {
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      measures: {
+        Returns: { direction: "lowerIsBetter", reviewed: true },
+        Profit: { direction: "higherIsBetter", reviewed: false },
+      },
+    });
+    vi.mocked(strategyInfer).mockResolvedValue({
+      version: 1,
+      measures: {
+        Returns: { direction: "higherIsBetter", unit: "percent", reviewed: false, source: "inferred" },
+        Profit: { direction: "neutral", reviewed: false, source: "inferred" },
+      },
+    });
+    await mount();
+  }
+
+  it("says BOTH answers, and applies neither on its own", async () => {
+    await diverging();
+
+    const note = byTestId("divergence-Returns", measureRow("Returns"));
+    // "This is out of date" is not something a person can act on. Both values,
+    // and the verb that says whose decision is being contradicted.
+    expect(note.textContent).toContain("You confirmed");
+    expect(note.textContent).toContain("lowerIsBetter");
+    expect(note.textContent).toContain("higherIsBetter");
+    // A field the row says NOTHING about is the commonest half of this pair —
+    // a column was added after the row was confirmed.
+    expect(note.textContent).toContain("(nothing)");
+    expect(note.textContent).toContain("percent");
+
+    // NOTHING is auto-applied: the row still says what the person confirmed,
+    // and it is still confirmed.
+    expect(measureRow("Returns").getAttribute("data-strategy-state")).toBe("confirmed");
+    await click(button("Save"));
+    expect(lastSaved().measures?.Returns.direction).toBe("lowerIsBetter");
+  });
+
+  it("takes inference's values when asked, and the row goes back to being a proposal", async () => {
+    await diverging();
+    await click(byTestId("take-inference-Returns", measureRow("Returns")));
+
+    // The values are the machine's again, so the badge says so — and nobody has
+    // vouched for the NEW values, so the confirmation does not carry over.
+    const row = measureRow("Returns");
+    expect(row.getAttribute("data-strategy-state")).toBe("inferred");
+    expect(container.querySelector('[data-testid="divergence-Returns"]')).toBeNull();
+
+    await click(button("Save"));
+    expect(lastSaved().measures?.Returns.direction).toBe("higherIsBetter");
+    expect(lastSaved().measures?.Returns.unit).toBe("percent");
+    expect(lastSaved().measures?.Returns.reviewed).toBe(false);
+    expect(lastSaved().measures?.Returns.source).toBe("inferred");
+  });
+
+  it("says nothing about a row nobody has decided on", async () => {
+    await diverging();
+    // Profit is an unconfirmed guess that disagrees with today's guess. That is
+    // a stale draft, not a decision anybody needs interrupting over.
+    expect(measureRow("Profit").getAttribute("data-strategy-state")).toBe("inferred");
+    expect(container.querySelector('[data-testid="divergence-Profit"]')).toBeNull();
+  });
+
+  it("says nothing at all when no draft could be built", async () => {
+    vi.mocked(strategyInfer).mockRejectedValue(new Error("the model has no measure ASTs"));
+    const ctx = ctxFor();
+    await mount(ctx);
+
+    // Returns is confirmed and there is nothing to compare it against. A tab
+    // that cannot infer simply shows no divergences — it never guesses at one.
+    expect(container.querySelector('[data-testid="divergence-Returns"]')).toBeNull();
+    expect(ctx.reportError).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The model-wide panel
 // ---------------------------------------------------------------------------
 
@@ -777,6 +1158,85 @@ describe("the model panel", () => {
     const panel = byTestId("model-panel");
     expect(panel.textContent).toContain("unknown-column");
     expect(panel.textContent).toContain("is not a column in the model");
+  });
+
+  it("carries the same badge a row does, and Confirm flips it", async () => {
+    // `defaultTimeAxis` is a value guessed from a calendar that was itself
+    // guessed. The insights output announces that guess; until now the one
+    // place a person could ACCEPT it did not.
+    vi.mocked(strategyGet).mockResolvedValue({
+      ...MIXED_DOC,
+      model: { defaultTimeAxis: "Sales[DeptKey]", reviewed: false },
+    });
+    await mount();
+
+    const panel = (): HTMLElement => byTestId("model-panel");
+    expect(panel().getAttribute("data-strategy-state")).toBe("inferred");
+    expect(panel().textContent).toContain("inferred");
+
+    await click(button("Confirm", panel()));
+    expect(panel().getAttribute("data-strategy-state")).toBe("confirmed");
+
+    await click(button("Save"));
+    expect(lastSaved().model?.reviewed).toBe(true);
+    // Confirming agrees with the values; it does not write them. The axis is
+    // untouched and the block still says a machine chose it.
+    expect(lastSaved().model?.defaultTimeAxis).toBe("Sales[DeptKey]");
+    expect(lastSaved().model?.source).toBeUndefined();
+  });
+
+  it("un-confirms from the badge, and an edit drops the confirmation by itself", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      ...MIXED_DOC,
+      model: { defaultTimeAxis: "Sales[DeptKey]", reviewed: true },
+    });
+    await mount();
+    const panel = (): HTMLElement => byTestId("model-panel");
+
+    await click(byTestId("unconfirm-model", panel()));
+    expect(panel().getAttribute("data-strategy-state")).toBe("inferred");
+
+    await click(button("Confirm", panel()));
+    expect(panel().getAttribute("data-strategy-state")).toBe("confirmed");
+
+    // ...and then an actual edit: the block cannot go on claiming a human
+    // vouched for an axis they have not seen.
+    await change(axisSelect(), "Sales[Amount]");
+    expect(panel().getAttribute("data-strategy-state")).toBe("authored");
+    await click(button("Save"));
+    expect(lastSaved().model?.reviewed).toBe(false);
+    expect(lastSaved().model?.source).toBe("authored");
+  });
+
+  it("offers nothing to confirm when the block says nothing", async () => {
+    await mount();
+    // MIXED_DOC carries no model block at all. Confirming four empty boxes
+    // agrees to nothing, exactly as on an empty row.
+    const panel = byTestId("model-panel");
+    expect(panel.getAttribute("data-strategy-state")).toBe("empty");
+    expect(button("Confirm", panel).disabled).toBe(true);
+  });
+
+  it("marks a confirmed axis that inference no longer proposes, and can take the new one", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      ...MIXED_DOC,
+      model: { defaultTimeAxis: "Sales[DeptKey]", reviewed: true },
+    });
+    vi.mocked(strategyInfer).mockResolvedValue({
+      ...INFERRED_DRAFT,
+      model: { defaultTimeAxis: "Dim[DeptKey]", reviewed: false, source: "inferred" },
+    });
+    await mount();
+
+    const note = byTestId("divergence-model", byTestId("model-panel"));
+    expect(note.textContent).toContain("Sales[DeptKey]");
+    expect(note.textContent).toContain("Dim[DeptKey]");
+
+    await click(byTestId("take-inference-model", byTestId("model-panel")));
+    expect(axisSelect().value).toBe("Dim[DeptKey]");
+    await click(button("Save"));
+    expect(lastSaved().model?.defaultTimeAxis).toBe("Dim[DeptKey]");
+    expect(lastSaved().model?.reviewed).toBe(false);
   });
 
   it("keeps an axis the model no longer has selected, and says it is gone", async () => {
@@ -1044,11 +1504,19 @@ describe("an orphan entry", () => {
 // ---------------------------------------------------------------------------
 
 describe("the first view of a model", () => {
-  it("shows a stored strategy as it is, and infers nothing over it", async () => {
+  it("shows a stored strategy as it is, and never installs a draft over it", async () => {
     await mount();
     expect(strategyGet).toHaveBeenCalledTimes(1);
-    expect(strategyInfer).not.toHaveBeenCalled();
+    // Inference IS run for a stored document — its draft is the other half of
+    // the live divergence check, and it is model-only, so it costs a call and
+    // no lock. What must never happen is the draft being INSTALLED: the stored
+    // document is the authority, so Returns is still confirmed and Profit still
+    // says what the document says, not what the draft proposes.
+    expect(strategyInfer).toHaveBeenCalledWith("conn-1");
     expect(measureRow("Returns").getAttribute("data-unconfirmed")).toBe("false");
+    expect(directionSelect("Profit").value).toBe("higherIsBetter");
+    // ...and the tab does not announce a draft, because it is not showing one.
+    expect(container.querySelector('[data-testid="strategy-status"]')).toBeNull();
   });
 
   it("opens a model with no stored strategy on an inferred draft, saving nothing", async () => {
@@ -1075,7 +1543,10 @@ describe("the first view of a model", () => {
     });
     await mount(ctx);
 
-    expect(strategyInfer).toHaveBeenCalledTimes(1);
+    // The teeth are the CONFIRMATION, not the call count: inference runs on
+    // every load now (it is what divergence is measured against), so the thing
+    // that must not happen is the second draft being INSTALLED over the one the
+    // user has been working on.
     expect(measureRow("Profit").getAttribute("data-unconfirmed")).toBe("false");
     expect(byTestId("strategy-status").textContent).toContain("unsaved draft");
   });
@@ -1424,24 +1895,36 @@ describe("the rule scope editor", () => {
     // The guard is duplicated behind the picker on purpose: a typed name is a
     // rule that silently NEVER FIRES, which is indistinguishable from a rule
     // nobody needed.
-    const built = buildRuleFromDraft(overview(), {
-      ...emptyRuleDraft(),
-      id: "r1",
-      measure: "Returns",
-      scope: [{ column: "Dim[Deptt]", kind: "members", members: "Refunds", from: "", to: "" }],
-    });
+    const built = buildRuleFromDraft(
+      overview(),
+      {
+        ...emptyRuleDraft(),
+        id: "r1",
+        measure: "Returns",
+        scope: [{ column: "Dim[Deptt]", kind: "members", members: "Refunds", from: "", to: "" }],
+      },
+      // The document is only read by the band check, and this rule declares no
+      // band direction — an empty one keeps that irrelevance visible.
+      emptyStrategyDoc(),
+    );
     expect(built.ok).toBe(false);
     expect(built.ok === false && built.error).toContain("'Dim[Deptt]' is not a column in this model");
   });
 
   it("accepts a scope column the model does have", async () => {
-    const built = buildRuleFromDraft(overview(), {
-      ...emptyRuleDraft(),
-      id: "r1",
-      measure: "Returns",
-      direction: "higherIsBetter",
-      scope: [{ column: "Dim[Dept]", kind: "members", members: "Refunds, Retail", from: "", to: "" }],
-    });
+    const built = buildRuleFromDraft(
+      overview(),
+      {
+        ...emptyRuleDraft(),
+        id: "r1",
+        measure: "Returns",
+        direction: "higherIsBetter",
+        scope: [
+          { column: "Dim[Dept]", kind: "members", members: "Refunds, Retail", from: "", to: "" },
+        ],
+      },
+      emptyStrategyDoc(),
+    );
     expect(built.ok).toBe(true);
     expect(built.ok === true && built.rule).toEqual({
       id: "r1",
@@ -1453,11 +1936,11 @@ describe("the rule scope editor", () => {
   });
 
   it("refuses a measure the model does not have", async () => {
-    const built = buildRuleFromDraft(overview(), {
-      ...emptyRuleDraft(),
-      id: "r1",
-      measure: "Ghost",
-    });
+    const built = buildRuleFromDraft(
+      overview(),
+      { ...emptyRuleDraft(), id: "r1", measure: "Ghost" },
+      emptyStrategyDoc(),
+    );
     expect(built.ok).toBe(false);
     expect(built.ok === false && built.error).toContain("'Ghost' is not a measure in this model");
   });
@@ -1473,10 +1956,13 @@ describe("Infer", () => {
     // `false` here would pass even against code that never awaited.
     vi.mocked(confirmAsync).mockReturnValue(Promise.resolve(false));
     await mount();
+    // The load's own inference (the divergence reference) has already run, so
+    // "did the button infer?" is a question about the calls AFTER the mount.
+    const onMount = vi.mocked(strategyInfer).mock.calls.length;
     await click(button("Infer"));
 
     expect(confirmAsync).toHaveBeenCalledTimes(1);
-    expect(strategyInfer).not.toHaveBeenCalled();
+    expect(vi.mocked(strategyInfer).mock.calls.length).toBe(onMount);
     // The draft is untouched: Returns is still the confirmed one.
     expect(measureRow("Returns").getAttribute("data-unconfirmed")).toBe("false");
     expect(strategySet).not.toHaveBeenCalled();
@@ -1496,10 +1982,14 @@ describe("Infer", () => {
 
   it("draws its draft from the same backend inference the empty-model view uses", async () => {
     await mount();
+    const onMount = vi.mocked(strategyInfer).mock.calls.length;
     await click(button("Infer"));
-    // One call, one source of truth: a second (weaker) frontend inferrer is how
-    // the button and the first view came to disagree about what "inferred" is.
-    expect(strategyInfer).toHaveBeenCalledTimes(1);
+    // ONE source of truth, not one call: the button re-asks the backend rather
+    // than re-deriving anything here. A second (weaker) frontend inferrer is
+    // how the button and the first view came to disagree about what "inferred"
+    // means, and the guard against it is that every draft in this tab arrives
+    // from `op: "infer"` — this one, and the load's divergence reference.
+    expect(vi.mocked(strategyInfer).mock.calls.length).toBe(onMount + 1);
     expect(strategyInfer).toHaveBeenCalledWith("conn-1");
   });
 });

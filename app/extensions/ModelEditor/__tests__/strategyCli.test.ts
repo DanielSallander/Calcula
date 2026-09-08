@@ -482,6 +482,31 @@ describe("reading the strategy", () => {
     expect(output).toContain("Dim[Dept]=Refunds");
   });
 
+  it("counts the model block as an entry that can still be a machine's guess", async () => {
+    // The Strategy tab gives the model block the same badge every row has.
+    // `show strategy` printed its four fields and said nothing about who put
+    // them there, and its unreviewed tally counted only measures and tables —
+    // so a `defaultTimeAxis` inferred from an UNMARKED calendar read exactly
+    // like one a person had chosen.
+    vi.mocked(strategyGet).mockResolvedValue({
+      ...doc,
+      model: { defaultTimeAxis: "Calendar[Date]", reviewed: false },
+    });
+    const { output } = await run("show strategy");
+    expect(output).toContain("model block reviewed: no");
+    // Returns is reviewed, Dim is not, and the model block is not: two.
+    expect(output).toMatch(/unreviewed entries:\s*2/);
+  });
+
+  it("says nothing about a model block that states nothing", async () => {
+    // "reviewed: no" against four empty fields reads as an outstanding task
+    // where there is none.
+    vi.mocked(strategyGet).mockResolvedValue(doc);
+    const { output } = await run("show strategy");
+    expect(output).not.toContain("model block reviewed");
+    expect(output).toMatch(/unreviewed entries:\s*1/);
+  });
+
   it("validate strategy judges the DOCUMENT, not the engine's model checks", async () => {
     vi.mocked(strategyGet).mockResolvedValue(doc);
     vi.mocked(strategyValidate).mockResolvedValue({

@@ -37,6 +37,23 @@
 //          the entry says ANYTHING at all — because a measure the document
 //          never mentions and a measure a machine guessed at are not the same
 //          row. `entryState` is the one place that ladder is decided.
+//
+//          (5) CONFIRMATION IS ABOUT VALUES, NOT ABOUT ROWS. `reviewed` says a
+//          human vouched for what the entry SAYS, so an edit must drop it —
+//          `authoringStamp` writes `source: "authored"` and `reviewed: false`
+//          together, and only a patch that touches nothing but `reviewed` /
+//          `source` leaves both alone. Confirm and un-confirm therefore cannot
+//          re-author, and an edit cannot leave a stale confirmation standing
+//          over a value nobody has read.
+//
+//          (6) DIVERGENCE IS COMPUTED, NEVER STORED. A row confirmed last week
+//          can disagree with what inference would propose today — a column was
+//          added, a measure renamed, calendar detection flipped. Rather than
+//          storing a hash of the confirmed values (which needs maintaining on
+//          every edit, goes stale in its own way, and knows nothing about a
+//          document written before it existed), `measureDivergences` and its
+//          siblings diff the entry against a fresh draft on every render. The
+//          diff is SHOWN; nothing is ever applied without a person asking.
 
 import type { ModelOverview } from "@api";
 
@@ -111,7 +128,14 @@ export type ExpectedStatus = "favourable" | "unfavourable" | "neutral" | "suppre
 export type Target =
   | { type: "literal"; value: number }
   | { type: "measure"; ref: string }
-  | { type: "band"; low: number; high: number }
+  /**
+   * An acceptable range. Each bound carries its own inclusivity, and ABSENT
+   * means inclusive — "between 0.8 and 1.2" is how a band is stated, so the
+   * common case writes no key at all and the wire form of an ordinary band is
+   * unchanged. Only an exclusive bound is spelled out, which is why a document
+   * cannot acquire two new keys per band just by being opened.
+   */
+  | { type: "band"; low: number; high: number; lowInclusive?: boolean; highInclusive?: boolean }
   /** "Whatever the model's own KPI says." Resolution turns it into a number. */
   | { type: "kpi" };
 
@@ -164,6 +188,16 @@ export interface AttributeSet {
   rankWeight?: number;
 }
 
+/**
+ * The model-wide block.
+ *
+ * It carries `reviewed`/`source` for the same reason every measure and table
+ * entry does: `defaultTimeAxis` is a GUESS — inference picks it from a calendar
+ * that was itself guessed — and a panel with no badge cannot tell a person that
+ * the axis every time-series fact is computed against is nobody's decision yet.
+ * The granularity is the PANEL, not the field: there is no per-field row here
+ * to confirm, and four badges over four boxes would say less than one.
+ */
 export interface ModelStrategy {
   defaultTimeAxis?: string;
   /** `MM-DD`, e.g. "04-01" for an April fiscal year. */
@@ -171,6 +205,10 @@ export interface ModelStrategy {
   reportingCurrency?: string;
   /** Measure names, most important first. */
   priority?: string[];
+  /** Has a human confirmed this panel? A generated draft is `false`. */
+  reviewed: boolean;
+  /** Where the values came from. Absent means the drafting op wrote them. */
+  source?: StrategySource;
 }
 
 /**
@@ -472,7 +510,41 @@ export function formatScopeSpec(scope: Scope | undefined): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build a band, spelling out only the bounds that are EXCLUSIVE.
+ *
+ * The one constructor, so nothing anywhere writes `lowInclusive: true` — an
+ * absent key already means inclusive, and a document that gains two redundant
+ * keys per band every time someone opens the editor is a document nobody can
+ * review a diff of.
+ */
+export function bandTarget(
+  low: number,
+  high: number,
+  lowInclusive = true,
+  highInclusive = true,
+): Target {
+  const band: Target = { type: "band", low, high };
+  if (!lowInclusive) band.lowInclusive = false;
+  if (!highInclusive) band.highInclusive = false;
+  return band;
+}
+
+/** Is this bound inclusive? Absent means yes — see `bandTarget`. */
+export function bandLowInclusive(band: { lowInclusive?: boolean }): boolean {
+  return band.lowInclusive !== false;
+}
+
+export function bandHighInclusive(band: { highInclusive?: boolean }): boolean {
+  return band.highInclusive !== false;
+}
+
+/**
  * `kpi` | `measure:<Name>` | `band:<low>,<high>` | a plain number.
+ *
+ * A band may carry INTERVAL BRACKETS — `band:[0.8,1.2)` — where `[`/`]` is an
+ * inclusive bound and `(`/`)` an exclusive one. The bare `band:0.8,1.2` is the
+ * both-inclusive spelling and stays exactly what it always was on the wire, so
+ * an existing document neither changes shape nor re-reads differently.
  *
  * An empty string means CLEAR, which is why the result distinguishes "no
  * target" from "could not read a target".
@@ -490,17 +562,28 @@ export function parseTargetSpec(
     return { ok: true, target: { type: "measure", ref } };
   }
   if (lower.startsWith("band:")) {
-    const parts = raw
-      .slice("band:".length)
-      .split(",")
-      .map((p) => p.trim());
+    let body = raw.slice("band:".length).trim();
+    let lowInclusive = true;
+    let highInclusive = true;
+    if (body.startsWith("[") || body.startsWith("(")) {
+      if (!body.endsWith("]") && !body.endsWith(")")) {
+        return {
+          ok: false,
+          error: `'${raw}' opens an interval and never closes it — write band:[0.8,1.2) or band:0.8,1.2`,
+        };
+      }
+      lowInclusive = body.startsWith("[");
+      highInclusive = body.endsWith("]");
+      body = body.slice(1, -1);
+    }
+    const parts = body.split(",").map((p) => p.trim());
     if (parts.length !== 2) return { ok: false, error: "band: needs a low and a high, e.g. band:0.8,1.2" };
     const low = Number(parts[0]);
     const high = Number(parts[1]);
     if (!Number.isFinite(low) || !Number.isFinite(high)) {
       return { ok: false, error: `band bounds must be numbers (got '${raw}')` };
     }
-    return { ok: true, target: { type: "band", low, high } };
+    return { ok: true, target: bandTarget(low, high, lowInclusive, highInclusive) };
   }
   const value = Number(raw);
   if (!Number.isFinite(value)) {
@@ -521,8 +604,15 @@ export function formatTargetSpec(target: Target | undefined): string {
       return String(target.value);
     case "measure":
       return `measure:${target.ref}`;
-    case "band":
-      return `band:${target.low},${target.high}`;
+    case "band": {
+      const lowIn = bandLowInclusive(target);
+      const highIn = bandHighInclusive(target);
+      // The ordinary band prints the way it always did. Brackets appear only
+      // when they SAY something — a spelling that changed for every band would
+      // rewrite every document that round-trips through this editor.
+      if (lowIn && highIn) return `band:${target.low},${target.high}`;
+      return `band:${lowIn ? "[" : "("}${target.low},${target.high}${highIn ? "]" : ")"}`;
+    }
   }
 }
 
@@ -615,6 +705,11 @@ export function tableEntry(doc: StrategyDoc, name: string): TableStrategy {
   return doc.tables?.[name] ?? { reviewed: false };
 }
 
+/** The model-wide block, or the unconfirmed blank a missing one means. */
+export function modelEntry(doc: StrategyDoc): ModelStrategy {
+  return doc.model ?? { reviewed: false };
+}
+
 export function columnEntry(
   doc: StrategyDoc,
   table: string,
@@ -638,9 +733,31 @@ function patchAuthorsValues(patch: object): boolean {
 }
 
 /**
- * Immutably replace one measure entry, re-stamping `source` when the patch
- * touches a value. A row a person typed must never keep claiming a machine
- * guessed it — that is the lie the badge exists to prevent.
+ * What an AUTHORING patch does to the entry's metadata, before the patch itself
+ * is applied over it.
+ *
+ * Two stamps, and the second one was missing:
+ *
+ * `source: "authored"` — a row a person typed must never keep claiming a
+ * machine guessed it.
+ *
+ * `reviewed: false` — CONFIRMATION IS ABOUT VALUES, NOT ABOUT ROWS. `reviewed`
+ * is what the decomposition engine reads as "a human vouched for this", so an
+ * entry that keeps `reviewed: true` across an edit is vouching for a value no
+ * human ever saw. That is the same defect as a `{reviewed: true}` entry with no
+ * reader, one step further along: the flag is read, and it is now false.
+ *
+ * The patch is spread AFTER, so an explicit `reviewed` in it still wins — which
+ * is how the CLI's `set measure … unit=currency reviewed=true` states both
+ * things in one act.
+ */
+function authoringStamp(patch: object): { source: StrategySource; reviewed: boolean } | null {
+  return patchAuthorsValues(patch) ? { source: "authored", reviewed: false } : null;
+}
+
+/**
+ * Immutably replace one measure entry, re-stamping `source` and dropping a
+ * stale confirmation when the patch touches a value. See `authoringStamp`.
  */
 export function withMeasure(
   doc: StrategyDoc,
@@ -648,23 +765,36 @@ export function withMeasure(
   patch: Partial<MeasureStrategy>,
 ): StrategyDoc {
   const current = measureEntry(doc, name);
-  const authored: Partial<MeasureStrategy> = patchAuthorsValues(patch)
-    ? { source: "authored", ...patch }
-    : patch;
+  const stamp = authoringStamp(patch);
+  const authored: Partial<MeasureStrategy> = stamp === null ? patch : { ...stamp, ...patch };
   return { ...doc, measures: { ...(doc.measures ?? {}), [name]: { ...current, ...authored } } };
 }
 
-/** Immutably replace one table entry. Re-stamps `source` like `withMeasure`. */
+/** Immutably replace one table entry. Re-stamps like `withMeasure`. */
 export function withTable(
   doc: StrategyDoc,
   name: string,
   patch: Partial<TableStrategy>,
 ): StrategyDoc {
   const current = tableEntry(doc, name);
-  const authored: Partial<TableStrategy> = patchAuthorsValues(patch)
-    ? { source: "authored", ...patch }
-    : patch;
+  const stamp = authoringStamp(patch);
+  const authored: Partial<TableStrategy> = stamp === null ? patch : { ...stamp, ...patch };
   return { ...doc, tables: { ...(doc.tables ?? {}), [name]: { ...current, ...authored } } };
+}
+
+/**
+ * Immutably replace part of the model-wide block.
+ *
+ * The sibling of `withMeasure` / `withTable`, and it lives beside them rather
+ * than in the panel that calls it: the model block carries the same
+ * `reviewed`/`source` pair, so a second implementation of the stamping rule in
+ * a component is a second place for it to drift.
+ */
+export function withModel(doc: StrategyDoc, patch: Partial<ModelStrategy>): StrategyDoc {
+  const current = modelEntry(doc);
+  const stamp = authoringStamp(patch);
+  const authored: Partial<ModelStrategy> = stamp === null ? patch : { ...stamp, ...patch };
+  return { ...doc, model: { ...current, ...authored } };
 }
 
 /** Immutably replace one column entry inside its table.
@@ -735,6 +865,14 @@ export const MEASURE_VALUE_FIELDS = [
 /** The same list for a table entry. See `MEASURE_VALUE_FIELDS`. */
 export const TABLE_VALUE_FIELDS = ["kind", "labelColumn", "columns", "hierarchies"] as const;
 
+/** The same list for the model-wide block. See `MEASURE_VALUE_FIELDS`. */
+export const MODEL_VALUE_FIELDS = [
+  "defaultTimeAxis",
+  "fiscalYearStart",
+  "reportingCurrency",
+  "priority",
+] as const;
+
 /** Does this measure entry state anything at all? */
 export function measureHasValues(e: MeasureStrategy): boolean {
   return (
@@ -758,6 +896,16 @@ export function tableHasValues(e: TableStrategy): boolean {
     (e.labelColumn ?? "") !== "" ||
     Object.keys(e.columns ?? {}).length > 0 ||
     (e.hierarchies?.length ?? 0) > 0
+  );
+}
+
+/** Does the model-wide block state anything at all? */
+export function modelHasValues(e: ModelStrategy): boolean {
+  return (
+    (e.defaultTimeAxis ?? "") !== "" ||
+    (e.fiscalYearStart ?? "") !== "" ||
+    (e.reportingCurrency ?? "") !== "" ||
+    (e.priority?.length ?? 0) > 0
   );
 }
 
@@ -797,6 +945,204 @@ export function entryState(e: ReviewableEntry, hasValues: boolean): EntryState {
   if (!hasValues) return "empty";
   if (e.reviewed) return "confirmed";
   return e.source === "authored" ? "authored" : "inferred";
+}
+
+/** Do a human's fingerprints sit on this entry's values? Only those rows can
+ *  be OVERTAKEN by inference — an inferred row that disagrees with today's
+ *  inference is a stale draft, not a decision anybody has to be told about. */
+export function stateIsHumanDecision(state: EntryState): boolean {
+  return state === "confirmed" || state === "authored";
+}
+
+// ---------------------------------------------------------------------------
+// Divergence — where a stored decision and today's inference disagree
+// ---------------------------------------------------------------------------
+
+/**
+ * One field where the document and a fresh inference draft say different
+ * things.
+ *
+ * IT IS COMPUTED LIVE, NEVER STORED. The alternative — hashing the values at
+ * the moment of confirmation — needs maintaining on every edit, goes stale in
+ * its own way, and says nothing at all about a document written before the
+ * hash existed. Inference is model-only: it takes no engine lock and issues no
+ * query, so re-running it on load costs a call the tab already makes.
+ */
+export interface Divergence {
+  /** The document key, e.g. `direction`. */
+  field: string;
+  /** What the entry says today — `""` when it says nothing about this field. */
+  yours: string;
+  /** What inference proposes now. Never `""`: an absence is not a proposal. */
+  inference: string;
+}
+
+/** Is this a value at all, or one of the several spellings of "nothing"? */
+function statesSomething(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim() !== "";
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value as object).length > 0;
+  return true;
+}
+
+/** Key-sorted JSON, so two structurally equal values compare equal however
+ *  their keys were ordered by whoever built them. */
+function canonical(value: unknown): string {
+  if (value === undefined) return "";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
+}
+
+/**
+ * One field's value as a person reads it.
+ *
+ * The tagged unions get their own spelling because `[object Object]` beside
+ * "you confirmed" is worse than saying nothing at all.
+ */
+export function formatFieldValue(field: string, value: unknown): string {
+  if (!statesSomething(value)) return "";
+  switch (field) {
+    case "target":
+      return formatTargetSpec(value as Target);
+    case "materiality":
+      return formatMaterialitySpec(value as Materiality);
+    case "aggregation":
+      return formatAggregationSpec(value as AggregationSpec);
+    case "columns":
+      return Object.entries(value as Record<string, ColumnStrategy>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, c]) => `${name}: ${c.role}`)
+        .join(", ");
+    case "hierarchies":
+      return (value as string[][]).map((h) => h.join(" > ")).join("; ");
+    default:
+      return Array.isArray(value) ? value.join(", ") : String(value);
+  }
+}
+
+/**
+ * Every field where `proposed` says something the entry does not.
+ *
+ * A field inference is SILENT about is never a divergence: the draft proposes
+ * what it can read off the model, and "no opinion" is not a disagreement. The
+ * other direction does count — an entry silent where inference now proposes a
+ * value is exactly the case a new column or a renamed measure creates, and it
+ * is the one a confirmed row hides best.
+ */
+function divergencesOf<T extends object>(
+  fields: readonly string[],
+  entry: T,
+  proposed: T | undefined,
+): Divergence[] {
+  if (proposed === undefined) return [];
+  const out: Divergence[] = [];
+  for (const field of fields) {
+    const want = (proposed as Record<string, unknown>)[field];
+    if (!statesSomething(want)) continue;
+    const have = (entry as Record<string, unknown>)[field];
+    if (canonical(have) === canonical(want)) continue;
+    out.push({
+      field,
+      yours: formatFieldValue(field, have),
+      inference: formatFieldValue(field, want),
+    });
+  }
+  return out;
+}
+
+export function measureDivergences(
+  entry: MeasureStrategy,
+  proposed: MeasureStrategy | undefined,
+): Divergence[] {
+  return divergencesOf(MEASURE_VALUE_FIELDS, entry, proposed);
+}
+
+export function tableDivergences(
+  entry: TableStrategy,
+  proposed: TableStrategy | undefined,
+): Divergence[] {
+  return divergencesOf(TABLE_VALUE_FIELDS, entry, proposed);
+}
+
+export function modelDivergences(
+  entry: ModelStrategy,
+  proposed: ModelStrategy | undefined,
+): Divergence[] {
+  return divergencesOf(MODEL_VALUE_FIELDS, entry, proposed);
+}
+
+/**
+ * The patch that takes inference's answer for exactly the diverging fields.
+ *
+ * It carries `source: "inferred"` and `reviewed: false` DELIBERATELY. The
+ * values are the machine's, so calling them authored would be the same lie the
+ * `source` axis exists to prevent; and nobody has yet vouched for the new
+ * values, so the row goes back to being a proposal a person confirms. Taking
+ * inference's value is one decision — "use this" — not two.
+ */
+export function inferenceTakePatch<T extends object>(
+  proposed: T,
+  divergences: Divergence[],
+): Partial<T> & ReviewableEntry {
+  const patch: Record<string, unknown> = { source: "inferred", reviewed: false };
+  for (const d of divergences) patch[d.field] = (proposed as Record<string, unknown>)[d.field];
+  return patch as Partial<T> & ReviewableEntry;
+}
+
+// ---------------------------------------------------------------------------
+// The band direction — a statement that is only half made
+// ---------------------------------------------------------------------------
+
+/**
+ * Is this entry claiming a band direction without a band?
+ *
+ * `targetBand` is the one direction that needs a second value to mean
+ * anything: with no band the resolver has nothing to compare against, every
+ * favourability comes back `None` and the measure's Variance fact is never
+ * emitted — silently, because a missing fact looks exactly like a fact that
+ * was never interesting. The Rust validator REFUSES the document in this state;
+ * this predicate is what lets the tab say so at the keystroke instead of at
+ * Save, and it deliberately mirrors that rule rather than inventing a stricter
+ * one of its own.
+ */
+export function bandDirectionIsIncomplete(entry: {
+  direction?: Direction;
+  target?: Target;
+}): boolean {
+  return entry.direction === "targetBand" && entry.target?.type !== "band";
+}
+
+/**
+ * Does ANY declaration in the document give this measure a band?
+ *
+ * SCOPE-BLIND, exactly like the Rust `has_a_band_anywhere`. A band declared on
+ * the measure entry is a band a rule's `targetBand` direction can land on, so a
+ * rule that only narrows the direction is legal and must stay authorable —
+ * refusing it here would be a second, stricter rule nobody wrote down, which is
+ * the failure mode the fiscal-year check already documents. What the caller is
+ * catching is the measure whose band exists NOWHERE, which can never be judged.
+ *
+ * `exceptRule` leaves out the rule currently being edited: its own new `set` is
+ * what the caller has just examined, and counting the version still in the
+ * document would let a band the user has just deleted vouch for its own removal.
+ *
+ * A `kpi` target does not count, and that is the Rust rule too: a KPI resolves
+ * to a literal target, never to a band.
+ */
+export function bandExistsAnywhere(
+  doc: StrategyDoc,
+  measure: string,
+  exceptRule?: string,
+): boolean {
+  if (doc.measures?.[measure]?.target?.type === "band") return true;
+  return (doc.rules ?? []).some(
+    (r) => r.measure === measure && r.id !== exceptRule && r.set.target?.type === "band",
+  );
 }
 
 // ---------------------------------------------------------------------------

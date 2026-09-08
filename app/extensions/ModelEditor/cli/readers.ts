@@ -19,6 +19,8 @@ import {
   formatMaterialitySpec,
   formatScopeSpec,
   formatTargetSpec,
+  modelEntry,
+  modelHasValues,
 } from "../lib/strategyTypes";
 import type { AttributeSet, Finding, StrategyDoc } from "../lib/strategyTypes";
 import { filterNames, globToRegex, matchColumns, matchNamed, matchRelationships, matchTables, requireOne } from "./resolve";
@@ -712,8 +714,17 @@ async function runShowStrategy(s: CliSession, io: CliIo): Promise<void> {
   }
   const measures = Object.entries(doc.measures ?? {});
   const tables = Object.entries(doc.tables ?? {});
+  // THE MODEL BLOCK IS AN ENTRY LIKE ANY OTHER. It carries `reviewed` and
+  // `source` exactly as a measure or a table row does, so a summary that counts
+  // only those two under-reports what is still a machine's guess — and
+  // `defaultTimeAxis` is the field most likely to BE one, since an unmarked
+  // calendar is inferred.
+  const model = modelEntry(doc);
+  const modelUnreviewed = modelHasValues(model) && !model.reviewed;
   const unreviewed =
-    measures.filter(([, m]) => !m.reviewed).length + tables.filter(([, t]) => !t.reviewed).length;
+    measures.filter(([, m]) => !m.reviewed).length +
+    tables.filter(([, t]) => !t.reviewed).length +
+    (modelUnreviewed ? 1 : 0);
   io.print(
     detailBlock([
       ["version", String(doc.version)],
@@ -727,6 +738,11 @@ async function runShowStrategy(s: CliSession, io: CliIo): Promise<void> {
       ["fiscal year start", doc.model?.fiscalYearStart ?? null],
       ["reporting currency", doc.model?.reportingCurrency ?? null],
       ["priority", (doc.model?.priority ?? []).join(", ") || null],
+      // Only when the block says something: "reviewed: no" against four empty
+      // fields reads as an outstanding task where there is none.
+      ...(modelHasValues(model)
+        ? ([["model block reviewed", yesNo(model.reviewed)]] as [string, string][])
+        : []),
     ]),
   );
   printTable(

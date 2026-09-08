@@ -31,6 +31,29 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// The schema version a freshly written document carries.
 pub const STRATEGY_DOC_VERSION: u32 = 1;
 
+/// Every fact kind a `Rule`'s `suppress` list may name.
+///
+/// THE ONLY WAY A SUPPRESSION CAN FAIL IS BY SPELLING. `insights::model` filters
+/// facts with `resolved.suppressed_kinds.contains(&kind.kind_key())`, so a key
+/// nobody emits removes nothing and the author's instruction is silently
+/// ignored - the fact they asked to withhold appears in the report.
+///
+/// The list lives here, in the vocabulary file, because it is part of the
+/// document's contract with the person writing it; it is kept honest by
+/// `every_fact_kind_a_run_can_emit_is_spelled_in_the_suppressible_list` in
+/// `insights::model`, which builds one of each fact kind and diffs the two
+/// directions. Add a `ModelFactKind` without adding it here and that test reds.
+pub const SUPPRESSIBLE_FACT_KINDS: &[&str] = &[
+    "change",
+    "changePoint",
+    "contribution",
+    "definitionalDriver",
+    "memberMove",
+    "seasonality",
+    "trend",
+    "variance",
+];
+
 /// The serialized ceiling for one strategy document, in bytes.
 ///
 /// 256 KB is not a taste judgement: it is the BI engine's per-key extension-data
@@ -182,6 +205,23 @@ pub enum Unit {
     Other,
 }
 
+/// A bound of a `Target::Band` is INCLUSIVE unless the document says otherwise.
+///
+/// A separate function rather than a literal in the attribute because
+/// `#[serde(default)]` on a `bool` means `false`, and "the bound nobody
+/// mentioned excludes its own endpoint" is the opposite of what a person writing
+/// `low: 90000` means.
+fn bound_is_inclusive() -> bool {
+    true
+}
+
+/// Skip predicate for a bound that is inclusive, i.e. the default. A band whose
+/// bounds are both ordinary still serializes as `{low, high}`, which is the form
+/// the checked-in corpus and every hand-written document use.
+fn is_inclusive(inclusive: &bool) -> bool {
+    *inclusive
+}
+
 /// What "on target" means. A goal supplied by the business - never an observation.
 ///
 /// INTERNALLY tagged, so a person writes `{"type": "literal", "value": 0.38}`
@@ -198,9 +238,112 @@ pub enum Target {
         // without a per-field serde rename, which house rules forbid.
         r#ref: String,
     },
-    Band { low: f64, high: f64 },
+    /// Good means landing between `low` and `high`; both ends are bad.
+    ///
+    /// The inclusivity of each end is part of the band and not a separate
+    /// parallel field, because a band whose ends are described somewhere else is
+    /// a band that can be half-copied. `rename_all` sits on the VARIANT so the
+    /// wire names are `lowInclusive` / `highInclusive` without a per-field
+    /// rename, which house rules forbid.
+    #[serde(rename_all = "camelCase")]
+    Band {
+        low: f64,
+        high: f64,
+        #[serde(default = "bound_is_inclusive", skip_serializing_if = "is_inclusive")]
+        low_inclusive: bool,
+        #[serde(default = "bound_is_inclusive", skip_serializing_if = "is_inclusive")]
+        high_inclusive: bool,
+    },
     /// Inherit whatever the model's own KPI declares for this measure.
     Kpi,
+}
+
+/// A band's bounds, flattened out of `Target::Band` so the two things that
+/// actually ask about a band - "is this value inside it" and "can anything be
+/// inside it" - are answered in ONE place.
+///
+/// Both questions read the inclusivity flags, which is what keeps them from
+/// being decoration: `judge` in validate.rs decides a test's verdict with
+/// `contains`, `favourability_at` in model.rs decides a shipped fact's
+/// favourability with the same call, and `is_empty` is what refuses a band no
+/// value can ever satisfy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BandBounds {
+    pub low: f64,
+    pub high: f64,
+    pub low_inclusive: bool,
+    pub high_inclusive: bool,
+}
+
+impl BandBounds {
+    /// Is this value inside the band?
+    pub fn contains(&self, value: f64) -> bool {
+        let above = if self.low_inclusive {
+            value >= self.low
+        } else {
+            value > self.low
+        };
+        let below = if self.high_inclusive {
+            value <= self.high
+        } else {
+            value < self.high
+        };
+        above && below
+    }
+
+    /// Can NO value be inside it?
+    ///
+    /// `low > high` is the reversed band; `low == high` is a single point, which
+    /// is a legal (if strange) band only while both ends are inclusive. Left
+    /// unchecked, either one judges every value unfavourable forever - the exact
+    /// mirror of the empty date range validate.rs has always refused.
+    pub fn is_empty(&self) -> bool {
+        self.low > self.high
+            || (self.low == self.high && !(self.low_inclusive && self.high_inclusive))
+    }
+
+    /// `[90000, 140000]`, with a round bracket for an excluded end - the
+    /// interval notation, so provenance can quote a band without a sentence.
+    pub fn label(&self) -> String {
+        format!(
+            "{}{}, {}{}",
+            if self.low_inclusive { "[" } else { "(" },
+            self.low,
+            self.high,
+            if self.high_inclusive { "]" } else { ")" }
+        )
+    }
+}
+
+impl Target {
+    /// A band with both ends included, which is what a person writing
+    /// `{"type": "band", "low": 90000, "high": 140000}` gets.
+    pub fn band(low: f64, high: f64) -> Self {
+        Target::Band {
+            low,
+            high,
+            low_inclusive: true,
+            high_inclusive: true,
+        }
+    }
+
+    /// The bounds, when this target is a band.
+    pub fn as_band(&self) -> Option<BandBounds> {
+        match self {
+            Target::Band {
+                low,
+                high,
+                low_inclusive,
+                high_inclusive,
+            } => Some(BandBounds {
+                low: *low,
+                high: *high,
+                low_inclusive: *low_inclusive,
+                high_inclusive: *high_inclusive,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// The floor below which a movement is not worth saying out loud.
@@ -349,8 +492,17 @@ pub struct AttributeSet {
     pub cadence: Option<Cadence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregation: Option<AggregationSpec>,
-    /// Fact KINDS to withhold in this scope (e.g. "outlier", "trend"). It can
-    /// only take facts away.
+    /// Fact KINDS to withhold in this scope (e.g. `"contribution"`, `"trend"`).
+    /// It can only take facts away.
+    ///
+    /// SPELLED EXACTLY AS ONE OF `SUPPRESSIBLE_FACT_KINDS`. The engine matches
+    /// these against `ModelFactKind::kind_key`, so a near-miss withholds nothing
+    /// and the fact the author asked to hide is PUBLISHED. This very comment
+    /// used to give `"outlier"` as its example, and it was wrong twice over:
+    /// the core engine's own key for that fact is the PLURAL `"outliers"`, and
+    /// a model run never wraps an outlier fact anyway - so the one place a
+    /// person would copy a spelling from named something that could not be
+    /// suppressed under either spelling. validate.rs refuses an unknown key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suppress: Vec<String>,
     /// Multiplier on this measure's ranking score in this scope.
@@ -442,6 +594,13 @@ impl AttributeSet {
 // ---------------------------------------------------------------------------
 
 /// Model-wide defaults.
+///
+/// It carries `reviewed`/`source` for the same reason every measure and table
+/// entry does, and one of its four fields is the reason it matters most:
+/// `defaultTimeAxis` may be a GUESS - `facts.rs` infers a calendar when nobody
+/// marked one - and a guessed calendar drives every trend, seasonality and
+/// change-point claim in the report. Without a badge and a Confirm on this
+/// block, that guess is the one thing in the document a person cannot accept.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelStrategy {
@@ -455,6 +614,13 @@ pub struct ModelStrategy {
     /// Measure names, most important first. Ties in ranking break by this order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub priority: Vec<String>,
+    /// Has a human confirmed this block? BLOCK-LEVEL: one badge for four
+    /// fields, which is the same granularity a measure row already has.
+    #[serde(default)]
+    pub reviewed: bool,
+    /// Who wrote this block. Absent means nobody has - see `EntrySource`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EntrySource>,
 }
 
 /// Everything the strategy says about one measure, outside any scope.
@@ -863,7 +1029,9 @@ mod tests {
 
         let set = AttributeSet {
             direction: Some(Direction::LowerIsBetter),
-            suppress: vec!["outlier".into()],
+            // A kind the engine really emits: the example in this file used to
+            // be `"outlier"`, which nothing carries under any spelling.
+            suppress: vec!["contribution".into()],
             rank_weight: Some(2.0),
             ..Default::default()
         };
@@ -881,6 +1049,102 @@ mod tests {
         assert!(!Role::Key.may_scope());
         assert!(!Role::Label.may_scope());
         assert!(!Role::Ignore.may_scope());
+    }
+
+    #[test]
+    fn a_band_written_without_inclusivity_includes_both_ends_and_serializes_back_unchanged() {
+        // The wire shape a person writes, and the one the checked-in corpus
+        // uses. `#[serde(default)]` on a bool would have made an unmentioned
+        // bound EXCLUSIVE, which is the opposite of what `low: 90000` means.
+        let t: Target = serde_json::from_str(r#"{"type":"band","low":90000,"high":140000}"#).unwrap();
+        assert_eq!(t, Target::band(90000.0, 140000.0));
+        let band = t.as_band().expect("a band reports its bounds");
+        assert!(band.low_inclusive && band.high_inclusive);
+        assert!(band.contains(90000.0) && band.contains(140000.0));
+        // ...and it writes back the way it was written, with no two keys added
+        // to every hand-authored document.
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            r#"{"type":"band","low":90000.0,"high":140000.0}"#
+        );
+    }
+
+    #[test]
+    fn an_excluded_bound_survives_the_round_trip_and_changes_what_the_band_contains() {
+        let json = r#"{"type":"band","low":0.0,"high":1.0,"highInclusive":false}"#;
+        let t: Target = serde_json::from_str(json).unwrap();
+        let band = t.as_band().unwrap();
+        assert!(band.low_inclusive, "the bound nobody mentioned stays inclusive");
+        assert!(!band.high_inclusive);
+        assert!(band.contains(0.0), "the included end is inside");
+        assert!(!band.contains(1.0), "the excluded end is not");
+        assert!(band.contains(0.999));
+        // Only the bound that is NOT the default is written out, so the document
+        // stays as small as the statement it makes.
+        assert_eq!(serde_json::to_string(&t).unwrap(), json);
+        assert_eq!(band.label(), "[0, 1)");
+    }
+
+    #[test]
+    fn a_reversed_or_pointlike_band_is_recognised_as_one_no_value_can_satisfy() {
+        // Unchecked, every one of these judges every value unfavourable forever.
+        assert!(Target::band(140000.0, 90000.0).as_band().unwrap().is_empty());
+        assert!(!Target::band(5.0, 5.0).as_band().unwrap().is_empty(), "a single point is legal");
+        let half_open = Target::Band {
+            low: 5.0,
+            high: 5.0,
+            low_inclusive: true,
+            high_inclusive: false,
+        };
+        assert!(
+            half_open.as_band().unwrap().is_empty(),
+            "a single point with an excluded end admits nothing"
+        );
+        assert!(!Target::band(90000.0, 140000.0).as_band().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_suppressible_fact_kinds_are_sorted_unique_and_spelled_the_way_the_engine_emits_them() {
+        // The list is a CONTRACT with the person writing the document: they copy
+        // a spelling out of it. Sorted and unique so a diff of it reads.
+        //
+        // Neither spelling of the example this file used to give is in it. A
+        // model run wraps only three of `core/insights`' series facts, so
+        // `outlier` (the typo) and `outliers` (the core engine's real key) are
+        // BOTH unsuppressible here - which is exactly why the list is a list and
+        // not a sentence. That it matches the emitter is proved in
+        // `insights::model`, where the emitter lives.
+        let mut sorted = SUPPRESSIBLE_FACT_KINDS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.as_slice(), SUPPRESSIBLE_FACT_KINDS);
+        assert!(!SUPPRESSIBLE_FACT_KINDS.contains(&"outlier"));
+        assert!(!SUPPRESSIBLE_FACT_KINDS.contains(&"outliers"));
+    }
+
+    #[test]
+    fn the_model_block_carries_the_same_reviewed_and_source_badge_every_other_row_does() {
+        // `defaultTimeAxis` can be an inferred calendar, and an inferred
+        // calendar drives every trend claim in the report. Without these two
+        // fields the panel has no badge to show and no Confirm to offer on the
+        // one block where a guess most needs accepting.
+        let doc: StrategyDoc = serde_json::from_str(
+            r#"{"version":1,"model":{"fiscalYearStart":"04-01"}}"#,
+        )
+        .unwrap();
+        assert!(!doc.model.reviewed, "a block nobody wrote is not reviewed");
+        assert_eq!(doc.model.source, None, "and nobody has touched it");
+
+        let stamped = ModelStrategy {
+            default_time_axis: Some(QualifiedColumn::new("Date", "Date")),
+            reviewed: false,
+            source: Some(EntrySource::Inferred),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&stamped).unwrap(),
+            r#"{"defaultTimeAxis":"Date[Date]","reviewed":false,"source":"inferred"}"#
+        );
     }
 
     #[test]

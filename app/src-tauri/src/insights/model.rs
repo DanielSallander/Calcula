@@ -48,8 +48,8 @@ use insights::{narrate, timeseries};
 
 use super::strategy::resolve::CalendarSource;
 use super::strategy::{
-    Additivity, Attribute, AttrSource, Direction, Materiality, ModelFacts, QualifiedColumn,
-    ResolvedMeasure, StrategyDoc, Target,
+    Additivity, AggregationSpec, Attribute, AttrSource, Direction, Materiality, ModelFacts,
+    QualifiedColumn, ResolvedMeasure, StrategyDoc, Target,
 };
 use super::wire::{
     attr_source_id, BundleSource, EvidenceKind, WireBundle, WireEvidence, WireInsight,
@@ -450,7 +450,14 @@ fn target_word(t: &Target) -> String {
     match t {
         Target::Literal { value } => format!("literal {}", value),
         Target::Measure { r#ref } => format!("measure {}", r#ref),
-        Target::Band { low, high } => format!("band {}..{}", low, high),
+        // Interval notation, so an EXCLUDED end is visible in the provenance a
+        // reader is given: `band [0, 1)` and `band [0, 1]` disagree about a
+        // value of exactly 1, and the reader asking "why is this unfavourable"
+        // is asking about precisely that.
+        Target::Band { .. } => match t.as_band() {
+            Some(band) => format!("band {}", band.label()),
+            None => "band".to_string(),
+        },
         Target::Kpi => "kpi".to_string(),
     }
 }
@@ -553,6 +560,68 @@ pub fn resolved_favourability(resolved: &ResolvedMeasure, delta: f64) -> Option<
         .and_then(|d| favourability_of(d.value, delta))
 }
 
+/// Favourability WHERE THE VALUE LANDED, which is the only question a
+/// `targetBand` direction can answer.
+///
+/// THE BAND HAD NO PRODUCTIVE CONSUMER AT ALL. `favourability_of` reads a delta
+/// and correctly declines the band; the comment above it says "the variance fact
+/// answers instead", and that was not true - a band target resolves to no
+/// `target_value`, so no variance fact is ever built and the band decided
+/// nothing anywhere in a shipped run. A caller that HAS the landed value (every
+/// fact below does) can decide it here, and the bounds' inclusivity is spent on
+/// exactly this call.
+///
+/// Everything else falls through to the delta reading, unchanged.
+pub fn favourability_at(
+    resolved: &ResolvedMeasure,
+    value: Option<f64>,
+    delta: f64,
+) -> Option<Favourability> {
+    if resolved.suppression_of(Attribute::Direction).is_some() {
+        return None;
+    }
+    let is_band = resolved.direction.as_ref().map(|d| d.value) == Some(Direction::TargetBand);
+    if is_band {
+        let band = resolved.target.as_ref().and_then(|t| t.value.as_band());
+        // A band direction with no band, or no observed value, still carries no
+        // judgement — and validate.rs refuses the first of those outright.
+        return match (band, value) {
+            (Some(band), Some(v)) => Some(if band.contains(v) {
+                Favourability::Better
+            } else {
+                Favourability::Worse
+            }),
+            _ => None,
+        };
+    }
+    resolved_favourability(resolved, delta)
+}
+
+/// The additivity that actually applies along `dimension`, and whether the
+/// document said so ABOUT THAT DIMENSION or merely by default.
+///
+/// The three spellings are the contract `validate_aggregation` blesses -
+/// `Table[Column]`, the bare column, the bare table - and they were tried in ONE
+/// place and not the other: the share gate looked for all three while the
+/// provenance line looked only for `Table[Column]`, so a `byDimension` keyed on
+/// `"Date"` denied the share and then printed the default as the reason. Both
+/// now ask the same question through this function.
+pub fn effective_additivity(
+    spec: &AggregationSpec,
+    dimension: &QualifiedColumn,
+) -> (Additivity, bool) {
+    let per_dimension = spec
+        .by_dimension
+        .get(&dimension.to_string())
+        .or_else(|| spec.by_dimension.get(&dimension.column))
+        .or_else(|| spec.by_dimension.get(&dimension.table))
+        .copied();
+    match per_dimension {
+        Some(a) => (a, true),
+        None => (spec.default, false),
+    }
+}
+
 /// Is this measure summable along `dimension`?
 ///
 /// The per-dimension entry wins over the default, which is what makes a stock
@@ -564,17 +633,7 @@ pub fn is_additive_over(resolved: &ResolvedMeasure, dimension: &QualifiedColumn)
         // rather than assume the convenient answer.
         return false;
     };
-    let spec = &agg.value;
-    let per_dimension = spec
-        .by_dimension
-        .get(&dimension.to_string())
-        .or_else(|| spec.by_dimension.get(&dimension.column))
-        .or_else(|| spec.by_dimension.get(&dimension.table))
-        .copied();
-    matches!(
-        per_dimension.unwrap_or(spec.default),
-        Additivity::Additive
-    )
+    effective_additivity(&agg.value, dimension).0 == Additivity::Additive
 }
 
 // ---------------------------------------------------------------------------
@@ -1369,7 +1428,10 @@ pub fn facts_for_measure(
 
         let materiality = resolved.materiality.as_ref().map(|m| &m.value);
         if clears_materiality(materiality, first, delta) {
-            let favourability = resolved_favourability(resolved, delta);
+            // The landed value, not just the movement: under a `targetBand`
+            // direction that is the only thing that can be judged, and it is
+            // what makes a declared band decide something in a shipped run.
+            let favourability = favourability_at(resolved, Some(last), delta);
             run.favourability = favourability;
             let mut provenance = direction_provenance(resolved);
             if let Some(m) = resolved.materiality.as_ref() {
@@ -1416,7 +1478,7 @@ pub fn facts_for_measure(
                     delta,
                     pct: pct_change(target, value),
                     status,
-                    favourability: resolved_favourability(resolved, delta),
+                    favourability: favourability_at(resolved, Some(value), delta),
                 },
                 provenance,
                 vec![series_evidence.clone()],
@@ -1460,15 +1522,20 @@ pub fn facts_for_measure(
         let additive = is_additive_over(resolved, &slice.dimension);
         let mut provenance: Vec<AppliedAttr> = Vec::new();
         if let Some(agg) = resolved.aggregation.as_ref() {
-            let effective = agg
-                .value
-                .by_dimension
-                .get(&slice.dimension.to_string())
-                .copied()
-                .unwrap_or(agg.value.default);
+            let (effective, per_dimension) = effective_additivity(&agg.value, &slice.dimension);
+            // "lastValue over Product" is a PER-DIMENSION claim, and printing it
+            // for a spec whose `byDimension` is empty attributes to the document
+            // a statement it never made - about a rollup that has no meaning
+            // along that dimension anyway. Say "over <dimension>" only when the
+            // document really did name it; otherwise report the model-wide
+            // default as what it is.
             provenance.push(attr(
                 "aggregation",
-                format!("{} over {}", additivity_word(effective), slice.dimension),
+                if per_dimension {
+                    format!("{} over {}", additivity_word(effective), slice.dimension)
+                } else {
+                    additivity_word(effective).to_string()
+                },
                 &agg.source,
             ));
         }
@@ -1767,7 +1834,7 @@ mod tests {
     use super::*;
     use crate::insights::strategy::{
         AggregationSpec, Applied, MeasureFacts, ModelStrategy, Rule, Scope, ScopeValue,
-        Suppression, TableFacts,
+        Suppression, TableFacts, SUPPRESSIBLE_FACT_KINDS,
     };
     use std::collections::BTreeMap;
 
@@ -2668,6 +2735,229 @@ mod tests {
         r.suppressed_kinds = ["change".to_string()].into_iter().collect();
         let (facts, _) = facts_for_measure(&observation("Revenue", 100.0, 200.0), &r, &locale());
         assert!(!kinds_of(&facts).contains(&"change".to_string()));
+    }
+
+    /// One fact of every kind a run can emit.
+    ///
+    /// The three `Series` entries are exactly the three `facts_for_measure`
+    /// builds - trend, change point, seasonality - and no others: nothing else
+    /// in this file wraps a `FactKind`, so nothing else can reach a `suppress`
+    /// list.
+    fn one_of_every_fact_kind_a_run_can_emit() -> Vec<ModelFactKind> {
+        let series = |inner: FactKind| ModelFactKind::Series { inner };
+        vec![
+            ModelFactKind::Change {
+                measure: "Revenue".into(),
+                first_label: "Jan".into(),
+                last_label: "Feb".into(),
+                first: 100.0,
+                last: 120.0,
+                delta: 20.0,
+                pct: Some(0.2),
+                favourability: None,
+            },
+            ModelFactKind::Variance {
+                measure: "Revenue".into(),
+                period_label: "Feb".into(),
+                value: 120.0,
+                target: 150.0,
+                delta: -30.0,
+                pct: Some(-0.2),
+                status: None,
+                favourability: None,
+            },
+            ModelFactKind::DefinitionalDriver {
+                measure: "Margin".into(),
+                kind: DecompositionKind::Difference,
+                total_delta: 20.0,
+                parts: Vec::new(),
+                residual: 0.0,
+            },
+            ModelFactKind::Contribution {
+                measure: "Revenue".into(),
+                dimension: "Product[Category]".into(),
+                total_delta: 20.0,
+                members: Vec::new(),
+                others: None,
+                explained: 1.0,
+            },
+            ModelFactKind::MemberMove {
+                measure: "Revenue".into(),
+                dimension: "Product[Category]".into(),
+                member: "Gadgets".into(),
+                first: 10.0,
+                last: 12.0,
+                delta: 2.0,
+            },
+            series(FactKind::Trend {
+                subject: Subject::measure("Revenue"),
+                slope_per_step: 1.0,
+                r2: 0.9,
+                pct_change: 0.2,
+                first: 100.0,
+                last: 120.0,
+                n: 12,
+                direction: insights::types::Direction::Rising,
+            }),
+            series(FactKind::ChangePoint {
+                subject: Subject::measure("Revenue"),
+                at_label: "Mar".into(),
+                at_index: 2,
+                before_mean: 100.0,
+                after_mean: 130.0,
+                shift_sd: 2.0,
+            }),
+            series(FactKind::Seasonality {
+                subject: Subject::measure("Revenue"),
+                lag: 12,
+                acf: 0.8,
+            }),
+        ]
+    }
+
+    #[test]
+    fn every_fact_kind_a_run_can_emit_is_spelled_in_the_suppressible_list() {
+        // THE ONLY WAY A `suppress` ENTRY CAN FAIL IS BY SPELLING, and the list
+        // a person copies the spelling from lives in the strategy document's
+        // vocabulary file while the spellings themselves are produced HERE. That
+        // is a drift waiting to happen, so it is diffed in BOTH directions: a
+        // kind the engine emits and the list does not name cannot be suppressed
+        // at all, and a name in the list that no fact carries is a spelling the
+        // validator blesses and the engine then ignores.
+        let samples = one_of_every_fact_kind_a_run_can_emit();
+
+        // Adding a `ModelFactKind` variant fails to compile this match, and the
+        // `seen` array below then fails until a sample for it exists - which is
+        // what keeps the list above from silently going stale.
+        let mut seen = [false; 6];
+        for kind in &samples {
+            let variant = match kind {
+                ModelFactKind::Change { .. } => 0,
+                ModelFactKind::Variance { .. } => 1,
+                ModelFactKind::DefinitionalDriver { .. } => 2,
+                ModelFactKind::Contribution { .. } => 3,
+                ModelFactKind::MemberMove { .. } => 4,
+                ModelFactKind::Series { .. } => 5,
+            };
+            seen[variant] = true;
+        }
+        assert!(
+            seen.iter().all(|s| *s),
+            "every ModelFactKind variant needs a sample here: {seen:?}"
+        );
+
+        let emitted: BTreeSet<String> = samples.iter().map(|k| k.kind_key()).collect();
+        let listed: BTreeSet<String> = SUPPRESSIBLE_FACT_KINDS
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect();
+        assert_eq!(
+            emitted, listed,
+            "the suppressible list and the kinds a run emits have drifted; \
+             emitted-only {:?}, listed-only {:?}",
+            emitted.difference(&listed).collect::<Vec<_>>(),
+            listed.difference(&emitted).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_band_target_decides_favourability_from_where_the_value_landed() {
+        // THE BAND HAD NO PRODUCTIVE CONSUMER. `favourability_of` reads a delta
+        // and correctly declines a band; the variance fact that was supposed to
+        // answer instead is never built for a band target, so a `targetBand`
+        // measure shipped every fact with no favourability at all. The landed
+        // value is what can decide it, and every fact below has one.
+        let mut r = resolved("Quantity");
+        r.direction = Some(Applied::new(Direction::TargetBand, AttrSource::Strategy));
+        r.target = Some(Applied::new(Target::band(90.0, 140.0), AttrSource::Strategy));
+
+        let (facts, run) = facts_for_measure(&observation("Quantity", 100.0, 120.0), &r, &locale());
+        assert_eq!(
+            run.favourability,
+            Some(Favourability::Better),
+            "120 is inside [90, 140]: {:?}",
+            kinds_of(&facts)
+        );
+
+        let (_, out) = facts_for_measure(&observation("Quantity", 100.0, 160.0), &r, &locale());
+        assert_eq!(out.favourability, Some(Favourability::Worse), "160 is above it");
+
+        // ...and the inclusivity of the end is spent right here: the same value
+        // on the same band, judged the other way by one flag.
+        r.target = Some(Applied::new(
+            Target::Band {
+                low: 90.0,
+                high: 140.0,
+                low_inclusive: true,
+                high_inclusive: false,
+            },
+            AttrSource::Strategy,
+        ));
+        let (_, edge) = facts_for_measure(&observation("Quantity", 100.0, 140.0), &r, &locale());
+        assert_eq!(edge.favourability, Some(Favourability::Worse));
+        r.target = Some(Applied::new(Target::band(90.0, 140.0), AttrSource::Strategy));
+        let (_, edge) = facts_for_measure(&observation("Quantity", 100.0, 140.0), &r, &locale());
+        assert_eq!(edge.favourability, Some(Favourability::Better));
+
+        // A WITHHELD DIRECTION STILL WINS. Rule 4 outranks the band, or a
+        // suppression could be walked around by declaring one.
+        r.suppressions = vec![Suppression {
+            attribute: Attribute::Direction,
+            rule: "r1".into(),
+            reason: "the aggregate spans two directions".into(),
+        }];
+        let (_, withheld) = facts_for_measure(&observation("Quantity", 100.0, 120.0), &r, &locale());
+        assert_eq!(withheld.favourability, None);
+    }
+
+    #[test]
+    fn an_aggregation_with_no_entry_for_this_dimension_does_not_claim_one() {
+        // "lastValue over Product" is a PER-DIMENSION claim. The provenance line
+        // printed it for a spec whose `byDimension` was empty, attributing to
+        // the document a statement it never made - about a rollup that has no
+        // meaning along that dimension. It now says what the document said.
+        //
+        // The two lookups also used to disagree: the share GATE tried all three
+        // key spellings while the provenance line tried only `Table[Column]`, so
+        // a `byDimension` keyed on the bare table denied the share and then
+        // printed the default as its reason.
+        let dimension = QualifiedColumn::new("Product", "Category");
+        let mut r = resolved("Revenue");
+        r.aggregation = Some(non_additive());
+        let mut obs = observation("Revenue", 100.0, 140.0);
+        obs.slices = vec![slice(
+            "Product[Category]",
+            vec![MemberSeries::new("Gadgets", 100.0, 140.0)],
+        )];
+
+        let (facts, _) = facts_for_measure(&obs, &r, &locale());
+        let aggregation = facts
+            .iter()
+            .flat_map(|f| f.provenance.iter())
+            .find(|p| p.attr == "aggregation")
+            .expect("the additivity that denied the share is named");
+        assert_eq!(
+            aggregation.value, "nonAdditive",
+            "a model-wide default is reported as one, with no dimension attached"
+        );
+
+        // The bare-TABLE spelling: `is_additive_over` honours it, so the
+        // provenance must name it too rather than falling back to the default.
+        r.aggregation = Some(Applied::new(
+            AggregationSpec {
+                default: Additivity::Additive,
+                by_dimension: BTreeMap::from([("Product".to_string(), Additivity::LastValue)]),
+            },
+            AttrSource::Strategy,
+        ));
+        assert!(!is_additive_over(&r, &dimension), "the bare table key is honoured");
+        let (facts, _) = facts_for_measure(&obs, &r, &locale());
+        let aggregation = facts
+            .iter()
+            .flat_map(|f| f.provenance.iter())
+            .find(|p| p.attr == "aggregation")
+            .expect("an aggregation is named");
+        assert_eq!(aggregation.value, "lastValue over Product[Category]");
     }
 
     #[test]
