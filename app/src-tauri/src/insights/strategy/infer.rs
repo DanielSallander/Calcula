@@ -1097,10 +1097,6 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
         model: ModelStrategy {
             default_time_axis: infer_default_time_axis(model, facts),
             fiscal_year_start: infer_fiscal_year_start(model),
-            // Left unset: a currency code can be scraped out of `[$SEK-41d]`,
-            // but a model whose measures carry two different codes has a real
-            // reporting-currency question that a scrape would paper over.
-            reporting_currency: None,
             priority: seed_priority(model, facts, usage),
             // THE BLOCK IS A GUESS LIKE ANY OTHER ROW, and it is the guess that
             // most needs accepting: `default_time_axis` above may be a calendar

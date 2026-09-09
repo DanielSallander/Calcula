@@ -1726,6 +1726,28 @@ fn validate_table_kinds(
                     }
                 }
             }
+            // A WARNING, NOT AN ERROR, AND THE RULE SAYS SO. The declaration
+            // wins, so the axis survives and no fact is wrong or withheld — the
+            // document merely states something that does not take effect, which
+            // is the "less good" side of the line. It is worth saying at all
+            // because of the size of what the author was reaching for: demoting
+            // the calendar would have removed every trend, change point and
+            // seasonality claim at once, and a dropdown gives no hint of that.
+            KindRefusal::TheModelDeclaresItTheDateTable => {
+                out.push(Finding::warning(
+                    "authored-kind-demotes-the-date-table",
+                    path,
+                    format!(
+                        "the model marks '{}' as its date table, so calling it a '{}' here does \
+                         not take effect and time still runs along it. Had it taken effect, this \
+                         report would have lost every trend, change point and seasonality claim \
+                         for every measure. Unmark the date table in the Model Editor if that is \
+                         what you meant",
+                        conflict.table,
+                        conflict.authored.label()
+                    ),
+                ));
+            }
         }
     }
 
@@ -1761,7 +1783,14 @@ pub fn validate(facts: &ModelFacts, doc: &StrategyDoc) -> Vec<Finding> {
     // validation - here for the time axis and again inside
     // `validate_table_kinds` - and two calls are also two chances for the two
     // sites to be given different documents. Both readers take this one.
-    let authored = authored_table_kinds(facts, doc);
+    // The DECLARED calendar, which is the only thing an authored non-calendar
+    // kind is refused against. An INFERRED one is a heuristic and the document
+    // outranks it, so it is deliberately not passed here.
+    let declared_calendar = match facts.calendar_source {
+        Some(CalendarSource::Declared) => facts.date_table.as_deref(),
+        _ => None,
+    };
+    let authored = authored_table_kinds(facts, doc, declared_calendar);
 
     // --- the document's own version -----------------------------------------
     //
@@ -1812,8 +1841,8 @@ pub fn validate(facts: &ModelFacts, doc: &StrategyDoc) -> Vec<Finding> {
             ));
         }
     }
-    // `fiscalYearStart` and `reportingCurrency` USED TO BE CHECKED HERE and are
-    // not any more: they are `MonthDay` and `CurrencyCode`, so a malformed value
+    // `fiscalYearStart` USED TO BE CHECKED HERE and is not any more: it is a
+    // `MonthDay`, so a malformed value
     // cannot reach a `StrategyDoc` at all. The check that lived here protected
     // the two write gates and not the run path, which is exactly the asymmetry
     // the types remove. Nothing reads either field yet - the run walks whatever

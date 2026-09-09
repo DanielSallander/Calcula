@@ -48,8 +48,7 @@
 //          failure mode a prose list has and a variant list cannot: the comment
 //          drifted from the parser, and the one place a person copies a spelling
 //          from named something that could not work. The same reasoning gives
-//          `IsoDate`, `MonthDay` and `CurrencyCode` validating `Deserialize`
-//          impls: a value whose FORM is load-bearing is refused where it is
+//          `IsoDate` and `MonthDay` validating `Deserialize` impls: a value whose FORM is load-bearing is refused where it is
 //          read, not somewhere later by a check that a future caller can skip.
 //
 //          WHAT PARSE-TIME REFUSAL COSTS, stated so the next author can weigh it.
@@ -79,6 +78,24 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The schema version a freshly written document carries.
 pub const STRATEGY_DOC_VERSION: u32 = 1;
+
+/// Is this a schema version this build can honestly claim to understand?
+///
+/// DELIBERATELY NOT A VALIDATING `Deserialize`, unlike `IsoDate` and `MonthDay`.
+/// A malformed DATE is a typo in one field and refusing it at parse time costs
+/// the author nothing; an unreadable VERSION is a statement about the whole
+/// document, and refusing it in `Deserialize` would turn an anchored
+/// `unsupported-document-version` finding - which the Strategy tab pins to a row
+/// - into a path-less `unreadable-document` pinned to nothing.
+///
+/// So the refusal lives in TWO readers instead, and this predicate is what keeps
+/// them agreeing: `validate.rs` for the write gates, and `strategy_doc`
+/// (`model_commands.rs`) for the RUN path, which parses without validating and
+/// was the real hole - a `.calp` carrying a newer document would have been
+/// applied as v1, every field read with a meaning it does not have.
+pub fn is_readable_doc_version(version: u32) -> bool {
+    version != 0 && version <= STRATEGY_DOC_VERSION
+}
 
 /// Every fact kind a `Rule`'s `suppress` list may name.
 ///
@@ -534,57 +551,6 @@ impl<'de> Deserialize<'de> for MonthDay {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         MonthDay::from_str(&raw).map_err(D::Error::custom)
-    }
-}
-
-/// An ISO-4217 currency code: three uppercase letters, `SEK` or `USD`.
-///
-/// It had no validation and no consumer at all - `infer` writes `None`, nothing
-/// formats with it. Deleting it was the other option and was rejected: a
-/// reporting currency is a real thing a strategy document should be able to
-/// state, and a typed field that a formatter can later read is worth more than a
-/// field removed and re-added. What it must NOT be is a free-text box that
-/// accepts `kr` and then disagrees with whatever formatter finally arrives.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CurrencyCode(String);
-
-impl CurrencyCode {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for CurrencyCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl FromStr for CurrencyCode {
-    type Err = FormatError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() == 3 && s.bytes().all(|c| c.is_ascii_uppercase()) {
-            Ok(CurrencyCode(s.to_string()))
-        } else {
-            Err(FormatError {
-                input: s.to_string(),
-                expected: "a three-letter uppercase ISO-4217 currency code, e.g. 'SEK'",
-            })
-        }
-    }
-}
-
-impl Serialize for CurrencyCode {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for CurrencyCode {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        CurrencyCode::from_str(&raw).map_err(D::Error::custom)
     }
 }
 
@@ -1262,15 +1228,17 @@ pub struct ModelStrategy {
     pub fiscal_year_start: Option<MonthDay>,
     /// The currency every money measure in this model is reported in.
     ///
-    /// VALIDATED AND STILL INERT, said here so the next reader does not assume
-    /// a validator implies a consumer. `CurrencyCode` refuses `kr` at the door,
-    /// but no formatter reads this field: `infer` writes `None`, and nothing in
-    /// `model.rs`, `model_commands.rs` or `report.rs` looks it up. The change
-    /// that gave it a type made it a STRICTER inert field, not a live one - a
-    /// real improvement (a stored `kr` is a trap for whoever wires it up) and
-    /// not a feature. Wiring a formatter to it is a separate decision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reporting_currency: Option<CurrencyCode>,
+    // `reporting_currency` WAS HERE AND IS DELETED. It was authored, mirrored
+    // into TypeScript, given a validating `CurrencyCode` newtype - and read by
+    // NOTHING: `infer` wrote `None`, and no formatter in `model.rs`,
+    // `model_commands.rs` or `report.rs` ever looked it up. Typing it made it a
+    // STRICTER inert field, which is effort spent making a decoration rigorous.
+    //
+    // Deleting is also the cheaper reversal: re-adding a field once a formatter
+    // exists costs less than carrying one that never gets used, and this file's
+    // standing rule is that nothing becomes authorable until it has a reader.
+    // `unit` and `cadence` were kept where this was dropped, because both have a
+    // designed reader coming and this had none.
     /// Measure names, most important first.
     ///
     /// NOT A TIE-BREAK, which is what this line used to call it. `resolve` turns
@@ -2077,14 +2045,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fiscal_year_start_and_a_currency_are_refused_at_the_door_rather_than_stored_malformed() {
+    fn a_fiscal_year_start_is_refused_at_the_door_rather_than_stored_malformed() {
         assert_eq!("04-01".parse::<MonthDay>().unwrap().to_string(), "04-01");
         for bad in ["4-1", "13-01", "04-32", "0401", "04-01-01", ""] {
             assert!(bad.parse::<MonthDay>().is_err(), "'{bad}' must not parse as MM-DD");
-        }
-        assert_eq!("SEK".parse::<CurrencyCode>().unwrap().as_str(), "SEK");
-        for bad in ["sek", "SEKK", "SE", "S3K", ""] {
-            assert!(bad.parse::<CurrencyCode>().is_err(), "'{bad}' must not parse as ISO-4217");
         }
         let err = serde_json::from_str::<StrategyDoc>(
             r#"{"version":1,"model":{"fiscalYearStart":"4-1"}}"#,
@@ -2092,6 +2056,85 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("4-1"), "{err}");
+    }
+
+    #[test]
+    fn only_a_version_this_build_understands_is_readable_and_zero_is_not_one() {
+        // The predicate BOTH readers ask, so the write gate and the run path
+        // cannot drift into disagreeing about which documents are legible.
+        assert!(is_readable_doc_version(STRATEGY_DOC_VERSION));
+        assert!(
+            !is_readable_doc_version(0),
+            "0 is not a version this format ever had"
+        );
+        for ahead in [STRATEGY_DOC_VERSION + 1, 99] {
+            assert!(
+                !is_readable_doc_version(ahead),
+                "a document from a newer schema is not readable by pretending it is this one"
+            );
+        }
+        // A LOWER version stays readable when there is one - that is an OLDER
+        // document, which is the direction that must keep working. There is no
+        // such version yet, which is exactly why this is asserted rather than
+        // assumed: `<=` is the operator, not `==`.
+        assert!(
+            (1..=STRATEGY_DOC_VERSION).all(is_readable_doc_version),
+            "every version up to and including the current one must stay readable"
+        );
+    }
+
+    #[test]
+    fn no_untagged_enum_in_this_schema_can_swallow_a_typed_key() {
+        // THE `too` DEFECT, GUARDED AGAINST ITS RETURN. An untagged enum with a
+        // STRUCT variant is the shape where a misspelled key vanishes: serde
+        // tries each variant, and `{"from": .., "too": ..}` matched the range
+        // with `to` absent, so a bounded scope became an open-ended one and the
+        // rule ran on for every later period. `deny_unknown_fields` is NOT the
+        // repair - on an untagged enum it refuses but reports only "data did not
+        // match any variant", naming nothing - which is why `RawScopeValue` has
+        // a hand-written visitor instead.
+        //
+        // The rule this pins: in THIS file, an untagged enum may not also derive
+        // `Deserialize`. Scalar-discriminated ones elsewhere (`PivotCellValueData`,
+        // `PlanValue`) are safe because they have no field names to misspell;
+        // the moment one here grows a struct variant, it needs the visitor.
+        let source = include_str!("types.rs");
+        let lines: Vec<&str> = source.lines().collect();
+        let mut offenders: Vec<String> = Vec::new();
+        for (n, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("#[serde(") || !line.contains("untagged") {
+                continue;
+            }
+            // The derive list sits directly above the serde attribute, in the
+            // unbroken run of attributes and comments that introduces the item.
+            let derives_deserialize = lines[..n]
+                .iter()
+                .rev()
+                .take_while(|l| {
+                    l.trim_start().starts_with("#[") || l.trim_start().starts_with("//")
+                })
+                .any(|l| l.contains("derive(") && l.contains("Deserialize"));
+            if derives_deserialize {
+                let name = lines[n..]
+                    .iter()
+                    .find(|l| l.contains("enum "))
+                    .copied()
+                    .unwrap_or("<unknown>");
+                offenders.push(format!("line {}: {}", n + 1, name.trim()));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "an untagged enum on the READ path can swallow a misspelled key. Give it a \
+             hand-written visitor the way `RawScopeValue` has one:\n  {}",
+            offenders.join("\n  ")
+        );
+        // POSITIVE CONTROL: the scan can see the untagged attribute at all, so
+        // an empty offender list means "checked and clean", not "found nothing".
+        assert!(
+            source.lines().any(|l| l.contains("#[serde(untagged")),
+            "the scan found no untagged enum whatsoever - it has stopped looking"
+        );
     }
 
     #[test]

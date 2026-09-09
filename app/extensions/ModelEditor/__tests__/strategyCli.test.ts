@@ -637,12 +637,27 @@ describe("set table … kind= / labelcolumn= / reviewed=", () => {
     expect(strategySet).not.toHaveBeenCalled();
   });
 
-  it("still accepts the kinds that claim no lookup at all on the same table", async () => {
-    // The mirror must never be STRICTER than the validator, or the CLI would
-    // refuse a document the backend accepts.
-    const { ok } = await run("set table Sales kind=fact");
-    expect(ok).toBe(true);
-    expect(writtenDoc().tables?.Sales?.kind).toBe("fact");
+  it("refuses the three kinds nothing reads, and says they are detected rather than set", async () => {
+    // MEANING CHANGE, DELIBERATE. This test used to assert that `fact` was
+    // ACCEPTED, on the rule that the CLI must never be stricter than the
+    // validator. That rule still holds for `tableKindTopologyRefusal`, which
+    // mirrors the backend — but `fact`, `bridge` and `other` reach nothing on
+    // the run path at all, so accepting them was accepting a value the engine
+    // would ignore. `tableKindIsInert` is stricter than the backend ON PURPOSE
+    // and is a separate function for exactly that reason.
+    for (const kind of ["fact", "bridge", "other"]) {
+      const { ok, output } = await run(`set table Sales kind=${kind}`);
+      expect(ok, `'${kind}' must be refused`).toBe(false);
+      expect(output).toContain("Only 'calendar' and 'dimension' change what a report says");
+    }
+    expect(strategySet).not.toHaveBeenCalled();
+  });
+
+  it("still takes the two kinds the engine does read", async () => {
+    // The positive control, and the reason the refusal above is a restriction
+    // rather than a removal: the control still authors everything it consumes.
+    await run("set table Dim kind=dimension");
+    expect(writtenDoc().tables?.Dim?.kind).toBe("dimension");
   });
 
   it("names the alternatives for a kind that is not one", async () => {

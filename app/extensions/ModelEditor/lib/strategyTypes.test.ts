@@ -67,7 +67,6 @@ import {
   formatScopeSpec,
   isValidIsoDate,
   nearestSuppressibleFactKind,
-  parseCurrencyCode,
   parseIsoDate,
   parseScopeSpec,
   parseSuppressSpec,
@@ -136,7 +135,6 @@ const FULL_MEASURE: Required<MeasureStrategy> = {
 const FULL_MODEL: Required<ModelStrategy> = {
   defaultTimeAxis: "Date[Day]",
   fiscalYearStart: "04-01",
-  reportingCurrency: "SEK",
   priority: ["Revenue"],
   reviewed: false,
   source: "authored",
@@ -329,7 +327,7 @@ describe("modelHasValues", () => {
   it("reads a block that states nothing as empty, however it is spelled", () => {
     expect(modelHasValues({ reviewed: false })).toBe(false);
     expect(
-      modelHasValues({ reviewed: true, defaultTimeAxis: "", reportingCurrency: "", priority: [] }),
+      modelHasValues({ reviewed: true, defaultTimeAxis: "", fiscalYearStart: "", priority: [] }),
     ).toBe(false);
   });
 
@@ -424,15 +422,15 @@ describe("withMeasure / withTable / withColumn stamp who wrote the values", () =
 
   it("stamps the model block the same way, and leaves it alone for a bare confirm", () => {
     const doc: StrategyDoc = { version: 1, model: { defaultTimeAxis: "Date[Day]", reviewed: false } };
-    expect(withModel(doc, { reportingCurrency: "SEK" }).model?.source).toBe("authored");
+    expect(withModel(doc, { fiscalYearStart: "04-01" }).model?.source).toBe("authored");
     expect(withModel(doc, { reviewed: true }).model?.source).toBeUndefined();
     expect(withModel(doc, { reviewed: true }).model?.reviewed).toBe(true);
     // A block the document never had is created rather than merged into
     // nothing — `modelEntry` is what makes the missing case a blank.
-    expect(withModel({ version: 1 }, { reportingCurrency: "SEK" }).model).toEqual({
+    expect(withModel({ version: 1 }, { fiscalYearStart: "04-01" }).model).toEqual({
       reviewed: false,
       source: "authored",
-      reportingCurrency: "SEK",
+      fiscalYearStart: "04-01",
     });
   });
 });
@@ -463,7 +461,7 @@ describe("an edit revokes the confirmation it edits", () => {
     expect(
       withColumn(confirmedDoc, "Dim", "Dept", { role: "analysis" }).tables?.Dim?.reviewed,
     ).toBe(false);
-    expect(withModel(confirmedDoc, { reportingCurrency: "SEK" }).model?.reviewed).toBe(false);
+    expect(withModel(confirmedDoc, { fiscalYearStart: "04-01" }).model?.reviewed).toBe(false);
   });
 
   it("leaves it alone when the patch touches nothing but reviewed or source", () => {
@@ -1133,7 +1131,7 @@ describe("scope spec round trip", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The newtype mirrors — `IsoDate` and `CurrencyCode`
+// The newtype mirror — `IsoDate`
 // ---------------------------------------------------------------------------
 
 describe("isValidIsoDate", () => {
@@ -1170,24 +1168,6 @@ describe("isValidIsoDate", () => {
       // The STAKE, the same way the suppress refusal states it: a bad bound is
       // not one bad field, it is a document that stops parsing.
       expect(parsed.error).toContain("whole strategy document");
-    }
-  });
-});
-
-describe("parseCurrencyCode", () => {
-  it("takes a three-letter uppercase code and clears on empty", () => {
-    expect(parseCurrencyCode("SEK")).toEqual({ ok: true, value: "SEK" });
-    expect(parseCurrencyCode("  EUR  ")).toEqual({ ok: true, value: "EUR" });
-    // Clearing the field is how a document stops naming a currency; refusing
-    // an empty box would make that gesture unreachable.
-    expect(parseCurrencyCode("")).toEqual({ ok: true, value: undefined });
-  });
-
-  it("refuses every shape `CurrencyCode::from_str` refuses", () => {
-    for (const bad of ["sek", "Sek", "kr", "USDX", "US1", "SE K"]) {
-      const parsed = parseCurrencyCode(bad);
-      expect(parsed.ok, `'${bad}' must be refused`).toBe(false);
-      if (!parsed.ok) expect(parsed.error).toContain(bad);
     }
   });
 });
@@ -1333,26 +1313,13 @@ describe("the closed sets mirror insights/strategy/types.rs", () => {
     expect([...ROLE_DISPLAY_ORDER].sort()).toEqual([...ROLES].sort());
   });
 
-  it("pins the CurrencyCode rule the tab's own validator mirrors", () => {
-    // `parseCurrencyCode` restates a Rust PREDICATE rather than an enum, so the
-    // diff above cannot see it. Reading the predicate keeps the restatement
-    // honest: if `from_str` stops demanding three uppercase ASCII letters, this
-    // reds and the mirror gets re-read.
-    const at = rustSrc.indexOf("impl FromStr for CurrencyCode");
-    expect(at, "impl FromStr for CurrencyCode not found in types.rs").toBeGreaterThan(-1);
-    const body = rustSrc.slice(at, at + 600);
-    expect(body, `the CurrencyCode rule has changed. ${FIX}`).toContain("s.len() == 3");
-    expect(body, `the CurrencyCode rule has changed. ${FIX}`).toContain("is_ascii_uppercase");
-  });
-
   // -------------------------------------------------------------------------
   // The two CALENDAR predicates
   //
   // `isValidIsoDate` (here) and `parseFiscalYearStart` (`StrategySection.tsx`)
   // are restatements of Rust FUNCTIONS, not of enums, so the variant diff above
-  // is blind to them. The `CurrencyCode` row directly above pins its rule by
-  // quoting two substrings back at the file; a calendar cannot be pinned that
-  // way, because "is the day inside its own month" is a table and a leap-year
+  // is blind to them. A predicate can sometimes be pinned by quoting a
+  // substring back at the file; a calendar cannot, because "is the day inside its own month" is a table and a leap-year
   // rule rather than a phrase. So these rows READ the Rust functions and RUN
   // them: the leap-year body is a boolean expression that happens to be valid
   // JavaScript, and both month tables are a `match month` whose arms parse.

@@ -42,6 +42,7 @@ use super::report::{self, ReportGrid, REPORT_SHEET_BASE_NAME};
 // `strategy::` re-export list: the re-exports live in a `mod.rs`, and the seam
 // this needs is one function rather than a new public surface.
 use super::strategy::facts::{facts_with_authored_kinds, AuthoredKinds, KindRefusal};
+use super::strategy::types::{is_readable_doc_version, STRATEGY_DOC_VERSION};
 use super::strategy::{resolve, ModelFacts, QualifiedColumn, ScopePoint, StrategyDoc, Target};
 use super::wire::WireBundle;
 
@@ -106,6 +107,26 @@ fn strategy_doc(model: &bi_engine::DataModel, notes: &mut Vec<String>) -> Strate
         return StrategyDoc::default();
     }
     match serde_json::from_value::<StrategyDoc>(raw.clone()) {
+        // A VERSION THIS BUILD DOES NOT UNDERSTAND IS NOT A DOCUMENT IT MAY
+        // APPLY. `validate.rs` refuses one at the write gates with an anchored
+        // finding, but this path parses WITHOUT validating - so a `.calp` or
+        // `.cala` written by a newer build reached the planner and every rule,
+        // direction and materiality in it was read with v1 meaning, in silence.
+        // The `.cala` reader already takes this line for the workbook format:
+        // refuse a higher version rather than half-understand it.
+        //
+        // Falling back to the empty document is the safe half. The report then
+        // says only what the MODEL declares, which is less than the author
+        // wanted but never something they did not write.
+        Ok(doc) if !is_readable_doc_version(doc.version) => {
+            notes.push(format!(
+                "The model's strategy document declares version {} and this build understands \
+                 version {}; it was not applied. Every attribute fell back to what the model \
+                 itself declares. Open it in a build that understands it, or re-save it here.",
+                doc.version, STRATEGY_DOC_VERSION
+            ));
+            StrategyDoc::default()
+        }
         Ok(doc) => doc,
         Err(e) => {
             notes.push(format!(
@@ -185,6 +206,23 @@ fn shape_of(model: &bi_engine::DataModel, measure: &str) -> Option<DriverShape> 
 /// kind the run actually used.
 fn kind_conflict_notes(facts: &ModelFacts, authored: &AuthoredKinds) -> Vec<String> {
     let mut out = Vec::new();
+    // THE DEMOTION THAT TOOK EFFECT, said first because it is the largest thing
+    // this document did. Nothing refused it, so it produces no conflict and
+    // would otherwise reach the reader as an absence: a report that silently
+    // stopped reporting trends.
+    if let Some(demoted) = &authored.demoted_guess {
+        out.push(format!(
+            "The strategy document calls '{demoted}' a '{}', and that was the only table this \
+             model could have run time along. It now has no time axis, so no trend, change point \
+             or seasonality is reported for any measure. Call '{demoted}' a 'calendar' in the \
+             Strategy tab, or mark a date table in the Model Editor.",
+            authored
+                .accepted
+                .get(demoted)
+                .map(|k| k.label())
+                .unwrap_or("dimension"),
+        ));
+    }
     for conflict in &authored.conflicts {
         let table = &conflict.table;
         let kind = conflict.authored.label();
@@ -217,6 +255,18 @@ fn kind_conflict_notes(facts: &ModelFacts, authored: &AuthoredKinds) -> Vec<Stri
                  neither was used: this report treated '{table}' as a '{derived}'. Which table \
                  time runs along is one decision; make it in the Strategy tab, and give the other \
                  one a different kind."
+            ),
+            // SAID OUT LOUD BECAUSE THE CONSEQUENCE IS NOT GUESSABLE FROM THE
+            // CONTROL. Taking the calendar away removes every trend, change
+            // point and seasonality claim in the report at once, and a dropdown
+            // gives no hint of that — so the one case where the model's own
+            // declaration saves the reader from it is worth a sentence.
+            KindRefusal::TheModelDeclaresItTheDateTable => format!(
+                "The strategy document calls '{table}' a '{kind}', but the model itself marks it \
+                 as the date table, so it was left as the calendar. Demoting it would have taken \
+                 the time axis away and with it every trend, change point and seasonality claim \
+                 in this report. If that is what you meant, unmark the date table in the Model \
+                 Editor first."
             ),
         });
     }
@@ -368,6 +418,37 @@ pub async fn run_model_insights(
     let chosen = model::choose_measures(&doc, &facts, &request.measures);
     if chosen.is_empty() {
         notes.push("This model declares no measures to analyse.".to_string());
+    }
+
+    // CONFIRMATION IS ADVISORY, AND THE REPORT HAS TO SAY SO.
+    //
+    // `resolve` has no `reviewed` gate: an INFERRED direction, materiality or
+    // aggregation is applied at full strength whether or not a person ever
+    // looked at it. That is the right design — an inferred draft has to stay
+    // savable, which is the real reason the `unreviewed` finding is a warning
+    // and not an error — but the Strategy tab's Confirm workflow reads as
+    // though confirming CHANGES something, and it does not. Nowhere else does
+    // the reader learn that a word like "worse" rests on a guess nobody
+    // endorsed.
+    //
+    // Counted over the measures ACTUALLY IN THIS RUN, not the whole document: an
+    // unreviewed entry for a measure nothing reported is not something this
+    // report rests on.
+    let unreviewed: Vec<&str> = chosen
+        .iter()
+        .filter(|m| doc.measures.get(m.as_str()).is_some_and(|e| !e.reviewed))
+        .map(|m| m.as_str())
+        .collect();
+    if !unreviewed.is_empty() {
+        notes.push(format!(
+            "{} of the {} measures below still carry inferred settings nobody has confirmed ({}). \
+             The engine applies them at full strength either way — confirming in the Strategy tab \
+             records that a person agreed, it does not change what is reported. Where a direction \
+             was guessed wrong, the word 'better' or 'worse' is guessed wrong with it.",
+            unreviewed.len(),
+            chosen.len(),
+            unreviewed.join(", ")
+        ));
     }
 
     // KPI bands, indexed by the measure they mark up.
@@ -1173,6 +1254,76 @@ mod tests {
             "and what the run used instead: {}",
             notes[0]
         );
+    }
+
+    #[test]
+    fn a_demoted_guess_takes_the_axis_away_and_the_run_says_which_dropdown_did_it() {
+        // NOTHING REFUSED THIS ONE, which is exactly why it needs a note. The
+        // author said the guessed calendar is an ordinary dimension, that took
+        // effect, and the report simply stopped carrying trends. An absence
+        // cannot announce itself.
+        use crate::insights::strategy::TableKind;
+
+        let facts = ModelFacts::default();
+        let authored = AuthoredKinds {
+            demoted_guess: Some("dim_date".to_string()),
+            accepted: [("dim_date".to_string(), TableKind::Dimension)]
+                .into_iter()
+                .collect(),
+            ..AuthoredKinds::default()
+        };
+        let notes = kind_conflict_notes(&facts, &authored);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("'dim_date'"), "{}", notes[0]);
+        assert!(notes[0].contains("'dimension'"), "the kind that did it: {}", notes[0]);
+        assert!(
+            notes[0].contains("no time axis"),
+            "the consequence, which is the whole point: {}",
+            notes[0]
+        );
+    }
+
+    #[test]
+    fn a_strategy_document_from_a_newer_schema_is_not_applied_as_this_one() {
+        // `validate.rs` refuses this at the WRITE gates with an anchored
+        // finding. This path parses without validating, so a `.calp` or `.cala`
+        // written by a newer build reached the planner and every rule,
+        // direction and materiality in it was read with v1 meaning, in silence.
+        let stored = |version: u32| {
+            let mut data = std::collections::BTreeMap::new();
+            data.insert(
+                crate::bi::model_editor::STRATEGY_EXTENSION_KEY.to_string(),
+                serde_json::json!({
+                    "version": version,
+                    "measures": { "Revenue": { "direction": "lowerIsBetter", "reviewed": true } }
+                }),
+            );
+            a_star_with_a_bridge().with_extension_data(data)
+        };
+
+        let ahead = stored(STRATEGY_DOC_VERSION + 1);
+        let mut notes = Vec::new();
+        let doc = strategy_doc(&ahead, &mut notes);
+
+        assert!(
+            doc.measures.is_empty(),
+            "a schema this build does not understand must not be applied at all"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("was not applied"), "{}", notes[0]);
+        assert!(
+            notes[0].contains(&(STRATEGY_DOC_VERSION + 1).to_string()),
+            "the note quotes the version it was handed: {}",
+            notes[0]
+        );
+
+        // POSITIVE CONTROL: the version this build DOES understand still applies
+        // and says nothing, so the refusal is about the version and not about
+        // the shape of the document.
+        let current = stored(STRATEGY_DOC_VERSION);
+        let mut clean = Vec::new();
+        assert_eq!(strategy_doc(&current, &mut clean).measures.len(), 1);
+        assert!(clean.is_empty(), "{clean:?}");
     }
 
     #[test]

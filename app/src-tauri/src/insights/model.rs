@@ -2033,8 +2033,19 @@ mod tests {
         }
     }
 
-    /// Two periods of a measure, with no dimensions and no driver.
-    fn observation(measure: &str, first: f64, last: f64) -> MeasureObservation {
+    /// Two periods of a measure, WITH NO TARGET, no bands, no dimensions and no
+    /// driver.
+    ///
+    /// THE ABSENCES ARE IN THE NAME BECAUSE ONE OF THEM HID A BUG FOR FOUR
+    /// ROUNDS. `MeasureObservation` derives `Default`, so `..default()` leaves
+    /// `target_value: None` — and the Variance fact is built OUTSIDE the
+    /// materiality gate, so "the run emits nothing below the floor" is true
+    /// only while there is no target. Every fixture on that path had been built
+    /// this way, so 295 tests agreed with a premise none of them stated. A test
+    /// asserting an ABSENCE here is asserting about this helper's defaults; if
+    /// that is the point, say so in the assertion, and if it is not, set the
+    /// field.
+    fn observation_without_a_target(measure: &str, first: f64, last: f64) -> MeasureObservation {
         MeasureObservation {
             measure: measure.to_string(),
             labels: vec!["Jan".to_string(), "Feb".to_string()],
@@ -2288,7 +2299,7 @@ mod tests {
             AttrSource::Strategy,
         ));
         // 100 -> 102 is 2%, and the business said 5%.
-        let (facts, _) = facts_for_measure(&observation("Revenue", 100.0, 102.0), &r, &locale());
+        let (facts, _) = facts_for_measure(&observation_without_a_target("Revenue", 100.0, 102.0), &r, &locale());
         assert!(
             !kinds_of(&facts).contains(&"change".to_string()),
             "a movement the business calls noise produces NO fact: {:?}",
@@ -2304,7 +2315,7 @@ mod tests {
             AttrSource::Strategy,
         ));
         // 100 -> 112 is 12%.
-        let (facts, run) = facts_for_measure(&observation("Revenue", 100.0, 112.0), &r, &locale());
+        let (facts, run) = facts_for_measure(&observation_without_a_target("Revenue", 100.0, 112.0), &r, &locale());
         assert!(kinds_of(&facts).contains(&"change".to_string()));
         assert_eq!(run.delta, Some(12.0));
     }
@@ -2346,7 +2357,7 @@ mod tests {
                 .to_string(),
         }];
 
-        let (facts, run) = facts_for_measure(&observation("Returns", 100.0, 130.0), &r, &locale());
+        let (facts, run) = facts_for_measure(&observation_without_a_target("Returns", 100.0, 130.0), &r, &locale());
         let change = facts
             .iter()
             .find(|f| f.kind.kind_key() == "change")
@@ -2408,7 +2419,7 @@ mod tests {
         // ...and the same flip reaches the sentence.
         let mut better = resolved("Cost");
         better.direction = Some(Applied::new(Direction::LowerIsBetter, AttrSource::Strategy));
-        let (facts, _) = facts_for_measure(&observation("Cost", 100.0, 80.0), &better, &locale());
+        let (facts, _) = facts_for_measure(&observation_without_a_target("Cost", 100.0, 80.0), &better, &locale());
         let text = &facts
             .iter()
             .find(|f| f.kind.kind_key() == "change")
@@ -2481,7 +2492,7 @@ mod tests {
 
         // ...and nothing downstream can put it back: with no slice for it,
         // there is no contribution fact naming it.
-        let mut obs = observation("Revenue", 100.0, 140.0);
+        let mut obs = observation_without_a_target("Revenue", 100.0, 140.0);
         obs.slices = plan
             .dimensions
             .iter()
@@ -2732,7 +2743,7 @@ mod tests {
         ));
         r.aggregation = Some(non_additive());
 
-        let mut obs = observation("Revenue", 100.0, 140.0);
+        let mut obs = observation_without_a_target("Revenue", 100.0, 140.0);
         obs.target_value = Some(150.0);
         obs.slices = vec![slice(
             "Product[Category]",
@@ -2903,7 +2914,7 @@ mod tests {
     fn a_suppressed_fact_kind_is_not_emitted() {
         let mut r = resolved("Revenue");
         r.suppressed_kinds = [SuppressibleFactKind::Change].into_iter().collect();
-        let (facts, _) = facts_for_measure(&observation("Revenue", 100.0, 200.0), &r, &locale());
+        let (facts, _) = facts_for_measure(&observation_without_a_target("Revenue", 100.0, 200.0), &r, &locale());
         assert!(!kinds_of(&facts).contains(&"change".to_string()));
     }
 
@@ -3183,7 +3194,7 @@ mod tests {
         r.direction = Some(Applied::new(Direction::TargetBand, AttrSource::Strategy));
         r.target = Some(Applied::new(Target::band(90.0, 140.0), AttrSource::Strategy));
 
-        let (facts, run) = facts_for_measure(&observation("Quantity", 100.0, 120.0), &r, &locale());
+        let (facts, run) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 120.0), &r, &locale());
         assert_eq!(
             run.favourability,
             Some(Favourability::Better),
@@ -3191,7 +3202,7 @@ mod tests {
             kinds_of(&facts)
         );
 
-        let (_, out) = facts_for_measure(&observation("Quantity", 100.0, 160.0), &r, &locale());
+        let (_, out) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 160.0), &r, &locale());
         assert_eq!(out.favourability, Some(Favourability::Worse), "160 is above it");
 
         // ...and the inclusivity of the end is spent right here: the same value
@@ -3205,10 +3216,10 @@ mod tests {
             },
             AttrSource::Strategy,
         ));
-        let (_, edge) = facts_for_measure(&observation("Quantity", 100.0, 140.0), &r, &locale());
+        let (_, edge) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 140.0), &r, &locale());
         assert_eq!(edge.favourability, Some(Favourability::Worse));
         r.target = Some(Applied::new(Target::band(90.0, 140.0), AttrSource::Strategy));
-        let (_, edge) = facts_for_measure(&observation("Quantity", 100.0, 140.0), &r, &locale());
+        let (_, edge) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 140.0), &r, &locale());
         assert_eq!(edge.favourability, Some(Favourability::Better));
 
         // A WITHHELD DIRECTION STILL WINS. Rule 4 outranks the band, or a
@@ -3218,7 +3229,7 @@ mod tests {
             rule: "r1".into(),
             reason: "the aggregate spans two directions".into(),
         }];
-        let (_, withheld) = facts_for_measure(&observation("Quantity", 100.0, 120.0), &r, &locale());
+        let (_, withheld) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 120.0), &r, &locale());
         assert_eq!(withheld.favourability, None);
     }
 
@@ -3232,7 +3243,7 @@ mod tests {
         r.direction = Some(Applied::new(Direction::TargetBand, AttrSource::Strategy));
         r.target = Some(Applied::new(Target::band(90.0, 140.0), AttrSource::Strategy));
 
-        let (facts, _) = facts_for_measure(&observation("Quantity", 100.0, 160.0), &r, &locale());
+        let (facts, _) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 160.0), &r, &locale());
         let change = facts
             .iter()
             .find(|f| f.kind.kind_key() == "change")
@@ -3253,7 +3264,7 @@ mod tests {
 
         // The other side, and the inside case - so "above" is read off the
         // value rather than hard-coded.
-        let (below, _) = facts_for_measure(&observation("Quantity", 100.0, 40.0), &r, &locale());
+        let (below, _) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 40.0), &r, &locale());
         assert!(
             below
                 .iter()
@@ -3261,7 +3272,7 @@ mod tests {
             "{:?}",
             below.iter().map(|f| f.text.as_str()).collect::<Vec<_>>()
         );
-        let (inside, _) = facts_for_measure(&observation("Quantity", 90.0, 130.0), &r, &locale());
+        let (inside, _) = facts_for_measure(&observation_without_a_target("Quantity", 90.0, 130.0), &r, &locale());
         assert!(inside
             .iter()
             .any(|f| f.text.contains("is inside the band [90, 140]")));
@@ -3269,7 +3280,7 @@ mod tests {
         // NO OTHER DIRECTION GAINS A CLAUSE. A band is the only thing that can
         // produce one, so an ordinary measure's sentence is untouched.
         let plain = resolved("Revenue");
-        let (facts, _) = facts_for_measure(&observation("Revenue", 100.0, 120.0), &plain, &locale());
+        let (facts, _) = facts_for_measure(&observation_without_a_target("Revenue", 100.0, 120.0), &plain, &locale());
         assert!(
             facts.iter().all(|f| !f.text.contains("the band")),
             "{:?}",
@@ -3283,7 +3294,7 @@ mod tests {
             rule: "r1".into(),
             reason: "the aggregate spans two directions".into(),
         }];
-        let (facts, _) = facts_for_measure(&observation("Quantity", 100.0, 160.0), &r, &locale());
+        let (facts, _) = facts_for_measure(&observation_without_a_target("Quantity", 100.0, 160.0), &r, &locale());
         assert!(facts.iter().all(|f| !f.text.contains("the band")));
     }
 
@@ -3331,7 +3342,7 @@ mod tests {
         let dimension = QualifiedColumn::new("Product", "Category");
         let mut r = resolved("Revenue");
         r.aggregation = Some(non_additive());
-        let mut obs = observation("Revenue", 100.0, 140.0);
+        let mut obs = observation_without_a_target("Revenue", 100.0, 140.0);
         obs.slices = vec![slice(
             "Product[Category]",
             vec![MemberSeries::new("Gadgets", 100.0, 140.0)],
@@ -3415,7 +3426,7 @@ mod tests {
             "Gadgets",
         )]);
         let r = crate::insights::strategy::resolve(&star_facts(), &doc, "Revenue", &point);
-        let (facts, _) = facts_for_measure(&observation("Revenue", 100.0, 130.0), &r, &locale());
+        let (facts, _) = facts_for_measure(&observation_without_a_target("Revenue", 100.0, 130.0), &r, &locale());
         let change = facts
             .iter()
             .find(|f| f.kind.kind_key() == "change")

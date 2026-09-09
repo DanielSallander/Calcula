@@ -249,7 +249,8 @@ pub fn facts_with_authored_kinds(
     // `facts_with_authored_kinds` gets this very value back rather than asking
     // again. The function is stable under being asked twice (see its header),
     // which is what makes those safe rather than merely cheap.
-    let authored = authored_table_kinds(&facts, doc);
+    let mut authored = authored_table_kinds(&facts, doc, model.date_table());
+    let mut demoted_guess: Option<String> = None;
 
     // --- the calendar -------------------------------------------------------
     // Three rungs, most authoritative first. See this function's header for why
@@ -258,7 +259,22 @@ pub fn facts_with_authored_kinds(
         Some(declared) => (Some(declared.to_string()), Some(CalendarSource::Declared)),
         None => match authored.calendar.clone() {
             Some(chosen) => (Some(chosen), Some(CalendarSource::Authored)),
+            // A DEMOTION OVERRULES THE GUESS - BUT ONLY THE TABLE THE GUESS
+            // ACTUALLY NAMED. An authored `dimension` on the table this
+            // heuristic picked is a person saying "that is not the calendar",
+            // and a heuristic does not get to overrule that.
+            //
+            // NARROWED TO THE GUESS ITSELF ON PURPOSE, and a test caught the
+            // wider version: filtering the SEARCH by every non-calendar kind
+            // meant that confirming what the tab already showed you - typing
+            // `dimension` on a table detection had itself called a dimension -
+            // could break a two-candidate tie and INVENT a time axis that did
+            // not exist. Agreeing with a displayed value must change nothing.
             None => match infer_date_table(model, &is_from) {
+                Some(guessed) if authored.not_a_calendar.contains(&guessed) => {
+                    demoted_guess = Some(guessed);
+                    (None, None)
+                }
                 Some(guessed) => (Some(guessed), Some(CalendarSource::Inferred)),
                 None => (None, None),
             },
@@ -266,6 +282,7 @@ pub fn facts_with_authored_kinds(
     };
     facts.date_table = date_table;
     facts.calendar_source = calendar_source;
+    authored.demoted_guess = demoted_guess;
 
     // --- what each table is FOR ---------------------------------------------
     // An accepted authored kind stands in for the derived one WHOLESALE, which
@@ -361,6 +378,21 @@ pub enum KindRefusal {
     NothingLooksItUp { filters: Option<String> },
     /// Two tables are authored `Calendar`. `other` names the other one.
     AmbiguousCalendar { other: String },
+    /// The document gives a NON-calendar kind to the table the MODEL declares as
+    /// its date table.
+    ///
+    /// THE DEMOTION IS THE UNCOVERED DIRECTION, and it is the expensive one. The
+    /// promotion case (`Dimension` -> `Calendar`, detection missed it) only ADDS
+    /// an axis. Demoting the calendar takes one away, and with it every trend,
+    /// change-point and seasonality fact in the run - a large consequence for
+    /// one dropdown, in a direction the control gives no hint of.
+    ///
+    /// Refused only against a DECLARATION, never against a guess. `mark_date_table`
+    /// is a human statement made in the Model Editor, so it outranks this one
+    /// exactly as it outranks an authored `Calendar` elsewhere in this file; a
+    /// merely INFERRED calendar is a heuristic, and there the demotion wins and
+    /// the guess moves on.
+    TheModelDeclaresItTheDateTable,
 }
 
 /// One authored kind the model disproves.
@@ -379,6 +411,27 @@ pub struct AuthoredKinds {
     pub accepted: BTreeMap<String, TableKind>,
     /// The single accepted `Calendar`, if there is exactly one.
     pub calendar: Option<String>,
+    /// Every table the document gives an accepted NON-calendar kind.
+    ///
+    /// The guesser must skip these. Without it a demotion changed the table's
+    /// ROLE LADDER and nothing else: `infer_date_table` still picked the table,
+    /// so the model kept a time axis running along a table the document had just
+    /// called an ordinary dimension - one document saying two contradictory
+    /// things about one table, with the reader told neither.
+    pub not_a_calendar: BTreeSet<String>,
+    /// The table the heuristic would have made the calendar, when the document
+    /// demoted it and the model declares no date table of its own.
+    ///
+    /// The demotion TOOK EFFECT — that is why this is not a `KindConflict` — and
+    /// the model now has no time axis at all. It is recorded because the
+    /// consequence is enormous and invisible from the control that caused it:
+    /// every trend, change point and seasonality claim for every measure is
+    /// gone, from one dropdown.
+    ///
+    /// Set by `facts_with_authored_kinds`, which is the only place that knows
+    /// what the guess WOULD have been. `authored_table_kinds` alone cannot fill
+    /// it in, and leaves it `None`.
+    pub demoted_guess: Option<String>,
     /// Every authored kind that was refused, in table order.
     pub conflicts: Vec<KindConflict>,
 }
@@ -428,7 +481,11 @@ fn a_table_it_filters(facts: &ModelFacts, table: &str) -> Option<String> {
 /// overrule this month's relationship graph, silently and forever. An ABSENT
 /// source counts as authored: a hand-written document has no `source` field, and
 /// somebody typed it.
-pub fn authored_table_kinds(facts: &ModelFacts, doc: &StrategyDoc) -> AuthoredKinds {
+pub fn authored_table_kinds(
+    facts: &ModelFacts,
+    doc: &StrategyDoc,
+    declared_calendar: Option<&str>,
+) -> AuthoredKinds {
     let mut out = AuthoredKinds::default();
 
     // `doc.tables` is a BTreeMap, so this list — and therefore `conflicts` — is
@@ -479,6 +536,16 @@ pub fn authored_table_kinds(facts: &ModelFacts, doc: &StrategyDoc) -> AuthoredKi
             });
             continue;
         }
+        // A DEMOTION OF THE MODEL'S OWN DECLARATION, refused before it can take
+        // the axis away. See `KindRefusal::TheModelDeclaresItTheDateTable`.
+        if !matches!(kind, TableKind::Calendar) && declared_calendar == Some(name.as_str()) {
+            out.conflicts.push(KindConflict {
+                table: (*name).clone(),
+                authored: *kind,
+                refusal: KindRefusal::TheModelDeclaresItTheDateTable,
+            });
+            continue;
+        }
         if matches!(kind, TableKind::Calendar) && calendars.len() > 1 {
             let other = calendars
                 .iter()
@@ -496,6 +563,8 @@ pub fn authored_table_kinds(facts: &ModelFacts, doc: &StrategyDoc) -> AuthoredKi
         out.accepted.insert((*name).clone(), *kind);
         if matches!(kind, TableKind::Calendar) {
             out.calendar = Some((*name).clone());
+        } else {
+            out.not_a_calendar.insert((*name).clone());
         }
     }
 
@@ -1148,6 +1217,51 @@ mod tests {
             .expect("the unmarked warehouse calendar fixture builds")
     }
 
+    /// The same warehouse calendar, but MARKED in the Model Editor.
+    ///
+    /// The mark is what separates the two demotion cases: against a guess the
+    /// document wins, against a declaration it does not.
+    fn a_marked_warehouse_calendar() -> DataModel {
+        DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("DateKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_date",
+                    vec![
+                        Column::new("date_key", DataType::Int64),
+                        Column::new("full_date", DataType::Date),
+                        Column::new("year", DataType::Decimal(38, 10)),
+                        Column::new("quarter", DataType::Decimal(38, 10)),
+                        Column::new("month", DataType::Decimal(38, 10)),
+                        Column::new("day", DataType::Decimal(38, 10)),
+                        Column::new("week_of_year", DataType::Decimal(38, 10)),
+                        Column::new("month_name", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Date",
+                "Sales",
+                "DateKey",
+                "dim_date",
+                "date_key",
+            ))
+            .mark_date_table("dim_date")
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the marked warehouse calendar fixture builds")
+    }
+
     #[test]
     fn an_unmarked_warehouse_date_table_is_inferred_and_stamped_as_a_guess() {
         let facts = facts_from_model(&an_unmarked_warehouse_calendar());
@@ -1157,6 +1271,66 @@ mod tests {
         // would be an ordinary Dimension and the role ladder's calendar arm
         // would never fire.
         assert_eq!(facts.tables["dim_date"].kind, Some(TableKind::Calendar));
+    }
+
+    #[test]
+    fn demoting_a_guessed_calendar_takes_the_time_axis_away_and_the_run_says_so() {
+        // THE DIRECTION THE PROMOTION TESTS DO NOT COVER. `Dimension -> Calendar`
+        // only ADDS an axis; this takes one away, and with it every trend,
+        // change point and seasonality claim for every measure - a large,
+        // silent consequence for one dropdown, which is why the run has to say
+        // it out loud.
+        let model = an_unmarked_warehouse_calendar();
+        let doc = doc_with_kind("dim_date", TableKind::Dimension);
+        let (facts, authored) = facts_with_authored_kinds(&model, &doc);
+
+        assert_eq!(
+            facts.date_table, None,
+            "a person saying 'that is not the calendar' outranks a heuristic that guessed it was"
+        );
+        assert_eq!(facts.calendar_source, None);
+        assert_eq!(facts.tables["dim_date"].kind, Some(TableKind::Dimension));
+        assert_eq!(
+            authored.demoted_guess.as_deref(),
+            Some("dim_date"),
+            "and it is RECORDED, because an absence cannot announce itself"
+        );
+        assert!(
+            authored.conflicts.is_empty(),
+            "nothing refused it - it took effect, which is exactly why it needs a note \
+             rather than a finding"
+        );
+    }
+
+    #[test]
+    fn demoting_the_models_own_declared_date_table_is_refused_and_time_still_runs_along_it() {
+        // The other half of the precedence. A DECLARATION is a human statement
+        // made in the Model Editor, so it outranks this one - the same way it
+        // outranks an authored `Calendar` elsewhere in this file. The engine's
+        // own time intelligence resolves against `model.date_table()` and
+        // nothing else, so honouring the demotion here would leave the report
+        // and the engine disagreeing about what time means.
+        let model = a_marked_warehouse_calendar();
+        let doc = doc_with_kind("dim_date", TableKind::Dimension);
+        let (facts, authored) = facts_with_authored_kinds(&model, &doc);
+
+        assert_eq!(facts.date_table.as_deref(), Some("dim_date"));
+        assert_eq!(facts.calendar_source, Some(CalendarSource::Declared));
+        assert_eq!(
+            facts.tables["dim_date"].kind,
+            Some(TableKind::Calendar),
+            "the refused kind must not reach the map, or the calendar arm of the role \
+             ladder stops firing on the table time actually runs along"
+        );
+        assert_eq!(authored.demoted_guess, None, "nothing was demoted");
+        assert_eq!(
+            authored
+                .conflicts
+                .iter()
+                .map(|c| (c.table.as_str(), &c.refusal))
+                .collect::<Vec<_>>(),
+            vec![("dim_date", &KindRefusal::TheModelDeclaresItTheDateTable)]
+        );
     }
 
     #[test]
@@ -1429,7 +1603,7 @@ mod tests {
         let facts = facts_from_model(&a_small_star());
         for inert in [TableKind::Fact, TableKind::Bridge, TableKind::Other] {
             let doc = doc_with_kind("Sales", inert);
-            let judged = authored_table_kinds(&facts, &doc);
+            let judged = authored_table_kinds(&facts, &doc, None);
             assert!(
                 judged.conflicts.is_empty(),
                 "'{}' claims nothing the topology can disprove, so it cannot be refused: {:?}",
@@ -1449,7 +1623,7 @@ mod tests {
         }
         for claims_a_lookup in [TableKind::Dimension, TableKind::Calendar] {
             let judged =
-                authored_table_kinds(&facts, &doc_with_kind("Sales", claims_a_lookup));
+                authored_table_kinds(&facts, &doc_with_kind("Sales", claims_a_lookup), None);
             assert_eq!(
                 judged.conflicts.len(),
                 1,
@@ -1504,7 +1678,7 @@ mod tests {
         assert!(facts.lookup_tables.is_empty(), "{:?}", facts.lookup_tables);
 
         let doc = doc_with_kind("Basket", TableKind::Dimension);
-        let judged = authored_table_kinds(&facts, &doc);
+        let judged = authored_table_kinds(&facts, &doc, None);
         assert!(judged.accepted.is_empty());
         assert_eq!(judged.conflicts.len(), 1);
         assert_eq!(
@@ -1554,7 +1728,7 @@ mod tests {
         let model = a_role_playing_pair();
         let doc = doc_with_kind("Sales", TableKind::Calendar);
 
-        let judged = authored_table_kinds(&facts_from_model(&model), &doc);
+        let judged = authored_table_kinds(&facts_from_model(&model), &doc, None);
         assert!(judged.accepted.is_empty());
         assert_eq!(judged.calendar, None);
         assert_eq!(judged.conflicts.len(), 1);
@@ -1582,7 +1756,7 @@ mod tests {
             doc.tables["dim_order_date"].clone(),
         );
 
-        let judged = authored_table_kinds(&facts_from_model(&model), &doc);
+        let judged = authored_table_kinds(&facts_from_model(&model), &doc, None);
         assert_eq!(judged.calendar, None);
         assert!(judged.accepted.is_empty());
         assert_eq!(
@@ -1620,7 +1794,7 @@ mod tests {
         let mut doc = doc_with_kind("dim_order_date", TableKind::Calendar);
         doc.tables.get_mut("dim_order_date").unwrap().source = Some(EntrySource::Inferred);
 
-        let judged = authored_table_kinds(&facts_from_model(&model), &doc);
+        let judged = authored_table_kinds(&facts_from_model(&model), &doc, None);
         assert!(judged.accepted.is_empty());
         assert!(judged.conflicts.is_empty(), "ignored, not refused");
         assert_eq!(facts_from_model_with(&model, &doc), facts_from_model(&model));
@@ -1722,8 +1896,8 @@ mod tests {
             doc.tables["Sales"].clone(),
         );
 
-        let raw = authored_table_kinds(&facts_from_model(&model), &doc);
-        let applied = authored_table_kinds(&facts_from_model_with(&model, &doc), &doc);
+        let raw = authored_table_kinds(&facts_from_model(&model), &doc, None);
+        let applied = authored_table_kinds(&facts_from_model_with(&model, &doc), &doc, None);
         assert_eq!(raw, applied);
         assert_eq!(raw.conflicts.len(), 1, "{:?}", raw.conflicts);
         assert_eq!(raw.calendar.as_deref(), Some("dim_order_date"));
@@ -1742,7 +1916,7 @@ mod tests {
 
         let doc = doc_with_kind("dim_date", TableKind::Calendar);
         assert_eq!(
-            effective_date_table(&guessed, &authored_table_kinds(&guessed, &doc)),
+            effective_date_table(&guessed, &authored_table_kinds(&guessed, &doc, None)),
             Some("dim_date")
         );
     }

@@ -1015,16 +1015,10 @@ describe("the model panel", () => {
     // not a broken axis, it is an axis that silently disables every time fact.
     expect(axisSelect().tagName).toBe("SELECT");
     await change(axisSelect(), "Sales[DeptKey]");
-    // `commitText`, not `change`: the currency field commits on BLUR now, the
-    // same as `fiscalYearStart` beside it, because it has to refuse a bad code
-    // before it reaches the document and a per-keystroke commit would write
-    // `S` and `SE` on the way to `SEK`.
-    await commitText(byTestId<HTMLInputElement>("model-reporting-currency"), "SEK");
     expect(strategySet).not.toHaveBeenCalled();
 
     await click(button("Save"));
     expect(lastSaved().model?.defaultTimeAxis).toBe("Sales[DeptKey]");
-    expect(lastSaved().model?.reportingCurrency).toBe("SEK");
     // The rest of the document is untouched by a model-level edit.
     expect(lastSaved().measures?.Returns.direction).toBe("lowerIsBetter");
   });
@@ -1124,82 +1118,23 @@ describe("the model panel", () => {
     const marked = [...container.querySelectorAll("[data-inert-field]")]
       .map((el) => el.getAttribute("data-inert-field"))
       .sort();
-    expect(marked).toEqual(["fiscalYearStart", "reportingCurrency"]);
+    // `reportingCurrency` is NOT here because it was DELETED rather than
+    // labelled — it had no reader and none coming, and deleting is the cheaper
+    // reversal. `unit` and `cadence` are marked in the measures grid's header
+    // instead of per row, so they appear once each.
+    expect(marked).toEqual(["cadence", "fiscalYearStart", "unit"]);
   });
 
-  it("says the inert value is SAVED as well as unread, in visible text rather than a tooltip", async () => {
+  it("says an inert value is SAVED as well as unread, in visible text rather than a tooltip", async () => {
     await mount();
-    const note = byTestId("model-not-consulted-reportingCurrency");
-
     // Both halves. "Nothing reads this" alone reads as "typing here is
     // pointless", and the value is in fact stored and carried with the model.
+    const note = byTestId("model-not-consulted-fiscalYearStart");
     expect(note.textContent).toContain("Saved");
     expect(note.textContent).toContain("nothing reads it yet");
     // On screen, not hidden in a title: a tooltip is not a promise anyone reads
     // before typing, which is the entire objection this note answers.
-    expect((note.textContent ?? "").trim().length).toBeGreaterThan(0);
     expect(note.tagName).not.toBe("INPUT");
-  });
-
-  it("leaves an inert field fully editable, because the value still travels with the model", async () => {
-    await mount();
-    const field = byTestId<HTMLInputElement>("model-reporting-currency");
-
-    // Disabling would discard authored intent to buy nothing: the day something
-    // reads `reportingCurrency`, the SEK somebody typed has to be there.
-    expect(field.disabled).toBe(false);
-    await commitText(field, "SEK");
-    await click(button("Save"));
-    expect(lastSaved().model?.reportingCurrency).toBe("SEK");
-  });
-
-  it("refuses a reporting currency that is not a three-letter uppercase code, and says why", async () => {
-    await mount();
-    const field = byTestId<HTMLInputElement>("model-reporting-currency");
-
-    // `sek` is the commonest wrong answer and the one this field used to take
-    // silently. `CurrencyCode` validates in `Deserialize`, so the cost of
-    // storing it is not a wrong currency — it is a document `strategy_doc`
-    // cannot parse, after which every preview, validate and Save comes back
-    // `unreadable-document` anchored to nothing.
-    await commitText(field, "sek");
-    const message = byTestId("model-reporting-currency-error").textContent ?? "";
-    expect(message).toContain("ISO-4217");
-    expect(message).toContain("sek");
-    // Refused means NOT WRITTEN, and the typed text stays — a value that
-    // silently reverts reads as accepted.
-    expect(field.value).toBe("sek");
-    await click(button("Save"));
-    expect(lastSaved().model?.reportingCurrency).toBeUndefined();
-  });
-
-  it("refuses a four-letter currency code as readily as a lowercase one", async () => {
-    await mount();
-    const field = byTestId<HTMLInputElement>("model-reporting-currency");
-    // Length is half the rule and case is the other half; a check that only
-    // uppercased would wave `USDX` through.
-    await commitText(field, "USDX");
-    expect(byTestId("model-reporting-currency-error").textContent).toContain("USDX");
-    await click(button("Save"));
-    expect(lastSaved().model?.reportingCurrency).toBeUndefined();
-  });
-
-  it("clears the reporting currency when the box is emptied", async () => {
-    vi.mocked(strategyGet).mockResolvedValue({
-      ...MIXED_DOC,
-      model: { reportingCurrency: "SEK" },
-    });
-    await mount();
-    const field = byTestId<HTMLInputElement>("model-reporting-currency");
-    expect(field.value).toBe("SEK");
-
-    // An empty box is `undefined`, not a refusal: clearing the field is how a
-    // document stops naming a currency, and a refusal here would make that
-    // gesture unreachable.
-    await commitText(field, "");
-    expect(container.querySelector('[data-testid="model-reporting-currency-error"]')).toBeNull();
-    await click(button("Save"));
-    expect(lastSaved().model?.reportingCurrency).toBeUndefined();
   });
 
   it("shows the priority order and can clear it, without pretending to reorder it", async () => {
@@ -2249,11 +2184,20 @@ describe("the table kind", () => {
     expect(option("Sales", "calendar").disabled).toBe(true);
     expect(option("Sales", "dimension").disabled).toBe(true);
     expect(option("Sales", "calendar").title).toContain("'Dim'");
-    // The kinds that claim no lookup stay reachable: refusing those would be
-    // STRICTER than the backend, which is worse than not checking at all.
-    expect(option("Sales", "fact").disabled).toBe(false);
-    expect(option("Sales", "bridge").disabled).toBe(false);
-    // ...and the table the model really can look up is untouched.
+    // MEANING CHANGE, DELIBERATE. These three used to be asserted REACHABLE, on
+    // the rule that the tab must never be stricter than the backend. That rule
+    // still governs `tableKindTopologyRefusal`; this is a second, separate
+    // reason — `fact`, `bridge` and `other` reach nothing on the run path, so
+    // the backend accepts them and IGNORES them, and a control that takes a
+    // value nothing will read is the defect. Disabled, not dropped, because an
+    // inferred draft stores one of these on nearly every table.
+    for (const inert of ["fact", "bridge", "other"]) {
+      expect(option("Sales", inert).disabled, `'${inert}' is unreadable`).toBe(true);
+      expect(option("Sales", inert).title).toContain("Only 'calendar' and 'dimension'");
+    }
+    // ...and the two the engine DOES read stay reachable on a table whose
+    // topology permits them, which is what makes this a restriction and not a
+    // removal.
     expect(option("Dim", "calendar").disabled).toBe(false);
     expect(option("Dim", "dimension").disabled).toBe(false);
   });
@@ -2361,14 +2305,18 @@ describe("the reviewed column", () => {
       (r) => r.firstElementChild?.textContent === "measure",
     );
     expect(headerRow, "the measures grid must still have a header row").toBeDefined();
+    // The `*` on two of them is the not-yet-consulted mark, said once in the
+    // header rather than once per row. It is part of the header's text, so it
+    // is asserted here rather than stripped — a silent strip would let the mark
+    // disappear without this noticing.
     expect([...headerRow!.children].map((h) => h.textContent)).toEqual([
       "measure",
       "direction",
       "aggregation",
-      "unit",
+      "unit*",
       "target",
       "materiality",
-      "cadence",
+      "cadence*",
       "priority",
       "analysis dimensions",
       "never slice by",

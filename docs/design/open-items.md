@@ -1020,13 +1020,17 @@ Three findings outlive it:
     every table row). So the dropdown showed a plausible value, accepted a change, saved it, and
     read it back changed — while every consumer went on using `facts.tables[..].kind`, derived
     afresh from the model. A control that resets would have reported itself in one click.
-  - **The remaining four are inert and harmless**: `ResolvedMeasure.unit`, `ResolvedMeasure.cadence`
-    (`strategy/resolve.rs:660,719`), `model.fiscal_year_start` and `model.reporting_currency`
-    (`strategy/types.rs:611,613`). The tab labels the last two "not yet consulted"; `unit` and
-    `cadence` present as ordinary settable attributes and are not labelled at all. `cadence` is the
-    one with a designed consumer already written down (period bucketing and seasonality lag
-    selection, plan §6.4/§6.5) and never built. **Wire them or delete them — do not leave them as
-    surface.**
+  - **The remaining four were inert, and each was then wired, labelled or DELETED.**
+    `model.reporting_currency` is **gone** — no consumer and none coming, and typing it had only
+    made it a *stricter* inert field; deleting is the cheaper reversal, since re-adding a field once
+    a formatter exists costs less than carrying one nobody uses. `ResolvedMeasure.unit` and
+    `ResolvedMeasure.cadence` are **kept and labelled**, because unlike the currency both have a
+    designed reader written down: `unit` the moment narration formats a value ("rose by 12" vs
+    "12%" vs "12,000 SEK" are different sentences), `cadence` for period bucketing and seasonality
+    lag selection (plan §6.4/§6.5). They now carry the not-yet-consulted mark on the measures
+    grid's COLUMN HEADER — once, rather than one sentence repeated per row — beside
+    `fiscal_year_start`'s existing note in the model panel. **When one acquires a reader, delete its
+    note: a stale "nothing reads this" is the same lie pointed the other way.**
 
   The standing rule this produced is now a design rule, not a note:
   `docs/design/insights-strategy-layer.md` §2, *nothing becomes authorable until it has a reader*.
@@ -1078,7 +1082,15 @@ made an enum, the vacuous-test family closed structurally, the cardinality argum
   The semantics that finally held: **materiality is a property of a MOVEMENT; a variance against
   target is a comparison of LEVELS**, so a tiny movement can still sit far from target and gating
   the Variance fact on movement-materiality would have been the wrong fix.
-* **THE WARNING→ERROR SWEEP CAME BACK NEGATIVE, AND THAT IS THE RESULT.** All 15 warning sites are
+* **THE WARNING→ERROR SWEEP CAME BACK NEGATIVE — AS A SNAPSHOT, NOT AS A CLOSED CLASS.**
+  **Do not read "sweep negative" as "this cannot happen again."** The sweep establishes that the 15
+  sites are correctly classified *given each finding's current definition*. It says nothing about
+  findings that do not exist yet — and the one real defect this pass found in that area,
+  `contradictory-analysis-dimension`, was exactly that: a withheld fact with **no finding at all**,
+  which no sweep of existing severities could have surfaced.
+  **The durable artifact is the rule now written at the top of `strategy/validate.rs`**, applied to
+  every finding as it is written. The sweep is a dated observation about a tree that has since
+  changed. All 15 warning sites are
   correctly classified under the rule now written at the top of `strategy/validate.rs`: *a document
   that, saved as-is, would make a fact WRONG or SILENTLY WITHHELD is an error; one that would only
   make a fact LESS GOOD is a warning.* Eight are provably inert downstream, one is unreachable, one
@@ -1091,12 +1103,29 @@ made an enum, the vacuous-test family closed structurally, the cardinality argum
   is right, but because **an inferred draft must stay savable**, not because it produces correct
   facts. Cite the workflow reason.
 
-`TableStrategy.kind` is wired, and the honest scope is narrower than the dropdown implies: an
-authored `calendar` moves the axis, the roles and the narration (with `CalendarSource::Authored`
-joining Declared/Inferred); an authored `dimension` the topology refuses produces a run note that
-reaches the pane, the markdown and the report sheet; `fact`, `bridge` and `other` remain inert.
-An authored kind that relationship topology DISPROVES is a validation error — a human statement
-beats a heuristic, but not topology.
+`TableStrategy.kind` is wired, and **the control now offers exactly what the seam consumes.** An
+authored `calendar` moves the axis, the roles and the narration (`CalendarSource::Authored` joins
+Declared/Inferred); an authored `dimension` refuses against topology and demotes a guessed calendar.
+`fact`, `bridge` and `other` reach nothing on the run path, so they are **disabled in the dropdown
+and refused by the CLI**, with the reason on the option — documenting an inert control in a header
+the user never reads is weaker than not offering it. They are disabled rather than dropped because
+every inferred draft stores one. An authored kind that relationship topology DISPROVES is a
+validation error: a human statement beats a heuristic, but not topology.
+
+**The DEMOTION direction was the uncovered one, and it is the expensive one.** Promotion
+(`Dimension → Calendar`) only adds an axis; demoting the calendar takes one away and with it every
+trend, change-point and seasonality fact at once. Against an INFERRED calendar the demotion now
+wins and the run says so; against the model's own `mark_date_table` it is refused with a warning,
+because a declaration is a human statement too. A first attempt filtered the calendar SEARCH by
+every non-calendar kind and a test caught it: confirming what the tab already showed you could
+break a two-candidate tie and *invent* a time axis. **Agreeing with a displayed value must change
+nothing** — so only a demotion of the table the guess actually named takes effect.
+
+**Confirmation is advisory, and the report now says so.** `resolve.rs` has no `reviewed` gate, so an
+inferred direction applies at full strength whether or not anyone looked at it. That is the right
+design — an inferred draft must stay savable — but the tab's Confirm workflow reads as though
+confirming changes output, and it does not. A run whose measures carry unconfirmed inference now
+carries a note naming them.
 
 **2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) waits for the
 release decision; the fetch script makes bundle-vs-download a build-time switch. M4 (intent router)

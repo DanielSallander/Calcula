@@ -58,6 +58,7 @@ import {
   parseSuppressSpec,
   parseTargetSpec,
   resolveColumnRef,
+  tableKindIsInert,
   tableKindTopologyRefusal,
   withColumn,
   withMeasure,
@@ -2104,7 +2105,12 @@ export async function setTableStrategy(cmd: Command, s: CliSession, name: string
       patch.kind = undefined;
     } else {
       const kind: TableKind = oneOf(kindOpt, TABLE_KINDS, "table kind", line);
-      const refusal = tableKindTopologyRefusal(s.overview, name, kind);
+      // The same two refusals the tab's dropdown applies, so the CLI cannot
+      // author a kind the panel will not offer. `tableKindIsInert` is the
+      // stricter-than-the-backend one on purpose: the engine accepts `fact`,
+      // `bridge` and `other` and reads none of them.
+      const refusal =
+        tableKindTopologyRefusal(s.overview, name, kind) ?? tableKindIsInert(kind);
       if (refusal !== null) fail(`${name}: ${refusal}`, line);
       patch.kind = kind;
     }

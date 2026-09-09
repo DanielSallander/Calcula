@@ -3,7 +3,6 @@
   "model": {
     "defaultTimeAxis": "Date[Date]",
     "fiscalYearStart": "01-01",
-    "reportingCurrency": "SEK",
     "priority": [
       "Revenue",
       "MarginPct",

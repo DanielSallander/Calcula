@@ -737,7 +737,6 @@ async function runShowStrategy(s: CliSession, io: CliIo): Promise<void> {
       ["unreviewed entries", String(unreviewed)],
       ["default time axis", doc.model?.defaultTimeAxis ?? null],
       ["fiscal year start", doc.model?.fiscalYearStart ?? null],
-      ["reporting currency", doc.model?.reportingCurrency ?? null],
       ["priority", (doc.model?.priority ?? []).join(", ") || null],
       // Only when the block says something: "reviewed: no" against four empty
       // fields reads as an outstanding task where there is none.

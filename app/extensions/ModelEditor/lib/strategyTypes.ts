@@ -401,7 +401,6 @@ export interface ModelStrategy {
   defaultTimeAxis?: string;
   /** `MM-DD`, e.g. "04-01" for an April fiscal year. */
   fiscalYearStart?: string;
-  reportingCurrency?: string;
   /** Measure names, most important first. */
   priority?: string[];
   /** Has a human confirmed this panel? A generated draft is `false`. */
@@ -1224,7 +1223,6 @@ export const TABLE_VALUE_FIELDS = ["kind", "labelColumn", "columns", "hierarchie
 export const MODEL_VALUE_FIELDS = [
   "defaultTimeAxis",
   "fiscalYearStart",
-  "reportingCurrency",
   "priority",
 ] as const;
 
@@ -1259,7 +1257,6 @@ export function modelHasValues(e: ModelStrategy): boolean {
   return (
     (e.defaultTimeAxis ?? "") !== "" ||
     (e.fiscalYearStart ?? "") !== "" ||
-    (e.reportingCurrency ?? "") !== "" ||
     (e.priority?.length ?? 0) > 0
   );
 }
@@ -1601,12 +1598,44 @@ export function tableKindTopologyRefusal(
 ): string | null {
   if (!tableKindClaimsALookup(kind)) return null;
   if (lookupTables(overview).has(table)) return null;
+  if (lookupTables(overview).has(table)) return null;
   const filters = aTableItFilters(overview, table);
   const because =
     filters === undefined
       ? `no active many-to-one or one-to-one relationship points at '${table}', so the model cannot look it up`
       : `nothing looks '${table}' up — it is the FROM side of a relationship to '${filters}', so filters flow out of it and it is the grain of the model`;
   return `'${kind}' says the model can look this table up, and ${because}. Saving it is refused.`;
+}
+
+/**
+ * Why authoring this kind would change nothing, or null.
+ *
+ * THE SEAM CONSUMES TWO OF THE FIVE, SO THE CONTROL OFFERS TWO OF THE FIVE.
+ * `calendar` moves the time axis, the role ladder's calendar arm and the
+ * narration; `dimension` is what the topology can refuse and what demotes a
+ * guessed calendar. `fact`, `bridge` and `other` reach NOTHING on the run path
+ * — `infer_table` branches on `Calendar` and `Dimension` and treats the other
+ * three identically — so authoring one could only raise a finding or do nothing.
+ * Documenting that in a code header the user never reads is weaker than not
+ * offering it; this is the inert-control shape this feature has corrected three
+ * times now (`reportingCurrency`, `targetBand`, `kind` itself).
+ *
+ * DELIBERATELY SEPARATE FROM `tableKindTopologyRefusal`, which mirrors the
+ * backend and must never be stricter than it. This one IS stricter on purpose:
+ * the backend accepts these kinds and ignores them, and a control that accepts
+ * a value it will ignore is the defect. Two reasons, two functions, so neither
+ * can drift into the other's job.
+ *
+ * Disabled rather than DROPPED: a document that already stores one of these —
+ * every inferred draft does — has to keep rendering as what it is, and an option
+ * that vanishes teaches nobody why.
+ */
+export function tableKindIsInert(kind: TableKind): string | null {
+  if (tableKindClaimsALookup(kind)) return null;
+  return (
+    `'${kind}' is detected from the model's own relationships and nothing reads it here. ` +
+    `Only 'calendar' and 'dimension' change what a report says.`
+  );
 }
 
 // ---------------------------------------------------------------------------

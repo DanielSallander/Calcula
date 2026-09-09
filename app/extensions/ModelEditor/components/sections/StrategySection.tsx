@@ -84,8 +84,8 @@
 //          a decision; the bulk gesture has not.
 //
 //          (9) THE MODEL BLOCK IS AUTHORABLE. `ModelStrategy` carries
-//          `defaultTimeAxis`, `fiscalYearStart`, `reportingCurrency` and
-//          `priority`, and none of them had a control anywhere — so the axis
+//          `defaultTimeAxis`, `fiscalYearStart` and `priority`, and none of
+//          them had a control anywhere — so the axis
 //          every time-series fact is computed against could only ever be the
 //          one inference guessed from the marked date table. The axis is a
 //          <select> over the model's own columns for the same reason a scope
@@ -95,23 +95,26 @@
 //          at Save, because a fiscal year START RECURS — the commonest wrong
 //          answer is a full date.
 //
-//          (10) TWO OF THOSE FOUR FIELDS ARE STORED AND READ BY NOTHING, AND
-//          SAY SO ON SCREEN. `reportingCurrency` has no consumer anywhere;
-//          `fiscalYearStart` has none outside its own format check — the
-//          planner buckets by cadence and never asks where the fiscal year
-//          starts. Someone will type SEK into an ordinary-looking box and
-//          reasonably expect a downstream effect, so each of the two carries a
-//          VISIBLE note (`NotYetConsulted`) rather than a tooltip: a tooltip is
-//          not a promise anyone reads before typing. Both stay EDITABLE — the
-//          value is stored, travels with the model, and matters the moment
-//          something reads it, so disabling would discard authored intent and
-//          buy nothing. `defaultTimeAxis` and `priority` carry no note because
-//          both are read. This is the same overstatement that was just taken
-//          out of the Rust validator's comment (`insights/strategy/validate.rs`
-//          used to claim "every period bucket in every fact is derived from
-//          this"), reappearing somewhere a user can see it; when one of these
-//          fields acquires a reader, DELETE its note — a stale "nothing reads
-//          this" is the same lie pointed the other way.
+//          (10) THE FIELDS THAT ARE STORED AND READ BY NOTHING SAY SO ON
+//          SCREEN, AND ONE OF THEM WAS DELETED INSTEAD. `reportingCurrency` had
+//          no consumer and none coming, so it is GONE — deleting is the cheaper
+//          reversal, since re-adding a field once a formatter exists costs less
+//          than carrying one nobody uses. What is left is labelled rather than
+//          removed, because each has a designed reader written down and not yet
+//          built: `fiscalYearStart` (nothing outside its own format check), and
+//          in the measures grid `unit` (narration formatting a value) and
+//          `cadence` (period bucketing, seasonality lags). Someone will type
+//          into an ordinary-looking box and reasonably expect a downstream
+//          effect, so the model-block fields carry a VISIBLE note
+//          (`NotYetConsulted`) rather than a tooltip — a tooltip is not a
+//          promise anyone reads before typing — and the grid marks the COLUMN
+//          HEADER once instead of repeating one sentence per row. All stay
+//          EDITABLE: the value is stored, travels with the model, and matters
+//          the moment something reads it, so disabling would discard authored
+//          intent and buy nothing. `defaultTimeAxis` and `priority` carry no
+//          note because both are read. WHEN ONE ACQUIRES A READER, DELETE ITS
+//          NOTE — a stale "nothing reads this" is the same lie pointed the
+//          other way.
 //
 //          (11) THE RULES SECTION HAS TO INVITE ITS OWN ACTION. `Add rule` was
 //          a `smallBtn` beside a 13px heading and the empty state read "No
@@ -257,7 +260,6 @@ import {
   modelEntry,
   modelHasColumn,
   modelHasValues,
-  parseCurrencyCode,
   parseIsoDate,
   parseMaterialitySpec,
   parseSuppressSpec,
@@ -268,6 +270,7 @@ import {
   tableEntry,
   tableHasValues,
   tableKindOrigin,
+  tableKindIsInert,
   tableKindTopologyRefusal,
   tablePath,
   withAggregationDefault,
@@ -1635,85 +1638,6 @@ function FiscalYearStartField({
   );
 }
 
-const REPORTING_CURRENCY_HINT =
-  "A three-letter uppercase ISO-4217 code — SEK, EUR, USD.";
-
-/**
- * `reportingCurrency`, with the refusal where the typing happened.
- *
- * IT WAS A RAW TEXT BOX WRITING `e.target.value` STRAIGHT INTO THE DOCUMENT,
- * beside a `fiscalYearStart` that had both a keystroke refusal and a findings
- * row. That asymmetry was the whole defect: `CurrencyCode` validates in
- * `Deserialize`, so `sek`, `kr` or `USDX` did not produce a finding on this
- * field — they made `strategy_doc` fail serde and discard the ENTIRE document,
- * after which every preview, validate, runTests and set came back
- * `unreadable-document` at `path: ""`, which this tab can only render as
- * "(document)". One character in this box, and nothing in the tab worked and
- * nothing said why.
- *
- * Same commit-on-blur discipline as `FiscalYearStartField`, and for the same
- * reason: an unreadable value keeps the typed text rather than reverting,
- * because a value that vanishes reads as "accepted".
- */
-function ReportingCurrencyField({
-  value,
-  disabled,
-  onCommit,
-}: {
-  value: string;
-  disabled: boolean;
-  onCommit: (value: string | undefined) => void;
-}): React.ReactElement {
-  const [text, setText] = useState(value);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    setText(value);
-    setError(null);
-  }, [value]);
-  const commit = (raw: string): void => {
-    const parsed = parseCurrencyCode(raw);
-    if (!parsed.ok) {
-      setError(parsed.error);
-      return;
-    }
-    setError(null);
-    onCommit(parsed.value);
-  };
-  return (
-    <>
-      <input
-        data-testid="model-reporting-currency"
-        style={{ ...styles.input, borderColor: error ? "#a4262c" : "#ccc" }}
-        value={text}
-        disabled={disabled}
-        placeholder="SEK"
-        title={REPORTING_CURRENCY_HINT}
-        onChange={(e) => setText(e.target.value)}
-        onBlur={(e) => commit(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") commit((e.target as HTMLInputElement).value);
-        }}
-      />
-      {error !== null && (
-        <div
-          data-testid="model-reporting-currency-error"
-          style={{ color: "#a4262c", fontSize: 11, marginTop: 2 }}
-        >
-          {error}
-        </div>
-      )}
-    </>
-  );
-}
-
-/**
- * The exact sentence a stored-but-unread field says about itself.
- *
- * "Saved" and "nothing reads it" both have to be in it. Half of that sentence
- * on its own is a new lie in the other direction: "nothing reads this" alone
- * reads as "typing here is pointless", and the value IS kept, travels with the
- * model, and is the thing whoever wires the feature up will find waiting.
- */
 const NOT_YET_CONSULTED =
   "Saved with the strategy and carried with the model — but nothing reads it yet, so setting it changes no insight today.";
 
@@ -1876,22 +1800,6 @@ function ModelPanel({
               malformed is a trap for whoever eventually reads it. */}
           <NotYetConsulted field="fiscalYearStart" />
           <FieldFindings findings={findingsAtPath(findings, "model.fiscalYearStart")} />
-        </Field>
-
-        <Field label="Reporting currency" hint={REPORTING_CURRENCY_HINT} flex={1}>
-          <ReportingCurrencyField
-            value={model.reportingCurrency ?? ""}
-            disabled={disabled}
-            onCommit={(reportingCurrency) => onEdit(withModel(doc, { reportingCurrency }))}
-          />
-          {/* This is the field the objection was actually about: somebody types
-              SEK here and reasonably expects a currency to appear downstream.
-              Nothing anywhere reads `reportingCurrency`. The form is still
-              refused at the keystroke, because `CurrencyCode` refuses it at
-              DESERIALIZE — so a stored `kr` is not an inert wrong value, it is
-              a document nothing can open. */}
-          <NotYetConsulted field="reportingCurrency" />
-          <FieldFindings findings={findingsAtPath(findings, "model.reportingCurrency")} />
         </Field>
 
         <Field
@@ -2369,6 +2277,20 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
 // Measures grid
 // ===========================================================================
 
+/**
+ * Measure attributes that are stored, validated, resolved — and read by nothing.
+ *
+ * The standing rule is that nothing becomes authorable until it has a reader
+ * (`docs/design/insights-strategy-layer.md` §2). These two are the deliberate
+ * exception rather than an oversight: both have a designed consumer written down
+ * and not yet built — `unit` the moment narration formats a value, `cadence` for
+ * period bucketing and seasonality lag selection — which is why they were kept
+ * in the pass that DELETED `reportingCurrency`, whose reader was not coming.
+ * Until one lands they carry the same label the model-block fields do, so nobody
+ * spends authoring effort on a field that changes nothing.
+ */
+const NOT_YET_CONSULTED_MEASURE_FIELDS = ["unit", "cadence"];
+
 const MEASURE_HEADERS = [
   "measure",
   "direction",
@@ -2459,9 +2381,34 @@ function MeasuresGrid({
                   key={h}
                   style={h === "reviewed" ? stickyHeaderStyle : styles.th}
                   data-sticky={h === "reviewed" ? "reviewed" : undefined}
-                  title={h === "never slice by" ? NEVER_SLICE_TITLE : undefined}
+                  title={
+                    h === "never slice by"
+                      ? NEVER_SLICE_TITLE
+                      : NOT_YET_CONSULTED_MEASURE_FIELDS.includes(h)
+                        ? NOT_YET_CONSULTED
+                        : undefined
+                  }
                 >
                   {h}
+                  {/* SAID ONCE, IN THE HEADER, NOT ONCE PER ROW. `unit` and
+                      `cadence` are stored, validated and resolved, and READ BY
+                      NOTHING — `unit` waits on narration that formats a value
+                      ("rose by 12" vs "12%" vs "12,000 SEK" are different
+                      sentences) and `cadence` on period bucketing and
+                      seasonality lag selection. Both have a designed reader
+                      coming, which is why they were kept where
+                      `reportingCurrency` was deleted; until one arrives they
+                      must not present as ordinary settable attributes. A note
+                      per cell would be forty copies of one sentence. */}
+                  {NOT_YET_CONSULTED_MEASURE_FIELDS.includes(h) && (
+                    <span
+                      data-testid={`measure-not-consulted-${h}`}
+                      data-inert-field={h}
+                      style={{ color: "#7a5b00", fontWeight: 400, marginLeft: 4 }}
+                    >
+                      *
+                    </span>
+                  )}
                 </th>
               ))}
             </tr>
@@ -3150,11 +3097,16 @@ function TablesGrid({
                         // being true: the backend classifies every table anyway,
                         // and the blank was hiding whose answer is in force.
                         detectedKind === undefined ? null : `${detectedKind} — detected`,
-                        // The topology refusal, per option: `calendar` on a
-                        // table nothing looks up is now a Save-blocking ERROR,
-                        // so the cheapest fix is to make the state hard to
-                        // reach rather than to explain it afterwards.
-                        (k) => tableKindTopologyRefusal(overview, t.name, k),
+                        // Two reasons an option cannot be chosen, in the order a
+                        // person meets them. The topology refusal first:
+                        // `calendar` on a table nothing looks up is a
+                        // Save-blocking ERROR, so making the state hard to reach
+                        // beats explaining it afterwards. Then the inert kinds,
+                        // which the backend ACCEPTS and ignores — a control that
+                        // takes a value nothing will read is the defect this
+                        // feature has now corrected three times.
+                        (k) =>
+                          tableKindTopologyRefusal(overview, t.name, k) ?? tableKindIsInert(k),
                       )}{" "}
                       <KindOriginBadge origin={kindOrigin} table={t.name} kind={shownKind} />{" "}
                       <RowFindings findings={findingsAtPath(findings, `${path}.kind`)} />
