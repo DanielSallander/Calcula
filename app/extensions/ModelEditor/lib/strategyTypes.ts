@@ -407,6 +407,17 @@ export interface ModelStrategy {
   reviewed: boolean;
   /** Where the values came from. Absent means the drafting op wrote them. */
   source?: StrategySource;
+  /**
+   * USER-DEFINED ATTRIBUTES — the one open door in a schema that refuses every
+   * other unknown key. Mirrors `ExtBag` in `insights/strategy/types.rs`.
+   *
+   * TYPED HERE EVEN THOUGH NOTHING EDITS IT YET, because the tab reads a
+   * document and writes the whole thing back. Without the field the bag would
+   * survive only by JavaScript happening not to drop unknown properties —
+   * which is luck, not a contract, and the failure mode is losing data a user
+   * put in their own namespace.
+   */
+  x?: Record<string, unknown>;
 }
 
 /**
@@ -440,11 +451,33 @@ export interface MeasureStrategy {
   reviewed: boolean;
   /** Where the values came from. Absent means the drafting op wrote them. */
   source?: StrategySource;
+  /**
+   * USER-DEFINED ATTRIBUTES — the one open door in a schema that refuses every
+   * other unknown key. Mirrors `ExtBag` in `insights/strategy/types.rs`.
+   *
+   * TYPED HERE EVEN THOUGH NOTHING EDITS IT YET, because the tab reads a
+   * document and writes the whole thing back. Without the field the bag would
+   * survive only by JavaScript happening not to drop unknown properties —
+   * which is luck, not a contract, and the failure mode is losing data a user
+   * put in their own namespace.
+   */
+  x?: Record<string, unknown>;
 }
 
 export interface ColumnStrategy {
   role: Role;
   priority?: number;
+  /**
+   * USER-DEFINED ATTRIBUTES — the one open door in a schema that refuses every
+   * other unknown key. Mirrors `ExtBag` in `insights/strategy/types.rs`.
+   *
+   * TYPED HERE EVEN THOUGH NOTHING EDITS IT YET, because the tab reads a
+   * document and writes the whole thing back. Without the field the bag would
+   * survive only by JavaScript happening not to drop unknown properties —
+   * which is luck, not a contract, and the failure mode is losing data a user
+   * put in their own namespace.
+   */
+  x?: Record<string, unknown>;
 }
 
 export interface TableStrategy {
@@ -456,6 +489,17 @@ export interface TableStrategy {
   reviewed: boolean;
   /** Where the values came from. Absent means the drafting op wrote them. */
   source?: StrategySource;
+  /**
+   * USER-DEFINED ATTRIBUTES — the one open door in a schema that refuses every
+   * other unknown key. Mirrors `ExtBag` in `insights/strategy/types.rs`.
+   *
+   * TYPED HERE EVEN THOUGH NOTHING EDITS IT YET, because the tab reads a
+   * document and writes the whole thing back. Without the field the bag would
+   * survive only by JavaScript happening not to drop unknown properties —
+   * which is luck, not a contract, and the failure mode is losing data a user
+   * put in their own namespace.
+   */
+  x?: Record<string, unknown>;
 }
 
 export interface Rule {
@@ -500,7 +544,34 @@ export interface StrategyDoc {
   rules?: Rule[];
   periods?: PeriodAnnotation[];
   tests?: StrategyTest[];
+  /**
+   * What each `x` key in this document is supposed to look like.
+   *
+   * Declaring is optional and the asymmetry is deliberate: an undeclared key
+   * is a WARNING that still saves, a declared key whose value violates its
+   * declaration is an ERROR. Strictness inside the namespace differs from
+   * strictness outside it by SEVERITY, never by silence.
+   */
+  extensions?: Record<string, ExtensionDecl>;
 }
+
+/** The declared shape of one user-defined attribute. Mirrors `ExtensionDecl`. */
+export interface ExtensionDecl {
+  type: ExtValueType;
+  /** When non-empty, the only values allowed. Text-typed keys only. */
+  allowed?: string[];
+  description?: string;
+}
+
+export type ExtValueType = "text" | "number" | "boolean" | "any";
+
+/** The runtime mirror of Rust's `ExtValueType`, for the drift guard. */
+export const EXT_VALUE_TYPES: readonly ExtValueType[] = [
+  "text",
+  "number",
+  "boolean",
+  "any",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Findings (validate.rs)
@@ -1214,21 +1285,45 @@ export const MEASURE_VALUE_FIELDS = [
   "analysisDimensions",
   "neverSliceBy",
   "context",
+  // A BAG WITH SOMETHING IN IT IS A THING THE ENTRY SAYS, so it counts as a
+  // value: the row reads "set by you" rather than empty, an edit to it drops a
+  // stale confirmation like any other edit, and Confirm records that a person
+  // agreed to it. The engine still reads none of it - what is being confirmed
+  // is that a human put it there on purpose.
+  "x",
 ] as const;
 
 /** The same list for a table entry. See `MEASURE_VALUE_FIELDS`. */
-export const TABLE_VALUE_FIELDS = ["kind", "labelColumn", "columns", "hierarchies"] as const;
+export const TABLE_VALUE_FIELDS = [
+  "kind",
+  "labelColumn",
+  "columns",
+  "hierarchies",
+  // A BAG WITH SOMETHING IN IT IS A THING THE ENTRY SAYS, so it counts as a
+  // value: the row reads "set by you" rather than empty, an edit to it drops a
+  // stale confirmation like any other edit, and Confirm records that a person
+  // agreed to it. The engine still reads none of it - what is being confirmed
+  // is that a human put it there on purpose.
+  "x",
+] as const;
 
 /** The same list for the model-wide block. See `MEASURE_VALUE_FIELDS`. */
 export const MODEL_VALUE_FIELDS = [
   "defaultTimeAxis",
   "fiscalYearStart",
   "priority",
+  // A BAG WITH SOMETHING IN IT IS A THING THE ENTRY SAYS, so it counts as a
+  // value: the row reads "set by you" rather than empty, an edit to it drops a
+  // stale confirmation like any other edit, and Confirm records that a person
+  // agreed to it. The engine still reads none of it - what is being confirmed
+  // is that a human put it there on purpose.
+  "x",
 ] as const;
 
 /** Does this measure entry state anything at all? */
 export function measureHasValues(e: MeasureStrategy): boolean {
   return (
+    Object.keys(e.x ?? {}).length > 0 ||
     e.direction !== undefined ||
     e.aggregation !== undefined ||
     e.unit !== undefined ||
@@ -1245,6 +1340,7 @@ export function measureHasValues(e: MeasureStrategy): boolean {
 /** Does this table entry state anything at all? */
 export function tableHasValues(e: TableStrategy): boolean {
   return (
+    Object.keys(e.x ?? {}).length > 0 ||
     e.kind !== undefined ||
     (e.labelColumn ?? "") !== "" ||
     Object.keys(e.columns ?? {}).length > 0 ||
@@ -1255,6 +1351,7 @@ export function tableHasValues(e: TableStrategy): boolean {
 /** Does the model-wide block state anything at all? */
 export function modelHasValues(e: ModelStrategy): boolean {
   return (
+    Object.keys(e.x ?? {}).length > 0 ||
     (e.defaultTimeAxis ?? "") !== "" ||
     (e.fiscalYearStart ?? "") !== "" ||
     (e.priority?.length ?? 0) > 0

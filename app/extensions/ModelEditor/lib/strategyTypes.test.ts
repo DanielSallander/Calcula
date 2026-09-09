@@ -40,6 +40,7 @@ import {
   CADENCES,
   DIRECTIONS,
   EXPECTED_STATUSES,
+  EXT_VALUE_TYPES,
   MEASURE_VALUE_FIELDS,
   MODEL_VALUE_FIELDS,
   ROLES,
@@ -126,6 +127,7 @@ const FULL_MEASURE: Required<MeasureStrategy> = {
   analysisDimensions: ["Dim[Dept]"],
   neverSliceBy: ["Sales[Id]"],
   context: "the board reads this one first",
+  x: { "acme.owner": "finance" },
   reviewed: false,
   source: "authored",
 };
@@ -136,6 +138,7 @@ const FULL_MODEL: Required<ModelStrategy> = {
   defaultTimeAxis: "Date[Day]",
   fiscalYearStart: "04-01",
   priority: ["Revenue"],
+  x: { "acme.owner": "finance" },
   reviewed: false,
   source: "authored",
 };
@@ -145,6 +148,7 @@ const FULL_TABLE: Required<TableStrategy> = {
   labelColumn: "Dept",
   columns: { Dept: { role: "analysis" } },
   hierarchies: [["Region", "Dept"]],
+  x: { "acme.owner": "finance" },
   reviewed: false,
   source: "authored",
 };
@@ -1257,6 +1261,7 @@ describe("the closed sets mirror insights/strategy/types.rs", () => {
     ["EntrySource", STRATEGY_SOURCES],
     ["ExpectedStatus", EXPECTED_STATUSES],
     ["SuppressibleFactKind", SUPPRESSIBLE_FACT_KINDS],
+    ["ExtValueType", EXT_VALUE_TYPES],
   ];
 
   it.each(MIRRORS)("%s has exactly the variants Rust declares, in order", (rustEnum, tsConst) => {

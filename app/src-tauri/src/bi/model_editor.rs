@@ -5657,35 +5657,21 @@ const MODEL_EXTENSION_DATA_MAX_VALUE_BYTES: usize = 262_144;
 /// Extension-data keys are namespaced `vendor.feature` — a non-empty vendor
 /// segment, a dot, a non-empty rest. Keeps third-party entries collision-free
 /// (the `calcula.` prefix is reserved for built-in features).
+///
+/// THE RULE ITSELF LIVES IN `insights::strategy::types`, AND THAT IS
+/// DELIBERATE. The strategy document's per-object `x` bag carries the same
+/// reservation one nesting level down, and this function is where it used to be
+/// stated alone — case-sensitively, and with no test. `Calcula.strategy` walked
+/// past a reservation whose whole purpose is that the generic writer can never
+/// replace a document its owning command validates; it did not bite only
+/// because every reader looks up the exact lower-case literal, which is luck.
+/// One predicate, so the model bag and the document bag cannot answer
+/// differently, and a test pins them together.
 fn validate_extension_data_key(key: &str) -> Result<(), String> {
-    if key.len() > 200 {
-        return Err("Extension-data key is too long (max 200 chars)".to_string());
+    match crate::insights::strategy::types::extension_namespace_refusal(key) {
+        Some(why) => Err(why),
+        None => Ok(()),
     }
-    // The `calcula.` namespace belongs to built-in features, and each of them
-    // owns a command that validates its own shape before writing. Letting the
-    // generic writer through here would mean a script or an extension could
-    // replace `calcula.strategy` with any JSON at all, and the strategy layer
-    // would then load a document that never passed its validator — the exact
-    // "half-applied strategy file" the refusal discipline exists to prevent.
-    // The doc comment above claimed this was reserved for a long time before
-    // anything enforced it.
-    if key.starts_with("calcula.") {
-        return Err(format!(
-            "The 'calcula.' extension-data namespace is reserved for built-in features; \
-             '{}' must be written through the command that owns it",
-            key
-        ));
-    }
-    let mut parts = key.splitn(2, '.');
-    let vendor = parts.next().unwrap_or("");
-    let feature = parts.next().unwrap_or("");
-    if vendor.trim().is_empty() || feature.trim().is_empty() || key.contains(char::is_whitespace) {
-        return Err(format!(
-            "Extension-data keys must be namespaced 'vendor.feature' (got '{}')",
-            key
-        ));
-    }
-    Ok(())
 }
 
 /// Read/write the model's open extension-data map (namespaced opaque JSON,
@@ -11799,6 +11785,7 @@ mod strategy_tests {
                         ColumnStrategy {
                             role: Role::Analysis,
                             priority: None,
+                            x: Default::default(),
                         },
                     ),
                     (
@@ -11806,6 +11793,7 @@ mod strategy_tests {
                         ColumnStrategy {
                             role: Role::Key,
                             priority: None,
+                            x: Default::default(),
                         },
                     ),
                 ]),
@@ -11814,6 +11802,7 @@ mod strategy_tests {
                 // Hand-built by this test, so it is neither inferred nor typed
                 // by a person in the editor - `None` is the honest third state.
                 source: None,
+                x: Default::default(),
             },
         );
 

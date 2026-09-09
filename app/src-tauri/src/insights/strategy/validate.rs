@@ -57,8 +57,8 @@ use super::facts::{authored_table_kinds, effective_date_table, AuthoredKinds, Ki
 use super::overlap::check_overlaps;
 use super::resolve::{point_from_scope, resolve, CalendarSource, ModelFacts, ResolvedMeasure};
 use super::types::{
-    Additivity, AggregationSpec, Attribute, BandBounds, Direction, ExpectedStatus, IsoDate,
-    Materiality, QualifiedColumn, Role, Scope, ScopeValue, StrategyDoc, TableKind, Target,
+    Additivity, AggregationSpec, Attribute, BandBounds, Direction, ExpectedStatus, ExtBag, ExtKey,
+    ExtValueType, ExtensionDecl, IsoDate, Materiality, QualifiedColumn, Role, Scope, ScopeValue, StrategyDoc, TableKind, Target,
     TestGiven, MAX_STRATEGY_DOC_BYTES, STRATEGY_DOC_VERSION,
 };
 // THE PLANNER'S OWN GATES, imported rather than reimplemented. Everything this
@@ -1775,6 +1775,112 @@ fn validate_table_kinds(
 }
 
 /// Validate a whole document against the model it annotates.
+/// Every `x` bag in the document, with the path its findings anchor to.
+///
+/// THE PATHS MATTER MORE THAN THE WALK. `findingsAtPath` in the Strategy tab
+/// matches by PREFIX, so `measures['Revenue'].x['acme.slaTier']` lands on the
+/// Revenue row for free. A finding rooted at a new top-level container would
+/// anchor nowhere and behave exactly like the empty path, which the tab renders
+/// as "(document)" and highlights against nothing.
+fn extension_bags(doc: &StrategyDoc) -> Vec<(String, &ExtBag)> {
+    let mut out: Vec<(String, &ExtBag)> = vec![("model".to_string(), &doc.model.x)];
+    for (measure, ms) in &doc.measures {
+        out.push((format!("measures['{measure}']"), &ms.x));
+    }
+    for (table, ts) in &doc.tables {
+        out.push((format!("tables['{table}']"), &ts.x));
+        for (column, cs) in &ts.columns {
+            out.push((format!("tables['{table}'].columns['{column}']"), &cs.x));
+        }
+    }
+    out
+}
+
+/// The one place in this file where strictness differs, and it differs by
+/// SEVERITY rather than by silence.
+///
+/// Outside the `x` bag every unknown key is refused by serde, by name, at parse
+/// time. Inside it a key is by definition unknown to this build — that is what
+/// the bag is for — so the question changes from "is this a key I know" to "is
+/// this a key the AUTHOR said they meant".
+///
+/// * A key with a declaration that its value violates is an ERROR. The author
+///   wrote down what they meant and the document does not match it.
+/// * A key with NO declaration is a WARNING that still saves. A hand-edited bag
+///   on a model whose author never wrote a schema must not be fatal, or the
+///   namespace is useless for exactly the tinkering it exists to enable — and
+///   the person is still told, by name, which is the half that matters.
+/// * A declaration nobody uses is a WARNING, the same shape as `orphan-measure`.
+fn validate_extensions(doc: &StrategyDoc, out: &mut Vec<Finding>) {
+    let bags = extension_bags(doc);
+    let mut used: BTreeSet<&ExtKey> = BTreeSet::new();
+
+    for (path, bag) in &bags {
+        for (key, value) in *bag {
+            used.insert(key);
+            let Some(decl) = doc.extensions.get(key) else {
+                out.push(Finding::warning(
+                    "undeclared-extension-key",
+                    format!("{path}.x['{key}']"),
+                    format!(
+                        "'{key}' is not declared in this document's `extensions` block, so \
+                         nothing can check it and a typo in it would look exactly like a new \
+                         attribute. Declare it to have the shape checked"
+                    ),
+                ));
+                continue;
+            };
+            if !decl.r#type.admits(value) {
+                out.push(Finding::error(
+                    "extension-value-invalid",
+                    format!("{path}.x['{key}']"),
+                    format!(
+                        "'{key}' is declared as {}, and this value is not",
+                        decl.r#type.label()
+                    ),
+                ));
+                continue;
+            }
+            // The allowed list is a STRING closed set, so it only ever applies
+            // to a text-typed key. A number's closed set is a range and this is
+            // deliberately not JSON Schema.
+            if !decl.allowed.is_empty() {
+                let matches = value
+                    .as_str()
+                    .is_some_and(|s| decl.allowed.iter().any(|a| a == s));
+                if !matches {
+                    out.push(Finding::error(
+                        "extension-value-invalid",
+                        format!("{path}.x['{key}']"),
+                        format!(
+                            "'{key}' allows only {}, and this value is not one of them",
+                            decl.allowed
+                                .iter()
+                                .map(|a| format!("'{a}'"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    for key in doc.extensions.keys() {
+        if !used.contains(key) {
+            out.push(Finding::warning(
+                "unused-extension-declaration",
+                format!("extensions['{key}']"),
+                format!(
+                    "'{key}' is declared and nothing in this document uses it. Harmless, but a \
+                     declaration that describes nothing is usually a rename that only happened \
+                     on one side"
+                ),
+            ));
+        }
+    }
+}
+
 pub fn validate(facts: &ModelFacts, doc: &StrategyDoc) -> Vec<Finding> {
     let mut out: Vec<Finding> = Vec::new();
 
@@ -1874,6 +1980,9 @@ pub fn validate(facts: &ModelFacts, doc: &StrategyDoc) -> Vec<Finding> {
             ));
         }
     }
+
+    // --- the user's own attributes -------------------------------------------
+    validate_extensions(doc, &mut out);
 
     // --- tables --------------------------------------------------------------
     validate_table_kinds(facts, doc, &authored, &mut out);
@@ -2520,6 +2629,7 @@ mod tests {
                         ColumnStrategy {
                             role: Role::Analysis,
                             priority: None,
+                            x: Default::default(),
                         },
                     ),
                     (
@@ -2527,6 +2637,7 @@ mod tests {
                         ColumnStrategy {
                             role: Role::Key,
                             priority: None,
+                            x: Default::default(),
                         },
                     ),
                 ]),
@@ -2542,6 +2653,7 @@ mod tests {
                     ColumnStrategy {
                         role: Role::Key,
                         priority: None,
+                        x: Default::default(),
                     },
                 )]),
                 reviewed: true,
@@ -2930,6 +3042,7 @@ mod tests {
             ColumnStrategy {
                 role: Role::Label,
                 priority: None,
+                x: Default::default(),
             },
         );
         by_role
@@ -3254,6 +3367,7 @@ mod tests {
             ColumnStrategy {
                 role: Role::Label,
                 priority: None,
+                x: Default::default(),
             },
         );
         doc.rules.push(Rule {
@@ -3291,6 +3405,7 @@ mod tests {
             ColumnStrategy {
                 role: Role::Label,
                 priority: None,
+                x: Default::default(),
             },
         );
         let mut scoped = labelled.clone();
@@ -3389,6 +3504,7 @@ mod tests {
             ColumnStrategy {
                 role: Role::Analysis,
                 priority: None,
+                x: Default::default(),
             },
         );
         doc.rules.push(Rule {
@@ -3451,6 +3567,7 @@ mod tests {
             ColumnStrategy {
                 role: Role::Analysis,
                 priority: None,
+                x: Default::default(),
             },
         );
         doc.rules.push(Rule {
@@ -3604,6 +3721,142 @@ mod tests {
         let findings = validate(&facts(), &doc);
         assert!(codes(&findings, Severity::Warning).contains(&"unknown-member"));
         assert!(!is_refused(&findings));
+    }
+
+    /// One declared extension key, for the tests below.
+    fn decl(t: ExtValueType, allowed: &[&str]) -> ExtensionDecl {
+        ExtensionDecl {
+            r#type: t,
+            allowed: allowed.iter().map(|a| a.to_string()).collect(),
+            description: None,
+        }
+    }
+
+    fn ext(key: &str) -> ExtKey {
+        key.parse().expect("a namespaced key")
+    }
+
+    #[test]
+    fn an_undeclared_extension_key_warns_by_name_and_still_saves() {
+        // THE ONE PLACE STRICTNESS DIFFERS, AND IT DIFFERS BY SEVERITY. Outside
+        // the bag an unknown key is a parse error. Inside it, a key this build
+        // does not know is the POINT - so the question becomes whether the
+        // author said they meant it, and a document whose author never wrote a
+        // schema must still save or the namespace is useless for tinkering.
+        let mut doc = clean_doc();
+        doc.measures
+            .entry("Returns".into())
+            .or_default()
+            .x
+            .insert(ext("acme.slaTier"), serde_json::json!("gold"));
+
+        let findings = validate(&facts(), &doc);
+        let warned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.code == "undeclared-extension-key")
+            .collect();
+        assert_eq!(warned.len(), 1, "{findings:?}");
+        assert_eq!(warned[0].severity, Severity::Warning);
+        assert!(warned[0].message.contains("acme.slaTier"), "named: {:?}", warned[0]);
+        assert!(!is_refused(&findings), "a warning must still publish");
+
+        // AND THE PATH ANCHORS FOR FREE. `findingsAtPath` in the tab matches by
+        // prefix, so a finding under the measure's own path lands on the measure
+        // row with no UI change at all. A new top-level container would have
+        // anchored nowhere, exactly like the empty path.
+        assert!(
+            warned[0].path.starts_with("measures['Returns']"),
+            "anchors to the row: {}",
+            warned[0].path
+        );
+    }
+
+    #[test]
+    fn a_declared_key_is_checked_against_its_declaration_and_a_violation_refuses() {
+        // Declaring is what buys the strictness back. `acme.slaTeir` is then a
+        // typo the validator can see, because the author wrote down what they
+        // meant.
+        let mut doc = clean_doc();
+        doc.extensions
+            .insert(ext("acme.slaTier"), decl(ExtValueType::Text, &["gold", "silver"]));
+        let m = doc.measures.entry("Returns".into()).or_default();
+        m.x.insert(ext("acme.slaTier"), serde_json::json!(7));
+
+        let findings = validate(&facts(), &doc);
+        assert!(
+            codes(&findings, Severity::Error).contains(&"extension-value-invalid"),
+            "a number where text was declared: {findings:?}"
+        );
+        assert!(is_refused(&findings));
+
+        // The right TYPE but outside the allowed set is the same refusal, since
+        // the author closed the set themselves.
+        let m = doc.measures.get_mut("Returns").unwrap();
+        m.x.insert(ext("acme.slaTier"), serde_json::json!("bronze"));
+        let findings = validate(&facts(), &doc);
+        assert!(codes(&findings, Severity::Error).contains(&"extension-value-invalid"));
+
+        // POSITIVE CONTROL: a declared value that matches raises nothing at all,
+        // so the refusals above are about the value and not about the bag.
+        let m = doc.measures.get_mut("Returns").unwrap();
+        m.x.insert(ext("acme.slaTier"), serde_json::json!("gold"));
+        let findings = validate(&facts(), &doc);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.code.starts_with("extension-") || f.code == "undeclared-extension-key"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_declaration_nobody_uses_is_reported_the_way_an_orphan_measure_is() {
+        let mut doc = clean_doc();
+        doc.extensions
+            .insert(ext("acme.slaTier"), decl(ExtValueType::Text, &[]));
+        let findings = validate(&facts(), &doc);
+        let warned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.code == "unused-extension-declaration")
+            .collect();
+        assert_eq!(warned.len(), 1, "{findings:?}");
+        assert_eq!(warned[0].severity, Severity::Warning);
+        assert!(!is_refused(&findings));
+    }
+
+    #[test]
+    fn every_place_a_bag_can_hang_is_walked() {
+        // A bag the validator does not reach is a bag whose typos are silent,
+        // which is the defect the declaration mechanism exists to prevent. Four
+        // places carry one; this asserts all four, by path.
+        let mut doc = clean_doc();
+        doc.model.x.insert(ext("acme.a"), serde_json::json!(1));
+        doc.measures
+            .entry("Returns".into())
+            .or_default()
+            .x
+            .insert(ext("acme.b"), serde_json::json!(1));
+        let t = doc.tables.get_mut("Dim").expect("the fixture has Dim");
+        t.x.insert(ext("acme.c"), serde_json::json!(1));
+        t.columns
+            .get_mut("Dept")
+            .expect("the fixture has Dept")
+            .x
+            .insert(ext("acme.d"), serde_json::json!(1));
+
+        let findings = validate(&facts(), &doc);
+        let paths: Vec<&str> = findings
+            .iter()
+            .filter(|f| f.code == "undeclared-extension-key")
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(paths.len(), 4, "one per bag: {findings:?}");
+        assert!(paths.iter().any(|p| p.starts_with("model.x")));
+        assert!(paths.iter().any(|p| p.starts_with("measures['Returns'].x")));
+        assert!(paths.iter().any(|p| *p == "tables['Dim'].x['acme.c']"));
+        assert!(paths
+            .iter()
+            .any(|p| *p == "tables['Dim'].columns['Dept'].x['acme.d']"));
     }
 
     #[test]
@@ -4285,6 +4538,7 @@ mod tests {
             ColumnStrategy {
                 role: Role::Analysis,
                 priority: None,
+                x: Default::default(),
             },
         );
         unknowable.rules.push(Rule {

@@ -555,6 +555,135 @@ impl<'de> Deserialize<'de> for MonthDay {
 }
 
 // ---------------------------------------------------------------------------
+// The extension namespace
+// ---------------------------------------------------------------------------
+
+/// The namespace built-in features own, and nobody else may write.
+pub const RESERVED_EXTENSION_PREFIX: &str = "calcula.";
+
+/// The longest an extension key may be, in BYTES.
+///
+/// The model-level message used to say "chars" while the check counted bytes,
+/// so a key of Swedish or Japanese characters was refused sooner than the
+/// sentence promised. Bytes is the honest word and this constant carries it.
+pub const MAX_EXTENSION_KEY_BYTES: usize = 200;
+
+/// Why this key may not name a third-party namespace, or `None`.
+///
+/// ONE RULE, TWO READERS, AND THEY MUST NOT DRIFT. The model's own
+/// `extension_data` map is guarded by `validate_extension_data_key`
+/// (`bi/model_editor.rs`), and the strategy document's per-object `x` bag is
+/// guarded by `ExtKey` below. They are the same reservation one nesting level
+/// apart: a user writing `acme.notes` on the MODEL and a user writing
+/// `acme.notes` on a MEASURE are doing the same thing, and a rule that held in
+/// one place and not the other would be discovered by whoever hit the softer
+/// half.
+///
+/// THE CASE-SENSITIVITY IS A FIX, NOT A CHOICE. The model-level check was
+/// `key.starts_with("calcula.")`, so `Calcula.strategy` walked past a
+/// reservation whose entire purpose is that the generic writer can never
+/// replace a document its owning command validates. It did not bite only
+/// because every reader looks up the exact lower-case literal — which is luck,
+/// not a guard.
+pub fn extension_namespace_refusal(key: &str) -> Option<String> {
+    if key.len() > MAX_EXTENSION_KEY_BYTES {
+        return Some(format!(
+            "'{key}' is too long for an extension key: {} bytes, and the limit is {}",
+            key.len(),
+            MAX_EXTENSION_KEY_BYTES
+        ));
+    }
+    // `get` rather than a slice: a non-ASCII first character is not a char
+    // boundary at byte 8, and it is also not `calcula.`, so `None` is the right
+    // answer both ways.
+    let reserved = key
+        .get(..RESERVED_EXTENSION_PREFIX.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(RESERVED_EXTENSION_PREFIX));
+    if reserved {
+        return Some(format!(
+            "the '{RESERVED_EXTENSION_PREFIX}' namespace is reserved for built-in features, so \
+             '{key}' cannot be written here; a built-in is written through the command that owns \
+             it and validates its shape"
+        ));
+    }
+    let mut parts = key.splitn(2, '.');
+    let vendor = parts.next().unwrap_or("");
+    let feature = parts.next().unwrap_or("");
+    if vendor.trim().is_empty() || feature.trim().is_empty() || key.contains(char::is_whitespace) {
+        return Some(format!(
+            "extension keys are namespaced 'vendor.feature' with both halves non-empty and no \
+             spaces; '{key}' is not"
+        ));
+    }
+    None
+}
+
+/// A key in a strategy entry's `x` bag — one user-defined attribute.
+///
+/// THE BAG IS THE RESERVATION, AND THAT IS THE WHOLE DESIGN. Built-in
+/// attributes are FIELDS on `MeasureStrategy` and friends; user attributes are
+/// KEYS in `x`. The two never share a key space, so the hazard that motivates
+/// every namespacing scheme — a user adds `confidence` today, a built-in
+/// `confidence` ships next year, and every model carrying it collides in
+/// silence — cannot arise. A future built-in `confidence` is a field. It is not
+/// a prefix convention that a careful author has to respect; it is a shape.
+///
+/// This is why `deny_unknown_fields` survives untouched on every container: `x`
+/// is one KNOWN field. Strict outside, open inside one named door.
+///
+/// Refused at parse time like `IsoDate` and `MonthDay`, and by the same
+/// predicate the model-level bag uses, so the two cannot drift.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExtKey(String);
+
+impl ExtKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The vendor half — everything before the first dot.
+    ///
+    /// Used to group a document's extension keys by who owns them, which is how
+    /// a person answers "what is this file carrying that is not mine".
+    pub fn vendor(&self) -> &str {
+        self.0.split_once('.').map(|(v, _)| v).unwrap_or(&self.0)
+    }
+}
+
+impl fmt::Display for ExtKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for ExtKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match extension_namespace_refusal(s) {
+            Some(why) => Err(why),
+            None => Ok(ExtKey(s.to_string())),
+        }
+    }
+}
+
+impl Serialize for ExtKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        ExtKey::from_str(&raw).map_err(D::Error::custom)
+    }
+}
+
+/// One user-defined attribute bag, as it hangs off a strategy entry.
+pub type ExtBag = BTreeMap<ExtKey, serde_json::Value>;
+
+// ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------
 
@@ -834,6 +963,39 @@ pub enum Cadence {
     Monthly,
     Quarterly,
     Yearly,
+}
+
+impl Cadence {
+    /// How many points of a series at this cadence make one natural cycle.
+    ///
+    /// `cadence`'s FIRST READER. A monthly series has a twelve-point year in it,
+    /// and the seasonality scan — which knows nothing about calendars — can pick
+    /// a noisier five-point correlation over the real annual one on a short
+    /// window. "Revenue repeats every 5 months" is not a claim anybody can act
+    /// on; it is a maximum found by a scan that had no idea what a month was.
+    /// Telling it the number the reader would recognise fixes that, and costs
+    /// `core/insights` no knowledge of calendars: it receives a `usize`.
+    ///
+    /// HARDCODED ON PURPOSE, and the reasoning is §13.8 of the design doc. The
+    /// obvious intuition is that an unwritten consumer is the natural place to
+    /// ask "could a user have written this?" — but this one is not, because
+    /// cadence's OTHER consumer is period bucketing, which is query planning,
+    /// and a producer never influences a query. The first instance of a pattern
+    /// must not be the case the pattern forbids.
+    ///
+    /// `Yearly` gets `None`: a cycle above a year needs years of history the
+    /// series will not have, so there is no lag worth preferring.
+    pub fn expected_cycle(self) -> Option<usize> {
+        match self {
+            // A week, not a year. Daily data long enough to carry an annual
+            // cycle is rare, and the weekly rhythm is the one a reader sees.
+            Cadence::Daily => Some(7),
+            Cadence::Weekly => Some(52),
+            Cadence::Monthly => Some(12),
+            Cadence::Quarterly => Some(4),
+            Cadence::Yearly => None,
+        }
+    }
 }
 
 /// What a column is FOR, which decides whether it may scope a rule or slice a
@@ -1257,6 +1419,16 @@ pub struct ModelStrategy {
     /// Who wrote this block. Absent means nobody has - see `EntrySource`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<EntrySource>,
+    /// USER-DEFINED ATTRIBUTES. The one open door in a schema that refuses
+    /// every other unknown key, and the engine reads NOTHING out of it - see
+    /// `ExtKey` for why the bag rather than a prefix is the design.
+    ///
+    /// Its guarantee is ROUND-TRIP FIDELITY, NOT CONSUMPTION, which is the
+    /// narrow carve-out from "nothing becomes authorable until it has a
+    /// reader": what a user puts here is theirs, travels with the model, and
+    /// is never interpreted. A built-in that wants meaning gets a field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub x: ExtBag,
 }
 
 /// Everything the strategy says about one measure, outside any scope.
@@ -1295,17 +1467,40 @@ pub struct MeasureStrategy {
     /// Who wrote this entry. Absent means nobody has - see `EntrySource`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<EntrySource>,
+    /// USER-DEFINED ATTRIBUTES. The one open door in a schema that refuses
+    /// every other unknown key, and the engine reads NOTHING out of it - see
+    /// `ExtKey` for why the bag rather than a prefix is the design.
+    ///
+    /// Its guarantee is ROUND-TRIP FIDELITY, NOT CONSUMPTION, which is the
+    /// narrow carve-out from "nothing becomes authorable until it has a
+    /// reader": what a user puts here is theirs, travels with the model, and
+    /// is never interpreted. A built-in that wants meaning gets a field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub x: ExtBag,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// NO `Eq`: the `x` bag holds `serde_json::Value`, which is PartialEq and not Eq
+// (a JSON number can be a NaN float). Nothing compares these for total equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ColumnStrategy {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+    /// USER-DEFINED ATTRIBUTES. The one open door in a schema that refuses
+    /// every other unknown key, and the engine reads NOTHING out of it - see
+    /// `ExtKey` for why the bag rather than a prefix is the design.
+    ///
+    /// Its guarantee is ROUND-TRIP FIDELITY, NOT CONSUMPTION, which is the
+    /// narrow carve-out from "nothing becomes authorable until it has a
+    /// reader": what a user puts here is theirs, travels with the model, and
+    /// is never interpreted. A built-in that wants meaning gets a field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub x: ExtBag,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// NO `Eq`, for the same reason as `ColumnStrategy` above.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableStrategy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1328,6 +1523,16 @@ pub struct TableStrategy {
     /// Who wrote this entry. Absent means nobody has - see `EntrySource`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<EntrySource>,
+    /// USER-DEFINED ATTRIBUTES. The one open door in a schema that refuses
+    /// every other unknown key, and the engine reads NOTHING out of it - see
+    /// `ExtKey` for why the bag rather than a prefix is the design.
+    ///
+    /// Its guarantee is ROUND-TRIP FIDELITY, NOT CONSUMPTION, which is the
+    /// narrow carve-out from "nothing becomes authorable until it has a
+    /// reader": what a user puts here is theirs, travels with the model, and
+    /// is never interpreted. A built-in that wants meaning gets a field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub x: ExtBag,
 }
 
 /// A scoped override. It ANNOTATES facts; it cannot generate one.
@@ -1506,6 +1711,79 @@ pub struct StrategyDoc {
     pub periods: Vec<PeriodAnnotation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<StrategyTest>,
+    /// What each `x` key in this document is supposed to look like.
+    ///
+    /// WITHOUT THIS, THE OPEN DOOR REINTRODUCES THE BUG IT WAS OPENED BESIDE.
+    /// The whole point of `deny_unknown_fields` everywhere else is that a typo
+    /// is an error rather than a shrug - and `x` is a map, so `acme.slaTeir`
+    /// would otherwise be a perfectly good key that nothing reads. A user who
+    /// declares their own attributes gets the same protection for them that the
+    /// built-ins have.
+    ///
+    /// Declaring is OPTIONAL, and that asymmetry is deliberate: an undeclared
+    /// key is a WARNING and still saves, because a hand-edited `x` on a model
+    /// whose author never wrote a schema must not be fatal. Strictness inside
+    /// the namespace differs from strictness outside it by SEVERITY, never by
+    /// silence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<ExtKey, ExtensionDecl>,
+}
+
+/// The declared shape of one user-defined attribute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionDecl {
+    /// The JSON shape values must take.
+    ///
+    /// A RAW IDENTIFIER, not a per-field `rename`. `type` is a Rust keyword and
+    /// the wire word a person expects; serde strips the `r#` and the
+    /// struct-level `rename_all` does the rest, so the house rule against
+    /// per-field renames holds.
+    pub r#type: ExtValueType,
+    /// When non-empty, the only values allowed. String-typed keys only - a
+    /// closed set of numbers is a range, and this is not trying to be JSON
+    /// Schema.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
+    /// What it means, for whoever opens the file next. Prose; nothing reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The JSON shapes a declared extension value may take.
+///
+/// DELIBERATELY FOUR, NOT JSON SCHEMA. The job is catching a typo and a wrong
+/// shape, not expressing a grammar; a validator nobody can predict is worse
+/// than no validator. `Any` exists so a user can declare a key they know is
+/// structured without being forced to describe it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtValueType {
+    Text,
+    Number,
+    Boolean,
+    Any,
+}
+
+impl ExtValueType {
+    /// Does `value` match this declared shape?
+    pub fn admits(self, value: &serde_json::Value) -> bool {
+        match self {
+            ExtValueType::Text => value.is_string(),
+            ExtValueType::Number => value.is_number(),
+            ExtValueType::Boolean => value.is_boolean(),
+            ExtValueType::Any => true,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExtValueType::Text => "text",
+            ExtValueType::Number => "number",
+            ExtValueType::Boolean => "boolean",
+            ExtValueType::Any => "any",
+        }
+    }
 }
 
 impl Default for StrategyDoc {
@@ -1518,6 +1796,7 @@ impl Default for StrategyDoc {
             rules: Vec::new(),
             periods: Vec::new(),
             tests: Vec::new(),
+            extensions: BTreeMap::new(),
         }
     }
 }
@@ -2058,6 +2337,144 @@ mod tests {
         assert!(err.contains("4-1"), "{err}");
     }
 
+    fn ext_key(k: &str) -> ExtKey {
+        k.parse().expect("a namespaced key")
+    }
+
+    #[test]
+    fn the_reserved_namespace_is_refused_however_it_is_capitalised() {
+        // THE HOLE THIS CLOSES. The model-level check was
+        // `key.starts_with("calcula.")` - case-SENSITIVE - so `Calcula.strategy`
+        // walked past a reservation whose entire purpose is that the generic
+        // writer can never replace a document its owning command validates. It
+        // did not bite only because every reader looks up the exact lower-case
+        // literal, which is luck rather than a guard. And the whole function had
+        // no test at all: the shape, the cap and the reservation were unpinned.
+        for spelling in [
+            "calcula.strategy",
+            "Calcula.strategy",
+            "CALCULA.strategy",
+            "cAlCuLa.anything",
+        ] {
+            let why = extension_namespace_refusal(spelling)
+                .unwrap_or_else(|| panic!("'{spelling}' must be refused"));
+            assert!(why.contains(spelling), "the refusal quotes the key: {why}");
+        }
+        // A vendor that merely STARTS like the reserved one is fine - the
+        // reservation is a namespace, not a substring.
+        assert!(extension_namespace_refusal("calculax.notes").is_none());
+        assert!(extension_namespace_refusal("acme.calcula.notes").is_none());
+    }
+
+    #[test]
+    fn an_extension_key_is_vendor_dot_feature_and_says_so_when_it_is_not() {
+        for good in ["acme.notes", "acme.sla.tier", "a.b"] {
+            assert!(
+                extension_namespace_refusal(good).is_none(),
+                "'{good}' is a valid namespaced key"
+            );
+        }
+        // `splitn(2, '.')` on purpose: the feature half may carry further dots,
+        // so a vendor can nest without asking anyone.
+        assert_eq!("acme.sla.tier".parse::<ExtKey>().unwrap().vendor(), "acme");
+
+        for bad in ["acme", "acme.", ".notes", "", "a b.c", "acme. notes"] {
+            assert!(
+                extension_namespace_refusal(bad).is_some(),
+                "'{bad}' is not a namespaced key"
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_length_cap_counts_bytes_and_the_message_now_says_bytes() {
+        // The old message said "max 200 chars" while the check counted BYTES, so
+        // a key of Swedish or Japanese characters was refused sooner than the
+        // sentence promised - and there was no test to notice.
+        let ascii = format!("acme.{}", "a".repeat(MAX_EXTENSION_KEY_BYTES - 5));
+        assert_eq!(ascii.len(), MAX_EXTENSION_KEY_BYTES);
+        assert!(extension_namespace_refusal(&ascii).is_none(), "exactly at the cap is fine");
+
+        let over = format!("{ascii}a");
+        let why = extension_namespace_refusal(&over).expect("one byte over is refused");
+        assert!(why.contains("bytes"), "the unit is named: {why}");
+
+        // Half as many CHARACTERS, still over the cap, because they are two
+        // bytes each. That is the honest behaviour; the old message denied it.
+        let swedish = format!("acme.{}", "ä".repeat(120));
+        assert!(swedish.chars().count() < MAX_EXTENSION_KEY_BYTES);
+        assert!(swedish.len() > MAX_EXTENSION_KEY_BYTES);
+        assert!(extension_namespace_refusal(&swedish).is_some());
+    }
+
+    #[test]
+    fn a_bad_extension_key_stops_the_document_parsing_rather_than_being_dropped() {
+        // `ExtKey` refuses where it is READ, like `IsoDate` and `MonthDay`. A
+        // bag is a map, so a key serde merely tolerated would be a perfectly
+        // good entry that nothing reads - the silent-no-op shape this whole
+        // subtree exists to refuse.
+        let err = serde_json::from_str::<StrategyDoc>(
+            r#"{"version":1,"measures":{"Revenue":{"x":{"calcula.sneaky":1}}}}"#,
+        )
+        .expect_err("the reserved namespace is refused inside the document too")
+        .to_string();
+        assert!(err.contains("calcula.sneaky"), "{err}");
+
+        let ok: StrategyDoc = serde_json::from_str(
+            r#"{"version":1,"measures":{"Revenue":{"x":{"acme.slaTier":"gold"}}}}"#,
+        )
+        .expect("a properly namespaced key parses");
+        let bag = &ok.measures["Revenue"].x;
+        assert_eq!(bag.len(), 1);
+        assert_eq!(bag.values().next().unwrap(), &serde_json::json!("gold"));
+    }
+
+    #[test]
+    fn the_open_door_does_not_open_any_of_the_others() {
+        // The bag is ONE known field. Every other unknown key is still refused
+        // by name, which is the whole reason `deny_unknown_fields` survives the
+        // arrival of an extension namespace untouched.
+        let err = serde_json::from_str::<StrategyDoc>(
+            r#"{"version":1,"measures":{"Revenue":{"direktion":"higherIsBetter"}}}"#,
+        )
+        .expect_err("a typo in a BUILT-IN key is still an error")
+        .to_string();
+        assert!(err.contains("direktion"), "{err}");
+    }
+
+    #[test]
+    fn an_extension_bag_round_trips_and_an_empty_one_writes_nothing() {
+        // THE GUARANTEE IS VALUE FIDELITY, NOT BYTE FIDELITY, and the difference
+        // is worth stating because it is the opposite of a defect. `serde_json`
+        // is built here without `preserve_order`, so an object's keys come back
+        // SORTED rather than in the order they were typed. That is what the
+        // model bytes need: `extension_data` is a `BTreeMap` for exactly this
+        // reason - deterministic bytes feed `.calp` checksums and signatures, so
+        // two publishes of the same document have to produce the same file.
+        //
+        // What must survive intact is every VALUE, at any depth.
+        let json = r#"{"version":1,"measures":{"Revenue":{"reviewed":false,"x":{"acme.owner":{"team":"finance","ids":[1,2]}}}}}"#;
+        let doc: StrategyDoc = serde_json::from_str(json).expect("parses");
+        let value = &doc.measures["Revenue"].x[&ext_key("acme.owner")];
+        assert_eq!(value["team"], serde_json::json!("finance"));
+        assert_eq!(value["ids"], serde_json::json!([1, 2]));
+
+        // And writing it out and reading it back is a FIXED POINT, which is the
+        // property a document that travels actually depends on.
+        let once = serde_json::to_string(&doc).unwrap();
+        let again: StrategyDoc = serde_json::from_str(&once).expect("re-parses");
+        assert_eq!(serde_json::to_string(&again).unwrap(), once);
+        assert_eq!(again, doc);
+
+        // An entry that names no extension writes no `x` at all, so a document
+        // does not grow a key just by being opened.
+        let plain: StrategyDoc =
+            serde_json::from_str(r#"{"version":1,"measures":{"Revenue":{"reviewed":false}}}"#)
+                .expect("parses");
+        let written = serde_json::to_string(&plain).unwrap();
+        assert!(!written.contains("\"x\""), "no bag key appears at all: {written}");
+    }
+
     #[test]
     fn only_a_version_this_build_understands_is_readable_and_zero_is_not_one() {
         // The predicate BOTH readers ask, so the write gate and the run path
@@ -2253,6 +2670,7 @@ mod tests {
                     ColumnStrategy {
                         role: Role::Label,
                         priority: None,
+                        x: Default::default(),
                     },
                 )]),
                 hierarchies: vec![vec!["Country".into(), "City".into()]],

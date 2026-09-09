@@ -411,13 +411,12 @@ make the base fillable. That comes first.
 - **Narration stays deterministic until M6.** A model writes no sentence in this feature. When one
   does, it will be structurally checked: every sentence tagged with the fact ids it covers, and a
   sentence citing a number that is not in its cited facts is dropped.
-- **Three attributes are settable and read by nothing, and each is labelled as such.** `unit`,
-  `cadence` and `fiscalYearStart` are authored, inferred, validated and resolved with no consumer
-  (verified by grepping the READERS rather than the writers). `reportingCurrency` was a fourth and
-  was deleted rather than labelled, because unlike these three it had no designed reader coming.
-  `unit` waits on narration formatting a value; `cadence` on period bucketing and seasonality lag
-  selection. Tracked in `open-items.md` §2.AI.7 as wire-or-delete, not as a limit to live with.
-- **`MeasureStrategy.context` is a fourth, and it is the prose one.** It is copied into
+- **`fiscalYearStart` is settable and read by nothing, and says so on screen.** `unit` and `cadence`
+  were beside it until 2026-09-09 and now have readers (§13.6a); `reportingCurrency` was deleted
+  rather than labelled, because unlike them it had no designed reader coming. `cadence`'s OTHER
+  designed consumer — period bucketing, which decides the grain a series is fetched at — is still
+  unbuilt, and is deliberately not plugin-shaped: query planning is engine business (§13.8).
+- **`MeasureStrategy.context` is the last one, and it is the prose one.** It is copied into
   `ResolvedMeasure` and read by nothing, because its consumer is M6's narrator. So the prose
   boundary §2 rests on is currently *vacuous rather than fragile* — nobody can smuggle structured
   data into a field that influences nothing. This is why §13's Tier A is worth building on its own
@@ -601,16 +600,50 @@ question for the strategy document is what the publish gate got wrong until 2026
   load-bearing gap for §13.1, since the namespace rests on that reservation. Tracked in
   `open-items.md`.
 
+### 13.6a What shipped 2026-09-09, and what each step actually cost
+
+Steps 1–5 of the order below are **built**. What they taught:
+
+* **The reservation is one predicate now.** `extension_namespace_refusal`
+  (`strategy/types.rs`) is what both the model bag and the document bag ask, so they cannot answer
+  differently. The casing hole is closed, and the length message says **bytes** because the check
+  always counted bytes while the sentence said "chars".
+* **Tier A is the `x` bag plus an `extensions` declaration block.** `deny_unknown_fields` survived
+  untouched, exactly as designed — a typo in a built-in key is still a parse error, and the only
+  softening is inside one named field.
+* **The round-trip guarantee is VALUE fidelity, not BYTE fidelity.** `serde_json` here has no
+  `preserve_order`, so an object's keys come back sorted. That is what the model bytes need —
+  `extension_data` is a `BTreeMap` precisely so `.calp` checksums and signatures are deterministic —
+  but it is not what "round-trips unchanged" sounds like, so the test asserts a **fixed point**
+  rather than string equality.
+* **The hoist was the enabling work and was worth doing alone.** `finish_facts` now does the
+  suppress/score/narrate stage that used to be a loop inside generation; `apply_fact_policy` is
+  Tier D, and its guard is a **subset check on the answer** rather than trust in the policy.
+* **`unit`'s designed consumer was weaker than the plan assumed, and the honest one is narrower.**
+  The plan had `unit` driving number formatting — but `format_string` already does that and carries
+  strictly more information, because `0.0%` scales by a hundred and `0.0"%"` does not. `unit` cannot
+  know the scale. What it *can* decide is which SENTENCE is correct: for a `percent` or `ratio`
+  measure the relative-change clause is withheld, because "rose 0.02 … (+20.0%)" invites the reader
+  to take twenty per cent as the movement when the movement is two points.
+* **`cadence` earns its place in the seasonality scan.** A scan has no idea what a month is, so on a
+  short window a noisier four-point correlation can beat the real twelve-point year.
+  `Cadence::expected_cycle` passes `core/insights` a plain `usize` — no calendar, no measure, no
+  vocabulary — and a preference the data does not support is ignored rather than asserted.
+
 ### 13.7 Build order, and why C is last
 
 The rule that binds hardest here is the layer's own: **nothing becomes authorable until it has a
 reader** — applied to the extension mechanism itself. Four strategy fields are still unread.
 
-1. Test the reservation; fix the casing hole; share one predicate with `ExtKey`.
-2. **Tier A** — the `x` bag, `ExtKey`, the `extensions` schema block.
-3. Hoist suppression/scoring/narration out of `facts_for_measure` (worth doing on its own merits).
-4. **Tier D** — reorder and withhold, subset-checked.
-5. Wire the `unit` and `cadence` consumers, hardcoded, `unit` with an explicit unknown arm.
+1. ~~Test the reservation; fix the casing hole; share one predicate with `ExtKey`.~~ **DONE.**
+2. ~~**Tier A** — the `x` bag, `ExtKey`, the `extensions` schema block.~~ **DONE**, Rust and the
+   TypeScript mirror, with the closed-set drift guard extended to `ExtValueType`.
+3. ~~Hoist suppression/scoring/narration out of `facts_for_measure`.~~ **DONE** — `finish_facts`.
+4. ~~**Tier D** — reorder and withhold, subset-checked.~~ **DONE** — `apply_fact_policy`. The
+   ENGINE seam exists and is guarded; no authoring surface points at it yet, which is the next step
+   whenever a policy is worth writing.
+5. ~~Wire the `unit` and `cadence` consumers, hardcoded.~~ **DONE**, and both are narrower than
+   the plan expected — see §13.6a.
 6. An authoring surface for `tests:`, then the golden-observation harness — **applied to built-ins
    first**.
 7. **Tier C**, once the fact catalogue is consumed end to end.

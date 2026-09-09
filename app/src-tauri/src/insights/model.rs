@@ -37,7 +37,7 @@
 //          and already tested; a second copy would drift in the direction of
 //          whichever caller was edited last.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +49,8 @@ use insights::{narrate, timeseries};
 use super::strategy::resolve::CalendarSource;
 use super::strategy::{
     Additivity, AggregationSpec, Attribute, AttrSource, BandPlacement, BandSide, Direction,
-    Materiality, ModelFacts, QualifiedColumn, ResolvedMeasure, StrategyDoc, SuppressibleFactKind,
+    Cadence, Materiality, ModelFacts, QualifiedColumn, ResolvedMeasure, StrategyDoc,
+    SuppressibleFactKind, Unit,
     Target,
 };
 use super::wire::{
@@ -1184,10 +1185,32 @@ fn moved(delta: f64, locale: &LocaleSettings) -> String {
     format!("{} {}", word, number::num(delta.abs(), locale))
 }
 
-fn with_pct(pct: Option<f64>, locale: &LocaleSettings) -> String {
-    match pct {
-        Some(p) => format!(" ({})", number::signed_pct(p, locale)),
-        None => String::new(),
+/// The relative-change parenthetical, when it is not a trap.
+///
+/// A PERCENTAGE CHANGE OF A PERCENTAGE IS THE CLASSIC MISREADING, and this is
+/// what `unit` is for. A margin moving from 10% to 12% has risen by two
+/// PERCENTAGE POINTS and by twenty PER CENT, and a sentence that prints
+/// "rose 0.02 ... (+20.0%)" invites the reader to take the larger number as the
+/// move. So for a `percent` or `ratio` measure the clause is withheld and the
+/// absolute movement stands alone, which is unambiguous.
+///
+/// IT DELIBERATELY DOES NOT RESCALE OR APPEND A SIGN, and that limit is the
+/// honest half. This layer does not know whether a percent measure is stored as
+/// `0.12` or as `12` — `format_string` knows, because `0.0%` scales by a
+/// hundred and `0.0"%"` does not, and `unit` carries no such thing. Anything
+/// that needs the SCALE must read the format string; `unit` can only decide
+/// which sentence to write.
+///
+/// The `_` arm is deliberate and is where Tier B plugs in (§13 of the design
+/// doc): a user-defined unit must land on a wording this function chose on
+/// purpose, never fall through to one it happens to reach.
+fn with_pct(pct: Option<f64>, unit: Option<Unit>, locale: &LocaleSettings) -> String {
+    match unit {
+        Some(Unit::Percent) | Some(Unit::Ratio) => String::new(),
+        _ => match pct {
+            Some(p) => format!(" ({})", number::signed_pct(p, locale)),
+            None => String::new(),
+        },
     }
 }
 
@@ -1212,7 +1235,15 @@ fn band_clause(band: Option<BandPlacement>, value: f64, locale: &LocaleSettings)
 }
 
 /// One sentence per fact, in the reader's number formatting.
-pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
+/// One fact as a sentence, in the reader's number formatting.
+///
+/// TAKES THE MEASURE'S UNIT, because two of them change which sentence is
+/// correct rather than merely how a number is punctuated - see `with_pct`.
+pub fn narrate_fact(
+    kind: &ModelFactKind,
+    unit: Option<Unit>,
+    locale: &LocaleSettings,
+) -> String {
     match kind {
         ModelFactKind::Change {
             measure,
@@ -1239,7 +1270,7 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
                 first_label,
                 number::num(*last, locale),
                 last_label,
-                with_pct(*pct, locale),
+                with_pct(*pct, unit, locale),
                 judgement,
                 band_clause(*band, *last, locale)
             )
@@ -1272,7 +1303,7 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
                 number::num(*target, locale),
                 if *delta >= 0.0 { "over by" } else { "under by" },
                 number::num(delta.abs(), locale),
-                with_pct(*pct, locale),
+                with_pct(*pct, unit, locale),
                 judgement,
                 kpi_status,
                 band_clause(*band, *value, locale)
@@ -1502,11 +1533,14 @@ pub struct MeasureRun {
 /// The test now builds its samples by RUNNING this list, so a fourth builder is
 /// inside the diff from the moment it is added here. The name is carried only so
 /// that test can say which builder produced nothing on its probes.
-const SERIES_BUILDERS: &[(&str, fn(&timeseries::Series) -> Vec<FactKind>)] = &[
-    ("trend", |s| timeseries::trend_fact(s).into_iter().collect()),
-    ("change points", timeseries::change_point_facts),
-    ("seasonality", |s| {
-        timeseries::seasonality_fact(s).into_iter().collect()
+const SERIES_BUILDERS: &[(&str, fn(&timeseries::Series, Option<usize>) -> Vec<FactKind>)] = &[
+    ("trend", |s, _| timeseries::trend_fact(s).into_iter().collect()),
+    ("change points", |s, _| timeseries::change_point_facts(s)),
+    // The only builder that takes the cycle. The other two are handed it and
+    // ignore it, which keeps ONE signature for the table rather than a special
+    // case that a fourth builder would have to guess at.
+    ("seasonality", |s, cycle| {
+        timeseries::seasonality_fact(s, cycle).into_iter().collect()
     }),
 ];
 
@@ -1664,7 +1698,7 @@ pub fn facts_for_measure(
                 parts: decomposition.parts,
                 residual: decomposition.residual,
             };
-            run.driver = Some(narrate_fact(&kind, locale));
+            run.driver = Some(narrate_fact(&kind, resolved.unit.as_ref().map(|u| u.value), locale));
             kinds.push((
                 kind,
                 Vec::new(),
@@ -1715,9 +1749,12 @@ pub fn facts_for_measure(
         &observation.labels,
         &observation.values,
     );
+    // WHAT ONE POINT OF THIS SERIES MEANS, which the statistics crate cannot
+    // know and the strategy document does. See `Cadence::expected_cycle`.
+    let cycle = resolved.cadence.as_ref().and_then(|c| c.value.expected_cycle());
     let mut series_facts: Vec<FactKind> = Vec::new();
     for (_, build) in SERIES_BUILDERS {
-        series_facts.extend(build(&series));
+        series_facts.extend(build(&series, cycle));
     }
     for inner in series_facts {
         kinds.push((
@@ -1727,16 +1764,44 @@ pub fn facts_for_measure(
         ));
     }
 
-    // --- Suppression, scoring, narration ------------------------------------
+    (finish_facts(kinds, resolved, locale), run)
+}
+
+/// One fact as `facts_for_measure` builds it, before it is judged worth showing.
+///
+/// The triple was an anonymous tuple inside one loop; naming it is what let the
+/// three jobs that loop was doing come apart.
+pub type DraftFact = (ModelFactKind, Vec<AppliedAttr>, Vec<WireEvidence>);
+
+/// Suppress, score and narrate — the stage AFTER generation.
+///
+/// IT WAS ONE LOOP DOING FOUR JOBS, and that is why nothing could reorder or
+/// withhold a fact without also being able to invent one. Generation decides
+/// what the numbers ARE; this decides what is worth saying about them. They are
+/// different questions, they have different answers for different measures, and
+/// only the second is something a person could reasonably want to change.
+///
+/// Splitting them is what makes a policy seam possible at all (see
+/// `apply_fact_policy`): a caller can be handed the finished facts and allowed
+/// to drop or reorder them, and cannot reach the arithmetic that produced them.
+pub fn finish_facts(
+    kinds: Vec<DraftFact>,
+    resolved: &ResolvedMeasure,
+    locale: &LocaleSettings,
+) -> Vec<ModelFact> {
     let mut facts: Vec<ModelFact> = Vec::new();
     for (kind, provenance, evidence) in kinds {
+        // SUPPRESSION IS PART OF JUDGING, NOT OF GENERATING. A suppressed fact
+        // is one the document asked not to be told about; the numbers behind it
+        // were still computed, and a later stage that wanted them could have
+        // them.
         if kind
             .suppressible_kind()
             .is_some_and(|k| resolved.suppressed_kinds.contains(&k))
         {
             continue;
         }
-        let text = narrate_fact(&kind, locale);
+        let text = narrate_fact(&kind, resolved.unit.as_ref().map(|u| u.value), locale);
         facts.push(ModelFact {
             id: kind.id(),
             score: score_for(&kind, resolved),
@@ -1746,7 +1811,58 @@ pub fn facts_for_measure(
             provenance,
         });
     }
-    (facts, run)
+    facts
+}
+
+/// Why a fact policy was refused, or `None` when it may stand.
+///
+/// A POLICY MAY REORDER AND WITHHOLD. IT MAY NEVER EMIT. That is the whole
+/// boundary, and it is enforced by checking the answer rather than by trusting
+/// the policy: whatever comes back must be a SUBSET of what went in, matched by
+/// fact id, with no duplicates. A policy that returns an id nobody generated is
+/// asserting something, and asserting is the one thing this seam does not do.
+///
+/// The check is total and cheap, which is why the seam is safe to open long
+/// before a fact PRODUCER is (§13 of the design doc): reordering cannot put a
+/// number in front of a reader that the model did not compute.
+pub fn fact_policy_refusal(before: &[ModelFact], after: &[String]) -> Option<String> {
+    let allowed: BTreeSet<&str> = before.iter().map(|f| f.id.as_str()).collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for id in after {
+        if !allowed.contains(id.as_str()) {
+            return Some(format!(
+                "the policy returned '{id}', which no measure produced. A policy may reorder and \
+                 withhold; it cannot introduce a fact"
+            ));
+        }
+        if !seen.insert(id.as_str()) {
+            return Some(format!(
+                "the policy returned '{id}' twice. A policy returns a subset, so one fact cannot \
+                 appear in the report more than once"
+            ));
+        }
+    }
+    None
+}
+
+/// Apply a ranking/suppression policy to a measure's finished facts.
+///
+/// The policy states an ORDER OF IDS. Everything it leaves out is withheld;
+/// everything it names keeps the fact the engine built, untouched — so a policy
+/// cannot alter a number, a sentence or a piece of evidence, only whether and
+/// where it appears.
+pub fn apply_fact_policy(facts: Vec<ModelFact>, order: &[String]) -> Result<Vec<ModelFact>, String> {
+    if let Some(why) = fact_policy_refusal(&facts, order) {
+        return Err(why);
+    }
+    let mut by_id: BTreeMap<&str, &ModelFact> = BTreeMap::new();
+    for f in &facts {
+        by_id.insert(f.id.as_str(), f);
+    }
+    Ok(order
+        .iter()
+        .filter_map(|id| by_id.get(id.as_str()).map(|f| (*f).clone()))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -2114,6 +2230,7 @@ mod tests {
                 parts: d.parts,
                 residual: d.residual,
             },
+            None,
             &locale(),
         );
         assert!(text.contains("Margin fell 4.1"), "{}", text);
@@ -2149,6 +2266,7 @@ mod tests {
                 parts: d.parts,
                 residual: d.residual,
             },
+            None,
             &locale(),
         );
         assert!(
@@ -2241,7 +2359,7 @@ mod tests {
                 "a non-additive member carries no share: {}",
                 json
             );
-            let text = narrate_fact(fact, &locale());
+            let text = narrate_fact(fact, None, &locale());
             assert!(
                 !text.contains(" of the total)"),
                 "the share parenthetical is the Contribution wording and must not appear: {}",
@@ -2267,7 +2385,7 @@ mod tests {
             panic!("expected a Contribution");
         };
         assert!(members.iter().all(|m| m.share.is_some()));
-        assert!(narrate_fact(&facts[0], &locale()).contains("of the total"));
+        assert!(narrate_fact(&facts[0], None, &locale()).contains("of the total"));
     }
 
     #[test]
@@ -2727,6 +2845,226 @@ mod tests {
     // -- provenance and determinism ----------------------------------------
 
     #[test]
+    fn the_declared_cadence_decides_which_cycle_a_seasonal_measure_reports() {
+        // `cadence`'s FIRST READER, wired end to end. The mechanism is proved in
+        // `core/insights`; this proves the WIRING, which is the half that can be
+        // inert without anyone noticing - a resolved attribute that reaches no
+        // caller looks exactly like one that does.
+        //
+        // Same fixture shape as the core test: a clean 4-point cycle carrying a
+        // 12-point envelope, so the scan's own maximum is the wrong answer.
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let quarterly = if i % 4 == 0 { 10.0 } else { 0.0 };
+                let annual = if i % 12 == 0 { 1.0 } else { 0.0 };
+                100.0 + quarterly + annual
+            })
+            .collect();
+        let obs = MeasureObservation {
+            measure: "Revenue".to_string(),
+            labels: (0..48).map(|i| format!("m{i}")).collect(),
+            values,
+            ..MeasureObservation::default()
+        };
+
+        let lag_of = |r: &ResolvedMeasure| -> Option<usize> {
+            let (facts, _) = facts_for_measure(&obs, r, &locale());
+            facts.iter().find_map(|f| match &f.kind {
+                ModelFactKind::Series {
+                    inner: FactKind::Seasonality { lag, .. },
+                } => Some(*lag),
+                _ => None,
+            })
+        };
+
+        let mut r = resolved("Revenue");
+        assert_eq!(lag_of(&r), Some(4), "with no cadence the scan's maximum stands");
+
+        r.cadence = Some(Applied::new(Cadence::Monthly, AttrSource::Strategy));
+        assert_eq!(
+            lag_of(&r),
+            Some(12),
+            "a monthly measure reports the twelve-point year, not the noisier short lag"
+        );
+
+        // A cadence whose cycle the data does not carry changes nothing, so the
+        // document states what a reader would RECOGNISE and never what is there.
+        r.cadence = Some(Applied::new(Cadence::Weekly, AttrSource::Strategy));
+        assert_eq!(lag_of(&r), Some(4));
+
+        // And `yearly` has no cycle to prefer at all - a supra-annual period
+        // needs years of history a series will not have.
+        assert_eq!(Cadence::Yearly.expected_cycle(), None);
+    }
+
+    #[test]
+    fn a_percentage_change_of_a_percentage_is_withheld_because_it_reads_as_the_move() {
+        // `unit`'s FIRST READER, and it is a correctness fix rather than a
+        // flourish. A margin going from 0.10 to 0.12 has risen by two
+        // percentage POINTS and by twenty PER CENT; a sentence carrying both
+        // invites the reader to take the larger number as the movement, and the
+        // larger number is ten times the real one.
+        let mut r = resolved("MarginPct");
+        r.direction = Some(Applied::new(Direction::HigherIsBetter, AttrSource::Strategy));
+
+        // Without a unit, the relative clause is printed as it always was.
+        let (plain, _) = facts_for_measure(
+            &observation_without_a_target("MarginPct", 0.10, 0.12),
+            &r,
+            &locale(),
+        );
+        let plain_change = plain
+            .iter()
+            .find(|f| f.kind.kind_key() == "change")
+            .expect("a change fact");
+        assert!(
+            plain_change.text.contains("20.0%"),
+            "the relative change is the default: {}",
+            plain_change.text
+        );
+
+        // Declared a percent, the clause goes and the absolute movement stands
+        // alone - which is unambiguous whatever scale the measure is stored in.
+        r.unit = Some(Applied::new(Unit::Percent, AttrSource::Strategy));
+        let (pct, _) = facts_for_measure(
+            &observation_without_a_target("MarginPct", 0.10, 0.12),
+            &r,
+            &locale(),
+        );
+        let pct_change = pct
+            .iter()
+            .find(|f| f.kind.kind_key() == "change")
+            .expect("a change fact");
+        assert!(
+            !pct_change.text.contains("20.0%"),
+            "a percent OF a percent is the misreading this withholds: {}",
+            pct_change.text
+        );
+        assert!(
+            pct_change.text.contains("0.02"),
+            "the movement itself is still stated: {}",
+            pct_change.text
+        );
+
+        // `ratio` is the same sentence for the same reason.
+        r.unit = Some(Applied::new(Unit::Ratio, AttrSource::Strategy));
+        let (ratio, _) = facts_for_measure(
+            &observation_without_a_target("MarginPct", 0.10, 0.12),
+            &r,
+            &locale(),
+        );
+        assert!(!ratio
+            .iter()
+            .find(|f| f.kind.kind_key() == "change")
+            .expect("a change fact")
+            .text
+            .contains("20.0%"));
+
+        // POSITIVE CONTROL: a unit with no opinion keeps the clause, so the two
+        // arms above are a decision rather than a blanket removal.
+        r.unit = Some(Applied::new(Unit::Currency, AttrSource::Strategy));
+        let (currency, _) = facts_for_measure(
+            &observation_without_a_target("MarginPct", 0.10, 0.12),
+            &r,
+            &locale(),
+        );
+        assert!(currency
+            .iter()
+            .find(|f| f.kind.kind_key() == "change")
+            .expect("a change fact")
+            .text
+            .contains("20.0%"));
+    }
+
+    #[test]
+    fn a_policy_may_reorder_and_withhold_and_the_facts_it_keeps_are_untouched() {
+        // TIER D's WHOLE SEAM, and the reason it can ship long before a fact
+        // PRODUCER can: reordering cannot put a number in front of a reader that
+        // the model did not compute.
+        let mut r = resolved("Revenue");
+        r.direction = Some(Applied::new(Direction::HigherIsBetter, AttrSource::Strategy));
+        // A TARGET, so the run emits both a Change and a Variance fact and there
+        // is genuinely an order to change. A one-fact fixture would let a
+        // no-op policy pass as a reordering one.
+        let mut obs = observation_without_a_target("Revenue", 100.0, 140.0);
+        obs.target_value = Some(120.0);
+        let (facts, _) = facts_for_measure(&obs, &r, &locale());
+        assert!(facts.len() >= 2, "the fixture needs something to reorder: {facts:?}");
+
+        // Reversed, and one dropped.
+        let mut order: Vec<String> = facts.iter().map(|f| f.id.clone()).collect();
+        order.reverse();
+        let dropped = order.pop().expect("more than one fact");
+
+        let after = apply_fact_policy(facts.clone(), &order).expect("a subset in a new order");
+        assert_eq!(after.len(), facts.len() - 1);
+        assert!(!after.iter().any(|f| f.id == dropped), "the withheld one is gone");
+
+        // WHAT IT KEPT IS BYTE-FOR-BYTE WHAT THE ENGINE BUILT. A policy that
+        // could edit a fact would be a producer wearing a policy's clothes.
+        for kept in &after {
+            let original = facts
+                .iter()
+                .find(|f| f.id == kept.id)
+                .expect("kept ids come from the input");
+            assert_eq!(kept, original, "a policy reorders; it does not rewrite");
+        }
+    }
+
+    #[test]
+    fn a_policy_that_invents_a_fact_or_repeats_one_is_refused_by_name() {
+        // The guard is a check on the ANSWER, not trust in the policy, which is
+        // what makes it total: whatever comes back must be a subset of what went
+        // in, matched by id, without duplicates.
+        let mut r = resolved("Revenue");
+        r.direction = Some(Applied::new(Direction::HigherIsBetter, AttrSource::Strategy));
+        let mut obs = observation_without_a_target("Revenue", 100.0, 140.0);
+        obs.target_value = Some(120.0);
+        let (facts, _) = facts_for_measure(&obs, &r, &locale());
+        let real = facts[0].id.clone();
+
+        let invented = apply_fact_policy(facts.clone(), &["change:Margin".to_string()])
+            .expect_err("a fact nobody generated must be refused");
+        assert!(invented.contains("change:Margin"), "named: {invented}");
+        assert!(invented.contains("cannot introduce"), "and the reason: {invented}");
+
+        let twice = apply_fact_policy(facts.clone(), &[real.clone(), real.clone()])
+            .expect_err("one fact cannot appear twice in one report");
+        assert!(twice.contains(&real), "named: {twice}");
+
+        // POSITIVE CONTROL: the empty policy is legal and means "say nothing
+        // about this measure", which is a thing a person may legitimately want.
+        assert!(apply_fact_policy(facts, &[]).expect("withholding everything is allowed").is_empty());
+    }
+
+    #[test]
+    fn suppression_still_happens_after_the_hoist_and_before_any_policy() {
+        // THE HOIST MUST NOT HAVE MOVED THE BEHAVIOUR, only the code. A rule's
+        // `suppress` list is the DOCUMENT's answer and is applied while the
+        // facts are being finished; a policy is a later, separate question.
+        let mut r = resolved("Revenue");
+        r.direction = Some(Applied::new(Direction::HigherIsBetter, AttrSource::Strategy));
+        let (before, _) = facts_for_measure(
+            &observation_without_a_target("Revenue", 100.0, 140.0),
+            &r,
+            &locale(),
+        );
+        assert!(before.iter().any(|f| f.kind.kind_key() == "change"));
+
+        r.suppressed_kinds
+            .insert(crate::insights::strategy::types::SuppressibleFactKind::Change);
+        let (after, _) = facts_for_measure(
+            &observation_without_a_target("Revenue", 100.0, 140.0),
+            &r,
+            &locale(),
+        );
+        assert!(
+            !after.iter().any(|f| f.kind.kind_key() == "change"),
+            "a suppressed kind never reaches a policy at all: {after:?}"
+        );
+    }
+
+    #[test]
     fn every_fact_that_used_a_strategy_attribute_carries_its_provenance() {
         let mut r = resolved("Revenue");
         r.direction = Some(Applied::new(
@@ -3109,11 +3447,17 @@ mod tests {
             let produced: Vec<FactKind> = probe_values()
                 .iter()
                 .flat_map(|values| {
-                    build(&timeseries::Series::new(
-                        Subject::measure("Revenue"),
-                        &probe_labels(values),
-                        values,
-                    ))
+                    build(
+                        &timeseries::Series::new(
+                            Subject::measure("Revenue"),
+                            &probe_labels(values),
+                            values,
+                        ),
+                        // No cadence: the probe is asking whether each builder
+                        // FIRES at all, and a preferred cycle can only change
+                        // which lag one of them picks.
+                        None,
+                    )
                 })
                 .collect();
             assert!(

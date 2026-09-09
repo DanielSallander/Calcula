@@ -253,7 +253,9 @@ fn numeric_column_facts(
     facts.extend(timeseries::change_fact(&series));
     facts.extend(timeseries::extremes_fact(&series));
     facts.extend(timeseries::smoothed_peak_fact(&series));
-    facts.extend(timeseries::seasonality_fact(&series));
+    // The raw-grid path has no model and therefore no cadence: nothing here
+    // knows what one point of this series means, so the scan stands alone.
+    facts.extend(timeseries::seasonality_fact(&series, None));
 
     if !line_explains_it {
         facts.extend(timeseries::change_point_facts(&series));

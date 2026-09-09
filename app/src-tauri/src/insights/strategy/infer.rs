@@ -802,6 +802,7 @@ fn infer_table(
                 ColumnStrategy {
                     role,
                     priority: None,
+                    x: Default::default(),
                 },
             );
         }
@@ -814,6 +815,7 @@ fn infer_table(
         hierarchies,
         reviewed: false,
         source: Some(EntrySource::Inferred),
+        x: Default::default(),
     }
 }
 
@@ -1088,6 +1090,7 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
                 // off, nor from one nobody has ever touched - and the Strategy
                 // tab was badging all three the same.
                 source: Some(EntrySource::Inferred),
+                x: Default::default(),
             },
         );
     }
@@ -1106,6 +1109,7 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
             // badge to show and a Confirm to offer here too.
             reviewed: false,
             source: Some(EntrySource::Inferred),
+            x: Default::default(),
         },
         measures,
         tables,
@@ -1116,6 +1120,7 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
         rules: Vec::new(),
         periods: Vec::new(),
         tests: Vec::new(),
+        extensions: Default::default(),
     }
 }
 

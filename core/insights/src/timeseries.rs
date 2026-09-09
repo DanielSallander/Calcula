@@ -226,9 +226,27 @@ pub fn seasonality_scan(series: &Series) -> Vec<(usize, f64)> {
     out
 }
 
-pub fn seasonality_fact(series: &Series) -> Option<FactKind> {
+pub fn seasonality_fact(series: &Series, expected_lag: Option<usize>) -> Option<FactKind> {
     let scan = seasonality_scan(series);
     let mut best: Option<(usize, f64)> = None;
+    // THE CALLER'S OWN CYCLE OUTRANKS A STRONGER CORRELATION, when it qualifies
+    // at all.
+    //
+    // A monthly series has a twelve-point year in it, and a noisy five-point
+    // correlation can carry a higher autocorrelation than the real annual cycle
+    // on a short window. "Revenue repeats every 5 months" is not a thing anybody
+    // can act on, and it is not what the data means; it is what a maximum picked
+    // out of a scan that had no idea what a month was.
+    //
+    // The caller passes a NUMBER and nothing else, so this crate still knows
+    // nothing about calendars, cadences or measures - it just knows which lag
+    // the caller would recognise. `None` restores the pure scan, which is what
+    // the raw-grid path (no model, no cadence) still uses.
+    let preferred = expected_lag.and_then(|want| {
+        scan.iter()
+            .find(|(lag, acf)| *lag == want && *acf >= SEASONALITY_MIN_ACF)
+            .copied()
+    });
     for (lag, acf) in scan {
         if acf < SEASONALITY_MIN_ACF {
             continue;
@@ -243,7 +261,7 @@ pub fn seasonality_fact(series: &Series) -> Option<FactKind> {
             best = Some((lag, acf));
         }
     }
-    let (lag, acf) = best?;
+    let (lag, acf) = preferred.or(best)?;
     Some(FactKind::Seasonality {
         subject: series.subject.clone(),
         lag,
@@ -427,7 +445,7 @@ mod tests {
             }
         }
 
-        match seasonality_fact(&s).expect("a 12-point cycle must be found") {
+        match seasonality_fact(&s, None).expect("a 12-point cycle must be found") {
             FactKind::Seasonality { lag, acf, .. } => {
                 assert_eq!(lag, 12);
                 assert!(acf >= SEASONALITY_MIN_ACF);
@@ -439,7 +457,53 @@ mod tests {
     #[test]
     fn a_ramp_reports_no_seasonality_at_any_lag() {
         let s = series("Ramp", (0..60).map(|i| i as f64).collect());
-        assert!(seasonality_fact(&s).is_none());
+        assert!(seasonality_fact(&s, None).is_none());
+    }
+
+    #[test]
+    fn a_caller_that_knows_the_cycle_beats_a_stronger_correlation_at_another_lag() {
+        // A SCAN HAS NO IDEA WHAT A MONTH IS. On a short window a shorter lag
+        // can carry a higher autocorrelation than the real annual cycle, and
+        // "repeats every 4 months" is not a claim anybody can act on. A caller
+        // who knows the cadence knows which lag a reader would recognise.
+        //
+        // Built so BOTH lags qualify and the wrong one wins the scan: a clean
+        // 4-point cycle with a 12-point envelope on top of it.
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let quarterly = if i % 4 == 0 { 10.0 } else { 0.0 };
+                let annual = if i % 12 == 0 { 1.0 } else { 0.0 };
+                100.0 + quarterly + annual
+            })
+            .collect();
+        let s = series("Revenue", values);
+
+        let scan = seasonality_scan(&s);
+        let acf_at = |want: usize| scan.iter().find(|(l, _)| *l == want).map(|(_, a)| *a);
+        let (four, twelve) = (
+            acf_at(4).expect("lag 4 is scanned"),
+            acf_at(12).expect("lag 12 is scanned"),
+        );
+        assert!(four > twelve, "the fixture must make the WRONG lag win the scan");
+        assert!(twelve >= SEASONALITY_MIN_ACF, "and the right one must still qualify");
+
+        // Unprompted, the scan picks the stronger one.
+        match seasonality_fact(&s, None).expect("a cycle is found") {
+            FactKind::Seasonality { lag, .. } => assert_eq!(lag, 4),
+            other => panic!("expected seasonality, got {other:?}"),
+        }
+        // Told the cadence, it picks the one a reader recognises.
+        match seasonality_fact(&s, Some(12)).expect("a cycle is found") {
+            FactKind::Seasonality { lag, .. } => assert_eq!(lag, 12),
+            other => panic!("expected seasonality, got {other:?}"),
+        }
+        // A preference the data does not support is IGNORED rather than
+        // asserted - the caller says which lag it would recognise, not which
+        // lag is there.
+        match seasonality_fact(&s, Some(7)).expect("a cycle is still found") {
+            FactKind::Seasonality { lag, .. } => assert_eq!(lag, 4),
+            other => panic!("expected seasonality, got {other:?}"),
+        }
     }
 
     #[test]

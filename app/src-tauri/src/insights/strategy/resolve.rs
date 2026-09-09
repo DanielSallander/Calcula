@@ -893,6 +893,7 @@ mod tests {
                     ColumnStrategy {
                         role: Role::Analysis,
                         priority: None,
+                        x: Default::default(),
                     },
                 )]),
                 ..Default::default()

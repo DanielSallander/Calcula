@@ -1127,19 +1127,29 @@ design — an inferred draft must stay savable — but the tab's Confirm workflo
 confirming changes output, and it does not. A run whose measures carry unconfirmed inference now
 carries a note naming them.
 
-**2.AI.9 — The extension seams are designed and not built, and the survey found two defects.**
-Design lives in `docs/design/insights-strategy-layer.md` §13 (four tiers, the namespace, the
-verifier boundary, the build order). Open work, in the order §13.7 gives:
+**2.AI.9 — The extension seams: steps 1-5 SHIPPED 2026-09-09, C and B remain.**
+Design in `docs/design/insights-strategy-layer.md` §13; what each step cost is in §13.6a.
 
-* **`validate_extension_data_key` has no test, and its reservation has a casing hole.**
-  `app/src-tauri/src/bi/model_editor.rs:5660`. The check is `key.starts_with("calcula.")`, which is
-  case-SENSITIVE, so `Calcula.strategy` is accepted by the generic writer. The key shape, the 256 KB
-  per-key cap and the reservation itself are entirely unpinned — the only two references to the
-  function are its definition and its single call site. **This is the load-bearing gap for §13.1**,
-  because the extension namespace rests on that reservation being sound. The reservation is also
-  write-only (`get`/`list` expose `calcula.*` freely) and unmirrored in the CLI and the TS API,
-  which are defensible but should be deliberate.
-* **`ResolvedMeasure.context` is a fourth unread field, and it is the prose one.** Written at
+**Closed:** the shared `extension_namespace_refusal` predicate (casing hole fixed, cap message now
+says *bytes* because the check always counted bytes); **Tier A** (`x` bag, `ExtKey`, the
+`extensions` declaration block, prefix-anchored findings, TypeScript mirror, drift guard extended to
+`ExtValueType`); the `finish_facts` hoist; **Tier D**'s engine seam (`apply_fact_policy`, guarded by
+a subset check on the ANSWER rather than trust in the policy); and readers for **`unit`** and
+**`cadence`** — both narrower than the plan assumed, see §13.6a.
+
+Still open, in order:
+
+* **Tier D has an engine seam and no authoring surface.** `apply_fact_policy` is guarded and unused.
+  That is the right order — the guard exists before anything can reach it — but the seam is inert
+  until something points at it, which is the same shape this layer keeps having to correct. Wire it
+  or say plainly that it waits for a policy worth writing.
+* **`tests:` still has no authoring surface**, and §13.3 makes that a prerequisite for the
+  extension-grading claim: no Tests grid, no `add test` verb, `infer` emits none by design. Then the
+  golden-observation harness, **applied to built-ins first**.
+* **Tier C** (producer surface, structured sink, `AttrSource::Plugin`, the §2 amendment) waits on
+  the fact catalogue being consumed end to end. **Tier B** waits on Tier C's unknown-value
+  discipline; `with_pct`'s `_` arm (`insights/model.rs`) is the plug point already written for it.
+* **`ResolvedMeasure.context` is the last unread field, and it is the prose one.** Written at
   `strategy/resolve.rs`, read by nothing. Its consumer is M6's narrator. The consequence for §2 is
   recorded there: the prose boundary is currently *vacuous rather than fragile*, and the source-scan
   guard the section used to claim exists does not. Write the guard when M6 gives prose a reader.
