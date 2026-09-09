@@ -36,8 +36,13 @@ by tests rather than by review:
 - `Rule` has no field that can carry a value or assert something about the data. Its `set` is an
   `AttributeSet` containing exactly the overridable attributes. This is enforced by the type, so a
   rule that says "revenue was up because of the new pricing" is not something the schema can express.
-- A source-scan test asserts that no code path under `insights/` reads a `context` or `note` field
-  except the narrator. Prose reaches the sentence. It never reaches fact selection.
+- Prose reaches the sentence and never fact selection. **This one is currently true by absence
+  rather than by guard, and the distinction matters.** `MeasureStrategy.context` is copied into
+  `ResolvedMeasure.context` (`strategy/resolve.rs`) and read by *nothing* — its consumer is M6's
+  narrator, which is deferred. So there is no source-scan test, because there is as yet no reader to
+  constrain. Earlier revisions of this section claimed such a test existed; it did not. Write it
+  when M6 gives prose a reader — a guard over a field nothing reads is the same inert-surface defect
+  one level up.
 - Every attribute that influenced a fact is recorded with its source, so "why does it think a rise
   here is bad?" always has a named answer.
 
@@ -62,8 +67,15 @@ consuming it, and that gap — not the count of unread fields — is the thing t
 
 Practically: a new attribute lands with its consumer in the same change, or it does not land. When
 a reader genuinely has to come later, the surface says so where the person is *typing* — the
-"not yet consulted" label on `reportingCurrency` and `fiscalYearStart` is the pattern — rather than
-being recorded only in a design document the author will never read.
+"not yet consulted" label on `fiscalYearStart`, and the marked column headers on `unit` and
+`cadence` — rather than being recorded only in a design document the author will never read.
+
+**The rule has three branches, not two.** `reportingCurrency` was DELETED under it, and that was
+right: no consumer, none coming, and typing it had only made it a stricter decoration. But "wire it
+or delete it" is too narrow for a field with no *engine* consumer that a user's own tooling might
+read. §13 adds the third branch — **move it to the extension namespace** — whose guarantee is
+round-trip fidelity rather than consumption. That is a deliberate, narrow carve-out from this rule,
+and it applies only inside the namespace.
 
 ## 3. Layering, and why it is two crates
 
@@ -399,13 +411,17 @@ make the base fillable. That comes first.
 - **Narration stays deterministic until M6.** A model writes no sentence in this feature. When one
   does, it will be structurally checked: every sentence tagged with the fact ids it covers, and a
   sentence citing a number that is not in its cited facts is dropped.
-- **Four attributes are settable and read by nothing.** `unit`, `cadence`, `fiscalYearStart` and
-  `reportingCurrency` are authored, inferred, validated and resolved, and no consumer reads them
-  (verified 2026-09-08 against `insights/model.rs`, `model_commands.rs` and `report.rs`, by
-  grepping the READERS rather than the writers). The tab labels the last two "not yet consulted";
-  the first two present as ordinary attributes and are not labelled at all. `cadence` has a
-  designed consumer — period bucketing and seasonality lag selection — that was never built. This
-  is tracked in `open-items.md` §2.AI.7 as wire-or-delete, not as a limit to live with.
+- **Three attributes are settable and read by nothing, and each is labelled as such.** `unit`,
+  `cadence` and `fiscalYearStart` are authored, inferred, validated and resolved with no consumer
+  (verified by grepping the READERS rather than the writers). `reportingCurrency` was a fourth and
+  was deleted rather than labelled, because unlike these three it had no designed reader coming.
+  `unit` waits on narration formatting a value; `cadence` on period bucketing and seasonality lag
+  selection. Tracked in `open-items.md` §2.AI.7 as wire-or-delete, not as a limit to live with.
+- **`MeasureStrategy.context` is a fourth, and it is the prose one.** It is copied into
+  `ResolvedMeasure` and read by nothing, because its consumer is M6's narrator. So the prose
+  boundary §2 rests on is currently *vacuous rather than fragile* — nobody can smuggle structured
+  data into a field that influences nothing. This is why §13's Tier A is worth building on its own
+  merits rather than as a pressure valve: the valve protects a boundary that does not yet exist.
 - **A `targetBand` direction decides favourability but produces no variance ROW.** The band reads
   where the value landed, each bound's inclusivity included, so it is no longer inert. But
   `Observation.target_value` is one number and a band is two, so a report says "inside the band"
@@ -420,3 +436,208 @@ make the base fillable. That comes first.
   signal as everywhere else in §9.
 - **The layer is worth zero if nobody fills it in.** Inference plus confirm-the-default is the
   mitigation, and rule expressiveness is deliberately limited to keep the checker honest.
+
+## 13. Extension seams — designed 2026-09-09, not built
+
+Openness is the project's prime directive, and this layer is closed twice over: the **attribute set**
+is fixed, and the **fact catalogue** is fixed. Neither was a decision — the layer was simply never
+designed for extension. This section designs the seams before they harden, and says what must be
+consumed and shipping before each is safe to freeze.
+
+**None of the strictness work is rolled back, and the reason is that the two concerns are
+orthogonal.** Every case closed in the September rounds was a *misspelling of a key the schema
+defines* — `too` for `to`, `outlier` for `outliers`, version 99 read as v1. Extensibility means a
+user can define a *new* key; it has never meant a typo in a built-in key should be swallowed.
+`deny_unknown_fields` stays, the `RawScopeValue` visitor stays, `is_readable_doc_version` matters
+more rather than less, and `kind` stays restricted to what the engine consumes. The extension
+namespace is the one place strictness differs, and **it differs by severity, never by silence**.
+
+### 13.1 The namespace is a bag, not a prefix
+
+The forward-compatibility hazard is real: a user adds `confidence` today, a built-in `confidence`
+ships next year, and every model using it collides silently. That hazard dissolves if the two never
+share a key space.
+
+> **Built-in attributes are struct FIELDS. User attributes are MAP KEYS inside one named bag.**
+
+```jsonc
+"measures": {
+  "GrossMarginPct": {
+    "direction": "higherIsBetter",     // built-in: a field
+    "x": { "acme.slaTier": "gold" }    // user: a key in the one open door
+  }
+}
+```
+
+A future built-in `confidence` is `MeasureStrategy.confidence`, never `x["confidence"]`. Collision
+is **structurally impossible** rather than conventionally avoided — the same move
+`SuppressibleFactKind` made when it stopped being a `Vec<String>`.
+
+`deny_unknown_fields` stays on every container, because `x` is one *known* field. Strict outside,
+open inside one named door.
+
+Keys are an `ExtKey` newtype validated at parse time, following `IsoDate`/`MonthDay`: `vendor.feature`
+shape, no whitespace, capped length, and **not** `calcula.` **case-insensitively**. One predicate,
+shared with `validate_extension_data_key` so the model-level and document-level reservations cannot
+drift — and pinned by a test, which today's reservation has none of (§13.6).
+
+A doc-root `extensions` block declares each key's shape, so `acme.slaTeir` is still caught. A
+declared key that violates its schema is an **error**; an *undeclared* key is a **warning** that
+still saves. That asymmetry is the whole design: a hand-edited `x` on a model whose author never
+wrote a schema must not be fatal, or the namespace is useless for the tinkering it exists to enable.
+
+Findings anchor for free. `findingsAtPath` matches by prefix, so a finding at
+`measures['Revenue'].x['acme.slaTier']` lands on the Revenue row with **no UI change**. Rooting
+extension findings at a new top-level container would anchor nowhere, exactly like the empty path.
+
+### 13.2 The four tiers
+
+| Tier | What | Can | Cannot |
+|---|---|---|---|
+| **A** | Namespaced free metadata | Carry arbitrary JSON per object; travel with the model; be read by external tooling | Influence which facts exist, how they rank, or their wording |
+| **B** | Custom vocabularies for existing attributes | Extend the value space of `unit`, status bands, materiality shapes | Add a consumer |
+| **C** | Custom fact generators | Emit facts from an observation the engine fetched | Issue a query; introduce data |
+| **D** | Ranking and suppression policy | Reorder, withhold, reweight | Emit |
+
+**Tier A partly exists.** Model-level free metadata is `bi_model_extension_data` with `vendor.feature`
+keys, today. What is missing is per-object metadata inside the strategy document — §13.1.
+
+**Tier B is blocked on its own consumers, and that is the finding.** Extending the value space of
+`unit` is meaningless while `unit` has no reader. B is not a seam to design; it is what falls out
+once each consumer is written **with an explicit unknown-value arm**. That rule is the one to carry
+forward: a consumer of a closed vocabulary must degrade deliberately, never fall through to a
+neutral default. An unhandled unknown value produces exactly the vacuous-green failure — an answer
+that looks like a judgement and rests on nothing.
+
+**Tier D ships before C.** It answers the commonest complaint about this whole feature category —
+"it keeps telling me things I don't care about" — without letting anyone introduce a claim. The
+enabling work is to hoist suppression, scoring and narration out of `facts_for_measure`, where they
+are currently one loop doing four jobs. The seam takes `Vec<ModelFact>` and returns a **permutation
+of a subset**, enforced by checking returned ids against input ids rather than by trusting the
+policy.
+
+### 13.3 Tier C, and the verifier boundary
+
+**The obvious design cannot be built.** "Plugins emit facts with evidence, which the engine
+re-evaluates" presumes re-derivable evidence, and there is none: `WireEvidence` carries `measures`
+and `group_by` and no filters, while the real query carries a time axis, a grain and a scoped filter
+pinning the compared periods. That is deliberate — inventing a grouping a fact was never computed
+with would open a pivot showing different numbers from the sentence beside it. **And nothing
+re-verifies a built-in fact either**, so "graded like ours" would have been graded like nothing.
+
+The invariant that *is* buildable, and is a stronger claim because it is true:
+
+> **A producer is a pure function from an observation the engine fetched to a set of facts.**
+> It cannot issue a query, so it cannot introduce data.
+> The engine re-runs it and requires identical output.
+> Every fact it emits is marked `AttrSource::Plugin(id)` and is visible as such.
+
+This works because `facts_for_measure` is already pure over inputs that already round-trip through
+serde. The producer is a script on a surface shaped exactly like `writeback-validator` — no model
+provider, no capability, host globals deleted — and *that choice is the security design, not a
+performance one*: a producer that cannot query cannot invent data. It also keeps user JavaScript off
+the engine lock entirely, and keeps true the existing assertion that the QuickJS interpreter may
+demand only `bi.query` or `bi.sql` — a producer demands nothing.
+
+Facts enter through `build_run`, which already accepts pre-built facts and needs no signature
+change, and compete in the same ranked list carrying a visible badge. The one genuinely new piece of
+plumbing is a **structured return channel**: today a script returns text or a table of strings, and
+the eval result is discarded. Whatever replaces that must be registered in `OP_MANIFEST` or the test
+that boots a real QuickJS runtime fails the build — a guard that makes the new surface impossible to
+add quietly.
+
+**How a user extension is graded — not by `tests:`.** Extending the inline-test harness would make
+its reachability analysis *unsound*: the value, baseline and delta probes derive candidate verdicts
+from band bounds and materiality, a foreign attribute contributes no probes, and the `possible` set
+would systematically exclude verdicts the producer can reach. Spurious refusals or vacuous passes —
+precisely the family §7 was rewritten to eliminate. The mechanism is instead a **golden-observation
+harness**: a producer ships cases of `(observation, resolved)` to expected facts, and the engine runs
+it and requires exact output. **Built-ins get the same harness**, which is what makes "the engine
+grades your rules the way it grades ours" literally true rather than aspirational.
+
+A prerequisite nobody had noticed: **`tests:` has no authoring surface at all.** No Tests grid, no
+`add test` verb, and `infer` emits none by design. Tests reach a document only as hand-written JSON.
+That has to change before "held to the same standard" means anything to a user.
+
+### 13.4 The amendment to §2
+
+Tier C is the capability §2's invariant exists to deny, and `AttributeSet::touched()` is a
+destructuring match specifically so nobody widens it by accident. So the amendment is argued here
+rather than added quietly beside it:
+
+> **Rules still never generate facts.** A **producer** may, under four conditions a rule can never
+> meet: it is code rather than data, it runs sandboxed with no data access, it is reproducible, and
+> its output is marked as its own. The invariant's purpose — *nothing a consultant writes in a
+> strategy file can put a number in front of a reader that the model did not compute* — survives
+> intact, because a producer computes only over numbers the model did compute.
+
+### 13.5 Distribution and consent
+
+A producer travelling in a `.calp` is distributed code and inherits the existing path: a new
+surface-namespaced consent key, consent bound to the triple *(package key, artifact id,
+sha256(source))* so a changed producer re-prompts with a diff, and a mount refusal that fails closed
+on every uncertainty. Because the surface declares no capability, the dialog has no capability list
+to show — the question is purely *"do you trust this code to describe your data?"*, which is the
+honest one.
+
+A subscriber cannot author: model writes are refused on a package-subscribed connection. They can
+**refuse** a producer, and refusing must degrade to *no facts from that producer* — never to a broken
+run. A producer is additive by construction, so this falls out; it is stated because the equivalent
+question for the strategy document is what the publish gate got wrong until 2026-09-09.
+
+### 13.6 Two defects this design work uncovered
+
+- **`calp_publish_model` bypassed the strategy publish gate.** `validate_published_strategies` had
+  one call site, inside `assemble_publish_workbook`, and a model-only push never assembles a
+  workbook — so the one package kind whose entire content *is* a model was the one kind shipping an
+  ungraded strategy to a subscriber who cannot repair it. **Fixed 2026-09-09**, and the guard that
+  should have caught it was replaced: it asserted the call appeared at least once anywhere in the
+  file, which proves existence and not coverage. It now enumerates the publish entry points and asks
+  the question per path, with a positive control proving the scan can tell a reached path from an
+  unreached one.
+- **The `calcula.` reservation has a casing hole and no test.** The prefix check is case-sensitive,
+  so `Calcula.strategy` passes the generic writer; and `validate_extension_data_key` has no test at
+  all, so the key shape, the 256 KB cap and the reservation are unpinned. This is the single most
+  load-bearing gap for §13.1, since the namespace rests on that reservation. Tracked in
+  `open-items.md`.
+
+### 13.7 Build order, and why C is last
+
+The rule that binds hardest here is the layer's own: **nothing becomes authorable until it has a
+reader** — applied to the extension mechanism itself. Four strategy fields are still unread.
+
+1. Test the reservation; fix the casing hole; share one predicate with `ExtKey`.
+2. **Tier A** — the `x` bag, `ExtKey`, the `extensions` schema block.
+3. Hoist suppression/scoring/narration out of `facts_for_measure` (worth doing on its own merits).
+4. **Tier D** — reorder and withhold, subset-checked.
+5. Wire the `unit` and `cadence` consumers, hardcoded, `unit` with an explicit unknown arm.
+6. An authoring surface for `tests:`, then the golden-observation harness — **applied to built-ins
+   first**.
+7. **Tier C**, once the fact catalogue is consumed end to end.
+8. **Tier B**, once its consumers exist to have vocabularies.
+
+**Tier C is last not because it is hardest, but because it is the only one that cannot be revised.**
+A and D are internal until a model in the wild uses them. C defines a contract that user code
+compiles against, and unlike an internal field you cannot quietly change it afterwards.
+
+### 13.8 Two decisions taken here
+
+**`cadence`'s consumer should be hardcoded, not plugin-shaped** — the opposite of the intuition that
+an unwritten consumer is the natural place to answer "could a user have written this?". Both of
+`cadence`'s consumers sit on the wrong side of the plugin boundary. Period bucketing is *query
+planning*: it decides how the series is fetched, before any fact exists, inside the engine-lock and
+budget window — and Tier C's central constraint is that a producer never influences a query. Making
+the first instance of the pattern the one thing the pattern forbids would set exactly the wrong
+precedent. Seasonality lag selection is the other consumer, and it lives in `core/insights`, the
+crate that deliberately has no names and no registry.
+
+`unit` is the better first Tier B case and should also be written hardcoded — but its consumer is
+narration formatting, where an unknown value must degrade rather than fall through. Write it with an
+explicit unknown-unit arm producing unit-less wording, and **that arm is where Tier B plugs in**.
+
+**Freeze the authorable attribute surface** until the extension seam exists. The freeze covers
+`MeasureStrategy`/`TableStrategy`/`ColumnStrategy`/`ModelStrategy` fields and `AttributeSet` members.
+It does *not* cover findings, validation, inference or fact kinds — none of those is a surface a user
+authors against, and all must stay free to improve. What it blocks, concretely: audience overlays
+(§11) and per-side band severity. Both are additive, and both would want the extension mechanism's
+answer to "is this a built-in or a vocabulary?" — so blocking them is the point rather than a cost.

@@ -1127,6 +1127,42 @@ design — an inferred draft must stay savable — but the tab's Confirm workflo
 confirming changes output, and it does not. A run whose measures carry unconfirmed inference now
 carries a note naming them.
 
+**2.AI.9 — The extension seams are designed and not built, and the survey found two defects.**
+Design lives in `docs/design/insights-strategy-layer.md` §13 (four tiers, the namespace, the
+verifier boundary, the build order). Open work, in the order §13.7 gives:
+
+* **`validate_extension_data_key` has no test, and its reservation has a casing hole.**
+  `app/src-tauri/src/bi/model_editor.rs:5660`. The check is `key.starts_with("calcula.")`, which is
+  case-SENSITIVE, so `Calcula.strategy` is accepted by the generic writer. The key shape, the 256 KB
+  per-key cap and the reservation itself are entirely unpinned — the only two references to the
+  function are its definition and its single call site. **This is the load-bearing gap for §13.1**,
+  because the extension namespace rests on that reservation being sound. The reservation is also
+  write-only (`get`/`list` expose `calcula.*` freely) and unmirrored in the CLI and the TS API,
+  which are defensible but should be deliberate.
+* **`ResolvedMeasure.context` is a fourth unread field, and it is the prose one.** Written at
+  `strategy/resolve.rs`, read by nothing. Its consumer is M6's narrator. The consequence for §2 is
+  recorded there: the prose boundary is currently *vacuous rather than fragile*, and the source-scan
+  guard the section used to claim exists does not. Write the guard when M6 gives prose a reader.
+* **Two Strategy-tab finding paths anchor nowhere**: `tests[i]` and `periods[i]` have no grid, and
+  `version` has no `data-strategy-path` row despite a comment in `strategy/types.rs` claiming it is
+  pinned to one. They land in the findings strip and highlight nothing. Related: **there is no
+  authoring surface for inline tests at all** — no Tests grid, no `add test` verb, and `infer`
+  emits none by design. §13.3 makes that a prerequisite for the extension-grading claim rather than
+  a cosmetic gap.
+
+**CLOSED 2026-09-09 — `calp_publish_model` bypassed the strategy publish gate.**
+`validate_published_strategies` had exactly one call site, inside `assemble_publish_workbook`, and a
+model-only push captures its data sources directly and never assembles a workbook. So the ONE
+package kind whose entire content is a model was the one kind that could publish a strategy document
+which fails validation, carries an unresolved rule overlap, or fails its own inline tests — to a
+subscriber who cannot repair it, because `editable_base` refuses model writes on a
+package-subscribed connection. That is verbatim the case the gate's own header says it exists to
+prevent. The guard that should have caught it asserted the call appeared `>= 1` times **anywhere in
+the file**, which proves existence rather than coverage and stayed green throughout; it now
+enumerates the publish entry points and asks per path, with a positive control proving the scan can
+tell a reached path from an unreached one. Sabotage-verified: removing the new call reds the
+coverage test naming `calp_publish_model`, where the old count would still have passed.
+
 **2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) waits for the
 release decision; the fetch script makes bundle-vs-download a build-time switch. M4 (intent router)
 and M6 (Tier-1 narration, Swedish, grammars) keep their designs and their seams — `factsJson`

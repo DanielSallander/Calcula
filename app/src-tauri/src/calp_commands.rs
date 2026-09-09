@@ -1559,6 +1559,22 @@ pub fn calp_publish_model(
     }
     let model_name = data_sources[0].name.clone();
 
+    // THE SAME GATE THE WORKBOOK PUSH APPLIES, AND THIS PATH HAD NONE.
+    //
+    // `validate_published_strategies` had exactly one call site, inside
+    // `assemble_publish_workbook`, and a model-only push does not go through it:
+    // it captures its data sources directly above rather than assembling a
+    // workbook. So a `dataset` application could ship a strategy document that
+    // fails validation, carries an unresolved rule overlap, or fails its own
+    // inline tests — which is verbatim the case that function's header says it
+    // exists to prevent, and the ONE package kind whose whole content is a model
+    // was the one kind that skipped it.
+    //
+    // The subscriber cannot repair it: `editable_base` refuses model writes on a
+    // package-subscribed connection, so their only symptom is an Insights pane
+    // confidently calling a rise "unfavourable" for a reason nobody can inspect.
+    validate_published_strategies(&data_sources)?;
+
     // A minimal carrier: zero sheets, no scripts/tables/names — the application is
     // the model. Workbook::new()'s default sheet is never published because
     // sheet_indices is empty.
@@ -18529,6 +18545,36 @@ mod published_strategy_gate_tests {
     }
 
     #[test]
+    fn a_model_only_application_is_graded_exactly_like_a_workbook_one() {
+        // THE DEFECT, AT THE SHAPE THAT CARRIED IT. `calp_publish_model` filters
+        // the captured sources down to one connection and hands them straight to
+        // `calp::publish::publish`; it never assembles a workbook, so it never
+        // met the gate. The data it publishes is the same `PublishDataSource`
+        // the workbook path grades, which is why one call on the filtered vector
+        // closes it - and why this test can prove it without a live engine.
+        // A RULE naming a measure the model does not have - an ERROR. An orphan
+        // `measures` ENTRY is only a warning and publishes by design, which is
+        // the distinction this fixture has to respect to be testing the gate at
+        // all rather than testing that warnings pass.
+        let broken = a_model_with_strategy(Some(serde_json::json!({
+            "version": 1,
+            "rules": [{
+                "id": "ghost",
+                "measure": "Profit",
+                "set": { "direction": "higherIsBetter" }
+            }]
+        })));
+        let filtered_the_way_a_model_only_push_filters: Vec<_> = vec![source(broken)]
+            .into_iter()
+            .filter(|ds| ds.id == "conn1")
+            .collect();
+
+        let err = validate_published_strategies(&filtered_the_way_a_model_only_push_filters)
+            .expect_err("a rule naming a measure the model does not have must refuse this push too");
+        assert!(err.contains("Profit"), "the offending measure is named: {err}");
+    }
+
+    #[test]
     fn a_model_with_no_strategy_document_publishes_untouched() {
         // The overwhelmingly common case. Nobody who has never opened the
         // Strategy tab may find publishing harder because this gate exists.
@@ -18584,19 +18630,96 @@ mod published_strategy_gate_tests {
         assert!(err.contains("north") && err.contains("south"), "both rules named: {err}");
     }
 
+    /// Every function that can put an application on a workspace.
+    ///
+    /// A NAME MISSING FROM THIS LIST IS THE DEFECT THIS TEST EXISTS FOR, so the
+    /// test panics rather than skipping when one cannot be found: a renamed
+    /// entry point must fail loudly, not quietly stop being covered.
+    const PUBLISH_ENTRY_POINTS: &[&str] = &[
+        "calp_publish",
+        "calp_publish_preview",
+        "calp_publish_model",
+        "publish_into_for_preview",
+    ];
+
     #[test]
-    fn the_gate_is_actually_called_on_the_publish_path() {
-        // Every other test here proves the FUNCTION refuses. None of them would
-        // notice if the call were deleted from `calp_publish`, and a gate that
-        // is not called is indistinguishable from no gate. So this reads the
-        // source and asserts the call site exists next to the pivot validator
-        // it was added beside.
+    fn every_publish_entry_point_reaches_the_strategy_gate() {
+        // THE COUNT THIS REPLACES COULD NOT SEE THE BUG IT WAS WRITTEN FOR.
+        // It asserted `source.matches("validate_published_strategies(&data_sources)")
+        // .count() >= 1` — which proves the gate is called SOMEWHERE, and stayed
+        // green for the whole time `calp_publish_model` skipped it. A model-only
+        // application is the one package kind whose entire content is a model,
+        // and it was the one kind publishing an ungraded strategy document to a
+        // subscriber who cannot repair it.
+        //
+        // Existence is not coverage. This asks the question per entry point.
         let source = include_str!("calp_commands.rs");
-        let calls = source.matches("validate_published_strategies(&data_sources)").count();
+        let lines: Vec<&str> = source.lines().collect();
+
+        let mut unreached: Vec<&str> = Vec::new();
+        for name in PUBLISH_ENTRY_POINTS {
+            let header = format!("fn {name}(");
+            let start = lines
+                .iter()
+                .position(|l| l.contains(&header) && !l.trim_start().starts_with("//"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "publish entry point `{name}` no longer exists under that name. Either \
+                         it was renamed - update PUBLISH_ENTRY_POINTS - or a publish path was \
+                         deleted. Do not delete the row: an entry point nobody checks is exactly \
+                         what this test was written after."
+                    )
+                });
+            // A free function ends at the first line that is exactly `}` - the
+            // convention every item in this crate is written to, and the one
+            // `document_store_census_tests` already relies on.
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| *l == "}")
+                .map(|off| start + 1 + off)
+                .unwrap_or(lines.len() - 1);
+            let body = lines[start..=end].join("\n");
+
+            // Directly, or through the assembler that carries the gate for the
+            // three workbook-shaped paths. Either answer is coverage; neither is
+            // assumed.
+            let reaches = body.contains("validate_published_strategies(")
+                || body.contains("assemble_publish_workbook(");
+            if !reaches {
+                unreached.push(name);
+            }
+        }
+
         assert!(
-            calls >= 1,
-            "the publish path no longer calls the strategy gate; a broken strategy \
-             document would ship to subscribers who cannot fix it"
+            unreached.is_empty(),
+            "these publish paths ship a strategy document nobody graded: {unreached:?}. A \
+             subscriber cannot fix one - `editable_base` refuses model writes on a \
+             package-subscribed connection - so the refusal has to happen while the author is \
+             still present. Call `validate_published_strategies` on the data sources before \
+             publishing them."
+        );
+    }
+
+    #[test]
+    fn the_coverage_check_can_tell_a_reached_path_from_an_unreached_one() {
+        // THE POSITIVE CONTROL, because the test above is a source scan and a
+        // source scan that matches nothing passes just as cheerfully as one that
+        // matches everything. This runs the same two questions over hand-written
+        // bodies, so "all four reached" means the scan can see the difference
+        // rather than that it found nothing to object to.
+        let reached_directly = "fn a() {\n    validate_published_strategies(&data_sources)?;\n}";
+        let reached_via_assembler = "fn b() {\n    let w = assemble_publish_workbook(x)?;\n}";
+        let unreached = "fn c() {\n    let sources = capture_bi_data_sources(&state)?;\n}";
+
+        let reaches = |body: &str| {
+            body.contains("validate_published_strategies(") || body.contains("assemble_publish_workbook(")
+        };
+        assert!(reaches(reached_directly));
+        assert!(reaches(reached_via_assembler));
+        assert!(
+            !reaches(unreached),
+            "the scan admits a body that grades nothing - it would have passed on the defect \
+             it was written for"
         );
     }
 
