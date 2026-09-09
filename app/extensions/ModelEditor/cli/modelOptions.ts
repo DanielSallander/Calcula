@@ -19,6 +19,12 @@
 //          reads stay lenient. No model verb reads options while
 //          cmd.kind === null, so the kindless table is EMPTY: a stray option
 //          there errors as "takes no options here".
+// UPDATE:  2026-09-08. Two strategy changes reach this file. `set table` gained
+//          the strategy half (`kind=`/`labelcolumn=`/`reviewed=`) because
+//          `kind` stopped being decoration: it now overrides table detection
+//          and can decide the calendar. And the table gained a VALUE check —
+//          `MODEL_CLOSED_VALUE_LISTS` — for the one option whose near-miss is
+//          not a bad value but a document the backend cannot deserialize.
 // UPDATE:  2026-08-25. `transform table` joined the table kind. Its specs are
 //          NOT re-typed here: TRANSFORM_STEP_OPTIONS lives next to the builder
 //          that reads them (transformSteps.ts), so the audit is structural
@@ -28,10 +34,12 @@
 import { mergeVocabulary } from "../../_shared/cli/registry";
 import { validateOptions } from "../../_shared/cli/optionSchema";
 import type { CliOptionSpec, CliOptionTable } from "../../_shared/cli/optionSchema";
+import { CliError } from "./lex";
 import { MODEL_VOCABULARY_CONTRIBUTION } from "./parse";
 import type { Command, Kind } from "./parse";
 import { DATA_TYPE_NAMES } from "./dataTypes";
 import { TRANSFORM_STEP_OPTIONS } from "./transformSteps";
+import { SUPPRESSIBLE_FACT_KINDS, TABLE_KINDS, parseSuppressKind } from "../lib/strategyTypes";
 
 // ---------------------------------------------------------------------------
 // Shared spec lists (add/set accept the same keys for most kinds)
@@ -162,6 +170,27 @@ const MEASURE_STRATEGY_PROPS: CliOptionSpec[] = [
   { key: "reviewed", type: "boolean", help: "mark the entry as agreed by a human" },
 ];
 
+/**
+ * The strategy half of `set table`.
+ *
+ * `kind=` IS AUTHORABLE FROM HERE BECAUSE IT NOW DOES SOMETHING. It used to be
+ * a dropdown that changed nothing, so leaving it out of the CLI cost nothing
+ * either; it now overrides the backend's own table classification, decides
+ * which table is the calendar and therefore what the time axis of every trend,
+ * seasonality and change-point claim is. A field the tab can set and the
+ * command line cannot is a field a script cannot fix.
+ */
+const TABLE_STRATEGY_PROPS: CliOptionSpec[] = [
+  {
+    key: "kind",
+    type: "enum",
+    values: [...TABLE_KINDS],
+    help: "what the table IS; an authored kind overrides detection (empty clears)",
+  },
+  { key: "labelcolumn", type: "string", help: "the column a reader recognises a row by (empty clears)" },
+  { key: "reviewed", type: "boolean", help: "mark the entry as agreed by a human" },
+];
+
 const COLUMN_STRATEGY_PROPS: CliOptionSpec[] = [
   {
     key: "role",
@@ -179,7 +208,16 @@ const RULE_PROPS: CliOptionSpec[] = [
   { key: "target", type: "string", help: "1000 | kpi | measure:<Name> | band:<low>,<high>" },
   { key: "materiality", type: "string", help: "1000 (absolute) | 2% (relative)" },
   { key: "cadence", type: "enum", values: CADENCE_VALUES, help: "cadence in this scope" },
-  { key: "suppress", type: "list", help: "fact KINDS to withhold here (it can only take facts away)" },
+  {
+    key: "suppress",
+    type: "list",
+    // `values` carries the closed set so completion and help offer it; the
+    // VALUES are enforced by `validateModelOptions` below, because the shared
+    // kernel validates keys only and a near-miss here is now a document the
+    // backend refuses to parse at all.
+    values: [...SUPPRESSIBLE_FACT_KINDS],
+    help: "fact KINDS to withhold here (it can only take facts away)",
+  },
   { key: "rankweight", type: "number", help: "multiplier on this measure's ranking score here" },
   { key: "note", type: "string", help: "prose; reaches wording only, never which facts exist" },
 ];
@@ -217,6 +255,7 @@ export const MODEL_OPTION_TABLES: Partial<Record<Kind, CliOptionTable>> = {
       { key: "source", type: "string", help: "bind to a catalog source; empty or none unbinds" },
       { key: "schema", type: "string", help: "source-side schema for the binding" },
       { key: "sourcetable", type: "string", help: "source-side table name for the binding" },
+      ...TABLE_STRATEGY_PROPS,
     ],
     rename: [],
     delete: [],
@@ -401,11 +440,46 @@ export function modelOptionTableFor(kind: Kind | null): CliOptionTable | undefin
   return kind === null ? MODEL_KINDLESS_OPTIONS : MODEL_OPTION_TABLES[kind];
 }
 
+/**
+ * Option keys whose VALUES are a closed set the backend refuses to PARSE.
+ *
+ * A deliberately short list rather than "every spec that carries `values`".
+ * Most enum specs here are already re-checked by the writer that consumes them
+ * (`oneOf`), and several — `cardinality`, the writeback `type` — accept
+ * spellings the engine resolves for itself, so value-checking them at the
+ * table would refuse commands the engine would have run. What earns a row here
+ * is the case where a near-miss is not a bad value but a bad DOCUMENT: a
+ * `suppress` entry outside `SuppressibleFactKind` makes the strategy file fail
+ * serde, and `model_commands::strategy_doc` answers that by discarding the
+ * whole document. So it is refused at the option table, before anything is
+ * read, and the refusal names the near miss rather than only the vocabulary.
+ */
+const MODEL_CLOSED_VALUE_LISTS: {
+  key: string;
+  parse: (raw: string) => { ok: true } | { ok: false; error: string };
+}[] = [{ key: "suppress", parse: parseSuppressKind }];
+
+/** Every value typed for one option key, across all of its occurrences. */
+function optionValues(cmd: Command, key: string): string[] {
+  return (cmd.opts.get(key) ?? []).flat().map((tok) => tok.text);
+}
+
 /** Strict option validation for every write-routed model command — called at
  *  the TOP of both previewWrite and runWrite (reads consume no options and
- *  stay lenient). Throws CliError naming the valid keys. */
+ *  stay lenient). Throws CliError naming the valid keys, and — for the closed
+ *  sets above — the valid VALUES plus the near miss. */
 export function validateModelOptions(cmd: Command): void {
   validateOptions(cmd, modelOptionTableFor(cmd.kind), true);
+  for (const closed of MODEL_CLOSED_VALUE_LISTS) {
+    for (const raw of optionValues(cmd, closed.key)) {
+      // An empty token is how a value is CLEARED (`suppress=`), which every
+      // consumer already treats as "say nothing"; refusing it here would make
+      // the clear gesture unreachable.
+      if (raw.trim() === "") continue;
+      const parsed = closed.parse(raw);
+      if (!parsed.ok) throw new CliError(`${closed.key}=: ${parsed.error}`, cmd.line);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

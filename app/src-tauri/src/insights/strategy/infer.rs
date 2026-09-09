@@ -43,7 +43,7 @@ use regex::Regex;
 use super::resolve::ModelFacts;
 use super::types::{
     Additivity, AggregationSpec, Cadence, ColumnStrategy, Direction, EntrySource, MeasureStrategy,
-    ModelStrategy, QualifiedColumn, Role, StrategyDoc, TableKind, TableStrategy, Target, Unit,
+    ModelStrategy, QualifiedColumn, Role, StrategyDoc, TableKind, TableStrategy, Target,
     STRATEGY_DOC_VERSION,
 };
 use crate::insights::usage::UsageIndex;
@@ -992,12 +992,14 @@ fn seed_priority(model: &DataModel, facts: &ModelFacts, usage: &UsageIndex) -> V
 /// unset rather than written as `01-01`: an absent value and a value that says
 /// "the default" resolve the same way, and the absent one does not read as a
 /// decision somebody made.
-fn infer_fiscal_year_start(model: &DataModel) -> Option<String> {
+fn infer_fiscal_year_start(model: &DataModel) -> Option<super::types::MonthDay> {
     let end = model.fiscal_year_end_month()?;
     if !(1..=12).contains(&end) || end == 12 {
         return None;
     }
-    Some(format!("{:02}-01", end % 12 + 1))
+    // `MonthDay::new` is the only constructor, so an out-of-calendar month can
+    // never be written into the document even from here.
+    super::types::MonthDay::new(end % 12 + 1, 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,7 +1126,8 @@ pub fn infer(facts: &ModelFacts, model: &DataModel, usage: &UsageIndex) -> Strat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::insights::strategy::facts::facts_from_model;
+    use crate::insights::strategy::facts::{facts_from_model, facts_from_model_with};
+    use crate::insights::strategy::types::Unit;
     use bi_engine::{
         expression, sum_measure, Column, DataType, Hierarchy, HierarchyLevel, Kpi, KpiStatus,
         KpiTarget, Measure, Relationship, StatusBand, Table,
@@ -2469,6 +2472,209 @@ mod tests {
         );
         let doc = infer(&facts, &model, &usage);
         assert_eq!(doc.model.priority, vec!["Beta".to_string()]);
+    }
+
+    // --- the draft versus a document that disagrees with it -------------------
+
+    /// Two role-playing date tables with warehouse-typed calendar parts.
+    ///
+    /// The heuristic REFUSES this shape (two candidates), so the model has no
+    /// calendar at all until a person says which one it is — and the parts are
+    /// `Decimal(38,10)`, which is how a real `dim_date` types them and what the
+    /// non-calendar allowlist rejects.
+    fn a_role_playing_pair_of_warehouse_calendars() -> DataModel {
+        let mut builder = DataModel::builder().add_table(
+            Table::new(
+                "Sales",
+                vec![
+                    Column::new("Amount", DataType::Float64),
+                    Column::new("OrderDateKey", DataType::Int64),
+                    Column::new("ShipDateKey", DataType::Int64),
+                ],
+            )
+            .unwrap(),
+        );
+        for name in ["dim_order_date", "dim_ship_date"] {
+            builder = builder.add_table(
+                Table::new(
+                    name,
+                    vec![
+                        Column::new("date_key", DataType::Int64),
+                        Column::new("full_date", DataType::Date),
+                        Column::new("year", DataType::Decimal(38, 10)),
+                        Column::new("month", DataType::Decimal(38, 10)),
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        builder
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Order",
+                "Sales",
+                "OrderDateKey",
+                "dim_order_date",
+                "date_key",
+            ))
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Ship",
+                "Sales",
+                "ShipDateKey",
+                "dim_ship_date",
+                "date_key",
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the role-playing warehouse fixture builds")
+    }
+
+    /// One authored `kind`, the way the Strategy tab's dropdown writes it.
+    fn a_document_naming(table: &str, kind: TableKind) -> StrategyDoc {
+        let mut doc = StrategyDoc::default();
+        doc.tables.insert(
+            table.to_string(),
+            TableStrategy {
+                kind: Some(kind),
+                reviewed: true,
+                source: Some(EntrySource::Authored),
+                ..Default::default()
+            },
+        );
+        doc
+    }
+
+    #[test]
+    fn the_draft_is_taken_from_the_model_alone_even_when_the_stored_document_disagrees() {
+        // THE ONE PATH THE SEAM MUST NOT REACH. `bi_model_strategy`'s "infer" op
+        // builds facts from the model and never parses `stored`, and that is
+        // deliberate: a draft that folded the document in could never disagree
+        // with it, and the Strategy tab's whole divergence badge - "inference
+        // says dimension, you saved calendar" - would go permanently quiet.
+        let model = a_role_playing_pair_of_warehouse_calendars();
+        let doc = a_document_naming("dim_order_date", TableKind::Calendar);
+
+        let drafted = infer(&facts_from_model(&model), &model, &no_usage());
+        assert_eq!(
+            drafted.tables["dim_order_date"].kind,
+            Some(TableKind::Dimension),
+            "the draft reports what the relationships say, not what the document does"
+        );
+        assert_eq!(
+            drafted.model.default_time_axis, None,
+            "and with no calendar it drafts no time axis either"
+        );
+
+        // ...and the same function DOES follow an authored kind when the facts
+        // carry one, so the line above is a decision about which facts the draft
+        // path builds rather than a limitation of `infer`.
+        let with_doc = infer(&facts_from_model_with(&model, &doc), &model, &no_usage());
+        assert_eq!(
+            with_doc.tables["dim_order_date"].kind,
+            Some(TableKind::Calendar)
+        );
+    }
+
+    #[test]
+    fn an_authored_calendar_carries_every_arm_of_the_role_ladder() {
+        // ONE EXPRESSION IN facts.rs COVERS ALL FIVE PLACES `infer_table`
+        // BRANCHES ON KIND - which is the point of putting the override at the
+        // seam rather than at each consumption point. The visible half is this:
+        // a warehouse calendar's `Decimal(38,10)` year and month are admitted as
+        // breakdown axes by the calendar arm alone. Off it they fall past the
+        // String|Int32|Int64 allowlist to no role at all, so nothing is ever
+        // broken down by month and nothing says why.
+        let model = a_role_playing_pair_of_warehouse_calendars();
+
+        let drafted = infer(&facts_from_model(&model), &model, &no_usage());
+        assert_eq!(
+            drafted.tables["dim_order_date"].columns.get("year"),
+            None,
+            "the control: a Decimal on a plain dimension defends no role"
+        );
+
+        let doc = a_document_naming("dim_order_date", TableKind::Calendar);
+        let chosen = infer(&facts_from_model_with(&model, &doc), &model, &no_usage());
+        let table = &chosen.tables["dim_order_date"];
+        assert_eq!(table.columns["year"].role, Role::Analysis);
+        assert_eq!(table.columns["month"].role, Role::Analysis);
+        assert_eq!(
+            table.columns["date_key"].role,
+            Role::Key,
+            "the calendar arm still sits below Key"
+        );
+        // ...and the model-wide default time axis lands on it too, which is the
+        // same `facts.date_table` reaching a second consumer.
+        assert_eq!(
+            chosen.model.default_time_axis,
+            Some(QualifiedColumn::new("dim_order_date", "full_date"))
+        );
+        // The other role-playing table is left exactly where it was.
+        assert!(chosen.tables["dim_ship_date"].columns.get("year").is_none());
+    }
+
+    #[test]
+    fn a_freshly_inferred_draft_carries_no_error_finding_on_any_shape_of_model() {
+        // THE WORST REGRESSION THIS LAYER COULD CARRY, and until now nothing
+        // held the line. Both write gates refuse a document with ANY Error
+        // finding (`is_refused`, called from `bi/model_editor.rs` and the .calp
+        // publish gate), so a draft the product generated for a person and then
+        // declined to save is a dead end with their own Confirm on it.
+        //
+        // The change that made this urgent added two Error-severity findings
+        // reachable from TABLE entries — `authored-kind-contradicts-topology`
+        // and `two-authored-calendars`. `infer` stamps every table it writes
+        // `EntrySource::Inferred`, so `authored_table_kinds` skips them and
+        // neither can fire; that is a REASON, not a guard, and the next error
+        // variant will not be so considerate. Hence a test rather than a trace.
+        //
+        // The gates validate against `facts_from_model` — document-blind facts
+        // — so that is the spelling under test, and the run path's spelling is
+        // checked beside it because a draft has to survive both.
+        use super::super::validate::{validate, Severity};
+
+        let fixtures: Vec<(&str, DataModel)> = vec![
+            (
+                "an ordinary marked star",
+                a_star_with(vec![sum_measure("Revenue", "Sales", "Amount")]),
+            ),
+            ("a snowflake the executor cannot reach through", a_snowflake()),
+            ("an unmarked warehouse calendar", an_unmarked_warehouse_calendar()),
+            (
+                "two role-playing calendars, so no calendar at all",
+                a_role_playing_pair_of_warehouse_calendars(),
+            ),
+            ("three measures, one carrying a KPI", three_measures_one_with_a_kpi()),
+            (
+                "a dimension with several name-like columns",
+                a_dimension_with_several_name_columns(),
+            ),
+            (
+                "a dimension whose label is also a date part",
+                a_dimension_whose_label_is_also_a_date_part(),
+            ),
+        ];
+
+        for (label, model) in fixtures {
+            let facts = facts_from_model(&model);
+            let doc = infer(&facts, &model, &no_usage());
+            for (spelling, judged) in [
+                ("document-blind facts", validate(&facts, &doc)),
+                (
+                    "facts built with the draft",
+                    validate(&facts_from_model_with(&model, &doc), &doc),
+                ),
+            ] {
+                let errors: Vec<&super::super::validate::Finding> = judged
+                    .iter()
+                    .filter(|f| f.severity == Severity::Error)
+                    .collect();
+                assert!(
+                    errors.is_empty(),
+                    "{label} ({spelling}): a draft this product generated must be savable, \
+                     and these findings refuse it: {errors:#?}"
+                );
+            }
+        }
     }
 
     #[test]

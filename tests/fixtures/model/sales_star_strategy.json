@@ -500,7 +500,7 @@
         "baseline": 600000
       },
       "expect": {
-        "status": "neutral"
+        "status": "immaterial"
       }
     },
     {
@@ -508,6 +508,19 @@
       "scope": {},
       "given": {
         "delta": -120000,
+        "value": 1280000,
+        "baseline": 1400000
+      },
+      "expect": {
+        "status": "unfavourable"
+      }
+    },
+    {
+      "measure": "Revenue",
+      "scope": {},
+      "given": {
+        "delta": 5000,
+        "value": 1405000,
         "baseline": 1400000
       },
       "expect": {

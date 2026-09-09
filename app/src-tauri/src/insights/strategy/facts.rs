@@ -18,15 +18,31 @@
 //          produces a confidently wrong favourability, which is why each
 //          derivation below states what it assumes.
 //
-//          ONE OF THOSE DERIVATIONS IS NOW A GUESS, AND IT SAYS SO.
-//          `mark_date_table` is builder-only, so an ordinary imported star
-//          schema arrives with no calendar at all — and without one there is no
+//          ONE OF THOSE DERIVATIONS IS A GUESS, AND IT SAYS SO. Most models
+//          never mark a date table — `bi_model_set_date_table` exists
+//          (`bi/model_editor.rs`, wired to the Model Editor's Settings tab) but
+//          it is a step almost nobody takes — so an ordinary imported star
+//          schema arrives with no calendar at all, and without one there is no
 //          default time axis, no `TableKind::Calendar` and no role for a
 //          `Decimal` month column, which switches off the whole time-series half
 //          of the engine in silence. `infer_date_table` fills that in when the
 //          shape is unmistakable and REFUSES when two tables qualify;
-//          `ModelFacts::calendar_source` carries whether the answer was declared
-//          or guessed, and the planner announces the difference.
+//          `ModelFacts::calendar_source` carries whether the answer was
+//          declared, authored or guessed, and the planner announces the
+//          difference.
+//
+//          THE THIRD RUNG IS THE STRATEGY DOCUMENT, and it is the reason this
+//          file has document-aware entry points at all. `TableStrategy::kind`
+//          is a dropdown on every row of the Strategy tab, and until
+//          `facts_from_model_with` existed it was read by NOTHING: a person who
+//          watched calendar detection get it wrong and corrected it changed
+//          nothing at all. Read `facts_from_model_with` before either of the
+//          other two — it carries the precedence, what each rung may and may
+//          not overrule, and (bluntly) which of the dropdown's five values
+//          actually changes a report. `facts_with_authored_kinds` is the same
+//          work returning the VERDICT alongside the facts, for the run, which
+//          owes the reader a note when a stored kind is refused;
+//          `facts_from_model` is the draft path's document-blind wrapper.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,10 +52,127 @@ use super::infer::{has_phrase, has_term, words};
 use super::resolve::{
     BandStatus, CalendarSource, KpiBand, KpiFacts, MeasureFacts, ModelFacts, TableFacts,
 };
-use super::types::{QualifiedColumn, TableKind, Unit};
+use super::types::{EntrySource, QualifiedColumn, StrategyDoc, TableKind, Unit};
 
-/// Read a model into the facts the strategy layer resolves against.
+/// Read a model into the facts the strategy layer resolves against, with NO
+/// strategy document in hand.
+///
+/// This is the DRAFT path's entry point and it must stay that way: `infer`
+/// resolves its whole answer out of the model, so that the Strategy tab can show
+/// a person where the machine disagrees with what they stored. Facts built with
+/// the document folded in would make inference agree with the document by
+/// construction, and the divergence badge would go permanently quiet.
 pub fn facts_from_model(model: &DataModel) -> ModelFacts {
+    facts_from_model_with(model, &StrategyDoc::default())
+}
+
+/// Read a model into facts, letting the strategy document's AUTHORED table kinds
+/// overrule what the relationship graph and the calendar heuristic worked out.
+///
+/// WHAT AUTHORING A KIND ACTUALLY DOES TODAY, STATED BEFORE THE LADDER BECAUSE
+/// THE LADDER READS LIKE MORE THAN IT IS. The Strategy tab offers a five-value
+/// dropdown that presents itself as "correct the machine". Two of the five
+/// change what a reader sees, and they change different things:
+///
+/// * `calendar` is the only value that can move a NUMBER. When it is accepted it
+///   becomes `facts.date_table` (rung 3 below — only if the model itself declares
+///   none), and from there the time axis, the series query, and every trend,
+///   change-point and seasonality claim in the report.
+/// * `dimension` moves no number and no cell, but it can produce a run NOTE. It
+///   claims the model can look the table up (`claims_a_lookup`), so a topology
+///   that disproves it yields `KindRefusal::NothingLooksItUp`, and
+///   `kind_conflict_notes` (`model_commands.rs`) turns every conflict into a note
+///   carried into the insights pane, the markdown and the report sheet's Notes
+///   block. `calendar` can be refused the same way, and additionally as
+///   `AmbiguousCalendar`.
+/// * `fact`, `bridge` and `other` are INERT. `claims_a_lookup` is false for all
+///   three and neither refusal can name them, so they raise no conflict, no run
+///   note and no `validate.rs` finding keyed on the kind. They land in
+///   `TableFacts::kind` and nothing on the run path branches on a kind value.
+///
+/// THE TWO NON-TEST READERS OF `TableFacts::kind` OUTSIDE THIS FILE — grepped,
+/// not remembered, because both earlier versions of this paragraph named one
+/// reader and one of them was falsified by an edit in its own pass:
+///
+///   1. `infer_table` (infer.rs), which BRANCHES on the value but runs on the
+///      DRAFT path alone. It is reached only from `infer`, whose one production
+///      caller is the `"infer"` op in `bi/model_editor.rs`, and that call hands
+///      it MODEL-ONLY facts from `facts_from_model` — so a document can never
+///      reach it. (`facts_from_model` itself has four production callers: that
+///      op, `"preview"`, the `"validate"`/`"runTests"`/`"set"` gate, and the
+///      `.calp` publish check in `calp_commands.rs`. None of the other three
+///      runs inference.)
+///   2. `kind_conflict_notes` (model_commands.rs), which runs on the RUN path but
+///      reads the kind only to NAME what the run classified the table as instead,
+///      inside a note it is already emitting because a kind was refused.
+///
+/// SAY IT PLAINLY, BECAUSE THE PRODUCT DOES NOT. Only `calendar` corrects the
+/// machine; `dimension` can only tell you it was refused; the other three do
+/// nothing at all. Wiring them is a SEPARATE decision and not a tidying-up:
+/// `fact`/`dimension`/`bridge` are read off join DIRECTION, so a document that
+/// could move them would be a second, staler topology competing with the
+/// model's own — which is the shape of defect the `Inferred`-source rule below
+/// exists to prevent. Do not fix this header by wiring them.
+///
+/// THE PRECEDENCE, AND WHY EACH RUNG SITS WHERE IT DOES.
+///
+/// 1. A HUMAN STATEMENT BEATS A HEURISTIC. This is not a new rule; it is the one
+///    the calendar detector has always applied by preferring `mark_date_table`
+///    over its own inference. An authored `kind: "calendar"` is the same kind of
+///    statement about the same question, so it goes on the same ladder — above
+///    the guess.
+/// 2. A HUMAN STATEMENT DOES NOT BEAT TOPOLOGY. `Fact`/`Dimension`/`Bridge` are
+///    read off relationship DIRECTION, which the model can disprove rather than
+///    merely disagree with. `Dimension` and `Calendar` both claim the model can
+///    LOOK THIS TABLE UP; a table nothing looks up through a to-one relationship
+///    cannot be either, so authoring one there is refused and reported by
+///    `validate.rs` naming what the topology says. `Fact`, `Bridge` and `Other`
+///    claim nothing a relationship can contradict — and are behaviourally
+///    identical inside `infer_table` — so they are accepted as written.
+/// 3. THE MODEL'S OWN DECLARATION BEATS THE DOCUMENT, for the calendar only.
+///    `mark_date_table` is not just another opinion about which table is the
+///    calendar: the ENGINE resolves `TOTALYTD`, `DATEADD` and every other time
+///    intelligence function against it and refuses when it is unset
+///    (`compute/time_intelligence.rs`). If the annotation layer could move the
+///    calendar, the insights report would plot its series along one table while
+///    the model's own time-intelligence measures computed along another — two
+///    different times inside one report. So a declared date table stands, the
+///    authored `Calendar` kind is still applied to the table it names, and
+///    `validate.rs` raises a WARNING naming both. (The "the authored value is
+///    the more recent and more reversible statement" argument does not survive
+///    contact with `bi_model_set_date_table`: the declaration is edited from a
+///    dropdown in the same window, so it is exactly as local and exactly as
+///    reversible as the strategy document's.)
+///
+/// AMBIGUITY REFUSES, here as everywhere else in this file: two tables authored
+/// `Calendar` means neither is applied and both are reported, for the same
+/// reason `infer_date_table` returns `None` on two candidates. Picking the one
+/// that sorted first would make what time means in a report depend on a table
+/// name.
+///
+/// ONLY *AUTHORED* ENTRIES OVERRULE ANYTHING. `infer` writes the DERIVED kind
+/// into the document it drafts, stamped `EntrySource::Inferred`. Honouring that
+/// copy would pin a stale reading of an older model over the current
+/// relationship graph — the model changes, the saved draft does not, and the
+/// document would quietly win. See `authored_table_kinds`.
+pub fn facts_from_model_with(model: &DataModel, doc: &StrategyDoc) -> ModelFacts {
+    facts_with_authored_kinds(model, doc).0
+}
+
+/// The same facts, plus the verdict on every kind the document stated.
+///
+/// THE REFUSALS ARE PRODUCED HERE AND WERE THROWN AWAY HERE. Building the facts
+/// already judges every authored kind — that is what decides which ones enter
+/// the map — and `facts_from_model_with` then dropped the refusals on the
+/// floor. `validate.rs` re-derived them for its findings, so a document that
+/// was valid when it was saved and is invalidated by a later relationship edit
+/// changed what a RUN said with nothing reported anywhere: the run applied the
+/// same refusal and pushed no note. `run_model_insights` takes this pair so the
+/// note costs no second pass over `doc.tables`.
+pub fn facts_with_authored_kinds(
+    model: &DataModel,
+    doc: &StrategyDoc,
+) -> (ModelFacts, AuthoredKinds) {
     let mut facts = ModelFacts::default();
 
     // --- relationships ------------------------------------------------------
@@ -70,35 +203,22 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
             ));
         }
     }
-
-    // --- the calendar -------------------------------------------------------
-    // A DECLARATION ALWAYS WINS AND IS NEVER OVERRIDDEN. `mark_date_table` is
-    // the author saying which table time runs along, and no heuristic here may
-    // second-guess it — not even on a model where another table looks more like
-    // a calendar than the marked one does.
-    let (date_table, calendar_source) = match model.date_table() {
-        Some(declared) => (Some(declared.to_string()), Some(CalendarSource::Declared)),
-        None => match infer_date_table(model, &is_from) {
-            Some(guessed) => (Some(guessed), Some(CalendarSource::Inferred)),
-            None => (None, None),
-        },
-    };
-    facts.date_table = date_table;
-    facts.calendar_source = calendar_source;
+    // The to-one to-sides, kept rather than recomputed downstream: the pairs
+    // above lose the cardinality, and `validate.rs` — which has no `DataModel` —
+    // needs exactly this set to know whether an authored `Dimension` or
+    // `Calendar` is a claim the model can disprove.
+    facts.lookup_tables = is_to.iter().map(|t| t.to_string()).collect();
 
     // --- tables -------------------------------------------------------------
+    // KIND IS DECIDED IN A SECOND PASS, below, because it depends on which table
+    // ends up being the calendar and THAT can depend on the document.
     for table in model.tables() {
         let name = table.name();
         let columns: BTreeSet<String> = table.columns().iter().map(|c| c.name().to_string()).collect();
         facts.tables.insert(
             name.to_string(),
             TableFacts {
-                kind: Some(classify_table(
-                    name,
-                    facts.date_table.as_deref(),
-                    is_from.contains(name),
-                    is_to.contains(name),
-                )),
+                kind: None,
                 columns,
                 // The model's own hierarchies, level order preserved. Validation
                 // reads them from HERE rather than from the strategy document's
@@ -117,6 +237,52 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
                 members: BTreeMap::new(),
             },
         );
+    }
+
+    // --- what the document was allowed to say -------------------------------
+    // ONE PLACE WHERE AN AUTHORED KIND ENTERS `ModelFacts`, and this is it: the
+    // defect being fixed was a cascade with one arm wired and the rest not, so
+    // the calendar rung and the per-table rung below both read this one answer.
+    //
+    // It is NOT the only call in the process. `validate.rs` asks the same pure
+    // question of its own facts to write its findings, and the caller of
+    // `facts_with_authored_kinds` gets this very value back rather than asking
+    // again. The function is stable under being asked twice (see its header),
+    // which is what makes those safe rather than merely cheap.
+    let authored = authored_table_kinds(&facts, doc);
+
+    // --- the calendar -------------------------------------------------------
+    // Three rungs, most authoritative first. See this function's header for why
+    // the declaration outranks the document and the document outranks the guess.
+    let (date_table, calendar_source) = match model.date_table() {
+        Some(declared) => (Some(declared.to_string()), Some(CalendarSource::Declared)),
+        None => match authored.calendar.clone() {
+            Some(chosen) => (Some(chosen), Some(CalendarSource::Authored)),
+            None => match infer_date_table(model, &is_from) {
+                Some(guessed) => (Some(guessed), Some(CalendarSource::Inferred)),
+                None => (None, None),
+            },
+        },
+    };
+    facts.date_table = date_table;
+    facts.calendar_source = calendar_source;
+
+    // --- what each table is FOR ---------------------------------------------
+    // An accepted authored kind stands in for the derived one WHOLESALE, which
+    // is what makes one expression here cover all five places `infer_table`
+    // branches on kind. A refused one never reaches this map, so a claim the
+    // topology disproves cannot cascade while `validate.rs` reports it.
+    let calendar = facts.date_table.clone();
+    for (name, table_facts) in facts.tables.iter_mut() {
+        table_facts.kind = Some(match authored.accepted.get(name) {
+            Some(kind) => *kind,
+            None => classify_table(
+                name,
+                calendar.as_deref(),
+                is_from.contains(name.as_str()),
+                is_to.contains(name.as_str()),
+            ),
+        });
     }
 
     // --- KPIs, indexed by the measure they mark up --------------------------
@@ -159,7 +325,7 @@ pub fn facts_from_model(model: &DataModel) -> ModelFacts {
         );
     }
 
-    facts
+    (facts, authored)
 }
 
 /// The engine's `KpiStatus` in the strategy layer's own vocabulary.
@@ -173,6 +339,190 @@ fn band_status(status: KpiStatus) -> BandStatus {
         KpiStatus::AtRisk => BandStatus::AtRisk,
         KpiStatus::OnTrack => BandStatus::OnTrack,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The table kinds a person typed
+// ---------------------------------------------------------------------------
+
+/// Why an authored table kind was not applied.
+///
+/// The variants are the only two things that can refuse one. Everything else a
+/// person can type in that dropdown is accepted, because nothing in the model
+/// contradicts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KindRefusal {
+    /// The document claims the model LOOKS THIS TABLE UP — `Dimension` or
+    /// `Calendar` — and no active to-one relationship points at it.
+    ///
+    /// `filters` names a table it is the FROM side of, when there is one. That
+    /// is the readable half of the contradiction: filters flow out of it, so it
+    /// is the grain of the model rather than something the model can slice by.
+    NothingLooksItUp { filters: Option<String> },
+    /// Two tables are authored `Calendar`. `other` names the other one.
+    AmbiguousCalendar { other: String },
+}
+
+/// One authored kind the model disproves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KindConflict {
+    pub table: String,
+    pub authored: TableKind,
+    pub refusal: KindRefusal,
+}
+
+/// What the strategy document's table kinds are allowed to change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthoredKinds {
+    /// Table -> the kind that stands, for every authored kind the topology does
+    /// not disprove.
+    pub accepted: BTreeMap<String, TableKind>,
+    /// The single accepted `Calendar`, if there is exactly one.
+    pub calendar: Option<String>,
+    /// Every authored kind that was refused, in table order.
+    pub conflicts: Vec<KindConflict>,
+}
+
+/// Does this kind assert that the model can look the table up?
+///
+/// `Dimension` and `Calendar` do, and that is a claim a relationship graph can
+/// contradict. `Fact`, `Bridge` and `Other` assert nothing testable — and, as it
+/// happens, nothing behavioural either: `infer_table` branches on `Calendar` and
+/// `Dimension` and treats the other three identically.
+fn claims_a_lookup(kind: TableKind) -> bool {
+    match kind {
+        TableKind::Dimension | TableKind::Calendar => true,
+        TableKind::Fact | TableKind::Bridge | TableKind::Other => false,
+    }
+}
+
+/// A table this one filters, for a message that has to show the contradiction.
+///
+/// The SMALLEST name rather than the first, so the sentence a user reads does
+/// not depend on relationship declaration order.
+fn a_table_it_filters(facts: &ModelFacts, table: &str) -> Option<String> {
+    facts
+        .relationships
+        .iter()
+        .filter(|(from, _)| from.table == table)
+        .map(|(_, to)| to.table.clone())
+        .min()
+}
+
+/// The table kinds the strategy document states, judged against the model.
+///
+/// PURE, and deliberately takes `ModelFacts` rather than a `DataModel`: it is
+/// the same answer whether it is asked while facts are being built (facts.rs) or
+/// while a document is being judged (validate.rs), and both must agree or the
+/// validator would refuse something the run had already applied.
+///
+/// IT IS ALSO STABLE UNDER BEING ASKED TWICE. Nothing it reads — the
+/// relationships and `lookup_tables` — is anything it changes, so calling it on
+/// facts that already carry the accepted kinds returns the same conflicts.
+/// A refusal that quietly disappeared the second time round would be the same
+/// class of defect as the one this whole seam exists to fix.
+///
+/// AN INFERRED ENTRY IS NOT AN AUTHORED ONE. `infer` writes the kind it derived
+/// into every table of the draft, stamped `EntrySource::Inferred`; treating that
+/// copy as a statement would let a document drafted against last month's model
+/// overrule this month's relationship graph, silently and forever. An ABSENT
+/// source counts as authored: a hand-written document has no `source` field, and
+/// somebody typed it.
+pub fn authored_table_kinds(facts: &ModelFacts, doc: &StrategyDoc) -> AuthoredKinds {
+    let mut out = AuthoredKinds::default();
+
+    // `doc.tables` is a BTreeMap, so this list — and therefore `conflicts` — is
+    // in table-name order whatever order the document was written in.
+    let authored: Vec<(&String, TableKind)> = doc
+        .tables
+        .iter()
+        // A kind on a table the model no longer has is already reported as an
+        // orphan entry; it cannot classify anything, so it is not a conflict.
+        .filter(|(name, _)| facts.tables.contains_key(name.as_str()))
+        .filter(|(_, ts)| ts.source != Some(EntrySource::Inferred))
+        .filter_map(|(name, ts)| ts.kind.map(|kind| (name, kind)))
+        .collect();
+
+    // TOPOLOGY IS JUDGED FIRST, AND A REFUSED CALENDAR IS NOT A CANDIDATE.
+    //
+    // Otherwise one impossible entry disables a possible one: `calendar` typed
+    // on the fact table — which is the commonest way to get this wrong, because
+    // a wide fact table carrying an order date does look like a calendar — would
+    // make the real calendar "ambiguous" and leave the model with no time axis
+    // at all, reporting the good entry as the problem.
+    let refused_by_topology: BTreeSet<&str> = authored
+        .iter()
+        .filter(|(name, kind)| {
+            claims_a_lookup(*kind) && !facts.lookup_tables.contains(name.as_str())
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    let calendars: Vec<&str> = authored
+        .iter()
+        .filter(|(name, kind)| {
+            matches!(kind, TableKind::Calendar) && !refused_by_topology.contains(name.as_str())
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    // One emission loop, so `conflicts` comes out in table order whichever
+    // refusal fired.
+    for (name, kind) in &authored {
+        if refused_by_topology.contains(name.as_str()) {
+            out.conflicts.push(KindConflict {
+                table: (*name).clone(),
+                authored: *kind,
+                refusal: KindRefusal::NothingLooksItUp {
+                    filters: a_table_it_filters(facts, name),
+                },
+            });
+            continue;
+        }
+        if matches!(kind, TableKind::Calendar) && calendars.len() > 1 {
+            let other = calendars
+                .iter()
+                .find(|c| **c != name.as_str())
+                .expect("more than one calendar means there is another one");
+            out.conflicts.push(KindConflict {
+                table: (*name).clone(),
+                authored: *kind,
+                refusal: KindRefusal::AmbiguousCalendar {
+                    other: (*other).to_string(),
+                },
+            });
+            continue;
+        }
+        out.accepted.insert((*name).clone(), *kind);
+        if matches!(kind, TableKind::Calendar) {
+            out.calendar = Some((*name).clone());
+        }
+    }
+
+    out
+}
+
+/// The table time runs along once the document has had its say.
+///
+/// `validate.rs` needs this and cannot call `facts_from_model_with`: it is given
+/// facts and a document, never a model. The answer matches the ladder in
+/// `facts_from_model_with` exactly — a DECLARED calendar is never moved, and an
+/// authored one otherwise wins over the guess.
+///
+/// Correct on facts built either way. Given raw facts it applies the document;
+/// given facts already built with the document it returns what they already say,
+/// because an authored calendar is stamped `Authored` rather than `Declared`.
+pub fn effective_date_table<'a>(
+    facts: &'a ModelFacts,
+    authored: &'a AuthoredKinds,
+) -> Option<&'a str> {
+    if facts.calendar_source == Some(CalendarSource::Declared) {
+        return facts.date_table.as_deref();
+    }
+    authored
+        .calendar
+        .as_deref()
+        .or_else(|| facts.date_table.as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -223,8 +573,10 @@ fn names_a_calendar_part(column: &str) -> bool {
 
 /// The table that IS a calendar on a model whose author never marked one.
 ///
-/// WHY THIS EXISTS AT ALL. `mark_date_table` is builder-only; an ordinary
-/// imported star schema arrives with no mark, and without a `date_table` the
+/// WHY THIS EXISTS AT ALL. Marking a date table is a step almost nobody takes —
+/// `bi_model_set_date_table` puts it one dropdown away in the Model Editor's
+/// Settings tab, and an ordinary imported star schema still arrives with no
+/// mark. Without a `date_table` the
 /// whole time-series half of the engine is switched off in silence: there is no
 /// default time axis, so trend, seasonality and change-point facts have nothing
 /// to compute against; `classify_table` never answers `Calendar`, so the role
@@ -474,7 +826,7 @@ fn infer_unit(name: &str, format: Option<&str>) -> Option<Unit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::types::Direction;
+    use super::super::types::{Direction, TableStrategy};
     use bi_engine::{
         sum_measure, Column, DataType, Hierarchy, HierarchyLevel, Kpi, Relationship, StatusBand,
         Table,
@@ -753,7 +1105,8 @@ mod tests {
     /// parts typed `Decimal(38,10)` the way a star schema imported from a
     /// database actually types them. NOTHING marks it.
     ///
-    /// `mark_date_table` is builder-only and no host command sets it, so this —
+    /// Marking a date table is possible from the Model Editor
+    /// (`bi_model_set_date_table`) and is a step almost nobody takes, so this —
     /// not the marked star above — is what an ordinary imported model looks like.
     fn an_unmarked_warehouse_calendar() -> DataModel {
         DataModel::builder()
@@ -863,12 +1216,13 @@ mod tests {
         assert_eq!(facts.tables["dim_date"].kind, Some(TableKind::Dimension));
     }
 
-    #[test]
-    fn two_candidate_calendars_infer_neither_rather_than_picking_one() {
-        // A role-playing pair: order date and ship date, both shaped exactly
-        // like a calendar. WHICH ONE time runs along is a business decision, and
-        // answering it from table declaration order would be the confident-wrong
-        // this whole layer exists to avoid.
+    /// A role-playing pair: order date and ship date, both shaped exactly like a
+    /// calendar, and nothing marked.
+    ///
+    /// The heuristic REFUSES this model (two candidates), which is what makes it
+    /// the fixture for the authored kind as well: it is the shape where a person
+    /// has something to add that no rule can work out for them.
+    fn a_role_playing_pair() -> DataModel {
         let mut builder = DataModel::builder().add_table(
             Table::new(
                 "Sales",
@@ -894,7 +1248,7 @@ mod tests {
                 .unwrap(),
             );
         }
-        let model = builder
+        builder
             .add_relationship(Relationship::many_to_one(
                 "Sales_Order",
                 "Sales",
@@ -911,8 +1265,16 @@ mod tests {
             ))
             .add_measure(sum_measure("Revenue", "Sales", "Amount"))
             .build()
-            .expect("the role-playing fixture builds");
-        let facts = facts_from_model(&model);
+            .expect("the role-playing fixture builds")
+    }
+
+    #[test]
+    fn two_candidate_calendars_infer_neither_rather_than_picking_one() {
+        // A role-playing pair: order date and ship date, both shaped exactly
+        // like a calendar. WHICH ONE time runs along is a business decision, and
+        // answering it from table declaration order would be the confident-wrong
+        // this whole layer exists to avoid.
+        let facts = facts_from_model(&a_role_playing_pair());
         assert_eq!(facts.date_table, None, "ambiguity refuses");
         assert_eq!(facts.calendar_source, None);
         assert_eq!(facts.tables["dim_order_date"].kind, Some(TableKind::Dimension));
@@ -1022,6 +1384,366 @@ mod tests {
             Some(Unit::Currency),
             "the fixture measure carries no format string at all, so the name is \
              the only thing that can answer"
+        );
+    }
+
+    // --- the table kinds a person typed --------------------------------------
+
+    /// A document whose only content is one AUTHORED table kind.
+    fn doc_with_kind(table: &str, kind: TableKind) -> StrategyDoc {
+        let mut doc = StrategyDoc::default();
+        doc.tables.insert(
+            table.to_string(),
+            TableStrategy {
+                kind: Some(kind),
+                reviewed: true,
+                source: Some(EntrySource::Authored),
+                ..Default::default()
+            },
+        );
+        doc
+    }
+
+    #[test]
+    fn the_lookup_tables_are_the_to_one_sides_and_nothing_else() {
+        // The set that DISPROVES an authored kind, so it is worth pinning on its
+        // own: a table is a lookup when something points at it through a to-one
+        // relationship, and the fact table it is pointed at FROM is not one.
+        let facts = facts_from_model(&a_small_star());
+        assert_eq!(
+            facts.lookup_tables,
+            BTreeSet::from(["Product".to_string(), "Date".to_string()])
+        );
+    }
+
+    #[test]
+    fn fact_bridge_and_other_are_taken_as_written_on_the_grain_while_dimension_and_calendar_are_refused_there(
+    ) {
+        // WHAT THIS FUNCTION'S HEADER MEANS BY "INERT". `Sales` is the FROM side
+        // of both relationships in the fixture, so nothing looks it up. Three of
+        // the five kinds assert nothing a join DIRECTION can contradict, so they
+        // are accepted and produce no conflict — and a conflict is the only route
+        // by which a non-calendar kind reaches a reader at all
+        // (`kind_conflict_notes`, model_commands.rs). The two that claim the
+        // model can look the table up are refused on the same fixture.
+        let facts = facts_from_model(&a_small_star());
+        for inert in [TableKind::Fact, TableKind::Bridge, TableKind::Other] {
+            let doc = doc_with_kind("Sales", inert);
+            let judged = authored_table_kinds(&facts, &doc);
+            assert!(
+                judged.conflicts.is_empty(),
+                "'{}' claims nothing the topology can disprove, so it cannot be refused: {:?}",
+                inert.label(),
+                judged.conflicts
+            );
+            assert_eq!(judged.accepted.get("Sales"), Some(&inert));
+            assert_eq!(judged.calendar, None);
+
+            // And it moves nothing else: the calendar the model declared is
+            // still the calendar, so no trend, change point or seasonality
+            // claim in the report can shift because of this entry.
+            let with_doc = facts_from_model_with(&a_small_star(), &doc);
+            assert_eq!(with_doc.date_table.as_deref(), Some("Date"));
+            assert_eq!(with_doc.calendar_source, Some(CalendarSource::Declared));
+            assert_eq!(with_doc.tables["Sales"].kind, Some(inert));
+        }
+        for claims_a_lookup in [TableKind::Dimension, TableKind::Calendar] {
+            let judged =
+                authored_table_kinds(&facts, &doc_with_kind("Sales", claims_a_lookup));
+            assert_eq!(
+                judged.conflicts.len(),
+                1,
+                "'{}' says the model can look 'Sales' up, and the joins say it cannot",
+                claims_a_lookup.label()
+            );
+            assert!(judged.accepted.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_many_to_many_end_is_not_a_lookup_and_cannot_be_authored_a_dimension() {
+        // WHY `lookup_tables` IS STORED RATHER THAN READ BACK OFF
+        // `facts.relationships`. Those pairs keep no cardinality, so a to-side
+        // read off them would count this bridge - and offering a many-to-many
+        // end as an analysis axis is the exact failure `is_to` was written to
+        // avoid. A person authoring `dimension` on it must hit the same refusal.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("BasketId", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Basket",
+                    vec![
+                        Column::new("BasketId", DataType::Int64),
+                        Column::new("Channel", DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::new(
+                "Sales_Basket",
+                "Sales",
+                "BasketId",
+                "Basket",
+                "BasketId",
+                Cardinality::ManyToMany,
+            ))
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the many-to-many fixture builds");
+
+        let facts = facts_from_model(&model);
+        assert!(facts.lookup_tables.is_empty(), "{:?}", facts.lookup_tables);
+
+        let doc = doc_with_kind("Basket", TableKind::Dimension);
+        let judged = authored_table_kinds(&facts, &doc);
+        assert!(judged.accepted.is_empty());
+        assert_eq!(judged.conflicts.len(), 1);
+        assert_eq!(
+            judged.conflicts[0].refusal,
+            // Nothing points at Basket through a to-one relationship, and Basket
+            // filters nothing either — so the message has no join to quote and
+            // says so rather than inventing one.
+            KindRefusal::NothingLooksItUp { filters: None }
+        );
+    }
+
+    #[test]
+    fn an_authored_calendar_wins_where_the_heuristic_refused_to_choose() {
+        // THE CASE THE SEAM EXISTS FOR. Two role-playing date tables, so
+        // `infer_date_table` refuses and the model has no time axis at all. A
+        // person says which one it is; from then on the whole cascade below
+        // `facts.date_table` follows.
+        let model = a_role_playing_pair();
+        assert_eq!(
+            facts_from_model(&model).date_table,
+            None,
+            "the control: with no document there is still no calendar"
+        );
+
+        let doc = doc_with_kind("dim_order_date", TableKind::Calendar);
+        let facts = facts_from_model_with(&model, &doc);
+        assert_eq!(facts.date_table.as_deref(), Some("dim_order_date"));
+        assert_eq!(
+            facts.calendar_source,
+            Some(CalendarSource::Authored),
+            "a chosen calendar is neither a declaration nor a guess, and the \
+             planner's note says which it was"
+        );
+        assert_eq!(facts.tables["dim_order_date"].kind, Some(TableKind::Calendar));
+        assert_eq!(
+            facts.tables["dim_ship_date"].kind,
+            Some(TableKind::Dimension),
+            "the other one is untouched"
+        );
+    }
+
+    #[test]
+    fn an_authored_calendar_on_a_fact_table_is_refused_and_never_becomes_the_calendar() {
+        // Filters flow out of Sales and nothing looks it up. That is not a
+        // heuristic to be overruled; it is the join direction, and the document
+        // does not get to contradict it.
+        let model = a_role_playing_pair();
+        let doc = doc_with_kind("Sales", TableKind::Calendar);
+
+        let judged = authored_table_kinds(&facts_from_model(&model), &doc);
+        assert!(judged.accepted.is_empty());
+        assert_eq!(judged.calendar, None);
+        assert_eq!(judged.conflicts.len(), 1);
+        assert_eq!(judged.conflicts[0].table, "Sales");
+        assert_eq!(
+            judged.conflicts[0].refusal,
+            KindRefusal::NothingLooksItUp {
+                // The SMALLEST of the tables it filters, so the sentence a user
+                // reads does not depend on relationship declaration order.
+                filters: Some("dim_order_date".to_string())
+            }
+        );
+
+        let facts = facts_from_model_with(&model, &doc);
+        assert_eq!(facts.date_table, None, "a refused claim cascades nowhere");
+        assert_eq!(facts.tables["Sales"].kind, Some(TableKind::Fact));
+    }
+
+    #[test]
+    fn two_authored_calendars_apply_neither_and_report_both() {
+        let model = a_role_playing_pair();
+        let mut doc = doc_with_kind("dim_order_date", TableKind::Calendar);
+        doc.tables.insert(
+            "dim_ship_date".to_string(),
+            doc.tables["dim_order_date"].clone(),
+        );
+
+        let judged = authored_table_kinds(&facts_from_model(&model), &doc);
+        assert_eq!(judged.calendar, None);
+        assert!(judged.accepted.is_empty());
+        assert_eq!(
+            judged
+                .conflicts
+                .iter()
+                .map(|c| c.table.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dim_order_date", "dim_ship_date"],
+            "both are refused - picking one would answer a business question by \
+             sort order"
+        );
+
+        let facts = facts_from_model_with(&model, &doc);
+        assert_eq!(facts.date_table, None);
+        assert_eq!(facts.tables["dim_order_date"].kind, Some(TableKind::Dimension));
+        assert_eq!(facts.tables["dim_ship_date"].kind, Some(TableKind::Dimension));
+    }
+
+    #[test]
+    fn an_authored_kind_that_agrees_with_detection_changes_nothing_at_all() {
+        // Whole-struct equality on purpose: "changes nothing" has to mean the
+        // facts are the same facts, not merely that the kind came out the same.
+        let model = a_role_playing_pair();
+        let doc = doc_with_kind("dim_order_date", TableKind::Dimension);
+        assert_eq!(facts_from_model_with(&model, &doc), facts_from_model(&model));
+    }
+
+    #[test]
+    fn an_inferred_entry_is_a_copy_of_the_derivation_and_never_overrules_it() {
+        // `infer` stamps every table it drafts `Inferred`. Honouring that copy
+        // would let a draft taken against an older model pin a kind the current
+        // relationship graph contradicts - the document winning by being stale.
+        let model = a_role_playing_pair();
+        let mut doc = doc_with_kind("dim_order_date", TableKind::Calendar);
+        doc.tables.get_mut("dim_order_date").unwrap().source = Some(EntrySource::Inferred);
+
+        let judged = authored_table_kinds(&facts_from_model(&model), &doc);
+        assert!(judged.accepted.is_empty());
+        assert!(judged.conflicts.is_empty(), "ignored, not refused");
+        assert_eq!(facts_from_model_with(&model, &doc), facts_from_model(&model));
+    }
+
+    #[test]
+    fn a_document_with_no_source_field_at_all_counts_as_authored() {
+        // A hand-written strategy file has no `source`, and somebody typed it.
+        // Only `inferred` is excluded.
+        let model = a_role_playing_pair();
+        let mut doc = doc_with_kind("dim_order_date", TableKind::Calendar);
+        doc.tables.get_mut("dim_order_date").unwrap().source = None;
+        assert_eq!(
+            facts_from_model_with(&model, &doc).date_table.as_deref(),
+            Some("dim_order_date")
+        );
+    }
+
+    #[test]
+    fn the_models_own_mark_outranks_an_authored_calendar_but_the_kind_still_lands() {
+        // TWO HUMAN STATEMENTS, and the model's wins. `mark_date_table` is not
+        // just another opinion: the engine's time intelligence resolves against
+        // it and nothing else, so moving the calendar from the annotation layer
+        // would plot the report along one table while TOTALYTD computed along
+        // another. The authored kind still applies to the table it names - the
+        // person is not wrong that it looks like a calendar - and `validate.rs`
+        // raises the warning that names both.
+        let model = DataModel::builder()
+            .add_table(
+                Table::new(
+                    "Sales",
+                    vec![
+                        Column::new("Amount", DataType::Float64),
+                        Column::new("DateKey", DataType::Int64),
+                        Column::new("KalenderKey", DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "Kalender",
+                    vec![
+                        Column::new("kalender_key", DataType::Int64),
+                        Column::new("datum", DataType::Date),
+                        Column::new("år", DataType::Int32),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                Table::new(
+                    "dim_date",
+                    vec![
+                        Column::new("date_key", DataType::Int64),
+                        Column::new("full_date", DataType::Date),
+                        Column::new("year", DataType::Int32),
+                        Column::new("month", DataType::Int32),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Date",
+                "Sales",
+                "DateKey",
+                "dim_date",
+                "date_key",
+            ))
+            .add_relationship(Relationship::many_to_one(
+                "Sales_Kalender",
+                "Sales",
+                "KalenderKey",
+                "Kalender",
+                "kalender_key",
+            ))
+            .mark_date_table("Kalender")
+            .add_measure(sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the declared-versus-authored fixture builds");
+
+        let facts = facts_from_model_with(&model, &doc_with_kind("dim_date", TableKind::Calendar));
+        assert_eq!(facts.date_table.as_deref(), Some("Kalender"));
+        assert_eq!(facts.calendar_source, Some(CalendarSource::Declared));
+        assert_eq!(facts.tables["Kalender"].kind, Some(TableKind::Calendar));
+        assert_eq!(facts.tables["dim_date"].kind, Some(TableKind::Calendar));
+    }
+
+    #[test]
+    fn judging_the_same_document_twice_reaches_the_same_verdict() {
+        // The validator is handed RAW facts and the run builds OVERRIDDEN ones.
+        // If a refusal quietly disappeared once the accepted kinds were applied,
+        // the two would disagree about the same document - which is the shape of
+        // the defect this whole seam fixes.
+        let model = a_role_playing_pair();
+        let mut doc = doc_with_kind("Sales", TableKind::Calendar);
+        doc.tables.insert(
+            "dim_order_date".to_string(),
+            doc.tables["Sales"].clone(),
+        );
+
+        let raw = authored_table_kinds(&facts_from_model(&model), &doc);
+        let applied = authored_table_kinds(&facts_from_model_with(&model, &doc), &doc);
+        assert_eq!(raw, applied);
+        assert_eq!(raw.conflicts.len(), 1, "{:?}", raw.conflicts);
+        assert_eq!(raw.calendar.as_deref(), Some("dim_order_date"));
+    }
+
+    #[test]
+    fn the_effective_calendar_is_the_one_the_document_produces() {
+        // What `validate.rs` reads, and it has no `DataModel` to work it out
+        // from. Declared stands; otherwise the authored one wins over the guess.
+        let model = an_unmarked_warehouse_calendar();
+        let guessed = facts_from_model(&model);
+        assert_eq!(
+            effective_date_table(&guessed, &AuthoredKinds::default()),
+            Some("dim_date")
+        );
+
+        let doc = doc_with_kind("dim_date", TableKind::Calendar);
+        assert_eq!(
+            effective_date_table(&guessed, &authored_table_kinds(&guessed, &doc)),
+            Some("dim_date")
         );
     }
 }

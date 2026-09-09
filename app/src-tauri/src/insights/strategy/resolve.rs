@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use super::overlap::specificity;
 use super::types::{
     AggregationSpec, Attribute, AttributeSet, Cadence, Direction, Materiality, QualifiedColumn,
-    Rule, Scope, ScopeValue, StrategyDoc, TableKind, Target, Unit,
+    Rule, Scope, ScopeValue, StrategyDoc, SuppressibleFactKind, TableKind, Target, Unit,
 };
 
 // ---------------------------------------------------------------------------
@@ -196,16 +196,29 @@ pub struct TableFacts {
 ///
 /// THE DISTINCTION IS THE WHOLE POINT OF CARRYING IT. A declared date table is
 /// the model author's own statement about what time means in this model; an
-/// inferred one is `facts.rs` reading column names and guessing. Both drive the
-/// same time axis, the same trend facts and the same seasonality claims, so a
-/// reader who cannot tell them apart is being handed a guess wearing a
-/// declaration's clothes — which is the "honest and invisible" failure the
-/// planner's notes exist to prevent.
+/// authored one is the same person saying it in the ANNOTATION layer, where the
+/// engine's own time intelligence cannot hear it; an inferred one is `facts.rs`
+/// reading column names and guessing. All three drive the same time axis, the
+/// same trend facts and the same seasonality claims, so a reader who cannot
+/// tell them apart is being handed a guess wearing a declaration's clothes —
+/// which is the "honest and invisible" failure the planner's notes exist to
+/// prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CalendarSource {
-    /// `mark_date_table`: somebody said so.
+    /// `mark_date_table`: somebody said so IN THE MODEL.
     Declared,
+    /// The strategy document names this table `kind: "calendar"`: somebody said
+    /// so IN THE ANNOTATION LAYER, and the model itself still marks nothing.
+    ///
+    /// A separate variant from `Declared` because the two have different
+    /// consequences and a reader is owed the difference. The engine's time
+    /// intelligence resolves against `model.date_table()` alone
+    /// (`compute/time_intelligence.rs`), so an authored calendar gives the
+    /// insights run a time axis while `TOTALYTD` in the same model still
+    /// refuses. That is worth saying out loud, and it is not a guess, so it
+    /// cannot be folded into `Inferred`.
+    Authored,
     /// `infer_date_table` in facts.rs: nobody said so and the shape fit.
     Inferred,
 }
@@ -216,10 +229,12 @@ pub enum CalendarSource {
 pub struct ModelFacts {
     pub measures: BTreeMap<String, MeasureFacts>,
     pub tables: BTreeMap<String, TableFacts>,
-    /// The calendar: the table the model MARKED, or the one `facts.rs` inferred
-    /// when nobody marked one.
+    /// The calendar, from the highest rung that answered: the table the model
+    /// MARKED, else the one the strategy document AUTHORED as `kind: calendar`,
+    /// else the one `facts.rs` inferred when neither said anything.
     pub date_table: Option<String>,
-    /// Which of those two it was. `None` exactly when `date_table` is `None`.
+    /// Which of those THREE rungs it came from. `None` exactly when `date_table`
+    /// is `None`.
     ///
     /// Separate from `date_table` rather than folded into it because every
     /// existing reader wants only the NAME, and every one of them would have had
@@ -229,6 +244,19 @@ pub struct ModelFacts {
     /// Relationship endpoints, as column pairs. Direction is irrelevant to
     /// reachability, so they are stored unordered.
     pub relationships: Vec<(QualifiedColumn, QualifiedColumn)>,
+    /// Tables the model LOOKS UP: the to-side of at least one active
+    /// many-to-one or one-to-one relationship.
+    ///
+    /// THIS IS THE ONE TOPOLOGICAL FACT `relationships` CANNOT CARRY. The pairs
+    /// above are pushed for every active relationship whatever its cardinality,
+    /// so a to-side read off them counts the ends of a many-to-many — and
+    /// calling one of those a dimension is how a bridge table ends up offered as
+    /// an analysis axis (`facts.rs` has refused it since the beginning, but only
+    /// inside its own function). It is stored because it is what DISPROVES an
+    /// authored `kind`: a table nothing looks up cannot be a dimension or a
+    /// calendar, and `validate.rs` has no `DataModel` to work that out from.
+    #[serde(default)]
+    pub lookup_tables: BTreeSet<String>,
 }
 
 impl ModelFacts {
@@ -415,11 +443,25 @@ pub struct ResolvedMeasure {
     pub unit: Option<Applied<Unit>>,
     pub target: Option<Applied<Target>>,
     pub materiality: Option<Applied<Materiality>>,
+    /// How often this measure is reported on.
+    ///
+    /// RESOLVED AND DISPLAYED, NEVER ACTED ON. Nothing on the run path reads it:
+    /// `model.rs`, `model_commands.rs` and `report.rs` never mention cadence, so
+    /// the planner does not bucket periods by it and no fact is withheld for
+    /// being off-cadence. It is written here (layered like every other
+    /// attribute) and surfaces in the Strategy tab's inheritance list, which is
+    /// where its value is - a person can see what the machine believes and
+    /// correct it. Inside the strategy layer the one Rust reader of a cadence is
+    /// `infer`, which SEEDS the draft from `UsageIndex::cadence_for`; the
+    /// Model Editor CLI prints the stored one (`cli/readers.ts`). Scoped that
+    /// way and no wider: `cadence` is also a live field of the SCRIPTING
+    /// scheduler (`scripting/scheduler.rs`), an unrelated concept that happens
+    /// to share the word.
     pub cadence: Option<Applied<Cadence>>,
     pub priority: Option<Applied<u32>>,
     pub rank_weight: Option<Applied<f64>>,
     /// Fact kinds withheld here, as the union of every rule that reaches.
-    pub suppressed_kinds: BTreeSet<String>,
+    pub suppressed_kinds: BTreeSet<SuppressibleFactKind>,
     pub analysis_dimensions: Vec<QualifiedColumn>,
     pub never_slice_by: Vec<QualifiedColumn>,
     /// PROSE, for the narrative layer only.
@@ -451,8 +493,12 @@ enum Applicability {
 fn constraint_admits(constraint: &ScopeValue, member: &str) -> bool {
     match constraint {
         ScopeValue::Members(allowed) => allowed.iter().any(|m| m == member),
-        // ISO-8601 string comparison; validate.rs enforces the format. An
-        // absent `to` is "onwards", so only the lower bound constrains.
+        // ISO-8601 string comparison, which is exact only because the bounds
+        // are `IsoDate` and that type refuses anything else WHERE IT IS READ.
+        // Not validate.rs, which this line used to name: the
+        // `malformed-date-range` finding was deleted when the newtype took the
+        // job over, and `validate_scope` says so itself. An absent `to` is
+        // "onwards", so only the lower bound constrains.
         ScopeValue::DateRange { from, to } => {
             from.as_str() <= member && to.as_ref().is_none_or(|t| member <= t.as_str())
         }
@@ -738,10 +784,10 @@ pub fn resolve(
     // covering only part of the aggregate still applies: withholding a fact kind
     // for a region it partly describes is the cautious direction, and unlike a
     // direction flip it cannot state anything false.
-    let mut suppressed_kinds: BTreeSet<String> = BTreeSet::new();
+    let mut suppressed_kinds: BTreeSet<SuppressibleFactKind> = BTreeSet::new();
     for v in &views {
         for kind in &v.rule.set.suppress {
-            suppressed_kinds.insert(kind.clone());
+            suppressed_kinds.insert(*kind);
         }
     }
 
@@ -833,6 +879,7 @@ mod tests {
             date_table: None,
             calendar_source: None,
             relationships: vec![(col("Sales", "DeptKey"), col("Dim", "DeptKey"))],
+            lookup_tables: BTreeSet::from(["Dim".to_string()]),
         }
     }
 
@@ -1098,13 +1145,15 @@ mod tests {
     fn suppressed_fact_kinds_are_the_union_of_every_reaching_rule() {
         let facts = facts();
         let mut doc = doc_with_refunds_rule();
-        doc.rules[0].set.suppress = vec!["outlier".into()];
+        // The rule that only PARTLY covers the aggregate still contributes:
+        // suppression unions rather than picks, so Rule 4 does not apply to it.
+        doc.rules[0].set.suppress = vec![SuppressibleFactKind::Contribution];
         doc.rules.push(Rule {
             id: "no-trend".into(),
             measure: "Returns".into(),
             scope: Scope::new(),
             set: AttributeSet {
-                suppress: vec!["trend".into()],
+                suppress: vec![SuppressibleFactKind::Trend],
                 ..Default::default()
             },
             note: None,
@@ -1112,7 +1161,7 @@ mod tests {
         let r = resolve(&facts, &doc, "Returns", &ScopePoint::default());
         assert_eq!(
             r.suppressed_kinds,
-            BTreeSet::from(["outlier".to_string(), "trend".to_string()])
+            BTreeSet::from([SuppressibleFactKind::Contribution, SuppressibleFactKind::Trend])
         );
     }
 

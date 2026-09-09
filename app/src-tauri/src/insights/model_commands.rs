@@ -38,7 +38,11 @@ use super::model::{
     ModelRun, StatusBand, MAX_PERIODS,
 };
 use super::report::{self, ReportGrid, REPORT_SHEET_BASE_NAME};
-use super::strategy::{facts_from_model, resolve, ModelFacts, QualifiedColumn, ScopePoint, StrategyDoc, Target};
+// `facts_with_authored_kinds` is reached through the module rather than the
+// `strategy::` re-export list: the re-exports live in a `mod.rs`, and the seam
+// this needs is one function rather than a new public surface.
+use super::strategy::facts::{facts_with_authored_kinds, AuthoredKinds, KindRefusal};
+use super::strategy::{resolve, ModelFacts, QualifiedColumn, ScopePoint, StrategyDoc, Target};
 use super::wire::WireBundle;
 
 /// The hard ceiling on engine round-trips for one analysis.
@@ -165,6 +169,60 @@ fn shape_of(model: &bi_engine::DataModel, measure: &str) -> Option<DriverShape> 
     model::driver_shape(m.expression(), &lookup)
 }
 
+/// What the run owes a reader about a table kind the document states and the
+/// model disproves.
+///
+/// A SAVED DOCUMENT CAN BE INVALIDATED WITHOUT BEING EDITED. `validate.rs` runs
+/// at the two write gates, so a document that was valid when it was stored is
+/// never re-judged; delete the relationship that made `Product` a lookup, and
+/// the next run silently stops applying `kind: "dimension"` — the same class of
+/// silence as an unreadable strategy document, which this file has always had a
+/// note for. The report says something different and nothing says why.
+///
+/// It names the table, what was authored, and WHAT THE TOPOLOGY SAYS INSTEAD,
+/// because "your kind was ignored" sends a reader to a dropdown that already
+/// shows the value they typed. `facts` is the built facts, so `derived` is the
+/// kind the run actually used.
+fn kind_conflict_notes(facts: &ModelFacts, authored: &AuthoredKinds) -> Vec<String> {
+    let mut out = Vec::new();
+    for conflict in &authored.conflicts {
+        let table = &conflict.table;
+        let kind = conflict.authored.label();
+        let derived = facts
+            .tables
+            .get(table)
+            .and_then(|t| t.kind)
+            .map(|k| k.label())
+            .unwrap_or("unclassified");
+        out.push(match &conflict.refusal {
+            KindRefusal::NothingLooksItUp { filters } => {
+                let topology = match filters {
+                    Some(other) => format!(
+                        "filters flow OUT of it to '{other}', so the model cannot look it up — it \
+                         is the grain"
+                    ),
+                    None => "no active many-to-one or one-to-one relationship points at it, so \
+                             the model cannot look it up"
+                        .to_string(),
+                };
+                format!(
+                    "The strategy document calls '{table}' a '{kind}', and the model's \
+                     relationships disprove it: {topology}. That kind was not applied — this \
+                     report treated '{table}' as a '{derived}'. Change the kind in the Strategy \
+                     tab, or add the relationship that would make it true."
+                )
+            }
+            KindRefusal::AmbiguousCalendar { other } => format!(
+                "The strategy document calls both '{table}' and '{other}' a 'calendar', so \
+                 neither was used: this report treated '{table}' as a '{derived}'. Which table \
+                 time runs along is one decision; make it in the Strategy tab, and give the other \
+                 one a different kind."
+            ),
+        });
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Querying
 // ---------------------------------------------------------------------------
@@ -273,14 +331,28 @@ pub async fn run_model_insights(
 
     let mut notes: Vec<String> = Vec::new();
     let doc = strategy_doc(&base, &mut notes);
-    let facts: ModelFacts = facts_from_model(&base);
+    // WITH THE DOCUMENT, because this is the run. A person who corrected the
+    // table kind in the Strategy tab — the commonest correction being "that
+    // table is the calendar and you missed it" — expects the report to follow,
+    // and the whole cascade below (`date_axis_candidates`, `plan_time_axis`, the
+    // series query, every trend and seasonality claim) hangs off
+    // `facts.date_table`. The DRAFT path deliberately does not do this: see
+    // `facts_from_model`.
+    //
+    // THE VERDICT COMES BACK WITH THE FACTS. Building them already judged every
+    // authored kind; taking the pair is what lets the refusals be REPORTED
+    // without a second pass over `doc.tables`.
+    let (facts, authored_kinds): (ModelFacts, AuthoredKinds) =
+        facts_with_authored_kinds(&base, &doc);
+    notes.extend(kind_conflict_notes(&facts, &authored_kinds));
 
     // TAKE THE PLAN, NOT JUST THE ANSWER. `plan_time_axis` returns the axis AND
     // the note it owes the reader — that the calendar was GUESSED, when nobody
-    // marked one. Calling `choose_time_axis` here would drop that note and let a
-    // guessed calendar carry every trend, change point and seasonality claim in
-    // the report without saying so, which is the same honest-but-invisible
-    // failure `plan_dimensions` already has a note for two calls below.
+    // marked one. Reading `plan_time_axis(...).axis` and discarding the notes
+    // would drop that and let a guessed calendar carry every trend, change point
+    // and seasonality claim in the report without saying so, which is the same
+    // honest-but-invisible failure `plan_dimensions` already has a note for two
+    // calls below.
     let axis_plan = model::plan_time_axis(&doc, &facts, &date_axis_candidates(&base, &facts));
     notes.extend(axis_plan.notes);
     let axis = axis_plan.axis;
@@ -298,9 +370,21 @@ pub async fn run_model_insights(
         notes.push("This model declares no measures to analyse.".to_string());
     }
 
-    // KPI bands, indexed by the measure they mark up. `facts_from_model` keeps
-    // only the thresholds; the band NAMES are what a reader acts on, so they
-    // are read from the model here rather than smuggled into `ModelFacts`.
+    // KPI bands, indexed by the measure they mark up.
+    //
+    // THE REASON TO READ THEM AGAIN IS THE SPELLING, NOT THE CONTENT, and this
+    // comment used to say `facts_from_model` keeps only the thresholds. It does
+    // not: `KpiFacts::bands` carries the STATUS across with each threshold,
+    // under a capitalised comment in facts.rs saying why - thresholds alone
+    // could only ever conclude "higher is better", including for a churn KPI
+    // whose every band says the opposite. What differs is the word. The
+    // resolver's `BandStatus` prints WIRE spellings for a validation message to
+    // quote (`offTrack`), and a report cell needs the DISPLAY words a person
+    // reads ("Off track"), which is what is built here.
+    //
+    // Reusing the resolver's copy would put `offTrack` in the Status column of a
+    // shipped report, so the model is read a second time rather than the wire
+    // word being prettified back into a display one.
     let mut bands_by_measure: std::collections::BTreeMap<String, Vec<StatusBand>> =
         std::collections::BTreeMap::new();
     for kpi in base.kpis() {
@@ -722,6 +806,11 @@ fn unique_report_name(state: &AppState) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The document-blind spelling and the plain document-aware one are used by
+    // tests only; `run_model_insights` itself takes the PAIR, so neither belongs
+    // in the module's own import list.
+    use crate::insights::strategy::facts::facts_from_model_with;
+    use crate::insights::strategy::facts_from_model;
 
     fn grid(columns: &[&str], rows: Vec<Vec<Option<String>>>) -> QueryGrid {
         QueryGrid {
@@ -938,6 +1027,328 @@ mod tests {
         assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
         assert!(plan.notes[0].contains("dim_date"), "{}", plan.notes[0]);
         assert!(plan.notes[0].contains("guessed"), "{}", plan.notes[0]);
+    }
+
+    #[test]
+    fn the_run_builds_its_facts_with_the_strategy_document_in_hand() {
+        // A SOURCE GUARD, and it is here because nothing else can hold this
+        // line. `run_model_insights` needs a live connection and an engine, so
+        // no test in this suite executes it — and that one call is the ENTIRE
+        // wiring of an authored table kind into the run. Swapping it back to
+        // `facts_from_model(&base)` reddened no test whatsoever when this was
+        // measured, while silently returning the product to the defect the seam
+        // was written to fix: a person corrects the calendar, and the report
+        // does not follow.
+        //
+        // The composition it stands in for IS tested, one call down, by
+        // `an_authored_calendar_supplies_the_axis_this_run_walks...`.
+        const SOURCE: &str = include_str!("model_commands.rs");
+        let body = SOURCE
+            .split_once("pub async fn run_model_insights")
+            .expect("this file defines run_model_insights")
+            .1;
+        // Stop at the next top-level section rule, so the tests below — which
+        // legitimately call both spellings — are not part of the evidence.
+        let body = body.split_once("\n// ---").map(|(b, _)| b).unwrap_or(body);
+        assert!(
+            body.contains("facts_with_authored_kinds(&base, &doc)"),
+            "run_model_insights must build its facts WITH the stored strategy \
+             document, or an authored table kind reaches no report"
+        );
+        assert!(
+            !body.contains("facts_from_model(&base)"),
+            "the document-blind spelling is back in run_model_insights"
+        );
+        // AND THE VERDICT MUST BE SAID OUT LOUD. Same reasoning as the line
+        // above and the same reason it can only be held here: a run needs a
+        // live engine, so nothing else can assert that a refused kind reaches
+        // `notes`. Dropping this one call returns the product to a report that
+        // quietly stops obeying a document nobody edited.
+        assert!(
+            body.contains("notes.extend(kind_conflict_notes("),
+            "run_model_insights must push a note for every authored table kind \
+             the topology refuses, or the report silently changes meaning"
+        );
+    }
+
+    /// Sales -> Product (many-to-one) and Sales -> Basket (many-to-MANY), so
+    /// Product is a lookup and Basket is not.
+    fn a_star_with_a_bridge() -> bi_engine::DataModel {
+        bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![
+                        bi_engine::Column::new("Amount", bi_engine::DataType::Float64),
+                        bi_engine::Column::new("ProductKey", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("BasketId", bi_engine::DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                bi_engine::Table::new(
+                    "Product",
+                    vec![
+                        bi_engine::Column::new("ProductKey", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("Category", bi_engine::DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                bi_engine::Table::new(
+                    "Basket",
+                    vec![
+                        bi_engine::Column::new("BasketId", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("Channel", bi_engine::DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(bi_engine::Relationship::many_to_one(
+                "Sales_Product",
+                "Sales",
+                "ProductKey",
+                "Product",
+                "ProductKey",
+            ))
+            .add_relationship(bi_engine::Relationship::new(
+                "Sales_Basket",
+                "Sales",
+                "BasketId",
+                "Basket",
+                "BasketId",
+                bi_engine::Cardinality::ManyToMany,
+            ))
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the bridge fixture builds")
+    }
+
+    fn doc_with_kinds(
+        entries: &[(&str, crate::insights::strategy::TableKind)],
+    ) -> StrategyDoc {
+        use crate::insights::strategy::{EntrySource, TableStrategy};
+        let mut doc = StrategyDoc::default();
+        for (table, kind) in entries {
+            doc.tables.insert(
+                (*table).to_string(),
+                TableStrategy {
+                    kind: Some(*kind),
+                    reviewed: true,
+                    source: Some(EntrySource::Authored),
+                    ..Default::default()
+                },
+            );
+        }
+        doc
+    }
+
+    #[test]
+    fn a_kind_the_topology_refuses_is_reported_to_the_reader_of_the_run() {
+        // THE SILENCE THIS CLOSES. A document that was VALID when it was saved
+        // is invalidated by a later relationship edit — nothing re-validates a
+        // stored document — so the run quietly stops applying a kind and the
+        // report changes meaning with nothing said. `validate.rs` had the only
+        // reader of these refusals, and `validate.rs` does not run here.
+        use crate::insights::strategy::TableKind;
+
+        let model = a_star_with_a_bridge();
+        let doc = doc_with_kinds(&[("Basket", TableKind::Dimension)]);
+        let (facts, authored) = crate::insights::strategy::facts::facts_with_authored_kinds(&model, &doc);
+
+        assert_eq!(authored.conflicts.len(), 1, "{:?}", authored.conflicts);
+        let notes = kind_conflict_notes(&facts, &authored);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("'Basket'"), "{}", notes[0]);
+        assert!(notes[0].contains("'dimension'"), "the authored kind: {}", notes[0]);
+        assert!(
+            notes[0].contains("cannot look it up"),
+            "what the topology says: {}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains("'other'"),
+            "and what the run used instead: {}",
+            notes[0]
+        );
+    }
+
+    #[test]
+    fn two_authored_calendars_are_reported_as_one_undecided_question_per_table() {
+        use crate::insights::strategy::TableKind;
+
+        // BOTH tables must be LOOKUPS, or the topology arm fires first and this
+        // would be testing the other refusal. So the fixture is a star with two
+        // dimensions, and the document calls both of them the calendar.
+        let model = bi_engine::DataModel::builder()
+            .add_table(
+                bi_engine::Table::new(
+                    "Sales",
+                    vec![
+                        bi_engine::Column::new("Amount", bi_engine::DataType::Float64),
+                        bi_engine::Column::new("ProductKey", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("DateKey", bi_engine::DataType::Int64),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                bi_engine::Table::new(
+                    "Product",
+                    vec![
+                        bi_engine::Column::new("ProductKey", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("Category", bi_engine::DataType::String),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_table(
+                bi_engine::Table::new(
+                    "Date",
+                    vec![
+                        bi_engine::Column::new("DateKey", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("full_date", bi_engine::DataType::Date),
+                    ],
+                )
+                .unwrap(),
+            )
+            .add_relationship(bi_engine::Relationship::many_to_one(
+                "Sales_Product",
+                "Sales",
+                "ProductKey",
+                "Product",
+                "ProductKey",
+            ))
+            .add_relationship(bi_engine::Relationship::many_to_one(
+                "Sales_Date", "Sales", "DateKey", "Date", "DateKey",
+            ))
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the two-lookup fixture builds");
+
+        let doc = doc_with_kinds(&[
+            ("Date", TableKind::Calendar),
+            ("Product", TableKind::Calendar),
+        ]);
+        let (facts, authored) = crate::insights::strategy::facts::facts_with_authored_kinds(&model, &doc);
+        assert_eq!(authored.calendar, None, "ambiguity applies neither");
+        let notes = kind_conflict_notes(&facts, &authored);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.iter().all(|n| n.contains("'calendar'")), "{notes:?}");
+        assert!(notes[0].contains("'Date'") && notes[0].contains("'Product'"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn a_document_whose_kinds_all_stand_produces_no_note_at_all() {
+        // The control. A note per run for a document that is entirely correct
+        // would be noise, and noise is how a real note stops being read.
+        use crate::insights::strategy::TableKind;
+
+        let model = a_star_with_a_bridge();
+        let doc = doc_with_kinds(&[("Product", TableKind::Dimension), ("Sales", TableKind::Fact)]);
+        let (facts, authored) = crate::insights::strategy::facts::facts_with_authored_kinds(&model, &doc);
+        assert!(authored.conflicts.is_empty(), "{:?}", authored.conflicts);
+        assert!(kind_conflict_notes(&facts, &authored).is_empty());
+    }
+
+    #[test]
+    fn an_authored_calendar_supplies_the_axis_this_run_walks_and_says_it_was_chosen() {
+        // THE RUN PATH, END TO END. Two role-playing date tables: the heuristic
+        // refuses to pick one, so this model has no time axis and no trend,
+        // change-point or seasonality fact at all. A person picks one in the
+        // Strategy tab — and until `run_model_insights` built its facts WITH the
+        // document, that correction changed nothing whatsoever.
+        use crate::insights::strategy::{EntrySource, TableKind, TableStrategy};
+
+        let mut builder = bi_engine::DataModel::builder().add_table(
+            bi_engine::Table::new(
+                "Sales",
+                vec![
+                    bi_engine::Column::new("Amount", bi_engine::DataType::Float64),
+                    bi_engine::Column::new("OrderDateKey", bi_engine::DataType::Int64),
+                    bi_engine::Column::new("ShipDateKey", bi_engine::DataType::Int64),
+                ],
+            )
+            .unwrap(),
+        );
+        for name in ["dim_order_date", "dim_ship_date"] {
+            builder = builder.add_table(
+                bi_engine::Table::new(
+                    name,
+                    vec![
+                        bi_engine::Column::new("date_key", bi_engine::DataType::Int64),
+                        bi_engine::Column::new("full_date", bi_engine::DataType::Date),
+                        bi_engine::Column::new("year", bi_engine::DataType::Int32),
+                        bi_engine::Column::new("month", bi_engine::DataType::Int32),
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        let model = builder
+            .add_relationship(bi_engine::Relationship::many_to_one(
+                "Sales_Order",
+                "Sales",
+                "OrderDateKey",
+                "dim_order_date",
+                "date_key",
+            ))
+            .add_relationship(bi_engine::Relationship::many_to_one(
+                "Sales_Ship",
+                "Sales",
+                "ShipDateKey",
+                "dim_ship_date",
+                "date_key",
+            ))
+            .add_measure(bi_engine::sum_measure("Revenue", "Sales", "Amount"))
+            .build()
+            .expect("the role-playing fixture builds");
+
+        // The control: with no document, nothing here can be a time axis.
+        let raw = facts_from_model(&model);
+        assert_eq!(raw.date_table, None, "ambiguity refuses");
+        assert!(date_axis_candidates(&model, &raw).is_empty());
+
+        let mut doc = StrategyDoc::default();
+        doc.tables.insert(
+            "dim_order_date".to_string(),
+            TableStrategy {
+                kind: Some(TableKind::Calendar),
+                reviewed: true,
+                source: Some(EntrySource::Authored),
+                ..Default::default()
+            },
+        );
+
+        let facts = facts_from_model_with(&model, &doc);
+        assert_eq!(facts.date_table.as_deref(), Some("dim_order_date"));
+        let candidates = date_axis_candidates(&model, &facts);
+        assert_eq!(
+            candidates,
+            vec![QualifiedColumn::new("dim_order_date", "full_date")]
+        );
+
+        let plan = model::plan_time_axis(&doc, &facts, &candidates);
+        assert_eq!(
+            plan.axis,
+            Some(QualifiedColumn::new("dim_order_date", "full_date"))
+        );
+        // A CHOICE ANNOUNCES ITSELF TOO, and not as a guess: the model still
+        // marks no date table, so the report has a time axis while the model's
+        // own time-intelligence measures do not.
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        assert!(
+            plan.notes[0].contains("strategy document"),
+            "{}",
+            plan.notes[0]
+        );
+        assert!(
+            !plan.notes[0].contains("guessed"),
+            "a chosen calendar is not a guess: {}",
+            plan.notes[0]
+        );
     }
 
     #[test]

@@ -48,8 +48,9 @@ use insights::{narrate, timeseries};
 
 use super::strategy::resolve::CalendarSource;
 use super::strategy::{
-    Additivity, AggregationSpec, Attribute, AttrSource, Direction, Materiality, ModelFacts,
-    QualifiedColumn, ResolvedMeasure, StrategyDoc, Target,
+    Additivity, AggregationSpec, Attribute, AttrSource, BandPlacement, BandSide, Direction,
+    Materiality, ModelFacts, QualifiedColumn, ResolvedMeasure, StrategyDoc, SuppressibleFactKind,
+    Target,
 };
 use super::wire::{
     attr_source_id, BundleSource, EvidenceKind, WireBundle, WireEvidence, WireInsight,
@@ -292,6 +293,15 @@ pub enum ModelFactKind {
         delta: f64,
         pct: Option<f64>,
         favourability: Option<Favourability>,
+        /// Where the LANDED value sits relative to the band that judged it, and
+        /// the band itself. `None` under every direction but `targetBand`.
+        ///
+        /// Without it the sentence for a band measure says "which is worse" and
+        /// stops, and the reader has to open the strategy document to learn
+        /// whether the number was too high or too low - the one thing they need
+        /// in order to do anything about it. The band was already computed to
+        /// decide `favourability`; this keeps the side it threw away.
+        band: Option<BandPlacement>,
     },
     Variance {
         measure: String,
@@ -301,8 +311,15 @@ pub enum ModelFactKind {
         delta: f64,
         pct: Option<f64>,
         /// The KPI band the value/target ratio falls in, when the model bands it.
+        ///
+        /// A DIFFERENT CONCEPT FROM `band` below, and they must not be conflated:
+        /// this is the model KPI's own status scale (`onTrack`/`atRisk`), read
+        /// off `value / target`, while `band` is the strategy document's
+        /// `Target::Band` read off the value itself.
         status: Option<String>,
         favourability: Option<Favourability>,
+        /// Where the value sits relative to the strategy's `targetBand`.
+        band: Option<BandPlacement>,
     },
     DefinitionalDriver {
         measure: String,
@@ -352,6 +369,28 @@ impl ModelFactKind {
             ModelFactKind::Contribution { .. } => "contribution".to_string(),
             ModelFactKind::MemberMove { .. } => "memberMove".to_string(),
             ModelFactKind::Series { inner } => inner.kind_key().to_string(),
+        }
+    }
+
+    /// The `suppress` entry that withholds this fact, when one can.
+    ///
+    /// TYPED, and asked as an exhaustive match on the model's own variants. A
+    /// `Series` fact arrives as one of `core/insights`' twenty `FactKind`s and
+    /// only three of those are ever wrapped by a run, so the honest answer there
+    /// is "look the key up and say `None` if the vocabulary has no word for it"
+    /// - not a second hand-written list of three, which is exactly the drift
+    /// `every_fact_kind_a_run_can_emit_is_spelled_in_the_suppressible_list`
+    /// exists to catch.
+    pub fn suppressible_kind(&self) -> Option<SuppressibleFactKind> {
+        match self {
+            ModelFactKind::Change { .. } => Some(SuppressibleFactKind::Change),
+            ModelFactKind::Variance { .. } => Some(SuppressibleFactKind::Variance),
+            ModelFactKind::DefinitionalDriver { .. } => {
+                Some(SuppressibleFactKind::DefinitionalDriver)
+            }
+            ModelFactKind::Contribution { .. } => Some(SuppressibleFactKind::Contribution),
+            ModelFactKind::MemberMove { .. } => Some(SuppressibleFactKind::MemberMove),
+            ModelFactKind::Series { inner } => SuppressibleFactKind::from_wire(inner.kind_key()),
         }
     }
 
@@ -522,9 +561,19 @@ pub fn clears_materiality(materiality: Option<&Materiality>, first: f64, delta: 
 
 /// Which way is good, applied to a movement.
 ///
-/// `TargetBand` is deliberately absent: "good means inside a band" cannot be
-/// decided from a delta, only from where the value LANDED, so a change fact
-/// under it carries no favourability and the variance fact answers instead.
+/// `TargetBand` answers `None` HERE and is decided one level up: "good means
+/// inside a band" cannot be read off a delta, only off where the value LANDED,
+/// and this function is handed only the delta.
+///
+/// THE HEADER THAT USED TO SIT HERE WAS WRONG IN BOTH HALVES, and it is worth
+/// naming them because each sends a reader somewhere that does not exist. It
+/// said a Change fact under a band carries no favourability: `facts_for_measure`
+/// calls `favourability_at`, which resolves `TargetBand` through
+/// `band_placement`, so a Change fact under a band carries `Better` or `Worse`
+/// like any other. And it said "the variance fact answers instead": a
+/// `Target::Band` never yields a `target_value` - `model_commands.rs` resolves a
+/// band and a KPI target to `None` - so NO Variance fact is ever built under a
+/// band and there was never a second fact to answer.
 pub fn favourability_of(direction: Direction, delta: f64) -> Option<Favourability> {
     if delta == 0.0 {
         return Some(Favourability::Neutral);
@@ -563,13 +612,12 @@ pub fn resolved_favourability(resolved: &ResolvedMeasure, delta: f64) -> Option<
 /// Favourability WHERE THE VALUE LANDED, which is the only question a
 /// `targetBand` direction can answer.
 ///
-/// THE BAND HAD NO PRODUCTIVE CONSUMER AT ALL. `favourability_of` reads a delta
-/// and correctly declines the band; the comment above it says "the variance fact
-/// answers instead", and that was not true - a band target resolves to no
-/// `target_value`, so no variance fact is ever built and the band decided
-/// nothing anywhere in a shipped run. A caller that HAS the landed value (every
-/// fact below does) can decide it here, and the bounds' inclusivity is spent on
-/// exactly this call.
+/// THE BAND HAD NO PRODUCTIVE CONSUMER AT ALL until this function existed.
+/// `favourability_of` reads a delta and correctly declines the band, and nothing
+/// else looked at one: a band target resolves to no `target_value`, so no
+/// variance fact is ever built under it and the band decided nothing anywhere in
+/// a shipped run. A caller that HAS the landed value (every fact below does) can
+/// decide it here, and the bounds' inclusivity is spent on exactly this call.
 ///
 /// Everything else falls through to the delta reading, unchanged.
 pub fn favourability_at(
@@ -582,19 +630,36 @@ pub fn favourability_at(
     }
     let is_band = resolved.direction.as_ref().map(|d| d.value) == Some(Direction::TargetBand);
     if is_band {
-        let band = resolved.target.as_ref().and_then(|t| t.value.as_band());
-        // A band direction with no band, or no observed value, still carries no
-        // judgement — and validate.rs refuses the first of those outright.
-        return match (band, value) {
-            (Some(band), Some(v)) => Some(if band.contains(v) {
-                Favourability::Better
-            } else {
-                Favourability::Worse
-            }),
-            _ => None,
-        };
+        // ONE band predicate for the whole file: `side` answers inside/below/
+        // above and `contains` is the inside half of it, so the inclusivity
+        // flags cannot be read one way here and another way in the sentence.
+        return band_placement(resolved, value).map(|p| match p.side {
+            BandSide::Inside => Favourability::Better,
+            BandSide::Below | BandSide::Above => Favourability::Worse,
+        });
     }
     resolved_favourability(resolved, delta)
+}
+
+/// Where a landed value sits relative to the band that judges it.
+///
+/// `None` unless the measure really resolves to `targetBand` here, a band is
+/// actually declared at this point, the direction is not suppressed, and the
+/// caller has a value - which is exactly the set of conditions under which the
+/// band decides anything at all.
+pub fn band_placement(resolved: &ResolvedMeasure, value: Option<f64>) -> Option<BandPlacement> {
+    if resolved.suppression_of(Attribute::Direction).is_some() {
+        return None;
+    }
+    if resolved.direction.as_ref().map(|d| d.value) != Some(Direction::TargetBand) {
+        return None;
+    }
+    let bounds = resolved.target.as_ref().and_then(|t| t.value.as_band())?;
+    let v = value?;
+    Some(BandPlacement {
+        side: bounds.side(v),
+        bounds,
+    })
 }
 
 /// The additivity that actually applies along `dimension`, and whether the
@@ -976,34 +1041,32 @@ pub fn plan_time_axis(
     let mut notes: Vec<String> = Vec::new();
     if let Some(axis) = axis.as_ref() {
         let on_the_calendar = facts.date_table.as_deref() == Some(axis.table.as_str());
-        if on_the_calendar && facts.calendar_source == Some(CalendarSource::Inferred) {
-            notes.push(format!(
-                "Time runs along {}, and nobody said it should: no table in this model is marked \
-                 as its date table, so {} was guessed to be the calendar from its column names. \
-                 Every trend, change point and seasonality claim below rests on that guess. Mark \
-                 the date table in the Model Editor to make it a decision.",
-                axis, axis.table
-            ));
+        if on_the_calendar {
+            match facts.calendar_source {
+                Some(CalendarSource::Inferred) => notes.push(format!(
+                    "Time runs along {}, and nobody said it should: no table in this model is \
+                     marked as its date table, so {} was guessed to be the calendar from its \
+                     column names. Every trend, change point and seasonality claim below rests on \
+                     that guess. Mark the date table in the Model Editor to make it a decision.",
+                    axis, axis.table
+                )),
+                // A CHOICE, NOT A GUESS — and still worth saying, for a reason
+                // the guessed case does not have: the MODEL marks no date table,
+                // so the engine's own time intelligence (TOTALYTD, DATEADD)
+                // still refuses to run. A reader who sees a trend here and no
+                // year-to-date measure anywhere deserves to know why.
+                Some(CalendarSource::Authored) => notes.push(format!(
+                    "Time runs along {}, because the strategy document says {} is the calendar. \
+                     The model itself marks no date table, so this report has a time axis while \
+                     the model's own time-intelligence measures do not. Mark {} as the date table \
+                     in the Model Editor to give them one too.",
+                    axis, axis.table, axis.table
+                )),
+                Some(CalendarSource::Declared) | None => {}
+            }
         }
     }
     TimeAxisPlan { axis, notes }
-}
-
-/// The axis alone, for a caller that has no `notes` to put the provenance in.
-///
-/// WHAT THIS DROPS. `plan_time_axis` is the whole function; this is the half of
-/// it that answers "which column", and it silently discards the half that says
-/// where the calendar came from. `run_model_insights` in `model_commands.rs` is
-/// the one production caller and it HAS a `notes` vector two lines above the
-/// call — it should take the plan and `notes.extend(plan.notes)`, exactly as it
-/// already does for `plan_dimensions`. Until it does, a guessed calendar drives
-/// a real report without saying so.
-pub fn choose_time_axis(
-    doc: &StrategyDoc,
-    facts: &ModelFacts,
-    date_columns: &[QualifiedColumn],
-) -> Option<QualifiedColumn> {
-    plan_time_axis(doc, facts, date_columns).axis
 }
 
 /// What came of planning one measure's dimensions.
@@ -1053,8 +1116,24 @@ pub fn plan_dimensions(
 
     for dimension in &resolved.analysis_dimensions {
         if resolved.never_slice_by.contains(dimension) {
-            // A deliberate exclusion, not a failure. It is named in the
-            // document the reader can open, so it needs no note.
+            // THE DOCUMENT CONTRADICTS ITSELF, AND THE READER WAS NOT TOLD.
+            //
+            // This branch used to say "a deliberate exclusion, not a failure -
+            // it is named in the document the reader can open, so it needs no
+            // note", and that reasoning has the report's reader confused with
+            // the document's author. The person holding the report does not have
+            // the strategy file open; they see a breakdown section that is
+            // simply not there, which is the exact failure this function's own
+            // header exists to prevent, reached through the one path the header
+            // did not cover. `validate` refuses a document that says both things
+            // about one column, so this is the note for the hand-edited file
+            // that reached the run path anyway.
+            plan.notes.push(format!(
+                "{} was not sliced by {}: its strategy lists that column as an analysis \
+                 dimension AND forbids slicing by it. The prohibition wins; remove one of the \
+                 two statements to settle which was meant.",
+                resolved.measure, dimension
+            ));
             continue;
         }
         if !facts.has_column(dimension) {
@@ -1112,6 +1191,26 @@ fn with_pct(pct: Option<f64>, locale: &LocaleSettings) -> String {
     }
 }
 
+/// " 160,000 is above the band [90000, 140000]."
+///
+/// THE BAND WAS ABSENT FROM THE WHOLE OUTPUT, not just from this sentence. A
+/// `targetBand` measure produces no variance fact at all (a band target maps to
+/// no `target_value`), and the Change fact's provenance carried only direction
+/// and materiality - so the number that decided "worse" appeared nowhere a
+/// reader could see it, and "worse" alone does not say whether to ship more or
+/// ship less.
+fn band_clause(band: Option<BandPlacement>, value: f64, locale: &LocaleSettings) -> String {
+    match band {
+        Some(p) => format!(
+            " {} is {} the band {}.",
+            number::num(value, locale),
+            p.side.word(),
+            p.bounds.label()
+        ),
+        None => String::new(),
+    }
+}
+
 /// One sentence per fact, in the reader's number formatting.
 pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
     match kind {
@@ -1124,6 +1223,7 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
             delta,
             pct,
             favourability,
+            band,
         } => {
             let judgement = match favourability {
                 Some(f) => format!(", which is {}", f.word()),
@@ -1132,7 +1232,7 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
                 None => ", with no favourability claim".to_string(),
             };
             format!(
-                "{} {} from {} in {} to {} in {}{}{}.",
+                "{} {} from {} in {} to {} in {}{}{}.{}",
                 measure,
                 moved(*delta, locale),
                 number::num(*first, locale),
@@ -1140,7 +1240,8 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
                 number::num(*last, locale),
                 last_label,
                 with_pct(*pct, locale),
-                judgement
+                judgement,
+                band_clause(*band, *last, locale)
             )
         }
         ModelFactKind::Variance {
@@ -1152,8 +1253,10 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
             pct,
             status,
             favourability,
+            band,
         } => {
-            let band = match status {
+            // The KPI's own status scale, which is NOT the strategy band below.
+            let kpi_status = match status {
                 Some(s) => format!(" Status: {}.", s),
                 None => String::new(),
             };
@@ -1162,7 +1265,7 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
                 None => ", with no favourability claim".to_string(),
             };
             format!(
-                "{} was {} in {} against a target of {}, {} {}{}{}.{}",
+                "{} was {} in {} against a target of {}, {} {}{}{}.{}{}",
                 measure,
                 number::num(*value, locale),
                 period_label,
@@ -1171,7 +1274,8 @@ pub fn narrate_fact(kind: &ModelFactKind, locale: &LocaleSettings) -> String {
                 number::num(delta.abs(), locale),
                 with_pct(*pct, locale),
                 judgement,
-                band
+                kpi_status,
+                band_clause(*band, *value, locale)
             )
         }
         ModelFactKind::DefinitionalDriver {
@@ -1382,6 +1486,30 @@ pub struct MeasureRun {
     pub priority: Option<u32>,
 }
 
+/// Every `core/insights` series builder a run applies, as DATA rather than as
+/// three inline calls.
+///
+/// WHY A LIST. A `Series` fact reaches a `suppress` entry only if
+/// `SuppressibleFactKind::from_wire` has a word for its `kind_key`;
+/// `suppressible_kind` answers `None` when it does not, and the filter in
+/// `facts_for_measure` uses `is_some_and`, so an unnamed kind is silently
+/// UNSUPPRESSIBLE - a consultant writes the `suppress` entry, the validator
+/// accepts it, and the fact appears in the report anyway. The test that diffs
+/// the emitted kinds against the vocabulary hand-typed the same three builders
+/// this function called inline, so a fourth call escaped the diff entirely: two
+/// lists, one of them a copy, and the copy is the one the guard read.
+///
+/// The test now builds its samples by RUNNING this list, so a fourth builder is
+/// inside the diff from the moment it is added here. The name is carried only so
+/// that test can say which builder produced nothing on its probes.
+const SERIES_BUILDERS: &[(&str, fn(&timeseries::Series) -> Vec<FactKind>)] = &[
+    ("trend", |s| timeseries::trend_fact(s).into_iter().collect()),
+    ("change points", timeseries::change_point_facts),
+    ("seasonality", |s| {
+        timeseries::seasonality_fact(s).into_iter().collect()
+    }),
+];
+
 /// Every fact one measure supports, plus its row of the report.
 pub fn facts_for_measure(
     observation: &MeasureObservation,
@@ -1432,6 +1560,7 @@ pub fn facts_for_measure(
             // direction that is the only thing that can be judged, and it is
             // what makes a declared band decide something in a shipped run.
             let favourability = favourability_at(resolved, Some(last), delta);
+            let band = band_placement(resolved, Some(last));
             run.favourability = favourability;
             let mut provenance = direction_provenance(resolved);
             if let Some(m) = resolved.materiality.as_ref() {
@@ -1440,6 +1569,16 @@ pub fn facts_for_measure(
                     materiality_word(&m.value),
                     &m.source,
                 ));
+            }
+            // THE BAND IS PART OF THE ANSWER, so it belongs in the answer's
+            // provenance. A Change fact never carried its target because a
+            // change is about a movement - but under `targetBand` the band is
+            // precisely what decided "better" or "worse", and the why-panel was
+            // showing the direction that used it and never the band itself.
+            if band.is_some() {
+                if let Some(t) = resolved.target.as_ref() {
+                    provenance.push(attr("target", target_word(&t.value), &t.source));
+                }
             }
             kinds.push((
                 ModelFactKind::Change {
@@ -1451,6 +1590,7 @@ pub fn facts_for_measure(
                     delta,
                     pct,
                     favourability,
+                    band,
                 },
                 provenance,
                 vec![series_evidence.clone()],
@@ -1459,6 +1599,25 @@ pub fn facts_for_measure(
     }
 
     // --- Variance against the resolved target -------------------------------
+    //
+    // IT DOES NOT TOUCH `run.favourability`, AND THAT IS THE ROW/SENTENCE SPLIT
+    // A READER TRIPS OVER. `run.favourability` is written in the Change branch
+    // above and nowhere else, so on a point whose MOVEMENT is below the
+    // materiality floor while its LEVEL is judged against a target, the report
+    // ROW's Status cell reads "No claim" (what `favourability_word` in
+    // report.rs answers for `None`, unless a KPI band fills the cell instead
+    // - and NOT written here as a call, because a bare name before a bracket
+    // in a body this reachable is what `called_names` in
+    // `document_store_census_tests` mistakes for an edge) while the variance
+    // SENTENCE right next to it calls the measure better or worse in so many
+    // words. The shipped fixture has exactly such a point - the last inline test
+    // in `tests/fixtures/model/sales_star_strategy.json`, Revenue moving 5000
+    // against a floor of 15000 and sitting 95000 under a target of 1.5M.
+    //
+    // Neither half is a bug: the row summarises the MOVEMENT and the fact list
+    // carries every judgement. It is written down because "the report says
+    // nothing here" has been inferred from the row three times, and each time it
+    // produced a harness that scored a judged point as silent.
     if let (Some(target), Some(value)) = (observation.target_value, run.value) {
         if target != 0.0 {
             let delta = value - target;
@@ -1479,6 +1638,7 @@ pub fn facts_for_measure(
                     pct: pct_change(target, value),
                     status,
                     favourability: favourability_at(resolved, Some(value), delta),
+                    band: band_placement(resolved, Some(value)),
                 },
                 provenance,
                 vec![series_evidence.clone()],
@@ -1556,9 +1716,9 @@ pub fn facts_for_measure(
         &observation.values,
     );
     let mut series_facts: Vec<FactKind> = Vec::new();
-    series_facts.extend(timeseries::trend_fact(&series));
-    series_facts.extend(timeseries::change_point_facts(&series));
-    series_facts.extend(timeseries::seasonality_fact(&series));
+    for (_, build) in SERIES_BUILDERS {
+        series_facts.extend(build(&series));
+    }
     for inner in series_facts {
         kinds.push((
             ModelFactKind::Series { inner },
@@ -1570,7 +1730,10 @@ pub fn facts_for_measure(
     // --- Suppression, scoring, narration ------------------------------------
     let mut facts: Vec<ModelFact> = Vec::new();
     for (kind, provenance, evidence) in kinds {
-        if resolved.suppressed_kinds.contains(&kind.kind_key()) {
+        if kind
+            .suppressible_kind()
+            .is_some_and(|k| resolved.suppressed_kinds.contains(&k))
+        {
             continue;
         }
         let text = narrate_fact(&kind, locale);
@@ -1834,7 +1997,7 @@ mod tests {
     use super::*;
     use crate::insights::strategy::{
         AggregationSpec, Applied, MeasureFacts, ModelStrategy, Rule, Scope, ScopeValue,
-        Suppression, TableFacts, SUPPRESSIBLE_FACT_KINDS,
+        Suppression, TableFacts,
     };
     use std::collections::BTreeMap;
 
@@ -2443,13 +2606,20 @@ mod tests {
 
     #[test]
     fn no_time_axis_is_none_rather_than_an_invented_ordering() {
+        // THROUGH `plan_time_axis`, BECAUSE THAT IS THE ONLY WAY TO ASK, and
+        // the only way anything else asks: `model_commands.rs` takes the whole
+        // plan and extends `notes` from it. There is deliberately no
+        // axis-only convenience wrapper for a test to reach for - one existed,
+        // it threw the plan's notes away, and its only callers were assertions
+        // like this one, so the guessed-calendar note it dropped was invisible
+        // to every guard in the file. Read the axis off the plan.
         let mut facts = star_facts();
         facts.date_table = None;
         let doc = StrategyDoc {
             version: 1,
             ..StrategyDoc::default()
         };
-        assert_eq!(choose_time_axis(&doc, &facts, &[]), None);
+        assert_eq!(plan_time_axis(&doc, &facts, &[]).axis, None);
 
         // A declared axis wins even when a date table exists.
         let doc = StrategyDoc {
@@ -2461,7 +2631,7 @@ mod tests {
             ..StrategyDoc::default()
         };
         assert_eq!(
-            choose_time_axis(&doc, &star_facts(), &[QualifiedColumn::new("Date", "Date")]),
+            plan_time_axis(&doc, &star_facts(), &[QualifiedColumn::new("Date", "Date")]).axis,
             Some(QualifiedColumn::new("Date", "Month"))
         );
     }
@@ -2732,87 +2902,216 @@ mod tests {
     #[test]
     fn a_suppressed_fact_kind_is_not_emitted() {
         let mut r = resolved("Revenue");
-        r.suppressed_kinds = ["change".to_string()].into_iter().collect();
+        r.suppressed_kinds = [SuppressibleFactKind::Change].into_iter().collect();
         let (facts, _) = facts_for_measure(&observation("Revenue", 100.0, 200.0), &r, &locale());
         assert!(!kinds_of(&facts).contains(&"change".to_string()));
     }
 
-    /// One fact of every kind a run can emit.
+    #[test]
+    fn a_series_fact_kind_the_suppress_vocabulary_has_no_word_for_is_simply_unsuppressible() {
+        // The `Series` arm looks a wire key UP rather than carrying its own list
+        // of three. A `core/insights` fact a model run never wraps - `outliers`
+        // is the one that started all this - therefore reports NO suppressible
+        // kind, instead of a plausible-looking key nothing matches.
+        let unwrapped = ModelFactKind::Series {
+            inner: FactKind::Duplicates {
+                rows: 3,
+                example_row: 7,
+            },
+        };
+        assert_eq!(unwrapped.kind_key(), "duplicates");
+        assert_eq!(unwrapped.suppressible_kind(), None);
+        assert_eq!(
+            ModelFactKind::Series {
+                inner: FactKind::Trend {
+                    subject: Subject::measure("Revenue"),
+                    slope_per_step: 1.0,
+                    r2: 0.9,
+                    pct_change: 0.2,
+                    first: 100.0,
+                    last: 120.0,
+                    n: 12,
+                    direction: insights::types::Direction::Rising,
+                },
+            }
+            .suppressible_kind(),
+            Some(SuppressibleFactKind::Trend),
+            "and the three a run really does wrap are named"
+        );
+    }
+
+    /// Two sets of period values that between them fire every builder in
+    /// `SERIES_BUILDERS`.
     ///
-    /// The three `Series` entries are exactly the three `facts_for_measure`
-    /// builds - trend, change point, seasonality - and no others: nothing else
-    /// in this file wraps a `FactKind`, so nothing else can reach a `suppress`
-    /// list.
+    /// A ramp trends and (because binary segmentation splits a straight line
+    /// too) also change-points; a sixty-point sine over a twelve-period cycle is
+    /// the seasonality case. A fourth builder that neither of these fires is not
+    /// a hole the sample list can hide - `one_of_every_fact_kind_a_run_can_emit`
+    /// asserts every builder produced something and names the one that did not.
+    fn probe_values() -> Vec<Vec<f64>> {
+        let ramp: Vec<f64> = (0..30).map(|i| 100.0 + 5.0 * i as f64).collect();
+        let cycle: Vec<f64> = (0..60)
+            .map(|i| 100.0 + 10.0 * (std::f64::consts::TAU * i as f64 / 12.0).sin())
+            .collect();
+        vec![ramp, cycle]
+    }
+
+    /// The labels `facts_for_measure` would be handed beside those values.
+    fn probe_labels(values: &[f64]) -> Vec<String> {
+        (1..=values.len()).map(|i| format!("P{i}")).collect()
+    }
+
+    /// A fieldless mirror of `ModelFactKind`, so "every variant a run can emit"
+    /// is a SET rather than a hand-counted array of flags.
+    ///
+    /// WHAT THE COMPILER PROVES AND WHAT IT DOES NOT, stated because the
+    /// previous spelling implied more than it delivered. `Variant::of` is an
+    /// exhaustive match on `ModelFactKind`, so a seventh variant cannot compile
+    /// until it is named here; `ALL` is then the one hand-written list left, and
+    /// a variant named in `of` but missing from `ALL` is NOT caught. The old
+    /// spelling was `let mut seen = [false; 6]`, where the same omission could
+    /// be answered by editing a number - and where an arm mapped to an
+    /// out-of-range index panicked instead of failing an assertion that says
+    /// what is wrong.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Variant {
+        Change,
+        Variance,
+        DefinitionalDriver,
+        Contribution,
+        MemberMove,
+        Series,
+    }
+
+    impl Variant {
+        const ALL: &'static [Variant] = &[
+            Variant::Change,
+            Variant::Variance,
+            Variant::DefinitionalDriver,
+            Variant::Contribution,
+            Variant::MemberMove,
+            Variant::Series,
+        ];
+
+        fn of(kind: &ModelFactKind) -> Variant {
+            match kind {
+                ModelFactKind::Change { .. } => Variant::Change,
+                ModelFactKind::Variance { .. } => Variant::Variance,
+                ModelFactKind::DefinitionalDriver { .. } => Variant::DefinitionalDriver,
+                ModelFactKind::Contribution { .. } => Variant::Contribution,
+                ModelFactKind::MemberMove { .. } => Variant::MemberMove,
+                ModelFactKind::Series { .. } => Variant::Series,
+            }
+        }
+    }
+
+    /// One fact of every kind a run can emit, PRODUCED BY A RUN.
+    ///
+    /// NOTHING IN THIS LIST IS HAND-TYPED. The five non-`Series` kinds used to
+    /// be literals sitting under a header that said the list was derived - the
+    /// header describing the three `Series` entries and quietly covering for the
+    /// five beside them. A hand-typed `Variance` literal is a claim about
+    /// `facts_for_measure` that nothing checks: the branch could stop firing, or
+    /// start firing on different terms, and this list - the input to the guard
+    /// that exists to catch exactly that - would go on describing the old shape.
+    ///
+    /// So the samples are now whatever `facts_for_measure` returns for an
+    /// observation built to fire every branch it has: two periods and a target
+    /// for `Change` and `Variance`, a `Sum` driver for `DefinitionalDriver`, one
+    /// slice on an additive dimension for `Contribution` and one on a
+    /// semi-additive dimension for `MemberMove`, over the two series
+    /// `probe_values` supplies. A branch that stops firing is a failure of the
+    /// coverage check in the test below, which names the variant that went
+    /// missing.
     fn one_of_every_fact_kind_a_run_can_emit() -> Vec<ModelFactKind> {
-        let series = |inner: FactKind| ModelFactKind::Series { inner };
-        vec![
-            ModelFactKind::Change {
-                measure: "Revenue".into(),
-                first_label: "Jan".into(),
-                last_label: "Feb".into(),
-                first: 100.0,
-                last: 120.0,
-                delta: 20.0,
-                pct: Some(0.2),
-                favourability: None,
-            },
-            ModelFactKind::Variance {
-                measure: "Revenue".into(),
-                period_label: "Feb".into(),
-                value: 120.0,
-                target: 150.0,
-                delta: -30.0,
-                pct: Some(-0.2),
-                status: None,
-                favourability: None,
-            },
-            ModelFactKind::DefinitionalDriver {
-                measure: "Margin".into(),
-                kind: DecompositionKind::Difference,
-                total_delta: 20.0,
-                parts: Vec::new(),
-                residual: 0.0,
-            },
-            ModelFactKind::Contribution {
-                measure: "Revenue".into(),
-                dimension: "Product[Category]".into(),
-                total_delta: 20.0,
-                members: Vec::new(),
-                others: None,
-                explained: 1.0,
-            },
-            ModelFactKind::MemberMove {
-                measure: "Revenue".into(),
-                dimension: "Product[Category]".into(),
-                member: "Gadgets".into(),
-                first: 10.0,
-                last: 12.0,
-                delta: 2.0,
-            },
-            series(FactKind::Trend {
-                subject: Subject::measure("Revenue"),
-                slope_per_step: 1.0,
-                r2: 0.9,
-                pct_change: 0.2,
-                first: 100.0,
-                last: 120.0,
-                n: 12,
-                direction: insights::types::Direction::Rising,
-            }),
-            series(FactKind::ChangePoint {
-                subject: Subject::measure("Revenue"),
-                at_label: "Mar".into(),
-                at_index: 2,
-                before_mean: 100.0,
-                after_mean: 130.0,
-                shift_sd: 2.0,
-            }),
-            series(FactKind::Seasonality {
-                subject: Subject::measure("Revenue"),
-                lag: 12,
-                acf: 0.8,
-            }),
-        ]
+        // `Customer[Segment]` is semi-additive and `Product[Category]` is not,
+        // so the two slices below take the two different arms of
+        // `contributions_for`.
+        let resolved = ResolvedMeasure {
+            measure: "Revenue".to_string(),
+            direction: Some(Applied::new(Direction::HigherIsBetter, AttrSource::Strategy)),
+            target: Some(Applied::new(
+                Target::Literal { value: 150.0 },
+                AttrSource::Strategy,
+            )),
+            aggregation: Some(Applied::new(
+                AggregationSpec {
+                    default: Additivity::Additive,
+                    by_dimension: BTreeMap::from([(
+                        "Customer[Segment]".to_string(),
+                        Additivity::LastValue,
+                    )]),
+                },
+                AttrSource::Strategy,
+            )),
+            ..ResolvedMeasure::default()
+        };
+
+        let mut out: Vec<ModelFactKind> = Vec::new();
+        for values in probe_values() {
+            let observation = MeasureObservation {
+                measure: "Revenue".to_string(),
+                labels: probe_labels(&values),
+                values,
+                target_value: Some(150.0),
+                slices: vec![
+                    slice(
+                        "Product[Category]",
+                        vec![MemberSeries::new("Gadgets", 100.0, 140.0)],
+                    ),
+                    slice(
+                        "Customer[Segment]",
+                        vec![MemberSeries::new("Enterprise", 100.0, 140.0)],
+                    ),
+                ],
+                driver: Some(DriverInput::Sum {
+                    terms: vec![
+                        DriverTerm {
+                            measure: "Units".to_string(),
+                            coefficient: 1.0,
+                            first: 60.0,
+                            last: 64.0,
+                        },
+                        DriverTerm {
+                            measure: "Returns".to_string(),
+                            coefficient: -1.0,
+                            first: 10.0,
+                            last: 11.0,
+                        },
+                    ],
+                }),
+                ..MeasureObservation::default()
+            };
+            let (facts, _) = facts_for_measure(&observation, &resolved, &locale());
+            out.extend(facts.into_iter().map(|f| f.kind));
+        }
+
+        // WHICH BUILDER WENT SILENT, which neither check below can say. A
+        // `Series` fact carries the wire key of the fact it wraps and not the
+        // name of the builder that made it, so a seasonality builder that
+        // stopped firing leaves the `Series` variant covered by the trend facts:
+        // the variant check stays green and the kind-key diff fails with
+        // "listed-only [seasonality]", which points at the vocabulary file
+        // rather than at the probe series that stopped exercising it. This
+        // assertion fires first and names the builder.
+        for (name, build) in SERIES_BUILDERS {
+            let produced: Vec<FactKind> = probe_values()
+                .iter()
+                .flat_map(|values| {
+                    build(&timeseries::Series::new(
+                        Subject::measure("Revenue"),
+                        &probe_labels(values),
+                        values,
+                    ))
+                })
+                .collect();
+            assert!(
+                !produced.is_empty(),
+                "no probe series fires the '{name}' builder, so the suppressibility diff below \
+                 would silently not cover it. Add a series to `probe_values` that does."
+            );
+        }
+        out
     }
 
     #[test]
@@ -2826,38 +3125,51 @@ mod tests {
         // validator blesses and the engine then ignores.
         let samples = one_of_every_fact_kind_a_run_can_emit();
 
-        // Adding a `ModelFactKind` variant fails to compile this match, and the
-        // `seen` array below then fails until a sample for it exists - which is
-        // what keeps the list above from silently going stale.
-        let mut seen = [false; 6];
-        for kind in &samples {
-            let variant = match kind {
-                ModelFactKind::Change { .. } => 0,
-                ModelFactKind::Variance { .. } => 1,
-                ModelFactKind::DefinitionalDriver { .. } => 2,
-                ModelFactKind::Contribution { .. } => 3,
-                ModelFactKind::MemberMove { .. } => 4,
-                ModelFactKind::Series { .. } => 5,
-            };
-            seen[variant] = true;
-        }
+        // THE SAMPLES COME OUT OF A RUN, so this is a statement about the run
+        // and not about a list somebody maintained: a variant missing here means
+        // the observation above no longer fires the branch that emits it, and
+        // that kind is therefore not diffed against the vocabulary at all.
+        let seen: BTreeSet<Variant> = samples.iter().map(Variant::of).collect();
+        let missing: Vec<Variant> = Variant::ALL
+            .iter()
+            .copied()
+            .filter(|v| !seen.contains(v))
+            .collect();
         assert!(
-            seen.iter().all(|s| *s),
-            "every ModelFactKind variant needs a sample here: {seen:?}"
+            missing.is_empty(),
+            "the run in `one_of_every_fact_kind_a_run_can_emit` emits no {missing:?} fact, so \
+             that kind is not diffed against the suppressible vocabulary below. Give the \
+             observation whatever fires that branch"
         );
 
         let emitted: BTreeSet<String> = samples.iter().map(|k| k.kind_key()).collect();
-        let listed: BTreeSet<String> = SUPPRESSIBLE_FACT_KINDS
+        let listed: BTreeSet<String> = SuppressibleFactKind::ALL
             .iter()
-            .map(|k| (*k).to_string())
+            .map(|k| k.as_str().to_string())
             .collect();
         assert_eq!(
             emitted, listed,
-            "the suppressible list and the kinds a run emits have drifted; \
+            "the suppressible vocabulary and the kinds a run emits have drifted; \
              emitted-only {:?}, listed-only {:?}",
             emitted.difference(&listed).collect::<Vec<_>>(),
             listed.difference(&emitted).collect::<Vec<_>>()
         );
+
+        // ...and the same diff through the TYPED accessor, which is what the
+        // engine actually filters on. `kind_key` is the wire spelling and
+        // `suppressible_kind` is the enum; if they ever disagree, a `suppress`
+        // entry the validator accepts would withhold nothing - which is the
+        // whole defect the type was introduced to make impossible.
+        let typed: BTreeSet<String> = samples
+            .iter()
+            .map(|k| {
+                k.suppressible_kind()
+                    .unwrap_or_else(|| panic!("{} is emitted and must be suppressible", k.kind_key()))
+                    .as_str()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(typed, emitted, "kind_key and suppressible_kind disagree");
     }
 
     #[test]
@@ -2908,6 +3220,101 @@ mod tests {
         }];
         let (_, withheld) = facts_for_measure(&observation("Quantity", 100.0, 120.0), &r, &locale());
         assert_eq!(withheld.favourability, None);
+    }
+
+    #[test]
+    fn a_band_fact_says_which_side_the_value_missed_on_and_quotes_the_band() {
+        // "which is worse" does not tell a warehouse manager whether to ship
+        // more or ship less, and the band that decided it appeared NOWHERE in
+        // the output: a band target yields no variance fact at all, and the
+        // Change fact's provenance carried direction and materiality only.
+        let mut r = resolved("Quantity");
+        r.direction = Some(Applied::new(Direction::TargetBand, AttrSource::Strategy));
+        r.target = Some(Applied::new(Target::band(90.0, 140.0), AttrSource::Strategy));
+
+        let (facts, _) = facts_for_measure(&observation("Quantity", 100.0, 160.0), &r, &locale());
+        let change = facts
+            .iter()
+            .find(|f| f.kind.kind_key() == "change")
+            .expect("a material movement produces a change fact");
+        assert!(
+            change.text.contains("is above the band [90, 140]"),
+            "the sentence must name the side and the band: {}",
+            change.text
+        );
+        // ...and the band reaches the why-panel too, sourced like every other
+        // applied attribute.
+        let target = change
+            .provenance
+            .iter()
+            .find(|p| p.attr == "target")
+            .expect("the band decided this fact and must be in its provenance");
+        assert_eq!(target.value, "band [90, 140]");
+
+        // The other side, and the inside case - so "above" is read off the
+        // value rather than hard-coded.
+        let (below, _) = facts_for_measure(&observation("Quantity", 100.0, 40.0), &r, &locale());
+        assert!(
+            below
+                .iter()
+                .any(|f| f.text.contains("is below the band [90, 140]")),
+            "{:?}",
+            below.iter().map(|f| f.text.as_str()).collect::<Vec<_>>()
+        );
+        let (inside, _) = facts_for_measure(&observation("Quantity", 90.0, 130.0), &r, &locale());
+        assert!(inside
+            .iter()
+            .any(|f| f.text.contains("is inside the band [90, 140]")));
+
+        // NO OTHER DIRECTION GAINS A CLAUSE. A band is the only thing that can
+        // produce one, so an ordinary measure's sentence is untouched.
+        let plain = resolved("Revenue");
+        let (facts, _) = facts_for_measure(&observation("Revenue", 100.0, 120.0), &plain, &locale());
+        assert!(
+            facts.iter().all(|f| !f.text.contains("the band")),
+            "{:?}",
+            facts.iter().map(|f| f.text.as_str()).collect::<Vec<_>>()
+        );
+
+        // ...and a WITHHELD direction carries no band clause either, or Rule 4
+        // could be walked around by reading the sentence.
+        r.suppressions = vec![Suppression {
+            attribute: Attribute::Direction,
+            rule: "r1".into(),
+            reason: "the aggregate spans two directions".into(),
+        }];
+        let (facts, _) = facts_for_measure(&observation("Quantity", 100.0, 160.0), &r, &locale());
+        assert!(facts.iter().all(|f| !f.text.contains("the band")));
+    }
+
+    #[test]
+    fn a_dimension_that_is_both_an_analysis_axis_and_forbidden_says_so_instead_of_vanishing() {
+        // The document contradicts itself and the PROHIBITION wins, which is
+        // fine; what was not fine is that the breakdown simply was not there and
+        // nothing said why. `validate` refuses such a document, so this is the
+        // note for a hand-edited file that reached the run path anyway.
+        let dimension = QualifiedColumn::new("Product", "Category");
+        let mut r = resolved("Revenue");
+        r.analysis_dimensions = vec![dimension.clone()];
+        r.never_slice_by = vec![dimension.clone()];
+        let facts = ModelFacts {
+            tables: BTreeMap::from([(
+                "Product".to_string(),
+                TableFacts {
+                    columns: BTreeSet::from(["Category".to_string()]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let plan = plan_dimensions(&r, &facts, None);
+        assert!(plan.dimensions.is_empty(), "the prohibition wins");
+        assert_eq!(plan.notes.len(), 1, "{:?}", plan.notes);
+        assert!(
+            plan.notes[0].contains("Product[Category]") && plan.notes[0].contains("forbids"),
+            "{}",
+            plan.notes[0]
+        );
     }
 
     #[test]

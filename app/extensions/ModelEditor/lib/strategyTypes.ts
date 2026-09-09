@@ -54,6 +54,19 @@
 //          document written before it existed), `measureDivergences` and its
 //          siblings diff the entry against a fresh draft on every render. The
 //          diff is SHOWN; nothing is ever applied without a person asking.
+//
+//          (7) A CLOSED SET IS A TYPE HERE TOO. `suppress` is no longer
+//          `string[]`: the Rust field is `Vec<SuppressibleFactKind>`, so a
+//          near-miss is a DESERIALIZATION failure that costs the WHOLE
+//          document rather than one suppression. `parseSuppressSpec` is the
+//          only sanctioned way to build one, and it names the near miss.
+//
+//          (8) `kind` DECIDES THE TIME AXIS NOW, so who said it matters. An
+//          authored kind stands in for detection wholesale; a
+//          `source: "inferred"` one is DISREGARDED and re-derived from today's
+//          relationship graph. `tableKindOrigin` is the one place that ladder
+//          is decided, and `tableKindTopologyRefusal` mirrors — never exceeds —
+//          the validator's `authored-kind-contradicts-topology` arm.
 
 import type { ModelOverview } from "@api";
 
@@ -111,7 +124,189 @@ export type TableKind = "fact" | "dimension" | "bridge" | "calendar" | "other";
 
 export const TABLE_KINDS: TableKind[] = ["fact", "dimension", "bridge", "calendar", "other"];
 
-export type ExpectedStatus = "favourable" | "unfavourable" | "neutral" | "suppressed";
+/**
+ * What an inline test asserts the engine will say.
+ *
+ * `immaterial` IS NOT "THE MOVEMENT WAS TOO SMALL", and it is not a synonym for
+ * `neutral`. It asserts THE RUN MAKES NO JUDGEMENT ABOUT THIS MEASURE AT THIS
+ * POINT, which needs two things at once:
+ *
+ *   * the movement is below the materiality floor, so
+ *     `insights::model::facts_for_measure` builds no `Change` fact — the
+ *     `clears_materiality` gate in `model.rs`; AND
+ *   * no target resolves to a NUMBER, so no `Variance` fact is built either.
+ *     That branch sits OUTSIDE the materiality gate and needs nothing but a
+ *     non-zero `observation.target_value`, which `model_commands.rs` fills in
+ *     for a `Target::Literal` and, when the referenced measure resolves to a
+ *     number in the same grid, a `Target::Measure`. A `band` and a `kpi` target
+ *     both leave it `None`.
+ *
+ * WHEN A TARGET DOES RESOLVE, `immaterial` IS UNREACHABLE, and the Rust harness
+ * REFUSES such a test rather than answering it: the `Variance` fact judges the
+ * LEVEL and carries `favourability_at(resolved, Some(value), delta)`, which is
+ * a judgement. That is right rather than a workaround — materiality is a
+ * property of a MOVEMENT and a variance is a comparison of LEVELS, so a tiny
+ * movement can still sit far from target. Gating the `Variance` fact on
+ * movement-materiality would be the wrong fix.
+ *
+ * AND WHEN A CHANGE FACT AND A VARIANCE FACT BOTH CARRY FAVOURABILITY AND
+ * DISAGREE IN SIGN, no single word here is the answer. Both call
+ * `favourability_at`, one about the movement and one about the level, so a
+ * point can legitimately be favourable and unfavourable at once and the reader
+ * sees two words. The Rust harness refuses such a test rather than picking one
+ * of them — the same rule that governs every other refusal in it.
+ *
+ * WHAT BELOW THE FLOOR ACTUALLY COSTS. This comment used to say the engine
+ * "builds no fact at all and the report is silent"; the second half was false.
+ * `model.rs` sets `prior_label`, `prior_value`, `delta` and `pct`
+ * UNCONDITIONALLY, before the gate, and `report.rs` prints all four into the
+ * row. Only `favourability` is inside the gate, so the Status cell reads "No
+ * claim". The accurate sentence is: no Change FACT, so no favourability — the
+ * numbers are still printed. A harness that answered `neutral` for that let an
+ * assertion go green over a point the run never judged.
+ */
+export type ExpectedStatus =
+  | "favourable"
+  | "unfavourable"
+  | "neutral"
+  | "immaterial"
+  | "suppressed";
+
+/**
+ * The runtime mirror of `ExpectedStatus`, which the type alone cannot provide.
+ *
+ * A union type vanishes at compile time, so nothing could diff it against the
+ * Rust enum and adding a variant there reddened nothing here — `immaterial`
+ * landed on the Rust side and this file did not notice. The array is what
+ * `strategyTypes.test.ts` reads `insights/strategy/types.rs` to check against,
+ * IN DECLARATION ORDER, so it must stay exhaustive rather than "the ones this
+ * file happens to use".
+ */
+export const EXPECTED_STATUSES: readonly ExpectedStatus[] = [
+  "favourable",
+  "unfavourable",
+  "neutral",
+  "immaterial",
+  "suppressed",
+] as const;
+
+/**
+ * Every fact kind a rule's `suppress` list may name.
+ *
+ * A CLOSED SET, and mirroring it here is not decoration. `SuppressibleFactKind`
+ * in `insights/strategy/types.rs` is an enum with `deny_unknown_fields`
+ * containers around it, so a near-miss no longer withholds nothing quietly —
+ * it fails to DESERIALIZE, and `strategy_doc` answers a serde failure by
+ * discarding the WHOLE document and running on the default. One mistyped kind
+ * therefore costs every direction, materiality and rule in the file. A free
+ * text box over that is worse than the untyped version it replaced, which is
+ * why nothing on this side may write a `suppress` entry that has not been
+ * through `parseSuppressSpec`.
+ *
+ * The wire spellings are `SuppressibleFactKind::as_str`, character for
+ * character. `outlier` is deliberately absent and was the example this
+ * vocabulary used to offer: nothing emits it under any spelling.
+ */
+export type SuppressibleFactKind =
+  | "change"
+  | "changePoint"
+  | "contribution"
+  | "definitionalDriver"
+  | "memberMove"
+  | "seasonality"
+  | "trend"
+  | "variance";
+
+export const SUPPRESSIBLE_FACT_KINDS: readonly SuppressibleFactKind[] = [
+  "change",
+  "changePoint",
+  "contribution",
+  "definitionalDriver",
+  "memberMove",
+  "seasonality",
+  "trend",
+  "variance",
+] as const;
+
+/** Levenshtein distance, for the near-miss suggestion and nothing else. */
+function editDistance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  const cur = new Array<number>(b.length + 1);
+  for (let i = 1; i <= a.length; i += 1) {
+    cur[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= b.length; j += 1) prev[j] = cur[j];
+  }
+  return prev[b.length];
+}
+
+/**
+ * The kind a mistyped one most likely meant, or undefined.
+ *
+ * NAMING THE NEAR MISS IS THE POINT. The person typing `contribtion` has the
+ * vocabulary right and the keyboard wrong; listing all eight kinds back at them
+ * makes them find their own answer in a list, and the list is what a refusal
+ * already prints. The threshold scales with the word so `trend` cannot suggest
+ * `change` while `definitionalDrivr` can still reach `definitionalDriver`.
+ */
+export function nearestSuppressibleFactKind(raw: string): SuppressibleFactKind | undefined {
+  const text = raw.trim().toLowerCase();
+  if (text === "") return undefined;
+  const exact = SUPPRESSIBLE_FACT_KINDS.find((k) => k.toLowerCase() === text);
+  if (exact) return exact;
+  let best: SuppressibleFactKind | undefined;
+  let bestAt = Number.POSITIVE_INFINITY;
+  for (const kind of SUPPRESSIBLE_FACT_KINDS) {
+    const at = editDistance(text, kind.toLowerCase());
+    if (at < bestAt) {
+      bestAt = at;
+      best = kind;
+    }
+  }
+  const budget = Math.max(2, Math.floor(text.length / 3));
+  return best !== undefined && bestAt <= budget ? best : undefined;
+}
+
+/** One `suppress` token, refused with the near miss named. */
+export function parseSuppressKind(
+  raw: string,
+): { ok: true; kind: SuppressibleFactKind } | { ok: false; error: string } {
+  const text = raw.trim();
+  const exact = SUPPRESSIBLE_FACT_KINDS.find((k) => k.toLowerCase() === text.toLowerCase());
+  if (exact) return { ok: true, kind: exact };
+  const near = nearestSuppressibleFactKind(text);
+  const suggestion = near === undefined ? "" : ` Did you mean '${near}'?`;
+  return {
+    ok: false,
+    error:
+      `'${text}' is not a fact kind, so nothing would be withheld and the whole ` +
+      `strategy document would be refused.${suggestion} The kinds are: ` +
+      `${SUPPRESSIBLE_FACT_KINDS.join(", ")}.`,
+  };
+}
+
+/**
+ * A comma-separated `suppress` list. An empty string is an empty list, not an
+ * error — clearing the field is how a rule stops suppressing anything.
+ */
+export function parseSuppressSpec(
+  text: string,
+): { ok: true; kinds: SuppressibleFactKind[] } | { ok: false; error: string } {
+  const kinds: SuppressibleFactKind[] = [];
+  for (const token of text.split(",")) {
+    const raw = token.trim();
+    if (raw === "") continue;
+    const parsed = parseSuppressKind(raw);
+    if (!parsed.ok) return parsed;
+    // A kind named twice suppresses it once; silently de-duplicating is right
+    // here because the list is a SET on the Rust side in everything but type.
+    if (!kinds.includes(parsed.kind)) kinds.push(parsed.kind);
+  }
+  return { ok: true, kinds };
+}
 
 // ---------------------------------------------------------------------------
 // Tagged unions
@@ -183,8 +378,12 @@ export interface AttributeSet {
   materiality?: Materiality;
   cadence?: Cadence;
   aggregation?: AggregationSpec;
-  /** Fact KINDS to withhold in this scope. It can only take facts away. */
-  suppress?: string[];
+  /** Fact KINDS to withhold in this scope. It can only take facts away.
+   *
+   *  TYPED, mirroring the Rust enum: a `string[]` here would let a near-miss
+   *  reach a backend that now refuses to PARSE the document over it. Build one
+   *  with `parseSuppressSpec`, never by casting. */
+  suppress?: SuppressibleFactKind[];
   rankWeight?: number;
 }
 
@@ -219,6 +418,10 @@ export interface ModelStrategy {
  * its values was the drafting op.
  */
 export type StrategySource = "inferred" | "authored";
+
+/** The runtime mirror of Rust's `EntrySource`, for the drift guard — see
+ *  `EXPECTED_STATUSES` for why a union type on its own is not enough. */
+export const STRATEGY_SOURCES: readonly StrategySource[] = ["inferred", "authored"] as const;
 
 export interface MeasureStrategy {
   direction?: Direction;
@@ -431,18 +634,138 @@ export function resolveColumnRef(
 }
 
 // ---------------------------------------------------------------------------
+// Newtype mirrors — the fields whose FORM the backend refuses at deserialize
+//
+// `IsoDate` and `CurrencyCode` (`insights/strategy/types.rs`) validate in
+// `Deserialize`, not in the validator. That changes what a bad character costs
+// on this side: it is not one bad field with a finding pointing at it, it is
+// `strategy_doc` failing serde and discarding the WHOLE document, after which
+// every preview, validate, runTests and set answers `unreadable-document` at
+// `path: ""` — a refusal the tab can only render anchored to nothing. So a
+// value of either shape is refused HERE, where the person typed it and can see
+// which field is wrong.
+//
+// These mirror the Rust predicates exactly and must never exceed them: a tab
+// that refuses what Save would have accepted is a second, stricter rule nobody
+// wrote down.
+// ---------------------------------------------------------------------------
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** How many days that month of that year actually has. */
+function daysInMonth(year: number, month: number): number {
+  return month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1];
+}
+
+/**
+ * Is this the `YYYY-MM-DD` a scope bound must be? Mirrors `IsoDate::is_valid`.
+ *
+ * REAL CALENDAR VALIDATION, not "day between 1 and 31". `2026-02-31` is not a
+ * date, and a bound that is not a date is worse here than elsewhere:
+ * `overlap.rs` and `resolve.rs` compare these bounds as TEXT — which is exact
+ * for zero-padded ISO-8601 and meaningless for anything else — so a bound
+ * nobody can point at on a calendar makes the overlap checker quietly conclude
+ * two rules are disjoint when they are not.
+ *
+ * `isLeapYear` and `DAYS_IN_MONTH` above are a RESTATEMENT of `is_leap_year` /
+ * `days_in_month` in that file, and a restatement is only a mirror while
+ * something diffs it. `strategyTypes.test.ts` reads those two Rust functions at
+ * test time — the leap-year expression is evaluated, the match arms are parsed
+ * into a table — and probes this predicate against them, direction fixed
+ * Rust -> TypeScript. Before that guard existed the two matched by luck.
+ */
+export function isValidIsoDate(text: string): boolean {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!parts) return false;
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  if (month < 1 || month > 12) return false;
+  return day >= 1 && day <= daysInMonth(year, month);
+}
+
+/** One scope bound, refused with the reason rather than silently kept. */
+export function parseIsoDate(
+  text: string,
+): { ok: true; date: string } | { ok: false; error: string } {
+  const raw = text.trim();
+  if (raw === "") return { ok: false, error: "a date bound cannot be empty" };
+  if (!isValidIsoDate(raw)) {
+    return {
+      ok: false,
+      error:
+        `'${raw}' is not a date. Write YYYY-MM-DD — 2025-01-01. The backend refuses ` +
+        `any other spelling at parse time, which discards the whole strategy document, ` +
+        `not just this bound.`,
+    };
+  }
+  return { ok: true, date: raw };
+}
+
+/**
+ * The reporting currency, or why it is not one. Mirrors `CurrencyCode::from_str`
+ * (three uppercase ASCII letters) character for character.
+ *
+ * An empty box is `undefined`, not an error — clearing the field is how a
+ * document stops naming a currency. Lowercase is REFUSED rather than quietly
+ * uppercased: the tab's job here is to say what the document may hold, and a
+ * field that silently rewrites what was typed teaches nobody the rule.
+ */
+export function parseCurrencyCode(
+  text: string,
+): { ok: true; value: string | undefined } | { ok: false; error: string } {
+  const raw = text.trim();
+  if (raw === "") return { ok: true, value: undefined };
+  if (!/^[A-Z]{3}$/.test(raw)) {
+    return {
+      ok: false,
+      error:
+        `'${raw}' is not a currency code. Write the three-letter uppercase ISO-4217 ` +
+        `code — SEK, EUR, USD. Anything else is refused when the document is read, ` +
+        `which costs the whole strategy file rather than this one field.`,
+    };
+  }
+  return { ok: true, value: raw };
+}
+
+// ---------------------------------------------------------------------------
 // Scope text form (`Dept=A;Region=Nordics,Baltics`)
 // ---------------------------------------------------------------------------
 
-const DATE_RANGE_RE = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/;
+/**
+ * The date-range spelling, `from..to` — WITH THE END BOUND OPTIONAL.
+ *
+ * It used to demand both dates while `formatScopeSpec` printed an open-ended
+ * range as `Col=2025-01-01..`, so a `list rules` line copied back into
+ * `add rule` fell through to the MEMBER branch and became the one-member list
+ * `["2025-01-01.."]` — a date range silently turned into a member filter that
+ * matches nothing. The checked-in corpus has exactly such a range
+ * (`tests/fixtures/model/sales_star_strategy.json`), so this was reachable by
+ * reading a rule out and writing it back.
+ *
+ * The CALENDAR check is separate (`isValidIsoDate`) because the regex can only
+ * count digits: `2025-13-45` has the right shape and is not a date, and the
+ * Rust `IsoDate` refuses it at deserialize.
+ */
+const DATE_RANGE_RE = /^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})?$/;
 
 /**
  * Parse the CLI's scope spelling into a `Scope`.
  *
  * `Dept=A;Region=Nordics,Baltics` — semicolons separate columns, commas
- * separate members, and `from..to` (both ISO-8601) is a date range. Every
- * column is resolved against the model, so a typo is an error here rather than
- * a rule that never fires.
+ * separate members, and `from..to` is a date range whose END BOUND IS
+ * OPTIONAL (`2025-01-01..` means "from then onwards"). Every column is
+ * resolved against the model, and every bound against the calendar, so a typo
+ * is an error here rather than a rule that never fires — or a document the
+ * backend cannot read at all.
+ *
+ * This is the exact inverse of `formatScopeSpec`, and the two are pinned to
+ * round-trip in both directions: what `list rules` prints is what `add rule`
+ * accepts, because copying one into the other is how a rule gets edited.
  */
 export function parseScopeSpec(
   overview: ModelOverview,
@@ -470,9 +793,33 @@ export function parseScopeSpec(
       };
     }
     const valueText = part.slice(eq + 1).trim();
-    const range = DATE_RANGE_RE.exec(valueText);
-    if (range) {
-      scope[resolved.ref] = { from: range[1], to: range[2] };
+    // `..` IS THE RANGE MARKER, so a value carrying it is a range ATTEMPT and
+    // is judged as one. Falling back to the member branch is what turned
+    // `2025-01-01..` into the member `"2025-01-01.."`, and it would turn
+    // `2025-13-45..2025-99-99` into two members the backend then refuses to
+    // deserialize. A member whose text contains `..` is unreachable through
+    // this spelling as a result; that is the price of the marker being
+    // unambiguous, and it is the right way round — a scope that means nothing
+    // is refused instead of quietly meaning something else.
+    if (valueText.includes("..")) {
+      const range = DATE_RANGE_RE.exec(valueText);
+      if (!range) {
+        return {
+          ok: false,
+          error:
+            `'${valueText}' is not a date range for '${resolved.ref}' — write from..to, ` +
+            `or from.. for a range with no end (2025-01-01..2025-06-30, 2025-01-01..).`,
+        };
+      }
+      const from = parseIsoDate(range[1]);
+      if (!from.ok) return { ok: false, error: `'${resolved.ref}': ${from.error}` };
+      if (range[2] === undefined) {
+        scope[resolved.ref] = { from: from.date };
+        continue;
+      }
+      const to = parseIsoDate(range[2]);
+      if (!to.ok) return { ok: false, error: `'${resolved.ref}': ${to.error}` };
+      scope[resolved.ref] = { from: from.date, to: to.date };
       continue;
     }
     const members = valueText
@@ -490,7 +837,14 @@ export function parseScopeSpec(
   return { ok: true, scope };
 }
 
-/** The scope back as the text form the CLI accepts (and a grid cell shows). */
+/**
+ * The scope back as the text form the CLI accepts (and a grid cell shows).
+ *
+ * `list rules` prints this and `add rule` reads it, so the two ARE one grammar
+ * and a difference between them is a silent meaning change rather than an
+ * error. `parseScopeSpec(formatScopeSpec(s)) === s` is pinned over both bounded
+ * and open-ended ranges in `strategyTypes.test.ts`.
+ */
 export function formatScopeSpec(scope: Scope | undefined): string {
   const entries = Object.entries(scope ?? {});
   if (entries.length === 0) return "";
@@ -498,8 +852,9 @@ export function formatScopeSpec(scope: Scope | undefined): string {
     .map(([col, value]) =>
       Array.isArray(value)
         ? `${col}=${value.join(",")}`
-        : // An open-ended range prints its start and nothing after the dots,
-          // which is how it is written and how it round-trips.
+        : // An open-ended range prints its start and nothing after the dots.
+          // `parseScopeSpec` reads that back as an absent `to`; it used to
+          // demand a second date and quietly made this a MEMBER instead.
           `${col}=${value.from}..${value.to ?? ""}`,
     )
     .join("; ");
@@ -1143,6 +1498,115 @@ export function bandExistsAnywhere(
   return (doc.rules ?? []).some(
     (r) => r.measure === measure && r.id !== exceptRule && r.set.target?.type === "band",
   );
+}
+
+// ---------------------------------------------------------------------------
+// Table kind — a dropdown that now decides the time axis
+// ---------------------------------------------------------------------------
+
+/**
+ * Who put the `kind` on this table, in the only terms that change behaviour.
+ *
+ * `chosen` — the backend HONOURS this value as a statement and lets it stand in
+ *   for detection wholesale. The condition mirrors the one filter in
+ *   `authored_table_kinds`: `ts.source != Some(EntrySource::Inferred)`. An
+ *   ABSENT source counts as chosen, because a hand-written document has no
+ *   `source` field and somebody typed it.
+ * `detected` — a machine decided it. Either the value stored in the document
+ *   came from the drafting op (`source: "inferred"`, which the backend
+ *   DISREGARDS — it re-derives the kind from today's relationship graph
+ *   instead), or the document says nothing and inference has an opinion.
+ * `none` — nobody and nothing has an opinion to show.
+ *
+ * The distinction is not cosmetic and it is not the row badge: the row badge
+ * describes the whole entry, and a table whose `labelColumn` a person typed
+ * reads `authored` while its `kind` is still a guess the engine will overrule.
+ */
+export type TableKindOrigin = "chosen" | "detected" | "none";
+
+export function tableKindOrigin(
+  entry: TableStrategy,
+  /** What inference proposes for this table today, when the entry is silent. */
+  detected: TableKind | undefined,
+): TableKindOrigin {
+  if (entry.kind !== undefined) return entry.source === "inferred" ? "detected" : "chosen";
+  return detected === undefined ? "none" : "detected";
+}
+
+/** The kind shown for a table: what it SAYS, or what a machine detected. */
+export function effectiveTableKind(
+  entry: TableStrategy,
+  detected: TableKind | undefined,
+): TableKind | undefined {
+  return entry.kind ?? detected;
+}
+
+/**
+ * Does this kind claim the model can LOOK THIS TABLE UP?
+ *
+ * Mirrors `claims_a_lookup` in `insights/strategy/facts.rs`. `dimension` and
+ * `calendar` both assert a lookup side; `fact`, `bridge` and `other` assert
+ * nothing the relationship graph can disprove.
+ */
+export function tableKindClaimsALookup(kind: TableKind): boolean {
+  return kind === "dimension" || kind === "calendar";
+}
+
+/**
+ * The tables something can look up: the to-side of at least one ACTIVE
+ * many-to-one or one-to-one relationship.
+ *
+ * Mirrors `facts.lookup_tables`. Only a to-ONE endpoint counts — a
+ * many-to-many has no dimension side, and calling one of its ends a dimension
+ * is how a bridge table ends up offered as an analysis axis.
+ */
+export function lookupTables(overview: ModelOverview): Set<string> {
+  const out = new Set<string>();
+  for (const rel of overview.relationships) {
+    if (!rel.active) continue;
+    if (rel.cardinality === "manyToOne" || rel.cardinality === "oneToOne") out.add(rel.toTable);
+  }
+  return out;
+}
+
+/** A table this one filters, SMALLEST name first so the sentence a person
+ *  reads does not depend on relationship declaration order. Mirrors
+ *  `a_table_it_filters`. */
+export function aTableItFilters(overview: ModelOverview, table: string): string | undefined {
+  const targets = overview.relationships
+    .filter((r) => r.active && r.fromTable === table)
+    .map((r) => r.toTable)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return targets[0];
+}
+
+/**
+ * Why the model's own topology disproves this kind on this table, or null.
+ *
+ * THE SAME REFUSAL THE VALIDATOR MAKES, SAID BEFORE THE CLICK. `validate.rs`
+ * raises `authored-kind-contradicts-topology` as an ERROR, which blocks Save
+ * outright; a dropdown that cheerfully offers `calendar` on the fact table and
+ * then refuses the whole document at Save has taught the person nothing about
+ * why. This mirrors `authored_table_kinds`'s topology arm exactly — it must
+ * never be STRICTER, or the tab would refuse a kind the backend accepts, which
+ * is worse than not checking at all. The second refusal there (two calendars)
+ * is deliberately NOT mirrored: it is a property of the whole document rather
+ * than of one cell, and the validator names both tables in a way a per-option
+ * tooltip cannot.
+ */
+export function tableKindTopologyRefusal(
+  overview: ModelOverview,
+  table: string,
+  kind: TableKind,
+): string | null {
+  if (!tableKindClaimsALookup(kind)) return null;
+  if (lookupTables(overview).has(table)) return null;
+  const filters = aTableItFilters(overview, table);
+  const because =
+    filters === undefined
+      ? `no active many-to-one or one-to-one relationship points at '${table}', so the model cannot look it up`
+      : `nothing looks '${table}' up — it is the FROM side of a relationship to '${filters}', so filters flow out of it and it is the grain of the model`;
+  return `'${kind}' says the model can look this table up, and ${because}. Saving it is refused.`;
 }
 
 // ---------------------------------------------------------------------------

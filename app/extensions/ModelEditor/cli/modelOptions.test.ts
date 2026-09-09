@@ -271,7 +271,10 @@ const MATRIX: Array<[kind: string, verb: string, cmd: string]> = [
   ["measure", "set", 'set measure [Profit] format="0.0%" formatexpr="fx" folder="KPIs" hidden=true description="d" detailrows=Sales[Id] direction=lowerIsBetter unit=currency target=1000 materiality=2% cadence=monthly priority=1 analysisdims=Sales[Region] neverslice=Sales[Id] reviewed=true'],
   ["measure", "rename", "rename measure [Profit] [P2]"],
   ["measure", "delete", "delete measure [Profit]"],
-  ["table", "set", 'set table Sales displayname="S" description="d" hidden=false storage=InMemory refresh=interval:300 incremental="inc" source=Warehouse schema=public sourcetable=orders'],
+  // `set table` addresses the table AND its strategy entry — writers.ts routes
+  // per KEY (`TABLE_STRATEGY_KEYS`), so this row carries both halves, the same
+  // way the `set measure` row above does.
+  ["table", "set", 'set table Sales displayname="S" description="d" hidden=false storage=InMemory refresh=interval:300 incremental="inc" source=Warehouse schema=public sourcetable=orders kind=fact labelcolumn=Region reviewed=true'],
   ["table", "rename", "rename table Sales S2"],
   ["table", "delete", "delete table Orders"],
   ["table", "refresh", "refresh table Sales"],
@@ -347,7 +350,12 @@ const MATRIX: Array<[kind: string, verb: string, cmd: string]> = [
   // carries the whole AttributeSet a rule may set.
   ["strategy", "test", "test strategy"],
   ["strategy", "infer", "infer strategy --apply"],
-  ["rule", "add", 'add rule r1 measure=[Profit] scope="Sales[Region]=West" direction=lowerIsBetter target=kpi materiality=2% cadence=monthly suppress=outlier rankweight=2 note="n"'],
+  // `suppress=` carries a REAL kind. It said `outlier` — the spelling the old
+  // free-text field's own doc offered as an example and that nothing has ever
+  // emitted — which `MODEL_CLOSED_VALUE_LISTS` now correctly refuses at plan
+  // time. The matrix row has to be a command that plans, so it names a kind the
+  // engine can actually withhold.
+  ["rule", "add", 'add rule r1 measure=[Profit] scope="Sales[Region]=West" direction=lowerIsBetter target=kpi materiality=2% cadence=monthly suppress=seasonality rankweight=2 note="n"'],
   ["rule", "delete", "delete rule r1"],
 ];
 

@@ -49,16 +49,20 @@ import {
   CADENCES,
   DIRECTIONS,
   ROLES,
+  TABLE_KINDS,
   UNITS,
   emptyStrategyDoc,
   formatTargetSpec,
   parseMaterialitySpec,
   parseScopeSpec,
+  parseSuppressSpec,
   parseTargetSpec,
   resolveColumnRef,
+  tableKindTopologyRefusal,
   withColumn,
   withMeasure,
   withRule,
+  withTable,
   withoutRule,
 } from "../lib/strategyTypes";
 import type {
@@ -67,6 +71,8 @@ import type {
   MeasureStrategy,
   Role,
   StrategyDoc,
+  TableKind,
+  TableStrategy,
 } from "../lib/strategyTypes";
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1158,7 @@ async function setOne(cmd: Command, s: CliSession, name: string): Promise<void> 
           await mutOverview(s, () => g.setTableSourceBinding(cid, t.name, src.id, schema, sourceTable));
         }
       }
+      if (usesTableStrategy(cmd)) await setTableStrategy(cmd, s, t.name);
       return;
     }
     case "column": {
@@ -1965,6 +1972,12 @@ const MEASURE_STRATEGY_KEYS = [
 /** Option keys that address the STRATEGY entry of a column. */
 const COLUMN_STRATEGY_KEYS = ["role", "priority"] as const;
 
+/** The `set table` keys that address the STRATEGY document rather than the
+ *  model. `reviewed` is here and not on the model side because a table's
+ *  engine metadata has no such concept — the confirmation is the strategy
+ *  entry's. */
+const TABLE_STRATEGY_KEYS = ["kind", "labelcolumn", "reviewed"] as const;
+
 function usesAny(cmd: Command, keys: readonly string[]): boolean {
   return keys.some((k) => cmd.opts.has(k));
 }
@@ -1980,6 +1993,11 @@ export function isMeasureStrategyOnly(cmd: Command): boolean {
 /** Does this `set column` carry strategy keys? */
 export function usesColumnStrategy(cmd: Command): boolean {
   return usesAny(cmd, COLUMN_STRATEGY_KEYS);
+}
+
+/** Does this `set table` carry strategy keys? */
+export function usesTableStrategy(cmd: Command): boolean {
+  return usesAny(cmd, TABLE_STRATEGY_KEYS);
 }
 
 /** Case-insensitive enum lookup that names the alternatives when it fails. */
@@ -2066,6 +2084,49 @@ export async function setMeasureStrategy(cmd: Command, s: CliSession, name: stri
   await mutateStrategy(s, line, (doc) => withMeasure(doc, name, patch));
 }
 
+/**
+ * `set table <Name> kind=… labelcolumn=… reviewed=…` — the strategy half.
+ *
+ * `kind` IS REFUSED HERE WHEN THE TOPOLOGY DISPROVES IT, for the same reason
+ * the tab's dropdown will not offer it: the backend raises
+ * `authored-kind-contradicts-topology` as an ERROR, so writing it would come
+ * back as a whole-document refusal naming a code rather than a sentence. The
+ * check mirrors `authored_table_kinds` and is never stricter than it — the
+ * two-calendar refusal is left to the validator, which can see both tables.
+ */
+export async function setTableStrategy(cmd: Command, s: CliSession, name: string): Promise<void> {
+  const line = cmd.line;
+  const patch: Partial<TableStrategy> = {};
+
+  const kindOpt = optStr(cmd, "kind");
+  if (kindOpt !== undefined) {
+    if (kindOpt === "") {
+      patch.kind = undefined;
+    } else {
+      const kind: TableKind = oneOf(kindOpt, TABLE_KINDS, "table kind", line);
+      const refusal = tableKindTopologyRefusal(s.overview, name, kind);
+      if (refusal !== null) fail(`${name}: ${refusal}`, line);
+      patch.kind = kind;
+    }
+  }
+  const labelColumn = optStr(cmd, "labelcolumn");
+  if (labelColumn !== undefined) {
+    if (labelColumn === "") {
+      patch.labelColumn = undefined;
+    } else {
+      const table = s.overview.tables.find((t) => t.name === name);
+      if (!table?.columns.some((c) => c.name === labelColumn)) {
+        fail(`'${labelColumn}' is not a column of '${name}'`, line);
+      }
+      patch.labelColumn = labelColumn;
+    }
+  }
+  const reviewed = optBool(cmd, "reviewed");
+  if (reviewed !== undefined) patch.reviewed = reviewed;
+
+  await mutateStrategy(s, line, (doc) => withTable(doc, name, patch));
+}
+
 /** `set column <Table[Column]> role=… priority=…` — the strategy half. */
 export async function setColumnStrategy(cmd: Command, s: CliSession, ref: string): Promise<void> {
   const line = cmd.line;
@@ -2128,8 +2189,12 @@ async function addRule(cmd: Command, s: CliSession, id: string): Promise<void> {
     if (!parsed.ok) fail(parsed.error, line);
     set.materiality = parsed.materiality;
   }
-  const suppress = stringsOf(optList(cmd, "suppress") ?? []);
-  if (suppress.length > 0) set.suppress = suppress;
+  // The option table already refused a near miss by NAME; this is the parse
+  // that produces the typed list, and it is the one that runs when a caller
+  // reaches `addRule` without going through `validateModelOptions`.
+  const suppress = parseSuppressSpec(stringsOf(optList(cmd, "suppress") ?? []).join(","));
+  if (!suppress.ok) fail(suppress.error, line);
+  if (suppress.kinds.length > 0) set.suppress = suppress.kinds;
   const rankWeight = optNum(cmd, "rankweight");
   if (rankWeight !== undefined) set.rankWeight = rankWeight;
   const note = optStr(cmd, "note");

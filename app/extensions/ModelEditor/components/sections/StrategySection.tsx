@@ -168,6 +168,41 @@
 //          panel carries the same badge, Confirm and un-confirm as a row, at
 //          PANEL granularity (`ModelStrategy.reviewed` / `.source`), because
 //          there is no row here to confirm one field at a time.
+//
+//          (16) `kind` STOPPED BEING DECORATION. It was an editable dropdown
+//          that changed nothing; it now overrides the backend's own table
+//          classification, decides which table is the calendar and therefore
+//          the time axis every trend, seasonality and change-point claim is
+//          computed against. Two consequences land here. The cell says WHOSE
+//          answer it is showing — a kind the drafting op wrote is stamped
+//          `inferred` and is DISREGARDED (re-derived from today's relationship
+//          graph), so rendering it identically to a chosen one tells a person
+//          the engine is using a value it is not. And `dimension`/`calendar` on
+//          a table nothing looks up is now a Save-blocking ERROR
+//          (`authored-kind-contradicts-topology`), so those options are
+//          DISABLED in the dropdown with the reason on them, and the finding
+//          still lands on the row: making the state hard to reach is cheaper
+//          than explaining a whole-document refusal afterwards. The refusal
+//          mirrored here must never be stricter than the validator's, or the
+//          tab would refuse a document the backend accepts.
+//
+//          (17) THE CONFIRMATION COLUMN IS PINNED. Eleven columns in an
+//          `overflow-x: auto` card pushed `never slice by` and `reviewed` off
+//          the right-hand edge, and `reviewed` is the column a person is
+//          working DOWN while confirming a draft. `stickyConfirmCell` pins it
+//          to the trailing edge — sticky rather than reordered, so the answer
+//          still follows the values it answers for and no column changes what
+//          it contains. Its background is explicit because a sticky cell floats
+//          over the columns sliding beneath it and `rowTone` is transparent for
+//          three of its four states.
+//
+//          (18) `suppress` IS A CLOSED SET AND THE CONTROL IS THE VOCABULARY.
+//          It was a text field. Now that the Rust field is
+//          `Vec<SuppressibleFactKind>`, a near-miss is not a suppression that
+//          does nothing — it is a document that fails serde, and the backend
+//          answers that by discarding the WHOLE strategy. So the eight kinds
+//          are checkboxes, and `buildRuleFromDraft` still parses, because
+//          unsaved drafts outlive the control that wrote them.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ModelOverview, ModelTableInfo } from "@api";
@@ -194,6 +229,7 @@ import {
   CADENCES,
   DIRECTIONS,
   ROLES,
+  SUPPRESSIBLE_FACT_KINDS,
   TABLE_KINDS,
   UNITS,
   aggregationDimensionOptions,
@@ -203,6 +239,7 @@ import {
   bandLowInclusive,
   bandTarget,
   compareColumnsByRole,
+  effectiveTableKind,
   emptyStrategyDoc,
   entryState,
   findingsAtPath,
@@ -220,13 +257,18 @@ import {
   modelEntry,
   modelHasColumn,
   modelHasValues,
+  parseCurrencyCode,
+  parseIsoDate,
   parseMaterialitySpec,
+  parseSuppressSpec,
   parseTargetSpec,
   rulePath,
   stateIsHumanDecision,
   tableDivergences,
   tableEntry,
   tableHasValues,
+  tableKindOrigin,
+  tableKindTopologyRefusal,
   tablePath,
   withAggregationDefault,
   withAggregationException,
@@ -255,6 +297,7 @@ import type {
   ScopeValue,
   StrategyDoc,
   TableKind,
+  TableKindOrigin,
   Target,
   Unit,
 } from "../../lib/strategyTypes";
@@ -397,13 +440,29 @@ export function buildRuleFromDraft(
       }
       scope[clause.column] = members;
     } else {
-      if (clause.from === "") {
+      if (clause.from.trim() === "") {
         return { ok: false, error: `'${clause.column}' needs a from date.` };
       }
+      // THE BOUNDS ARE CHECKED AGAINST THE CALENDAR, not merely for being
+      // non-empty. They are plain text boxes, and `IsoDate` validates in
+      // `Deserialize`, so `2025-13-45` here did not produce a finding on this
+      // rule — it made the whole strategy document unreadable. `2026-02-31` is
+      // the same class of value and the same cost.
+      const from = parseIsoDate(clause.from);
+      if (!from.ok) return { ok: false, error: `'${clause.column}': ${from.error}` };
       // The end bound is OPTIONAL: "the Nordics floor took effect in 2025" has
       // no end, and inventing one would make the rule stop firing next year.
-      scope[clause.column] =
-        clause.to === "" ? { from: clause.from } : { from: clause.from, to: clause.to };
+      if (clause.to.trim() === "") {
+        scope[clause.column] = { from: from.date };
+      } else {
+        const to = parseIsoDate(clause.to);
+        if (!to.ok) return { ok: false, error: `'${clause.column}': ${to.error}` };
+        // WHETHER THE RANGE HOLDS ANYTHING IS NOT ASKED HERE. `from > to` is
+        // the validator's `empty-scope` ERROR, which it reports against the
+        // saved document; refusing it at this gate too would be a second rule
+        // and would refuse a rule Save accepts and then explains.
+        scope[clause.column] = { from: from.date, to: to.date };
+      }
     }
   }
 
@@ -441,11 +500,14 @@ export function buildRuleFromDraft(
   if (!materiality.ok) return { ok: false, error: materiality.error };
   if (materiality.materiality !== undefined) set.materiality = materiality.materiality;
 
-  const suppress = draft.suppress
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s !== "");
-  if (suppress.length > 0) set.suppress = suppress;
+  // THE PICKER CANNOT PRODUCE A BAD VALUE; A RESTORED DRAFT CAN. Unsaved rule
+  // drafts are persisted, so a draft written before `suppress` became a closed
+  // set outlives the control that used to accept it. Refusing here is what
+  // keeps that from reaching a backend that answers an unknown variant by
+  // discarding the entire strategy document.
+  const suppress = parseSuppressSpec(draft.suppress);
+  if (!suppress.ok) return { ok: false, error: suppress.error };
+  if (suppress.kinds.length > 0) set.suppress = suppress.kinds;
 
   if (draft.rankWeight.trim() !== "") {
     const weight = Number(draft.rankWeight);
@@ -648,12 +710,37 @@ const FISCAL_YEAR_START_HINT =
  * true, and it is the overstatement the field's own on-screen note exists to
  * stop repeating.
  *
- * The month/day ranges mirror the Rust validator
- * (`insights/strategy/validate.rs`) EXACTLY, `02-31` included. That is
- * deliberate: the backend is the authority, and a tab that refused something
- * Save would have accepted would be a second, stricter rule nobody wrote down.
- * This copy exists only to say so at the keystroke rather than at Save.
+ * The month/day ranges mirror `MonthDay::new` (`insights/strategy/types.rs`)
+ * EXACTLY. The backend is the authority, and a tab that refused something Save
+ * would have accepted would be a second, stricter rule nobody wrote down. This
+ * comment used to cite a `malformed-fiscal-year-start` arm in
+ * `insights/strategy/validate.rs`; that arm was DELETED when the field became a
+ * `MonthDay`, and validate.rs now says so in the comment standing where it used
+ * to be. The check moved from the validator to the TYPE, which is what raises
+ * the stakes here: a malformed value no longer earns a finding, it stops the
+ * whole document deserializing. This copy exists to say so at the keystroke
+ * rather than at Save.
+ *
+ * THE DAY IS CHECKED AGAINST ITS MONTH, AND FEBRUARY GETS 29. `MonthDay` used
+ * to take any day in 1..=31, so `02-31`, `04-31`, `06-31`, `09-31` and `11-31`
+ * were all storable — five days no calendar has, sitting in the document
+ * waiting for whoever wires the field up. It does not take the further step of
+ * checking `02-29` against a leap year, and neither does this, because AN MM-DD
+ * CARRIES NO YEAR: there is no year here to ask about, so 29 is the only
+ * defensible ceiling for February.
+ *
+ * `MONTH_DAY_MAX` is a restatement of a Rust rule and is only a mirror while
+ * something diffs it. The guard is in `lib/strategyTypes.test.ts`, beside the
+ * closed-set mirrors and the `isValidIsoDate` one, and it is there rather than
+ * in this component's own test file so that ONE reading of the Rust source
+ * serves both calendars: it parses the `max_day_of_month` match arms out of
+ * `insights/strategy/types.rs` at test time and probes this function against
+ * them, direction fixed Rust -> TypeScript. `max_day_of_month`, not
+ * `days_in_month` — the two are different tables on purpose, and February is
+ * where they differ.
  */
+const MONTH_DAY_MAX = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 export function parseFiscalYearStart(
   text: string,
 ): { ok: true; value: string | undefined } | { ok: false; error: string } {
@@ -662,10 +749,17 @@ export function parseFiscalYearStart(
   const parts = /^(\d{2})-(\d{2})$/.exec(raw);
   const month = parts ? Number(parts[1]) : NaN;
   const day = parts ? Number(parts[2]) : NaN;
-  if (!parts || month < 1 || month > 12 || day < 1 || day > 31) {
+  if (!parts || month < 1 || month > 12) {
     return {
       ok: false,
       error: `'${raw}' is not a fiscal year start. Write MM-DD — a fiscal year starts on the same day every year, so it carries no year (04-01, not 2026-04-01).`,
+    };
+  }
+  const maxDay = MONTH_DAY_MAX[month - 1];
+  if (day < 1 || day > maxDay) {
+    return {
+      ok: false,
+      error: `'${raw}' is not a fiscal year start: month ${parts[1]} runs to day ${maxDay}, so there is no such day to start a year on. February is allowed 29 here because an MM-DD carries no year and so cannot know whether the year is a leap year.`,
     };
   }
   return { ok: true, value: raw };
@@ -910,6 +1004,60 @@ const cellStyle: React.CSSProperties = { ...styles.td, whiteSpace: "nowrap" };
 
 const smallInput: React.CSSProperties = { ...styles.input, fontSize: 12, padding: "2px 4px" };
 
+// ---------------------------------------------------------------------------
+// The confirmation column stays reachable
+// ---------------------------------------------------------------------------
+
+/**
+ * `reviewed` is PINNED to the trailing edge of the scrolling card.
+ *
+ * Both grids live in an `overflow-x: auto` card, and the measures grid now
+ * carries eleven columns; `never slice by` and `reviewed` were pushed off the
+ * right-hand edge. Losing `never slice by` behind a scrollbar costs a look —
+ * losing `reviewed` costs the task: confirming a draft IS working down that
+ * column, and a control you have to scroll to for every row is a control people
+ * stop using. Widening the grid is the owner's call and is deferred; pinning
+ * the one column the work happens in is not the same decision and does not
+ * change what any column contains.
+ *
+ * It is `position: sticky` rather than a reordering because moving `reviewed`
+ * to the leading edge would put the ANSWER before the values it answers for,
+ * and because sticky touches only the cell style — the row markup, the column
+ * order and every `data-strategy-*` hook stay exactly as they were.
+ */
+const STICKY_CONFIRM: React.CSSProperties = {
+  position: "sticky",
+  right: 0,
+  // Over the cells, under nothing: the header's own sticky cell needs to win
+  // against the body's, which is what the two levels are for.
+  zIndex: 1,
+  // A shadow rather than a border, so the pinned column reads as floating
+  // above the scrolled ones instead of as a twelfth column.
+  boxShadow: "-6px 0 6px -6px rgba(0, 0, 0, 0.25)",
+};
+
+const stickyHeaderStyle: React.CSSProperties = {
+  ...styles.th,
+  ...STICKY_CONFIRM,
+  zIndex: 2,
+  background: "#fff",
+};
+
+/**
+ * The pinned cell for one row, opaque in the row's own tone.
+ *
+ * A sticky cell floats OVER the columns sliding beneath it, and `rowTone` gives
+ * `transparent` for three of its four states — so without an explicit
+ * background the scrolled content would show straight through the badge and the
+ * Confirm button. The card behind the table is white, which is what a
+ * transparent row resolves to.
+ */
+function stickyConfirmCell(state: EntryState): React.CSSProperties {
+  const tone = rowTone(state);
+  const background = tone.background === "transparent" ? "#fff" : String(tone.background);
+  return { ...cellStyle, ...STICKY_CONFIRM, background };
+}
+
 /**
  * A picker whose EMPTY option carries the inherited value rather than a dash.
  *
@@ -926,6 +1074,15 @@ function selectOf<T extends string>(
   disabled: boolean,
   width = 128,
   inherited: string | null = null,
+  /**
+   * Why one option cannot be chosen HERE, or null.
+   *
+   * The option stays in the list and is `disabled`, rather than being dropped:
+   * a value already stored has to keep rendering as what it is, and an option
+   * that vanishes teaches nobody why. The reason reaches the person through
+   * the option's own `title`, which is where they are already pointing.
+   */
+  unavailable: ((option: T) => string | null) | null = null,
 ): React.ReactElement {
   const showingInherited = value === "" && inherited !== null;
   return (
@@ -945,12 +1102,58 @@ function selectOf<T extends string>(
       onChange={(e) => onChange(e.target.value as T | "")}
     >
       <option value="">{inherited ?? "—"}</option>
-      {options.map((o) => (
-        <option key={o} value={o}>
-          {o}
-        </option>
-      ))}
+      {options.map((o) => {
+        const refusal = unavailable === null ? null : unavailable(o);
+        return (
+          <option key={o} value={o} disabled={refusal !== null} title={refusal ?? undefined}>
+            {o}
+            {refusal === null ? "" : " (refused here)"}
+          </option>
+        );
+      })}
     </select>
+  );
+}
+
+/**
+ * Whether the kind on screen is a person's statement or a machine's reading.
+ *
+ * IT IS NOT THE ROW BADGE SAID TWICE. The row badge describes the entry — a
+ * table whose `labelColumn` somebody typed reads "set by you" while its `kind`
+ * is still a guess. And the difference now changes behaviour: the backend
+ * honours an AUTHORED kind wholesale (it decides the calendar, and therefore
+ * the time axis of every trend, seasonality and change-point claim) and
+ * DISREGARDS an inferred one, re-deriving it from today's relationship graph.
+ * A person looking at "calendar" is owed the answer to "is the engine using
+ * this?".
+ */
+function KindOriginBadge({
+  origin,
+  table,
+  kind,
+}: {
+  origin: TableKindOrigin;
+  table: string;
+  kind: TableKind | undefined;
+}): React.ReactElement | null {
+  if (origin === "none") return null;
+  if (origin === "chosen") {
+    return (
+      <span
+        data-testid={`kind-origin-${table}`}
+        title={`You chose '${kind}' for ${table}. The engine takes it as a statement and stops classifying this table for itself.`}
+      >
+        <Badge tone="neutral">chosen</Badge>
+      </span>
+    );
+  }
+  return (
+    <span
+      data-testid={`kind-origin-${table}`}
+      title={`Nobody has said what ${table} is — '${kind}' is what the engine reads off the relationship graph, and it re-reads it every run. Pick a value here to state it instead.`}
+    >
+      <Badge tone="warn">detected</Badge>
+    </span>
   );
 }
 
@@ -1432,6 +1635,77 @@ function FiscalYearStartField({
   );
 }
 
+const REPORTING_CURRENCY_HINT =
+  "A three-letter uppercase ISO-4217 code — SEK, EUR, USD.";
+
+/**
+ * `reportingCurrency`, with the refusal where the typing happened.
+ *
+ * IT WAS A RAW TEXT BOX WRITING `e.target.value` STRAIGHT INTO THE DOCUMENT,
+ * beside a `fiscalYearStart` that had both a keystroke refusal and a findings
+ * row. That asymmetry was the whole defect: `CurrencyCode` validates in
+ * `Deserialize`, so `sek`, `kr` or `USDX` did not produce a finding on this
+ * field — they made `strategy_doc` fail serde and discard the ENTIRE document,
+ * after which every preview, validate, runTests and set came back
+ * `unreadable-document` at `path: ""`, which this tab can only render as
+ * "(document)". One character in this box, and nothing in the tab worked and
+ * nothing said why.
+ *
+ * Same commit-on-blur discipline as `FiscalYearStartField`, and for the same
+ * reason: an unreadable value keeps the typed text rather than reverting,
+ * because a value that vanishes reads as "accepted".
+ */
+function ReportingCurrencyField({
+  value,
+  disabled,
+  onCommit,
+}: {
+  value: string;
+  disabled: boolean;
+  onCommit: (value: string | undefined) => void;
+}): React.ReactElement {
+  const [text, setText] = useState(value);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setText(value);
+    setError(null);
+  }, [value]);
+  const commit = (raw: string): void => {
+    const parsed = parseCurrencyCode(raw);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    setError(null);
+    onCommit(parsed.value);
+  };
+  return (
+    <>
+      <input
+        data-testid="model-reporting-currency"
+        style={{ ...styles.input, borderColor: error ? "#a4262c" : "#ccc" }}
+        value={text}
+        disabled={disabled}
+        placeholder="SEK"
+        title={REPORTING_CURRENCY_HINT}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit((e.target as HTMLInputElement).value);
+        }}
+      />
+      {error !== null && (
+        <div
+          data-testid="model-reporting-currency-error"
+          style={{ color: "#a4262c", fontSize: 11, marginTop: 2 }}
+        >
+          {error}
+        </div>
+      )}
+    </>
+  );
+}
+
 /**
  * The exact sentence a stored-but-unread field says about itself.
  *
@@ -1604,25 +1878,20 @@ function ModelPanel({
           <FieldFindings findings={findingsAtPath(findings, "model.fiscalYearStart")} />
         </Field>
 
-        <Field label="Reporting currency" hint="A short code — SEK, EUR." flex={1}>
-          <input
-            data-testid="model-reporting-currency"
-            style={styles.input}
-            disabled={disabled}
+        <Field label="Reporting currency" hint={REPORTING_CURRENCY_HINT} flex={1}>
+          <ReportingCurrencyField
             value={model.reportingCurrency ?? ""}
-            placeholder="SEK"
-            onChange={(e) =>
-              onEdit(
-                withModel(doc, {
-                  reportingCurrency: e.target.value === "" ? undefined : e.target.value,
-                }),
-              )
-            }
+            disabled={disabled}
+            onCommit={(reportingCurrency) => onEdit(withModel(doc, { reportingCurrency }))}
           />
           {/* This is the field the objection was actually about: somebody types
               SEK here and reasonably expects a currency to appear downstream.
-              Nothing anywhere reads `reportingCurrency`. */}
+              Nothing anywhere reads `reportingCurrency`. The form is still
+              refused at the keystroke, because `CurrencyCode` refuses it at
+              DESERIALIZE — so a stored `kr` is not an inert wrong value, it is
+              a document nothing can open. */}
           <NotYetConsulted field="reportingCurrency" />
+          <FieldFindings findings={findingsAtPath(findings, "model.reportingCurrency")} />
         </Field>
 
         <Field
@@ -2186,7 +2455,12 @@ function MeasuresGrid({
           <thead>
             <tr>
               {MEASURE_HEADERS.map((h) => (
-                <th key={h} style={styles.th} title={h === "never slice by" ? NEVER_SLICE_TITLE : undefined}>
+                <th
+                  key={h}
+                  style={h === "reviewed" ? stickyHeaderStyle : styles.th}
+                  data-sticky={h === "reviewed" ? "reviewed" : undefined}
+                  title={h === "never slice by" ? NEVER_SLICE_TITLE : undefined}
+                >
                   {h}
                 </th>
               ))}
@@ -2416,7 +2690,7 @@ function MeasuresGrid({
                       onChange={(refs) => onEdit(withMeasure(doc, m.name, { neverSliceBy: refs }))}
                     />
                   </td>
-                  <td style={cellStyle}>
+                  <td style={stickyConfirmCell(state)} data-sticky="reviewed">
                     <ReviewedCell
                       id={m.name}
                       state={state}
@@ -2772,7 +3046,11 @@ function TablesGrid({
           <thead>
             <tr>
               {["table / column", "kind / role", "label column / priority", "reviewed"].map((h) => (
-                <th key={h} style={styles.th}>
+                <th
+                  key={h}
+                  style={h === "reviewed" ? stickyHeaderStyle : styles.th}
+                  data-sticky={h === "reviewed" ? "reviewed" : undefined}
+                >
                   {h}
                 </th>
               ))}
@@ -2787,6 +3065,14 @@ function TablesGrid({
                 ? tableDivergences(entry, proposed)
                 : [];
               const path = tablePath(t.name);
+              // WHOSE ANSWER IS IN FORCE. An authored kind stands in for the
+              // backend's own classification wholesale; a kind the drafting op
+              // wrote is stamped `inferred` and is DISREGARDED — re-derived
+              // from today's relationship graph — so showing the two the same
+              // way tells a person the engine is using a value it is not.
+              const detectedKind = proposed?.kind;
+              const kindOrigin = tableKindOrigin(entry, detectedKind);
+              const shownKind = effectiveTableKind(entry, detectedKind);
               const roleOf = (name: string): Role | undefined => entry.columns?.[name]?.role;
               const ordered = orderedColumns(t.columns, roleOf);
               // An UNSET column is not an ignored one: nobody has said it is
@@ -2829,7 +3115,11 @@ function TablesGrid({
                         }
                       />
                     </td>
-                    <td style={cellStyle} />
+                    {/* A column row has nothing to confirm — the confirmation
+                        is the TABLE's — but the cell still has to be pinned and
+                        opaque, or the scrolled columns show through the gap the
+                        rows above and below are covering. */}
+                    <td style={{ ...cellStyle, ...STICKY_CONFIRM, background: "#fff" }} />
                   </tr>
                 );
               };
@@ -2847,14 +3137,27 @@ function TablesGrid({
                     <td style={cellStyle}>
                       <strong>{t.name}</strong> <RowFindings findings={findingsAtPath(findings, path)} />
                     </td>
-                    <td style={cellStyle}>
+                    <td style={cellStyle} data-testid={`table-kind-${t.name}`} data-kind-origin={kindOrigin}>
                       {selectOf<TableKind>(
                         entry.kind ?? "",
                         TABLE_KINDS,
                         (v) => onEdit(withTable(doc, t.name, { kind: v === "" ? undefined : v })),
                         disabled,
                         112,
-                      )}
+                        // The DETECTED kind in the empty option, greyed, exactly
+                        // as an inherited direction is. A blank here reads as
+                        // "nobody has decided", which for `kind` has stopped
+                        // being true: the backend classifies every table anyway,
+                        // and the blank was hiding whose answer is in force.
+                        detectedKind === undefined ? null : `${detectedKind} — detected`,
+                        // The topology refusal, per option: `calendar` on a
+                        // table nothing looks up is now a Save-blocking ERROR,
+                        // so the cheapest fix is to make the state hard to
+                        // reach rather than to explain it afterwards.
+                        (k) => tableKindTopologyRefusal(overview, t.name, k),
+                      )}{" "}
+                      <KindOriginBadge origin={kindOrigin} table={t.name} kind={shownKind} />{" "}
+                      <RowFindings findings={findingsAtPath(findings, `${path}.kind`)} />
                     </td>
                     <td style={cellStyle}>
                       <select
@@ -2878,7 +3181,7 @@ function TablesGrid({
                         ))}
                       </select>
                     </td>
-                    <td style={cellStyle}>
+                    <td style={stickyConfirmCell(state)} data-sticky="reviewed">
                       <ReviewedCell
                         id={t.name}
                         state={state}
@@ -3211,6 +3514,59 @@ function FindingsStrip({
 // Rule modal
 // ===========================================================================
 
+/**
+ * The eight fact kinds, as toggles over the draft's comma-separated string.
+ *
+ * IT KEEPS THE STRING because that is what `RuleDraft` stores and what survives
+ * an unsaved draft round trip; what changes is that nothing can put a
+ * ninth value into it. The order is `SUPPRESSIBLE_FACT_KINDS`, i.e. the Rust
+ * variant order, so a person reading a rule beside the type sees the same list
+ * in the same sequence.
+ *
+ * A checkbox each, not a multi-select: a `<select multiple>` hides how many
+ * options exist behind a scroll box and needs ctrl-click to deselect, and there
+ * are only eight of them.
+ */
+function SuppressPicker({
+  value,
+  onChange,
+}: {
+  /** The draft's comma-separated spelling. */
+  value: string;
+  onChange: (next: string) => void;
+}): React.ReactElement {
+  // Whatever the draft holds, read through the parser: an older unsaved draft
+  // can carry a spelling this control can no longer produce, and it must not
+  // render as "nothing selected" and then be silently kept on save.
+  const parsed = parseSuppressSpec(value);
+  const chosen = new Set(parsed.ok ? parsed.kinds : []);
+  return (
+    <div data-testid="suppress-picker" style={{ display: "flex", flexWrap: "wrap", gap: "2px 10px" }}>
+      {SUPPRESSIBLE_FACT_KINDS.map((kind) => (
+        <label
+          key={kind}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12 }}
+        >
+          <input
+            type="checkbox"
+            data-testid={`suppress-${kind}`}
+            checked={chosen.has(kind)}
+            onChange={() => {
+              const next = new Set(chosen);
+              if (next.has(kind)) next.delete(kind);
+              else next.add(kind);
+              // Emitted in vocabulary order rather than click order, so the
+              // same set of kinds always writes the same string.
+              onChange(SUPPRESSIBLE_FACT_KINDS.filter((k) => next.has(k)).join(","));
+            }}
+          />
+          {kind}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 function RuleModal({
   overview,
   doc,
@@ -3334,11 +3690,20 @@ function RuleModal({
               />
             ) : (
               <>
+                {/* Free text rather than `type="date"` on purpose: the bounds
+                    are ISO-8601 TEXT the backend compares as text, and a
+                    native date picker renders in the browser's locale, which
+                    would show a person `2025-01-06` as `06/01/2025` and invite
+                    them to type it back that way. The FORM is refused instead,
+                    by `buildRuleFromDraft` — against the real calendar, so
+                    `2026-02-31` does not reach a document that would then fail
+                    to deserialize wholesale. */}
                 <input
                   aria-label="Scope from"
                   style={{ ...styles.input, width: 118 }}
                   value={clause.from}
                   placeholder="2025-01-01"
+                  title="YYYY-MM-DD. The date the rule starts applying."
                   onChange={(e) => patchClause(i, { from: e.target.value })}
                 />
                 <input
@@ -3346,6 +3711,7 @@ function RuleModal({
                   style={{ ...styles.input, width: 118 }}
                   value={clause.to}
                   placeholder="2025-06-30"
+                  title="YYYY-MM-DD, or empty for a rule with no end date."
                   onChange={(e) => patchClause(i, { to: e.target.value })}
                 />
               </>
@@ -3437,11 +3803,25 @@ function RuleModal({
       </div>
 
       <div style={{ display: "flex", gap: 8 }}>
-        <Field label="Suppress" hint="fact kinds to withhold here, e.g. outlier,trend" flex={1}>
-          <input
-            style={styles.input}
+        {/*
+          THE VOCABULARY IS THE CONTROL NOW, NOT A HINT UNDER A TEXT BOX. This
+          was a free-text field whose hint used to read "e.g. outlier,trend" —
+          and `outlier` is a kind nothing emits under any spelling. Since
+          `suppress` became `Vec<SuppressibleFactKind>` the cost of a near-miss
+          is no longer "this suppression does nothing": the document fails
+          serde, and the backend answers that by discarding the WHOLE strategy
+          and running on the default. A box that can type an unsaveable value
+          into a document that big is worse than the untyped version it
+          replaced, so the eight kinds are the only things clickable.
+        */}
+        <Field
+          label="Suppress"
+          hint="fact kinds to withhold here — it can only take facts away"
+          flex={1}
+        >
+          <SuppressPicker
             value={draft.suppress}
-            onChange={(e) => patch({ suppress: e.target.value })}
+            onChange={(next) => patch({ suppress: next })}
           />
         </Field>
         <Field label="Rank weight" hint="multiplier on this measure's ranking here" flex={1}>

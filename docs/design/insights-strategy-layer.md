@@ -45,6 +45,26 @@ The reason to be this strict: the moment a rule can assert a fact, the pane stop
 answer and becomes a place where someone wrote down what they wanted the data to say. Once that is
 possible anywhere, a reader has to distrust every card.
 
+### The second rule: nothing becomes authorable until it has a reader
+
+> **A field is not shipped when it round-trips. It is shipped when something READS it.**
+
+Added 2026-09-08, after a review found five attributes — `unit`, `cadence`, `fiscalYearStart`,
+`reportingCurrency` and `TableStrategy.kind` — that were authored, inferred, validated, resolved,
+and consumed by nothing. `kind` was the expensive one: it renders as an editable dropdown on every
+table row and gates the entire time-series cascade, so a user who saw calendar detection get it
+wrong and *corrected it* changed nothing, silently.
+
+The cost is not the dead code. **Authoring effort has been the binding constraint on this layer
+from the start** (§9 exists for that reason alone), and an unread field spends that budget for
+nothing while looking exactly like a field that works. The layer was growing faster than the engine
+consuming it, and that gap — not the count of unread fields — is the thing to watch.
+
+Practically: a new attribute lands with its consumer in the same change, or it does not land. When
+a reader genuinely has to come later, the surface says so where the person is *typing* — the
+"not yet consulted" label on `reportingCurrency` and `fiscalYearStart` is the pattern — rather than
+being recorded only in a design document the author will never read.
+
 ## 3. Layering, and why it is two crates
 
 | Layer | Location | Knows about |

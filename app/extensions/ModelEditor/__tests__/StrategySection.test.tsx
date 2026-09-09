@@ -1015,7 +1015,11 @@ describe("the model panel", () => {
     // not a broken axis, it is an axis that silently disables every time fact.
     expect(axisSelect().tagName).toBe("SELECT");
     await change(axisSelect(), "Sales[DeptKey]");
-    await change(byTestId<HTMLInputElement>("model-reporting-currency"), "SEK");
+    // `commitText`, not `change`: the currency field commits on BLUR now, the
+    // same as `fiscalYearStart` beside it, because it has to refuse a bad code
+    // before it reaches the document and a per-keystroke commit would write
+    // `S` and `SE` on the way to `SEK`.
+    await commitText(byTestId<HTMLInputElement>("model-reporting-currency"), "SEK");
     expect(strategySet).not.toHaveBeenCalled();
 
     await click(button("Save"));
@@ -1082,6 +1086,34 @@ describe("the model panel", () => {
     expect(lastSaved().model?.fiscalYearStart).toBe("04-01");
   });
 
+  it("refuses 02-31 on screen while still taking 02-29", async () => {
+    // `02-31` is ten characters of correct SHAPE naming a day no year has, so
+    // the shape message is the wrong one to show and a shape-only check would
+    // have stored it. `MonthDay::new` refuses it at deserialize, which costs
+    // the whole document rather than this field — hence the keystroke refusal.
+    //
+    // `02-29` is the case that stops this becoming a full date check: an MM-DD
+    // names no year, so whether the 29th of February exists is unanswerable
+    // here and the backend accepts it. A tab stricter than Save is a second
+    // rule nobody wrote down. (Which months have which ceilings is diffed
+    // against the Rust table in lib/strategyTypes.test.ts; this row is about
+    // what the PANEL does with the answer.)
+    await mount();
+    const field = byTestId<HTMLInputElement>("model-fiscal-year-start");
+
+    await commitText(field, "02-31");
+    const message = byTestId("model-fiscal-year-start-error").textContent ?? "";
+    expect(message).toContain("02-31");
+    expect(message).toContain("29");
+    await click(button("Save"));
+    expect(lastSaved().model?.fiscalYearStart).toBeUndefined();
+
+    await commitText(field, "02-29");
+    expect(container.querySelector('[data-testid="model-fiscal-year-start-error"]')).toBeNull();
+    await click(button("Save"));
+    expect(lastSaved().model?.fiscalYearStart).toBe("02-29");
+  });
+
   it("marks exactly the two fields nothing reads yet, and neither of the two that are read", async () => {
     await mount();
 
@@ -1116,9 +1148,58 @@ describe("the model panel", () => {
     // Disabling would discard authored intent to buy nothing: the day something
     // reads `reportingCurrency`, the SEK somebody typed has to be there.
     expect(field.disabled).toBe(false);
-    await change(field, "SEK");
+    await commitText(field, "SEK");
     await click(button("Save"));
     expect(lastSaved().model?.reportingCurrency).toBe("SEK");
+  });
+
+  it("refuses a reporting currency that is not a three-letter uppercase code, and says why", async () => {
+    await mount();
+    const field = byTestId<HTMLInputElement>("model-reporting-currency");
+
+    // `sek` is the commonest wrong answer and the one this field used to take
+    // silently. `CurrencyCode` validates in `Deserialize`, so the cost of
+    // storing it is not a wrong currency — it is a document `strategy_doc`
+    // cannot parse, after which every preview, validate and Save comes back
+    // `unreadable-document` anchored to nothing.
+    await commitText(field, "sek");
+    const message = byTestId("model-reporting-currency-error").textContent ?? "";
+    expect(message).toContain("ISO-4217");
+    expect(message).toContain("sek");
+    // Refused means NOT WRITTEN, and the typed text stays — a value that
+    // silently reverts reads as accepted.
+    expect(field.value).toBe("sek");
+    await click(button("Save"));
+    expect(lastSaved().model?.reportingCurrency).toBeUndefined();
+  });
+
+  it("refuses a four-letter currency code as readily as a lowercase one", async () => {
+    await mount();
+    const field = byTestId<HTMLInputElement>("model-reporting-currency");
+    // Length is half the rule and case is the other half; a check that only
+    // uppercased would wave `USDX` through.
+    await commitText(field, "USDX");
+    expect(byTestId("model-reporting-currency-error").textContent).toContain("USDX");
+    await click(button("Save"));
+    expect(lastSaved().model?.reportingCurrency).toBeUndefined();
+  });
+
+  it("clears the reporting currency when the box is emptied", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      ...MIXED_DOC,
+      model: { reportingCurrency: "SEK" },
+    });
+    await mount();
+    const field = byTestId<HTMLInputElement>("model-reporting-currency");
+    expect(field.value).toBe("SEK");
+
+    // An empty box is `undefined`, not a refusal: clearing the field is how a
+    // document stops naming a currency, and a refusal here would make that
+    // gesture unreachable.
+    await commitText(field, "");
+    expect(container.querySelector('[data-testid="model-reporting-currency-error"]')).toBeNull();
+    await click(button("Save"));
+    expect(lastSaved().model?.reportingCurrency).toBeUndefined();
   });
 
   it("shows the priority order and can clear it, without pretending to reorder it", async () => {
@@ -1944,6 +2025,90 @@ describe("the rule scope editor", () => {
     expect(built.ok).toBe(false);
     expect(built.ok === false && built.error).toContain("'Ghost' is not a measure in this model");
   });
+
+  // -------------------------------------------------------------------------
+  // Scope date bounds — the boxes behind `aria-label="Scope from"` are plain
+  // text, and `IsoDate` validates in `Deserialize`. A bad bound saved here does
+  // not earn a finding on this rule; it makes the WHOLE document unreadable.
+  // -------------------------------------------------------------------------
+
+  function dateRuleDraft(from: string, to: string): Parameters<typeof buildRuleFromDraft>[1] {
+    return {
+      ...emptyRuleDraft(),
+      id: "r1",
+      measure: "Returns",
+      scope: [{ column: "Dim[Dept]", kind: "dateRange", members: "", from, to }],
+    };
+  }
+
+  it("refuses a scope date that has the right shape and is not a date", async () => {
+    // `2025-13-45` counts ten characters and two hyphens and is nothing on a
+    // calendar. The old check asked only whether `from` was non-empty.
+    const built = buildRuleFromDraft(overview(), dateRuleDraft("2025-13-45", ""), emptyStrategyDoc());
+    expect(built.ok).toBe(false);
+    expect(built.ok === false && built.error).toContain("2025-13-45");
+    expect(built.ok === false && built.error).toContain("YYYY-MM-DD");
+  });
+
+  it("refuses a scope date whose day does not exist in its month", async () => {
+    // The day-in-month case, which a `1..=31` range check waves through:
+    // February never has 31 days in any year.
+    const built = buildRuleFromDraft(overview(), dateRuleDraft("2026-02-31", ""), emptyStrategyDoc());
+    expect(built.ok).toBe(false);
+    expect(built.ok === false && built.error).toContain("2026-02-31");
+  });
+
+  it("refuses a malformed END bound as readily as a malformed start", async () => {
+    // The end bound is optional, and "optional" was doing the work of
+    // "unchecked" — a present-but-malformed `to` reached the document.
+    const built = buildRuleFromDraft(
+      overview(),
+      dateRuleDraft("2025-01-01", "2025-06-31"),
+      emptyStrategyDoc(),
+    );
+    expect(built.ok).toBe(false);
+    expect(built.ok === false && built.error).toContain("2025-06-31");
+  });
+
+  it("takes a real date range, and an open-ended one", async () => {
+    const bounded = buildRuleFromDraft(
+      overview(),
+      dateRuleDraft("2024-02-29", "2025-06-30"),
+      emptyStrategyDoc(),
+    );
+    // A LEAP DAY, deliberately: 2024-02-29 exists and a naive "February has 28
+    // days" check would refuse a legal bound, which is the opposite failure and
+    // just as bad — the tab would be a second, stricter rule nobody wrote down.
+    expect(bounded.ok).toBe(true);
+    expect(bounded.ok === true && bounded.rule.scope).toEqual({
+      "Dim[Dept]": { from: "2024-02-29", to: "2025-06-30" },
+    });
+
+    const open = buildRuleFromDraft(overview(), dateRuleDraft("2025-01-01", ""), emptyStrategyDoc());
+    expect(open.ok).toBe(true);
+    // No `to` key at all, not `to: undefined`: every container carries
+    // `deny_unknown_fields` and an explicit undefined is what serialization
+    // turns into a null the backend refuses.
+    expect(open.ok === true && open.rule.scope).toEqual({ "Dim[Dept]": { from: "2025-01-01" } });
+  });
+
+  it("leaves 'from after to' to the validator rather than refusing it here", async () => {
+    // NOT a form question. The backend raises `empty-scope` as an ERROR against
+    // the saved document and explains it; refusing it at this gate would be a
+    // second rule, and it would refuse a rule Save accepts.
+    const built = buildRuleFromDraft(
+      overview(),
+      dateRuleDraft("2025-06-30", "2025-01-01"),
+      emptyStrategyDoc(),
+    );
+    expect(built.ok).toBe(true);
+  });
+
+  it("still refuses an empty from date, with the sentence it always had", async () => {
+    const built = buildRuleFromDraft(overview(), dateRuleDraft("", "2025-06-30"), emptyStrategyDoc());
+    expect(built.ok).toBe(false);
+    expect(built.ok === false && built.error).toContain("needs a from date");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2008,5 +2173,268 @@ describe("a read-only model", () => {
       (b.textContent ?? "").startsWith("Save"),
     ) as HTMLButtonElement;
     expect(save.disabled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The table kind — whose answer is on screen, and what the model disproves
+// ---------------------------------------------------------------------------
+
+describe("the table kind", () => {
+  /** One table row's kind cell. */
+  function kindCell(table: string): HTMLElement {
+    return byTestId<HTMLElement>(`table-kind-${table}`);
+  }
+
+  function kindSelect(table: string): HTMLSelectElement {
+    return kindCell(table).querySelector("select") as HTMLSelectElement;
+  }
+
+  function option(table: string, kind: string): HTMLOptionElement {
+    const hit = [...kindSelect(table).options].find((o) => o.value === kind);
+    if (!hit) throw new Error(`no '${kind}' option on ${table}`);
+    return hit;
+  }
+
+  it("tells a kind a person CHOSE from one the engine merely detected", async () => {
+    // The fixture document names Dim a dimension and says nothing about Sales;
+    // inference reads Sales as a fact. Before `kind` did anything the two
+    // rendered identically — and they must not, because the backend HONOURS
+    // the first (it stops classifying that table for itself) and DISREGARDS
+    // the second, re-deriving it from today's relationship graph.
+    await mount();
+    await settle();
+
+    expect(kindCell("Dim").getAttribute("data-kind-origin")).toBe("chosen");
+    expect(byTestId("kind-origin-Dim").textContent).toContain("chosen");
+
+    expect(kindCell("Sales").getAttribute("data-kind-origin")).toBe("detected");
+    expect(byTestId("kind-origin-Sales").textContent).toContain("detected");
+  });
+
+  it("shows the detected kind in the EMPTY option and writes nothing for it", async () => {
+    // The same discipline the inherited direction follows: a blank cell reads
+    // as "nobody has decided", which for `kind` stopped being true — the
+    // backend classifies every table anyway. Showing it must not be the same
+    // as storing it, or a machine's reading would become a person's statement
+    // by being looked at.
+    await mount();
+    await settle();
+
+    expect(kindSelect("Sales").value).toBe("");
+    expect([...kindSelect("Sales").options][0].textContent).toContain("fact — detected");
+    expect(strategySet).not.toHaveBeenCalled();
+  });
+
+  it("says nothing at all about a table neither the document nor inference names", async () => {
+    // The third state. A badge here would claim an opinion nobody has.
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    vi.mocked(strategyInfer).mockResolvedValue({ version: 1 });
+    await mount();
+    await settle();
+
+    expect(kindCell("Sales").getAttribute("data-kind-origin")).toBe("none");
+    expect(container.querySelector('[data-testid="kind-origin-Sales"]')).toBeNull();
+  });
+
+  it("REFUSES a lookup claim the topology disproves, in the dropdown, with the reason", async () => {
+    // Sales is the FROM side of the fixture's only relationship, so filters
+    // flow out of it and nothing can look it up. `calendar` and `dimension`
+    // both assert the opposite, and the validator answers that with a
+    // Save-blocking error — so the cheapest fix is to make the state hard to
+    // reach rather than to explain a whole-document refusal afterwards.
+    await mount();
+    await settle();
+
+    expect(option("Sales", "calendar").disabled).toBe(true);
+    expect(option("Sales", "dimension").disabled).toBe(true);
+    expect(option("Sales", "calendar").title).toContain("'Dim'");
+    // The kinds that claim no lookup stay reachable: refusing those would be
+    // STRICTER than the backend, which is worse than not checking at all.
+    expect(option("Sales", "fact").disabled).toBe(false);
+    expect(option("Sales", "bridge").disabled).toBe(false);
+    // ...and the table the model really can look up is untouched.
+    expect(option("Dim", "calendar").disabled).toBe(false);
+    expect(option("Dim", "dimension").disabled).toBe(false);
+  });
+
+  it("surfaces the validator's topology refusal on the row, and blocks Save with it", async () => {
+    // The dropdown makes the state hard to reach; the VALIDATOR is what makes
+    // it impossible, and a hand-edited document can arrive already in it. The
+    // finding's path is one level BELOW the row's, which a bare equality match
+    // would strand.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Sales: { kind: "calendar", reviewed: false, source: "authored" } },
+    });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        {
+          severity: "error",
+          code: "authored-kind-contradicts-topology",
+          path: "tables['Sales'].kind",
+          message:
+            "'Sales' is declared calendar, but nothing looks 'Sales' up — it is the FROM side of a relationship to 'Dim'",
+        },
+      ],
+    });
+    await mount();
+    await settle();
+    await click(button("Validate"));
+
+    // On the ROW, and specifically in the cell the finding names.
+    expect(kindCell("Sales").textContent).toContain("error");
+
+    const save = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").startsWith("Save"),
+    ) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(save.textContent).toContain("fix 1 error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The confirmation column stays reachable
+// ---------------------------------------------------------------------------
+
+describe("the reviewed column", () => {
+  /** Every cell of one row, in document order. */
+  function cells(row: Element): HTMLTableCellElement[] {
+    return [...row.children].filter(
+      (c) => c.tagName === "TD" || c.tagName === "TH",
+    ) as HTMLTableCellElement[];
+  }
+
+  it("is PINNED to the trailing edge in the measures grid, and is still last", async () => {
+    // Eleven columns in an `overflow-x: auto` card pushed `reviewed` off the
+    // right-hand edge, and it is the column a person works DOWN while
+    // confirming a draft. The assertion is on the MECHANISM — sticky, pinned
+    // right — because a width is a number this test would have to be retuned
+    // for every column anybody adds.
+    await mount();
+    await settle();
+
+    const row = measureRow("Profit");
+    const last = cells(row)[cells(row).length - 1];
+    expect(last.getAttribute("data-sticky")).toBe("reviewed");
+    expect(last.style.position).toBe("sticky");
+    expect(last.style.right).toBe("0px");
+    // The Confirm control is IN the pinned cell, which is the whole point.
+    expect(last.querySelector("button")).not.toBeNull();
+    // A sticky cell floats over the columns sliding beneath it, so it must be
+    // opaque — `rowTone` gives `transparent` for three of its four states.
+    expect(last.style.background).not.toBe("");
+    expect(last.style.background).not.toBe("transparent");
+  });
+
+  it("pins the measures HEADER cell too, so the pinned column keeps its name", async () => {
+    await mount();
+    await settle();
+    const header = container.querySelector('th[data-sticky="reviewed"]') as HTMLTableCellElement;
+    expect(header.textContent).toBe("reviewed");
+    expect(header.style.position).toBe("sticky");
+    expect(header.style.right).toBe("0px");
+  });
+
+  it("is pinned in the TABLES grid as well, where the same confirming happens", async () => {
+    await mount();
+    await settle();
+
+    const row = container.querySelector(
+      "tr[data-strategy-path=\"tables['Dim']\"]",
+    ) as HTMLElement;
+    const last = cells(row)[cells(row).length - 1];
+    expect(last.getAttribute("data-sticky")).toBe("reviewed");
+    expect(last.style.position).toBe("sticky");
+    expect(last.style.right).toBe("0px");
+    expect(last.querySelector("button")).not.toBeNull();
+  });
+
+  it("leaves every other column exactly where it was", async () => {
+    // "Do not change what any column contains." Pinning is a style on ONE
+    // cell; a reordering would have moved the answer in front of the values it
+    // answers for, and this is what tells the two apart.
+    await mount();
+    await settle();
+    const headerRow = [...container.querySelectorAll("thead tr")].find(
+      (r) => r.firstElementChild?.textContent === "measure",
+    );
+    expect(headerRow, "the measures grid must still have a header row").toBeDefined();
+    expect([...headerRow!.children].map((h) => h.textContent)).toEqual([
+      "measure",
+      "direction",
+      "aggregation",
+      "unit",
+      "target",
+      "materiality",
+      "cadence",
+      "priority",
+      "analysis dimensions",
+      "never slice by",
+      "reviewed",
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// suppress — a closed set, so the control is the vocabulary
+// ---------------------------------------------------------------------------
+
+describe("the rule's suppress field", () => {
+  it("offers the eight fact kinds as toggles, with no free text to mistype into", async () => {
+    // It was a text box. Since `suppress` became `Vec<SuppressibleFactKind>` a
+    // near-miss is not a suppression that does nothing — the document fails
+    // serde and the backend discards the WHOLE strategy, so a box that can
+    // type an unsaveable value is worse than the untyped version it replaced.
+    await mount();
+    await settle();
+    await click(button("Add rule"));
+
+    const picker = byTestId<HTMLElement>("suppress-picker");
+    const boxes = [...picker.querySelectorAll("input")] as HTMLInputElement[];
+    expect(boxes.map((b) => b.type)).toEqual(new Array(8).fill("checkbox"));
+    expect(picker.textContent).toContain("definitionalDriver");
+    expect(picker.textContent).toContain("memberMove");
+    // The example this field's hint used to offer, and a value nothing emits.
+    expect(picker.textContent).not.toContain("outlier");
+  });
+
+  it("writes the chosen kinds in VOCABULARY order, whatever order they were clicked", async () => {
+    // A set of kinds has to produce one string, or two people who chose the
+    // same suppressions get two different documents and a diff nobody can read.
+    await mount();
+    await settle();
+    await click(button("Add rule"));
+
+    await click(byTestId("suppress-trend"));
+    await click(byTestId("suppress-contribution"));
+
+    const id = container.querySelector(
+      'input[placeholder="refunds-dept"]',
+    ) as HTMLInputElement;
+    await change(id, "r1");
+    const measure = [...container.querySelectorAll("select")].find(
+      (s) => s.options[0]?.textContent === "(select measure)",
+    ) as HTMLSelectElement;
+    await change(measure, "Returns");
+    await click(button("OK"));
+    await click(button("Save"));
+
+    expect(lastSaved().rules?.[0]?.set.suppress).toEqual(["contribution", "trend"]);
+  });
+
+  it("refuses a RESTORED draft carrying a spelling the picker can no longer produce", async () => {
+    // Unsaved rule drafts are persisted, so a draft written before the closed
+    // set existed outlives the control that accepted it. This is the only
+    // route a bad kind still has, and it must not reach a backend that answers
+    // an unknown variant by discarding the entire document.
+    const built = buildRuleFromDraft(
+      overview(),
+      { ...emptyRuleDraft(), id: "r1", measure: "Returns", suppress: "trend,contribtion" },
+      emptyStrategyDoc(),
+    );
+    expect(built.ok).toBe(false);
+    expect(built.ok === false && built.error).toContain("Did you mean 'contribution'?");
   });
 });

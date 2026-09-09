@@ -932,6 +932,27 @@ STILL OPEN, and each needs a decision rather than work:
   Cardinality is the one signal that is convention-independent and language-independent. Treat
   this as the item that unblocks the others, not as a peer of them.
 
+  **THE LEXICON AND CARDINALITY FAIL IN OPPOSITE DIRECTIONS, AND NEITHER IS A STOPGAP FOR THE
+  OTHER.** This is the strongest argument for the item and it is not in the original A2 analysis.
+  Established 2026-09-08 from the two halves of the label-classifier fix:
+  - **Only the lexicon can demote `firstname`.** Cardinality cannot: roughly 500 distinct first
+    names across 10,000 customers is a textbook axis to a distinct count, and it would be
+    dictionary-encoded too. The signal that says "this is a fragment of a person's name" is in the
+    WORD, nowhere else.
+  - **Only cardinality can rescue `CategoryName`.** The lexicon cannot: it is name-like by
+    construction, so ANY name classifier demotes it. That demotion is the measured price of the
+    fix (`a_denormalised_name_that_really_is_an_axis_is_demoted_too_and_the_harness_says_so`,
+    `strategy/calibration_tests.rs`).
+  So the two signals are not redundant and not ranked — each is REQUIRED for a case the other gets
+  wrong, and only the combination gets both right. Anything that treats the lexicon as a temporary
+  stand-in "until statistics arrive" has the relationship wrong: statistics do not retire the
+  lexicon, and the lexicon never covered what statistics do.
+  **And the false-demote is the common case, not the exotic one.** A denormalised `<Thing> Name`
+  column beside its key is exactly what a flat CSV or a wide SQL view produces, and those are
+  ordinary import paths here (the CSV/Parquet/InMemory connectors are named two paragraphs below).
+  A star schema hand-built in the Model Editor is the case the lexicon was tested against; an
+  imported wide table is the case it will actually meet.
+
   **HOW TO BUILD IT, and a reversal.** An earlier costing here concluded distinct-count was
   unaffordable on DirectQuery. That was an artefact of the entry point measured, not of the layer.
   `distinct_members` (`bi/cube.rs`) builds a `QueryRequest`, which REQUIRES a measure, so on a
@@ -981,16 +1002,37 @@ strategy document found nine cases genuinely accepted in silence; eight are now 
 `test-needs-value`, `test-needs-baseline`, plus `unknown-measure` unified across its two sites).
 Three findings outlive it:
 
-* **Four strategy attributes are authored, inferred, validated, resolved — and READ BY NOTHING.**
-  Verified 2026-09-08 by grepping the consumers, not the writers: `ResolvedMeasure.unit`,
-  `ResolvedMeasure.cadence` (`strategy/resolve.rs:660,719`), `model.fiscal_year_start` and
-  `model.reporting_currency` (`strategy/types.rs:611,613`) have no reader in `insights/model.rs`,
-  `model_commands.rs` or `report.rs`. `TableStrategy.kind` is write-only the same way. The tab
-  labels the last two "not yet consulted"; `unit` and `cadence` present as ordinary settable
-  attributes and are not labelled at all. This is the same inert-control defect the C1 round fixed
-  for two fields and left standing for three. **Wire them or delete them — do not leave them as
-  surface.** `cadence` is the one with a designed consumer already written down (period bucketing
-  and seasonality lag selection, plan §6.4/§6.5) and never built.
+* **Five strategy attributes were authored, inferred, validated, resolved — and READ BY NOTHING,
+  and ONE of them was not harmless.** Verified 2026-09-08 by grepping the consumers, not the
+  writers. The split matters and the first filing here did not make it:
+  - **`TableStrategy.kind` was the high-consequence one, and is FIXED (see below).** It gates the
+    whole time-series cascade — calendar detection, `defaultTimeAxis`, the calendar arm of the role
+    ladder — and renders as an editable dropdown on EVERY table row. `classify_table`
+    (`strategy/facts.rs:291`) derived kind from the model's `date_table` plus relationship sides,
+    and `infer_table` (`strategy/infer.rs:624`) read `facts.tables[..].kind`; the document's own
+    field had no reader. So the `calendar` shown against a date table was a DISPLAY of a decision
+    made elsewhere, and a user who saw detection get it wrong and corrected it changed nothing,
+    silently. That is a different class from a field that merely does nothing: it is a control that
+    invites a correction and discards it.
+    **And the round trip was completely convincing**, which is what made it invisible.
+    `infer_table` stamps the DETECTED kind into the drafted document, and the tab's cell renders
+    `entry.kind` from that document (`StrategySection.tsx:2851-2857`, a `selectOf<TableKind>` on
+    every table row). So the dropdown showed a plausible value, accepted a change, saved it, and
+    read it back changed — while every consumer went on using `facts.tables[..].kind`, derived
+    afresh from the model. A control that resets would have reported itself in one click.
+  - **The remaining four are inert and harmless**: `ResolvedMeasure.unit`, `ResolvedMeasure.cadence`
+    (`strategy/resolve.rs:660,719`), `model.fiscal_year_start` and `model.reporting_currency`
+    (`strategy/types.rs:611,613`). The tab labels the last two "not yet consulted"; `unit` and
+    `cadence` present as ordinary settable attributes and are not labelled at all. `cadence` is the
+    one with a designed consumer already written down (period bucketing and seasonality lag
+    selection, plan §6.4/§6.5) and never built. **Wire them or delete them — do not leave them as
+    surface.**
+
+  The standing rule this produced is now a design rule, not a note:
+  `docs/design/insights-strategy-layer.md` §2, *nothing becomes authorable until it has a reader*.
+  The cost is not dead code — **authoring effort has been the binding constraint on this layer from
+  the start**, and an unread field spends that budget while looking exactly like a field that
+  works. The gap to watch is that the layer was growing faster than the engine consuming it.
 * **A band target still emits no `Variance` fact.** `Observation.target_value` is `Option<f64>`
   (`insights/model.rs:196`) and `model_commands.rs:414-424` maps `Target::Band` to `None` — a band
   is two numbers and does not fit. The band is no longer inert: `favourability_at`
@@ -1011,6 +1053,50 @@ on a product dimension reads as name-like and is demoted to `label`, so its brea
 offered (`a_denormalised_name_that_really_is_an_axis_is_demoted_too_and_the_harness_says_so`,
 `strategy/calibration_tests.rs`). The trade is a withheld breakdown against a meaningless one, paid
 in a dropdown, on a row that ships `reviewed: false`.
+
+**2.AI.8 — The fifth Strategy review: what closed, and the two things worth keeping.** Five items
+were raised; all five are done (`TableStrategy.kind` wired, the warning→error sweep run, `suppress`
+made an enum, the vacuous-test family closed structurally, the cardinality argument recorded in
+§2.AI.6). Two results are worth more than the items that produced them.
+
+* **A DEFECT ESCAPED FOUR SUCCESSIVE FIXES BY CHANGING AXIS.** The inline-test harness — the one
+  mechanism giving a strategy document teeth, and the artifact a consultant is asked to trust —
+  could report a green tick for an assertion the run does not deliver. Fixed four times:
+  a `targetBand` direction with no band fell to `Neutral`; then an IMMATERIAL delta returned
+  `Neutral` regardless of the band, because materiality was tested first; then an `Immaterial`
+  verdict was added on the premise "below the floor the run emits nothing", which is FALSE —
+  only the **Change** fact is materiality-gated (`insights/model.rs`), the **Variance** fact is
+  built outside it and carries its own favourability, so a flat period against a literal target
+  answered "immaterial" while the report said "worse"; then the new consistency gate's own float
+  tolerance let a relative floor move under the point. **Every fix was verified, and every
+  verification found the next spelling.** The transferable lesson: a single-shot fix to a family
+  defect closes the instance; only an adversarial pass that tries to BUILD a fresh reproduction
+  finds the family. The reason 295 tests could not see any of it is that every fixture exercising
+  the path was built with no target — and one test's NAME generalised past what its fixture proved
+  (`a_movement_below_the_floor_is_immaterial_here_because_the_run_emits_no_fact_there` hand-built
+  its observation with `..default()`, so `target_value` was `None`).
+  The semantics that finally held: **materiality is a property of a MOVEMENT; a variance against
+  target is a comparison of LEVELS**, so a tiny movement can still sit far from target and gating
+  the Variance fact on movement-materiality would have been the wrong fix.
+* **THE WARNING→ERROR SWEEP CAME BACK NEGATIVE, AND THAT IS THE RESULT.** All 15 warning sites are
+  correctly classified under the rule now written at the top of `strategy/validate.rs`: *a document
+  that, saved as-is, would make a fact WRONG or SILENTLY WITHHELD is an error; one that would only
+  make a fact LESS GOOD is a warning.* Eight are provably inert downstream, one is unreachable, one
+  over-refuses safely, two never gate a write, and the two that do change output announce
+  themselves. It found one genuine withheld fact with no finding at all — a measure listing a
+  column in both `analysisDimensions` and `neverSliceBy`, where the prohibition wins and the
+  breakdown is simply absent — now `contradictory-analysis-dimension`, an error.
+  It also corrected the justification usually given for the `unreviewed` warning: the resolver has
+  no `reviewed` gate, so an unreviewed inferred direction is applied at FULL STRENGTH. The warning
+  is right, but because **an inferred draft must stay savable**, not because it produces correct
+  facts. Cite the workflow reason.
+
+`TableStrategy.kind` is wired, and the honest scope is narrower than the dropdown implies: an
+authored `calendar` moves the axis, the roles and the narration (with `CalendarSource::Authored`
+joining Declared/Inferred); an authored `dimension` the topology refuses produces a run note that
+reaches the pane, the markdown and the report sheet; `fact`, `bridge` and `other` remain inert.
+An authored kind that relationship topology DISPROVES is a validation error — a human statement
+beats a heuristic, but not topology.
 
 **2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) waits for the
 release decision; the fetch script makes bundle-vs-download a build-time switch. M4 (intent router)

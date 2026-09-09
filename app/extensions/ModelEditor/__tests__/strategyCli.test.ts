@@ -606,3 +606,272 @@ describe("infer strategy", () => {
     expect(() => planRun("infer strategy -aply", h.session)).toThrow(/Unknown argument '-aply'/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// set table — the strategy half, which `kind` earned by starting to do something
+// ---------------------------------------------------------------------------
+
+describe("set table … kind= / labelcolumn= / reviewed=", () => {
+  it("round-trips an authored kind into the stored document", async () => {
+    // The tab could set `kind` and the command line could not, which was
+    // survivable while it changed nothing. It now overrides the backend's own
+    // table classification and can decide which table is the calendar — and a
+    // field a script cannot reach is a field a script cannot fix.
+    const { ok } = await run("set table Dim kind=dimension");
+    expect(ok).toBe(true);
+    expect(writtenDoc().tables?.Dim?.kind).toBe("dimension");
+    // A person typed it, so the entry must stop claiming a machine guessed it:
+    // `authored_table_kinds` DISREGARDS a kind stamped `inferred`.
+    expect(writtenDoc().tables?.Dim?.source).toBe("authored");
+    expect(writtenDoc().tables?.Dim?.reviewed).toBe(false);
+  });
+
+  it("REFUSES a lookup claim the relationship graph disproves, and names the join", async () => {
+    // Sales is the FROM side of the fixture's only relationship, so filters
+    // flow out of it and nothing looks it up. Writing this would come back as
+    // a whole-document refusal naming a finding code; refusing it here says it
+    // in a sentence, at the command that caused it.
+    const { ok, output } = await run("set table Sales kind=calendar");
+    expect(ok).toBe(false);
+    expect(output).toContain("'Dim'");
+    expect(strategySet).not.toHaveBeenCalled();
+  });
+
+  it("still accepts the kinds that claim no lookup at all on the same table", async () => {
+    // The mirror must never be STRICTER than the validator, or the CLI would
+    // refuse a document the backend accepts.
+    const { ok } = await run("set table Sales kind=fact");
+    expect(ok).toBe(true);
+    expect(writtenDoc().tables?.Sales?.kind).toBe("fact");
+  });
+
+  it("names the alternatives for a kind that is not one", async () => {
+    const { ok, output } = await run("set table Dim kind=dimenson");
+    expect(ok).toBe(false);
+    expect(output).toContain("fact, dimension, bridge, calendar, other");
+  });
+
+  it("sets a label column the table actually has, and refuses one it does not", async () => {
+    await run("set table Dim labelcolumn=Dept");
+    expect(writtenDoc().tables?.Dim?.labelColumn).toBe("Dept");
+
+    const { ok, output } = await run("set table Dim labelcolumn=Ghost");
+    expect(ok).toBe(false);
+    expect(output).toContain("'Ghost' is not a column of 'Dim'");
+  });
+
+  it("confirms an entry without re-authoring the values somebody else wrote", async () => {
+    // The same rule `set measure … reviewed=true` follows: agreeing with a
+    // machine's guess does not make the values a person's.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Dim: { kind: "dimension", reviewed: false, source: "inferred" } },
+    });
+    await run("set table Dim reviewed=true");
+    expect(writtenDoc().tables?.Dim).toEqual({
+      kind: "dimension",
+      reviewed: true,
+      source: "inferred",
+    });
+  });
+
+  it("writes the strategy without touching the table's own metadata", async () => {
+    const h = makeHarness();
+    const updateTable = vi.fn().mockResolvedValue(h.session.overview);
+    (h.session.gateway as unknown as Record<string, unknown>).updateTable = updateTable;
+    await executeRun(planRun("set table Dim kind=dimension", h.session), h.session, h.io);
+    expect(strategySet).toHaveBeenCalledTimes(1);
+    expect(updateTable).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// suppress — refused at the option table, with the near miss named
+// ---------------------------------------------------------------------------
+
+describe("add rule … suppress=", () => {
+  it("accepts the kinds the backend can name", async () => {
+    const { ok } = await run(
+      "add rule r1 measure=[Returns] suppress=contribution,trend direction=lowerIsBetter",
+    );
+    expect(ok).toBe(true);
+    expect(writtenDoc().rules?.[0].set.suppress).toEqual(["contribution", "trend"]);
+  });
+
+  it("refuses a near miss at the OPTION TABLE, naming the kind that was meant", async () => {
+    // The refusal has to happen before anything runs: `planRun` is what a
+    // person sees as "this will work". And it has to name `contribution` —
+    // printing eight kinds back at somebody makes them find their own answer.
+    const h = makeHarness();
+    expect(() =>
+      planRun("add rule r1 measure=[Returns] suppress=contribtion", h.session),
+    ).toThrow(/Did you mean 'contribution'\?/);
+  });
+
+  it("refuses 'outlier', which is what this vocabulary used to be documented with", async () => {
+    // Nothing emits it under any spelling. It survived in a doc comment, in a
+    // UI hint and in a test fixture precisely because a prose list cannot be
+    // diffed against a parser — and it is now a document the backend will not
+    // deserialize at all, so the whole strategy would be discarded over it.
+    const h = makeHarness();
+    expect(() =>
+      planRun("add rule r1 measure=[Returns] suppress=outlier", h.session),
+    ).toThrow(/is not a fact kind/);
+    expect(strategySet).not.toHaveBeenCalled();
+  });
+
+  it("lets an EMPTY suppress list through rather than refusing the clear gesture", async () => {
+    // `suppress=""` is how a rule stops suppressing anything. A value check
+    // that refused the empty token would make that unreachable, which is the
+    // classic way a new guard removes a capability nobody meant to remove.
+    const { ok } = await run(
+      'add rule r1 measure=[Returns] suppress="" direction=lowerIsBetter',
+    );
+    expect(ok).toBe(true);
+    expect(writtenDoc().rules?.[0].set.suppress).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The reads keep parity with what is now authorable and what is now refused
+// ---------------------------------------------------------------------------
+
+describe("show / validate strategy after the kind became load-bearing", () => {
+  it("show strategy says whether a kind is a person's statement or a machine's reading", async () => {
+    // The value alone is not the answer to "is the engine using this?": a kind
+    // the drafting op wrote is stamped `inferred` and is thrown away and
+    // re-derived, so printing the two identically shows somebody a calendar
+    // that may not be in force.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: {
+        Dim: { kind: "dimension", reviewed: false, source: "authored" },
+        Sales: { kind: "fact", reviewed: false, source: "inferred" },
+      },
+    });
+    const { output } = await run("show strategy");
+    expect(output).toContain("kind from");
+    expect(output).toMatch(/Dim\s+dimension\s+chosen/);
+    expect(output).toMatch(/Sales\s+fact\s+detected/);
+  });
+
+  it("leaves the column blank for a table entry that states no kind at all", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Dim: { labelColumn: "Dept", reviewed: false } },
+    });
+    const { output } = await run("show strategy");
+    expect(output).not.toContain("chosen");
+    expect(output).not.toContain("detected");
+  });
+
+  it("validate strategy surfaces the topology refusal, and says the document would be refused", async () => {
+    // The finding is new and it is an ERROR, not a warning: applying a kind
+    // the model disproves changes what the planner emits, and every claim then
+    // rests on a join direction that does not exist.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Sales: { kind: "calendar", reviewed: false, source: "authored" } },
+    });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        {
+          severity: "error",
+          code: "authored-kind-contradicts-topology",
+          path: "tables['Sales'].kind",
+          message:
+            "'Sales' is declared calendar, but nothing looks 'Sales' up — it is the FROM side of a relationship to 'Dim'",
+        },
+      ],
+    });
+    const { output } = await run("validate strategy");
+    expect(output).toContain("authored-kind-contradicts-topology");
+    expect(output).toContain("tables['Sales'].kind");
+    expect(output).toContain("the document would be refused");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The read/write round trip on a scope
+//
+// `show strategy` prints a rule's scope in the spelling `add rule scope=`
+// accepts, because copying a printed rule back in is how a rule gets edited.
+// The two had drifted on the ONE shape the checked-in corpus actually uses:
+// an open-ended date range printed as `Col=2025-01-01..` and parsed back as
+// the one-member list `["2025-01-01.."]` — a well-formed document the backend
+// accepts, constraining the rule to a member no column has, so the rule
+// silently never fires. Nothing in either direction reported anything.
+// ---------------------------------------------------------------------------
+
+describe("a printed scope is a scope `add rule` can read", () => {
+  const OPEN_ENDED: StrategyDoc = {
+    version: 1,
+    rules: [
+      {
+        id: "nordics-floor",
+        measure: "Returns",
+        // The shape `tests/fixtures/model/sales_star_strategy.json` carries:
+        // "the floor took effect in 2025" has no end date, and inventing one
+        // would make the rule stop firing next year.
+        scope: { "Dim[Dept]": { from: "2025-01-01" } },
+        set: { direction: "higherIsBetter" },
+      },
+    ],
+  };
+
+  it("prints an open-ended range with nothing after the dots", async () => {
+    vi.mocked(strategyGet).mockResolvedValue(OPEN_ENDED);
+    const { output } = await run("show strategy");
+    expect(output).toContain("Dim[Dept]=2025-01-01..");
+  });
+
+  it("reads that exact text back as a RANGE, not as a member ending in dots", async () => {
+    const { ok } = await run(
+      'add rule copied measure=[Returns] scope="Dim[Dept]=2025-01-01.." direction=higherIsBetter',
+    );
+    expect(ok).toBe(true);
+    expect(writtenDoc().rules?.[0].scope).toEqual({ "Dim[Dept]": { from: "2025-01-01" } });
+  });
+
+  it("reads a bounded range back as both bounds", async () => {
+    const { ok } = await run(
+      'add rule bounded measure=[Returns] scope="Dim[Dept]=2025-01-01..2025-06-30"',
+    );
+    expect(ok).toBe(true);
+    expect(writtenDoc().rules?.[0].scope).toEqual({
+      "Dim[Dept]": { from: "2025-01-01", to: "2025-06-30" },
+    });
+  });
+
+  it("refuses a bound that has the right shape and is not a date", async () => {
+    // `2025-13-01..2025-99-99` used to plan AND execute clean, because the
+    // CLI's regex counted digits while `IsoDate` checks the calendar. The
+    // document it wrote could not be deserialized, so the NEXT read of the
+    // strategy failed wholesale — nothing pointing at this rule, or at this
+    // command, or at the field.
+    const { ok, output } = await run(
+      'add rule bad measure=[Returns] scope="Dim[Dept]=2025-13-01..2025-99-99"',
+    );
+    expect(ok).toBe(false);
+    expect(output).toContain("2025-13-01");
+    expect(strategySet).not.toHaveBeenCalled();
+  });
+
+  it("refuses a day its month does not have", async () => {
+    const { ok, output } = await run(
+      'add rule feb measure=[Returns] scope="Dim[Dept]=2026-02-31.."',
+    );
+    expect(ok).toBe(false);
+    expect(output).toContain("2026-02-31");
+    expect(strategySet).not.toHaveBeenCalled();
+  });
+
+  it("takes a leap day, which is a real date", async () => {
+    // The opposite failure and just as bad: a CLI stricter than the backend
+    // would refuse a bound the document may legally hold.
+    const { ok } = await run('add rule leap measure=[Returns] scope="Dim[Dept]=2024-02-29.."');
+    expect(ok).toBe(true);
+    expect(writtenDoc().rules?.[0].scope).toEqual({ "Dim[Dept]": { from: "2024-02-29" } });
+  });
+});

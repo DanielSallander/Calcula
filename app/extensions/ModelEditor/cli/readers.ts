@@ -21,6 +21,7 @@ import {
   formatTargetSpec,
   modelEntry,
   modelHasValues,
+  tableKindOrigin,
 } from "../lib/strategyTypes";
 import type { AttributeSet, Finding, StrategyDoc } from "../lib/strategyTypes";
 import { filterNames, globToRegex, matchColumns, matchNamed, matchRelationships, matchTables, requireOne } from "./resolve";
@@ -762,10 +763,19 @@ async function runShowStrategy(s: CliSession, io: CliIo): Promise<void> {
   );
   printTable(
     io,
-    ["table", "kind", "label column", "columns", "reviewed"],
+    // "kind from" IS NOT THE `reviewed` COLUMN SAID TWICE. `kind` overrides the
+    // backend's own table classification and can decide which table is the
+    // calendar — but ONLY when the entry was authored: a kind the drafting op
+    // wrote is stamped `inferred` and is disregarded, re-derived from today's
+    // relationship graph. Printing the value without saying which of those it
+    // is shows a person a calendar the engine may not be using.
+    ["table", "kind", "kind from", "label column", "columns", "reviewed"],
     tables.map(([name, t]) => [
       name,
       t.kind ?? "",
+      // No inference draft is fetched by a read, so the only origins reachable
+      // here are the two the STORED document can carry.
+      tableKindOrigin(t, undefined) === "none" ? "" : tableKindOrigin(t, undefined),
       t.labelColumn ?? "",
       String(Object.keys(t.columns ?? {}).length),
       yesNo(t.reviewed),

@@ -195,7 +195,9 @@ fn witness(region: &Scope) -> BTreeMap<QualifiedColumn, String> {
         .iter()
         .filter_map(|(col, v)| match v {
             ScopeValue::Members(m) => m.first().map(|m| (col.clone(), m.clone())),
-            ScopeValue::DateRange { from, .. } => Some((col.clone(), from.clone())),
+            // The bound is an `IsoDate`; the witness is a plain member string,
+            // because a witness names a POINT and a point is a member spelling.
+            ScopeValue::DateRange { from, .. } => Some((col.clone(), from.to_string())),
         })
         .collect()
 }
@@ -261,7 +263,9 @@ mod tests {
     use super::*;
     // StrategyDoc, Rule, Scope, ScopeValue and QualifiedColumn arrive through
     // `use super::*`.
-    use crate::insights::strategy::types::{AttributeSet, Direction, Materiality};
+    use crate::insights::strategy::types::{
+        AttributeSet, Direction, Materiality, SuppressibleFactKind,
+    };
 
     fn col(table: &str, column: &str) -> QualifiedColumn {
         QualifiedColumn::new(table, column)
@@ -503,14 +507,20 @@ mod tests {
     #[test]
     fn suppression_is_a_union_so_overlapping_suppress_rules_are_not_refused() {
         let mut doc = StrategyDoc::default();
-        let suppress = |k: &str| AttributeSet {
-            suppress: vec![k.to_string()],
+        let suppress = |k: SuppressibleFactKind| AttributeSet {
+            suppress: vec![k],
             ..Default::default()
         };
-        doc.rules
-            .push(rule("a", members(&[("Dim", "Dept", &["A"])]), suppress("outlier")));
-        doc.rules
-            .push(rule("b", members(&[("Geo", "Region", &["Nordics"])]), suppress("trend")));
+        doc.rules.push(rule(
+            "a",
+            members(&[("Dim", "Dept", &["A"])]),
+            suppress(SuppressibleFactKind::Contribution),
+        ));
+        doc.rules.push(rule(
+            "b",
+            members(&[("Geo", "Region", &["Nordics"])]),
+            suppress(SuppressibleFactKind::Trend),
+        ));
         assert_eq!(check_overlaps(&doc), vec![]);
     }
 

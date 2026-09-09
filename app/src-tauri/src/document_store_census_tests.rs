@@ -575,6 +575,27 @@ fn call_closure(fns: &[FnDef], roots: &[&str]) -> Vec<FnDef> {
 }
 
 /// Every `ident(` in `code` — the call sites, resolved by name.
+///
+/// THE COST OF THIS BEING TEXTUAL, PAID ONCE ON 2026-09-08. `code()` is the raw
+/// body, so comments and string literals are scanned too — deliberately, since
+/// `join_method_chains` above records what a scanner that skipped things missed.
+/// The price is that PROSE FABRICATES CALL EDGES. A comment inside
+/// `insights::strategy::validate::judge_once` was written as the word "gate"
+/// followed by a bracket, `mcp::objects` declares a `pub(crate)` function of
+/// exactly that name taking a `&ScriptState`, and the closure from
+/// `assemble_publish_workbook` (which reaches `judge_once` through
+/// `validate_published_strategies` -> `run_inline_tests` -> `judge`) swallowed
+/// it and then `check_mcp_access` and `check_script_security` with it. Both
+/// tests below went red naming three `ScriptState` fields as an unreset publish
+/// leak. Nothing in the diff mentioned `ScriptState`, so three reviewers in a
+/// row filed it as pre-existing and unrelated; it was neither.
+///
+/// IF THIS TEST FAILS NAMING A STORE THE FLAGGED FUNCTIONS HAVE NO BUSINESS
+/// READING, CHECK FOR A PHANTOM EDGE BEFORE CHANGING ANY RESET. Print the
+/// closure path to the accused function: a hop through a short, generic name
+/// (`gate`, `check`, `apply`, `resolve`) is the signature. The fix is to reword
+/// the prose, never to loosen this scanner and never to add an `EXEMPT` for a
+/// store the path does not really reach.
 fn called_names(code: &str) -> Vec<String> {
     let bytes: Vec<char> = code.chars().collect();
     let mut out: Vec<String> = Vec::new();
