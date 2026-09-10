@@ -7,7 +7,7 @@
 //          window. The grid lives in the OTHER window — after every model
 //          mutation we emit model-changed so the main window recalcs CUBE.
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   biGetConnections,
   biModelExportToFile,
@@ -32,7 +32,9 @@ import {
   onOpenWithConnection,
 } from "../lib/crossWindowEvents";
 import { ACCENT, ErrorBanner, styles } from "./editorShared";
-import type { SectionCtx } from "./editorShared";
+import type { SectionCtx, SectionId } from "./editorShared";
+import { useSectionRoute } from "../lib/useSectionRoute";
+import { useRememberWindowGeometry } from "../lib/useRememberWindowGeometry";
 import { MeasuresSection } from "./sections/MeasuresSection";
 import { TablesSection } from "./sections/TablesSection";
 import { RelationshipsSection } from "./sections/RelationshipsSection";
@@ -54,59 +56,101 @@ import { SettingsSection } from "./sections/SettingsSection";
 import { TestingGroundSection } from "./sections/TestingGroundSection";
 import { LineageSection } from "./sections/LineageSection";
 import { NewModelDialog } from "./NewModelDialog";
+import { TopBarMenu } from "./TopBarMenu";
+import { SearchPalette } from "./SearchPalette";
+import { ProblemsChip, ProblemsDrawer } from "./ProblemsDrawer";
+import { useProblems } from "../lib/useProblems";
+import { problemsBySection } from "../lib/problems";
+import { createSession, executeRun, planRun } from "../cli/execute";
+import { createLiveGateway } from "../cli/gateway";
 import { CommandPanel } from "./CommandPanel";
 import { CliReferencePane } from "./CliReferencePane";
+import { FONT, ME, RADIUS, SIZE, SPACE, TABULAR } from "./theme";
 
 // ============================================================================
 // Navigation
 // ============================================================================
 
-type SectionId =
-  | "overview"
-  | "tables"
-  | "connections"
-  | "relationships"
-  | "hierarchies"
-  | "measures"
-  | "contexts"
-  | "kpis"
-  | "strategy"
-  | "calcGroups"
-  | "globals"
-  | "tableVariables"
-  | "scriptFunctions"
-  | "roles"
-  | "perspectives"
-  | "translations"
-  | "lineage"
-  | "testing"
-  | "settings"
-  | "import";
+// The rail was 20 flat items in DTO order — a mirror of the `ModelOverview`
+// struct rather than a model of the work. Grouping costs nothing and turns one
+// undifferentiated list into six short ones a reader can skip between. The
+// groups are the destination IA's; the MERGES that shrink 20 to 16
+// (Overview+Settings, Connections+Import, KPIs onto measures) are a later
+// stage, so every current section still has a slot.
+interface NavItem {
+  id: SectionId;
+  label: string;
+  /** Objects of this kind in the model, shown right-aligned. Omitted for the
+   *  sections that are tools rather than lists. */
+  count?: (o: ModelOverview) => number;
+}
 
-const NAV: Array<{ id: SectionId; label: string }> = [
-  { id: "overview", label: "Overview" },
-  { id: "tables", label: "Tables" },
-  { id: "connections", label: "Connections" },
-  { id: "relationships", label: "Relationships" },
-  { id: "hierarchies", label: "Hierarchies" },
-  { id: "measures", label: "Measures" },
-  { id: "contexts", label: "Contexts" },
-  { id: "kpis", label: "KPIs" },
-  // Sits directly after KPIs: a KPI states the goal, the strategy states what
-  // a movement towards it MEANS, and the tab layers on the same metadata.
-  { id: "strategy", label: "Strategy" },
-  { id: "calcGroups", label: "Calculation Groups" },
-  { id: "globals", label: "Calculated Tables" },
-  { id: "tableVariables", label: "Table Variables" },
-  { id: "scriptFunctions", label: "Script Functions" },
-  { id: "roles", label: "Security Roles" },
-  { id: "perspectives", label: "Perspectives" },
-  { id: "translations", label: "Translations" },
-  { id: "lineage", label: "Lineage" },
-  { id: "testing", label: "Testing Ground" },
-  { id: "settings", label: "Settings" },
-  { id: "import", label: "Import" },
+interface NavGroup {
+  /** Null renders the group with no heading (the first, always-visible band). */
+  title: string | null;
+  items: NavItem[];
+}
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    title: null,
+    items: [
+      { id: "overview", label: "Overview" },
+      { id: "connections", label: "Connections", count: (o) => o.sources.length },
+      { id: "import", label: "Import" },
+      { id: "settings", label: "Settings" },
+    ],
+  },
+  {
+    title: "Structure",
+    items: [
+      { id: "tables", label: "Tables", count: (o) => o.tables.length },
+      { id: "relationships", label: "Relationships", count: (o) => o.relationships.length },
+      { id: "hierarchies", label: "Hierarchies", count: (o) => o.hierarchies.length },
+      { id: "lineage", label: "Lineage" },
+    ],
+  },
+  {
+    title: "Calculations",
+    items: [
+      { id: "measures", label: "Measures", count: (o) => o.measures.length },
+      { id: "calcGroups", label: "Calculation Groups", count: (o) => o.calculationGroups.length },
+      { id: "scriptFunctions", label: "Script Functions", count: (o) => o.scriptFunctions.length },
+    ],
+  },
+  {
+    title: "Derived",
+    items: [
+      { id: "globals", label: "Calculated Tables", count: (o) => o.globalVariables.length },
+      { id: "tableVariables", label: "Table Variables", count: (o) => o.tableVariables.length },
+      { id: "contexts", label: "Contexts", count: (o) => o.contexts.length },
+    ],
+  },
+  {
+    title: "Governance",
+    items: [
+      { id: "roles", label: "Security Roles", count: (o) => o.securityRoles.length },
+      { id: "perspectives", label: "Perspectives", count: (o) => o.perspectives.length },
+      { id: "translations", label: "Translations", count: (o) => o.cultures.length },
+    ],
+  },
+  {
+    title: "Meaning",
+    // A KPI states the goal; the strategy states what a movement towards it
+    // MEANS, and layers on the same metadata.
+    items: [
+      { id: "kpis", label: "KPIs", count: (o) => o.kpis.length },
+      { id: "strategy", label: "Strategy" },
+    ],
+  },
+  {
+    title: "Tools",
+    items: [{ id: "testing", label: "Testing Ground" }],
+  },
 ];
+
+/** Flat, in rail order — the sequence Up/Down arrow keys walk. */
+const NAV_ORDER: SectionId[] = NAV_GROUPS.flatMap((g) => g.items.map((i) => i.id));
 
 // ============================================================================
 // Styles
@@ -117,51 +161,97 @@ const appStyle: React.CSSProperties = {
   flexDirection: "column",
   width: "100%",
   height: "100%",
-  background: "#f4f5f7",
-  color: "#222",
-  fontFamily: "'Segoe UI', system-ui, sans-serif",
-  fontSize: 13,
+  background: ME.canvas,
+  color: ME.text,
+  fontFamily: ME.font,
+  fontSize: FONT.base,
   overflow: "hidden",
 };
 
 const topBarStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
-  padding: "8px 12px",
-  background: "#fff",
-  borderBottom: "1px solid #ddd",
+  gap: SPACE.sm,
+  height: SIZE.topBar,
+  padding: `0 ${SPACE.md}px`,
+  background: ME.surface,
+  borderBottom: `1px solid ${ME.borderSubtle}`,
   flexShrink: 0,
 };
 
+const statusStripStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: SPACE.md,
+  height: SIZE.statusStrip,
+  flexShrink: 0,
+  padding: `0 ${SPACE.md}px`,
+  borderTop: `1px solid ${ME.border}`,
+  background: ME.surface,
+  color: ME.text3,
+  fontSize: FONT.xs,
+  whiteSpace: "nowrap",
+};
+
 const readOnlyBannerStyle: React.CSSProperties = {
-  padding: "5px 12px",
-  background: "#fff3cd",
-  color: "#7a5b00",
-  fontSize: 12,
-  borderBottom: "1px solid #ecdfa8",
+  padding: `${SPACE.sm}px ${SPACE.md}px`,
+  background: ME.warnBg,
+  color: ME.warnFg,
+  fontSize: FONT.sm,
+  borderBottom: `1px solid ${ME.warnFg}`,
   flexShrink: 0,
 };
 
 const navStyle: React.CSSProperties = {
-  width: 170,
+  width: SIZE.railWidth,
   flexShrink: 0,
-  borderRight: "1px solid #ddd",
-  background: "#eef0f2",
-  paddingTop: 8,
+  borderRight: `1px solid ${ME.border}`,
+  background: ME.sunken,
+  paddingTop: SPACE.sm,
+  paddingBottom: SPACE.sm,
   overflowY: "auto",
 };
 
+const navGroupTitleStyle: React.CSSProperties = {
+  padding: `${SPACE.md}px ${SPACE.md}px ${SPACE.xs}px`,
+  fontSize: FONT.xs,
+  fontWeight: 700,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: ME.text3,
+  userSelect: "none",
+};
+
+// The active item used to carry FOUR signals for one state: accent text, bold
+// weight, a white background and a left bar. One state, one emphasis — the
+// surface step plus the bar; the text stops shouting.
 const navItemStyle = (active: boolean): React.CSSProperties => ({
-  padding: "7px 14px",
-  fontSize: 12,
+  display: "flex",
+  alignItems: "center",
+  gap: SPACE.sm,
+  width: "100%",
+  boxSizing: "border-box",
+  minHeight: SIZE.railRow,
+  padding: `0 ${SPACE.md}px 0 9px`,
+  fontSize: FONT.base,
+  fontFamily: "inherit",
+  textAlign: "left",
   cursor: "pointer",
   userSelect: "none",
-  color: active ? ACCENT : "#333",
-  fontWeight: active ? 600 : 400,
-  background: active ? "#fff" : "transparent",
+  border: "none",
   borderLeft: active ? `3px solid ${ACCENT}` : "3px solid transparent",
+  color: ME.text,
+  fontWeight: active ? 600 : 400,
+  background: active ? ME.surface : "transparent",
 });
+
+/** Counts are tabular so the column does not shimmer as they change. */
+const navCountStyle: React.CSSProperties = {
+  marginLeft: "auto",
+  fontSize: FONT.sm,
+  color: ME.text3,
+  ...TABULAR,
+};
 
 const contentStyle: React.CSSProperties = {
   flex: 1,
@@ -183,9 +273,21 @@ export function ModelEditorApp(): React.ReactElement {
   const [overview, setOverview] = useState<ModelOverview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [active, setActive] = useState<SectionId>("overview");
+  const { route, navigate } = useSectionRoute(connectionId);
+  const active = route.section;
+  useRememberWindowGeometry();
+  const { problems, coverage: problemCoverage, busy: problemsBusy, recheck } =
+    useProblems(connectionId, overview);
+  const sectionSeverity = problemsBySection(problems);
   const [undoState, setUndoState] = useState<ModelUndoState>({ canUndo: false, canRedo: false });
   const [showNewModel, setShowNewModel] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [problemsOpen, setProblemsOpen] = useState(false);
+  // A handed-over command carries a nonce so the SAME text sent twice still
+  // lands in the prompt (see CliPanel.prefill).
+  const [cliPrefill, setCliPrefill] = useState<{ text: string; nonce: number } | null>(null);
+  const prefillNonce = useRef(0);
+
   const [showCli, setShowCli] = useState(
     () => localStorage.getItem("calcula.modelEditor.cli.open") === "1",
   );
@@ -207,17 +309,64 @@ export function ModelEditorApp(): React.ReactElement {
     });
   }, []);
 
-  // VSCode-style Ctrl+` toggles the command panel.
+  // Window-level shortcuts. Ctrl+` (the command panel) was the ONLY one in this
+  // window; undo and redo were buttons you had to reach for with the mouse in
+  // an editor whose every action is undoable.
+  const undoRef = useRef<() => void>(() => {});
+  const redoRef = useRef<() => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.ctrlKey && !e.altKey && !e.shiftKey && e.code === "Backquote") {
+      // `/` opens the palette when focus is not in a text surface — the
+      // convention every search-first tool uses. Checked BEFORE the ctrl gate
+      // because it carries no modifier. `typing` is reused by the undo/redo
+      // arm below for the same reason: Monaco must keep its own keys.
+      const el = document.activeElement;
+      const typing =
+        el instanceof HTMLElement &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable ||
+          el.closest(".monaco-editor") !== null);
+      if (!e.ctrlKey && !e.altKey && !e.metaKey && e.key === "/" && !typing) {
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      if (!e.ctrlKey || e.altKey) return;
+      if (!e.shiftKey && e.code === "KeyK") {
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      if (!e.shiftKey && e.code === "Backquote") {
         e.preventDefault();
         toggleCli();
+        return;
+      }
+      // Ctrl+1..7 jump to the first item of each rail group.
+      if (!e.shiftKey && /^Digit[1-9]$/.test(e.code)) {
+        const group = NAV_GROUPS[Number(e.code.slice(5)) - 1];
+        if (group) {
+          e.preventDefault();
+          navigate(group.items[0].id);
+        }
+        return;
+      }
+      // Monaco owns undo inside an editor; only take the key when focus is not
+      // in a text surface, or a half-typed measure would lose its edit history
+      // to a model-level undo. Same `typing` test the `/` shortcut uses.
+      if (typing) return;
+      if (!e.shiftKey && e.code === "KeyZ") {
+        e.preventDefault();
+        undoRef.current();
+      } else if (e.code === "KeyY" || (e.shiftKey && e.code === "KeyZ")) {
+        e.preventDefault();
+        redoRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleCli]);
+  }, [toggleCli, navigate]);
 
   // Macro-recording pill: edits made HERE are captured by the recorder in the
   // MAIN window while it is armed — without this, recording in the Model
@@ -242,6 +391,13 @@ export function ModelEditorApp(): React.ReactElement {
 
   const connectionIdRef = useRef(connectionId);
   connectionIdRef.current = connectionId;
+
+  // Same live-ref pattern: `runCommand` is handed to every section through the
+  // ctx and must see the CURRENT model, not the one captured when the callback
+  // was created — a stale overview would make wildcard expansion and
+  // read-modify-write carry operate on objects that no longer exist.
+  const overviewRef = useRef<ModelOverview | null>(overview);
+  overviewRef.current = overview;
 
   const refreshUndoState = useCallback(async (connId: string) => {
     if (!connId) {
@@ -399,9 +555,39 @@ export function ModelEditorApp(): React.ReactElement {
     }
   }, [applyOverview]);
 
+  // Written during render, matching this file's existing `connectionIdRef`
+  // precedent: the keydown listener is registered once and must not be torn
+  // down and rebuilt every time these callbacks change identity.
+  undoRef.current = () => void handleUndo();
+  redoRef.current = () => void handleRedo();
+
   const reportError = useCallback((err: unknown) => {
     setError(String(err));
   }, []);
+
+  // The single write path for multi-object edits. A fresh session per run, as
+  // the CLI panel does, so wildcard expansion and read-modify-write carry
+  // operate on the overview at run entry rather than on a stale capture.
+  const cliGateway = useMemo(createLiveGateway, []);
+  const runCommand = useCallback(
+    async (text: string): Promise<string[]> => {
+      const o = overviewRef.current;
+      if (!o) throw new Error("No model loaded for this connection.");
+      const session = createSession(connectionIdRef.current, o, !o.editable, cliGateway);
+      const plan = planRun(text, session);
+      const lines: string[] = [];
+      const outcome = await executeRun(plan, session, {
+        print: (t: string) => lines.push(t),
+        clear: () => {
+          lines.length = 0;
+        },
+      });
+      if (outcome.overview) applyOverview(outcome.overview);
+      if (!outcome.ok) throw new Error(lines.join("\n") || "The command failed.");
+      return lines;
+    },
+    [cliGateway, applyOverview],
+  );
 
   const handleModelCreated = useCallback(
     (conn: ConnectionInfo) => {
@@ -441,6 +627,31 @@ export function ModelEditorApp(): React.ReactElement {
       setIoBusy(false);
     }
   }, [handleModelCreated]);
+
+  // Up/Down/Home/End walk the rail and MOVE the section, matching the ARIA
+  // "automatic activation" tabs pattern — the panels are cheap to switch and
+  // it is what a keyboard user expects from a vertical tablist. Focus follows
+  // so the roving tabindex stays on the item you are standing on.
+  const onNavKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLElement>) => {
+      const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+      if (!keys.includes(e.key)) return;
+      e.preventDefault();
+      const at = NAV_ORDER.indexOf(active);
+      const next =
+        e.key === "Home"
+          ? 0
+          : e.key === "End"
+            ? NAV_ORDER.length - 1
+            : e.key === "ArrowDown"
+              ? (at + 1) % NAV_ORDER.length
+              : (at - 1 + NAV_ORDER.length) % NAV_ORDER.length;
+      const id = NAV_ORDER[next];
+      navigate(id);
+      e.currentTarget.querySelector<HTMLElement>(`[data-nav-item="${id}"]`)?.focus();
+    },
+    [active, navigate],
+  );
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -484,6 +695,9 @@ export function ModelEditorApp(): React.ReactElement {
       applyOverview,
       applyMeasures,
       reportError,
+      navigate,
+      runCommand,
+      selection: route.selection,
     };
     switch (active) {
       case "overview":
@@ -532,9 +746,35 @@ export function ModelEditorApp(): React.ReactElement {
     // formula tokens / identifiers (e.g. __column) in every input/textarea below.
     <div style={appStyle} spellCheck={false}>
       <div style={topBarStyle}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>Model Editor</span>
+        {/* The model-FILE verbs live in here. They were three of seven equal
+            buttons, and two of them ("Import…"/"Export…") collided outright
+            with the Import SECTION, which imports source TABLES — two
+            unrelated meanings of one word inside one chrome. Naming them
+            "…Model File…" kills the collision at the point of collision. */}
+        <TopBarMenu
+          label="Model"
+          items={[
+            { label: "New Model…", onSelect: () => setShowNewModel(true) },
+            {
+              label: "Open Model File…",
+              disabled: ioBusy,
+              title:
+                "Import a model from a file (.json / Studio ModelBundle) as a new workbook model",
+              onSelect: () => void handleImportModel(),
+              separatorBefore: true,
+            },
+            {
+              label: "Save Model Copy…",
+              disabled: ioBusy || !connectionId,
+              title: "Export this model to a standalone file (it still saves with the workbook)",
+              onSelect: () => void handleExportModel(),
+            },
+          ]}
+        />
         <select
-          style={{ ...styles.input, fontSize: 12, minWidth: 260 }}
+          style={{ ...styles.input, fontSize: 12, minWidth: 240 }}
+          aria-label="Model"
+          data-testid="topbar-connection"
           value={connectionId}
           onChange={(e) => setConnectionId(e.target.value)}
         >
@@ -545,59 +785,79 @@ export function ModelEditorApp(): React.ReactElement {
             </option>
           ))}
         </select>
-        <button style={styles.btn} onClick={() => setShowNewModel(true)}>
-          New Model&hellip;
-        </button>
+
+        {/* A button that LOOKS like a field. The palette owns the real input,
+            so a second live input here would be two places to type with two
+            selection models; this is the affordance, not the control. */}
         <button
-          style={styles.btn}
-          disabled={ioBusy}
-          title="Import a model from a file (.json / Studio ModelBundle) as a new workbook model"
-          onClick={() => void handleImportModel()}
+          type="button"
+          style={{
+            ...styles.input,
+            fontSize: FONT.sm,
+            flex: 1,
+            maxWidth: 380,
+            minWidth: 120,
+            textAlign: "left",
+            color: ME.text3,
+            cursor: "text",
+            display: "flex",
+            alignItems: "center",
+            gap: SPACE.sm,
+          }}
+          aria-label="Search the model"
+          data-testid="topbar-search"
+          onClick={() => setPaletteOpen(true)}
         >
-          Import&hellip;
+          <span aria-hidden="true">⌕</span>
+          <span>Search the model…</span>
+          <span style={{ marginLeft: "auto", ...TABULAR }}>Ctrl+K</span>
         </button>
+
         <button
-          style={styles.btn}
-          disabled={ioBusy || !connectionId}
-          title="Export this model to a standalone file (it still saves with the workbook)"
-          onClick={() => void handleExportModel()}
-        >
-          Export&hellip;
-        </button>
-        <button
-          style={styles.btn}
+          style={{ ...styles.btn, padding: "4px 9px" }}
           disabled={!undoState.canUndo || readOnly}
-          title="Undo the last model edit"
+          title="Undo the last model edit (Ctrl+Z)"
+          aria-label="Undo"
+          data-testid="topbar-undo"
           onClick={() => void handleUndo()}
         >
-          Undo
+          <span aria-hidden="true">↶</span>
         </button>
         <button
-          style={styles.btn}
+          style={{ ...styles.btn, padding: "4px 9px" }}
           disabled={!undoState.canRedo || readOnly}
-          title="Redo"
+          title="Redo (Ctrl+Y)"
+          aria-label="Redo"
+          data-testid="topbar-redo"
           onClick={() => void handleRedo()}
         >
-          Redo
+          <span aria-hidden="true">↷</span>
         </button>
         <button
           style={{
             ...styles.btn,
-            ...(showCli ? { background: ACCENT, color: "#fff" } : {}),
+            ...(showCli ? { background: ACCENT, color: ME.onAccent, borderColor: ACCENT } : {}),
           }}
           title="Toggle the command line panel (Ctrl+`)"
+          aria-pressed={showCli}
+          data-testid="topbar-cli"
           onClick={toggleCli}
         >
           Command Line
         </button>
+        <ProblemsChip
+          problems={problems}
+          open={problemsOpen}
+          onClick={() => setProblemsOpen((v) => !v)}
+        />
         <div style={{ flex: 1 }} />
         {macroRecording && (
           <span
             style={{
               fontSize: 12,
               fontWeight: 600,
-              color: "#fff",
-              background: "#c0392b",
+              color: ME.onAccent,
+              background: ME.recordingBg,
               borderRadius: 10,
               padding: "2px 10px",
               whiteSpace: "nowrap",
@@ -608,15 +868,6 @@ export function ModelEditorApp(): React.ReactElement {
           </span>
         )}
         {loading && <span style={{ ...styles.muted, fontSize: 12 }}>Loading&hellip;</span>}
-        {/* Models have no separate file: edits live in this workbook and are
-            written to disk when the workbook is saved. Surfaced so users don't
-            hunt for a "Save model" action that doesn't exist. */}
-        <span
-          style={{ ...styles.muted, fontSize: 12, whiteSpace: "nowrap" }}
-          title="Model changes are kept in this workbook and written to disk when you save the workbook (Ctrl+S). There is no separate model file to save."
-        >
-          Changes save with the workbook (Ctrl+S)
-        </span>
       </div>
 
       {overview?.readOnlyReason && (
@@ -625,19 +876,99 @@ export function ModelEditorApp(): React.ReactElement {
       {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        <nav style={navStyle}>
-          {NAV.map((item) => (
-            <div
-              key={item.id}
-              style={navItemStyle(item.id === active)}
-              onClick={() => setActive(item.id)}
-            >
-              {item.label}
-            </div>
+        {/* role="tablist" with a roving tabindex: the rail was 20 <div>s with
+            no role, no tabindex and no focus ring, so it was mouse-only and
+            invisible to a screen reader. Only the active item is tabbable;
+            arrows move within the rail, which is the ARIA tabs pattern. */}
+        <nav
+          style={navStyle}
+          role="tablist"
+          aria-orientation="vertical"
+          aria-label="Model sections"
+          data-testid="model-editor-nav"
+          onKeyDown={onNavKeyDown}
+        >
+          {NAV_GROUPS.map((group) => (
+            <React.Fragment key={group.title ?? "_"}>
+              {group.title && <div style={navGroupTitleStyle}>{group.title}</div>}
+              {group.items.map((item) => {
+                const isActive = item.id === active;
+                const count = overview && item.count ? item.count(overview) : null;
+                // A dot on the rail is what makes a problem noticeable without
+                // opening anything — the reason the old "Validate model" button
+                // on a page you visit once surfaced nothing in practice.
+                const severity = sectionSeverity.get(item.id);
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    aria-current={isActive ? "page" : undefined}
+                    tabIndex={isActive ? 0 : -1}
+                    data-nav-item={item.id}
+                    data-testid={`nav-${item.id}`}
+                    style={navItemStyle(isActive)}
+                    onClick={() => navigate(item.id)}
+                  >
+                    <span>{item.label}</span>
+                    {severity && (
+                      <span
+                        aria-label={`${severity} in ${item.label}`}
+                        data-testid={`nav-dot-${item.id}`}
+                        title={`${severity === "error" ? "Errors" : "Findings"} in ${item.label}`}
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: RADIUS.pill,
+                          flexShrink: 0,
+                          background:
+                            severity === "error"
+                              ? ME.dangerFg
+                              : severity === "warning"
+                                ? ME.warnFg
+                                : ME.infoFg,
+                        }}
+                      />
+                    )}
+                    {count !== null && <span style={navCountStyle}>{count}</span>}
+                  </button>
+                );
+              })}
+            </React.Fragment>
           ))}
         </nav>
         <main style={contentStyle}>{renderSection()}</main>
         {showCliRef && <CliReferencePane onClose={toggleCliRef} />}
+        {problemsOpen && (
+          <ProblemsDrawer
+            problems={problems}
+            coverage={problemCoverage}
+            busy={problemsBusy}
+            onNavigate={navigate}
+            onRecheck={recheck}
+            onClose={() => setProblemsOpen(false)}
+          />
+        )}
+      </div>
+
+      {/* Status strip. The save-location note used to sit in the top bar,
+          competing with the action buttons for the eye every time you looked
+          for one. It is a persistent FACT about the document, not a control,
+          so it belongs at the bottom edge where a status line lives. */}
+      <div style={statusStripStyle}>
+        <span
+          title="Model changes are kept in this workbook and written to disk when you save the workbook (Ctrl+S). There is no separate model file to save."
+          data-testid="status-save-location"
+        >
+          Changes save with the workbook (Ctrl+S)
+        </span>
+        <div style={{ flex: 1 }} />
+        {overview && (
+          <span style={{ fontVariantNumeric: "tabular-nums" }}>
+            {overview.tables.length} tables · {overview.measures.length} measures
+          </span>
+        )}
       </div>
 
       {showCli && (
@@ -649,6 +980,23 @@ export function ModelEditorApp(): React.ReactElement {
           onClose={toggleCli}
           referenceOpen={showCliRef}
           onToggleReference={toggleCliRef}
+          prefill={cliPrefill}
+        />
+      )}
+
+      {paletteOpen && (
+        <SearchPalette
+          overview={overview}
+          onNavigate={navigate}
+          onRunCommand={(text) => {
+            // Hand off, never execute here: `planRun`'s confirmation card for a
+            // multi-object write lives in the CLI panel, and a second executor
+            // would either skip it or duplicate it.
+            prefillNonce.current += 1;
+            setCliPrefill({ text, nonce: prefillNonce.current });
+            if (!showCli) toggleCli();
+          }}
+          onClose={() => setPaletteOpen(false)}
         />
       )}
 

@@ -27,7 +27,9 @@ import {
 } from "./RestSourceForm";
 import { Badge, Field, Modal, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { Xref } from "../Xref";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 const KINDS = [
   { value: "postgres", label: "PostgreSQL" },
@@ -225,7 +227,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
         <div
           style={{
             border: "1px solid #b7d9bc",
-            background: "#f0f9f1",
+            background: ME.okBg,
             borderRadius: 4,
             padding: "6px 10px",
             fontSize: 12,
@@ -238,7 +240,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
             </>
           )}
           {autoResult.failed.length > 0 && (
-            <span style={{ color: "#a4262c" }}>
+            <span style={{ color: ME.dangerFg }}>
               Saved sign-in failed for {autoResult.failed.map(sourceName).join(", ")} — connect
               manually (the password may have changed).
             </span>
@@ -251,7 +253,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
           <div
             style={{
               border: "1px solid #e2b04a",
-              background: "#fdf6e3",
+              background: ME.warnBg,
               borderRadius: 4,
               padding: "6px 10px",
               marginBottom: 10,
@@ -266,8 +268,11 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
 
         {sources.length === 0 && (
           <div style={styles.muted}>
-            No data sources yet. Import tables (under Import) records a source automatically, or add
-            one here.
+            No data sources yet.{" "}
+            <Xref to="import" navigate={ctx.navigate}>
+              Importing tables
+            </Xref>{" "}
+            records a source automatically, or add one here.
           </div>
         )}
 
@@ -277,7 +282,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
           return (
             <div
               key={s.id}
-              style={{ border: "1px solid #e4e4e4", borderRadius: 4, marginBottom: 8 }}
+              style={{ border: `1px solid ${ME.borderSubtle}`, borderRadius: 4, marginBottom: 8 }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px" }}>
                 <button
@@ -345,7 +350,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
                   Edit
                 </button>
                 <button
-                  style={{ ...styles.smallBtn, color: "#a4262c" }}
+                  style={{ ...styles.smallBtn, color: ME.dangerFg }}
                   disabled={readOnly || busy}
                   onClick={() => void deleteSource(s)}
                 >
@@ -354,7 +359,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
               </div>
 
               {open && (
-                <div style={{ borderTop: "1px solid #eee", padding: "6px 10px" }}>
+                <div style={{ borderTop: `1px solid ${ME.borderSubtle}`, padding: "6px 10px" }}>
                   {isRestKind(s.kind) && (
                     <RestSecretsCard
                       connectionId={connectionId}
@@ -612,7 +617,7 @@ function SourceModal({
         </Field>
       </div>
       {idClash && (
-        <div style={{ fontSize: 12, color: "#a4262c", marginBottom: 6 }}>
+        <div style={{ fontSize: 12, color: ME.dangerFg, marginBottom: 6 }}>
           A source with this id already exists.
         </div>
       )}
@@ -630,7 +635,7 @@ function SourceModal({
         <>
           <RestSourceForm config={d.rest} onChange={(next) => set("rest", next)} />
           {restProblems.length > 0 && (
-            <ul style={{ fontSize: 12, color: "#a4262c", margin: "8px 0 0 0", paddingLeft: 18 }}>
+            <ul style={{ fontSize: 12, color: ME.dangerFg, margin: "8px 0 0 0", paddingLeft: 18 }}>
               {restProblems.map((problem, i) => (
                 <li key={i}>{problem}</li>
               ))}
@@ -793,7 +798,7 @@ function ConnectModal({
             <div
               style={{
                 border: "1px solid #b7d9bc",
-                background: "#f0f9f1",
+                background: ME.okBg,
                 borderRadius: 4,
                 padding: "8px 10px",
                 marginBottom: 10,

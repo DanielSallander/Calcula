@@ -7,6 +7,7 @@
 import React from "react";
 import type { TransformPreviewResult } from "@api";
 import { styles } from "../editorShared";
+import { ME } from "../theme";
 
 export function PreviewGrid({
   title,
@@ -54,7 +55,7 @@ export function PreviewGrid({
         <div
           style={{
             fontSize: 12,
-            color: "#a4262c",
+            color: ME.dangerFg,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
             marginBottom: 6,
@@ -70,7 +71,7 @@ export function PreviewGrid({
             key={i}
             style={{
               fontSize: 12,
-              color: d.severity === "error" ? "#a4262c" : "#7a5b00",
+              color: d.severity === "error" ? ME.dangerFg : ME.warnFg,
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
               marginBottom: 6,
@@ -88,9 +89,9 @@ export function PreviewGrid({
               flex: 1,
               minHeight: 120,
               overflow: "auto",
-              border: "1px solid #ddd",
+              border: `1px solid ${ME.border}`,
               borderRadius: 4,
-              background: "#fff",
+              background: ME.surface,
             }}
           >
             <table style={{ borderCollapse: "collapse", width: "100%" }}>
@@ -103,7 +104,7 @@ export function PreviewGrid({
                         ...styles.th,
                         position: "sticky",
                         top: 0,
-                        background: "#f7f8fa",
+                        background: ME.sunken,
                         zIndex: 1,
                       }}
                     >
@@ -153,8 +154,8 @@ export function PreviewGrid({
               style={{
                 marginTop: 4,
                 padding: "4px 8px",
-                background: "#fff3cd",
-                color: "#7a5b00",
+                background: ME.warnBg,
+                color: ME.warnFg,
                 border: "1px solid #f0d98c",
                 borderRadius: 3,
                 fontSize: 11,

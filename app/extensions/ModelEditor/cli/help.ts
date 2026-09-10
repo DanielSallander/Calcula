@@ -27,6 +27,14 @@ Verbs:
 Kinds:
   ${KINDS.join(", ")}
 
+Narrowing with 'where':
+  set column * hidden=true where table="Sales" and format=
+  Globs match NAMES; 'where' matches PROPERTIES, so the two together express
+  "every unformatted column of Sales". Equality only, joined by 'and'; an
+  empty value tests "unset" (where format= finds the ones with none).
+  Works on column, measure, table and relationship. An unknown property is
+  an error, never a silent non-match.
+
 Notes:
   [Bracketed Names] or "quoted names" for names with spaces.
   A free-standing = starts a formula and takes THE REST OF THE COMMAND —

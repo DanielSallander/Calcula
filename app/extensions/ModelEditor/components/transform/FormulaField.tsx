@@ -26,6 +26,8 @@ import {
   registerTransformFormulaLanguage,
   setFormulaContext,
 } from "./formulaLanguage";
+import { ME } from "../theme";
+import { applyModelEditorTheme } from "../../lib/monacoTheme";
 
 // Chain the worker handler so this editor never clobbers another Monaco setup
 // in the same window (mirrors ExpressionEditorModal / ScriptPane).
@@ -79,7 +81,10 @@ export function FormulaField({
     setFormulaContext({ columns, functions });
   }, [columns, functions]);
 
-  const handleMount: OnMount = (editor) => {
+  const handleMount: OnMount = (editor, monaco) => {
+    // Every Monaco in this window ran the stock light "vs" theme; once the
+    // window follows the skin that is a white editor inside a dark dialog.
+    applyModelEditorTheme(monaco);
     editorRef.current = editor;
     registerTransformFormulaLanguage();
     setFormulaContext({ columns, functions });
@@ -96,10 +101,10 @@ export function FormulaField({
     <div>
       <div
         style={{
-          border: "1px solid #ccc",
+          border: `1px solid ${ME.ctlBorder}`,
           borderRadius: 4,
           overflow: "hidden",
-          background: readOnly ? "#f6f6f6" : "#fff",
+          background: readOnly ? ME.sunken : ME.surface,
         }}
       >
         <Editor

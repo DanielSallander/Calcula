@@ -166,8 +166,63 @@ export const dialogGuardConfigs = [
   },
 ]
 
+// =============================================================================
+// MODEL EDITOR: no hardcoded colours
+// =============================================================================
+// The Model Editor window accumulated 362 hex literals and three independent
+// palettes against 18 var() usages, and it never loaded the app's skin at all,
+// so switching Calcula to Dark left it white. It now resolves every colour from
+// components/theme.ts. This rule is what stops that drifting back one
+// convenient `#fff` at a time — the drift was never a decision anyone made, it
+// was 362 individually reasonable choices.
+//
+// theme.ts itself is exempt: it is the ONE place a literal is correct, as the
+// fallback half of `var(--token, #literal)`.
+const MODEL_EDITOR_HEX_MESSAGE =
+  'Hardcoded colour in the Model Editor. Use a token from components/theme.ts ' +
+  '(ME.surface, ME.text, ME.border, ME.dangerFg, …) so the window follows the ' +
+  "user's skin. If the colour is genuinely categorical DATA (a chart series, a " +
+  'node kind) keep it literal and say so in a comment, then add the file here.'
+
+const modelEditorColorConfigs = [
+  {
+    files: ['extensions/ModelEditor/**/*.{ts,tsx}'],
+    ignores: [
+      // The token layer: literals here are the fallback half of var().
+      'extensions/ModelEditor/components/theme.ts',
+      // Resolves CSS variables into the real colour values Monaco demands (it
+      // cannot read custom properties), so it needs the same literal fallbacks
+      // theme.ts does.
+      'extensions/ModelEditor/lib/monacoTheme.ts',
+      // Categorical palettes whose colours identify a KIND, not a surface.
+      // Each keeps a comment saying so, and each derives its BACKGROUND from a
+      // token so the tint follows the theme even though the hue does not.
+      'extensions/ModelEditor/components/sections/ExecutionPlanView.tsx',
+      'extensions/ModelEditor/components/sections/LineageSection.tsx',
+      '**/__tests__/**',
+      '**/*.test.{ts,tsx}',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          // Literal hex in any string: style values, JSX attributes, template
+          // chunks. Matches #rgb, #rrggbb and #rrggbbaa.
+          selector: 'Literal[value=/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/]',
+          message: MODEL_EDITOR_HEX_MESSAGE,
+        },
+        {
+          selector: 'TemplateElement[value.raw=/#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b/]',
+          message: MODEL_EDITOR_HEX_MESSAGE,
+        },
+      ],
+    },
+  },
+]
+
 export const boundaryConfigs = [
   ...dialogGuardConfigs,
+  ...modelEditorColorConfigs,
 
   // FACADE RULE: Extensions must ONLY import from src/api (no deep core/shell),
   // and must NOT reach the raw @api/backend invokeBackend door (A3).

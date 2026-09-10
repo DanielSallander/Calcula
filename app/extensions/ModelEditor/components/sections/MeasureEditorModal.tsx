@@ -29,6 +29,7 @@ import {
   ExpressionWorkspace,
   type ExpressionWorkspaceHandle,
 } from "./ExpressionWorkspace";
+import { ME } from "../theme";
 
 /** Best-effort preview of a number-format code applied to a sample value.
  *  Covers the common cases (decimals, thousands grouping, %, currency prefix);
@@ -95,7 +96,7 @@ function FormatField({
           />
         )}
         <span style={{ ...styles.muted, fontSize: 12, whiteSpace: "nowrap" }}>
-          Preview: <strong style={{ color: "#222" }}>{previewFormat(sample, value)}</strong>
+          Preview: <strong style={{ color: ME.text }}>{previewFormat(sample, value)}</strong>
         </span>
       </div>
     </Field>
@@ -337,7 +338,7 @@ export function MeasureEditorModal({
             fontSize: 12,
             padding: "6px 8px",
             marginBottom: 8,
-            backgroundColor: "#fff3cd",
+            backgroundColor: ME.warnBg,
             borderRadius: 4,
           }}
         >
@@ -378,7 +379,7 @@ export function MeasureEditorModal({
       />
 
       {/* Secondary attributes — hidden by default, expandable on click. */}
-      <div style={{ border: "1px solid #e5e5e5", borderRadius: 4, marginBottom: 8 }}>
+      <div style={{ border: `1px solid ${ME.borderSubtle}`, borderRadius: 4, marginBottom: 8 }}>
         <button
           onClick={() => setAdvancedOpen((o) => !o)}
           style={{
@@ -392,11 +393,11 @@ export function MeasureEditorModal({
             cursor: "pointer",
             fontSize: 12,
             fontWeight: 600,
-            color: "#444",
+            color: ME.text2,
             textAlign: "left",
           }}
         >
-          <span style={{ color: "#888", width: 10 }}>{advancedOpen ? "▾" : "▸"}</span>
+          <span style={{ color: ME.text3, width: 10 }}>{advancedOpen ? "▾" : "▸"}</span>
           More options
           {!advancedOpen && (
             <span style={{ ...styles.hint, fontWeight: 400 }}>
@@ -405,7 +406,7 @@ export function MeasureEditorModal({
           )}
         </button>
         {advancedOpen && (
-          <div style={{ padding: "4px 12px 8px", borderTop: "1px solid #f0f0f0" }}>
+          <div style={{ padding: "4px 12px 8px", borderTop: `1px solid ${ME.borderSubtle}` }}>
             <FolderField value={group} onChange={setGroup} groups={existingGroups} />
             <FormatField value={formatString} onChange={setFormatString} />
             <Field

@@ -11,6 +11,7 @@ import type { SectionCtx } from "../editorShared";
 import { RelationshipDiagram } from "../diagram/RelationshipDiagram";
 import type { ColumnDropResult, DiagramLayoutMode } from "../diagram/RelationshipDiagram";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 const CARDINALITIES = ["manyToOne", "oneToMany", "oneToOne", "manyToMany"];
 const JOIN_OPERATORS = ["=", ">", ">=", "<", "<="];
@@ -51,7 +52,7 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
       style={{
         display: "flex",
         gap: 0,
-        border: `1px solid #bbb`,
+        border: `1px solid ${ME.ctlBorder}`,
         borderRadius: 3,
         overflow: "hidden",
       }}
@@ -63,8 +64,8 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             ...styles.smallBtn,
             border: "none",
             borderRadius: 0,
-            background: view === v ? "#2f6fce" : "#fff",
-            color: view === v ? "#fff" : "#222",
+            background: view === v ? ME.accent : ME.surface,
+            color: view === v ? ME.onAccent : ME.text,
           }}
           onClick={() => setView(v)}
         >
@@ -96,7 +97,7 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
       style={{
         display: "flex",
         gap: 0,
-        border: `1px solid #bbb`,
+        border: `1px solid ${ME.ctlBorder}`,
         borderRadius: 3,
         overflow: "hidden",
       }}
@@ -109,8 +110,8 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             ...styles.smallBtn,
             border: "none",
             borderRadius: 0,
-            background: layoutMode === opt.mode ? "#2f6fce" : "#fff",
-            color: layoutMode === opt.mode ? "#fff" : "#222",
+            background: layoutMode === opt.mode ? ME.accent : ME.surface,
+            color: layoutMode === opt.mode ? ME.onAccent : ME.text,
           }}
           onClick={() => setLayoutMode(opt.mode)}
         >
@@ -158,6 +159,7 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             onEditRelationship={openEdit}
             onColumnDrop={readOnly ? undefined : (r) => setEditing({ original: null, prefill: r })}
             layoutMode={layoutMode}
+            onNavigateToTables={() => ctx.navigate("tables")}
           />
         </div>
         <div style={styles.hint}>

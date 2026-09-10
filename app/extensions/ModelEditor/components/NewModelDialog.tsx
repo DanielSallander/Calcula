@@ -9,6 +9,7 @@ import React, { useState } from "react";
 import { biModelConnect, biModelCreateBlank, biModelTestConnection } from "@api";
 import type { ConnectionInfo } from "@api";
 import { ACCENT, Field, Modal, styles } from "./editorShared";
+import { ME } from "./theme";
 
 interface SourceType {
   id: string;
@@ -168,10 +169,10 @@ export function NewModelDialog({
               onClick={() => pick(s)}
               style={{
                 textAlign: "left",
-                border: `1px solid ${s.enabled ? "#ccd3dd" : "#e6e6e6"}`,
+                border: `1px solid ${s.enabled ? ME.ctlBorder : ME.ctlBorder}`,
                 borderRadius: 6,
                 padding: "12px 14px",
-                background: s.enabled ? "#fff" : "#f6f6f7",
+                background: s.enabled ? ME.surface : ME.sunken,
                 cursor: s.enabled ? "pointer" : "not-allowed",
                 opacity: s.enabled ? 1 : 0.6,
                 display: "flex",
@@ -182,7 +183,7 @@ export function NewModelDialog({
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontSize: 18 }}>{s.glyph}</span>
-                <span style={{ fontWeight: 600, color: s.enabled ? ACCENT : "#888" }}>{s.label}</span>
+                <span style={{ fontWeight: 600, color: s.enabled ? ACCENT : ME.text3 }}>{s.label}</span>
               </div>
               <div style={{ ...styles.hint }}>{s.desc}</div>
             </button>
@@ -305,9 +306,9 @@ export function NewModelDialog({
             fontSize: 12,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
-            background: testResult.ok ? "#e2f4e5" : "#fdecea",
-            color: testResult.ok ? "#1e7a34" : "#a4262c",
-            border: `1px solid ${testResult.ok ? "#b7e0bf" : "#f3c1c4"}`,
+            background: testResult.ok ? ME.okBg : ME.dangerBg,
+            color: testResult.ok ? ME.okFg : ME.dangerFg,
+            border: `1px solid ${testResult.ok ? ME.okFg : ME.dangerFg}`,
           }}
         >
           {testResult.message}
@@ -323,8 +324,8 @@ export function NewModelDialog({
             fontSize: 12,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
-            background: "#fff3cd",
-            color: "#7a5b00",
+            background: ME.warnBg,
+            color: ME.warnFg,
             border: "1px solid #ecdfa8",
           }}
         >

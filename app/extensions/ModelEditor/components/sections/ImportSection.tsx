@@ -17,6 +17,7 @@ import { Badge, styles } from "../editorShared";
 import { NewModelDialog } from "../NewModelDialog";
 import { SqlEditorModal } from "../SqlEditorModal";
 import { TransformEditorModal, summarizeSteps } from "../transform";
+import { ME } from "../theme";
 
 /** First non-empty line of a query, truncated for an inline preview. */
 function firstLine(sql: string): string {
@@ -243,7 +244,7 @@ export function ImportSection({
           </div>
         )}
         {sourceError && (
-          <div style={{ marginTop: 8, fontSize: 12, color: "#a4262c" }}>
+          <div style={{ marginTop: 8, fontSize: 12, color: ME.dangerFg }}>
             <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{sourceError}</div>
             <div style={{ ...styles.hint, marginTop: 4 }}>
               Listing source tables requires a live database connection. Connect this connection via
@@ -261,7 +262,7 @@ export function ImportSection({
                 style={{
                   maxHeight: 260,
                   overflowY: "auto",
-                  border: "1px solid #eee",
+                  border: `1px solid ${ME.borderSubtle}`,
                   borderRadius: 3,
                 }}
               >
@@ -389,7 +390,7 @@ export function ImportSection({
             style={{
               maxHeight: 220,
               overflowY: "auto",
-              border: "1px solid #eee",
+              border: `1px solid ${ME.borderSubtle}`,
               borderRadius: 3,
             }}
           >
@@ -431,8 +432,8 @@ export function ImportSection({
                     fontSize: 10,
                     padding: "1px 6px",
                     borderRadius: 8,
-                    background: w.audience === "publisher" ? "#e8f0fe" : "#f0f0f0",
-                    color: w.audience === "publisher" ? "#1a5dab" : "#555",
+                    background: w.audience === "publisher" ? ME.accentSoft : ME.sunken,
+                    color: w.audience === "publisher" ? ME.accent : ME.text2,
                     whiteSpace: "nowrap",
                   }}
                 >
@@ -446,7 +447,7 @@ export function ImportSection({
             ))}
           </div>
           {wbError && (
-            <div style={{ marginTop: 8, fontSize: 12, color: "#a4262c", whiteSpace: "pre-wrap" }}>
+            <div style={{ marginTop: 8, fontSize: 12, color: ME.dangerFg, whiteSpace: "pre-wrap" }}>
               {wbError}
             </div>
           )}
@@ -507,7 +508,7 @@ export function ImportSection({
           </span>
         </div>
         {sqlError && (
-          <div style={{ marginBottom: 8, fontSize: 12, color: "#a4262c", whiteSpace: "pre-wrap" }}>
+          <div style={{ marginBottom: 8, fontSize: 12, color: ME.dangerFg, whiteSpace: "pre-wrap" }}>
             {sqlError}
           </div>
         )}

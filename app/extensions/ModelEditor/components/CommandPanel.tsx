@@ -29,6 +29,8 @@ export interface CommandPanelProps {
   referenceOpen: boolean;
   /** Toggle the reference-guide side pane (lives beside the sections). */
   onToggleReference: () => void;
+  /** A command handed over from the search palette (see CliPanel.prefill). */
+  prefill?: { text: string; nonce: number } | null;
 }
 
 export function CommandPanel({
@@ -39,6 +41,7 @@ export function CommandPanel({
   onClose,
   referenceOpen,
   onToggleReference,
+  prefill,
 }: CommandPanelProps): React.ReactElement {
   const gateway = useMemo(createLiveGateway, []);
 
@@ -87,6 +90,7 @@ export function CommandPanel({
       referenceOpen={referenceOpen}
       onToggleReference={onToggleReference}
       closeShortcut="Ctrl+`"
+      prefill={prefill}
     />
   );
 }

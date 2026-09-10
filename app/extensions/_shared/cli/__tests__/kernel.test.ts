@@ -42,6 +42,7 @@ function makeDomain(
     verbs?: Array<{ verb: string; kindless?: boolean }>;
     batch?: "rollback" | "keep" | null;
     undoRedo?: boolean;
+    supportsWhere?: boolean;
   } = {},
 ): CliDomain<FixtureSession> {
   const label = id;
@@ -63,6 +64,7 @@ function makeDomain(
       if (s.failOn === cmd.raw) throw new CliError(`boom on '${cmd.raw}'`, cmd.line);
       s.log.push(`${id}:write:${cmd.verb}:${cmd.kind ?? "-"}`);
     },
+    supportsWhere: opts.supportsWhere ?? false,
     isWritable(s: FixtureSession) {
       return s.writable;
     },
@@ -288,5 +290,55 @@ describe("batching", () => {
     const io = recordingIo();
     await engine.executeRun(engine.planRun("add apple A\nadd apple B"), io);
     expect(io.out.some((l) => l.includes("line 2"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `where` — the fail-closed gate
+// ---------------------------------------------------------------------------
+// A `where` clause NARROWS a command. A domain that receives one it cannot
+// evaluate does not run a narrower command — it runs the ORIGINAL, widened one.
+// `delete measure * where folder="Archive"` becomes "delete every measure",
+// reports success, and the confirmation card that should have listed three
+// names lists three hundred. The kernel therefore refuses by DEFAULT and a
+// domain must opt in.
+
+describe("where clause gating", () => {
+  function engineWith(supportsWhere: boolean) {
+    const session: FixtureSession = { log: [], writable: true };
+    const domain = makeDomain("fruit", ["apple", "pear"], { supportsWhere });
+    return {
+      engine: createCliEngine([{ domain, session }], "fruit"),
+      session,
+    };
+  }
+
+  it("refuses a clause when the domain has not opted in", () => {
+    const { engine } = engineWith(false);
+    expect(() => engine.planRun("delete apple * where colour=red")).toThrow(
+      /`where` is not supported/,
+    );
+  });
+
+  it("says WHY, so nobody removes the clause and reruns the widened command", () => {
+    const { engine } = engineWith(false);
+    try {
+      engine.planRun("delete apple * where colour=red");
+      throw new Error("should have thrown");
+    } catch (e) {
+      // The message has to warn that dropping the clause BROADENS the command;
+      // "unsupported syntax" alone invites exactly the destructive retry.
+      expect(String(e)).toMatch(/widen/i);
+    }
+  });
+
+  it("lets the clause through once the domain opts in", () => {
+    const { engine } = engineWith(true);
+    expect(() => engine.planRun("delete apple * where colour=red")).not.toThrow();
+  });
+
+  it("never blocks a command with no clause", () => {
+    const { engine } = engineWith(false);
+    expect(() => engine.planRun("delete apple *")).not.toThrow();
   });
 });

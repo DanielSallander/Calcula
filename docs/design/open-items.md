@@ -37,8 +37,13 @@ been stale within a day of being written more than once.
 These needed a product judgement before anyone wrote code. Each was small to implement and
 consequential to get wrong, which is why none of them had been decided under cover of another fix.
 
-**ONLY 1.6 IS STILL OPEN**, and the owner's instruction on it was explicit: leave it, analyse it,
-recommend. That analysis is in place below and nothing was implemented for it.
+**SECTION 1 IS FULLY CLOSED.** 1.1-1.5 were decided and built on 2026-08-16; 1.6 was analysed at
+the owner's request, then fixed on 2026-08-17 — its original statement is kept below, struck, for
+the record.
+
+This header said "ONLY 1.6 IS STILL OPEN" for three weeks after 1.6 closed, which is the staleness
+direction rule 3 of §3 names as the costlier one: a row claiming something is broken that now works
+sends the next reader to re-fix working code. Corrected 2026-09-09.
 
 **1.1-1.5 were DECIDED AND BUILT on 2026-08-16**, under the standing rule "Excel parity takes
 priority always". The as-built record — what each turned out to be, what else it found, and what

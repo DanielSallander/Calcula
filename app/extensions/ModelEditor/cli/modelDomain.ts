@@ -58,6 +58,11 @@ export function createModelDomain(): CliDomain<CliSession> {
       await runWrite(c, s, io);
     },
 
+    // The model evaluates a `where` clause (cli/whereClause.ts). Without
+    // this flag the kernel REFUSES any command carrying one, rather than
+    // running it widened to everything the pattern matched.
+    supportsWhere: true,
+
     isWritable(s: CliSession): boolean {
       return !s.readOnly;
     },

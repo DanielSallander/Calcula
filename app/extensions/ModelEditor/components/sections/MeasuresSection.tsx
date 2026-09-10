@@ -5,7 +5,7 @@
 //          selection, and add/edit/delete/move them through the Monaco measure
 //          modal, drag-and-drop, and a context menu.
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import {
   biModelDeleteMeasure,
   biModelMeasureLineage,
@@ -24,9 +24,11 @@ import {
   type FolderNode,
 } from "../../lib/measureFolders";
 import { Chevron, FolderIcon, TREE_INDENT, treeStyles } from "../treeKit";
+import { buildSetCommand } from "../../lib/bulkEdit";
 import { MeasureEditorModal } from "./MeasureEditorModal";
 import { MeasureInspector } from "./MeasureInspector";
 import { confirmAsync, promptAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 /** dragOver sentinel for the "Ungrouped" drop zone (a NUL can't be in a path). */
 const UNGROUPED = "\u0000ungrouped";
@@ -38,6 +40,14 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   const measures = overview.measures;
 
   const [selected, setSelected] = useState<string | null>(null);
+  // Honour a route selection on ARRIVAL (Ctrl+K, an Xref, a restored hash),
+  // once per requested name — a route that re-asserted itself on every render
+  // would snap the tree back every time the user clicked something else.
+  const honouredSelection = useRef<string | null>(null);
+  if (ctx.selection && ctx.selection !== honouredSelection.current) {
+    honouredSelection.current = ctx.selection;
+    if (measures.some((m) => m.name === ctx.selection)) setSelected(ctx.selection);
+  }
   const [lineage, setLineage] = useState<MeasureLineage | null>(null);
   const [editing, setEditing] = useState<{ measure: ModelMeasureInfo | null } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -263,7 +273,7 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
       }}
       title={m.formula}
     >
-      <span style={{ color: "#8a5cf6", flexShrink: 0, fontSize: 11 }}>∑</span>
+      <span style={{ color: ME.calculatedHue, flexShrink: 0, fontSize: 11 }}>∑</span>
       <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
         {m.name}
       </span>
@@ -298,7 +308,7 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           style={{
             borderRadius: 3,
             border: isTarget ? "1px dashed #2f6fce" : "1px solid transparent",
-            background: isTarget ? "#eff5ff" : undefined,
+            background: isTarget ? ME.accentSoft : undefined,
           }}
         >
           <div
@@ -307,7 +317,7 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
             style={{ ...treeStyles.folderRow, paddingLeft: headerPad }}
           >
             <Chevron open={isOpen} />
-            <span style={{ color: "#666", display: "flex", alignItems: "center" }}>
+            <span style={{ color: ME.text2, display: "flex", alignItems: "center" }}>
               <FolderIcon />
             </span>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -397,12 +407,12 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
                 marginTop: 4,
                 borderRadius: 3,
                 border: dragOver === UNGROUPED ? "1px dashed #2f6fce" : "1px solid transparent",
-                background: dragOver === UNGROUPED ? "#eff5ff" : undefined,
+                background: dragOver === UNGROUPED ? ME.accentSoft : undefined,
               }}
             >
               <div
                 title="Drag measures here to remove them from their folder"
-                style={{ padding: "3px 6px", fontWeight: 600, fontSize: 12, color: "#666" }}
+                style={{ padding: "3px 6px", fontWeight: 600, fontSize: 12, color: ME.text2 }}
               >
                 Ungrouped
               </div>
@@ -431,6 +441,17 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
               if (newName) setSelected(newName);
             }}
             onEditFormula={() => setEditing({ measure: selectedMeasure })}
+            onEvaluate={() => ctx.navigate("testing", selectedMeasure.name)}
+            onCopyAsCommand={() => {
+              // The GUI already knows the grammar; a user should not have to
+              // read a 31-topic reference to learn it.
+              const cmd = buildSetCommand("measure", selectedMeasure.name, {
+                format: selectedMeasure.formatString ?? "",
+                folder: selectedMeasure.group ?? "",
+                hidden: selectedMeasure.isHidden,
+              });
+              if (cmd) void navigator.clipboard?.writeText(cmd).catch(() => {});
+            }}
             reportError={reportError}
           />
         )}
@@ -499,7 +520,7 @@ function MeasureContextMenu({
     padding: "5px 12px",
     border: "none",
     background: "transparent",
-    color: "#222",
+    color: ME.text,
     fontSize: 12,
     cursor: "pointer",
     whiteSpace: "nowrap",
@@ -509,9 +530,9 @@ function MeasureContextMenu({
     padding: "5px 12px 2px",
     fontSize: 11,
     fontWeight: 600,
-    color: "#888",
+    color: ME.text3,
   };
-  const hr: React.CSSProperties = { height: 1, background: "#eee", margin: "3px 0" };
+  const hr: React.CSSProperties = { height: 1, background: ME.borderSubtle, margin: "3px 0" };
   return (
     <div
       // The measure list's own overflow would clip a menu near the bottom, so
@@ -524,8 +545,8 @@ function MeasureContextMenu({
         minWidth: 200,
         maxHeight: 360,
         overflowY: "auto",
-        background: "#fff",
-        border: "1px solid #ccc",
+        background: ME.surface,
+        border: `1px solid ${ME.ctlBorder}`,
         borderRadius: 4,
         boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
         padding: "4px 0",
@@ -534,7 +555,7 @@ function MeasureContextMenu({
       <button style={item} onClick={onEdit}>
         Edit…
       </button>
-      <button style={{ ...item, color: "#a4262c" }} onClick={onDelete}>
+      <button style={{ ...item, color: ME.dangerFg }} onClick={onDelete}>
         Delete
       </button>
       <div style={hr} />

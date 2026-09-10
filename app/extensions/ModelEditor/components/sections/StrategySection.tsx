@@ -304,6 +304,7 @@ import type {
   Target,
   Unit,
 } from "../../lib/strategyTypes";
+import { ME } from "../theme";
 
 // ===========================================================================
 // The per-connection working draft
@@ -943,8 +944,8 @@ function WhyCell({
       style={{
         marginLeft: 6,
         fontSize: 11,
-        color: "#2f6fce",
-        borderBottom: "1px dotted #2f6fce",
+        color: ME.accent,
+        borderBottom: `1px dotted ${ME.accent}`,
         cursor: "help",
       }}
     >
@@ -995,11 +996,11 @@ function RuleOverrideMark({
 function rowTone(state: EntryState): React.CSSProperties {
   switch (state) {
     case "inferred":
-      return { color: "#8a8a8a", background: "#fbfaf5", fontStyle: "italic" };
+      return { color: ME.text3, background: ME.sunken, fontStyle: "italic" };
     case "empty":
-      return { color: "#9a9a9a", background: "transparent" };
+      return { color: ME.text3, background: "transparent" };
     default:
-      return { color: "#222", background: "transparent" };
+      return { color: ME.text, background: "transparent" };
   }
 }
 
@@ -1043,7 +1044,7 @@ const stickyHeaderStyle: React.CSSProperties = {
   ...styles.th,
   ...STICKY_CONFIRM,
   zIndex: 2,
-  background: "#fff",
+  background: ME.surface,
 };
 
 /**
@@ -1052,12 +1053,14 @@ const stickyHeaderStyle: React.CSSProperties = {
  * A sticky cell floats OVER the columns sliding beneath it, and `rowTone` gives
  * `transparent` for three of its four states — so without an explicit
  * background the scrolled content would show straight through the badge and the
- * Confirm button. The card behind the table is white, which is what a
- * transparent row resolves to.
+ * Confirm button. What a transparent row resolves to is the CARD behind the
+ * table, which is `ME.surface` — NOT literal white. It was briefly white while
+ * the text followed the skin, which put light-grey "Confirm" on a white chip in
+ * Dark: unreadable, and invisible in a screenshot taken in Light.
  */
 function stickyConfirmCell(state: EntryState): React.CSSProperties {
   const tone = rowTone(state);
-  const background = tone.background === "transparent" ? "#fff" : String(tone.background);
+  const background = tone.background === "transparent" ? ME.surface : String(tone.background);
   return { ...cellStyle, ...STICKY_CONFIRM, background };
 }
 
@@ -1093,7 +1096,7 @@ function selectOf<T extends string>(
       style={{
         ...smallInput,
         width,
-        ...(showingInherited ? { color: "#6a6a6a", fontStyle: "italic" } : {}),
+        ...(showingInherited ? { color: ME.text2, fontStyle: "italic" } : {}),
       }}
       value={value}
       disabled={disabled}
@@ -1130,17 +1133,25 @@ function selectOf<T extends string>(
  * A person looking at "calendar" is owed the answer to "is the engine using
  * this?".
  */
+// The prop is `provenance`, not `origin`, ON PURPOSE. `scriptOriginForgery`'s
+// census scans every file under extensions/ for an identifier ending in
+// `origin`/`Origin` compared to a string literal, because a SCRIPT TRUST origin
+// is a discriminated union and comparing one to a string is a real security
+// defect. `TableKindOrigin` is an unrelated three-valued string union about who
+// classified a table, so the name — not the code — was tripping a guard that
+// then sat red, and a permanently-red guard is how the next genuine offender
+// gets filed as "unrelated".
 function KindOriginBadge({
-  origin,
+  provenance,
   table,
   kind,
 }: {
-  origin: TableKindOrigin;
+  provenance: TableKindOrigin;
   table: string;
   kind: TableKind | undefined;
 }): React.ReactElement | null {
-  if (origin === "none") return null;
-  if (origin === "chosen") {
+  if (provenance === "none") return null;
+  if (provenance === "chosen") {
     return (
       <span
         data-testid={`kind-origin-${table}`}
@@ -1200,7 +1211,7 @@ function SpecInput<T>({
       style={{
         ...smallInput,
         width,
-        borderColor: error ? "#a4262c" : "#ccc",
+        borderColor: error ? ME.dangerFg : ME.ctlBorder,
       }}
       value={text}
       disabled={disabled}
@@ -1354,7 +1365,7 @@ function BandIncomplete({ measure }: { measure: string }): React.ReactElement {
   return (
     <div
       data-testid={`band-incomplete-${measure}`}
-      style={{ fontSize: 11, color: "#a4262c", marginTop: 2, whiteSpace: "normal", maxWidth: 200 }}
+      style={{ fontSize: 11, color: ME.dangerFg, marginTop: 2, whiteSpace: "normal", maxWidth: 200 }}
     >
       A band direction needs both bounds. Until it has them this measure has no favourability and
       no variance, and the strategy is refused on Save.
@@ -1388,7 +1399,7 @@ function ColumnRefList({
         <span
           key={r}
           style={{
-            background: "#eef0f2",
+            background: ME.sunken,
             borderRadius: 3,
             padding: "1px 4px",
             fontSize: 11,
@@ -1478,7 +1489,7 @@ function DivergenceNote({
   return (
     <div
       data-testid={`divergence-${id}`}
-      style={{ fontSize: 11, color: "#7a5b00", marginTop: 3, whiteSpace: "normal", maxWidth: 260 }}
+      style={{ fontSize: 11, color: ME.warnFg, marginTop: 3, whiteSpace: "normal", maxWidth: 260 }}
     >
       {divergences.map((d) => (
         <div key={d.field}>
@@ -1615,7 +1626,7 @@ function FiscalYearStartField({
     <>
       <input
         data-testid="model-fiscal-year-start"
-        style={{ ...styles.input, borderColor: error ? "#a4262c" : "#ccc" }}
+        style={{ ...styles.input, borderColor: error ? ME.dangerFg : ME.ctlBorder }}
         value={text}
         disabled={disabled}
         placeholder="04-01"
@@ -1629,7 +1640,7 @@ function FiscalYearStartField({
       {error !== null && (
         <div
           data-testid="model-fiscal-year-start-error"
-          style={{ color: "#a4262c", fontSize: 11, marginTop: 2 }}
+          style={{ color: ME.dangerFg, fontSize: 11, marginTop: 2 }}
         >
           {error}
         </div>
@@ -1656,7 +1667,7 @@ function NotYetConsulted({ field }: { field: keyof ModelStrategy }): React.React
     <div
       data-testid={`model-not-consulted-${field}`}
       data-inert-field={field}
-      style={{ fontSize: 11, color: "#7a5b00", marginTop: 2 }}
+      style={{ fontSize: 11, color: ME.warnFg, marginTop: 2 }}
     >
       {NOT_YET_CONSULTED}
     </div>
@@ -1848,7 +1859,7 @@ function FieldFindings({ findings }: { findings: Finding[] }): React.ReactElemen
         <div
           key={`${f.code}-${String(i)}`}
           data-finding-severity={f.severity}
-          style={{ color: f.severity === "error" ? "#a4262c" : "#7a5b00" }}
+          style={{ color: f.severity === "error" ? ME.dangerFg : ME.warnFg }}
         >
           {f.code}: {f.message}
         </div>
@@ -2208,7 +2219,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
       <div style={{ ...styles.hint, display: "flex", gap: 10, alignItems: "center" }}>
         <span>Nothing is written until you press Save.</span>
         {status && (
-          <span data-testid="strategy-status" style={{ color: "#444" }}>
+          <span data-testid="strategy-status" style={{ color: ME.text2 }}>
             {status}
           </span>
         )}
@@ -2404,7 +2415,7 @@ function MeasuresGrid({
                     <span
                       data-testid={`measure-not-consulted-${h}`}
                       data-inert-field={h}
-                      style={{ color: "#7a5b00", fontWeight: 400, marginLeft: 4 }}
+                      style={{ color: ME.warnFg, fontWeight: 400, marginLeft: 4 }}
                     >
                       *
                     </span>
@@ -2672,7 +2683,7 @@ function MeasuresGrid({
                 key={`orphan-${p.measure}`}
                 data-strategy-path={measurePath(p.measure)}
                 data-strategy-orphan="true"
-                style={{ color: "#7a5b00", background: "#fffaf0" }}
+                style={{ color: ME.warnFg, background: ME.warnBg }}
               >
                 <td style={cellStyle}>
                   <strong>{p.measure}</strong>{" "}
@@ -2846,7 +2857,7 @@ function AggregationEditor({
             data-testid="aggregation-exception"
             style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}
           >
-            <span style={{ ...styles.input, flex: 2, minWidth: 0, background: "#f6f7f8" }}>
+            <span style={{ ...styles.input, flex: 2, minWidth: 0, background: ME.sunken }}>
               {dimension}
             </span>
             <select
@@ -3066,7 +3077,7 @@ function TablesGrid({
                         is the TABLE's — but the cell still has to be pinned and
                         opaque, or the scrolled columns show through the gap the
                         rows above and below are covering. */}
-                    <td style={{ ...cellStyle, ...STICKY_CONFIRM, background: "#fff" }} />
+                    <td style={{ ...cellStyle, ...STICKY_CONFIRM, background: ME.surface }} />
                   </tr>
                 );
               };
@@ -3108,7 +3119,7 @@ function TablesGrid({
                         (k) =>
                           tableKindTopologyRefusal(overview, t.name, k) ?? tableKindIsInert(k),
                       )}{" "}
-                      <KindOriginBadge origin={kindOrigin} table={t.name} kind={shownKind} />{" "}
+                      <KindOriginBadge provenance={kindOrigin} table={t.name} kind={shownKind} />{" "}
                       <RowFindings findings={findingsAtPath(findings, `${path}.kind`)} />
                     </td>
                     <td style={cellStyle}>
@@ -3276,7 +3287,7 @@ function AddRuleBlocked({ reason }: { reason: string }): React.ReactElement {
   return (
     <div
       data-testid="rules-add-blocked"
-      style={{ fontSize: 11, color: "#7a5b00", marginTop: 4 }}
+      style={{ fontSize: 11, color: ME.warnFg, marginTop: 4 }}
     >
       {reason}
     </div>
@@ -3343,7 +3354,7 @@ function RulesGrid({
                       who has just been told what a rule is for should not have
                       to go and find it. */}
                   <div data-testid="rules-empty" style={{ maxWidth: 720 }}>
-                    <div style={{ fontSize: 12, color: "#444", marginBottom: 6 }}>
+                    <div style={{ fontSize: 12, color: ME.text2, marginBottom: 6 }}>
                       No rules yet. {RULE_INVITATION}
                     </div>
                     <button
@@ -3428,7 +3439,7 @@ function FindingsStrip({
         ].map(([severity, list]) =>
           list.length === 0 ? null : (
             <div key={severity} style={{ marginBottom: 6 }}>
-              <div style={{ ...styles.label, color: severity === "error" ? "#a4262c" : "#7a5b00" }}>
+              <div style={{ ...styles.label, color: severity === "error" ? ME.dangerFg : ME.warnFg }}>
                 {severity === "error" ? "Errors — these refuse the document" : "Warnings — stale or unfinished"}
               </div>
               {list.map((f, i) => (
@@ -3440,7 +3451,7 @@ function FindingsStrip({
                     gap: 8,
                     padding: "3px 4px",
                     fontSize: 12,
-                    background: selectedPath !== null && f.path === selectedPath ? "#eef3fb" : "transparent",
+                    background: selectedPath !== null && f.path === selectedPath ? ME.accentSoft : "transparent",
                   }}
                 >
                   <button
@@ -3450,7 +3461,7 @@ function FindingsStrip({
                   >
                     {f.path === "" ? "(document)" : f.path}
                   </button>
-                  <span style={{ fontFamily: "Consolas, monospace", color: "#666" }}>{f.code}</span>
+                  <span style={{ fontFamily: "Consolas, monospace", color: ME.text2 }}>{f.code}</span>
                   <span>{f.message}</span>
                 </div>
               ))}
@@ -3789,7 +3800,7 @@ function RuleModal({
         <input style={styles.input} value={draft.note} onChange={(e) => patch({ note: e.target.value })} />
       </Field>
 
-      {error && <div style={{ color: "#a4262c", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

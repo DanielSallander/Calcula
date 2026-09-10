@@ -20,6 +20,7 @@ import type { LayoutMode, Position } from "./layoutEngine";
 import { TableNode } from "./TableNode";
 import type { ColumnDragInfo } from "./TableNode";
 import { RelationshipEdge } from "./RelationshipEdge";
+import { styles } from "../editorShared";
 
 export interface ColumnDropResult {
   fromTable: string;
@@ -40,6 +41,8 @@ interface RelationshipDiagramProps {
   onEditRelationship?: (relationshipName: string) => void;
   /** "auto" (default) picks radial for stars, layered otherwise; "free" = drag. */
   layoutMode?: DiagramLayoutMode;
+  /** Empty-state action. Optional so the diagram stays usable standalone. */
+  onNavigateToTables?: () => void;
 }
 
 interface ColumnDragState {
@@ -107,6 +110,7 @@ export function RelationshipDiagram({
   onColumnDrop,
   onEditRelationship,
   layoutMode = "auto",
+  onNavigateToTables,
 }: RelationshipDiagramProps): React.ReactElement {
   const [columnDrag, setColumnDrag] = useState<ColumnDragState | null>(null);
   const [hoverColumn, setHoverColumn] = useState<ColumnDragInfo | null>(null);
@@ -479,21 +483,41 @@ export function RelationshipDiagram({
               );
             })}
 
-            {tables.length === 0 && (
-              <text
-                x={canvas.w / 2}
-                y={canvas.h / 2}
-                textAnchor="middle"
-                dominantBaseline="central"
-                fill={C.textMuted}
-                fontSize={14}
-              >
-                No tables in model. Add tables in the Tables section first.
-              </text>
-            )}
           </g>
         </svg>
       </div>
+
+      {/* The empty state is an HTML overlay rather than SVG <text> because it
+          carries an ACTION: SVG text cannot hold a focusable control, so the
+          old version could only name the Tables section and leave you to find
+          it. */}
+      {tables.length === 0 && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            pointerEvents: "none",
+            color: C.textMuted,
+            fontSize: 14,
+          }}
+        >
+          <div>No tables in this model.</div>
+          {onNavigateToTables && (
+            <button
+              type="button"
+              style={{ ...styles.btn, pointerEvents: "auto" }}
+              onClick={onNavigateToTables}
+            >
+              Go to Tables
+            </button>
+          )}
+        </div>
+      )}
 
       {tables.length > 0 && (
         <div

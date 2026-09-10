@@ -75,6 +75,7 @@ import type {
   TableKind,
   TableStrategy,
 } from "../lib/strategyTypes";
+import { describeWhere, matchesWhere, validateWhere } from "./whereClause";
 
 // ---------------------------------------------------------------------------
 // Small shared helpers
@@ -270,11 +271,46 @@ function stringsOf(vals: ValueTok[]): string[] {
 interface NamedTarget {
   label: string;
   name: string;
+  /** The matched object, carried so a `where` clause can read its properties.
+   *  Undefined for the handful of kinds expanded from a literal id rather than
+   *  from the overview (extdata, rule) — those refuse `where` in validation. */
+  obj?: unknown;
 }
 
-/** Expand a set/rename/delete/refresh/materialize target to concrete names.
- *  Returns null when the verb+kind carries no name-pattern target. */
+/**
+ * Expand a set/rename/delete/refresh/materialize target to concrete names,
+ * then narrow by any `where` clause.
+ *
+ * THE FILTER LIVES HERE, in the one function both `previewWriteCommand` and
+ * `runWrite` call. Filtering anywhere else would let the confirmation card and
+ * the execution disagree about what the command touches — the card would list
+ * three hundred columns and three would change, or worse, the reverse.
+ */
 function expandNamed(cmd: Command, s: CliSession): NamedTarget[] | null {
+  const where = cmd.where && cmd.where.length > 0 ? cmd.where : null;
+
+  // Validate the clause BEFORE expanding anything. A malformed or unsupported
+  // clause is a malformed COMMAND, whatever the pattern happens to match — and
+  // validating afterwards made `delete role * where x=1` report "No role
+  // matches '*'", which points at the wrong half of the line and would send
+  // someone off to check their pattern.
+  const kind = where ? validateWhere(where, cmd.kind, cmd.line) : null;
+
+  const targets = expandNamedUnfiltered(cmd, s);
+  if (targets === null || !where || !kind) return targets;
+
+  const kept = targets.filter((t) => t.obj !== undefined && matchesWhere(t.obj, where, kind));
+  if (kept.length === 0) {
+    fail(
+      `No ${cmd.kind} matches '${cmd.pos[0]?.text ?? "*"}' where ${describeWhere(where)}`,
+      cmd.line,
+    );
+  }
+  return kept;
+}
+
+/** Expand a target to concrete names, ignoring any `where` clause. */
+function expandNamedUnfiltered(cmd: Command, s: CliSession): NamedTarget[] | null {
   const o = s.overview;
   const t0 = cmd.pos[0];
   const pat = t0?.text ?? null;
@@ -282,7 +318,7 @@ function expandNamed(cmd: Command, s: CliSession): NamedTarget[] | null {
     if (pat === null) fail(`Usage: ${cmd.verb} ${cmd.kind} <name>`, cmd.line);
     const m = matchNamed(items, nameOf, pat);
     if (m.length === 0) fail(`No ${kindLabel} matches '${pat}'`, cmd.line);
-    return m.map((x) => ({ label: `${kindLabel} ${nameOf(x)}`, name: nameOf(x) }));
+    return m.map((x) => ({ label: `${kindLabel} ${nameOf(x)}`, name: nameOf(x), obj: x }));
   };
 
   switch (cmd.kind) {
@@ -294,9 +330,12 @@ function expandNamed(cmd: Command, s: CliSession): NamedTarget[] | null {
       if (!t0 || t0.kind !== "colref") fail(`Usage: ${cmd.verb} column Table[Column]`, cmd.line);
       const m = matchColumns(o, t0.table ?? "*", t0.column ?? "*");
       if (m.length === 0) fail(`No column matches '${t0.text}'`, cmd.line);
+      // The ColumnMatch { table, column } is exactly what the column property
+      // readers take, so a where clause can filter on the OWNING TABLE too.
       return m.map((x) => ({
         label: `column ${x.table.name}[${x.column.name}]`,
         name: `${x.table.name}[${x.column.name}]`,
+        obj: x,
       }));
     }
     case "relationship": {
@@ -306,7 +345,7 @@ function expandNamed(cmd: Command, s: CliSession): NamedTarget[] | null {
       }
       const m = matchRelationships(o, namePat, from, to);
       if (m.length === 0) fail("No relationship matches", cmd.line);
-      return m.map((r) => ({ label: `relationship ${r.name} (${r.fromTable} -> ${r.toTable})`, name: r.name }));
+      return m.map((r) => ({ label: `relationship ${r.name} (${r.fromTable} -> ${r.toTable})`, name: r.name, obj: r }));
     }
     case "hierarchy":
       return named(o.hierarchies, (h) => h.name, "hierarchy");

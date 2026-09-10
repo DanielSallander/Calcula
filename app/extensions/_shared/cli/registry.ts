@@ -96,6 +96,18 @@ export interface CliDomain<S = unknown> {
   helpText(topic: string[]): string | null;
   /** Enforce the option schema on writes (see optionSchema.ts). */
   strictOptions?: boolean;
+  /**
+   * Whether this domain evaluates a `where` clause.
+   *
+   * FAIL CLOSED, and this is the whole reason the flag exists rather than the
+   * kernel just handing the clause over and hoping. `delete measure * where
+   * folder="Archive"` in a domain that parses `where` but ignores it does not
+   * delete the archived measures — it deletes EVERY measure, reports success,
+   * and the confirm card that should have shown three names showed three
+   * hundred. A domain that does not set this gets a refusal, never a
+   * broadened command.
+   */
+  supportsWhere?: boolean;
 }
 
 /** One registered domain + the live session its executors run against. */

@@ -6,7 +6,7 @@
 //          returned rows, per-column metadata, and (optionally) the execution
 //          plan. Read-only — it never mutates the model.
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { biModelCancelQuery, biModelTestQuery, saveTextToFile } from "@api";
 import type {
   MeasureFilterDto,
@@ -17,7 +17,9 @@ import type {
 } from "@api";
 import { Badge, Field, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { Xref } from "../Xref";
 import { ExecutionPlanView } from "./ExecutionPlanView";
+import { ME } from "../theme";
 
 const FILTER_OPERATORS = ["=", "!=", ">", ">=", "<", "<="];
 
@@ -57,6 +59,17 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
   const { connectionId, overview } = ctx;
 
   const [selectedMeasures, setSelectedMeasures] = useState<string[]>([]);
+  // "Evaluate" on the measure inspector lands here with the measure already
+  // ticked. Write DAX → evaluate → fix is the tightest loop in the job, and it
+  // was sixteen rail slots away with nothing carried across.
+  const honouredSelection = useRef<string | null>(null);
+  if (ctx.selection && ctx.selection !== honouredSelection.current) {
+    honouredSelection.current = ctx.selection;
+    if (overview.measures.some((m) => m.name === ctx.selection)) {
+      const wanted = ctx.selection;
+      setSelectedMeasures((prev) => (prev.includes(wanted) ? prev : [...prev, wanted]));
+    }
+  }
   const [rows, setRows] = useState<DimDraft[]>([]);
   const [filters, setFilters] = useState<FilterRow[]>([]);
   const [rowLimit, setRowLimit] = useState("100");
@@ -179,7 +192,13 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
       <div style={styles.card}>
         <label style={styles.label}>Measures</label>
         {overview.measures.length === 0 ? (
-          <div style={styles.hint}>The model has no measures — add some in the Measures section.</div>
+          <div style={styles.hint}>
+            The model has no measures —{" "}
+            <Xref to="measures" navigate={ctx.navigate}>
+              add some
+            </Xref>
+            .
+          </div>
         ) : (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
             {overview.measures.map((m) => (
@@ -190,11 +209,11 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
                   alignItems: "center",
                   gap: 4,
                   fontSize: 12,
-                  border: "1px solid #ddd",
+                  border: `1px solid ${ME.border}`,
                   borderRadius: 3,
                   padding: "2px 6px",
                   cursor: "pointer",
-                  background: selectedMeasures.includes(m.name) ? "#e8f0fd" : "#fff",
+                  background: selectedMeasures.includes(m.name) ? ME.accentSoft : ME.surface,
                 }}
               >
                 <input
@@ -714,7 +733,7 @@ function ResultView({ result }: { result: TestQueryResult }): React.ReactElement
                 return (
                   <th
                     key={i}
-                    style={{ ...styles.th, position: "sticky", top: 0, background: "#f7f8fa", zIndex: 1 }}
+                    style={{ ...styles.th, position: "sticky", top: 0, background: ME.sunken, zIndex: 1 }}
                   >
                     {c}
                     {meta && (

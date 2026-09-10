@@ -146,6 +146,23 @@ export function createCliEngine(
 
     const items = commands.map(dispatch);
 
+    // A `where` clause NARROWS a command. A domain that parses it but cannot
+    // evaluate it would run the un-narrowed command instead — so
+    // `delete measure * where folder="Archive"` would delete every measure and
+    // report success. Refuse before anything is planned, let alone previewed.
+    for (const item of items) {
+      if (!item.cmd.where || item.cmd.where.length === 0) continue;
+      if (!item.binding?.domain.supportsWhere) {
+        throw new CliError(
+          `\`where\` is not supported${
+            item.binding ? ` by ${item.binding.domain.label} commands` : " here"
+          } — remove it rather than relying on it being ignored, which would ` +
+            `widen this command to everything the pattern matches`,
+          item.cmd.line,
+        );
+      }
+    }
+
     const writeLabels: string[] = [];
     let hasWildcard = false;
     let writeBinding: CliDomainBinding | null = null;

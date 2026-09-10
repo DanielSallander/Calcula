@@ -10,6 +10,7 @@ import { biModelUpsertWritebackColumn } from "@api";
 import type { ModelOverview, ModelTableInfo, ModelWritebackColumnInfo } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import { ExpressionEditorModal } from "../ExpressionEditorModal";
+import { ME } from "../theme";
 
 /** Value types a writeback column can collect (the backend accepts these). */
 const WRITEBACK_DATA_TYPES = ["Float64", "Int64", "String", "Boolean"];
@@ -228,9 +229,9 @@ export function WritebackColumnModal({
       >
         <div
           style={{
-            border: "1px solid #ccc",
+            border: `1px solid ${ME.ctlBorder}`,
             borderRadius: 3,
-            background: "#fff",
+            background: ME.surface,
             maxHeight: 150,
             overflowY: "auto",
             padding: 6,
@@ -255,7 +256,7 @@ export function WritebackColumnModal({
                   alignItems: "center",
                   gap: 6,
                   fontSize: 12,
-                  color: eligible ? "#222" : "#aaa",
+                  color: eligible ? ME.text : ME.text3,
                   cursor: eligible ? "pointer" : "not-allowed",
                 }}
               >
@@ -278,7 +279,7 @@ export function WritebackColumnModal({
                 alignItems: "center",
                 gap: 6,
                 fontSize: 12,
-                color: "#a4262c",
+                color: ME.dangerFg,
                 cursor: "pointer",
               }}
             >
@@ -369,7 +370,7 @@ export function WritebackColumnModal({
         </Field>
       )}
 
-      <div style={{ fontSize: 12, fontWeight: 600, color: "#444", margin: "10px 0 6px" }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: ME.text2, margin: "10px 0 6px" }}>
         Constraints
       </div>
       <label

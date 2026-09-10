@@ -8,6 +8,7 @@ import React from "react";
 import type { TransformDiagnosticDto, TransformStepDto } from "@api";
 import { SELECTION_BG, styles } from "../editorShared";
 import { STEP_GROUPS, STEP_TYPES, describeStep, stepDetail } from "./stepKit";
+import { ME } from "../theme";
 
 /** The step list's Source row — the raw rows the connector returned, before
  *  any step. Previewing it is `asOfStep: -1`. */
@@ -45,9 +46,9 @@ export function StepList({
           flex: 1,
           minHeight: 0,
           overflowY: "auto",
-          border: "1px solid #ddd",
+          border: `1px solid ${ME.border}`,
           borderRadius: 4,
-          background: "#fff",
+          background: ME.surface,
         }}
       >
         <div
@@ -96,7 +97,7 @@ export function StepList({
                 {hasError && (
                   <span
                     title={rowDiagnostics.map((d) => d.message).join("\n")}
-                    style={{ color: "#a4262c", fontWeight: 700, flexShrink: 0 }}
+                    style={{ color: ME.dangerFg, fontWeight: 700, flexShrink: 0 }}
                   >
                     !
                   </span>
@@ -157,7 +158,7 @@ export function StepList({
                     marginLeft: 22,
                     marginTop: 2,
                     fontSize: 11,
-                    color: d.severity === "error" ? "#a4262c" : "#7a5b00",
+                    color: d.severity === "error" ? ME.dangerFg : ME.warnFg,
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
                   }}

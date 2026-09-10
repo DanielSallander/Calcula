@@ -34,6 +34,8 @@ import {
   registerMeasureLanguage,
   setMeasureLanguageContext,
 } from "../../lib/measureLanguage";
+import { ME } from "../theme";
+import { applyModelEditorTheme } from "../../lib/monacoTheme";
 
 // Preserve any prior worker handler so this editor never clobbers another
 // Monaco setup living in the same window.
@@ -139,7 +141,7 @@ function saveLayout(layout: BladeLayout): void {
 const iconBtnStyle: React.CSSProperties = {
   border: "1px solid transparent",
   background: "transparent",
-  color: "#666",
+  color: ME.text2,
   cursor: "pointer",
   fontSize: 12,
   lineHeight: 1,
@@ -196,7 +198,7 @@ function ResizeHandle({
         justifyContent: "center",
       }}
     >
-      <div style={{ width: 1, height: "100%", background: "#ddd" }} />
+      <div style={{ width: 1, height: "100%", background: ME.border }} />
     </div>
   );
 }
@@ -232,9 +234,9 @@ function Blade({
           width: 30,
           flexShrink: 0,
           cursor: "pointer",
-          border: "1px solid #ddd",
+          border: `1px solid ${ME.border}`,
           borderRadius: 4,
-          background: "#f2f3f5",
+          background: ME.sunken,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
@@ -242,14 +244,14 @@ function Blade({
           padding: "8px 0",
         }}
       >
-        <span style={{ fontSize: 12, color: "#888" }}>{side === "left" ? "▸" : "◂"}</span>
+        <span style={{ fontSize: 12, color: ME.text3 }}>{side === "left" ? "▸" : "◂"}</span>
         <span
           style={{
             writingMode: "vertical-rl",
             transform: "rotate(180deg)",
             fontSize: 11,
             fontWeight: 600,
-            color: "#555",
+            color: ME.text2,
             whiteSpace: "nowrap",
             letterSpacing: 0.3,
           }}
@@ -267,9 +269,9 @@ function Blade({
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
-        border: "1px solid #ddd",
+        border: `1px solid ${ME.border}`,
         borderRadius: 4,
-        background: "#fafafa",
+        background: ME.sunken,
         overflow: "hidden",
       }}
     >
@@ -279,8 +281,8 @@ function Blade({
           alignItems: "center",
           gap: 2,
           padding: "4px 4px 4px 8px",
-          borderBottom: "1px solid #eee",
-          background: "#f2f3f5",
+          borderBottom: `1px solid ${ME.borderSubtle}`,
+          background: ME.sunken,
           flexShrink: 0,
         }}
       >
@@ -288,7 +290,7 @@ function Blade({
           style={{
             fontWeight: 600,
             fontSize: 12,
-            color: "#555",
+            color: ME.text2,
             flex: 1,
             whiteSpace: "nowrap",
             overflow: "hidden",
@@ -399,7 +401,10 @@ export const ExpressionWorkspace = forwardRef<
     };
   }, [docsSideCollapsed, docs]);
 
-  const handleMount: OnMount = (editor) => {
+  const handleMount: OnMount = (editor, monaco) => {
+    // Every Monaco in this window ran the stock light "vs" theme; once the
+    // window follows the skin that is a white editor inside a dark dialog.
+    applyModelEditorTheme(monaco);
     editorRef.current = editor;
     registerMeasureLanguage();
   };
@@ -549,7 +554,7 @@ export const ExpressionWorkspace = forwardRef<
         }}
       >
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontSize: 12, fontWeight: 600, color: "#444" }}>{label}</span>
+          <span style={{ fontSize: 12, fontWeight: 600, color: ME.text2 }}>{label}</span>
           {hint && (
             <span
               style={{
@@ -569,7 +574,7 @@ export const ExpressionWorkspace = forwardRef<
           style={{
             flex: 1,
             minHeight: 120,
-            border: "1px solid #ccc",
+            border: `1px solid ${ME.ctlBorder}`,
             borderRadius: 3,
             overflow: "hidden",
           }}
@@ -633,12 +638,12 @@ function ModelTreeContent({
   const subHeaderStyle: React.CSSProperties = {
     padding: "4px 8px",
     fontWeight: 600,
-    color: "#555",
-    borderBottom: "1px solid #eee",
-    borderTop: "1px solid #eee",
+    color: ME.text2,
+    borderBottom: `1px solid ${ME.borderSubtle}`,
+    borderTop: `1px solid ${ME.borderSubtle}`,
     position: "sticky",
     top: 0,
-    background: "#f2f2f2",
+    background: ME.sunken,
   };
   const rowStyle: React.CSSProperties = {
     display: "flex",
@@ -656,11 +661,11 @@ function ModelTreeContent({
         minHeight: 0,
         overflowY: "auto",
         fontSize: 12,
-        background: "#fafafa",
+        background: ME.sunken,
       }}
     >
       {overview.tables.length === 0 && (
-        <div style={{ padding: "6px 8px", color: "#999" }}>No tables yet.</div>
+        <div style={{ padding: "6px 8px", color: ME.text3 }}>No tables yet.</div>
       )}
       {overview.tables.map((t) => {
         const open = expanded.has(t.name);
@@ -688,7 +693,7 @@ function ModelTreeContent({
                   onClick={() => onInsert(`${t.name}[${c.name}]`)}
                   title={`Insert ${t.name}[${c.name}]`}
                 >
-                  <span style={{ color: c.isCalculated ? "#2f6fce" : "#aaa" }}>
+                  <span style={{ color: c.isCalculated ? ME.accent : ME.text3 }}>
                     {c.isCalculated ? "ƒ" : "▪"}
                   </span>
                   <span
@@ -696,7 +701,7 @@ function ModelTreeContent({
                   >
                     {c.name}
                   </span>
-                  <span style={{ marginLeft: "auto", color: "#bbb", fontSize: 10, flexShrink: 0 }}>
+                  <span style={{ marginLeft: "auto", color: ME.text3, fontSize: 10, flexShrink: 0 }}>
                     {c.dataType}
                   </span>
                 </div>
@@ -716,7 +721,7 @@ function ModelTreeContent({
               onClick={() => onInsert(`[${m.name}]`)}
               title={`Insert [${m.name}]`}
             >
-              <span style={{ color: "#8a5cf6" }}>∑</span>
+              <span style={{ color: ME.calculatedHue }}>∑</span>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {m.name}
               </span>

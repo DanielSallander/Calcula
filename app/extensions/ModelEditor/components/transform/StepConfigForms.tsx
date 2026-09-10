@@ -35,6 +35,7 @@ import {
   stepTypeInfo,
   stepTypeLabel,
 } from "./stepKit";
+import { ME } from "../theme";
 
 /** Row-level expressions see this table's columns as bare names. Spelled out
  *  under both expression editors so the author does not have to guess — and
@@ -789,8 +790,8 @@ export function StepConfigForm({
                             ...styles.smallBtn,
                             fontStyle: "italic",
                             fontWeight: 600,
-                            background: a.expression !== undefined ? "#0b5cad" : undefined,
-                            color: a.expression !== undefined ? "#fff" : undefined,
+                            background: a.expression !== undefined ? ME.accent : undefined,
+                            color: a.expression !== undefined ? ME.onAccent : undefined,
                           }}
                           disabled={readOnly}
                           title={
@@ -968,7 +969,7 @@ export function StepConfigForm({
                 </span>
               </div>
               {detectError && (
-                <div style={{ marginTop: 6, fontSize: 11, color: "#a4262c", whiteSpace: "pre-wrap" }}>
+                <div style={{ marginTop: 6, fontSize: 11, color: ME.dangerFg, whiteSpace: "pre-wrap" }}>
                   {detectError}
                 </div>
               )}

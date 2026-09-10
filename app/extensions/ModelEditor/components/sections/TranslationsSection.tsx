@@ -11,6 +11,7 @@ import type { ModelCultureInfo, ModelOverview, NameTranslationInfo } from "@api"
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 export function TranslationsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -312,7 +313,7 @@ function TranslationGroup({
         </span>
       </div>
       {open && (
-        <div style={{ border: "1px solid #ddd", borderRadius: 3, padding: 6 }}>
+        <div style={{ border: `1px solid ${ME.border}`, borderRadius: 3, padding: 6 }}>
           {searchable && (
             <input
               style={{ ...styles.input, marginBottom: 6 }}

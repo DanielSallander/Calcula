@@ -24,6 +24,7 @@ import type { SectionCtx } from "../editorShared";
 import { CalcGroupIcon, Chevron, treeStyles } from "../treeKit";
 import { ExpressionWorkspace } from "./ExpressionWorkspace";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 /** What a modal save actually installed — for selection/alias reconciliation. */
 interface SavedGroup {
@@ -532,7 +533,7 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                   >
                     <Chevron open={isOpen} />
                   </span>
-                  <span style={{ color: "#666", display: "flex", alignItems: "center" }}>
+                  <span style={{ color: ME.text2, display: "flex", alignItems: "center" }}>
                     <CalcGroupIcon />
                   </span>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -543,7 +544,7 @@ export function CalcGroupsSection({ ctx }: { ctx: SectionCtx }): React.ReactElem
                       marginLeft: "auto",
                       border: "1px solid transparent",
                       background: "transparent",
-                      color: "#666",
+                      color: ME.text2,
                       cursor: "pointer",
                       fontSize: 13,
                       lineHeight: 1,
@@ -763,7 +764,7 @@ function CalcGroupContextMenu({
     padding: "5px 12px",
     border: "none",
     background: "transparent",
-    color: "#222",
+    color: ME.text,
     fontSize: 12,
     cursor: "pointer",
     whiteSpace: "nowrap",
@@ -779,8 +780,8 @@ function CalcGroupContextMenu({
         left: menu.x,
         zIndex: 1000,
         minWidth: 180,
-        background: "#fff",
-        border: "1px solid #ccc",
+        background: ME.surface,
+        border: `1px solid ${ME.ctlBorder}`,
         borderRadius: 4,
         boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
         padding: "4px 0",
@@ -797,7 +798,7 @@ function CalcGroupContextMenu({
       <button
         style={{
           ...itemStyle,
-          color: "#a4262c",
+          color: ME.dangerFg,
           opacity: isItem && lastItem ? 0.5 : 1,
         }}
         disabled={isItem && lastItem}
@@ -1051,7 +1052,7 @@ function CalcGroupInspector({
               Edit in editor…
             </button>
             <button
-              style={{ ...styles.btn, color: "#a4262c" }}
+              style={{ ...styles.btn, color: ME.dangerFg }}
               disabled={readOnly || group.items.length <= 1}
               title={
                 group.items.length <= 1
@@ -1286,8 +1287,8 @@ function CalcGroupModal({
     fontSize: 12,
     cursor: "pointer",
     border: active ? `1px solid ${ACCENT}` : "1px solid #ccc",
-    background: active ? "#eff5ff" : "#fff",
-    color: active ? ACCENT : "#444",
+    background: active ? ME.accentSoft : ME.surface,
+    color: active ? ACCENT : ME.text2,
     fontWeight: active ? 600 : 400,
     whiteSpace: "nowrap",
     maxWidth: 220,
@@ -1401,7 +1402,7 @@ function CalcGroupModal({
             {items.length > 1 && (
               <span
                 title="Remove this item"
-                style={{ color: "#999", cursor: "pointer", fontSize: 13, lineHeight: 1 }}
+                style={{ color: ME.text3, cursor: "pointer", fontSize: 13, lineHeight: 1 }}
                 onClick={(e) => {
                   e.stopPropagation();
                   removeItem(i);
@@ -1418,7 +1419,7 @@ function CalcGroupModal({
         {/* AS-style selection-state expressions: applied when the group is
             filtered to several items / none (multiple-or-empty) or not
             filtered at all (no selection). Blank = default: base measures. */}
-        <span style={{ width: 1, alignSelf: "stretch", background: "#ddd", margin: "0 4px" }} />
+        <span style={{ width: 1, alignSelf: "stretch", background: ME.border, margin: "0 4px" }} />
         <span
           style={chipStyle(sel === "moe")}
           onClick={() => setSel("moe")}

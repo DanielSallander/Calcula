@@ -10,6 +10,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { FunctionDocDto } from "@api";
 import { styles } from "../editorShared";
 import { linkStyle, renderMarkdown } from "../markdownRender";
+import { ME } from "../theme";
 
 
 /** First non-heading, non-blank line of a doc — a one-line summary for the list. */
@@ -121,7 +122,7 @@ export function FunctionDocsPanel({
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        background: "#fff",
+        background: ME.surface,
       }}
     >
       {current ? (
@@ -129,7 +130,7 @@ export function FunctionDocsPanel({
           <div
             style={{
               padding: "6px 8px",
-              borderBottom: "1px solid #f0f0f0",
+              borderBottom: `1px solid ${ME.borderSubtle}`,
               display: "flex",
               gap: 10,
             }}
@@ -148,13 +149,13 @@ export function FunctionDocsPanel({
               </a>
             )}
           </div>
-          <div style={{ padding: "8px 12px", overflowY: "auto", flex: 1, fontSize: 13, color: "#333" }}>
+          <div style={{ padding: "8px 12px", overflowY: "auto", flex: 1, fontSize: 13, color: ME.text }}>
             {renderMarkdown(current.markdown, navigate)}
           </div>
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
-          <div style={{ padding: 8, borderBottom: "1px solid #f0f0f0" }}>
+          <div style={{ padding: 8, borderBottom: `1px solid ${ME.borderSubtle}` }}>
             <input
               style={{ ...styles.input, width: "100%" }}
               placeholder="Search functions…"
@@ -184,16 +185,16 @@ export function FunctionDocsPanel({
                       alignItems: "center",
                       gap: 6,
                       padding: "5px 10px",
-                      background: "#f7f8fa",
-                      borderBottom: "1px solid #e8e8e8",
+                      background: ME.sunken,
+                      borderBottom: `1px solid ${ME.borderSubtle}`,
                       cursor: "pointer",
                       userSelect: "none",
                     }}
                   >
-                    <span style={{ fontSize: 9, color: "#888", width: 10 }}>
+                    <span style={{ fontSize: 9, color: ME.text3, width: 10 }}>
                       {isCollapsed ? "▸" : "▾"}
                     </span>
-                    <span style={{ fontWeight: 600, fontSize: 11, color: "#555" }}>{group.category}</span>
+                    <span style={{ fontWeight: 600, fontSize: 11, color: ME.text2 }}>{group.category}</span>
                     <span style={{ ...styles.muted, fontSize: 10, marginLeft: "auto" }}>{group.docs.length}</span>
                   </div>
                   {!isCollapsed &&
@@ -211,7 +212,7 @@ export function FunctionDocsPanel({
                         }}
                         style={{
                           padding: "6px 10px",
-                          borderBottom: "1px solid #f2f2f2",
+                          borderBottom: `1px solid ${ME.borderSubtle}`,
                           cursor: "pointer",
                         }}
                         title={
@@ -220,7 +221,7 @@ export function FunctionDocsPanel({
                             : `Open ${d.name}`
                         }
                       >
-                        <div style={{ fontWeight: 600, fontSize: 12, color: "#2f6fce" }}>{d.name}</div>
+                        <div style={{ fontWeight: 600, fontSize: 12, color: ME.accent }}>{d.name}</div>
                         <div
                           style={{
                             ...styles.muted,

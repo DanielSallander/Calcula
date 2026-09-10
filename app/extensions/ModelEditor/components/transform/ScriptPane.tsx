@@ -33,6 +33,8 @@ import {
   setTransformScriptFormulaContext,
   setTransformScriptVocabulary,
 } from "./transformScriptLanguage";
+import { ME } from "../theme";
+import { applyModelEditorTheme } from "../../lib/monacoTheme";
 
 // Chain the worker handler so this editor never clobbers another Monaco setup
 // in the same window (mirrors ExpressionEditorModal / ExpressionWorkspace).
@@ -126,7 +128,10 @@ export function ScriptPane({
     setTransformScriptFormulaContext([...byName.values()], functions);
   }, [sourceColumns, derivedColumns, functions]);
 
-  const handleMount: OnMount = (editor) => {
+  const handleMount: OnMount = (editor, monaco) => {
+    // Every Monaco in this window ran the stock light "vs" theme; once the
+    // window follows the skin that is a white editor inside a dark dialog.
+    applyModelEditorTheme(monaco);
     editorRef.current = editor;
     registerTransformScriptLanguage();
     editor.focus();
@@ -211,7 +216,7 @@ export function ScriptPane({
         style={{
           flex: 1,
           minHeight: 0,
-          border: `1px solid ${worst ? "#a4262c" : "#ddd"}`,
+          border: `1px solid ${worst ? ME.dangerFg : ME.border}`,
           borderRadius: 4,
           overflow: "hidden",
         }}
@@ -241,7 +246,7 @@ export function ScriptPane({
         <div
           style={{
             fontSize: 12,
-            color: "#a4262c",
+            color: ME.dangerFg,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
           }}
@@ -251,8 +256,8 @@ export function ScriptPane({
               style={{
                 ...styles.smallBtn,
                 marginRight: 6,
-                borderColor: "#a4262c",
-                color: "#a4262c",
+                borderColor: ME.dangerFg,
+                color: ME.dangerFg,
               }}
               onClick={() => goTo(diagnostics[0].line ?? 1, diagnostics[0].column ?? 1)}
             >

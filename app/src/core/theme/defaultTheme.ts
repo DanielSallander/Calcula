@@ -131,6 +131,19 @@ export const defaultTheme: Record<string, string> = {
   [THEME_TOKENS.FONT_SIZE_CELL]: '14.667px',
   [THEME_TOKENS.Z_INDEX_EDITOR]: '10',
 
+  // --- Semantic tones ---
+  // Foreground/background pairs. Each fg is >= 4.5:1 on its own bg AND on
+  // BG_SURFACE (#ffffff), so a tone is readable whether it is used as a filled
+  // badge or as bare text on a card.
+  [THEME_TOKENS.TONE_DANGER_FG]: '#b42318',
+  [THEME_TOKENS.TONE_DANGER_BG]: '#fef3f2',
+  [THEME_TOKENS.TONE_WARN_FG]: '#b54708',
+  [THEME_TOKENS.TONE_WARN_BG]: '#fffaeb',
+  [THEME_TOKENS.TONE_OK_FG]: '#067647',
+  [THEME_TOKENS.TONE_OK_BG]: '#ecfdf3',
+  [THEME_TOKENS.TONE_INFO_FG]: '#175cd3',
+  [THEME_TOKENS.TONE_INFO_BG]: '#eff8ff',
+
   // --- Scrollbar ---
   [THEME_TOKENS.SCROLLBAR_TRACK_BG]: '#f5f5f5',
   [THEME_TOKENS.SCROLLBAR_BORDER_COLOR]: '#d1d5db',

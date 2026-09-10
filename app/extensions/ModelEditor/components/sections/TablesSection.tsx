@@ -3,7 +3,7 @@
 //          tables, per-table metadata form, and the columns grid with
 //          physical-column editing plus calculated-column add/edit/delete.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   biModelDeleteCalcColumn,
   biModelDeleteContextColumn,
@@ -33,11 +33,14 @@ const STRATEGY_TYPES = [
 ];
 import { Badge, Field, SELECTION_BG, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { Xref } from "../Xref";
+import { ColumnSelectionBar } from "./ColumnSelectionBar";
 import { CalcColumnModal, PhysicalColumnModal } from "./TableColumnModals";
 import { WritebackColumnModal } from "./WritebackColumnModal";
 import { SqlEditorModal } from "../SqlEditorModal";
 import { TransformEditorModal, summarizeSteps } from "../transform";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -50,6 +53,11 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
     existing: ModelWritebackColumnInfo | null;
   } | null>(null);
   const [transformOpen, setTransformOpen] = useState(false);
+  // Multi-select for bulk column edits. Keyed by column NAME, and cleared
+  // whenever the selected table changes — a name from another table would
+  // otherwise survive and be silently included in the next batch.
+  const [selectedCols, setSelectedCols] = useState<string[]>([]);
+  const lastClickedRow = useRef<number | null>(null);
 
   // Keep the selection valid when the table set changes (e.g. a table was just
   // deleted or imported) — the render-time "adjust state on prop change" pattern
@@ -61,15 +69,61 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
       setSelectedName(next);
       // The transform editor is per-table; it must never survive onto another.
       setTransformOpen(false);
+      setSelectedCols([]);
     }
   }
 
+  // Honour a route selection on ARRIVAL (the palette, an Xref, a restored
+  // hash). Tracked by a ref so it applies once per requested name and then
+  // stops fighting the user's own clicks — a route that re-asserted itself
+  // every render would make the list unusable.
+  const honouredSelection = useRef<string | null>(null);
+  if (ctx.selection && ctx.selection !== honouredSelection.current) {
+    honouredSelection.current = ctx.selection;
+    if (tables.some((t) => t.name === ctx.selection) && ctx.selection !== selectedName) {
+      setSelectedName(ctx.selection);
+    }
+  }
+
+  // The column selection is by NAME, so switching tables must clear it or a
+  // bulk edit would target names that happen to exist in the new table too.
+  const shownTable = useRef<string | null>(selectedName);
+  if (shownTable.current !== selectedName) {
+    shownTable.current = selectedName;
+    if (selectedCols.length > 0) setSelectedCols([]);
+    lastClickedRow.current = null;
+  }
+
   const table = tables.find((t) => t.name === selectedName) ?? null;
+
+  /** Ctrl/plain click toggles one; shift-click extends from the last click. */
+  const toggleColumn = (name: string, rowIndex: number, shift: boolean): void => {
+    const all = allColumnNames.current;
+    if (shift && lastClickedRow.current !== null) {
+      const [lo, hi] =
+        lastClickedRow.current <= rowIndex
+          ? [lastClickedRow.current, rowIndex]
+          : [rowIndex, lastClickedRow.current];
+      const range = all.slice(lo, hi + 1);
+      setSelectedCols((prev) => Array.from(new Set([...prev, ...range])));
+      return;
+    }
+    lastClickedRow.current = rowIndex;
+    setSelectedCols((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    );
+  };
   // Writeback columns live on the MODEL (overview.writebackColumns), not in
   // the table's column list — pick out the selected table's here.
   const writebackCols = table
     ? overview.writebackColumns.filter((w) => w.table === table.name)
     : [];
+  // Selectable = the columns a `set column` command can actually target.
+  // Context (dynamic) columns are excluded: they are a projection of a context
+  // expression, not physical columns, and `set column` does not own them.
+  const selectableCols = table ? table.columns : [];
+  const allColumnNames = useRef<string[]>([]);
+
   // Dynamic (context-driven) columns are shaped like column rows for the grid
   // but deliberately kept OUT of table.columns — pickers that require
   // materialized columns (sort-by, refresh date column, role filters,
@@ -91,6 +145,12 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
           formatString: null,
         }))
     : [];
+
+  // Row order in the grid, so a shift-click range maps to the right names.
+  // Written during render (this file's established pattern) because the grid
+  // and the handler must agree on the SAME order, and the handler is created
+  // before the rows are rendered.
+  allColumnNames.current = table ? [...table.columns, ...dynamicCols].map((c) => c.name) : [];
 
   // Static and dynamic calculated columns live in different model stores —
   // the row's isDynamic flag routes the delete.
@@ -127,7 +187,7 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
       <div style={{ ...styles.card, width: 260, flexShrink: 0, overflowY: "auto", padding: 4 }}>
         {tables.length === 0 && (
           <div style={{ ...styles.muted, padding: 8 }}>
-            No tables in this model — import some under Import.
+            No tables in this model — <Xref to="import" navigate={ctx.navigate}>import some</Xref>.
           </div>
         )}
         {tables.map((t) => (
@@ -181,6 +241,7 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
                 readOnly={readOnly}
                 applyOverview={applyOverview}
                 reportError={reportError}
+                navigate={ctx.navigate}
               />
             )}
 
@@ -216,10 +277,42 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
                 Add writeback column
               </button>
             </div>
+            <ColumnSelectionBar
+              ctx={ctx}
+              table={table.name}
+              selected={selectedCols}
+              columns={selectableCols.map((c) => ({
+                name: c.name,
+                isHidden: c.isHidden,
+                formatString: c.formatString,
+                isCalculated: c.isCalculated,
+              }))}
+              onDone={() => setSelectedCols([])}
+            />
+
             <div style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
               <table style={{ borderCollapse: "collapse", width: "100%" }}>
                 <thead>
                   <tr>
+                    <th style={{ ...styles.th, width: 28 }}>
+                      <input
+                        type="checkbox"
+                        aria-label="Select all columns"
+                        data-testid="select-all-columns"
+                        ref={(el) => {
+                          if (el) {
+                            el.indeterminate =
+                              selectedCols.length > 0 && selectedCols.length < selectableCols.length;
+                          }
+                        }}
+                        checked={
+                          selectableCols.length > 0 && selectedCols.length === selectableCols.length
+                        }
+                        onChange={(e) =>
+                          setSelectedCols(e.target.checked ? selectableCols.map((c) => c.name) : [])
+                        }
+                      />
+                    </th>
                     <th style={styles.th}>Name</th>
                     <th style={styles.th}>Type</th>
                     <th style={styles.th}>Display name</th>
@@ -230,8 +323,24 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
                   </tr>
                 </thead>
                 <tbody>
-                  {[...table.columns, ...dynamicCols].map((c) => (
-                    <tr key={c.name}>
+                  {[...table.columns, ...dynamicCols].map((c, rowIndex) => (
+                    <tr
+                      key={c.name}
+                      data-me-row=""
+                      style={
+                        selectedCols.includes(c.name) ? { background: SELECTION_BG } : undefined
+                      }
+                    >
+                      <td style={styles.td}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${c.name}`}
+                          data-testid={`select-col-${c.name}`}
+                          checked={selectedCols.includes(c.name)}
+                          onChange={() => {}}
+                          onClick={(e) => toggleColumn(c.name, rowIndex, e.shiftKey)}
+                        />
+                      </td>
                       <td style={styles.td}>
                         <strong>{c.name}</strong> {c.isCalculated && <Badge tone="ok">calc</Badge>}{" "}
                         {c.isDynamic && (
@@ -465,6 +574,7 @@ function BindTableCard({
   readOnly,
   applyOverview,
   reportError,
+  navigate,
 }: {
   connectionId: string;
   table: ModelTableInfo;
@@ -472,6 +582,7 @@ function BindTableCard({
   readOnly: boolean;
   applyOverview: (overview: ModelOverview) => void;
   reportError: (err: unknown) => void;
+  navigate: SectionCtx["navigate"];
 }): React.ReactElement {
   const [sourceId, setSourceId] = useState(sources[0]?.id ?? "");
   // Pre-filled from the chosen source's default schema (set on the connection),
@@ -507,13 +618,16 @@ function BindTableCard({
 
   return (
     <div
-      style={{ ...styles.card, border: "1px solid #e2b04a", background: "#fdf6e3", marginTop: 8 }}
+      style={{ ...styles.card, border: "1px solid #e2b04a", background: ME.warnBg, marginTop: 8 }}
     >
       <div style={{ fontWeight: 600, marginBottom: 4 }}>Unbound table</div>
       {sources.length === 0 ? (
         <div style={styles.hint}>
-          This table isn&apos;t bound to a data source. Add a source under the Connections tab, then
-          bind it here.
+          This table isn&apos;t bound to a data source.{" "}
+          <Xref to="connections" navigate={navigate}>
+            Add a source
+          </Xref>
+          , then bind it here.
         </div>
       ) : (
         <>
@@ -697,7 +811,7 @@ function TableMetaForm({
           Refresh data
         </button>
         <button
-          style={{ ...styles.smallBtn, color: "#a4262c" }}
+          style={{ ...styles.smallBtn, color: ME.dangerFg }}
           disabled={readOnly || busy}
           title="Remove this table from the model"
           onClick={() => void deleteTable()}
@@ -922,7 +1036,7 @@ function RefreshStrategyCard({
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
-                  color: s.sql.trim() ? "#222" : "#999",
+                  color: s.sql.trim() ? ME.text : ME.text3,
                 }}
                 title="Edit the source query"
                 onClick={() => setSqlEditIndex(i)}

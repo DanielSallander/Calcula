@@ -13,6 +13,7 @@
 import React, { useState } from "react";
 import type { ModelColumnInfo, TransformDataType, TransformStepDto } from "@api";
 import { Badge, styles } from "../editorShared";
+import { ME } from "../theme";
 
 // ============================================================================
 // Vocabulary
@@ -533,9 +534,9 @@ export function ColumnMultiSelect({
         style={{
           maxHeight: height,
           overflowY: "auto",
-          border: "1px solid #ccc",
+          border: `1px solid ${ME.ctlBorder}`,
           borderRadius: 3,
-          background: "#fff",
+          background: ME.surface,
           padding: "2px 0",
         }}
       >

@@ -10,6 +10,7 @@ import { biModelDependencyGraph } from "@api";
 import type { DependencyGraphDto, DependencyNodeDto } from "@api";
 import { styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
+import { ME } from "../theme";
 
 const NODE_W = 176;
 const NODE_H = 38;
@@ -17,11 +18,39 @@ const COL_GAP = 220;
 const ROW_GAP = 58;
 const PAD = 20;
 
+// The four hues are CATEGORICAL DATA — they identify a node kind and stay
+// literal, like the ribbon's colour palettes. What must NOT stay literal is the
+// node FILL: a fixed light tint under text that follows the skin is the exact
+// "light-on-light in Dark" defect this codebase has already paid for. Mixing
+// each hue into the live surface token makes the tint follow its text — a pale
+// wash on white, a deep wash on charcoal — with one definition.
+const tint = (hue: string): string =>
+  `color-mix(in srgb, ${hue} 14%, ${ME.surface})`;
+
+const NODE_HUES = {
+  measure: ME.accent,
+  globalVariable: "#7a3fce",
+  calculatedColumn: "#2c9a4a",
+  contextColumn: "#c9781f",
+} as const;
+
 const TYPE_COLORS: Record<string, { bg: string; border: string; label: string }> = {
-  measure: { bg: "#e8f0fd", border: "#2f6fce", label: "Measure" },
-  globalVariable: { bg: "#f0e8fd", border: "#7a3fce", label: "Calc table" },
-  calculatedColumn: { bg: "#e6f6ea", border: "#2c9a4a", label: "Calc column" },
-  contextColumn: { bg: "#fdf0e1", border: "#c9781f", label: "Context column" },
+  measure: { bg: tint(NODE_HUES.measure), border: NODE_HUES.measure, label: "Measure" },
+  globalVariable: {
+    bg: tint(NODE_HUES.globalVariable),
+    border: NODE_HUES.globalVariable,
+    label: "Calc table",
+  },
+  calculatedColumn: {
+    bg: tint(NODE_HUES.calculatedColumn),
+    border: NODE_HUES.calculatedColumn,
+    label: "Calc column",
+  },
+  contextColumn: {
+    bg: tint(NODE_HUES.contextColumn),
+    border: NODE_HUES.contextColumn,
+    label: "Context column",
+  },
 };
 
 interface Positioned {
@@ -195,7 +224,7 @@ export function LineageSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
                     key={i}
                     d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
                     fill="none"
-                    stroke={active ? "#2f6fce" : "#c7cdd6"}
+                    stroke={active ? ME.accent : ME.border}
                     strokeWidth={active ? 2 : 1}
                   />
                 );
@@ -223,10 +252,10 @@ export function LineageSection({ ctx }: { ctx: SectionCtx }): React.ReactElement
                       stroke={p.node.id === focus ? "#111" : c.border}
                       strokeWidth={p.node.id === focus ? 2 : 1}
                     />
-                    <text x={8} y={16} fontSize={12} fontWeight={600} fill="#222">
+                    <text x={8} y={16} fontSize={12} fontWeight={600} fill={ME.text}>
                       {truncate(p.node.name, 22)}
                     </text>
-                    <text x={8} y={30} fontSize={10} fill="#777">
+                    <text x={8} y={30} fontSize={10} fill={ME.text3}>
                       {p.node.table ?? c.label}
                     </text>
                   </g>

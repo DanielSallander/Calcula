@@ -39,6 +39,7 @@ import { SOURCE_ROW, StepList } from "./StepList";
 import { StepConfigForm } from "./StepConfigForms";
 import { ScriptPane } from "./ScriptPane";
 import { defaultStep, describeStep } from "./stepKit";
+import { ME } from "../theme";
 
 /** The backend caps a preview at 500 rows; asking for that much keeps the
  *  `truncated` flag meaningful without turning the editor into a report. */
@@ -398,7 +399,7 @@ export function TransformEditorModal({
         <>
           <div style={{ flex: 1, minWidth: 0, fontSize: 12, alignSelf: "center" }}>
             {applyError && (
-              <span style={{ color: "#a4262c", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              <span style={{ color: ME.dangerFg, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                 {applyError}
               </span>
             )}
@@ -442,7 +443,7 @@ export function TransformEditorModal({
             style={{
               ...styles.card,
               border: "1px solid #e2b04a",
-              background: "#fdf6e3",
+              background: ME.warnBg,
               padding: 8,
               marginBottom: 8,
               fontSize: 12,
@@ -463,7 +464,7 @@ export function TransformEditorModal({
           <div
             style={{
               fontSize: 12,
-              color: "#a4262c",
+              color: ME.dangerFg,
               marginBottom: 6,
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
@@ -477,14 +478,14 @@ export function TransformEditorModal({
             the script is a rendering of them, compiled back before anything is
             stored — so switching is not an edit. */}
         <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
-          <div style={{ display: "flex", border: "1px solid #ccc", borderRadius: 4 }}>
+          <div style={{ display: "flex", border: `1px solid ${ME.ctlBorder}`, borderRadius: 4 }}>
             <button
               style={{
                 ...styles.smallBtn,
                 border: "none",
                 borderRadius: "3px 0 0 3px",
-                background: mode === "steps" ? "#0b5cad" : "transparent",
-                color: mode === "steps" ? "#fff" : undefined,
+                background: mode === "steps" ? ME.accent : "transparent",
+                color: mode === "steps" ? ME.onAccent : undefined,
               }}
               onClick={enterSteps}
             >
@@ -495,8 +496,8 @@ export function TransformEditorModal({
                 ...styles.smallBtn,
                 border: "none",
                 borderRadius: "0 3px 3px 0",
-                background: mode === "script" ? "#0b5cad" : "transparent",
-                color: mode === "script" ? "#fff" : undefined,
+                background: mode === "script" ? ME.accent : "transparent",
+                color: mode === "script" ? ME.onAccent : undefined,
               }}
               onClick={enterScript}
               title="Edit the whole pipeline as text — copy it between tables, diff it, paste one you were sent"
@@ -524,7 +525,7 @@ export function TransformEditorModal({
               }}
             >
               {scriptSeedError !== null && (
-                <div style={{ fontSize: 12, color: "#a4262c", marginBottom: 6 }}>
+                <div style={{ fontSize: 12, color: ME.dangerFg, marginBottom: 6 }}>
                   {scriptSeedError}
                 </div>
               )}
@@ -603,10 +604,10 @@ export function TransformEditorModal({
                         key={c.name}
                         style={{
                           fontSize: 11,
-                          border: "1px solid #ddd",
+                          border: `1px solid ${ME.border}`,
                           borderRadius: 3,
                           padding: "1px 6px",
-                          background: "#fafafa",
+                          background: ME.sunken,
                         }}
                         title={c.dataType}
                       >
@@ -674,9 +675,9 @@ export function TransformEditorModal({
                 flex: 1,
                 minHeight: 0,
                 overflowY: "auto",
-                border: "1px solid #ddd",
+                border: `1px solid ${ME.border}`,
                 borderRadius: 4,
-                background: "#fff",
+                background: ME.surface,
                 padding: "2px 0",
               }}
             >

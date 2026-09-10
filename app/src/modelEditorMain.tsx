@@ -6,7 +6,32 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { RootErrorBoundary } from "./shell/RootErrorBoundary";
+import { initSkinLoader } from "./core/theme/skinLoader";
+import { getBootPreferredSkinId } from "./api/appearancePolicy";
 import { ModelEditorApp } from "../extensions/ModelEditor/components/ModelEditorApp";
+import { installModelEditorStyles } from "../extensions/ModelEditor/components/theme";
+
+// Stamp the active skin's CSS variables BEFORE first paint, exactly as
+// main.tsx:34 does. Without this the model-editor window was skin-BLIND: it is
+// a separate Tauri window with its own React tree, nothing ever injected the
+// ~130 theme variables onto its :root, and switching Calcula to Dark left this
+// window white. Every `var(--token, literal)` in here silently took its light
+// fallback.
+//
+// initSkinLoader is idempotent and self-contained (registry + localStorage +
+// one <style> element), and localStorage is shared across the app's windows,
+// so this picks up the same skin the main window is showing.
+//
+// Use THIS function, not getMergedTokens/getSkinTokens — that is the swatch
+// PREVIEW path used by the Appearance settings page, and it drops forcedBase,
+// highContrast, minFontScale and reduced-motion. Copying it here would ship a
+// second, drifting skin applier.
+initSkinLoader(getBootPreferredSkinId());
+
+// Hover, :focus-visible, ::placeholder and scrollbars cannot be expressed as
+// inline styles, and this window is styled almost entirely with inline styles
+// — which is exactly why it had no hover feedback and no focus ring anywhere.
+installModelEditorStyles();
 
 // This window is created with dragDropEnabled: false so HTML5 drag-and-drop
 // works (Tauri's native handler swallows it on Windows) — which also hands OS

@@ -7,10 +7,11 @@
 
 import React from "react";
 import { styles } from "./editorShared";
+import { ME } from "./theme";
 
 const codeBlock: React.CSSProperties = {
-  background: "#f5f6f8",
-  border: "1px solid #e3e5e8",
+  background: ME.sunken,
+  border: `1px solid ${ME.borderSubtle}`,
   borderRadius: 4,
   padding: "8px 10px",
   fontFamily: "Consolas, 'Cascadia Code', monospace",
@@ -20,14 +21,14 @@ const codeBlock: React.CSSProperties = {
   margin: "6px 0",
 };
 const inlineCode: React.CSSProperties = {
-  background: "#eef0f2",
+  background: ME.sunken,
   borderRadius: 3,
   padding: "0 4px",
   fontFamily: "Consolas, 'Cascadia Code', monospace",
   fontSize: "0.92em",
 };
 export const linkStyle: React.CSSProperties = {
-  color: "#2f6fce",
+  color: ME.accent,
   cursor: "pointer",
   textDecoration: "none",
 };
@@ -64,7 +65,7 @@ function renderInline(text: string, onNavigate: (fn: string) => void): React.Rea
       } else {
         // External / non-doc link: show the label (no navigation in the sandbox).
         nodes.push(
-          <span key={key++} style={{ color: "#2f6fce" }}>
+          <span key={key++} style={{ color: ME.accent }}>
             {label}
           </span>,
         );
@@ -133,8 +134,8 @@ export function renderMarkdown(md: string, onNavigate: (fn: string) => void): Re
                     key={hi}
                     style={{
                       ...styles.th,
-                      borderBottom: "2px solid #ddd",
-                      background: "#f7f8fa",
+                      borderBottom: `2px solid ${ME.border}`,
+                      background: ME.sunken,
                     }}
                   >
                     {renderInline(h, onNavigate)}
@@ -170,7 +171,7 @@ export function renderMarkdown(md: string, onNavigate: (fn: string) => void): Re
           style={{
             fontSize: size,
             fontWeight: 600,
-            color: "#222",
+            color: ME.text,
             margin: level === 1 ? "2px 0 8px" : "12px 0 4px",
             borderBottom: level <= 2 ? "1px solid #eee" : undefined,
             paddingBottom: level <= 2 ? 3 : 0,

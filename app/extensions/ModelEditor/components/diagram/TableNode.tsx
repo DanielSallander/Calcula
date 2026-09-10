@@ -9,6 +9,7 @@
 import React, { memo } from "react";
 import type { ModelTableInfo } from "@api";
 import { DIAGRAM_COLORS as C } from "./diagramTheme";
+import { ME } from "../theme";
 import {
   columnLabel,
   getNodeHeight,
@@ -104,7 +105,7 @@ export const TableNode = memo(function TableNode({
             y={13}
             textAnchor="middle"
             dominantBaseline="central"
-            fill={isSelected ? C.accent : "#fff"}
+            fill={isSelected ? C.accent : ME.onAccent}
             fontSize={8}
             fontWeight={700}
             style={{ pointerEvents: "none" }}
@@ -117,7 +118,7 @@ export const TableNode = memo(function TableNode({
         x={10}
         y={HEADER_HEIGHT / 2}
         dominantBaseline="central"
-        fill={isSelected ? "#fff" : C.textPrimary}
+        fill={isSelected ? ME.onAccent : C.textPrimary}
         fontSize={12}
         fontWeight={600}
         onMouseDown={handleHeaderMouseDown}

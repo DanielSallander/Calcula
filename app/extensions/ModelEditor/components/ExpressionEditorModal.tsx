@@ -18,6 +18,8 @@ import {
   registerMeasureLanguage,
   setMeasureLanguageContext,
 } from "../lib/measureLanguage";
+import { ME } from "./theme";
+import { applyModelEditorTheme } from "../lib/monacoTheme";
 
 // Chain the worker handler so this editor never clobbers another Monaco setup
 // in the same window (mirrors sections/ExpressionWorkspace / SqlEditorModal).
@@ -51,7 +53,10 @@ export function ExpressionEditorModal({
 }): React.ReactElement {
   const [value, setValue] = useState(initialValue);
 
-  const handleMount: OnMount = (editor) => {
+  const handleMount: OnMount = (editor, monaco) => {
+    // Every Monaco in this window ran the stock light "vs" theme; once the
+    // window follows the skin that is a white editor inside a dark dialog.
+    applyModelEditorTheme(monaco);
     registerMeasureLanguage();
     editor.focus();
   };
@@ -93,7 +98,7 @@ export function ExpressionEditorModal({
         </>
       }
     >
-      <div style={{ border: "1px solid #ccc", borderRadius: 4, overflow: "hidden" }}>
+      <div style={{ border: `1px solid ${ME.ctlBorder}`, borderRadius: 4, overflow: "hidden" }}>
         <Editor
           height="300px"
           language={MEASURE_LANGUAGE_ID}

@@ -153,4 +153,20 @@ export const THEME_TOKENS = {
   // --- Ribbon icon accents (@api ribbonIcons two-tone set) ---
   ICON_ACCENT: '--icon-accent',
   ICON_DANGER: '--icon-danger',
+
+  // --- Semantic tones (status: danger / warn / ok / info) ---
+  // The set had TEXT_ERROR and ICON_DANGER and nothing else semantic: no warn,
+  // no ok, no info, and no background for any of them. That is why every
+  // status badge in the app carries its own literal pair, and why the Model
+  // Editor rendered validation ERRORS in the same yellow as warnings — the
+  // only tone it could reach. Foreground/background pairs so a caller never
+  // has to invent a readable background for a token it was given.
+  TONE_DANGER_FG: '--tone-danger-fg',
+  TONE_DANGER_BG: '--tone-danger-bg',
+  TONE_WARN_FG: '--tone-warn-fg',
+  TONE_WARN_BG: '--tone-warn-bg',
+  TONE_OK_FG: '--tone-ok-fg',
+  TONE_OK_BG: '--tone-ok-bg',
+  TONE_INFO_FG: '--tone-info-fg',
+  TONE_INFO_BG: '--tone-info-bg',
 } as const;

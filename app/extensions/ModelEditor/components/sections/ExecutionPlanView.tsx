@@ -9,13 +9,14 @@ import React, { useMemo, useState } from "react";
 import { saveTextToFile } from "@api";
 import type { ExecutionPlanDto, PlanNodeDto } from "@api";
 import { styles } from "../editorShared";
+import { ME } from "../theme";
 
 // Color/badge per plan operation (aligned with Calcula Studio's palette).
 // Keys are the engine's PascalCase PlanOperation names, verbatim.
 /* eslint-disable @typescript-eslint/naming-convention */
 const OP_CONFIG: Record<string, { color: string; badge: string }> = {
-  Planning: { color: "#64748b", badge: "OUT" },
-  PushdownDecision: { color: "#6b7280", badge: "PLAN" },
+  Planning: { color: ME.text2, badge: "OUT" },
+  PushdownDecision: { color: ME.text2, badge: "PLAN" },
   SourceFetch: { color: "#3b82f6", badge: "DB" },
   SourceFetchCached: { color: "#10b981", badge: "MEM" },
   LocalJoin: { color: "#f59e0b", badge: "JOIN" },
@@ -28,7 +29,7 @@ const OP_CONFIG: Record<string, { color: string; badge: string }> = {
   CalculatedColumnMaterialization: { color: "#d97706", badge: "COL" },
 };
 /* eslint-enable @typescript-eslint/naming-convention */
-const OP_FALLBACK = { color: "#94a3b8", badge: "OP" };
+const OP_FALLBACK = { color: ME.text3, badge: "OP" };
 
 type PlanViewMode = "visual" | "tree" | "json";
 
@@ -55,9 +56,9 @@ export function ExecutionPlanView({ plan }: { plan: ExecutionPlanDto }): React.R
 
   const tabStyle = (m: PlanViewMode): React.CSSProperties => ({
     ...styles.smallBtn,
-    background: mode === m ? "#2f6fce" : "#fff",
-    color: mode === m ? "#fff" : "#222",
-    borderColor: mode === m ? "#2f6fce" : "#bbb",
+    background: mode === m ? ME.accent : ME.surface,
+    color: mode === m ? "#fff" : ME.text,
+    borderColor: mode === m ? ME.accent : ME.ctlBorder,
   });
 
   return (
@@ -99,8 +100,8 @@ export function ExecutionPlanView({ plan }: { plan: ExecutionPlanDto }): React.R
             overflow: "auto",
             margin: 0,
             padding: 8,
-            background: "#f7f8fa",
-            border: "1px solid #eee",
+            background: ME.sunken,
+            border: `1px solid ${ME.borderSubtle}`,
             borderRadius: 4,
             fontSize: 11,
             fontFamily: "Consolas, 'Cascadia Code', monospace",
@@ -227,7 +228,7 @@ function PlanGraph({ plan }: { plan: ExecutionPlanDto }): React.ReactElement {
 
   return (
     <div>
-      <div style={{ maxHeight: 320, overflow: "auto", border: "1px solid #eee", borderRadius: 4 }}>
+      <div style={{ maxHeight: 320, overflow: "auto", border: `1px solid ${ME.borderSubtle}`, borderRadius: 4 }}>
         <svg width={width} height={height} style={{ display: "block" }}>
           {edges.map((e, i) => {
             const x1 = e.from.x + NODE_W;
@@ -240,7 +241,7 @@ function PlanGraph({ plan }: { plan: ExecutionPlanDto }): React.ReactElement {
                 key={i}
                 d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
                 fill="none"
-                stroke="#c3cad4"
+                stroke={ME.border}
                 strokeWidth={1.5}
               />
             );
@@ -259,23 +260,27 @@ function PlanGraph({ plan }: { plan: ExecutionPlanDto }): React.ReactElement {
                   width={NODE_W}
                   height={NODE_H}
                   rx={6}
-                  fill="#fff"
-                  stroke={isSel ? "#2f6fce" : "#d7dbe0"}
+                  fill={ME.surface}
+                  stroke={isSel ? ME.accent : ME.border}
                   strokeWidth={isSel ? 2 : 1}
                 />
                 <rect width={4} height={NODE_H} rx={2} fill={cfg.color} />
                 <rect x={10} y={8} width={34} height={14} rx={3} fill={cfg.color} />
+                {/* Literal white, NOT ME.surface: this sits on the badge rect
+                    above, which is filled with the operation's own saturated
+                    hue in both themes. A surface token here would render dark
+                    charcoal on a coloured chip the moment the skin flips. */}
                 <text x={27} y={18.5} textAnchor="middle" fontSize={8.5} fontWeight={700} fill="#fff">
                   {cfg.badge}
                 </text>
-                <text x={50} y={19} fontSize={10} fill="#667">
+                <text x={50} y={19} fontSize={10} fill={ME.text3}>
                   {n.node.durationMs.toFixed(1)} ms
                 </text>
-                <text x={10} y={38} fontSize={11} fontWeight={600} fill="#223">
+                <text x={10} y={38} fontSize={11} fontWeight={600} fill={ME.text}>
                   {n.node.label.length > 26 ? `${n.node.label.slice(0, 25)}…` : n.node.label}
                   <title>{n.node.label}</title>
                 </text>
-                <text x={10} y={49} fontSize={9} fill="#99a">
+                <text x={10} y={49} fontSize={9} fill={ME.text3}>
                   {n.node.operation}
                 </text>
               </g>
@@ -288,8 +293,8 @@ function PlanGraph({ plan }: { plan: ExecutionPlanDto }): React.ReactElement {
           style={{
             marginTop: 6,
             padding: 8,
-            background: "#f7f8fa",
-            border: "1px solid #eee",
+            background: ME.sunken,
+            border: `1px solid ${ME.borderSubtle}`,
             borderRadius: 4,
             fontSize: 12,
           }}

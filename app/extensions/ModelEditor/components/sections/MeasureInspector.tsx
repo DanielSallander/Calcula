@@ -20,6 +20,7 @@ import { biModelUpsertMeasure } from "@api";
 import type { MeasureLineage, ModelMeasureInfo } from "@api";
 import { Badge, styles } from "../editorShared";
 import { folderDepth, splitFolderPath } from "../../lib/measureFolders";
+import { ME } from "../theme";
 
 /** A measure-property patch: `undefined` = keep the current value. */
 interface MeasurePatch {
@@ -40,6 +41,8 @@ export function MeasureInspector({
   readOnly,
   onApply,
   onEditFormula,
+  onEvaluate,
+  onCopyAsCommand,
   reportError,
 }: {
   connectionId: string;
@@ -51,6 +54,10 @@ export function MeasureInspector({
   /** Install the fresh measure list; newName is set when the commit renamed. */
   onApply: (measures: ModelMeasureInfo[], newName?: string) => void;
   onEditFormula: () => void;
+  /** Open the Testing Ground with this measure selected. */
+  onEvaluate?: () => void;
+  /** Copy the CLI line that reproduces this measure's settings. */
+  onCopyAsCommand?: () => void;
   reportError: (err: unknown) => void;
 }): React.ReactElement {
   const [name, setName] = useState(measure.name);
@@ -290,8 +297,8 @@ export function MeasureInspector({
         style={{
           fontFamily: "Consolas, 'Cascadia Code', monospace",
           fontSize: 11,
-          background: "#f7f8fa",
-          border: "1px solid #e5e5e5",
+          background: ME.sunken,
+          border: `1px solid ${ME.borderSubtle}`,
           borderRadius: 3,
           padding: "6px 8px",
           whiteSpace: "pre-wrap",
@@ -302,13 +309,36 @@ export function MeasureInspector({
       >
         {measure.formula || "(empty — BLANK())"}
       </div>
-      <div style={{ marginTop: 6 }}>
+      <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button style={styles.btn} disabled={readOnly} onClick={onEditFormula}>
           Edit formula…
         </button>
+        {/* Write DAX → evaluate → fix is the tightest loop in this job, and the
+            query runner was sixteen rail slots away with nothing carried
+            across. This lands there with the measure already selected. */}
+        {onEvaluate && (
+          <button
+            style={styles.btn}
+            data-testid="measure-evaluate"
+            title="Open the Testing Ground with this measure selected"
+            onClick={onEvaluate}
+          >
+            Evaluate
+          </button>
+        )}
+        {onCopyAsCommand && (
+          <button
+            style={styles.btn}
+            data-testid="measure-copy-command"
+            title="Copy the command line that reproduces this measure's settings"
+            onClick={onCopyAsCommand}
+          >
+            Copy as command
+          </button>
+        )}
       </div>
 
-      <div style={{ borderTop: "1px solid #eee", marginTop: 12, paddingTop: 8, fontSize: 12 }}>
+      <div style={{ borderTop: `1px solid ${ME.borderSubtle}`, marginTop: 12, paddingTop: 8, fontSize: 12 }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>Lineage</div>
         {!lineage && <div style={styles.muted}>Loading…</div>}
         {lineage && (

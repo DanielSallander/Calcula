@@ -317,6 +317,8 @@ function ctxFor(o: ModelOverview = overview(), readOnly = false): SectionCtx {
     applyOverview: vi.fn(),
     applyMeasures: vi.fn(),
     reportError: vi.fn(),
+    navigate: vi.fn(),
+    runCommand: vi.fn().mockResolvedValue([]),
   };
 }
 

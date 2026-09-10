@@ -136,6 +136,21 @@ export const darkTheme: Record<string, string> = {
   [THEME_TOKENS.FONT_SIZE_CELL]: "14.667px",
   [THEME_TOKENS.Z_INDEX_EDITOR]: "10",
 
+  // --- Semantic tones ---
+  // INVERTED, not reused. The light foregrounds (#b42318 and friends) are
+  // 2-3:1 on a #252526 surface — the same defect that forced ICON_DANGER to be
+  // lightened for dark. Foreground is the light tint, background the dark one,
+  // and `tone_pairs_are_legible` in tokens.test.ts asserts both directions
+  // rather than trusting this comment.
+  [THEME_TOKENS.TONE_DANGER_FG]: "#fda29b",
+  [THEME_TOKENS.TONE_DANGER_BG]: "#55160c",
+  [THEME_TOKENS.TONE_WARN_FG]: "#fec84b",
+  [THEME_TOKENS.TONE_WARN_BG]: "#4e1d09",
+  [THEME_TOKENS.TONE_OK_FG]: "#6ce9a6",
+  [THEME_TOKENS.TONE_OK_BG]: "#053321",
+  [THEME_TOKENS.TONE_INFO_FG]: "#84caff",
+  [THEME_TOKENS.TONE_INFO_BG]: "#102a56",
+
   // --- Scrollbar ---
   [THEME_TOKENS.SCROLLBAR_TRACK_BG]: "#1e1e1e",
   [THEME_TOKENS.SCROLLBAR_BORDER_COLOR]: "#3a3a3a",

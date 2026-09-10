@@ -10,6 +10,8 @@ import * as monaco from "monaco-editor";
 import { enforceLfLineEndings } from "../../_shared/lib/monacoLineEndings";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { Modal, styles } from "./editorShared";
+import { ME } from "./theme";
+import { applyModelEditorTheme } from "../lib/monacoTheme";
 
 // Chain the worker handler so this editor never clobbers another Monaco setup
 // living in the same window (mirrors sections/ExpressionWorkspace).
@@ -40,7 +42,10 @@ export function SqlEditorModal({
 }): React.ReactElement {
   const [sql, setSql] = useState(initialSql);
 
-  const handleMount: OnMount = (editor) => {
+  const handleMount: OnMount = (editor, monaco) => {
+    // Every Monaco in this window ran the stock light "vs" theme; once the
+    // window follows the skin that is a white editor inside a dark dialog.
+    applyModelEditorTheme(monaco);
     editor.focus();
   };
 
@@ -60,7 +65,7 @@ export function SqlEditorModal({
         </>
       }
     >
-      <div style={{ border: "1px solid #ccc", borderRadius: 4, overflow: "hidden" }}>
+      <div style={{ border: `1px solid ${ME.ctlBorder}`, borderRadius: 4, overflow: "hidden" }}>
         <Editor
           height="340px"
           language="sql"

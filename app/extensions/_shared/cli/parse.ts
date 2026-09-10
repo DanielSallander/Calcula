@@ -42,6 +42,21 @@ export interface CliVocabulary {
  *  boundary (e.g. the Model Editor's `asModelCommand`). Deliberately
  *  serializable: no closures, no live references (a future "record as CLI
  *  script" printer depends on that staying true). */
+/**
+ * One `key=value` test in a `where` clause.
+ *
+ * Equality only, deliberately. The two jobs this exists for — "every measure
+ * with no format string" and "every visible key column" — are both equality,
+ * and half a comparison language (`>`, `LIKE`, `OR`) is worse than none: it
+ * invites people to write predicates that look like they work.
+ */
+export interface WherePredicate {
+  key: string;
+  /** The compared value. `""` is meaningful: it tests "unset or empty". */
+  value: string;
+  line: number;
+}
+
 export interface GenericCommand {
   verb: string;
   kind: string | null;
@@ -53,6 +68,17 @@ export interface GenericCommand {
   expr: string | null;
   /** key → occurrences → comma-separated value list of that occurrence. */
   opts: Map<string, ValueTok[][]>;
+  /**
+   * `where key=value and key=value` — narrows the objects a name pattern
+   * matched. Null when the command carried no clause at all, which is NOT the
+   * same as an empty list: a domain that cannot evaluate predicates must be
+   * able to tell "no clause" from "a clause I must refuse".
+   *
+   * Kept SEPARATE from `opts` even though it lexes identically. `set column *
+   * hidden=true where hidden=false` is a coherent command — hide the visible
+   * ones — and merging the two would collapse it into a contradiction.
+   */
+  where: WherePredicate[] | null;
   raw: string;
   line: number;
 }
@@ -119,6 +145,7 @@ export function createParser(vocabulary: CliVocabulary): CliParser {
       arrowPos: [],
       expr,
       opts: new Map(),
+      where: null,
       raw: logical.text,
       line: logical.line,
     };
@@ -160,6 +187,41 @@ export function createParser(vocabulary: CliVocabulary): CliParser {
       }
       if (t.kind === "eqAttached") fail("Unexpected '='");
       if (!isValue(t)) fail("Unexpected token");
+
+      // `where` opens the predicate clause. Everything after it is a filter on
+      // the objects the target pattern matched, NOT more options — checked
+      // before the option branch below, which would otherwise swallow
+      // `table="Sales"` as an option named `table`.
+      if (t.kind === "word" && t.text.toLowerCase() === "where") {
+        i++;
+        cmd.where = [];
+        while (i < tokens.length) {
+          const k = tokens[i];
+          // `and` is the only connective. There is no `or`: it would need
+          // precedence rules, and every predicate this exists for is a
+          // conjunction.
+          if (k.kind === "word" && k.text.toLowerCase() === "and") {
+            i++;
+            continue;
+          }
+          if (k.kind !== "word" || tokens[i + 1]?.kind !== "eqAttached") {
+            fail("A `where` clause is `key=value` pairs joined by `and`");
+          }
+          const key = (k as ValueTok).text.toLowerCase();
+          i += 2;
+          // An absent value is the "unset or empty" test (`where format=`),
+          // which is the whole point of the clause for "measures with no
+          // format string".
+          let value = "";
+          if (i < tokens.length && isValue(tokens[i])) {
+            value = (tokens[i] as ValueTok).text;
+            i++;
+          }
+          cmd.where.push({ key, value, line: logical.line });
+        }
+        if (cmd.where.length === 0) fail("`where` needs at least one `key=value`");
+        continue;
+      }
 
       // Option assignment: word glued to '='.
       if (t.kind === "word" && tokens[i + 1]?.kind === "eqAttached") {

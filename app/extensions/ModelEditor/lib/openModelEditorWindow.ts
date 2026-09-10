@@ -7,6 +7,7 @@
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emitOpenWithConnection, onEditorReady } from "./crossWindowEvents";
+import { MIN_HEIGHT, MIN_WIDTH, readGeometry } from "./windowGeometry";
 
 const WINDOW_LABEL = "model-editor";
 
@@ -51,15 +52,19 @@ async function doOpen(connectionId: string | null): Promise<void> {
     }
   }
 
+  // Reopen where it was left. `center` and an explicit position are mutually
+  // exclusive: passing both centres the window and silently discards the
+  // remembered position.
+  const saved = readGeometry();
   editorWindow = new WebviewWindow(WINDOW_LABEL, {
     url: "/modelEditor.html",
     title: "Calcula - Model Editor",
-    width: 1150,
-    height: 780,
-    minWidth: 760,
-    minHeight: 520,
+    width: saved?.width ?? 1150,
+    height: saved?.height ?? 780,
+    ...(saved ? { x: saved.x, y: saved.y } : { center: true }),
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
     resizable: true,
-    center: true,
     // Tauri's native drag-drop handler swallows ALL HTML5 drag events inside
     // the WebView on Windows — with it on, dragging measures into folders and
     // dragging tree/function entries onto the Monaco editor never fire.

@@ -6,6 +6,7 @@
 //          compact row styles.
 
 import React from "react";
+import { ME } from "./theme";
 
 /** Minimalistic outline folder (stroke-only, rounded, tab top-left). Inherits
  *  the text color via currentColor. */
@@ -54,7 +55,7 @@ export function CalcGroupIcon({ size = 14 }: { size?: number }): React.ReactElem
 /** Fixed-width expand/collapse chevron, so rows with and without one align. */
 export function Chevron({ open }: { open: boolean }): React.ReactElement {
   return (
-    <span style={{ width: 12, flexShrink: 0, color: "#888", fontSize: 11, lineHeight: 1 }}>
+    <span style={{ width: 12, flexShrink: 0, color: ME.text3, fontSize: 11, lineHeight: 1 }}>
       {open ? "▾" : "▸"}
     </span>
   );
@@ -72,7 +73,7 @@ export const treeStyles = {
     padding: "3px 6px",
     cursor: "pointer",
     fontWeight: 600,
-    color: "#444",
+    color: ME.text2,
     borderRadius: 3,
     userSelect: "none",
   },

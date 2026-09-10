@@ -10,6 +10,7 @@ import { styles } from "./editorShared";
 import { renderMarkdown } from "./markdownRender";
 import { CLI_REFERENCE } from "../cli/referenceDocs";
 import type { CliRefTopic } from "../cli/referenceDocs";
+import { ME } from "./theme";
 
 const WIDTH_KEY = "calcula.modelEditor.cliRef.width";
 const MIN_WIDTH = 260;
@@ -72,8 +73,8 @@ export function CliReferencePane({ onClose }: { onClose: () => void }): React.Re
         display: "flex",
         minWidth: 0,
         minHeight: 0,
-        borderLeft: "1px solid #ddd",
-        background: "#fff",
+        borderLeft: `1px solid ${ME.border}`,
+        background: ME.surface,
       }}
     >
       <div
@@ -88,7 +89,7 @@ export function CliReferencePane({ onClose }: { onClose: () => void }): React.Re
             alignItems: "center",
             gap: 8,
             padding: "6px 8px 6px 4px",
-            borderBottom: "1px solid #eee",
+            borderBottom: `1px solid ${ME.borderSubtle}`,
             flexShrink: 0,
           }}
         >
@@ -101,21 +102,21 @@ export function CliReferencePane({ onClose }: { onClose: () => void }): React.Re
 
         {current ? (
           <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
-            <div style={{ padding: "6px 10px", borderBottom: "1px solid #f0f0f0", flexShrink: 0 }}>
+            <div style={{ padding: "6px 10px", borderBottom: `1px solid ${ME.borderSubtle}`, flexShrink: 0 }}>
               <a
-                style={{ color: "#2f6fce", cursor: "pointer", fontSize: 12 }}
+                style={{ color: ME.accent, cursor: "pointer", fontSize: 12 }}
                 onClick={() => setSelectedId(null)}
               >
                 &larr; All topics
               </a>
             </div>
-            <div style={{ padding: "8px 12px", overflowY: "auto", flex: 1, fontSize: 13, color: "#333" }}>
+            <div style={{ padding: "8px 12px", overflowY: "auto", flex: 1, fontSize: 13, color: ME.text }}>
               {renderMarkdown(current.markdown, navigate)}
             </div>
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
-            <div style={{ padding: 8, borderBottom: "1px solid #f0f0f0", flexShrink: 0 }}>
+            <div style={{ padding: 8, borderBottom: `1px solid ${ME.borderSubtle}`, flexShrink: 0 }}>
               <input
                 style={{ ...styles.input, width: "100%" }}
                 placeholder="Search the reference…"
@@ -134,7 +135,7 @@ export function CliReferencePane({ onClose }: { onClose: () => void }): React.Re
                         padding: "6px 10px 3px",
                         fontSize: 11,
                         fontWeight: 700,
-                        color: "#6b7280",
+                        color: ME.text2,
                         textTransform: "uppercase",
                         letterSpacing: 0.4,
                       }}
@@ -145,10 +146,10 @@ export function CliReferencePane({ onClose }: { onClose: () => void }): React.Re
                       <div
                         key={t.id}
                         onClick={() => setSelectedId(t.id)}
-                        style={{ padding: "5px 10px", borderBottom: "1px solid #f4f4f4", cursor: "pointer" }}
+                        style={{ padding: "5px 10px", borderBottom: `1px solid ${ME.borderSubtle}`, cursor: "pointer" }}
                         title={`Open ${t.title}`}
                       >
-                        <div style={{ fontWeight: 600, fontSize: 12, color: "#2f6fce" }}>{t.title}</div>
+                        <div style={{ fontWeight: 600, fontSize: 12, color: ME.accent }}>{t.title}</div>
                         <div
                           style={{
                             ...styles.muted,

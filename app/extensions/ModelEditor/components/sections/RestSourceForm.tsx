@@ -33,6 +33,7 @@ import type {
   SourceSecretSlot,
 } from "@api";
 import { Badge, Field, styles } from "../editorShared";
+import { ME } from "../theme";
 
 /** The auth shapes the engine understands. Each collects slot NAMES only. */
 const REST_AUTHS = [
@@ -428,7 +429,7 @@ function EndpointCard({
         <RemoveButton onClick={onRemove} title="Remove this endpoint" />
       </div>
       {pathProblem && (
-        <div style={{ fontSize: 12, color: "#a4262c", marginBottom: 6 }}>{pathProblem}</div>
+        <div style={{ fontSize: 12, color: ME.dangerFg, marginBottom: 6 }}>{pathProblem}</div>
       )}
 
       <Field label="Path to the rows in the response">
@@ -643,7 +644,7 @@ export function RestSourceForm({
         />
       </Field>
       {urlProblem && (
-        <div style={{ fontSize: 12, color: "#a4262c", marginBottom: 6 }}>{urlProblem}</div>
+        <div style={{ fontSize: 12, color: ME.dangerFg, marginBottom: 6 }}>{urlProblem}</div>
       )}
 
       {/* --- Auth: SLOT NAMES ONLY --- */}

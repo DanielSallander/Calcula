@@ -10,6 +10,7 @@ import React, { useState, useCallback, useEffect } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps, ConnectionInfo } from "@api";
 import { biGetConnections, biModelExportToFile, showToast } from "@api";
+import { ME } from "./theme";
 
 const styles = {
   backdrop: {
@@ -22,14 +23,14 @@ const styles = {
     justifyContent: "center",
   },
   dialog: {
-    background: "var(--panel-bg, #ffffff)",
-    border: "1px solid var(--border-default, #d0d0d0)",
+    background: `var(--panel-bg, ${ME.surface})`,
+    border: `1px solid var(--border-default, ${ME.border})`,
     borderRadius: 8,
     boxShadow: "0 12px 40px rgba(0, 0, 0, 0.35)",
     width: 360,
     display: "flex",
     flexDirection: "column" as const,
-    color: "var(--text-primary, #333333)",
+    color: `var(--text-primary, ${ME.text})`,
     fontFamily: '"Segoe UI", system-ui, sans-serif',
     fontSize: 13,
   },
@@ -38,7 +39,7 @@ const styles = {
     justifyContent: "space-between",
     alignItems: "center",
     padding: "12px 16px 8px",
-    borderBottom: "1px solid var(--border-default, #d0d0d0)",
+    borderBottom: `1px solid var(--border-default, ${ME.border})`,
   },
   title: {
     fontSize: 14,
@@ -47,7 +48,7 @@ const styles = {
   closeBtn: {
     background: "none",
     border: "none",
-    color: "var(--text-secondary, #999)",
+    color: `var(--text-secondary, ${ME.text3})`,
     fontSize: 18,
     cursor: "pointer",
     padding: "2px 6px",
@@ -62,21 +63,21 @@ const styles = {
   label: {
     fontSize: 12,
     fontWeight: 500,
-    color: "var(--text-secondary, #555)",
+    color: `var(--text-secondary, ${ME.text2})`,
   },
   select: {
     padding: "6px 10px",
     fontSize: 13,
-    border: "1px solid var(--border-default, #ccc)",
+    border: `1px solid var(--border-default, ${ME.ctlBorder})`,
     borderRadius: 4,
     width: "100%",
     boxSizing: "border-box" as const,
-    background: "var(--input-bg, #ffffff)",
-    color: "var(--text-primary, #333333)",
+    background: `var(--input-bg, ${ME.surface})`,
+    color: `var(--text-primary, ${ME.text})`,
   },
   hint: {
     fontSize: 12,
-    color: "var(--text-secondary, #555)",
+    color: `var(--text-secondary, ${ME.text2})`,
     lineHeight: 1.5,
   },
   error: {
@@ -88,14 +89,14 @@ const styles = {
     justifyContent: "flex-end",
     gap: 8,
     padding: "8px 16px 12px",
-    borderTop: "1px solid var(--border-default, #d0d0d0)",
+    borderTop: `1px solid var(--border-default, ${ME.border})`,
   },
   btn: {
     padding: "5px 16px",
     borderRadius: 4,
     border: "1px solid var(--border-default, #c0c0c0)",
-    background: "var(--button-bg, #f0f0f0)",
-    color: "var(--text-primary, #333)",
+    background: `var(--button-bg, ${ME.sunken})`,
+    color: `var(--text-primary, ${ME.text})`,
     cursor: "pointer",
     fontSize: 13,
   },
@@ -104,7 +105,7 @@ const styles = {
     borderRadius: 4,
     border: "none",
     background: "var(--accent-bg, #0078d4)",
-    color: "#ffffff",
+    color: ME.onAccent,
     cursor: "pointer",
     fontSize: 13,
     fontWeight: 600,
@@ -114,7 +115,7 @@ const styles = {
     borderRadius: 4,
     border: "none",
     background: "var(--button-bg, #e0e0e0)",
-    color: "var(--text-secondary, #999)",
+    color: `var(--text-secondary, ${ME.text3})`,
     cursor: "not-allowed" as const,
     fontSize: 13,
     fontWeight: 600,

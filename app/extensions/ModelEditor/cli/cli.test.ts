@@ -992,3 +992,89 @@ describe("transform — show table lists the pipeline", () => {
     expect(text).toMatch(/^ +rename=c:d$/m);
   });
 });
+
+// ---------------------------------------------------------------------------
+// `where` clause — end to end through planRun/executeRun
+// ---------------------------------------------------------------------------
+// The unit tests in __tests__/whereClause.test.ts cover parsing and predicate
+// evaluation. These cover the thing that actually protects the user: that the
+// CONFIRMATION CARD and the EXECUTION see the same narrowed set. A clause that
+// narrowed only one of them would either ask consent for work it does not do,
+// or — far worse — do work it did not ask consent for.
+
+describe("where clause", () => {
+  it("narrows the confirmation card, not just the execution", async () => {
+    // THE point of the feature. `writeLabels` is what the confirm card lists,
+    // and it comes from the same `expandNamed` the execution walks — so a card
+    // showing N names is a promise that N objects change.
+    const overview = fixtureOverview();
+    const sales = overview.tables.find((t) => t.name === "Sales")!;
+    sales.columns[0] = { ...sales.columns[0], isHidden: true };
+    const { gateway } = mockGateway(overview);
+    const session = createSession("conn-1", overview, false, gateway);
+
+    const all = planRun("set column Sales[*] format=\"0\"", session);
+    const narrowed = planRun('set column Sales[*] format="0" where hidden=true', session);
+
+    expect(all.writeLabels.length).toBe(sales.columns.length);
+    expect(narrowed.writeLabels).toEqual([`set column Sales[${sales.columns[0].name}]`]);
+  });
+
+  it("refuses when the clause matches nothing, rather than running unfiltered", async () => {
+    const overview = fixtureOverview();
+    const { gateway } = mockGateway(overview);
+    const session = createSession("conn-1", overview, false, gateway);
+    // No Sales column is hidden, so this qualifies nothing. The dangerous
+    // alternative is running `set column Sales[*] hidden=true` over everything.
+    expect(() =>
+      planRun('set column Sales[*] hidden=true where hidden=true', session),
+    ).toThrow(/where hidden=true/);
+  });
+
+  it("actually filters the writes it performs", async () => {
+    // Only ONE Sales column carries a format string in the fixture, so
+    // `where format=` must skip it and hit the rest.
+    const overview = fixtureOverview();
+    const target = overview.tables.find((t) => t.name === "Sales")!;
+    target.columns[0] = { ...target.columns[0], formatString: "0.0%" };
+    const { calls } = await runText('set column Sales[*] hidden=true where format=', overview);
+    const touched = calls.updateColumn.map((c) => (c[0] as { column: string }).column);
+    expect(touched).not.toContain(target.columns[0].name);
+    expect(touched.length).toBe(target.columns.length - 1);
+  });
+
+  it("filters measures by folder, and hides NOTHING when none qualify", async () => {
+    // THE defect this whole clause could have introduced: with the predicate
+    // ignored, `set measure * hidden=true where folder="Archive"` hides every
+    // measure in the model and reports success. It must refuse instead.
+    await expect(
+      runText('set measure * hidden=true where folder="Archive"'),
+    ).rejects.toThrow(/No measure matches '\*' where folder=Archive/);
+
+    // And it must actually FIND them when they do qualify.
+    const overview = fixtureOverview();
+    overview.measures[0] = { ...overview.measures[0], group: "Archive" };
+    const { calls } = await runText(
+      'set measure * hidden=true where folder="Archive"',
+      overview,
+    );
+    expect(calls.upsertMeasure.length).toBe(1);
+    expect((calls.upsertMeasure[0][0] as { name: string }).name).toBe(overview.measures[0].name);
+  });
+
+  it("rejects an unknown property before touching anything", async () => {
+    const overview = fixtureOverview();
+    const { gateway } = mockGateway(overview);
+    const session = createSession("conn-1", overview, false, gateway);
+    expect(() => planRun('set column Sales[*] hidden=true where hiden=false', session)).toThrow(
+      /not a property of a column/,
+    );
+  });
+
+  it("rejects a clause on a kind that cannot evaluate one", async () => {
+    const overview = fixtureOverview();
+    const { gateway } = mockGateway(overview);
+    const session = createSession("conn-1", overview, false, gateway);
+    expect(() => planRun('delete role * where x=1', session)).toThrow(/cannot filter role/);
+  });
+});

@@ -10,6 +10,7 @@ import type { ModelOverview, ModelPerspectiveInfo } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 export function PerspectivesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -136,7 +137,7 @@ function PerspectiveModal({
   const checkList: React.CSSProperties = {
     maxHeight: 140,
     overflowY: "auto",
-    border: "1px solid #ddd",
+    border: `1px solid ${ME.border}`,
     borderRadius: 3,
     padding: 6,
     display: "flex",

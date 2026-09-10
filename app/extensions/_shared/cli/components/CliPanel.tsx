@@ -17,6 +17,7 @@ import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import { confirmAsync, promptAsync } from "@api/dialogs";
 import { CliError } from "../lex";
 import type { CliIo } from "../registry";
+import { applyModelEditorTheme as applyCalculaMonacoTheme } from "../../lib/monacoTheme";
 
 // Same defensive Monaco worker setup as ExpressionWorkspace (either module may
 // load first; never clobber a handler another editor installed).
@@ -99,15 +100,15 @@ interface LogEntry {
 }
 
 const ENTRY_COLOR: Record<EntryCls, string> = {
-  cmd: "#0b5cad",
-  out: "#222",
-  err: "#b3261e",
-  info: "#6b7280",
+  cmd: "var(--tone-info-fg, #0b5cad)",
+  out: "var(--text-primary, #222)",
+  err: "var(--tone-danger-fg, #b3261e)",
+  info: "var(--text-secondary, #6b7280)",
 };
 
 const BTN: React.CSSProperties = {
-  border: "1px solid #ccc",
-  background: "#f4f5f7",
+  border: `1px solid ${"var(--border-default, #ccc)"}`,
+  background: "var(--panel-bg, #f4f5f7)",
   borderRadius: 3,
   padding: "2px 10px",
   fontSize: 11,
@@ -128,6 +129,17 @@ export interface CliPanelProps {
   headerExtra?: React.ReactNode;
   /** Title shown in the close button's tooltip ("Ctrl+`", "Ctrl+Shift+P"). */
   closeShortcut?: string;
+  /**
+   * Text to drop into the prompt from outside — the Model Editor's search
+   * palette hands a typed command over rather than executing it itself, so
+   * there stays exactly ONE executor and one confirmation card for a
+   * multi-object write.
+   *
+   * Carries a `nonce` because the same text handed over twice must still land:
+   * comparing the string alone would silently swallow the second attempt.
+   * Optional, so the main window's Command Line is unaffected.
+   */
+  prefill?: { text: string; nonce: number } | null;
 }
 
 const MIN_HEIGHT = 120;
@@ -140,6 +152,7 @@ export function CliPanel({
   onToggleReference,
   headerExtra,
   closeShortcut,
+  prefill,
 }: CliPanelProps): React.ReactElement {
   const HEIGHT_KEY = `${driver.storagePrefix}.height`;
   const HISTORY_KEY = `${driver.storagePrefix}.history`;
@@ -172,6 +185,27 @@ export function CliPanel({
   // Live refs so Monaco commands (registered once) see current state.
   const stateRef = useRef({ mode, promptText, busy, driver });
   stateRef.current = { mode, promptText, busy, driver };
+
+  // Adopt an externally handed-over command at RENDER time (this config bans
+  // setState inside an effect). It switches to prompt mode deliberately: a
+  // handed-over line is a single command, and dropping it into a script buffer
+  // would bury it under whatever was already there.
+  const lastPrefill = useRef<number>(-1);
+  if (prefill && prefill.nonce !== lastPrefill.current) {
+    lastPrefill.current = prefill.nonce;
+    setMode("prompt");
+    setPromptText(prefill.text);
+  }
+
+  // Focusing is a DOM effect, not state, so it belongs in one.
+  useEffect(() => {
+    if (!prefill) return;
+    const ed = editorRef.current;
+    if (!ed) return;
+    ed.focus();
+    const model = ed.getModel();
+    if (model) ed.setPosition(model.getFullModelRange().getEndPosition());
+  }, [prefill]);
 
   useEffect(() => saveJson(HEIGHT_KEY, height), [HEIGHT_KEY, height]);
 
@@ -273,7 +307,11 @@ export function CliPanel({
   // ── Monaco wiring ─────────────────────────────────────────────────────────
 
   const handleMount: OnMount = useCallback(
-    (editor) => {
+    (editor, monacoApi) => {
+      // The panel ran the stock light "vs" theme, so a dark window had a
+      // brilliant white prompt sitting in it. Shared with the main window, so
+      // this fixes both command lines at once.
+      applyCalculaMonacoTheme(monacoApi);
       editorRef.current = editor;
       promptModeKey.current = editor.createContextKey<boolean>("cliPromptMode", true);
       editor.addCommand(
@@ -388,8 +426,8 @@ export function CliPanel({
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
-        borderTop: "1px solid #ccc",
-        background: "#fff",
+        borderTop: `1px solid ${"var(--border-default, #ccc)"}`,
+        background: "var(--bg-surface, #ffffff)",
         minHeight: 0,
       }}
     >
@@ -409,7 +447,7 @@ export function CliPanel({
         }}
       >
         <span style={{ fontWeight: 600, fontSize: 12 }}>Command Line</span>
-        <div style={{ display: "flex", border: "1px solid #ccc", borderRadius: 3, overflow: "hidden" }}>
+        <div style={{ display: "flex", border: `1px solid ${"var(--border-default, #ccc)"}`, borderRadius: 3, overflow: "hidden" }}>
           {(["prompt", "script"] as const).map((m) => (
             <button
               key={m}
@@ -419,8 +457,8 @@ export function CliPanel({
                 padding: "2px 10px",
                 fontSize: 11,
                 cursor: "pointer",
-                background: mode === m ? "#0b5cad" : "#f4f5f7",
-                color: mode === m ? "#fff" : "#333",
+                background: mode === m ? "var(--tone-info-fg, #0b5cad)" : "var(--panel-bg, #f4f5f7)",
+                color: mode === m ? "var(--bg-surface, #ffffff)" : "var(--text-primary, #333)",
               }}
             >
               {m === "prompt" ? "Prompt" : "Script"}
@@ -461,14 +499,14 @@ export function CliPanel({
           </>
         )}
         {driver.readOnlyNote && (
-          <span style={{ fontSize: 11, color: "#7a5b00" }}>{driver.readOnlyNote}</span>
+          <span style={{ fontSize: 11, color: "var(--tone-warn-fg, #7a5b00)" }}>{driver.readOnlyNote}</span>
         )}
         {headerExtra}
         <div style={{ flex: 1 }} />
-        {busy && <span style={{ fontSize: 11, color: "#6b7280" }}>Running…</span>}
+        {busy && <span style={{ fontSize: 11, color: "var(--text-secondary, #6b7280)" }}>Running…</span>}
         {onToggleReference && (
           <button
-            style={{ ...BTN, ...(referenceOpen ? { background: "#0b5cad", color: "#fff" } : {}) }}
+            style={{ ...BTN, ...(referenceOpen ? { background: "var(--tone-info-fg, #0b5cad)", color: "var(--bg-surface, #ffffff)" } : {}) }}
             onClick={onToggleReference}
             title="Open the full command reference guide in a side pane"
           >
@@ -520,7 +558,7 @@ export function CliPanel({
               padding: "6px 8px",
               border: "1px solid #e0c060",
               borderRadius: 3,
-              background: "#fff9e8",
+              background: "var(--tone-warn-bg, #fff9e8)",
             }}
           >
             <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
@@ -536,7 +574,7 @@ export function CliPanel({
             </pre>
             <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
               <button
-                style={{ ...BTN, background: "#0b5cad", color: "#fff" }}
+                style={{ ...BTN, background: "var(--tone-info-fg, #0b5cad)", color: "var(--bg-surface, #ffffff)" }}
                 disabled={busy}
                 onClick={() => {
                   const p = pending;
@@ -577,7 +615,7 @@ export function CliPanel({
             alignItems: mode === "script" ? "flex-start" : "center",
             justifyContent: "center",
             paddingTop: mode === "script" ? 6 : 0,
-            color: "#0b5cad",
+            color: "var(--tone-info-fg, #0b5cad)",
             fontFamily: "Consolas, monospace",
             fontSize: 12,
             fontWeight: 700,
