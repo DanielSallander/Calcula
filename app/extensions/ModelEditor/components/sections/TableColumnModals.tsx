@@ -10,6 +10,7 @@ import { biModelUpdateColumn, biModelUpsertModelColumn } from "@api";
 import type { ModelColumnInfo, ModelOverview } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import { ExpressionEditorModal } from "../ExpressionEditorModal";
+import { ME } from "../theme";
 
 export const CALC_COLUMN_DATA_TYPES = [
   "String",
@@ -200,7 +201,7 @@ export function PhysicalColumnModal({
         </div>
       </Field>
 
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
 
       {lookupEditorOpen && (
         <ExpressionEditorModal
@@ -341,7 +342,7 @@ export function CalcColumnModal({
           onChange={(e) => setDescription(e.target.value)}
         />
       </Field>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

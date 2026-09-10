@@ -13,7 +13,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { styles } from "./editorShared";
-import { ME } from "./theme";
+import { ME, SHADOW } from "./theme";
 
 export interface TopBarMenuItem {
   label: string;
@@ -33,7 +33,7 @@ const menuStyle: React.CSSProperties = {
   background: ME.surface,
   border: `1px solid ${ME.border}`,
   borderRadius: 6,
-  boxShadow: "0 8px 24px rgba(16, 24, 40, 0.12)",
+  boxShadow: SHADOW.popover,
   padding: 4,
   zIndex: 900,
 };

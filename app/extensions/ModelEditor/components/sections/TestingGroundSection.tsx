@@ -594,7 +594,7 @@ export function TestingGroundSection({ ctx }: { ctx: SectionCtx }): React.ReactE
         )}
       </div>
 
-      {error && <div style={{ color: "red", fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, fontSize: 12 }}>{error}</div>}
 
       {result && <ResultView result={result} />}
     </div>

@@ -9,6 +9,7 @@ import type { ModelKpiInfo, ModelOverview } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 const KPI_STATUSES = [
   { value: "offTrack", label: "Off track" },
@@ -309,7 +310,7 @@ function KpiModal({
           onChange={(e) => setDescription(e.target.value)}
         />
       </Field>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

@@ -11,7 +11,7 @@
 
 import React, { useEffect, useState } from "react";
 import { Badge, styles } from "../../editorShared";
-import { ME } from "../../theme";
+import { ME, SHADOW } from "../../theme";
 import {
   bandHighInclusive,
   bandLowInclusive,
@@ -138,7 +138,7 @@ export const STICKY_CONFIRM: React.CSSProperties = {
   zIndex: 1,
   // A shadow rather than a border, so the pinned column reads as floating
   // above the scrolled ones instead of as a twelfth column.
-  boxShadow: "-6px 0 6px -6px rgba(0, 0, 0, 0.25)",
+  boxShadow: SHADOW.stickyLeft,
 };
 
 export const stickyHeaderStyle: React.CSSProperties = {

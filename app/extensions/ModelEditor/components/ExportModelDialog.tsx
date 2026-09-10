@@ -10,14 +10,14 @@ import React, { useState, useCallback, useEffect } from "react";
 import { useDialogWindow } from "@api/dialogWindow";
 import type { DialogProps, ConnectionInfo } from "@api";
 import { biGetConnections, biModelExportToFile, showToast } from "@api";
-import { ME } from "./theme";
+import { ME, SHADOW } from "./theme";
 
 const styles = {
   backdrop: {
     position: "fixed" as const,
     inset: 0,
     zIndex: 1050,
-    background: "rgba(0, 0, 0, 0.45)",
+    background: ME.scrim,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -26,7 +26,7 @@ const styles = {
     background: `var(--panel-bg, ${ME.surface})`,
     border: `1px solid var(--border-default, ${ME.border})`,
     borderRadius: 8,
-    boxShadow: "0 12px 40px rgba(0, 0, 0, 0.35)",
+    boxShadow: SHADOW.modal,
     width: 360,
     display: "flex",
     flexDirection: "column" as const,

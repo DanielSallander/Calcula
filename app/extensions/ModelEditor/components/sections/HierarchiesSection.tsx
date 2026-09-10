@@ -9,6 +9,7 @@ import type { ModelHierarchyInfo, ModelOverview } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 export function HierarchiesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -290,7 +291,7 @@ function HierarchyModal({
           </button>
         </div>
       </div>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

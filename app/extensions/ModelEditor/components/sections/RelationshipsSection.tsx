@@ -3,12 +3,14 @@
 //          relationships and add/edit/delete them (multi-condition joins,
 //          cardinality, active flag).
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { biModelDeleteRelationship, biModelUpsertRelationship } from "@api";
 import type { ModelOverview, ModelRelationshipInfo, RelationshipConditionDto } from "@api";
 import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { RelationshipDiagram } from "../diagram/RelationshipDiagram";
+import { DiagramInspector } from "../diagram/DiagramInspector";
+import { loadDiagramView, saveDiagramView } from "../../lib/diagramPositions";
 import type { ColumnDropResult, DiagramLayoutMode } from "../diagram/RelationshipDiagram";
 import { confirmAsync } from "@api/dialogs";
 import { ME } from "../theme";
@@ -29,9 +31,57 @@ type EditState = {
 export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
   const [editing, setEditing] = useState<EditState | null>(null);
-  const [view, setView] = useState<"list" | "diagram">("list");
+  // Seeded from what you were last looking at, for this connection. The
+  // section is conditionally rendered, so without this a glance at Measures
+  // puts you back in List view with the computed layout — and a remembered
+  // Free arrangement is only read while you are IN Free, so it would look as
+  // though nothing had been saved at all.
+  const [view, setView] = useState<"list" | "diagram">(
+    () => (loadDiagramView(connectionId)?.view as "list" | "diagram" | undefined) ?? "list",
+  );
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
-  const [layoutMode, setLayoutMode] = useState<DiagramLayoutMode>("auto");
+  const [layoutMode, setLayoutMode] = useState<DiagramLayoutMode>(
+    () => (loadDiagramView(connectionId)?.layoutMode as DiagramLayoutMode | undefined) ?? "auto",
+  );
+
+  /** Remember view + layout together; they are one preference in two parts. */
+  const rememberView = (next: Partial<{ view: "list" | "diagram"; layoutMode: DiagramLayoutMode }>): void => {
+    saveDiagramView(connectionId, {
+      view: next.view ?? view,
+      layoutMode: next.layoutMode ?? layoutMode,
+    });
+  };
+  /** The relationship a search hit or a problems row named, or null. */
+  const [selectedRelationship, setSelectedRelationship] = useState<string | null>(null);
+
+  // ARRIVING WITH A SELECTION. `modelIndex` emits every relationship as
+  // `{section: "relationships", selection: r.name}` and the problems drawer
+  // navigates the same way — and this section read neither, so every Ctrl+K hit
+  // on a relationship landed you on the right page with nothing indicated and
+  // nothing scrolled to. That is the "search highlight" item, and it is the
+  // whole of it: the index is already built, the route already carries the
+  // name, and only the consumer was missing.
+  //
+  // Honoured ONCE per distinct value, at render time — the idiom
+  // TablesSection, MeasuresSection and StrategySection use, and the one this
+  // eslint config leaves legal (`react-hooks/set-state-in-effect` is an error).
+  const honouredSelection = useRef<string | null>(null);
+  if (ctx.selection !== undefined && ctx.selection !== honouredSelection.current) {
+    honouredSelection.current = ctx.selection;
+    const wanted = ctx.selection;
+    if (wanted !== null && overview.relationships.some((r) => r.name === wanted)) {
+      setSelectedRelationship(wanted);
+      // Show the table the relationship comes FROM, so the diagram has
+      // something marked when that is the view you are in.
+      const rel = overview.relationships.find((r) => r.name === wanted);
+      if (rel) setSelectedTable(rel.fromTable);
+    }
+  }
+
+  /** The selected table, resolved against the model. Null when nothing is
+   *  selected OR when the selection names a table the model no longer has. */
+  const selectedTableInfo =
+    selectedTable === null ? null : (overview.tables.find((t) => t.name === selectedTable) ?? null);
 
   const handleDelete = async (r: ModelRelationshipInfo) => {
     if (!(await confirmAsync(`Delete relationship '${r.name}'?`))) return;
@@ -67,7 +117,10 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             background: view === v ? ME.accent : ME.surface,
             color: view === v ? ME.onAccent : ME.text,
           }}
-          onClick={() => setView(v)}
+          onClick={() => {
+            setView(v);
+            rememberView({ view: v });
+          }}
         >
           {v === "list" ? "List" : "Diagram"}
         </button>
@@ -113,7 +166,10 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             background: layoutMode === opt.mode ? ME.accent : ME.surface,
             color: layoutMode === opt.mode ? ME.onAccent : ME.text,
           }}
-          onClick={() => setLayoutMode(opt.mode)}
+          onClick={() => {
+            setLayoutMode(opt.mode);
+            rememberView({ layoutMode: opt.mode });
+          }}
         >
           {opt.label}
         </button>
@@ -150,17 +206,31 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
             New
           </button>
         </div>
-        <div style={{ ...styles.card, flex: 1, minHeight: 0, padding: 0, overflow: "auto" }}>
-          <RelationshipDiagram
-            tables={overview.tables}
-            relationships={overview.relationships}
-            selectedTable={selectedTable}
-            onSelectTable={setSelectedTable}
-            onEditRelationship={openEdit}
-            onColumnDrop={readOnly ? undefined : (r) => setEditing({ original: null, prefill: r })}
-            layoutMode={layoutMode}
-            onNavigateToTables={() => ctx.navigate("tables")}
-          />
+        <div style={{ ...styles.card, flex: 1, minHeight: 0, padding: 0, display: "flex" }}>
+          <div style={{ flex: 1, minWidth: 0, overflow: "auto" }}>
+            <RelationshipDiagram
+              tables={overview.tables}
+              relationships={overview.relationships}
+              selectedTable={selectedTable}
+              onSelectTable={setSelectedTable}
+              onEditRelationship={openEdit}
+              onColumnDrop={readOnly ? undefined : (r) => setEditing({ original: null, prefill: r })}
+              layoutMode={layoutMode}
+              onNavigateToTables={() => ctx.navigate("tables")}
+              connectionId={connectionId}
+            />
+          </div>
+          {/* Selecting a node was WRITE-ONLY until now: the state existed and
+              the node highlight was its only reader. */}
+          {selectedTableInfo && (
+            <DiagramInspector
+              table={selectedTableInfo}
+              relationships={overview.relationships}
+              onOpenTable={(name) => ctx.navigate("tables", name)}
+              onEditRelationship={openEdit}
+              onClose={() => setSelectedTable(null)}
+            />
+          )}
         </div>
         <div style={styles.hint}>
           {layoutMode === "free"
@@ -196,12 +266,31 @@ export function RelationshipsSection({ ctx }: { ctx: SectionCtx }): React.ReactE
         {overview.relationships.map((r) => (
           <div
             key={r.name}
+            data-relationship={r.name}
+            data-selected={r.name === selectedRelationship ? "true" : undefined}
+            ref={
+              r.name === selectedRelationship
+                ? (el) => {
+                    // Scroll the named row into view. The typeof guard is not
+                    // decoration: jsdom does not implement scrollIntoView at
+                    // all, so an optional call would still throw.
+                    if (el && typeof el.scrollIntoView === "function") {
+                      el.scrollIntoView({ block: "nearest" });
+                    }
+                  }
+                : undefined
+            }
             style={{
               ...styles.listRow,
               cursor: "default",
               display: "flex",
               alignItems: "center",
               gap: 8,
+              // The same 2px accent outline every other section marks an
+              // arrived-at row with, so "you are here" reads the same
+              // everywhere.
+              outline: r.name === selectedRelationship ? `2px solid ${ME.accent}` : "none",
+              background: r.name === selectedRelationship ? ME.select : undefined,
             }}
           >
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -531,7 +620,7 @@ function RelationshipModal({
           Active
         </label>
       </div>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

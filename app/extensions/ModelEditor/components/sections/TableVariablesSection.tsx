@@ -18,6 +18,7 @@ import {
 } from "../editorShared";
 import type { FilterDraft, SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 export function TableVariablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -186,7 +187,7 @@ function TableVariableModal({
           emptyHint="No filters — the variable is the whole source table."
         />
       </div>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

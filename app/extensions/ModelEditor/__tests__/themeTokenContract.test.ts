@@ -123,10 +123,12 @@ describe("Model Editor theme token contract", () => {
     // Asserted by BUILDING the regex out of the config and running it, rather
     // than by reading the selector: an anchored pattern looks perfectly
     // reasonable until you try it on the string people actually write.
-    const config = readFileSync(join(__dirname, "..", "..", "..", "eslint.boundaries.js"), "utf8");
-    const hexRules = [...config.matchAll(/selector:\s*\n?\s*'Literal\[value=\/(.+?)\/\]'/g)];
-    expect(hexRules.length, "the Literal hex selector is still in the config").toBe(1);
-    const pattern = new RegExp(hexRules[0][1].replace(/\\\\/g, "\\"));
+    // THREE rules now, not one: hex, named colours, and rgb()/rgba(). They are
+    // matched by what they catch rather than by position, so adding a fourth
+    // does not red this — but weakening any of them does.
+    const patterns = colourRules();
+    const hex = patterns.find((p) => p.test("#2f6fce"));
+    expect(hex, "a rule catching a bare hex is still in the config").toBeDefined();
 
     for (const caught of [
       "#2f6fce",
@@ -136,11 +138,39 @@ describe("Model Editor theme token contract", () => {
       "0 0 0 2px #abc",
       "#11223344",
     ]) {
-      expect(pattern.test(caught), `the ban must catch ${JSON.stringify(caught)}`).toBe(true);
+      expect(hex?.test(caught), `the ban must catch ${JSON.stringify(caught)}`).toBe(true);
     }
     // ...and must not fire on things that merely contain a hash.
-    for (const allowed of ["#", "id=#top", "rgba(0,0,0,.2)", "#zzzzzz"]) {
-      expect(pattern.test(allowed), `the ban must ignore ${JSON.stringify(allowed)}`).toBe(false);
+    for (const allowed of ["#", "id=#top", "#zzzzzz"]) {
+      expect(hex?.test(allowed), `the ban must ignore ${JSON.stringify(allowed)}`).toBe(false);
+    }
+  });
+
+  it("the ban catches a NAMED colour and an rgba(), which it never used to", () => {
+    // `color: "red"` appeared seventeen times, every one of them an error
+    // message — so the tab's error text was the one thing on screen that
+    // ignored the skin, and pure red on the dark ground is the worse of the two
+    // readings. rgba() was six hand-rolled shadows against a three-level scale.
+    const patterns = colourRules();
+    const matched = (v: string): boolean => patterns.some((p) => p.test(v));
+
+    for (const caught of ["red", "green", "white", "Black", "rgba(0,0,0,0.14)", "rgb(1, 2, 3)"]) {
+      expect(matched(caught), `the ban must catch ${JSON.stringify(caught)}`).toBe(true);
+    }
+    // Structural keywords are NOT colours and must stay legal, or the rule
+    // becomes noise people learn to suppress.
+    for (const allowed of ["transparent", "inherit", "currentColor", "none", "unset", "redacted"]) {
+      expect(matched(allowed), `the ban must ignore ${JSON.stringify(allowed)}`).toBe(false);
     }
   });
 });
+
+/** Every `Literal[value=/…/]` selector in the colour-ban block, as real
+ *  regexes. Built from the config rather than restated here, so the test
+ *  measures what is enforced. */
+function colourRules(): RegExp[] {
+  const config = readFileSync(join(__dirname, "..", "..", "..", "eslint.boundaries.js"), "utf8");
+  return [...config.matchAll(/selector:\s*\n?\s*'Literal\[value=\/(.+?)\/(i?)\]'/g)].map(
+    (m) => new RegExp(m[1].replace(/\\\\/g, "\\"), m[2]),
+  );
+}

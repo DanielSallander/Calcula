@@ -28,7 +28,7 @@ import { buildSetCommand } from "../../lib/bulkEdit";
 import { MeasureEditorModal } from "./MeasureEditorModal";
 import { MeasureInspector } from "./MeasureInspector";
 import { confirmAsync, promptAsync } from "@api/dialogs";
-import { ME } from "../theme";
+import { ME, SHADOW } from "../theme";
 
 /** dragOver sentinel for the "Ungrouped" drop zone (a NUL can't be in a path). */
 const UNGROUPED = "\u0000ungrouped";
@@ -548,7 +548,7 @@ function MeasureContextMenu({
         background: ME.surface,
         border: `1px solid ${ME.ctlBorder}`,
         borderRadius: 4,
-        boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+        boxShadow: SHADOW.popover,
         padding: "4px 0",
       }}
     >

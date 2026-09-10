@@ -22,6 +22,7 @@ import type { SectionCtx } from "../editorShared";
 import { treeStyles } from "../treeKit";
 import { ExpressionWorkspace } from "./ExpressionWorkspace";
 import { confirmAsync, alertAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 /** Human-readable list of what is bound to a materialized calculated table
  *  (null when nothing is). Shown in the cascade-confirm dialogs. */
@@ -344,7 +345,7 @@ function CalculatedTableModal({
         hintTitle="QUERY(SUM(fact[amount]) AS Amt BY dim[city]) — aggregate grouping; QUERY(DISTINCT dim[city]) — unique rows (materialized only); CALENDAR(2024-01-01, 2026-12-31) — generated date table (materialized only). Referenced in measures as name[column]."
       />
 
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

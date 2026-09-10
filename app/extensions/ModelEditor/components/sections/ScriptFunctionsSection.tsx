@@ -9,6 +9,7 @@ import type { ModelOverview, ModelScriptFunctionInfo, ScriptParamDto } from "@ap
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 const PARAM_TYPES = ["Int", "Float", "Bool", "String"];
 
@@ -240,7 +241,7 @@ function ScriptFunctionModal({
       <div style={styles.hint}>
         Rhai expression or block; the parameters are in scope. e.g. cost * rate
       </div>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

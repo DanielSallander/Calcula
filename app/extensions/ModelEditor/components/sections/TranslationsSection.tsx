@@ -234,7 +234,7 @@ function CultureModal({
         onChange={setMeasuresDraft}
         defaultOpen={false}
       />
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

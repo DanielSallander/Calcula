@@ -458,7 +458,7 @@ export function WritebackColumnModal({
           : "The full submission history becomes queryable as a synthesized table (its name is assigned on save)."}
       </div>
 
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
 
       {exprEditorOpen && (
         <ExpressionEditorModal

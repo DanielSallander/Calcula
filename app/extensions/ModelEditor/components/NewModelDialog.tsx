@@ -338,7 +338,7 @@ export function NewModelDialog({
         </div>
       )}
 
-      {error && <div style={{ color: "red", marginTop: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginTop: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

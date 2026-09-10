@@ -15,12 +15,14 @@ import type { ModelRelationshipInfo, ModelTableInfo } from "@api";
 import { DIAGRAM_COLORS as C } from "./diagramTheme";
 import { edgeSides, getNodeHeight, getNodeWidth, HEADER_HEIGHT, ROW_HEIGHT } from "./nodeGeometry";
 import type { EdgeSide, NodePos } from "./nodeGeometry";
+import { clearDiagramPositions, loadDiagramPositions, saveDiagramPositions } from "../../lib/diagramPositions";
 import { computeLayout } from "./layoutEngine";
 import type { LayoutMode, Position } from "./layoutEngine";
 import { TableNode } from "./TableNode";
 import type { ColumnDragInfo } from "./TableNode";
 import { RelationshipEdge } from "./RelationshipEdge";
 import { styles } from "../editorShared";
+import { SHADOW } from "../theme";
 
 export interface ColumnDropResult {
   fromTable: string;
@@ -43,6 +45,9 @@ interface RelationshipDiagramProps {
   layoutMode?: DiagramLayoutMode;
   /** Empty-state action. Optional so the diagram stays usable standalone. */
   onNavigateToTables?: () => void;
+  /** Scopes the remembered Free-mode arrangement. Optional: without it the
+   *  diagram still works, it just forgets where you dragged things. */
+  connectionId?: string;
 }
 
 interface ColumnDragState {
@@ -111,6 +116,7 @@ export function RelationshipDiagram({
   onEditRelationship,
   layoutMode = "auto",
   onNavigateToTables,
+  connectionId,
 }: RelationshipDiagramProps): React.ReactElement {
   const [columnDrag, setColumnDrag] = useState<ColumnDragState | null>(null);
   const [hoverColumn, setHoverColumn] = useState<ColumnDragInfo | null>(null);
@@ -146,11 +152,40 @@ export function RelationshipDiagram({
   if (layoutMode !== prevLayoutMode) {
     setPrevLayoutMode(layoutMode);
     if (layoutMode === "free") {
-      setFreePositions(computed);
+      // Entering Free: the REMEMBERED arrangement if there is one, otherwise
+      // the layout that was just showing. Seeding from the computed layout is
+      // right for a first visit and wrong for the fourteenth, which is the
+      // whole point of storing it.
+      const stored = connectionId
+        ? loadDiagramPositions(
+            connectionId,
+            tables.map((t) => t.name),
+          )
+        : null;
+      setFreePositions(stored ? { ...computed, ...stored } : computed);
     } else {
       setLastComputedMode(layoutMode);
+      // Leaving Free clears the WORKING copy, not the stored one: the next
+      // entry re-reads from storage. Clearing storage here would make the mode
+      // forget every time you glanced at Radial.
       setFreePositions(null);
     }
+  }
+
+  // Seed on MOUNT too, not only on a mode change. The section is conditionally
+  // rendered, so coming back from another view mounts this component afresh
+  // with layoutMode already "free" — and the block above never fires, because
+  // nothing changed.
+  const [seeded, setSeeded] = useState(false);
+  if (!seeded && isFree && freePositions === null) {
+    setSeeded(true);
+    const stored = connectionId
+      ? loadDiagramPositions(
+          connectionId,
+          tables.map((t) => t.name),
+        )
+      : null;
+    if (stored) setFreePositions({ ...computed, ...stored });
   }
 
   // Effective positions: the computed layout, overlaid in Free mode with the
@@ -197,6 +232,12 @@ export function RelationshipDiagram({
 
   // Distinguishes a header click (select) from a header drag (move) in Free mode.
   const didDragRef = useRef(false);
+
+  // The latest positions, for the drag-end save. `handleMouseUp` is a stable
+  // callback and would otherwise close over the arrangement as it was when the
+  // drag STARTED — saving the position the node was dragged FROM.
+  const freePositionsRef = useRef(freePositions);
+  freePositionsRef.current = freePositions;
 
   const handleHeaderMouseDown = useCallback(
     (tableName: string, e: React.MouseEvent) => {
@@ -261,8 +302,14 @@ export function RelationshipDiagram({
     }
     setColumnDrag(null);
     setHoverColumn(null);
+    // REMEMBER WHERE IT LANDED, on drag END rather than on every mousemove: a
+    // node drag fires dozens of moves a second and each one would be a
+    // JSON.stringify of the whole arrangement into localStorage.
+    if (dragging !== null && didDragRef.current && connectionId) {
+      saveDiagramPositions(connectionId, freePositionsRef.current);
+    }
     setDragging(null);
-  }, [columnDrag, hoverColumn, onColumnDrop]);
+  }, [columnDrag, hoverColumn, onColumnDrop, dragging, connectionId]);
 
   let dragLine: { x1: number; y1: number; x2: number; y2: number } | null = null;
   if (columnDrag) {
@@ -386,12 +433,68 @@ export function RelationshipDiagram({
 
   const clampScale = (s: number): number => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
   // Fit the whole diagram into the visible viewport (never zoom past 1:1).
+  //
+  // IT CANNOT ALWAYS FIT, AND IT NOW SAYS SO. `MIN_SCALE` is 0.25, so on a big
+  // model the true fit is below the floor and this used to clamp silently —
+  // leaving a diagram that still overflowed under a button labelled "Fit". A
+  // control that lies is worse than one that is merely limited, so the button
+  // reports when it has hit the floor (see `fitIsCapped`). The real fix is
+  // node collapse, which is not in this stage; what is in this stage is not
+  // pretending.
+  const [fitIsCapped, setFitIsCapped] = useState(false);
   const handleFit = useCallback(() => {
     const el = scrollerRef.current;
     if (!el) return;
+    // clientWidth is 0 in jsdom, which would make `fit` 0 and every fit look
+    // capped. A viewport we cannot measure is one we cannot fit to.
+    if (el.clientWidth === 0 || el.clientHeight === 0) return;
     const fit = Math.min(el.clientWidth / canvas.w, el.clientHeight / canvas.h, 1);
+    setFitIsCapped(fit < MIN_SCALE);
     setScale(Math.max(MIN_SCALE, fit));
   }, [canvas.w, canvas.h]);
+
+  // ---- pan by dragging the background ------------------------------------
+  //
+  // Drives scrollLeft/scrollTop rather than a viewBox, because the content
+  // lives in an `overflow: auto` scroller and the SVG is sized `canvas * scale`
+  // — moving a viewBox would fight the scrollbars rather than replace them.
+  const panRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  // Set the moment a pan actually MOVES, and read by the background click
+  // handler below: without it, letting go after a pan clears the selection you
+  // panned in order to look at.
+  const didPanRef = useRef(false);
+
+  const handleBackgroundMouseDown = useCallback((e: React.MouseEvent) => {
+    // Only the background. A mousedown on a node header starts a node drag and
+    // on a column starts a relationship drag; both stop propagation of intent
+    // by setting their own state, so this checks the target instead.
+    if (e.button !== 0) return;
+    const el = scrollerRef.current;
+    if (!el) return;
+    const target = e.target as Element;
+    if (target.closest("[data-diagram-node]")) return;
+    panRef.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop };
+    didPanRef.current = false;
+    setPanning(true);
+  }, []);
+
+  const handlePanMove = useCallback((e: React.MouseEvent) => {
+    const start = panRef.current;
+    const el = scrollerRef.current;
+    if (!start || !el) return;
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    // A few pixels of slop, so a click with a shaky hand is still a click.
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) didPanRef.current = true;
+    el.scrollLeft = start.left - dx;
+    el.scrollTop = start.top - dy;
+  }, []);
+
+  const endPan = useCallback(() => {
+    panRef.current = null;
+    setPanning(false);
+  }, []);
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}>
@@ -400,15 +503,42 @@ export function RelationshipDiagram({
           ref={svgRef}
           width={canvas.w * scale}
           height={canvas.h * scale}
+          data-testid="relationship-diagram"
           style={{
             background: C.bgPrimary,
-            cursor: columnDrag ? "crosshair" : dragging ? "grabbing" : "default",
+            cursor: columnDrag
+              ? "crosshair"
+              : dragging
+                ? "grabbing"
+                : panning
+                  ? "grabbing"
+                  : "grab",
             display: "block",
           }}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
+          onMouseDown={handleBackgroundMouseDown}
+          onMouseMove={(e) => {
+            handlePanMove(e);
+            handleMouseMove(e);
+          }}
+          onMouseUp={() => {
+            endPan();
+            handleMouseUp();
+          }}
+          // Ending the pan here as well: without it, releasing the button
+          // outside the SVG leaves `panRef` set and the next mousemove over the
+          // diagram jumps the scroll position.
+          onMouseLeave={() => {
+            endPan();
+            handleMouseUp();
+          }}
           onClick={() => {
+            // A pan that ENDS over the background is not a click on the
+            // background. Clearing here would deselect the table the user
+            // panned across the canvas in order to look at.
+            if (didPanRef.current) {
+              didPanRef.current = false;
+              return;
+            }
             if (!columnDrag) onSelectTable(null);
           }}
         >
@@ -532,7 +662,7 @@ export function RelationshipDiagram({
             border: `1px solid ${C.border}`,
             borderRadius: 6,
             padding: "4px 8px",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.14)",
+            boxShadow: SHADOW.card,
             userSelect: "none",
           }}
         >
@@ -567,12 +697,46 @@ export function RelationshipDiagram({
           </span>
           <button
             type="button"
-            title="Fit diagram to view"
+            data-testid="diagram-fit"
+            title={
+              fitIsCapped
+                ? `This model does not fit: the zoom floor is ${Math.round(MIN_SCALE * 100)}%, and fitting it would need less. Scroll or drag the background to move around.`
+                : "Fit diagram to view"
+            }
             style={zoomFitStyle}
             onClick={handleFit}
           >
             Fit
           </button>
+          {/* SAYS SO WHEN IT COULD NOT. The button silently clamped at the zoom
+              floor and left the diagram overflowing, which reads as a broken
+              control rather than a model too big to draw at once. */}
+          {fitIsCapped && (
+            <span
+              data-testid="diagram-fit-capped"
+              title="Every column of every table is drawn, so a wide model is taller than any zoom can compress."
+              style={{ fontSize: 11, color: C.textSecondary }}
+            >
+              too large to fit
+            </span>
+          )}
+          {/* Only in Free, and only when there IS something remembered to
+              forget — a reset that resets nothing is a button that looks
+              broken. */}
+          {isFree && connectionId && freePositions !== null && (
+            <button
+              type="button"
+              data-testid="diagram-reset-layout"
+              title="Forget the arrangement you dragged and go back to the computed layout"
+              style={zoomFitStyle}
+              onClick={() => {
+                clearDiagramPositions(connectionId);
+                setFreePositions(computed);
+              }}
+            >
+              Reset
+            </button>
+          )}
         </div>
       )}
     </div>

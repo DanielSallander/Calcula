@@ -62,8 +62,24 @@ export const TableNode = memo(function TableNode({
     ? (e: React.MouseEvent) => onHeaderMouseDown(table.name, e)
     : undefined;
 
+  // `data-diagram-node` is what pan-by-drag tests for: a mousedown that lands
+  // inside a node is a node interaction, not a canvas pan.
   return (
-    <g transform={`translate(${x}, ${y})`} onClick={() => onSelect(table.name)}>
+    <g
+      data-diagram-node={table.name}
+      transform={`translate(${x}, ${y})`}
+      onClick={(e) => {
+        // STOP HERE. The SVG background's own click handler clears the
+        // selection, and this click bubbles straight into it — so selecting a
+        // node set the name and then immediately unset it, and node selection
+        // has never actually stuck. It went unnoticed because the only consumer
+        // was this node's own highlight: the feature was write-only, so the
+        // writer being broken looked like nothing at all. Adding a second
+        // reader (the inspector) is what made it visible.
+        e.stopPropagation();
+        onSelect(table.name);
+      }}
+    >
       <rect
         width={width}
         height={height}

@@ -9,6 +9,7 @@ import type { ModelOverview, ModelRoleInfo } from "@api";
 import { Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 const OPERATORS = ["=", "!=", ">", ">=", "<", "<="];
 
@@ -314,7 +315,7 @@ function RoleModal({
         from field lists and any query touching them is refused. Comma-separated; columns as
         Table[column].
       </div>
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

@@ -8,6 +8,15 @@
 //          tables+relationships alone (a pure function called inside a useMemo)
 //          — nothing is stored, so the same model always draws the same shape.
 //
+//          THAT IS STILL TRUE OF EVERY MODE THIS FILE COMPUTES. The "free"
+//          layout mode, which this file knows nothing about, does now remember
+//          what the user dragged (lib/diagramPositions.ts). That is not a
+//          reversal of the decision above: manual drag stopped being the
+//          DEFAULT positioning mechanism and has not come back — Auto, Radial
+//          and Layered store nothing and never will. What is remembered is only
+//          what someone explicitly dragged, only in the mode named for
+//          dragging, and a Reset control puts it back.
+//
 // FACT DETECTION (the subtle part): in this codebase `fromTable` is the MANY
 // side and `toTable` is the ONE side of a relationship (see the RelationshipModal
 // "From table (many side)" / "To table (one side)" labels). A star's fact table

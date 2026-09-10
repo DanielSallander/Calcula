@@ -24,6 +24,51 @@ if (typeof document !== "undefined" && !document.queryCommandSupported) {
   document.queryCommandSupported = () => false;
 }
 
+// ---------------------------------------------------------------------------
+// SVG geometry, for the relationship diagram
+// ---------------------------------------------------------------------------
+//
+// jsdom implements the SVG DOM but none of its GEOMETRY: `createSVGPoint`,
+// `getScreenCTM` and `getBBox` are simply absent, and every element reports
+// `clientWidth`/`clientHeight` of 0. The Model Editor's relationship diagram
+// calls the first two on EVERY mouse event (`svgPoint` in
+// RelationshipDiagram.tsx) and the third when fitting to the viewport, so
+// without these shims none of its interaction can be tested at all — which is
+// why it had 401 lines of pure-function tests and not one component test.
+//
+// The shims are deliberately IDENTITY transforms, not a layout engine. They let
+// a test drive a drag and assert on the coordinates that came out; they do not
+// pretend jsdom can lay out an SVG, so a test that depends on real geometry
+// will read zeroes and should be a browser test instead. Anything cleverer here
+// would be a second, wrong renderer that tests would slowly come to trust.
+if (typeof window !== "undefined" && typeof SVGSVGElement !== "undefined") {
+  const proto = SVGSVGElement.prototype as unknown as Record<string, unknown>;
+  if (!proto.createSVGPoint) {
+    proto.createSVGPoint = function createSVGPoint(): DOMPoint {
+      const pt = {
+        x: 0,
+        y: 0,
+        // The inverse of an identity CTM is an identity, so a point maps to
+        // itself: a test drives clientX/clientY and reads the same numbers back
+        // in layout space.
+        matrixTransform: (_m: DOMMatrix) => ({ x: pt.x, y: pt.y }),
+      };
+      return pt as unknown as DOMPoint;
+    };
+  }
+  const elemProto = SVGElement.prototype as unknown as Record<string, unknown>;
+  if (!elemProto.getScreenCTM) {
+    elemProto.getScreenCTM = function getScreenCTM(): DOMMatrix {
+      return { inverse: () => ({}) } as unknown as DOMMatrix;
+    };
+  }
+  if (!elemProto.getBBox) {
+    elemProto.getBBox = function getBBox(): DOMRect {
+      return { x: 0, y: 0, width: 0, height: 0 } as DOMRect;
+    };
+  }
+}
+
 // monaco also probes matchMedia in some contributions; jsdom lacks it.
 if (typeof window !== "undefined" && !window.matchMedia) {
   window.matchMedia = (query: string) =>

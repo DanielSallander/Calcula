@@ -24,7 +24,7 @@ import type { SectionCtx } from "../editorShared";
 import { CalcGroupIcon, Chevron, treeStyles } from "../treeKit";
 import { ExpressionWorkspace } from "./ExpressionWorkspace";
 import { confirmAsync } from "@api/dialogs";
-import { ME } from "../theme";
+import { ME, SHADOW } from "../theme";
 
 /** What a modal save actually installed — for selection/alias reconciliation. */
 interface SavedGroup {
@@ -783,7 +783,7 @@ function CalcGroupContextMenu({
         background: ME.surface,
         border: `1px solid ${ME.ctlBorder}`,
         borderRadius: 4,
-        boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+        boxShadow: SHADOW.popover,
         padding: "4px 0",
       }}
     >
@@ -1472,7 +1472,7 @@ function CalcGroupModal({
         hintTitle="Example: CALCULATE(SELECTEDMEASURE(), DATESYTD(Calendar[date])). SELECTEDMEASURE() references whichever measure is in play when the item is applied."
       />
 
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
     </Modal>
   );
 }

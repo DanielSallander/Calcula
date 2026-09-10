@@ -199,6 +199,12 @@ const modelEditorColorConfigs = [
       // token so the tint follows the theme even though the hue does not.
       'extensions/ModelEditor/components/sections/ExecutionPlanView.tsx',
       'extensions/ModelEditor/components/sections/LineageSection.tsx',
+      // Monaco TOKEN CLASS NAMES, which happen to be spelled like colours.
+      // `[/\s+/, "white"]` in a tokenizer means "classify this as whitespace",
+      // not "paint it white" — the actual colours live in monacoTheme.ts. The
+      // named-colour rule cannot tell the two apart from the AST, and a rule
+      // that flags a correct line teaches people to ignore it.
+      'extensions/ModelEditor/lib/measureLanguage.ts',
       '**/__tests__/**',
       '**/*.test.{ts,tsx}',
     ],
@@ -221,6 +227,24 @@ const modelEditorColorConfigs = [
         },
         {
           selector: 'TemplateElement[value.raw=/#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b/]',
+          message: MODEL_EDITOR_HEX_MESSAGE,
+        },
+        {
+          // A NAMED colour is a hardcoded colour too, and the ban never saw
+          // one. `color: "red"` appeared seventeen times — every one of them an
+          // error message — so the tab's error text was the one thing on screen
+          // that ignored the skin entirely, and pure red on the dark ground is
+          // the worst of the two. `transparent`, `inherit`, `currentColor` and
+          // `none` are deliberately absent: they are structural, not colours.
+          selector:
+            'Literal[value=/^(?:red|blue|green|orange|yellow|purple|pink|brown|cyan|magenta|white|black|gray|grey|lime|navy|teal|olive|maroon|silver|gold)$/i]',
+          message: MODEL_EDITOR_HEX_MESSAGE,
+        },
+        {
+          // rgb()/rgba() in a style value. Shadows are the usual offender and
+          // they belong in SHADOW (theme.ts), which is a three-level scale
+          // precisely so a fourth elevation cannot be invented per file.
+          selector: 'Literal[value=/rgba?\\(/]',
           message: MODEL_EDITOR_HEX_MESSAGE,
         },
       ],

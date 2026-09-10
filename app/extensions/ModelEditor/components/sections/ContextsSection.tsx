@@ -27,6 +27,7 @@ import {
   type ExpressionWorkspaceHandle,
 } from "./ExpressionWorkspace";
 import { confirmAsync } from "@api/dialogs";
+import { ME } from "../theme";
 
 // ============================================================================
 // Section
@@ -266,8 +267,8 @@ function ContextEditorModal({
         }
       />
 
-      {error && <div style={{ color: "red", marginBottom: 8, fontSize: 12 }}>{error}</div>}
-      {status && <div style={{ color: "green", marginBottom: 8, fontSize: 12 }}>{status}</div>}
+      {error && <div style={{ color: ME.dangerFg, marginBottom: 8, fontSize: 12 }}>{error}</div>}
+      {status && <div style={{ color: ME.okFg, marginBottom: 8, fontSize: 12 }}>{status}</div>}
     </Modal>
   );
 }

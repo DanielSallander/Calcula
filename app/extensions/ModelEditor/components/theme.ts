@@ -222,6 +222,11 @@ export const SHADOW = {
   card: "0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.10)",
   popover: "0 8px 24px rgba(16, 24, 40, 0.12)",
   modal: "0 16px 48px rgba(16, 24, 40, 0.18)",
+  /** A column pinned to the trailing edge, casting LEFTWARD over the cells
+   *  sliding beneath it (Strategy's `reviewed`). Not one of the three
+   *  elevations — it is directional, and its job is to say "this column is
+   *  floating, the ones under it are moving" rather than to raise a surface. */
+  stickyLeft: "-6px 0 6px -6px rgba(16, 24, 40, 0.25)",
 } as const;
 
 // ---------------------------------------------------------------------------
