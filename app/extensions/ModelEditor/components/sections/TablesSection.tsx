@@ -31,7 +31,7 @@ const STRATEGY_TYPES = [
   { value: "dailyAfter", label: "Daily after time" },
   { value: "sourceQuery", label: "Source query changed" },
 ];
-import { Badge, Field, SELECTION_BG, stripSchemaPrefix, styles } from "../editorShared";
+import { Badge, Disclosure, Field, SELECTION_BG, stripSchemaPrefix, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
 import { Xref } from "../Xref";
 import { ColumnSelectionBar } from "./ColumnSelectionBar";
@@ -40,7 +40,31 @@ import { WritebackColumnModal } from "./WritebackColumnModal";
 import { SqlEditorModal } from "../SqlEditorModal";
 import { TransformEditorModal, summarizeSteps } from "../transform";
 import { confirmAsync } from "@api/dialogs";
-import { ME } from "../theme";
+import { ME, SPACE } from "../theme";
+
+/**
+ * What the folded Refresh row says.
+ *
+ * The section cost 270px to render "No strategies." plus two paragraphs of
+ * explanation and an empty input. Folded, the same fact is one line — and it
+ * says what NO strategies MEANS, which the expanded card never did: the reader
+ * had to know that no strategy implies cache-once to understand that an empty
+ * list was a decision rather than an omission.
+ */
+function refreshSummary(table: ModelTableInfo): string {
+  const n = table.refreshStrategies.length;
+  const filter = table.incrementalRefresh ? " · incremental filter set" : "";
+  if (n === 0) return `No strategies — cached once, refreshed manually${filter}`;
+  return `${n} ${n === 1 ? "strategy" : "strategies"}${filter}`;
+}
+
+/** What the folded Transformations row says — the step count and the first
+ *  step, which is what the expanded card showed anyway. */
+function transformSummary(table: ModelTableInfo): string {
+  const n = table.transformSteps.length;
+  if (n === 0) return "No steps — the table loads as the source returns it";
+  return `${n} step${n === 1 ? "" : "s"}: ${summarizeSteps(table.transformSteps)}`;
+}
 
 export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement {
   const { connectionId, overview, readOnly, applyOverview, reportError } = ctx;
@@ -53,6 +77,22 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
     existing: ModelWritebackColumnInfo | null;
   } | null>(null);
   const [transformOpen, setTransformOpen] = useState(false);
+
+  // WHICH SECTIONS ARE FOLDED, held HERE rather than in each card.
+  //
+  // The cards remount whenever the selected table changes, so card-local state
+  // would re-open everything on every click in the master list — and a fold you
+  // have to redo six times is worse than no fold. This is a preference about
+  // the KIND of section, not about the table, so it lives with the section and
+  // survives the selection changing.
+  //
+  // All three start CLOSED. That is the whole point: they are set-once
+  // surfaces, and the pane exists to show columns. Each carries a summary line
+  // so closed never means unknown.
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  const isOpen = (id: string): boolean => openSections[id] === true;
+  const toggleSection = (id: string): void =>
+    setOpenSections((prev) => ({ ...prev, [id]: !prev[id] }));
   // Multi-select for bulk column edits. Keyed by column NAME, and cleared
   // whenever the selected table changes — a name from another table would
   // otherwise survive and be silently included in the next batch.
@@ -220,18 +260,32 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
         ))}
       </div>
 
-      {/* Detail */}
-      <div style={{ flex: 1, minWidth: 0, overflowY: "auto" }}>
+      {/* Detail.
+          A COLUMN, not a scrolling block. The pane used to be one
+          `overflow-y: auto` div with four cards stacked in it, so the columns
+          grid — the thing the pane is mostly for — started 337px down on an
+          ordinary table and 607px down on an InMemory one, six of ten rows
+          visible in a 940px window. Now the folded sections take what they need
+          at the top and the grid takes the rest, with the scroll bounded to the
+          grid so the header and its actions stay put. */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
         {!table && <div style={styles.muted}>Select a table.</div>}
         {table && (
           <>
-            <TableMetaForm
-              connectionId={connectionId}
-              table={table}
-              readOnly={readOnly}
-              applyOverview={applyOverview}
-              reportError={reportError}
-            />
+            {/* ONE card for everything that is not columns. Three cards each
+                carrying their own padding and margin spent nearly as much
+                height as the sections they fold away — the hairline between
+                rows says "same group" for a fraction of the pixels. */}
+            <div style={{ ...styles.card, marginBottom: SPACE.sm, flexShrink: 0 }}>
+              <TableMetaForm
+                connectionId={connectionId}
+                table={table}
+                readOnly={readOnly}
+                applyOverview={applyOverview}
+                reportError={reportError}
+                settingsOpen={isOpen("settings")}
+                onToggleSettings={() => toggleSection("settings")}
+              />
 
             {!table.sourceId && (
               <BindTableCard
@@ -246,18 +300,45 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
             )}
 
             {table.storageMode === "InMemory" && (
-              <RefreshStrategyCard
-                connectionId={connectionId}
-                table={table}
-                readOnly={readOnly}
-                applyOverview={applyOverview}
-                reportError={reportError}
-              />
+              <Disclosure
+                id="refresh"
+                title="Refresh"
+                summary={refreshSummary(table)}
+                open={isOpen("refresh")}
+                onToggle={() => toggleSection("refresh")}
+                divided
+              >
+                <RefreshStrategyCard
+                  connectionId={connectionId}
+                  table={table}
+                  readOnly={readOnly}
+                  applyOverview={applyOverview}
+                  reportError={reportError}
+                />
+              </Disclosure>
             )}
 
-            <TransformCard table={table} onEdit={() => setTransformOpen(true)} />
+            {/* The Edit action stays on the folded row: it opens a modal, so
+                expanding the section first would be a click that achieves
+                nothing but showing you the button you already wanted. */}
+            <Disclosure
+              id="transforms"
+              title="Transformations"
+              summary={transformSummary(table)}
+              open={isOpen("transforms")}
+              onToggle={() => toggleSection("transforms")}
+              divided
+              right={
+                <button style={styles.smallBtn} onClick={() => setTransformOpen(true)}>
+                  Edit transforms…
+                </button>
+              }
+            >
+              <TransformCard table={table} onEdit={() => setTransformOpen(true)} />
+            </Disclosure>
+            </div>
 
-            <div style={{ ...styles.sectionHeader, marginTop: 12, marginBottom: 8 }}>
+            <div style={{ ...styles.sectionHeader, marginTop: SPACE.sm, marginBottom: SPACE.sm, flexShrink: 0 }}>
               <span style={styles.sectionTitle}>
                 Columns ({table.columns.length + dynamicCols.length + writebackCols.length})
               </span>
@@ -290,7 +371,7 @@ export function TablesSection({ ctx }: { ctx: SectionCtx }): React.ReactElement 
               onDone={() => setSelectedCols([])}
             />
 
-            <div style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
+            <div style={{ ...styles.card, padding: 0, overflow: "auto", flex: 1, minHeight: 0 }}>
               <table style={{ borderCollapse: "collapse", width: "100%" }}>
                 <thead>
                   <tr>
@@ -685,12 +766,16 @@ function TableMetaForm({
   readOnly,
   applyOverview,
   reportError,
+  settingsOpen,
+  onToggleSettings,
 }: {
   connectionId: string;
   table: ModelTableInfo;
   readOnly: boolean;
   applyOverview: (overview: ModelOverview) => void;
   reportError: (err: unknown) => void;
+  settingsOpen: boolean;
+  onToggleSettings: () => void;
 }): React.ReactElement {
   const [displayName, setDisplayName] = useState(table.displayName ?? "");
   const [description, setDescription] = useState(table.description ?? "");
@@ -769,10 +854,16 @@ function TableMetaForm({
     }
   };
 
-  return (
-    <div style={styles.card}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <span style={{ fontWeight: 600 }}>{table.name}</span>
+  // THE IDENTITY BAR IS ALWAYS VISIBLE; THE FIELDS FOLD.
+  //
+  // They used to be one card, and the three fields under it — display name,
+  // description, hidden — are set once and then read never. Keeping them
+  // expanded cost ~110px on every table, above the columns, forever. What
+  // cannot fold is what identifies the table you are looking at and the two
+  // actions that are destructive or expensive.
+  const identityBar = (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ fontWeight: 600 }}>{table.name}</span>
         <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
           <span style={styles.muted}>Storage</span>
           <select
@@ -810,48 +901,75 @@ function TableMetaForm({
         >
           Refresh data
         </button>
-        <button
-          style={{ ...styles.smallBtn, color: ME.dangerFg }}
-          disabled={readOnly || busy}
-          title="Remove this table from the model"
-          onClick={() => void deleteTable()}
-        >
-          Delete table
-        </button>
-      </div>
-      {refreshMsg && <div style={{ ...styles.hint, marginBottom: 6 }}>{refreshMsg}</div>}
-      <div style={{ display: "flex", gap: 8 }}>
-        <Field label="Display name" flex={1}>
-          <input
-            style={styles.input}
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            placeholder={table.name}
-          />
-        </Field>
-        <Field label="Description" flex={2}>
-          <input
-            style={styles.input}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </Field>
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-          <input
-            type="checkbox"
-            checked={isHidden}
-            onChange={(e) => setIsHidden(e.target.checked)}
-          />
-          Hidden
-        </label>
-        <div style={{ flex: 1 }} />
-        <button style={styles.primaryBtn} disabled={readOnly || busy} onClick={() => void save()}>
-          {busy ? "Saving…" : "Save table"}
-        </button>
-      </div>
+      <button
+        style={{ ...styles.smallBtn, color: ME.dangerFg }}
+        disabled={readOnly || busy}
+        title="Remove this table from the model"
+        onClick={() => void deleteTable()}
+      >
+        Delete table
+      </button>
     </div>
+  );
+
+  /** What the folded Settings row says.
+   *
+   *  States a FACT, never an absence. "no display name" was the first version
+   *  and it reads as a warning about something missing, when a table that
+   *  carries its own name is the ordinary, correct case. */
+  const settingsSummary = [
+    table.displayName ? `shown as "${table.displayName}"` : "not renamed",
+    table.description ? "described" : null,
+    table.isHidden ? "hidden" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <>
+      {identityBar}
+      {refreshMsg && <div style={{ ...styles.hint, marginTop: 6 }}>{refreshMsg}</div>}
+      <Disclosure
+        id="table-settings"
+        title="Settings"
+        summary={settingsSummary}
+        open={settingsOpen}
+        onToggle={onToggleSettings}
+        divided
+      >
+        <div style={{ display: "flex", gap: 8 }}>
+          <Field label="Display name" flex={1}>
+            <input
+              style={styles.input}
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder={table.name}
+            />
+          </Field>
+          <Field label="Description" flex={2}>
+            <input
+              style={styles.input}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Field>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+            <input
+              type="checkbox"
+              checked={isHidden}
+              onChange={(e) => setIsHidden(e.target.checked)}
+            />
+            Hidden
+          </label>
+          <div style={{ flex: 1 }} />
+          <button style={styles.primaryBtn} disabled={readOnly || busy} onClick={() => void save()}>
+            {busy ? "Saving…" : "Save table"}
+          </button>
+        </div>
+      </Disclosure>
+    </>
   );
 }
 

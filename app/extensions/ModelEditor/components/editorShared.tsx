@@ -322,6 +322,107 @@ export function Field({
 }
 
 // ============================================================================
+// Disclosure — a section that folds away, and says what it folded
+// ============================================================================
+//
+// THE SUMMARY IS REQUIRED, and that is the whole design. A collapsed section
+// that shows only its title asks the reader to open it to find out whether it
+// matters, so they open all of them and the folding bought nothing. One line
+// saying "No refresh strategies — cached once, refreshed manually" answers the
+// question without the click.
+//
+// It exists because the Tables detail pane stacked four cards of very unequal
+// weight, all permanently expanded, with the one people came for last: an
+// InMemory table spent 270px to say "No strategies." and put the Columns
+// header 607px down a 940px window, six of ten rows visible. The occasional
+// sections fold; the dominant one gets the height.
+//
+// `open`/`onToggle` are CONTROLLED rather than internal, because the state
+// belongs to the section and not to the row: collapsing "Refresh" and then
+// clicking through six tables should leave it collapsed. Local state in a
+// component that remounts per selection would re-open it every time.
+
+export function Disclosure({
+  id,
+  title,
+  summary,
+  open,
+  onToggle,
+  right,
+  divided,
+  children,
+}: {
+  /** Stable id for the test hooks and for the section's open-state map. */
+  id: string;
+  title: string;
+  /** What is inside, in one line, WHEN COLLAPSED. Required on purpose. */
+  summary: string;
+  open: boolean;
+  onToggle: () => void;
+  /** An action that belongs to the section and stays reachable while it is
+   *  folded — "Edit transforms…" is useful without expanding anything. */
+  right?: React.ReactNode;
+  /** A hairline above the row, for stacking several inside ONE card. */
+  divided?: boolean;
+  children: React.ReactNode;
+}): React.ReactElement {
+  // NOT A CARD. It draws a row and its body; the CALLER decides whether that
+  // sits in a card, and stacking three of these inside one card is the point —
+  // three cards each with their own padding and margin spent nearly as much
+  // height as the sections they were folding away.
+  return (
+    <div style={divided ? { borderTop: `1px solid ${ME.borderSubtle}` } : undefined}>
+      <div style={{ display: "flex", alignItems: "center", gap: SPACE.sm }}>
+        <button
+          type="button"
+          data-testid={`disclosure-${id}`}
+          aria-expanded={open}
+          onClick={onToggle}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: SPACE.sm,
+            flex: 1,
+            minWidth: 0,
+            minHeight: SIZE.control,
+            background: "none",
+            border: "none",
+            padding: 0,
+            font: "inherit",
+            color: "inherit",
+            textAlign: "left",
+            cursor: "pointer",
+          }}
+        >
+          <span aria-hidden style={{ width: 12, flexShrink: 0, color: ME.text3, fontSize: 11 }}>
+            {open ? "▾" : "▸"}
+          </span>
+          <span style={{ fontWeight: 600, flexShrink: 0 }}>{title}</span>
+          {/* The summary is hidden while OPEN: the contents are right there,
+              and a summary above them would be the same fact stated twice. */}
+          {!open && (
+            <span
+              data-testid={`disclosure-summary-${id}`}
+              style={{
+                ...styles.hint,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                minWidth: 0,
+              }}
+            >
+              {summary}
+            </span>
+          )}
+        </button>
+        {right}
+      </div>
+      {open && <div style={{ paddingBottom: SPACE.sm }}>{children}</div>}
+    </div>
+  );
+}
+
+// ============================================================================
 // FilterPredicateList — shared row-filter editor
 // ============================================================================
 // The engine `FilterPredicate` (table/column/operator/value + optional dynamic
