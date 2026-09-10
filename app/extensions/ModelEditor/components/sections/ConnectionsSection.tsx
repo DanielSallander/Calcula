@@ -226,7 +226,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
       {autoResult && (autoResult.connected.length > 0 || autoResult.failed.length > 0) && (
         <div
           style={{
-            border: "1px solid #b7d9bc",
+            border: `1px solid ${ME.okBorder}`,
             background: ME.okBg,
             borderRadius: 4,
             padding: "6px 10px",
@@ -252,7 +252,7 @@ export function ConnectionsSection({ ctx }: { ctx: SectionCtx }): React.ReactEle
         {unbound.length > 0 && (
           <div
             style={{
-              border: "1px solid #e2b04a",
+              border: `1px solid ${ME.warnBorder}`,
               background: ME.warnBg,
               borderRadius: 4,
               padding: "6px 10px",
@@ -797,7 +797,7 @@ function ConnectModal({
           {savedUser && (
             <div
               style={{
-                border: "1px solid #b7d9bc",
+                border: `1px solid ${ME.okBorder}`,
                 background: ME.okBg,
                 borderRadius: 4,
                 padding: "8px 10px",

@@ -355,7 +355,7 @@ export function restConfigProblems(config: RestSourceConfigDto): string[] {
 
 const rowStyle: React.CSSProperties = { display: "flex", gap: 8, alignItems: "flex-end" };
 const cardStyle: React.CSSProperties = {
-  border: "1px solid #e1dfdd",
+  border: `1px solid ${ME.border}`,
   borderRadius: 4,
   padding: 10,
   marginBottom: 8,

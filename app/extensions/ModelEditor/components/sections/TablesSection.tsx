@@ -618,7 +618,7 @@ function BindTableCard({
 
   return (
     <div
-      style={{ ...styles.card, border: "1px solid #e2b04a", background: ME.warnBg, marginTop: 8 }}
+      style={{ ...styles.card, border: `1px solid ${ME.warnBorder}`, background: ME.warnBg, marginTop: 8 }}
     >
       <div style={{ fontWeight: 600, marginBottom: 4 }}>Unbound table</div>
       {sources.length === 0 ? (

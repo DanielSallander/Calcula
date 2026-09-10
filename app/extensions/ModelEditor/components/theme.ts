@@ -94,6 +94,20 @@ export const ME = {
   infoFg: "var(--tone-info-fg, #175cd3)",
   infoBg: "var(--tone-info-bg, #eff8ff)",
 
+  // The BORDER of a toned banner: the tone's own foreground, thinned.
+  //
+  // These are new because they were missing, and what filled the gap was seven
+  // hardcoded ambers and greens across six files (#e2b04a, #ecdfa8, #f0d98c,
+  // #b7d9bc) that the hex ban could not see — its selector was anchored, so
+  // "1px solid #e2b04a" was not a hex literal as far as it was concerned.
+  // DERIVED rather than picked, for the reason `select` and `rowHover` are: a
+  // hand-picked amber is a fourth opinion about what "warning" looks like, and
+  // it does not follow the skin.
+  dangerBorder: "color-mix(in srgb, var(--tone-danger-fg, #b42318) 35%, transparent)",
+  warnBorder: "color-mix(in srgb, var(--tone-warn-fg, #b54708) 35%, transparent)",
+  okBorder: "color-mix(in srgb, var(--tone-ok-fg, #067647) 35%, transparent)",
+  infoBorder: "color-mix(in srgb, var(--tone-info-fg, #175cd3) 35%, transparent)",
+
   /**
    * Text and icons ON a filled accent or danger ground (a primary button, a
    * selected toggle, the recording pill). Deliberately a LITERAL and

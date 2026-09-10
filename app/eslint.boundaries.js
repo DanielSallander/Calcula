@@ -206,9 +206,17 @@ const modelEditorColorConfigs = [
       'no-restricted-syntax': [
         'error',
         {
-          // Literal hex in any string: style values, JSX attributes, template
-          // chunks. Matches #rgb, #rrggbb and #rrggbbaa.
-          selector: 'Literal[value=/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/]',
+          // Literal hex ANYWHERE in a string: style values, JSX attributes,
+          // template chunks. Matches #rgb, #rgba, #rrggbb and #rrggbbaa.
+          //
+          // NOT anchored. It was `^#…$` — the hex had to be the WHOLE string —
+          // so `"1px solid #2f6fce"` and `"var(--x, #d32f2f)"` sailed through,
+          // and fifteen hardcoded colours survived the sweep that this rule
+          // exists to make permanent. Three of them were one selection outline
+          // written three times in the same file. A rule that catches the easy
+          // spelling and misses the common one reads as enforcement and is not.
+          selector:
+            'Literal[value=/#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\\b/]',
           message: MODEL_EDITOR_HEX_MESSAGE,
         },
         {

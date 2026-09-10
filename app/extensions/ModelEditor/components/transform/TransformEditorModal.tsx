@@ -442,7 +442,7 @@ export function TransformEditorModal({
           <div
             style={{
               ...styles.card,
-              border: "1px solid #e2b04a",
+              border: `1px solid ${ME.warnBorder}`,
               background: ME.warnBg,
               padding: 8,
               marginBottom: 8,

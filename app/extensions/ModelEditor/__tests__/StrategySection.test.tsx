@@ -3168,3 +3168,130 @@ describe("a finding reaches its row however deep it is anchored", () => {
     expect(cells[cells.length - 1].style.right).toBe("0px");
   });
 });
+
+// ===========================================================================
+// The view switcher is the FOURTH way a row can be hidden
+// ===========================================================================
+//
+// Property (19) shipped without knowing the switcher existed. A finding on a
+// table, clicked while looking at Measures, revealed the row perfectly and left
+// it in a view nobody was on — nothing visible happened at all.
+//
+// The suite could not see it either: every existing test that touches another
+// view calls `showView` first, so none of them was ever in the wrong view when
+// it selected something. These deliberately do NOT call showView.
+
+describe("selecting a finding goes to the view its row lives in", () => {
+  async function validatedWith(path: string): Promise<void> {
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [{ severity: "warning", code: "x", path, message: "needs a look" }],
+    });
+    await mount();
+    await click(button("Validate"));
+  }
+
+  const activeView = (): string | null => {
+    const tab = [...container.querySelectorAll('[data-testid^="strategy-view-"]')].find(
+      (b) => b.getAttribute("aria-selected") === "true",
+    );
+    return tab?.getAttribute("data-testid")?.replace("strategy-view-", "") ?? null;
+  };
+
+  it("switches to Tables for a table finding, from the Measures view", async () => {
+    await validatedWith("tables['Sales'].kind");
+    expect(activeView(), "the grid opens on Measures").toBe("measures");
+
+    await click(button("tables['Sales'].kind"));
+    expect(activeView(), "a table finding must take you to the tables view").toBe("tables");
+    // ...and the row is actually there to be looked at.
+    expect(container.querySelector(`tr[data-strategy-path="tables['Sales']"]`)).not.toBeNull();
+  });
+
+  it("switches to Rules for a rule finding", async () => {
+    await validatedWith("rules[0].scope");
+    await click(button("rules[0].scope"));
+    expect(activeView()).toBe("rules");
+  });
+
+  it("switches to Defaults for a model finding", async () => {
+    await validatedWith("model.defaultTimeAxis");
+    await click(button("model.defaultTimeAxis"));
+    expect(activeView()).toBe("defaults");
+  });
+
+  it("stays put for a measure finding, and does not thrash the view", async () => {
+    // The negative control: the commonest case must NOT move you, or every
+    // click in the measures sweep would feel like a navigation.
+    await validatedWith("measures['Profit'].target");
+    await click(button("measures['Profit'].target"));
+    expect(activeView()).toBe("measures");
+  });
+
+  it("does not change the view when the highlight is cleared", async () => {
+    await validatedWith("tables['Sales'].kind");
+    await click(button("tables['Sales'].kind"));
+    expect(activeView()).toBe("tables");
+    // Clicking the same finding again deselects. That is a dismissal, not a
+    // navigation — being thrown back to Measures would be a surprise.
+    await click(button("tables['Sales'].kind"));
+    expect(activeView()).toBe("tables");
+  });
+});
+
+describe("arriving with a selection", () => {
+  // ctx.selection had a producer (the problems drawer, via
+  // locateStrategyFinding) and no consumer here: the tab dropped it and opened
+  // on Measures regardless of what the drawer row was about.
+
+  const activeView = (): string | null => {
+    const tab = [...container.querySelectorAll('[data-testid^="strategy-view-"]')].find(
+      (b) => b.getAttribute("aria-selected") === "true",
+    );
+    return tab?.getAttribute("data-testid")?.replace("strategy-view-", "") ?? null;
+  };
+
+  it("opens the view the selection names and highlights its row", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    const ctx = { ...ctxFor(), selection: "tables['Sales'].kind" };
+    await act(async () => {
+      root.render(<StrategySection ctx={ctx} />);
+    });
+    expect(activeView(), "the drawer said this was about a table").toBe("tables");
+    const row = container.querySelector(
+      `tr[data-strategy-path="tables['Sales']"]`,
+    ) as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(row.style.outline, "and the row it named is marked").not.toBe("none");
+  });
+
+  it("honours a selection ONCE, so the user can navigate away from it", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    const ctx = { ...ctxFor(), selection: "tables['Sales'].kind" };
+    await act(async () => {
+      root.render(<StrategySection ctx={ctx} />);
+    });
+    expect(activeView()).toBe("tables");
+
+    // Switch views by hand. A re-render with the same ctx.selection must not
+    // drag you back — that is the difference between honouring an arrival and
+    // pinning the view to a prop.
+    await showView("rules");
+    expect(activeView()).toBe("rules");
+    await act(async () => {
+      root.render(<StrategySection ctx={ctx} />);
+    });
+    expect(activeView(), "the same selection must not re-fire").toBe("rules");
+  });
+
+  it("ignores a selection that is not a strategy path", async () => {
+    // A bare name is a producer bug, and guessing which of a table and a
+    // measure "Sales" means would hide it. Do nothing, visibly.
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    await act(async () => {
+      root.render(<StrategySection ctx={{ ...ctxFor(), selection: "Sales" }} />);
+    });
+    expect(activeView()).toBe("measures");
+  });
+});

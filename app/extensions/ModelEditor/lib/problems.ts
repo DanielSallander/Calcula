@@ -250,13 +250,30 @@ export function bestPracticeProblems(o: ModelOverview): Problem[] {
 // Folding in the other sources
 // ---------------------------------------------------------------------------
 
-/** `measures['Revenue']` / `tables['Sales'].columns['x']` -> a section+selection. */
+/**
+ * A strategy finding's path -> the section and the selection token to navigate
+ * with.
+ *
+ * THE TOKEN IS THE WHOLE PATH, not the object's name. `selection` is opaque —
+ * every consumer decides what it means — and Strategy addresses everything by
+ * path: the path says which of the four views the row lives in, which row it
+ * is, and (for a column or an attribute) which part of that row. A bare name
+ * threw all of that away and could not even say whether "Sales" was a table or
+ * a measure, so the tab could do nothing useful with it and did nothing at all.
+ *
+ * The paths that reach here are `measures['X']…`, `tables['X']…` (including
+ * `.columns['Y']`), `rules[N]…` and `model…`; anything else carries no
+ * selection rather than a guess.
+ */
 export function locateStrategyFinding(path: string): { section: SectionId; selection?: string } {
-  const measure = /^measures\['(.+?)'\]/.exec(path);
-  if (measure) return { section: "strategy", selection: measure[1] };
-  const table = /^tables\['(.+?)'\]/.exec(path);
-  if (table) return { section: "strategy", selection: table[1] };
-  return { section: "strategy" };
+  const known =
+    path.startsWith("measures[") ||
+    path.startsWith("tables[") ||
+    path.startsWith("rules[") ||
+    path === "model" ||
+    path.startsWith("model.") ||
+    path.startsWith("model[");
+  return known ? { section: "strategy", selection: path } : { section: "strategy" };
 }
 
 export function strategyProblems(findings: Finding[]): Problem[] {

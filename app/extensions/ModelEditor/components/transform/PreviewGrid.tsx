@@ -156,7 +156,7 @@ export function PreviewGrid({
                 padding: "4px 8px",
                 background: ME.warnBg,
                 color: ME.warnFg,
-                border: "1px solid #f0d98c",
+                border: `1px solid ${ME.warnBorder}`,
                 borderRadius: 3,
                 fontSize: 11,
               }}

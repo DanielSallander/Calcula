@@ -173,7 +173,7 @@ export function renderMarkdown(md: string, onNavigate: (fn: string) => void): Re
             fontWeight: 600,
             color: ME.text,
             margin: level === 1 ? "2px 0 8px" : "12px 0 4px",
-            borderBottom: level <= 2 ? "1px solid #eee" : undefined,
+            borderBottom: level <= 2 ? `1px solid ${ME.borderSubtle}` : undefined,
             paddingBottom: level <= 2 ? 3 : 0,
           }}
         >

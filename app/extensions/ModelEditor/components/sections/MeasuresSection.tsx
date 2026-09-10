@@ -307,7 +307,7 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           onDrop={(e) => onZoneDrop(e, node.path)}
           style={{
             borderRadius: 3,
-            border: isTarget ? "1px dashed #2f6fce" : "1px solid transparent",
+            border: isTarget ? `1px dashed ${ME.accent}` : "1px solid transparent",
             background: isTarget ? ME.accentSoft : undefined,
           }}
         >
@@ -406,7 +406,7 @@ export function MeasuresSection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
               style={{
                 marginTop: 4,
                 borderRadius: 3,
-                border: dragOver === UNGROUPED ? "1px dashed #2f6fce" : "1px solid transparent",
+                border: dragOver === UNGROUPED ? `1px dashed ${ME.accent}` : "1px solid transparent",
                 background: dragOver === UNGROUPED ? ME.accentSoft : undefined,
               }}
             >

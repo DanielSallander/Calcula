@@ -326,7 +326,7 @@ export function NewModelDialog({
             wordBreak: "break-word",
             background: ME.warnBg,
             color: ME.warnFg,
-            border: "1px solid #ecdfa8",
+            border: `1px solid ${ME.warnBorder}`,
           }}
         >
           <strong>Model created, but it couldn&apos;t connect.</strong>

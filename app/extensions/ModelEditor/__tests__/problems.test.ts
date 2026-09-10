@@ -219,22 +219,44 @@ describe("the engine's own answer", () => {
 });
 
 describe("strategy findings", () => {
-  it("anchors a measure finding to its measure", () => {
+  // THE TOKEN IS THE WHOLE PATH. It used to be the bare object name, which
+  // threw away everything the consumer needs: which of Strategy's four views
+  // the row lives in, and — for a column or an attribute — which part of the
+  // row. It could not even say whether "Sales" was a table or a measure. The
+  // tab consequently did nothing with it at all.
+  it("carries a measure finding's whole path, attribute included", () => {
     expect(locateStrategyFinding("measures['Margin %'].unit")).toEqual({
       section: "strategy",
-      selection: "Margin %",
+      selection: "measures['Margin %'].unit",
     });
   });
 
-  it("anchors a table finding to its table", () => {
-    expect(locateStrategyFinding("tables['Dim_Date'].kind")).toEqual({
+  it("carries a column finding's path rather than collapsing it to the table", () => {
+    expect(locateStrategyFinding("tables['Dim_Date'].columns['Year']")).toEqual({
       section: "strategy",
-      selection: "Dim_Date",
+      selection: "tables['Dim_Date'].columns['Year']",
     });
   });
 
-  it("falls back to the section for a path it cannot anchor", () => {
-    expect(locateStrategyFinding("rules[2].scope")).toEqual({ section: "strategy" });
+  it("anchors a RULE finding, which it used to drop", () => {
+    // rules[N] is a real row in a real view. Returning no selection for it sent
+    // the user to the Measures view with nothing selected.
+    expect(locateStrategyFinding("rules[2].scope")).toEqual({
+      section: "strategy",
+      selection: "rules[2].scope",
+    });
+  });
+
+  it("anchors a MODEL finding to the defaults view", () => {
+    expect(locateStrategyFinding("model.defaultTimeAxis")).toEqual({
+      section: "strategy",
+      selection: "model.defaultTimeAxis",
+    });
+  });
+
+  it("carries no selection rather than a guess for a path it does not know", () => {
+    expect(locateStrategyFinding("somethingElse['x']")).toEqual({ section: "strategy" });
+    expect(locateStrategyFinding("")).toEqual({ section: "strategy" });
   });
 
   it("carries the finding's own severity through", () => {

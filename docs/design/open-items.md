@@ -1021,8 +1021,10 @@ Three findings outlive it:
     invites a correction and discards it.
     **And the round trip was completely convincing**, which is what made it invisible.
     `infer_table` stamps the DETECTED kind into the drafted document, and the tab's cell renders
-    `entry.kind` from that document (`StrategySection.tsx:2851-2857`, a `selectOf<TableKind>` on
-    every table row). So the dropdown showed a plausible value, accepted a change, saved it, and
+    `entry.kind` from that document (`strategy/TablesGrid.tsx:358-364`, a `selectOf<TableKind>` on
+    every table row — the cell moved out of `StrategySection.tsx` when that 4,681-line file was
+    split into `sections/strategy/`; the CLAIM is unchanged and still describes a fixed defect).
+    So the dropdown showed a plausible value, accepted a change, saved it, and
     read it back changed — while every consumer went on using `facts.tables[..].kind`, derived
     afresh from the model. A control that resets would have reported itself in one click.
   - **The remaining four were inert, and each was then wired, labelled or DELETED.**

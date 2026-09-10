@@ -1286,7 +1286,7 @@ function CalcGroupModal({
     borderRadius: 12,
     fontSize: 12,
     cursor: "pointer",
-    border: active ? `1px solid ${ACCENT}` : "1px solid #ccc",
+    border: `1px solid ${active ? ACCENT : ME.ctlBorder}`,
     background: active ? ME.accentSoft : ME.surface,
     color: active ? ACCENT : ME.text2,
     fontWeight: active ? 600 : 400,

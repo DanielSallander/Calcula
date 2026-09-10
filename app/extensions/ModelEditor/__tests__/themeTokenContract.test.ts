@@ -111,4 +111,36 @@ describe("Model Editor theme token contract", () => {
     const bare = [...source.matchAll(/var\(\s*(--[a-z0-9-]+)\s*\)/gi)].map((m) => m[1]);
     expect({ varsWithNoFallback: bare }).toEqual({ varsWithNoFallback: [] });
   });
+
+  it("the hex ban catches a colour EMBEDDED in a string, not only a bare one", () => {
+    // THE RULE HAD A HOLE FOR AS LONG AS IT HAS EXISTED. Its selector was
+    // anchored — `Literal[value=/^#…$/]` — so the hex had to be the entire
+    // string. `"#2f6fce"` was caught; `"2px solid #2f6fce"` and
+    // `"var(--x, #d32f2f)"` were not, which is how colours are actually
+    // written in a style object. Fifteen survived the sweep the rule exists to
+    // make permanent, three of them one selection outline written three times.
+    //
+    // Asserted by BUILDING the regex out of the config and running it, rather
+    // than by reading the selector: an anchored pattern looks perfectly
+    // reasonable until you try it on the string people actually write.
+    const config = readFileSync(join(__dirname, "..", "..", "..", "eslint.boundaries.js"), "utf8");
+    const hexRules = [...config.matchAll(/selector:\s*\n?\s*'Literal\[value=\/(.+?)\/\]'/g)];
+    expect(hexRules.length, "the Literal hex selector is still in the config").toBe(1);
+    const pattern = new RegExp(hexRules[0][1].replace(/\\\\/g, "\\"));
+
+    for (const caught of [
+      "#2f6fce",
+      "1px solid #2f6fce",
+      "2px solid #2f6fce",
+      "var(--status-error, #d32f2f)",
+      "0 0 0 2px #abc",
+      "#11223344",
+    ]) {
+      expect(pattern.test(caught), `the ban must catch ${JSON.stringify(caught)}`).toBe(true);
+    }
+    // ...and must not fire on things that merely contain a hash.
+    for (const allowed of ["#", "id=#top", "rgba(0,0,0,.2)", "#zzzzzz"]) {
+      expect(pattern.test(allowed), `the ban must ignore ${JSON.stringify(allowed)}`).toBe(false);
+    }
+  });
 });
