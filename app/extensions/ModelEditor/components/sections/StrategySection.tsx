@@ -304,7 +304,7 @@ import type {
   Target,
   Unit,
 } from "../../lib/strategyTypes";
-import { ME } from "../theme";
+import { FONT, ME, SPACE, TABULAR } from "../theme";
 
 // ===========================================================================
 // The per-connection working draft
@@ -1882,6 +1882,9 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   const [status, setStatus] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ original: Rule | null } | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // Which of the four views is showing. Measures first: it is the sweep this
+  // tab exists for, and the one with 300 rows behind it.
+  const [view, setView] = useState<StrategyView>("measures");
   /** What each measure RESOLVES to, by measure name. Empty until the preview
    *  arrives, and empty forever if it never does — inheritance is an extra the
    *  grid can do without, never a precondition for editing. */
@@ -2225,48 +2228,104 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
         )}
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
-        <ModelPanel
-          doc={doc}
-          overview={overview}
-          findings={findings}
-          inferredModel={inferred?.model}
-          disabled={disabled}
-          onEdit={edit}
-        />
-        <MeasuresGrid
-          doc={doc}
-          overview={overview}
-          findings={findings}
-          preview={preview}
-          inferred={inferred}
-          selectedPath={selectedPath}
-          columnRefs={columnRefs}
-          disabled={disabled}
-          onEdit={edit}
-          onConfirmAll={onConfirmAll}
-        />
-        <TablesGrid
-          doc={doc}
-          overview={overview}
-          findings={findings}
-          inferred={inferred}
-          selectedPath={selectedPath}
-          disabled={disabled}
-          onEdit={edit}
-        />
-        <RulesGrid
-          doc={doc}
-          findings={findings}
-          selectedPath={selectedPath}
-          disabled={disabled}
-          blockedReason={addRuleBlocked}
-          onAdd={() => setEditing({ original: null })}
-          onEditRule={(rule) => setEditing({ original: rule })}
-          onDelete={(id) => edit(withoutRule(doc, id))}
-        />
-        <FindingsStrip findings={findings} onSelect={setSelectedPath} selectedPath={selectedPath} />
+      {/* FOUR SIBLING VIEWS, NOT FOUR STACKED PANELS.
+          All of this used to live in ONE `overflowY` container, so reaching
+          Rules meant scrolling past every measure — and on a real model that is
+          three hundred rows, not two. Each view now owns its own scroll, so the
+          sweep you are actually doing fills the window.
+          (Splitting Tables from Columns is the remaining half; they are still
+          one interleaved grid, a row per table and a row per column.) */}
+      <div
+        role="tablist"
+        aria-label="Strategy views"
+        data-testid="strategy-views"
+        style={{ display: "flex", gap: SPACE.xs, flexShrink: 0 }}
+      >
+        {STRATEGY_VIEWS.map((v) => {
+          const isActive = v.id === view;
+          return (
+            <button
+              key={v.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              data-testid={`strategy-view-${v.id}`}
+              onClick={() => setView(v.id)}
+              style={{
+                ...styles.btn,
+                fontWeight: isActive ? 600 : 400,
+                background: isActive ? ME.accentSoft : ME.btnBg,
+                borderColor: isActive ? ME.accent : ME.ctlBorder,
+                color: isActive ? ME.text : ME.text2,
+              }}
+            >
+              {v.label}
+              {v.count !== undefined && (
+                <span style={{ marginLeft: SPACE.sm, color: ME.text3, ...TABULAR }}>
+                  {v.count(overview, doc)}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
+
+      <div
+        style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12 }}
+      >
+        {view === "defaults" && (
+          <ModelPanel
+            doc={doc}
+            overview={overview}
+            findings={findings}
+            inferredModel={inferred?.model}
+            disabled={disabled}
+            onEdit={edit}
+          />
+        )}
+        {view === "measures" && (
+          <MeasuresGrid
+            doc={doc}
+            overview={overview}
+            findings={findings}
+            preview={preview}
+            inferred={inferred}
+            selectedPath={selectedPath}
+            columnRefs={columnRefs}
+            disabled={disabled}
+            onEdit={edit}
+            onConfirmAll={onConfirmAll}
+          />
+        )}
+        {view === "tables" && (
+          <TablesGrid
+            doc={doc}
+            overview={overview}
+            findings={findings}
+            inferred={inferred}
+            selectedPath={selectedPath}
+            disabled={disabled}
+            onEdit={edit}
+          />
+        )}
+        {view === "rules" && (
+          <RulesGrid
+            doc={doc}
+            findings={findings}
+            selectedPath={selectedPath}
+            disabled={disabled}
+            blockedReason={addRuleBlocked}
+            onAdd={() => setEditing({ original: null })}
+            onEditRule={(rule) => setEditing({ original: rule })}
+            onDelete={(id) => edit(withoutRule(doc, id))}
+          />
+        )}
+      </div>
+
+      {/* OUTSIDE the switcher on purpose. A finding is why Save is refusing,
+          and hiding it behind whichever view you are not looking at would
+          leave a disabled Save button with its reason one click away. */}
+      <FindingsStrip findings={findings} onSelect={setSelectedPath} selectedPath={selectedPath} />
 
       {editing && (
         <RuleModal
@@ -2285,6 +2344,23 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
 }
 
 // ===========================================================================
+// Views
+// ===========================================================================
+
+type StrategyView = "measures" | "tables" | "rules" | "defaults";
+
+const STRATEGY_VIEWS: Array<{
+  id: StrategyView;
+  label: string;
+  count?: (o: ModelOverview, d: StrategyDoc) => number;
+}> = [
+  { id: "measures", label: "Measures", count: (o) => o.measures.length },
+  { id: "tables", label: "Tables and columns", count: (o) => o.tables.length },
+  { id: "rules", label: "Rules", count: (_o, d) => d.rules?.length ?? 0 },
+  { id: "defaults", label: "Defaults" },
+];
+
+// ===========================================================================
 // Measures grid
 // ===========================================================================
 
@@ -2300,7 +2376,23 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
  * Until one lands they carry the same label the model-block fields do, so nobody
  * spends authoring effort on a field that changes nothing.
  */
-const NOT_YET_CONSULTED_MEASURE_FIELDS = ["unit", "cadence"];
+// EMPTY, and that is the point. `unit` and `cadence` were marked here because
+// they were stored, validated and resolved but READ BY NOTHING. Both acquired
+// readers on 2026-09-09 — `unit` at insights/model.rs:1701 and :1804 (narration
+// picks the wording for a percent, a ratio and a currency differently), and
+// `cadence` at :1754, where `expected_cycle()` chooses the seasonality lag,
+// wired end to end by the Rust test literally named
+// `the_declared_cadence_decides_which_cycle_a_seasonal_measure_reports`.
+//
+// The file's own rule (property 10) says: WHEN ONE ACQUIRES A READER, DELETE
+// ITS NOTE — a stale "nothing reads this" is the same lie pointed the other
+// way. Two of them were still asserting it on screen.
+//
+// The marker MECHANISM stays, because the next inert attribute will want it.
+// Note it renders as `*`, which every reader on earth takes as REQUIRED — the
+// opposite of "this changes nothing". If something is ever added back here,
+// change the glyph too.
+const NOT_YET_CONSULTED_MEASURE_FIELDS: string[] = [];
 
 const MEASURE_HEADERS = [
   "measure",
@@ -2315,6 +2407,46 @@ const MEASURE_HEADERS = [
   "never slice by",
   "reviewed",
 ];
+
+/**
+ * Column groups, so eleven columns stop needing a horizontal scrollbar.
+ *
+ * Eleven columns do not fit in this window and never will — it opens at
+ * 1150px. Sideways scrolling in a grid you are working DOWN is the worst of
+ * both directions, and it is what forced the `reviewed` column to be sticky in
+ * the first place (property 17).
+ *
+ * Applied by CSS `nth-child` against `data-cols` on the table, NOT by making
+ * eleven hand-written `<td>`s conditional: the header is a map and the body is
+ * eleven literals, so a JSX split is eleven chances for the two to disagree
+ * about which column is which. `measure` (1) and `reviewed` (11) are in every
+ * group — one names the row, the other is the answer you are here to give.
+ */
+export type MeasureColumnGroup = "meaning" | "aggregation" | "slicing" | "all";
+
+export const MEASURE_COLUMN_GROUPS: Array<{ id: MeasureColumnGroup; label: string }> = [
+  { id: "meaning", label: "Meaning" },
+  { id: "aggregation", label: "Aggregation" },
+  { id: "slicing", label: "Slicing" },
+  { id: "all", label: "All columns" },
+];
+
+/** 1-based column indices each group SHOWS (see MEASURE_HEADERS order). */
+export const MEASURE_GROUP_COLUMNS: Record<MeasureColumnGroup, number[]> = {
+  // What the measure MEANS: which way is good, in what unit, against what, and
+  // how much it matters relative to the others.
+  meaning: [1, 2, 4, 5, 8, 11],
+  // How it adds up, and over what period.
+  aggregation: [1, 3, 6, 7, 11],
+  // What it may and may not be broken down by.
+  slicing: [1, 9, 10, 11],
+  all: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+};
+
+/** Which rows the grid shows. Defaults to the unconfirmed ones, because the
+ *  job this tab exists for is working DOWN a draft — landing on 12 rows to
+ *  read beats landing on 300 of which 288 are already answered. */
+type MeasureRowFilter = "needsReview" | "all";
 
 /** The accepted spellings for the two spec cells.
  *
@@ -2363,6 +2495,16 @@ function MeasuresGrid({
 }): React.ReactElement {
   /** The measure whose aggregation editor is open, or null. */
   const [aggregating, setAggregating] = useState<string | null>(null);
+  const [columnGroup, setColumnGroup] = useState<MeasureColumnGroup>("meaning");
+  const [rowFilter, setRowFilter] = useState<MeasureRowFilter>("needsReview");
+
+  // The rows this filter would show. Computed before the empty-state check so
+  // "12 of 300" can be honest about both numbers.
+  const unconfirmed = overview.measures.filter((m) => {
+    const e = measureEntry(doc, m.name);
+    return !stateIsHumanDecision(entryState(e, measureHasValues(e)));
+  });
+  const shownMeasures = rowFilter === "all" ? overview.measures : unconfirmed;
 
   // Entries naming a measure the model no longer has. They come from the
   // preview because the grid iterates the MODEL's measures — which is exactly
@@ -2372,8 +2514,38 @@ function MeasuresGrid({
 
   return (
     <section>
-      <div style={styles.sectionHeader}>
-        <span style={{ ...styles.sectionTitle, fontSize: 13 }}>Measures</span>
+      <div style={{ ...styles.sectionHeader, flexWrap: "wrap", gap: SPACE.sm }}>
+        <label style={{ display: "flex", alignItems: "center", gap: SPACE.xs, fontSize: FONT.sm }}>
+          Show
+          <select
+            style={{ ...styles.input, fontSize: FONT.sm }}
+            data-testid="measure-row-filter"
+            value={rowFilter}
+            onChange={(e) => setRowFilter(e.target.value as MeasureRowFilter)}
+          >
+            <option value="needsReview">Needs review</option>
+            <option value="all">All measures</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: SPACE.xs, fontSize: FONT.sm }}>
+          Columns
+          <select
+            style={{ ...styles.input, fontSize: FONT.sm }}
+            data-testid="measure-column-group"
+            value={columnGroup}
+            onChange={(e) => setColumnGroup(e.target.value as MeasureColumnGroup)}
+          >
+            {MEASURE_COLUMN_GROUPS.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span style={{ ...styles.hint, ...TABULAR }} data-testid="measure-row-count">
+          {unconfirmed.length} of {overview.measures.length} unconfirmed
+        </span>
+        <div style={{ flex: 1 }} />
         <button
           style={styles.smallBtn}
           disabled={disabled}
@@ -2384,7 +2556,11 @@ function MeasuresGrid({
         </button>
       </div>
       <div style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <table
+          style={{ borderCollapse: "collapse", width: "100%" }}
+          data-cols={columnGroup}
+          data-testid="measures-grid"
+        >
           <thead>
             <tr>
               {MEASURE_HEADERS.map((h) => (
@@ -2432,7 +2608,35 @@ function MeasuresGrid({
                 </td>
               </tr>
             )}
-            {overview.measures.map((m) => {
+            {overview.measures.length > 0 && shownMeasures.length === 0 && (
+              <tr>
+                <td style={styles.td} colSpan={MEASURE_HEADERS.length}>
+                  {/* Says WHICH filter is hiding them and offers the way out —
+                      an empty grid with 300 measures in the model behind it is
+                      otherwise indistinguishable from a broken one. */}
+                  <span style={styles.muted}>
+                    Every measure is confirmed.{" "}
+                    <button
+                      type="button"
+                      data-testid="measure-show-all"
+                      onClick={() => setRowFilter("all")}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        padding: 0,
+                        font: "inherit",
+                        color: ME.accent,
+                        cursor: "pointer",
+                        textDecoration: "underline",
+                      }}
+                    >
+                      Show all {overview.measures.length}
+                    </button>
+                  </span>
+                </td>
+              </tr>
+            )}
+            {shownMeasures.map((m) => {
               const entry = measureEntry(doc, m.name);
               const state = entryState(entry, measureHasValues(entry));
               const path = measurePath(m.name);

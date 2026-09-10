@@ -15,6 +15,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
+import { MEASURE_GROUP_COLUMNS } from "../components/sections/StrategySection";
 
 const THEME_FILE = join(__dirname, "..", "components", "theme.ts");
 // READ, don't import. `THEME_TOKENS` lives in src/core, and an extension —
@@ -68,6 +69,39 @@ describe("Model Editor theme token contract", () => {
       (t) => !known.has(t) && !NOT_SKIN_OWNED.has(t),
     );
     expect({ unknownTokens: unknown }).toEqual({ unknownTokens: [] });
+  });
+
+  it("the measure column groups agree with the CSS that hides them", () => {
+    // TWO SOURCES OF TRUTH, reconciled here rather than by eye.
+    // `MEASURE_GROUP_COLUMNS` says which of the eleven columns a group SHOWS;
+    // the stylesheet says which it HIDES, as nth-child rules. They are written
+    // in different files in different languages, and a mismatch is silent: the
+    // grid simply shows the wrong columns, which looks like a design decision.
+    const groups = MEASURE_GROUP_COLUMNS as Record<string, number[]>;
+    const ALL = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+    for (const [group, shown] of Object.entries(groups)) {
+      const block = new RegExp(
+        `table\\[data-cols="${group}"\\][\\s\\S]*?\\{\\s*display:\\s*none;\\s*\\}`,
+      ).exec(source);
+      const hiddenInCss = block
+        ? [...block[0].matchAll(/nth-child\((\d+)\)/g)].map((m) => Number(m[1])).sort((a, b) => a - b)
+        : [];
+      const hiddenExpected = ALL.filter((n) => !shown.includes(n));
+      expect(
+        hiddenInCss,
+        `the CSS for "${group}" hides a different set than MEASURE_GROUP_COLUMNS shows`,
+      ).toEqual(hiddenExpected);
+    }
+  });
+
+  it("never hides the measure name or the reviewed answer", () => {
+    // Column 1 names the row and column 11 is the answer you are there to
+    // give. A group that hid either would be a grid you cannot work in.
+    for (const shown of Object.values(MEASURE_GROUP_COLUMNS as Record<string, number[]>)) {
+      expect(shown).toContain(1);
+      expect(shown).toContain(11);
+    }
   });
 
   it("every var() reference carries a literal fallback", () => {

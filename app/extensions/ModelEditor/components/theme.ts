@@ -299,6 +299,40 @@ input:focus, select:focus, textarea:focus { border-color: ${ME.ctlBorderFocus}; 
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-bg-hover, #aab1bb); background-clip: content-box; }
 
+/* Strategy measure-column groups.
+   Eleven columns cannot fit a 1150px window, and sideways scrolling in a grid
+   you work DOWN is the worst of both directions. Driven by nth-child against
+   the table's data-cols rather than by making eleven hand-written <td>s
+   conditional — the header is a map and the body is eleven literals, so a JSX
+   split would be eleven chances for the two to disagree about which column is
+   which. Columns 1 (measure) and 11 (reviewed) are never hidden.
+   Keep in step with MEASURE_GROUP_COLUMNS in StrategySection.tsx; a test
+   asserts the two agree. */
+table[data-cols="meaning"] :is(th, td):nth-child(3),
+table[data-cols="meaning"] :is(th, td):nth-child(6),
+table[data-cols="meaning"] :is(th, td):nth-child(7),
+table[data-cols="meaning"] :is(th, td):nth-child(9),
+table[data-cols="meaning"] :is(th, td):nth-child(10) { display: none; }
+
+table[data-cols="aggregation"] :is(th, td):nth-child(2),
+table[data-cols="aggregation"] :is(th, td):nth-child(4),
+table[data-cols="aggregation"] :is(th, td):nth-child(5),
+table[data-cols="aggregation"] :is(th, td):nth-child(8),
+table[data-cols="aggregation"] :is(th, td):nth-child(9),
+table[data-cols="aggregation"] :is(th, td):nth-child(10) { display: none; }
+
+table[data-cols="slicing"] :is(th, td):nth-child(2),
+table[data-cols="slicing"] :is(th, td):nth-child(3),
+table[data-cols="slicing"] :is(th, td):nth-child(4),
+table[data-cols="slicing"] :is(th, td):nth-child(5),
+table[data-cols="slicing"] :is(th, td):nth-child(6),
+table[data-cols="slicing"] :is(th, td):nth-child(7),
+table[data-cols="slicing"] :is(th, td):nth-child(8) { display: none; }
+
+/* A row spanning every column (the empty state) must not be chopped up by the
+   rules above — it has one cell, not eleven. */
+table[data-cols] :is(th, td)[colspan] { display: table-cell !important; }
+
 @keyframes me-palette-in {
   from { opacity: 0; transform: scale(0.98); }
   to   { opacity: 1; transform: scale(1); }

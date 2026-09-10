@@ -326,6 +326,41 @@ async function mount(ctx: SectionCtx = ctxFor()): Promise<void> {
   await act(async () => {
     root.render(<StrategySection ctx={ctx} />);
   });
+  // The grid now opens filtered to the rows that still need an answer, which
+  // is right for the sweep the tab exists for and wrong for a suite that
+  // asserts on CONFIRMED rows. Every test here predates the filter and means
+  // "the grid", so the harness restores the unfiltered view; the handful of
+  // tests ABOUT the filter set it themselves.
+  await showAllMeasures();
+}
+
+/** Switch the section to one of its four views. */
+async function showView(id: "measures" | "tables" | "rules" | "defaults"): Promise<void> {
+  const tab = container.querySelector<HTMLButtonElement>(`[data-testid="strategy-view-${id}"]`);
+  if (!tab) return;
+  await act(async () => {
+    tab.click();
+  });
+}
+
+/** Drop the default "Needs review" filter so every measure row is present. */
+async function showAllMeasures(): Promise<void> {
+  const select = container.querySelector<HTMLSelectElement>('[data-testid="measure-row-filter"]');
+  if (!select || select.value === "all") return;
+  await act(async () => {
+    select.value = "all";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+/** Show every column, so a test may assert on any of the eleven. */
+async function showAllColumns(): Promise<void> {
+  const select = container.querySelector<HTMLSelectElement>('[data-testid="measure-column-group"]');
+  if (!select || select.value === "all") return;
+  await act(async () => {
+    select.value = "all";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
 }
 
 /** Let the preview land.
@@ -522,6 +557,7 @@ describe("the row state", () => {
     expect(measureRow("Profit").getAttribute("data-unconfirmed")).toBe("false");
     // The table entry, and the OTHER measure, are untouched.
     expect(measureRow("Returns").getAttribute("data-unconfirmed")).toBe("false");
+    await showView("tables");
     const table = container.querySelector('tr[data-strategy-path="tables[\'Dim\']"]');
     expect(table?.getAttribute("data-unconfirmed")).toBe("true");
     // Nothing writes until Save.
@@ -532,6 +568,7 @@ describe("the row state", () => {
     await mount();
     await click(button("Confirm all"));
     expect(measureRow("Profit").getAttribute("data-unconfirmed")).toBe("false");
+    await showView("tables");
     expect(
       container.querySelector('tr[data-strategy-path="tables[\'Dim\']"]')?.getAttribute("data-unconfirmed"),
     ).toBe("false");
@@ -599,6 +636,7 @@ describe("Confirm all", () => {
     await click(button("Confirm all"));
 
     expect(measureRow("Returns").getAttribute("data-unconfirmed")).toBe("false");
+    await showView("tables");
     expect(
       container.querySelector('tr[data-strategy-path="tables[\'Dim\']"]')?.getAttribute("data-unconfirmed"),
     ).toBe("false");
@@ -904,6 +942,7 @@ describe("un-confirming a row", () => {
       tables: { Sales: { kind: "fact", reviewed: true, columns: { Amount: { role: "ignore" } } } },
     });
     await mount();
+    await showView("tables");
     const tableRow = (): Element | null =>
       container.querySelector('tr[data-strategy-path="tables[\'Sales\']"]');
     expect(tableRow()?.getAttribute("data-strategy-state")).toBe("confirmed");
@@ -1012,6 +1051,7 @@ describe("the model panel", () => {
 
   it("edits the time axis through the document helper, and writes nothing until Save", async () => {
     await mount();
+    await showView("defaults");
 
     // A picker over the model's own columns, never free text: a typo here is
     // not a broken axis, it is an axis that silently disables every time fact.
@@ -1036,6 +1076,7 @@ describe("the model panel", () => {
     ];
     withCalendar.dateTable = "Calendar";
     await mount(ctxFor(withCalendar));
+    await showView("defaults");
 
     const groups = [...axisSelect().querySelectorAll("optgroup")];
     expect(groups[0].getAttribute("label")).toContain("Calendar");
@@ -1056,6 +1097,7 @@ describe("the model panel", () => {
 
   it("refuses a fiscal year start that is not MM-DD, and says why", async () => {
     await mount();
+    await showView("defaults");
     const field = byTestId<HTMLInputElement>("model-fiscal-year-start");
 
     // The commonest wrong answer: a fiscal year start RECURS, so it carries no
@@ -1075,6 +1117,7 @@ describe("the model panel", () => {
 
   it("takes an MM-DD fiscal year start", async () => {
     await mount();
+    await showView("defaults");
     await commitText(byTestId<HTMLInputElement>("model-fiscal-year-start"), "04-01");
     expect(container.querySelector('[data-testid="model-fiscal-year-start-error"]')).toBeNull();
 
@@ -1095,6 +1138,7 @@ describe("the model panel", () => {
     // against the Rust table in lib/strategyTypes.test.ts; this row is about
     // what the PANEL does with the answer.)
     await mount();
+    await showView("defaults");
     const field = byTestId<HTMLInputElement>("model-fiscal-year-start");
 
     await commitText(field, "02-31");
@@ -1110,25 +1154,41 @@ describe("the model panel", () => {
     expect(lastSaved().model?.fiscalYearStart).toBe("02-29");
   });
 
-  it("marks exactly the two fields nothing reads yet, and neither of the two that are read", async () => {
+  it("marks exactly the ONE field nothing reads yet, and none of the fields that are read", async () => {
+    // THIS TEST DID ITS JOB. It used to assert
+    // ["cadence", "fiscalYearStart", "unit"], with a comment saying that when
+    // one of those acquired a reader its note had to go and only an exhaustive
+    // assertion would notice. Two of them did, on 2026-09-09:
+    //   unit    -> insights/model.rs:1701 and :1804, where narration words a
+    //              percent, a ratio and a currency differently.
+    //   cadence -> insights/model.rs:1754, where expected_cycle() picks the
+    //              seasonality lag; proved by the Rust test named
+    //              `the_declared_cadence_decides_which_cycle_a_seasonal_measure_reports`.
+    // Their asterisks stayed on screen for a day, asserting something false —
+    // which is the same lie as an unmarked inert field, pointed the other way.
+    //
+    // Collected across EVERY view, not just the one showing: the markers live
+    // on different pages now (the model block here, the grid header there), and
+    // an assertion scoped to one view would stop noticing a stale note on
+    // another.
     await mount();
-
-    // An EQUALITY, not two presence checks. `defaultTimeAxis` and `priority`
-    // are both consulted, so a note on either of them would be a fresh lie; and
-    // when one of these two fields finally acquires a reader, its note has to
-    // go, which only an exhaustive assertion notices.
-    const marked = [...container.querySelectorAll("[data-inert-field]")]
-      .map((el) => el.getAttribute("data-inert-field"))
-      .sort();
+    const marked = new Set<string>();
+    for (const v of ["measures", "tables", "rules", "defaults"] as const) {
+      await showView(v);
+      for (const el of container.querySelectorAll("[data-inert-field]")) {
+        marked.add(el.getAttribute("data-inert-field") ?? "");
+      }
+    }
     // `reportingCurrency` is NOT here because it was DELETED rather than
     // labelled — it had no reader and none coming, and deleting is the cheaper
-    // reversal. `unit` and `cadence` are marked in the measures grid's header
-    // instead of per row, so they appear once each.
-    expect(marked).toEqual(["cadence", "fiscalYearStart", "unit"]);
+    // reversal. `defaultTimeAxis` and `priority` are both consulted, so a note
+    // on either would be a fresh lie.
+    expect([...marked].sort()).toEqual(["fiscalYearStart"]);
   });
 
   it("says an inert value is SAVED as well as unread, in visible text rather than a tooltip", async () => {
     await mount();
+    await showView("defaults");
     // Both halves. "Nothing reads this" alone reads as "typing here is
     // pointless", and the value is in fact stored and carried with the model.
     const note = byTestId("model-not-consulted-fiscalYearStart");
@@ -1145,6 +1205,7 @@ describe("the model panel", () => {
       model: { priority: ["Profit", "Returns"] },
     });
     await mount();
+    await showView("defaults");
 
     const list = byTestId("model-priority");
     expect([...list.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
@@ -1171,6 +1232,7 @@ describe("the model panel", () => {
       ],
     });
     await mount();
+    await showView("defaults");
     await click(button("Validate"));
 
     const panel = byTestId("model-panel");
@@ -1187,6 +1249,7 @@ describe("the model panel", () => {
       model: { defaultTimeAxis: "Sales[DeptKey]", reviewed: false },
     });
     await mount();
+    await showView("defaults");
 
     const panel = (): HTMLElement => byTestId("model-panel");
     expect(panel().getAttribute("data-strategy-state")).toBe("inferred");
@@ -1209,6 +1272,7 @@ describe("the model panel", () => {
       model: { defaultTimeAxis: "Sales[DeptKey]", reviewed: true },
     });
     await mount();
+    await showView("defaults");
     const panel = (): HTMLElement => byTestId("model-panel");
 
     await click(byTestId("unconfirm-model", panel()));
@@ -1228,6 +1292,7 @@ describe("the model panel", () => {
 
   it("offers nothing to confirm when the block says nothing", async () => {
     await mount();
+    await showView("defaults");
     // MIXED_DOC carries no model block at all. Confirming four empty boxes
     // agrees to nothing, exactly as on an empty row.
     const panel = byTestId("model-panel");
@@ -1245,6 +1310,7 @@ describe("the model panel", () => {
       model: { defaultTimeAxis: "Dim[DeptKey]", reviewed: false, source: "inferred" },
     });
     await mount();
+    await showView("defaults");
 
     const note = byTestId("divergence-model", byTestId("model-panel"));
     expect(note.textContent).toContain("Sales[DeptKey]");
@@ -1263,6 +1329,7 @@ describe("the model panel", () => {
       model: { defaultTimeAxis: "Gone[Day]" },
     });
     await mount();
+    await showView("defaults");
 
     // A <select> whose value matches no option renders blank, which would read
     // as "nobody set an axis" and erase the setting on the next edit.
@@ -1761,6 +1828,7 @@ describe("the columns grid", () => {
   it("collapses the ignored columns behind a summary that names the count", async () => {
     vi.mocked(strategyGet).mockResolvedValue(ROLED);
     await mount();
+    await showView("tables");
 
     expect(columnRow("Sales", "Note")).not.toBeNull();
     expect(columnRow("Sales", "Amount")).toBeNull();
@@ -1770,6 +1838,7 @@ describe("the columns grid", () => {
   it("expands to reveal the ignored columns still editable, and the count follows the edit", async () => {
     vi.mocked(strategyGet).mockResolvedValue(ROLED);
     await mount();
+    await showView("tables");
     // The summary carries a chevron glyph as well as its words, so it is
     // reached by its row rather than by an exact-text button lookup.
     await click(byTestId("ignored-summary-Sales").querySelector("button") as HTMLButtonElement);
@@ -1794,6 +1863,7 @@ describe("the columns grid", () => {
 describe("the rules section with no rules in it", () => {
   it("invites the action and names what a rule DOES, rather than defining one", async () => {
     await mount();
+    await showView("rules");
     const emptyState = byTestId("rules-empty");
     const text = emptyState.textContent ?? "";
 
@@ -1810,6 +1880,7 @@ describe("the rules section with no rules in it", () => {
 
   it("carries the action itself, so the 11px header button is not the only way in", async () => {
     await mount();
+    await showView("rules");
 
     const add = byTestId<HTMLButtonElement>("rules-empty-add", byTestId("rules-empty"));
     expect(add.disabled).toBe(false);
@@ -1823,6 +1894,7 @@ describe("the rules section with no rules in it", () => {
 
   it("explains a grey add control instead of only greying it out", async () => {
     await mount(ctxFor(overview(), true));
+    await showView("rules");
 
     expect(byTestId<HTMLButtonElement>("rules-empty-add").disabled).toBe(true);
     expect(button("Add rule").disabled).toBe(true);
@@ -1841,6 +1913,7 @@ describe("the rules section with no rules in it", () => {
     const subscribed = overview();
     subscribed.readOnlyReason = "this model came from the 'Nordics KPIs' application";
     await mount(ctxFor(subscribed, true));
+    await showView("rules");
 
     // The banner above already knows why this model refuses edits. A second
     // sentence invented in the Strategy tab would be a second source of truth
@@ -1850,6 +1923,7 @@ describe("the rules section with no rules in it", () => {
 
   it("says nothing at all when the add control is live", async () => {
     await mount();
+    await showView("rules");
     expect(container.querySelector('[data-testid="rules-add-blocked"]')).toBeNull();
   });
 });
@@ -1893,6 +1967,7 @@ describe("why Add rule is grey", () => {
 describe("the rule scope editor", () => {
   it("offers the model's columns as a picker, with no free-text column field", async () => {
     await mount();
+    await showView("rules");
     await click(button("Add rule"));
     await click(button("Add scope column"));
 
@@ -2140,6 +2215,7 @@ describe("the table kind", () => {
     // the first (it stops classifying that table for itself) and DISREGARDS
     // the second, re-deriving it from today's relationship graph.
     await mount();
+    await showView("tables");
     await settle();
 
     expect(kindCell("Dim").getAttribute("data-kind-origin")).toBe("chosen");
@@ -2156,6 +2232,7 @@ describe("the table kind", () => {
     // as storing it, or a machine's reading would become a person's statement
     // by being looked at.
     await mount();
+    await showView("tables");
     await settle();
 
     expect(kindSelect("Sales").value).toBe("");
@@ -2168,6 +2245,7 @@ describe("the table kind", () => {
     vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
     vi.mocked(strategyInfer).mockResolvedValue({ version: 1 });
     await mount();
+    await showView("tables");
     await settle();
 
     expect(kindCell("Sales").getAttribute("data-kind-origin")).toBe("none");
@@ -2181,6 +2259,7 @@ describe("the table kind", () => {
     // Save-blocking error — so the cheapest fix is to make the state hard to
     // reach rather than to explain a whole-document refusal afterwards.
     await mount();
+    await showView("tables");
     await settle();
 
     expect(option("Sales", "calendar").disabled).toBe(true);
@@ -2226,6 +2305,7 @@ describe("the table kind", () => {
       ],
     });
     await mount();
+    await showView("tables");
     await settle();
     await click(button("Validate"));
 
@@ -2287,6 +2367,7 @@ describe("the reviewed column", () => {
     await mount();
     await settle();
 
+    await showView("tables");
     const row = container.querySelector(
       "tr[data-strategy-path=\"tables['Dim']\"]",
     ) as HTMLElement;
@@ -2307,18 +2388,18 @@ describe("the reviewed column", () => {
       (r) => r.firstElementChild?.textContent === "measure",
     );
     expect(headerRow, "the measures grid must still have a header row").toBeDefined();
-    // The `*` on two of them is the not-yet-consulted mark, said once in the
-    // header rather than once per row. It is part of the header's text, so it
-    // is asserted here rather than stripped — a silent strip would let the mark
-    // disappear without this noticing.
+    // The two `*` marks are GONE: unit and cadence acquired readers on
+    // 2026-09-09 (see "marks exactly the ONE field" above). A mark is part of
+    // the header's text and is asserted here rather than stripped, so a mark
+    // appearing or vanishing cannot pass unnoticed.
     expect([...headerRow!.children].map((h) => h.textContent)).toEqual([
       "measure",
       "direction",
       "aggregation",
-      "unit*",
+      "unit",
       "target",
       "materiality",
-      "cadence*",
+      "cadence",
       "priority",
       "analysis dimensions",
       "never slice by",
@@ -2338,6 +2419,7 @@ describe("the rule's suppress field", () => {
     // serde and the backend discards the WHOLE strategy, so a box that can
     // type an unsaveable value is worse than the untyped version it replaced.
     await mount();
+    await showView("rules");
     await settle();
     await click(button("Add rule"));
 
@@ -2354,6 +2436,7 @@ describe("the rule's suppress field", () => {
     // A set of kinds has to produce one string, or two people who chose the
     // same suppressions get two different documents and a diff nobody can read.
     await mount();
+    await showView("rules");
     await settle();
     await click(button("Add rule"));
 
@@ -2386,5 +2469,99 @@ describe("the rule's suppress field", () => {
     );
     expect(built.ok).toBe(false);
     expect(built.ok === false && built.error).toContain("Did you mean 'contribution'?");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Four views, and the two filters that keep a 300-measure grid usable
+// ---------------------------------------------------------------------------
+// This used to be five panels stacked in ONE scroll container, eleven columns
+// wide. Reaching Rules meant scrolling past every measure, and reading the
+// eleventh column meant scrolling sideways in a grid you work DOWN — which is
+// what forced `reviewed` to be sticky in the first place.
+
+describe("the view switcher", () => {
+  it("shows one view at a time, so a 300-row grid is not between you and Rules", async () => {
+    await mount();
+    await settle();
+    // Measures first: it is the sweep the tab exists for.
+    expect(container.querySelector('[data-testid="measures-grid"]')).not.toBeNull();
+    expect(container.querySelector("tr[data-strategy-path=\"tables['Dim']\"]")).toBeNull();
+
+    await showView("tables");
+    expect(container.querySelector('[data-testid="measures-grid"]')).toBeNull();
+    expect(container.querySelector("tr[data-strategy-path=\"tables['Dim']\"]")).not.toBeNull();
+  });
+
+  it("keeps the findings strip OUTSIDE the switcher", async () => {
+    // A finding is why Save is refusing. Hiding it behind whichever view you
+    // are not looking at would leave a disabled Save with its reason one click
+    // away — the exact thing the strip exists to prevent.
+    await mount();
+    await settle();
+    for (const v of ["measures", "tables", "rules", "defaults"] as const) {
+      await showView(v);
+      expect(
+        container.querySelector('[data-testid="strategy-views"]'),
+        `the switcher must survive the ${v} view`,
+      ).not.toBeNull();
+    }
+  });
+});
+
+describe("the measures grid filters", () => {
+  it("opens on the rows that still need an answer", async () => {
+    // A fresh draft is entirely unconfirmed, so this shows everything; the
+    // point is that a mostly-CONFIRMED model does not.
+    await act(async () => {
+      root.render(<StrategySection ctx={ctxFor()} />);
+    });
+    await settle();
+    const filter = byTestId<HTMLSelectElement>("measure-row-filter");
+    expect(filter.value).toBe("needsReview");
+  });
+
+  it("hides a confirmed row, and says how many of how many are left", async () => {
+    await act(async () => {
+      root.render(<StrategySection ctx={ctxFor()} />);
+    });
+    await settle();
+    await click(button("Confirm", measureRow("Profit")));
+    // Confirmed rows leave the sweep. That is the behaviour that turns 300
+    // rows into the 12 you have not answered.
+    expect(container.querySelector("tr[data-strategy-path=\"measures['Profit']\"]")).toBeNull();
+    expect(byTestId("measure-row-count").textContent).toMatch(/of \d+ unconfirmed/);
+  });
+
+  it("offers a way back when the filter has hidden everything", async () => {
+    // An empty grid with measures in the model behind it is otherwise
+    // indistinguishable from a broken one.
+    await act(async () => {
+      root.render(<StrategySection ctx={ctxFor()} />);
+    });
+    await settle();
+    await click(button("Confirm all"));
+    const escape = container.querySelector<HTMLButtonElement>('[data-testid="measure-show-all"]');
+    expect(escape, "an emptied grid must say which filter emptied it").not.toBeNull();
+    await click(escape!);
+    expect(container.querySelector("tr[data-strategy-path=\"measures['Profit']\"]")).not.toBeNull();
+  });
+
+  it("switches column groups without changing what any column contains", async () => {
+    // The grouping is presentational: it hides columns, it never reorders them
+    // or moves a value into a different one.
+    await mount();
+    await settle();
+    const grid = byTestId<HTMLElement>("measures-grid");
+    expect(grid.getAttribute("data-cols")).toBe("meaning");
+
+    const headersOf = (): string[] =>
+      [...grid.querySelectorAll("thead th")].map((h) => h.textContent ?? "");
+    const before = headersOf();
+    await showAllColumns();
+    expect(grid.getAttribute("data-cols")).toBe("all");
+    // Every column is still present and in the same order — hiding is done in
+    // CSS against nth-child, so the DOM never changes shape.
+    expect(headersOf()).toEqual(before);
   });
 });
