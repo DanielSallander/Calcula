@@ -15,6 +15,7 @@ import {
   setDslControlHints,
   type DslControlHint,
 } from "./pivotDslLanguage";
+import { DescribeQueryRow, type DesignQueryAssistHost } from "./DescribeQueryRow";
 import type { BiPivotModelInfo } from "../../components/types";
 
 interface DesignQueryEditorProps {
@@ -27,6 +28,13 @@ interface DesignQueryEditorProps {
   controlHints?: DslControlHint[];
   /** Editor height (CSS). Defaults to 160px. */
   height?: string;
+  /**
+   * When set, a "describe the report in words" row is shown above the editor
+   * and a drafted query is put into it through `onChange`. The host supplies
+   * the connection and, when it can, a dry run — the shared editor has no
+   * backend channel of its own.
+   */
+  assist?: DesignQueryAssistHost;
 }
 
 export function DesignQueryEditor({
@@ -35,6 +43,7 @@ export function DesignQueryEditor({
   biModel,
   controlHints,
   height = "160px",
+  assist,
 }: DesignQueryEditorProps): React.ReactElement {
   useEffect(() => {
     registerPivotDslLanguage();
@@ -77,6 +86,10 @@ export function DesignQueryEditor({
   const handleChange: OnChange = useCallback((v) => onChange(v ?? ""), [onChange]);
 
   return (
+    <>
+    {assist && assist.connectionId ? (
+      <DescribeQueryRow biModel={biModel} host={assist} onDraft={onChange} />
+    ) : null}
     <div
       style={{
         height,
@@ -116,5 +129,6 @@ export function DesignQueryEditor({
         }}
       />
     </div>
+    </>
   );
 }

@@ -2717,6 +2717,8 @@ export {
   getInsightsProvider,
   requireInsightsProvider,
   resetInsightsProvider,
+  describeBundleForModel,
+  INSIGHT_NARRATION_RULES,
 } from "./insightsService";
 
 export type {
@@ -2725,6 +2727,7 @@ export type {
   InsightEvidence,
   InsightProvenance,
   InsightsProvider,
+  ModelConnection,
   ModelInsightsRequest,
   RangeInsightsRequest,
 } from "./insightsService";

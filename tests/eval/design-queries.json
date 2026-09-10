@@ -1,0 +1,489 @@
+{
+  "$comment": [
+    "THE DESIGN-QUERY EVAL CORPUS.",
+    "",
+    "Each task states a request a person would type into the 'describe the",
+    "report in words' row over the sales-star fixture model",
+    "(tests/fixtures/model/sales_star.json + sales_star_strategy.json), the",
+    "query that answers it, and a `distractor`: the plausible wrong query a",
+    "model reaches for, which MUST NOT be equal to the reference. A task whose",
+    "distractor equals its reference measures nothing and is a defect.",
+    "",
+    "Layer A (CI, no model): every reference parses and compiles against the",
+    "fixture with no errors; every distractor differs from its reference in",
+    "canonical form; every name a reference uses is among the candidates the",
+    "assistant would show a model for that intent.",
+    "",
+    "Equality is CANONICAL (canonical.ts): names case-insensitive, layout",
+    "directives unordered, SORT and TOP N included.",
+    "",
+    "SORT orders row and column LABELS only; the DSL ranks by a measure's",
+    "value solely through TOP/BOTTOM N BY [Measure]. Every 'highest first'",
+    "task therefore expects TOP N, never SORT: [Measure].",
+    "",
+    "Filter values are plausible member names; the fixture carries no rows, so",
+    "they are not verified against data. Subcategory is snowflaked and is left",
+    "out of the references: the query engine refuses paths longer than one hop.",
+    "",
+    "A task may list `alternatives`: other queries that answer the request",
+    "equally well (Date.Month vs Date.MonthName; the Swedish \"marginal\" that is",
+    "either margin measure). Layer A requires each to compile, to differ from",
+    "the reference and from the distractor; Layer B grades any of them as a pass."
+  ],
+  "version": 1,
+  "tasks": [
+    {
+      "id": "revenue-by-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "one-measure"
+      ],
+      "intent": "revenue by product category",
+      "reference": "ROWS: Product.Category\nVALUES: [Revenue]",
+      "distractor": "ROWS: Product.Category\nVALUES: [Cost]"
+    },
+    {
+      "id": "revenue-and-cost-by-region",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures"
+      ],
+      "intent": "revenue and cost by region",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue], [Cost]",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]"
+    },
+    {
+      "id": "top-3-segments-by-margin",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top"
+      ],
+      "intent": "the three customer segments with the highest margin",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Margin]\nTOP 3 BY [Margin]",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Margin]\nSORT: Customer.Segment DESC",
+      "alternatives": [
+        "ROWS: Customer.Segment\nVALUES: [MarginPct]\nTOP 3 BY [MarginPct]"
+      ]
+    },
+    {
+      "id": "revenue-per-year",
+      "lang": "en",
+      "tags": [
+        "time"
+      ],
+      "intent": "revenue per year",
+      "reference": "ROWS: Date.Year\nVALUES: [Revenue]",
+      "distractor": "ROWS: Date.Date\nVALUES: [Revenue]"
+    },
+    {
+      "id": "revenue-by-year-and-month",
+      "lang": "en",
+      "tags": [
+        "time",
+        "two-levels"
+      ],
+      "intent": "revenue by year and month",
+      "reference": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Revenue]",
+      "alternatives": [
+        "ROWS: Date.Year, Date.Month\nVALUES: [Revenue]"
+      ]
+    },
+    {
+      "id": "marginpct-by-category-split-by-region",
+      "lang": "en",
+      "tags": [
+        "columns"
+      ],
+      "intent": "margin percentage by category, with the regions as columns",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Geography.Region\nVALUES: [MarginPct]",
+      "distractor": "ROWS: Product.Category, Geography.Region\nVALUES: [MarginPct]"
+    },
+    {
+      "id": "top-5-countries-by-revenue",
+      "lang": "en",
+      "tags": [
+        "top"
+      ],
+      "intent": "top 5 countries by revenue",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 5 BY [Revenue]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nSORT: [Revenue] DESC"
+    },
+    {
+      "id": "bottom-3-categories-by-margin",
+      "lang": "en",
+      "tags": [
+        "top"
+      ],
+      "intent": "bottom 3 categories by margin",
+      "reference": "ROWS: Product.Category\nVALUES: [Margin]\nBOTTOM 3 BY [Margin]",
+      "distractor": "ROWS: Product.Category\nVALUES: [Margin]\nTOP 3 BY [Margin]",
+      "alternatives": [
+        "ROWS: Product.Category\nVALUES: [MarginPct]\nBOTTOM 3 BY [MarginPct]"
+      ]
+    },
+    {
+      "id": "customers-by-segment",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "one-measure"
+      ],
+      "intent": "number of customers by segment",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Customers]",
+      "distractor": "ROWS: Customer.Name\nVALUES: [Customers]"
+    },
+    {
+      "id": "quantity-by-category-consumer-only",
+      "lang": "en",
+      "tags": [
+        "filter"
+      ],
+      "intent": "quantity sold by category for the Consumer segment only",
+      "reference": "ROWS: Product.Category\nVALUES: [Quantity]\nFILTERS: Customer.Segment = (\"Consumer\")",
+      "distractor": "ROWS: Product.Category, Customer.Segment\nVALUES: [Quantity]"
+    },
+    {
+      "id": "revenue-by-region-excluding-europe",
+      "lang": "en",
+      "tags": [
+        "filter",
+        "exclude"
+      ],
+      "intent": "revenue by region excluding Europe",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Geography.Region NOT IN (\"Europe\")",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Geography.Region = (\"Europe\")"
+    },
+    {
+      "id": "share-of-revenue-by-category",
+      "lang": "en",
+      "tags": [
+        "show-as"
+      ],
+      "intent": "share of total revenue by category",
+      "reference": "ROWS: Product.Category\nVALUES: [Revenue] [% of grand total]",
+      "distractor": "ROWS: Product.Category\nVALUES: [Revenue]"
+    },
+    {
+      "id": "running-total-revenue-by-month",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "time"
+      ],
+      "intent": "running total of revenue by year and month",
+      "reference": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue] [running total]",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]",
+      "alternatives": [
+        "ROWS: Date.Year, Date.Month\nVALUES: [Revenue] [running total]"
+      ]
+    },
+    {
+      "id": "revenue-by-category-pct-of-region",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "columns"
+      ],
+      "intent": "revenue by category as a percentage of each region column",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Geography.Region\nVALUES: [Revenue] [% of column]",
+      "distractor": "ROWS: Product.Category\nCOLUMNS: Geography.Region\nVALUES: [Revenue] [% of row]"
+    },
+    {
+      "id": "cost-and-margin-by-country-tabular",
+      "lang": "en",
+      "tags": [
+        "layout"
+      ],
+      "intent": "cost and margin by country, tabular layout without grand totals",
+      "reference": "ROWS: Geography.Country\nVALUES: [Cost], [Margin]\nLAYOUT: tabular, no-grand-totals",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Cost], [Margin]"
+    },
+    {
+      "id": "average-amount-per-segment",
+      "lang": "en",
+      "tags": [
+        "aggregate-column"
+      ],
+      "intent": "average sales amount per customer segment",
+      "reference": "ROWS: Customer.Segment\nVALUES: average(Sales.Amount)",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Revenue]"
+    },
+    {
+      "id": "sum-of-amount-column-by-year",
+      "lang": "en",
+      "tags": [
+        "aggregate-column",
+        "time"
+      ],
+      "intent": "the sum of the Amount column by year",
+      "reference": "ROWS: Date.Year\nVALUES: sum(Sales.Amount)",
+      "distractor": "ROWS: Date.Year\nVALUES: count(Sales.Amount)"
+    },
+    {
+      "id": "revenue-by-category-and-segment",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "revenue by category and segment",
+      "reference": "ROWS: Product.Category, Customer.Segment\nVALUES: [Revenue]",
+      "distractor": "ROWS: Product.Category\nCOLUMNS: Customer.Segment\nVALUES: [Revenue]"
+    },
+    {
+      "id": "revenue-per-country-region-columns",
+      "lang": "en",
+      "tags": [
+        "columns"
+      ],
+      "intent": "revenue per country with the regions as columns",
+      "reference": "ROWS: Geography.Country\nCOLUMNS: Geography.Region\nVALUES: [Revenue]",
+      "distractor": "ROWS: Geography.Region\nCOLUMNS: Geography.Country\nVALUES: [Revenue]"
+    },
+    {
+      "id": "margin-and-marginpct-by-year-desc",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "time"
+      ],
+      "intent": "margin and margin percentage by year, latest year first",
+      "reference": "ROWS: Date.Year\nVALUES: [Margin], [MarginPct]\nSORT: Date.Year DESC",
+      "distractor": "ROWS: Date.Year\nVALUES: [Margin], [MarginPct]\nSORT: Date.Year ASC"
+    },
+    {
+      "id": "top-3-regions-by-customers",
+      "lang": "en",
+      "tags": [
+        "top"
+      ],
+      "intent": "the three regions with the most customers",
+      "reference": "ROWS: Geography.Region\nVALUES: [Customers]\nTOP 3 BY [Customers]",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Customers]\nBOTTOM 3 BY [Customers]"
+    },
+    {
+      "id": "revenue-by-segment-for-2024",
+      "lang": "en",
+      "tags": [
+        "filter",
+        "time"
+      ],
+      "intent": "revenue by segment for 2024",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")",
+      "distractor": "ROWS: Customer.Segment, Date.Year\nVALUES: [Revenue]"
+    },
+    {
+      "id": "revenue-per-month-in-2024",
+      "lang": "en",
+      "tags": [
+        "filter",
+        "time"
+      ],
+      "intent": "revenue per month in 2024",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")"
+      ]
+    },
+    {
+      "id": "cost-by-category-subtotals-off",
+      "lang": "en",
+      "tags": [
+        "layout"
+      ],
+      "intent": "cost by category with subtotals switched off",
+      "reference": "ROWS: Product.Category\nVALUES: [Cost]\nLAYOUT: subtotals-off",
+      "distractor": "ROWS: Product.Category\nVALUES: [Cost]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "revenue-renamed-sales-by-region",
+      "lang": "en",
+      "tags": [
+        "alias"
+      ],
+      "intent": "revenue by region, with the revenue column headed Sales",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue] AS \"Sales\"",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]"
+    },
+    {
+      "id": "revenue-difference-month-on-month",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "time"
+      ],
+      "intent": "the change in revenue from one month to the next, by year and month",
+      "reference": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue] [difference]",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]",
+      "alternatives": [
+        "ROWS: Date.Year, Date.Month\nVALUES: [Revenue] [difference]",
+        "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue] [% difference]",
+        "ROWS: Date.Year, Date.Month\nVALUES: [Revenue] [% difference]"
+      ]
+    },
+    {
+      "id": "top-3-categories-by-marginpct",
+      "lang": "en",
+      "tags": [
+        "top"
+      ],
+      "intent": "which three categories have the highest margin percentage",
+      "reference": "ROWS: Product.Category\nVALUES: [MarginPct]\nTOP 3 BY [MarginPct]",
+      "distractor": "ROWS: Product.Category\nVALUES: [Margin]\nTOP 3 BY [Margin]"
+    },
+    {
+      "id": "revenue-by-category-months-as-columns",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time"
+      ],
+      "intent": "revenue by category with the months as columns",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Date.MonthName\nVALUES: [Revenue]",
+      "distractor": "ROWS: Date.MonthName\nCOLUMNS: Product.Category\nVALUES: [Revenue]",
+      "alternatives": [
+        "ROWS: Product.Category\nCOLUMNS: Date.Month\nVALUES: [Revenue]"
+      ]
+    },
+    {
+      "id": "customers-per-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "one-measure"
+      ],
+      "intent": "count of customers per country",
+      "reference": "ROWS: Geography.Country\nVALUES: [Customers]",
+      "distractor": "ROWS: Geography.Country\nVALUES: count(Sales.CustomerKey)"
+    },
+    {
+      "id": "revenue-and-quantity-by-segment-europe",
+      "lang": "en",
+      "tags": [
+        "filter",
+        "two-measures"
+      ],
+      "intent": "revenue and quantity by segment in Europe only",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Revenue], [Quantity]\nFILTERS: Geography.Region = (\"Europe\")",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Revenue], [Quantity]\nFILTERS: Geography.Country = (\"Europe\")"
+    },
+    {
+      "id": "sv-omsattning-per-kategori",
+      "lang": "sv",
+      "tags": [
+        "rows",
+        "one-measure"
+      ],
+      "intent": "omsättning per produktkategori",
+      "reference": "ROWS: Product.Category\nVALUES: [Revenue]",
+      "distractor": "ROWS: Product.Name\nVALUES: [Revenue]"
+    },
+    {
+      "id": "sv-kostnad-och-marginal-per-region",
+      "lang": "sv",
+      "tags": [
+        "rows",
+        "two-measures"
+      ],
+      "intent": "kostnad och marginal per region",
+      "reference": "ROWS: Geography.Region\nVALUES: [Cost], [Margin]",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Cost], [Revenue]",
+      "alternatives": [
+        "ROWS: Geography.Region\nVALUES: [Cost], [MarginPct]"
+      ]
+    },
+    {
+      "id": "sv-antal-kunder-per-segment",
+      "lang": "sv",
+      "tags": [
+        "rows",
+        "one-measure"
+      ],
+      "intent": "antal kunder per segment",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Customers]",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Quantity]"
+    },
+    {
+      "id": "sv-omsattning-per-ar",
+      "lang": "sv",
+      "tags": [
+        "time"
+      ],
+      "intent": "omsättning per år",
+      "reference": "ROWS: Date.Year\nVALUES: [Revenue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Revenue]"
+    },
+    {
+      "id": "sv-fem-storsta-landerna",
+      "lang": "sv",
+      "tags": [
+        "top"
+      ],
+      "intent": "de fem största länderna efter omsättning",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 5 BY [Revenue]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nBOTTOM 5 BY [Revenue]"
+    },
+    {
+      "id": "sv-tre-kategorier-hogst-marginal",
+      "lang": "sv",
+      "tags": [
+        "top"
+      ],
+      "intent": "de tre kategorier som har högst marginal",
+      "reference": "ROWS: Product.Category\nVALUES: [Margin]\nTOP 3 BY [Margin]",
+      "distractor": "ROWS: Product.Category\nVALUES: [Margin]\nBOTTOM 3 BY [Margin]",
+      "alternatives": [
+        "ROWS: Product.Category\nVALUES: [MarginPct]\nTOP 3 BY [MarginPct]"
+      ]
+    },
+    {
+      "id": "sv-omsattning-per-kategori-region-kolumner",
+      "lang": "sv",
+      "tags": [
+        "columns"
+      ],
+      "intent": "omsättning per kategori med region som kolumner",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Geography.Region\nVALUES: [Revenue]",
+      "distractor": "ROWS: Product.Category, Geography.Region\nVALUES: [Revenue]"
+    },
+    {
+      "id": "sv-omsattning-per-manad-2024",
+      "lang": "sv",
+      "tags": [
+        "filter",
+        "time"
+      ],
+      "intent": "omsättning per månad under 2024",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")"
+      ]
+    },
+    {
+      "id": "sv-andel-av-omsattningen-per-segment",
+      "lang": "sv",
+      "tags": [
+        "show-as"
+      ],
+      "intent": "andel av den totala omsättningen per segment",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Revenue] [% of grand total]",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Revenue]"
+    },
+    {
+      "id": "sv-kvantitet-per-land-utan-totalsummor",
+      "lang": "sv",
+      "tags": [
+        "layout"
+      ],
+      "intent": "kvantitet per land utan totalsummor",
+      "reference": "ROWS: Geography.Country\nVALUES: [Quantity]\nLAYOUT: no-grand-totals",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Quantity]"
+    }
+  ]
+}

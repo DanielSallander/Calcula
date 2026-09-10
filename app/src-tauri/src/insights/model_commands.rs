@@ -96,7 +96,11 @@ fn kpi_status_word(status: bi_engine::KpiStatus) -> &'static str {
 /// it means every attribute resolves from its base layer. An UNREADABLE one is
 /// a different thing entirely and is reported: the write path validates before
 /// storing, so a document that will not parse means something else wrote it.
-fn strategy_doc(model: &bi_engine::DataModel, notes: &mut Vec<String>) -> StrategyDoc {
+///
+/// `pub(crate)` because `describe.rs` reads the document for a model the same
+/// way the run does; two readers with two version checks would be the drift
+/// the version check exists to prevent.
+pub(crate) fn strategy_doc(model: &bi_engine::DataModel, notes: &mut Vec<String>) -> StrategyDoc {
     let Some(raw) = model
         .extension_data()
         .get(crate::bi::model_editor::STRATEGY_EXTENSION_KEY)

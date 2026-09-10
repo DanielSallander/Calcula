@@ -49,6 +49,19 @@ export interface AiCompletionRequest {
   temperature?: number;
   /** Ask for a shape rather than prose. Ignored by a runtime that does not support it. */
   responseSchema?: AiResponseSchema;
+  /**
+   * A GBNF grammar the reply must match, for a runtime that honours one.
+   *
+   * Stronger than a schema and answers a different failure: a schema
+   * constrains the ENVELOPE, a grammar constrains the CONTENT, so a
+   * grammar-constrained query cannot name a column it was not shown. The reply
+   * is then the bare text the grammar describes, not JSON — a caller that
+   * sends a grammar reads it that way, and sends no `responseSchema` with it.
+   *
+   * Sent only where `honorsGrammar()` says so. The provider never forwards it
+   * to a vendor that rejects unknown request fields.
+   */
+  grammar?: string;
 }
 
 export interface AiCompletionResult {
@@ -89,6 +102,15 @@ export interface AiCompletionProvider {
    * a tolerant extractor still reads.
    */
   honorsSchema(): boolean | undefined;
+  /**
+   * Whether the selected runtime honours a GBNF `grammar`.
+   *
+   * `undefined` means UNMEASURED. Today the answer is by runtime identity —
+   * only llama.cpp's own server implements the field — and a probe that
+   * measures it, the way `honorsSchema` is measured, arrives with the bundled
+   * runtime. A caller sends a grammar only on `true`.
+   */
+  honorsGrammar(): boolean | undefined;
   complete(req: AiCompletionRequest, opts?: { signal?: AbortSignal }): Promise<AiCompletionResult>;
 }
 

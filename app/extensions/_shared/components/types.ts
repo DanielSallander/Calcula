@@ -6,8 +6,10 @@
 // filter/lookup helpers; re-exported here so BiPivotModelInfo is complete.
 import type { BiPerspectiveInfo } from './perspectiveFilter';
 import type { BiCultureInfo } from './cultureLookup';
+import type { DesignStrategySummary } from '@api/designQueryAssist';
 export type { BiPerspectiveInfo } from './perspectiveFilter';
 export type { BiCultureInfo, BiNameTranslationInfo } from './cultureLookup';
+export type { DesignStrategySummary } from '@api/designQueryAssist';
 
 export type FieldIndex = number;
 
@@ -209,6 +211,10 @@ export interface BiPivotModelInfo {
   /** Cultures defined in the BI model (per-locale metadata translations,
    *  display-only — keys and queries always use raw names). */
   cultures?: BiCultureInfo[];
+  /** The model's strategy document reduced to what the design-query assistant
+   *  needs to choose names (Rust `insights/describe.rs`). Present on
+   *  connection-level metadata; a pivot's cached metadata carries none. */
+  strategy?: DesignStrategySummary | null;
 }
 
 /** A calculation group + its items (read-only metadata). */

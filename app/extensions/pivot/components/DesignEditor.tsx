@@ -8,6 +8,7 @@ import type * as monaco from 'monaco-editor';
 import { processDsl, serialize, type CompileContext } from '../../_shared/dsl/pivotLayout';
 import { getControlValue, type ControlValue } from '@api/controlValues';
 import { LANGUAGE_ID, registerPivotDslLanguage, setDslEditorContext } from '../../_shared/dsl/pivotLayout/pivotDslLanguage';
+import { DescribeQueryRow } from '../../_shared/dsl/pivotLayout/DescribeQueryRow';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
 import type { LayoutConfig, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from './types';
 import type { DslError } from '../../_shared/dsl/pivotLayout/errors';
@@ -161,6 +162,17 @@ export function DesignEditor({
     );
   }, [externalDslText]);
 
+  // A drafted query from the "describe it in words" row: loaded the way Load
+  // Layout loads text, so onChange compiles it and the markers show.
+  const applyDraft = useCallback((dsl: string) => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) return;
+    isProgrammaticEdit.current = false;
+    lastSerializedText.current = dsl;
+    model.pushEditOperations([], [{ range: model.getFullModelRange(), text: dsl }], () => null);
+  }, []);
+
   // When the Design tab becomes active, tell Monaco to recalculate its layout.
   // Monaco doesn't handle display:none -> display:flex transitions on its own.
   useEffect(() => {
@@ -259,6 +271,21 @@ export function DesignEditor({
       display: isActive ? 'flex' : 'none',
       flexDirection: 'column',
       overflow: 'hidden',
+    }}>
+      {/* Model pivots only: a range pivot has no BI model to draft against. The
+          pivot compiles live, so no dry run is needed here. */}
+      {biModel ? (
+        <DescribeQueryRow
+          biModel={biModel}
+          host={{ connectionId: biModel.connectionId ?? '' }}
+          onDraft={applyDraft}
+        />
+      ) : null}
+    <div style={{
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
       border: '1px solid #d0d7de',
       borderRadius: '4px',
     }}>
@@ -291,6 +318,7 @@ export function DesignEditor({
           tabSize: 2,
         }}
       />
+    </div>
     </div>
   );
 }

@@ -6,10 +6,11 @@
 //          surfaces; it contains no analysis of its own.
 //
 //          THE PROVIDER REGISTRATION IS THE LOAD-BEARING LINE. Registering
-//          `InsightsProvider` is what turns the chat's "analyse this" from an
-//          impression into a deterministic answer: the chat asks
-//          `@api/insightsService` and gets the same bundle the pane shows,
-//          without ever importing this extension. It is registered in
+//          `InsightsProvider` is what turns the chat's "what is going on here"
+//          from an impression into a deterministic answer: the AI chat's
+//          pre-route (AIChat/lib/tierZero.ts) asks `@api/insightsService`
+//          before the model sees the message and gets the same bundle the pane
+//          shows, without ever importing this extension. It is registered in
 //          `activate` and unregistered in `deactivate`, like every other seam.
 //
 //          The connection cache is refreshed on activation AND on every document

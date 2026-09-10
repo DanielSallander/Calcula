@@ -253,6 +253,46 @@ export const TOOLS: ChatToolDef[] = [
       required: ["source_range", "destination_cell", "value_fields"],
     },
   },
+  // ---- Analysis: deterministic facts the engine computed (read-only) ----
+  // Until 2026-09-10 only an EXTERNAL MCP client could ask for these. The
+  // in-app chat had no analysis tool at all, so "what is going on in this
+  // data" was answered by a model reading raw cells and reasoning about them —
+  // the one job it is least reliable at, and the reason the engine exists.
+  {
+    name: "analyze_range",
+    description:
+      "Get DETERMINISTIC facts Calcula computed about a range of cells: trend with its r-squared, level shifts, seasonality, outliers by row, correlations, dominance and data-quality warnings. Prefer this over reading the cells and reasoning about them yourself — these statements are checked, and a trend you infer from raw values is not. Hidden rows are excluded and large ranges are sampled; the notes say when either happened. Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sheet_index: { type: "number", description: "0-based sheet index. Omit for the active sheet." },
+        start_row: { type: "number" }, start_col: { type: "number" },
+        end_row: { type: "number" }, end_col: { type: "number" },
+        expand_to_region: {
+          type: "boolean",
+          description: "Expand a single cell to the surrounding block of data first. Use it when you know roughly where a table is but not its exact extent.",
+        },
+      },
+      required: ["start_row", "start_col", "end_row", "end_col"],
+    },
+  },
+  {
+    name: "analyze_model",
+    description:
+      "Facts about a BI connection's MEASURES rather than cells, judged by the model's own strategy: whether a movement is material, whether a rise is favourable, which of the measure's own terms drove it and which dimension members it came from. Call list_bi_connections first for the connection_id, and leave measures empty to let the model's declared priority decide. Use run_bi_query when you want the numbers; use this when you want to know what happened. Read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        connection_id: { type: "string", description: "Connection id from list_bi_connections" },
+        measures: {
+          type: "array",
+          items: { type: "string" },
+          description: "Measure names. Empty means the model's declared priority decides.",
+        },
+      },
+      required: ["connection_id"],
+    },
+  },
   // ---- BI / cube (read-only) ----
   {
     name: "list_bi_connections",
@@ -435,6 +475,11 @@ export const AUTORUN_TOOLS: ReadonlySet<string> = new Set<string>([
   "cube_value",
   "cube_kpi",
   "cube_members",
+  // Computed facts. Read-only and takes no DocumentEffect, the same class as
+  // run_bi_query: the engine answers a question about cells it could already
+  // have read, and nothing in the workbook changes.
+  "analyze_range",
+  "analyze_model",
   "list_script_drafts",
   "get_script_draft",
   "draft_object_script",
@@ -480,9 +525,23 @@ export const AUTORUN_TOOLS: ReadonlySet<string> = new Set<string>([
 export function buildSystemPrompt(names: readonly string[] = TOOL_NAMES): string {
   const bi = names.includes("list_bi_connections")
     ? "If the workbook has BI/cube connections (list_bi_connections), you can query them read-only " +
-      "with describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members.\n\n"
+      "with describe_bi_model, run_bi_query, cube_value, cube_kpi, and cube_members. " +
+      "describe_bi_model ends with the model's STRATEGY when one exists — which way is good for " +
+      "each measure, what is material, and which columns to group by or never group by. " +
+      "Follow it when you choose measures and group_by.\n\n"
     : "";
-  return SYSTEM_PROMPT_HEAD + names.join(", ") + SYSTEM_PROMPT_MIDDLE + bi + SYSTEM_PROMPT_TAIL;
+  // Gated on the tool being offered, like the BI paragraph: a prompt that tells
+  // the model to call analyze_range while the request does not carry it is a
+  // promise of a tool that is genuinely not there.
+  const analysis = names.includes("analyze_range")
+    ? "ANALYSIS. When the user asks what is going on, what changed, what stands out, or for a " +
+      "trend, an outlier or a summary of the data, call analyze_range on the range in question " +
+      "(or analyze_model on a BI connection) and put the facts it returns into words. Do not " +
+      "derive a trend, an outlier or a correlation from raw cell values yourself: those tools " +
+      "return checked statements, and a claim you compute from a read is not checked. Never " +
+      "suggest a cause for a movement the facts do not state.\n\n"
+    : "";
+  return SYSTEM_PROMPT_HEAD + names.join(", ") + SYSTEM_PROMPT_MIDDLE + bi + analysis + SYSTEM_PROMPT_TAIL;
 }
 
 const SYSTEM_PROMPT_HEAD =

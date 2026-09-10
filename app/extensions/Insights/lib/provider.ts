@@ -1,9 +1,10 @@
 //! FILENAME: app/extensions/Insights/lib/provider.ts
 // PURPOSE: The `InsightsProvider` implementation — the thing that makes the
 //          chat's "analyse this" deterministic instead of an impression.
-// CONTEXT: A caller (the AI chat, a report generator, a future ribbon button)
-//          asks `@api/insightsService` for facts about a range or a model and
-//          gets a bundle back. It never learns that this extension exists.
+// CONTEXT: A caller (the AI chat's pre-route, a report generator, a future
+//          ribbon button) asks `@api/insightsService` for facts about a range or
+//          a model and gets a bundle back. It never learns that this extension
+//          exists.
 //
 //          THE PROVIDER DOES NOT TOUCH THE PANE. It is tempting to have a chat
 //          tool call also light up the Insights pane, and it is wrong: a tool
@@ -13,18 +14,19 @@
 //          command, the grid menu and "Explain this chart" — all of which are
 //          things a PERSON just clicked.
 //
-//          `hasModel()` is synchronous by contract, so it answers from the
-//          connection cache the store refreshes at activation and on every
-//          document swap, never from a fresh IPC call.
+//          `hasModel()` and `modelConnections()` are synchronous by contract,
+//          so they answer from the connection cache the store refreshes at
+//          activation and on every document swap, never from a fresh IPC call.
 
 import type {
   InsightBundle,
   InsightsProvider,
+  ModelConnection,
   ModelInsightsRequest,
   RangeInsightsRequest,
 } from "@api/insightsService";
 import { analyzeModel, analyzeRange } from "./backend";
-import { hasModel } from "./store";
+import { getState, hasModel } from "./store";
 
 /**
  * Build the provider. One instance per activation, so the unregister returned
@@ -41,6 +43,9 @@ export function createInsightsProvider(): InsightsProvider {
     },
     hasModel(): boolean {
       return hasModel();
+    },
+    modelConnections(): readonly ModelConnection[] {
+      return getState().connections;
     },
   };
 }

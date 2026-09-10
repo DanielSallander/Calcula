@@ -1878,6 +1878,12 @@ pub struct BiPivotModelInfo {
     /// of …"). Lets a reader gauge offline-snapshot freshness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_as_of: Option<String>,
+    /// The model's strategy document, reduced to what a design-query assistant
+    /// needs to choose names (`insights/describe.rs`). Present on the
+    /// connection-level metadata (`get_connection_bi_model`); a pivot's cached
+    /// metadata carries none, because the cache holds no model to read it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<crate::insights::describe::DesignStrategySummary>,
 }
 
 // ---------------------------------------------------------------------------

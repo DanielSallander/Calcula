@@ -194,6 +194,32 @@ pub async fn ai_chat_run_tool(
                 serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
             tools::cube_members(&handle, &p.connection, &p.level).await
         }
+        // Deterministic analysis — the Tier-0 engine, reached from the chat.
+        // Until 2026-09-10 only an EXTERNAL MCP client could ask for these; the
+        // in-app chat's 24 tools had no analysis tool, so "what is going on in
+        // this data" was answered by a model reading raw cells and reasoning
+        // about them — the one job it is least reliable at. Same param structs
+        // and the same crate::mcp::tools bodies as the MCP server, so the chat
+        // and an external client get byte-identical facts. Read-only: neither
+        // takes a `DocumentEffect`.
+        "analyze_range" => {
+            let p: crate::mcp::server::AnalyzeRangeParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::analyze_range(
+                &handle,
+                p.sheet_index,
+                p.start_row,
+                p.start_col,
+                p.end_row,
+                p.end_col,
+                p.expand_to_region,
+            )
+        }
+        "analyze_model" => {
+            let p: crate::mcp::server::AnalyzeModelParams =
+                serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
+            tools::analyze_model(&handle, p.connection_id, p.measures).await
+        }
         other => Err(format!("Unknown tool '{}'.", other)),
     }
 }

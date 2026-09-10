@@ -17,6 +17,7 @@
 //          BI engine's DataFusion tree can break it.
 
 pub mod commands;
+pub mod describe;
 pub mod model;
 pub mod model_commands;
 pub mod region;

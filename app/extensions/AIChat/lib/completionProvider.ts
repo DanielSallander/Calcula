@@ -59,6 +59,18 @@ function refreshLocalIds(): void {
     });
 }
 
+/**
+ * Runtimes whose OpenAI-compatible endpoint implements the GBNF `grammar`
+ * field. llama.cpp's own server does; Ollama's compatible endpoint has no such
+ * field and ignores it; every cloud vendor rejects an unknown key. Identity
+ * for now — the bundled runtime brings a probe that measures it instead.
+ */
+const GRAMMAR_PROVIDERS: ReadonlySet<string> = new Set(["llamacpp"]);
+
+export function acceptsGrammar(providerId: string): boolean {
+  return GRAMMAR_PROVIDERS.has(providerId);
+}
+
 function textOf(blocks: ChatBlock[]): string {
   return blocks
     .filter((b): b is Extract<ChatBlock, { type: "text" }> => b.type === "text")
@@ -88,6 +100,12 @@ export function buildCompletionProvider(): AiCompletionProvider {
       return readProfile(sel.providerId, sel.model)?.honorsSchema;
     },
 
+    honorsGrammar(): boolean | undefined {
+      const sel = readSelection();
+      if (!isComplete(sel)) return undefined;
+      return acceptsGrammar(sel.providerId);
+    },
+
     async complete(
       req: AiCompletionRequest,
       opts?: { signal?: AbortSignal },
@@ -115,6 +133,11 @@ export function buildCompletionProvider(): AiCompletionProvider {
           // pinned the chat's tool-use temperature applies here.
           temperature: req.temperature ?? 0,
           ...(req.responseSchema ? { responseSchema: req.responseSchema } : {}),
+          // FORWARDED ONLY WHERE IT IS HONOURED. Ollama ignores an unknown
+          // key (verified, ai/wire.rs), but a cloud vendor rejects one with a
+          // 400 before any inference — so a grammar never leaves for a
+          // runtime that has not been named as accepting it.
+          ...(req.grammar && acceptsGrammar(sel.providerId) ? { grammar: req.grammar } : {}),
         },
         baseUrlOverride: sel.baseUrl || null,
       });

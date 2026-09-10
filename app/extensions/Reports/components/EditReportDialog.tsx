@@ -12,6 +12,7 @@ import type { DslControlHint } from "../../_shared/dsl/pivotLayout/pivotDslLangu
 import type { BiPivotModelInfo } from "../../_shared/components/types";
 import { buildControlHints } from "../../_shared/dsl/pivotLayout/controlHints";
 import { reportsBackend } from "../lib/reportsBackend";
+import { dryRunDesignQuery } from "../lib/dryRunDesignQuery";
 import { refreshReport, refreshGridCells } from "../lib/reportRefresh";
 import { refreshReportRegions, getCachedReport } from "../lib/reportRegions";
 import { cellRef } from "../lib/cellRef";
@@ -145,6 +146,7 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
               biModel={biModel}
               controlHints={controlHints}
               height="180px"
+              assist={{ connectionId: report.connectionId, dryRun: dryRunDesignQuery }}
             />
             <div style={{ fontSize: 11, color: "var(--text-secondary, #666)", margin: "6px 0 12px" }}>
               Anchored at <strong>{cellRef(report.anchorRow, report.anchorCol)}</strong>. Saving

@@ -69,6 +69,9 @@ pub async fn get_connection_bi_model(
         // Connection-level metadata has no pivot, hence no selection.
         selected_perspective: None,
         cultures,
+        // The strategy rides with the model it describes, so the report, chart
+        // and pivot editors get it in the fetch they already make.
+        strategy: crate::insights::describe::strategy_for_design(engine.model()),
     }))
 }
 

@@ -57,6 +57,8 @@ import {
   type Bubble,
 } from "../lib/toolTimeline";
 import { detectScriptIntent, guessObjectType } from "../lib/scriptIntent";
+import { detectAnalysisIntent } from "../lib/analysisIntent";
+import { describeTierZero, prepareTierZeroFacts, type TierZeroFacts } from "../lib/tierZero";
 import { subscribeToJobs, latestJob, formatElapsed, type AuthorJob } from "../lib/authorJobs";
 import { onJobViewRequested } from "../lib/jobFocus";
 import { ActivityDot } from "../../_shared/components/ActivityDot";
@@ -425,9 +427,27 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     stoppedRef.current = false;
     draftIdsRef.current = [];
 
+    // TIER 0 FIRST. A question about what the data says is answered by the
+    // deterministic engine BEFORE the model sees it: a quarter of a second, no
+    // model, checked statements. The facts ride in the user's own message so
+    // the model's job is wording, and a follow-up turn still has them. When
+    // nothing can be analysed, or the engine refuses, the message goes as
+    // typed and the model keeps analyze_range / analyze_model as tools.
+    let tierZero: TierZeroFacts | null = null;
+    if (detectAnalysisIntent(text).looksLikeAnalysis) {
+      setActivity("Computing the facts first...");
+      tierZero = await prepareTierZeroFacts();
+      if (tierZero) addBubble({ kind: "notice", text: describeTierZero(tierZero, selection.model) });
+    }
+
     let messages: ChatMessage[] = [
       ...rawRef.current,
-      { role: "user", content: [{ type: "text", text }] },
+      {
+        role: "user",
+        content: tierZero
+          ? [{ type: "text", text }, { type: "text", text: tierZero.text }]
+          : [{ type: "text", text }],
+      },
     ];
     let turn = 0;
     /**

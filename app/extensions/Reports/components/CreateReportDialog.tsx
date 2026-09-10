@@ -19,6 +19,7 @@ import { substituteControlParams } from "../../_shared/dsl/pivotLayout/paramSubs
 import { buildControlHints } from "../../_shared/dsl/pivotLayout/controlHints";
 import { refreshReportRegions } from "../lib/reportRegions";
 import { colLetter } from "../lib/cellRef";
+import { dryRunDesignQuery } from "../lib/dryRunDesignQuery";
 
 const DSL_TEMPLATE =
   "# Report — ROWS become row groups, VALUES become measure columns.\n" +
@@ -215,6 +216,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
           biModel={biModel}
           controlHints={controlHints}
           height="180px"
+          assist={{ connectionId, dryRun: dryRunDesignQuery }}
         />
         <div style={{ fontSize: 11, color: "var(--text-secondary, #666)", margin: "6px 0 12px" }}>
           Materializes at <strong>{destination}</strong>. Bind a Controls-pane value or ribbon

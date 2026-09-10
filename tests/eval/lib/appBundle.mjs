@@ -73,6 +73,11 @@ export async function bundleAppModules({ appRoot, exports: wanted, tag = "eval" 
     target: "node20",
     outfile,
     logLevel: "silent",
+    // The app's own path aliases (`@api/...`), so a module that reaches the
+    // seam layer the way the product does — `_shared/dsl/pivotLayout/draft.ts`
+    // imports `@api/designQueryAssist` — bundles as written rather than being
+    // ported around the alias.
+    tsconfig: path.join(appRoot, "tsconfig.app.json"),
   });
 
   const mod = await import(`file://${outfile.replace(/\\/g, "/")}`);

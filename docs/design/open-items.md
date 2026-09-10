@@ -1180,13 +1180,90 @@ enumerates the publish entry points and asks per path, with a positive control p
 tell a reached path from an unreached one. Sabotage-verified: removing the new call reds the
 coverage test naming `calp_publish_model`, where the old count would still have passed.
 
-**2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) waits for the
-release decision; the fetch script makes bundle-vs-download a build-time switch. M4 (intent router)
-and M6 (Tier-1 narration, Swedish, grammars) keep their designs and their seams — `factsJson`
-carries fact ids precisely so a later narrator can be checked for coverage. M5 (the fine-tune
-flywheel) is dropped. M7 (usage aggregates back to an application's author) needs a new manifest
-declaration, a new submission kind and a consent sentence, and is the one telemetry-shaped feature
-in a product that is otherwise local by construction.
+**2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) is UNBUILT:
+no sidecar, no fetch script and no built-in provider exist (verified 2026-09-10 against
+`tauri.conf.json`, `app/scripts/` and `ai/providers.rs`; an earlier version of this row described
+the planned fetch step as if it existed). Its posture was decided 2026-09-10 — see 2.AI.10. M4
+(intent router) and M6 (Tier-1 narration, Swedish, grammars) keep their designs and their seams —
+`factsJson` carries fact ids precisely so a later narrator can be checked for coverage. M5 (the
+fine-tune flywheel) is dropped. M7 (usage aggregates back to an application's author) needs a new
+manifest declaration, a new submission kind and a consent sentence, and is the one telemetry-shaped
+feature in a product that is otherwise local by construction.
+
+**2.AI.10 — AI consumers of the strategy, and the on-board runtime: decided 2026-09-10, Step 1
+SHIPPED.** Design: `docs/design/insights-strategy-layer.md` §14. The tier vocabulary, restated
+because the request that opened this item used it the other way round: **Tier 0 is no model at
+all** (the deterministic engine); **Tier 1 is the bundled on-board model** (M2 + M6); Tier 2 is a
+larger optional model, which the picker already covers; Tier 3 is a bring-your-own key. Three owner
+decisions: **D5** build order — strategy into the chat, then "Describe it in words" for design
+queries, then the runtime, then narration, then the router, each measured before the next; **D6**
+bundle `llama-server` (CPU build) in the installer and download the model on first use behind one
+consent sentence naming size, licence and source, with an offline-installer variant bundling both
+(amends D2's bundle-both); **D7** CPU build only, Vulkan after measurement.
+
+*Step 1 shipped 2026-09-10.* Until then the in-app chat had no analysis tool — its 24 tools
+carried no `analyze_*` and only the external MCP server did — and `describe_bi_model` printed no
+strategy attribute, so a chat model composing a `run_bi_query` had no idea which measures mattered
+or which way was good. Now `analyze_range` / `analyze_model` are chat tools
+(`AIChat/lib/chatTools.ts`, arms in `ai/tools.rs`, both directions diffed by
+`chatToolSurface.test.ts`, read-only and auto-run); `describe_bi_model` appends the block
+`insights/describe.rs` renders — structured attributes only, `context` prose excluded and pinned by
+the fixture's own two sentences, measures in `choose_measures`' order, capped at forty with the cap
+stated; and the chat computes Tier-0 facts BEFORE the model sees an "analyse" message
+(`AIChat/lib/analysisIntent.ts` + `lib/tierZero.ts`, wording from
+`@api/insightsService::describeBundleForModel`, which the Insights pane's "Send to chat" now shares).
+The two tools are NOT in `CORE_TOOL_NAMES`: that set was measured, and a change to it is a
+measurement. Seven sabotages, each redding the test that names it.
+
+*Step 2 shipped 2026-09-10 — "Describe the report in words".* Design: `insights-strategy-layer.md`
+§14.3. A row above the shared design-query editor (Report from Design Query, the edit-report dialog,
+the chart data tab) and on the model pivot's Design tab drafts a query from a sentence: pure pieces in
+`app/src/api/designQueryAssist/` (candidates, prompt, bounded schema, per-request GBNF grammar,
+extraction), the loop in `_shared/dsl/pivotLayout/draft.ts` with `compileDesignQuery` as the verifier,
+one stall-checked repair, and the host's headless `run_design_query` as a dry run. The strategy is
+the consumer here: `DesignStrategySummary` (`insights/describe.rs`, on `BiPivotModelInfo`) decides
+which names the model is shown and how they rank; `context` prose is not in it. The seam gained
+`grammar` + `honorsGrammar()`, forwarded only to llama.cpp. Two language facts the tests caught
+before a user did: `SORT` orders labels only (ranking by a measure is `TOP N BY`), and the `ignore`
+role means "not an axis", not "never aggregate". Corpus `tests/eval/design-queries.json` (40 tasks,
+10 Swedish, each with a distractor) with Layer A (`designQueryCorpus.test.ts`: compiles, distractor
+differs, every reference name is among the candidates for its intent) and Layer B
+(`run-design-query-eval.mjs`, canonical-form grading). Six sabotages, each redding the test that
+names it. **The first measurement changed the language rather than the model**: of a 1.5B's 33
+failures, 24 did not compile and most were shapes a person types too, so the DSL parser now reads a
+single-quoted value and a bare number as values and accepts a redundant direction after TOP/BOTTOM
+(refusing a contradictory one by name; `dsl-lenient-values.test.ts`), and grading compares the
+layout as drawn with defaults dropped (`canonical.test.ts`). **Found, not fixed:** the DSL's
+`subtotals-top` / `subtotals-bottom` / `subtotals-off` directives and the `(no-subtotals)` field
+option are lexed, parsed, validated and autocompleted — and `_shared/dsl/pivotLayout/compiler.ts`
+has no case for any of them, so a typed or drafted `LAYOUT: subtotals-off` compiles to nothing
+and the report keeps its subtotals in silence (`LayoutConfig` in `_shared/components/types.ts` has
+no subtotals field; the script surface maps them in `scriptHost/pivotLayoutVocabulary.ts:190-196`,
+the DSL does not). **Measured 2026-09-10** on this CPU (`node tests/eval/run-design-query-eval.mjs
+--provider ollama --model qwen2.5-coder:1.5b|3b`, schema on, examples on, no repair), four rounds
+because the first three measured the pipeline rather than the model: (1) first prompt 7/40 and
+20/40; (2) after the parser leniency and the fairer grading, compile rates rose (16→23, 25→33 of 40)
+and pass rates did not, because the prompt's own examples taught a `SORT: [Measure]` the compiler
+refuses and a `TOP 10` nobody asked for, and both models copied them; (3) examples fixed and guarded
+by a test: 18/40 and 21/40; (4) four general rules (no unasked LAYOUT, a share label only when a
+share is asked, a filtered column not repeated as COLUMNS, a measure never aggregated) plus an
+aggregation example and alternatives for genuinely ambiguous requests: **1.5B 21/40 (52.5 %),
+36/40 compile, 5.5 s median; 3B 27/40 (67.5 %), 38/40 compile, 11.5 s median; 1,138 prompt
+tokens.** Levers measured on the way: one repair round +1 task on the 1.5B and +0 on the 3B (the
+formula assistant's finding again); the shaped examples +0 on the 3B for 247 tokens. What remains
+is judgement — a filtered column repeated as COLUMNS, an unasked layout, a share label on a Swedish
+ranking — plus SQL habits (`LAG()`, `!=`, `count([Measure])`) the grammar would forbid, and Swedish
+vocabulary on the 1.5B. The 3B clears the 95 % compile bar; neither clears the 80 % exactness bar;
+the grammar lever is unmeasured until Step 3 ships a runtime that honours one.
+
+Still open, in order: **Step 3** M2 under D6/D7 (`ai/runtime.rs`, a `calcula-builtin` provider,
+`externalBin`, model download with consent, an `honorsGrammar` probe replacing the identity gate);
+**Step 4** M6 narration with a fact-id coverage guard, which is what gives `ResolvedMeasure.context`
+its reader; **Step 5** M4 router absorbing `scriptIntent.ts` and `analysisIntent.ts`. Also: a pivot's
+cached metadata carries no strategy summary (the cache holds no model), so the pivot Design tab's
+row drafts without the strategy's ranking; and an inclusion filter (`= ("x")`) compiles to no filter
+when the compiler has no member list, which is the existing report behaviour and is why grading
+uses the parsed form.
 
 ## 3. How to keep this file honest
 

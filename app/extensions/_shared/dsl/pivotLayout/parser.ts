@@ -19,6 +19,23 @@ export interface ParseResult {
 }
 
 /**
+ * A token that may stand as a filter VALUE.
+ *
+ * Double-quoted is the canonical form and the only one the serializer writes.
+ * A single-quoted value (`'Consumer'`) and a bare number (`2024`) are accepted
+ * too: a value is a value, there is nothing else either could mean in that
+ * position, and both are what people — and the models that draft queries for
+ * them — actually type. The token's text is the value either way.
+ */
+function isValueToken(tok: Token): boolean {
+  return (
+    tok.type === TokenType.StringLiteral ||
+    tok.type === TokenType.SingleQuotedIdentifier ||
+    tok.type === TokenType.NumberLiteral
+  );
+}
+
+/**
  * Parse a token stream into a PivotLayoutAST.
  * Uses error recovery: on parse failure within a clause, skips to the next
  * clause keyword and continues, accumulating errors.
@@ -180,13 +197,13 @@ class Parser {
       const values: string[] = [];
       const hasParen = this.match(TokenType.LeftParen);
       let valTok = this.peek();
-      if (valTok.type === TokenType.StringLiteral) {
+      if (isValueToken(valTok)) {
         this.advance();
         values.push(valTok.value);
         while (this.match(TokenType.Comma)) {
           this.skipNewlines();
           valTok = this.peek();
-          if (valTok.type === TokenType.StringLiteral) {
+          if (isValueToken(valTok)) {
             this.advance();
             values.push(valTok.value);
           } else {
@@ -406,13 +423,13 @@ class Parser {
     const hasParen = this.match(TokenType.LeftParen);
 
     const valTok = this.peek();
-    if (valTok.type === TokenType.StringLiteral) {
+    if (isValueToken(valTok)) {
       this.advance();
       values.push(valTok.value);
       while (this.match(TokenType.Comma)) {
         this.skipNewlines();
         const nextVal = this.peek();
-        if (nextVal.type === TokenType.StringLiteral) {
+        if (isValueToken(nextVal)) {
           this.advance();
           values.push(nextVal.value);
         } else {
@@ -592,6 +609,24 @@ class Parser {
     } else {
       const nameResult = this.parseFieldName();
       byField = nameResult?.name ?? '?';
+    }
+
+    // A trailing direction. TOP already ranks highest first and BOTTOM lowest
+    // first, so `TOP 5 BY [Revenue] DESC` is redundant and accepted — people
+    // (and models) write it — while the CONTRADICTORY pair is refused by
+    // name rather than silently flipped: `TOP ... ASC` means the person
+    // wanted BOTTOM, and the error says so.
+    if (this.check(TokenType.Asc) || this.check(TokenType.Desc)) {
+      const dirTok = this.advance();
+      const asc = dirTok.type === TokenType.Asc;
+      if (top === asc) {
+        this.errors.push(dslError(
+          top
+            ? 'TOP already ranks highest first; for the lowest values write BOTTOM N BY ...'
+            : 'BOTTOM already ranks lowest first; for the highest values write TOP N BY ...',
+          dirTok.location,
+        ));
+      }
     }
 
     return { count, top, byField, byAggregation, location: tok.location };

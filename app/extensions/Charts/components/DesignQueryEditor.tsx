@@ -6,6 +6,8 @@
 import React, { useEffect, useState } from "react";
 import { DesignQueryEditor as SharedDesignQueryEditor } from "../../_shared/dsl/pivotLayout/DesignQueryEditor";
 import { buildControlHints } from "../../_shared/dsl/pivotLayout/controlHints";
+import type { DesignQueryRequest } from "../../_shared/dsl/pivotLayout/designQuery";
+import type { DryRunSummary } from "../../_shared/dsl/pivotLayout/draft";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
 import { chartsBackend } from "../lib/chartsBackend";
 
@@ -51,6 +53,13 @@ export function DesignQueryEditor({
       biModel={biModel}
       controlHints={controlHints}
       height="220px"
+      assist={{ connectionId, dryRun: dryRunDesignQuery }}
     />
   );
+}
+
+/** The dry run over the Charts door: the size of the view, nothing materialised. */
+async function dryRunDesignQuery(request: DesignQueryRequest): Promise<DryRunSummary> {
+  const view = await chartsBackend.invoke<{ rowCount: number; colCount: number }>("run_design_query", { request });
+  return { rowCount: view?.rowCount ?? 0, colCount: view?.colCount ?? 0 };
 }

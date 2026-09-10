@@ -3,6 +3,24 @@
 Can a given model write Calcula object scripts? This answers it with a number
 instead of a vibe.
 
+Two siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
+engine — see `docs/design/formula-assist.md`) and `run-design-query-eval.mjs`
+(design queries, graded by the DSL compiler and `canonical.ts`):
+
+```
+node tests/eval/run-design-query-eval.mjs --provider ollama --model qwen2.5-coder:1.5b
+node tests/eval/run-design-query-eval.mjs --provider llamacpp --model default --grammar on
+node tests/eval/run-design-query-eval.mjs --provider ollama --model qwen2.5-coder:3b \
+     --examples off --repair 1 --json out/dq.json
+```
+
+Its corpus is `design-queries.json` over the sales-star fixture; Layer A is
+`app/extensions/_shared/dsl/pivotLayout/designQueryCorpus.test.ts`. It drives
+the PRODUCT's own loop (`draft.ts`) with a provider over a bare endpoint, so
+the number is about the model, never a port of the pipeline. `--grammar on` is
+refused for any provider but llama.cpp's server, which is the only one that
+honours the field.
+
 The corpus is `tasks.json`. It ships in the repo deliberately (design doc
 §11.3): withholding it would make every claim about which models work
 unfalsifiable, which is a poor look for a project whose pitch is auditability.

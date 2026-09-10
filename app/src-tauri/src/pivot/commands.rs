@@ -2372,6 +2372,8 @@ pub fn get_pivot_at_cell(
                 perspectives: meta.perspectives.clone(),
                 selected_perspective: meta.selected_perspective.clone(),
                 cultures: meta.cultures.clone(),
+                // The cache holds no model to read a strategy from.
+                strategy: None,
             }
         })
     };
@@ -3077,6 +3079,8 @@ pub fn get_pivot_hierarchies(
                 perspectives: meta.perspectives.clone(),
                 selected_perspective: meta.selected_perspective.clone(),
                 cultures: meta.cultures.clone(),
+                // The cache holds no model to read a strategy from.
+                strategy: None,
             }
         })
     };

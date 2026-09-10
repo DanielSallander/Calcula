@@ -1610,7 +1610,24 @@ pub async fn describe_bi_model(handle: &AppHandle, connection_id: &str) -> Resul
         Some(arc) => {
             let engine = arc.lock().await;
             let info = crate::bi::commands::model_to_info(engine.model());
-            Ok(format_bi_model_info(connection_id, &info))
+            let mut out = format_bi_model_info(connection_id, &info);
+            // THE STRATEGY RIDES ALONG. A model composing a query from the
+            // schema alone groups Revenue by invoice id as readily as by region
+            // and cannot tell a rise in Churn from a rise in Margin. The block
+            // states direction, materiality, the columns the business slices
+            // by and the ones it never does - structured attributes only, no
+            // authored prose - so the tool every client calls before querying
+            // is the one that carries it. Absent for a model nobody annotated.
+            if let Some(strategy) = crate::insights::describe::strategy_summary(engine.model()) {
+                out.push('\n');
+                out.push_str(&strategy);
+                out.push_str(
+                    "Use these settings when choosing measures and group_by for run_bi_query. \
+                     For what HAPPENED to a measure, call analyze_model rather than deriving \
+                     it from query rows yourself.\n",
+                );
+            }
+            Ok(out)
         }
         None => Ok(format!("Connection '{}' has no model loaded.", connection_id)),
     }

@@ -230,8 +230,11 @@ describe('Parser coverage', () => {
       expect(r.ast.filters[0].exclude).toBe(true);
     });
 
-    it('reports error when filter value is not a string', () => {
-      const r = p('FILTERS: Region = 42');
+    it('reports error when filter value is not a value', () => {
+      // A bare identifier is a field name, not a value. A bare NUMBER is a
+      // value since 2026-09-10 (`Year = 2024`), as is a single-quoted string;
+      // see dsl-lenient-values.test.ts.
+      const r = p('FILTERS: Region = North');
       expect(r.errors.some(e => e.message.includes('Expected quoted string value'))).toBe(true);
     });
 

@@ -674,3 +674,144 @@ It does *not* cover findings, validation, inference or fact kinds — none of th
 authors against, and all must stay free to improve. What it blocks, concretely: audience overlays
 (§11) and per-side band severity. Both are additive, and both would want the extension mechanism's
 answer to "is this a built-in or a vocabulary?" — so blocking them is the point rather than a cost.
+
+## 14. Consumers outside the engine — 2026-09-10
+
+Until this date the insights engine was the strategy's only reader, and the only way a language
+model ever saw the strategy was through the external MCP server's `analyze_model` or the Insights
+pane's "Send to chat" prefill. The in-app chat had neither: its 24 tools carried no analysis tool,
+and the model description it reads before writing a query carried no strategy attribute. Two more
+readers exist now, both through the same resolver at company scope, and each is held to §2 the same
+way the engine is.
+
+### 14.1 The model description a chat reads before it queries
+
+`describe_bi_model` — the tool every MCP client and the in-app chat call before composing a
+`run_bi_query` — printed tables, measures, KPIs and relationships. A model composing a query from
+the schema alone grouped Revenue by invoice id as readily as by region and could not tell a rise in
+Churn from a rise in Margin. It now ends with the block `insights/describe.rs` renders: one line per
+measure (direction, unit, target, materiality, non-additive aggregation, cadence, priority, analysis
+dimensions, never-slice-by, suppressed fact kinds), the tables the document says something about
+(kind, analysis-role columns, label column), the declared priority order, the time axis and the
+calendar with its provenance. The measures are listed in `choose_measures`' order — declared
+priority, then the measures carrying a KPI, then the rest by name — so a model that reads the
+description and then an analysis sees one ranking. Past forty measures the block says how many it
+left out rather than trailing off.
+
+**Prose stays out.** `MeasureStrategy.context` reaches wording and never selection (§2), and a chat
+model choosing which query to run *is* selection. The block never prints it, and the fixture's own
+two `context` sentences are asserted absent, so an "include the first context" shortcut cannot pass
+by omitting one. A direction that Rule 4 withholds at company scope is printed as withheld — the
+fixture's `Cost`, whose entry says lower is better and whose rule flips it for some members, is the
+example — because "lower is better" told to a model that then calls a rise bad in the region where
+the rule says the opposite is exactly the confident wrong sentence this layer exists to prevent.
+
+### 14.2 The chat's two analysis tools and the Tier-0 pre-route
+
+The in-app chat gained `analyze_range` and `analyze_model`: the MCP server's own arms, so an external
+client and the chat get byte-identical facts. Both auto-run — read-only, no `DocumentEffect`, the
+same class as `run_bi_query`. Neither is in the ten-tool core set a small model falls back to,
+because that set was measured (4 of 4 real names at twelve tools, 0 of 4 at twenty-four) and a
+change to it is a measurement, not an edit.
+
+Separately, a message that reads as a question about the data — "what is going on", "trend",
+"outliers", "anything interesting", and the Swedish equivalents — is answered by the engine BEFORE
+the model sees it. A multi-cell selection is analysed as selected; otherwise the workbook's single
+model connection, top-ranked measures; otherwise the block around the selected cell, the way the
+pane's own button does it. The bundle rides inside the user's own message in the seam's wording
+(`describeBundleForModel`: the facts verbatim, the notes, the dropped count, the ban on causes), so
+the model's job is wording and a follow-up turn still has the facts. Two connections is a question
+for the person, not a guess. A refusal from the engine is not a refusal of the message: the text
+goes as typed and the model keeps its tools. The detector is a word list, not a classifier, for the
+reason `scriptIntent.ts` gives: a false positive costs one cheap read-only computation, a false
+negative costs nothing new.
+
+### 14.3 The design-query assistant — "describe the report in words"
+
+The same afternoon, the third consumer, and the first one where the strategy decides what a model
+is SHOWN rather than what it is told. Model > Report from Design Query…, the chart data tab and the
+model pivot's Design tab share one editor (`_shared/dsl/pivotLayout/DesignQueryEditor.tsx`, the
+pivot mounts the row on its own editor); a row above it takes a sentence and drafts the query.
+
+The pipeline is the formula assistant's, transposed. Pure pieces in `@api/designQueryAssist/`
+(candidates, prompt, schema, grammar, extraction) so the offline runner measures the product's
+own code; the loop in `_shared/dsl/pivotLayout/draft.ts` with the compiler and the dry run
+injected, because `@api` may not import the DSL. One generation, `compileDesignQuery` as the
+verifier, ONE stall-checked repair carrying the compiler's own line-numbered findings, then the
+host's headless `run_design_query` as a second check that the engine can answer it. The query
+lands in the editor; Create, Save or Apply is still the person's click, and a declined reply
+puts nothing anywhere.
+
+**Where the strategy acts.** `chooseCandidates` (`candidates.ts`) decides which names the model
+sees and in what order: the measures the request names, then the declared `priority` order, then
+the rest; the lead measures' `analysisDimensions` ahead of columns in the `analysis`, `hierarchy`
+and `filter` roles, label columns, calendar columns; `neverSliceBy` and `ignore`-role columns and
+keys never offered at all. Both lists are capped and the cap is stated. The summary the frontend
+reads (`DesignStrategySummary`, built in `insights/describe.rs`, riding on `BiPivotModelInfo` from
+`get_connection_bi_model`) carries only structured attributes; `context` prose is not in it. A
+pivot's cached metadata carries no summary, because the cache holds no model to read one from.
+
+**Two things the language taught the assistant, both found by the tests rather than by reading.**
+`SORT` orders row and column LABELS; the DSL ranks by a measure's value only through `TOP` and
+`BOTTOM N BY [Measure]`, and the compiler refuses `SORT: [Revenue]`. The first cheat-sheet taught
+the refused form and four corpus tasks expected it; the grammar-sampling test caught the grammar
+and Layer A caught the corpus. And inference marks a fact table's amount columns `ignore` because
+they are not slicing axes — the first candidate chooser dropped them entirely, so `sum(Sales.Amount)`
+could never be offered; the corpus recall check caught it. `ignore` now excludes a column as an
+axis and nothing more.
+
+**The grammar in both directions.** `buildDesignQueryGrammar` renders a GBNF grammar per request
+from the candidate names, so a runtime that honours one (llama.cpp's server; the seam's
+`honorsGrammar()` is identity-gated until the bundled runtime brings a probe) cannot emit a name it
+was not shown. A mini GBNF engine in `gbnfTestKit.ts` samples the grammar three hundred times per
+intent and compiles every sample, and matches every corpus reference against the grammar built
+from its own intent — so the grammar can neither produce a query the compiler refuses nor forbid
+one the corpus calls right. The seam gained `grammar`, forwarded only to llama.cpp; a grammar
+never leaves for a vendor that rejects unknown request fields.
+
+**Measured before polished.** `tests/eval/design-queries.json` (40 tasks, 10 Swedish, each with a
+distractor, some with `alternatives` where two columns answer equally), Layer A in
+`designQueryCorpus.test.ts`, Layer B in `tests/eval/run-design-query-eval.mjs`, which drives the
+real loop with a provider over a bare endpoint and grades by `canonical.ts` (names
+case-insensitive, layout compared as the pivot would draw it with defaults dropped, SORT and TOP
+included — the compiled request would lose the last two). The numbers are in `open-items.md`
+2.AI.10.
+
+**What the first measurement changed in the LANGUAGE, not the model.** Of a 1.5B coder model's
+thirty-three failures, twenty-four did not compile, and most of those were shapes a person types
+too: `= ('Consumer')`, `= 2024`, `TOP 3 BY [Margin] DESC`. The parser now reads a single-quoted
+value and a bare number as the value they can only be, and accepts a redundant direction after
+`TOP`/`BOTTOM` while refusing a contradictory one by naming the clause the person wanted
+(`dsl-lenient-values.test.ts`). Double quotes remain the canonical form the serializer writes.
+What stays refused is what would be a guess: `!=`, an aggregation inside brackets, a
+show-values-as label in a measure's place. Those are the grammar's job on a runtime that honours
+one, and the repair round's job elsewhere. The canonical form also surfaced a gap in the language
+itself: the `subtotals-*` directives and the `(no-subtotals)` field option are validated and
+offered by the editor and dropped by the compiler, which has no case for them. Filed in
+`open-items.md` 2.AI.10; the canonical form carries them so that asking for them still counts as
+asking.
+
+**What the second measurement changed in the PROMPT.** The compile rate rose (1.5B 16 → 23 of
+40, 3B 25 → 33) and the pass rate did not, and the failure buckets said why: the prompt's own
+second worked example sorted by a measure — the shape the compiler refuses — and both models
+copied it into a quarter of their answers; the share example carried a `TOP 10` nobody asked for
+and that was copied too; the cheat-sheet's LAYOUT line read as a template and the 3B pasted it
+whole. A worked example is the strongest instruction a small model receives, so every example
+now shows exactly one thing, and a test compiles every example and matches it against the grammar
+(`designQueryGrammar.test.ts`) — the guard that would have caught the first version. One repair
+round bought one task on the 1.5B and none on the 3B, the formula assistant's finding again, and
+the shaped examples bought the 3B nothing for 247 tokens. With four general rules added (no unasked
+layout, a share label only when a share is asked, a filtered column not repeated as COLUMNS, a
+measure never aggregated) the final numbers are **1.5B 21/40 at 5.5 s, 3B 27/40 at 11.5 s**, both
+compiling 36 and 38 of 40; the rest is judgement and SQL habit, which is the grammar's territory.
+
+### 14.4 The tier rule this establishes
+
+Tier 0 first, always: the engine answers before a model is asked. A model is used for exactly three
+things — putting computed facts into words, turning words into a structured artifact the engine
+verifies before anyone sees it (a formula, a design query, a script), and nothing else. The app
+decides the tier per task and says which it used: the notice above a Tier-0 answer names the facts
+as computed and the model that words them. The user decides the model, in one place. The vocabulary
+itself, restated because it was being used the other way round: **Tier 0 is no model**; **Tier 1 is
+the bundled on-board model** (M2 + M6, unbuilt); Tier 2 is a larger optional model the picker
+already covers; Tier 3 is a bring-your-own key.

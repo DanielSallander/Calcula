@@ -32,6 +32,8 @@ const store = new Map<string, string>([
   ["calcula.ai-chat:model", "qwen2.5-coder:3b"],
   ["calcula.ai-chat:baseUrl", "http://127.0.0.1:11434/v1"],
 ]);
+/** The Insights seam, or null for a workbook where the extension is not loaded. */
+let insightsProvider: Record<string, unknown> | null = null;
 vi.mock("@api", () => ({
   getSetting: (ext: string, k: string, d: string) => store.get(`${ext}:${k}`) ?? d,
   setSetting: (ext: string, k: string, v: string) => void store.set(`${ext}:${k}`, String(v)),
@@ -46,6 +48,11 @@ vi.mock("@api", () => ({
   a1Rect: (r1: number, c1: number, r2: number, c2: number) => `R${r1}C${c1}:R${r2}C${c2}`,
   // The job strip subscribes to the real job store, which toasts on completion.
   showToast: vi.fn(),
+  // The Tier-0 pre-route. The seam's wording is proved in @api's own tests;
+  // here a recognisable stub shows WHAT reached the transcript.
+  getInsightsProvider: () => insightsProvider,
+  describeBundleForModel: (bundle: { markdown: string }, label?: string | null) =>
+    `FACTS for ${label ?? "?"}:\n${bundle.markdown}`,
 }));
 
 // The gate needs a Worker realm it does not have here; it is proved separately
@@ -64,6 +71,9 @@ const { ChatView } = await import("../components/ChatView");
 // The REAL job store: the strip below is a view of it, and doubling it would
 // test the double rather than the wiring.
 const { startAuthorJob, __resetJobs } = await import("../lib/authorJobs");
+// The real selection tracker, set directly: the pre-route reads it to decide
+// what to analyse.
+const { __setSelectionForTest } = await import("../lib/selectionContext");
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -123,6 +133,8 @@ beforeEach(async () => {
   openDraftInEditor.mockClear();
   // Miss this and one case's verdict decorates every transcript after it.
   gateVerdict = { allow: true };
+  insightsProvider = null;
+  __setSelectionForTest(null);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -1098,5 +1110,147 @@ describe("the gate's verdict is shown to the person, not only to the model", () 
     await ask("make me a button script");
     expect(container.textContent).not.toContain("Before you mount it");
     expect(container.textContent).not.toContain("Restricted access level");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tier 0 first: a question about the data is answered from computed facts
+// ---------------------------------------------------------------------------
+
+describe("a question about the data is answered from computed facts first", () => {
+  const computed = {
+    source: "range",
+    insights: [
+      { id: "i1", kind: "trend", score: 0.8, text: "Column B rises steadily.", evidence: [], provenance: [] },
+    ],
+    dropped: 0,
+    markdown: "- Column B rises steadily from January to June.",
+    factsJson: "{}",
+    notes: [],
+  };
+
+  function plainReply(): void {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") return textReply("Revenue is rising steadily.");
+      return "";
+    });
+  }
+
+  /** The pre-route awaits the seam before the stream call; give it a tick. */
+  async function settle(): Promise<void> {
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  }
+
+  it("computes the facts for a multi-cell selection and puts them in the user's message", async () => {
+    const analyzeRange = vi.fn(async () => computed);
+    insightsProvider = { analyzeRange, analyzeModel: vi.fn(), hasModel: () => false, modelConnections: () => [] };
+    __setSelectionForTest({ sheetIndex: 0, areas: [{ startRow: 1, startCol: 1, endRow: 20, endCol: 3 }] });
+    plainReply();
+
+    await ask("what is going on in this data?");
+    await settle();
+
+    expect(analyzeRange).toHaveBeenCalledWith({
+      sheetIndex: 0, startRow: 1, startCol: 1, endRow: 20, endCol: 3,
+    });
+    const user = sentMessages(0).at(-1)!;
+    expect(user.role).toBe("user");
+    // Two text blocks: what the person typed, then the seam's wording of the
+    // bundle. The facts ride in the message so a follow-up turn keeps them.
+    expect(user.content).toHaveLength(2);
+    expect(JSON.stringify(user.content[0])).toContain("what is going on in this data?");
+    expect(JSON.stringify(user.content[1])).toContain("Column B rises steadily from January to June.");
+    expect(JSON.stringify(user.content[1])).toContain("FACTS for R1C1:R20C3 on sheet index 0");
+    // The person is told, and no tool round trip was spent on it.
+    expect(container.textContent).toContain("computed 1 fact about R1C1:R20C3");
+    expect(container.textContent).toContain("no model involved");
+    expect(runToolCalls()).toEqual([]);
+  });
+
+  it("sends the message as typed when no Insights provider is registered", async () => {
+    __setSelectionForTest({ sheetIndex: 0, areas: [{ startRow: 1, startCol: 1, endRow: 20, endCol: 3 }] });
+    plainReply();
+
+    await ask("what is going on in this data?");
+    await settle();
+
+    expect(sentMessages(0).at(-1)!.content).toHaveLength(1);
+    expect(container.textContent).not.toContain("computed");
+  });
+
+  it("does not compute facts for a message that is not about the data", async () => {
+    const analyzeRange = vi.fn(async () => computed);
+    insightsProvider = { analyzeRange, analyzeModel: vi.fn(), hasModel: () => false, modelConnections: () => [] };
+    __setSelectionForTest({ sheetIndex: 0, areas: [{ startRow: 1, startCol: 1, endRow: 20, endCol: 3 }] });
+    plainReply();
+
+    await ask("make A1:A3 yellow");
+    await settle();
+
+    expect(analyzeRange).not.toHaveBeenCalled();
+    expect(sentMessages(0).at(-1)!.content).toHaveLength(1);
+  });
+
+  it("asks the one model connection about its measures when nothing is selected", async () => {
+    const analyzeModel = vi.fn(async () => ({
+      ...computed,
+      source: "model",
+      markdown: "- Revenue fell 4.1% and the fall is unfavourable.",
+    }));
+    insightsProvider = {
+      analyzeRange: vi.fn(),
+      analyzeModel,
+      hasModel: () => true,
+      modelConnections: () => [{ id: "conn-1", name: "Sales" }],
+    };
+    __setSelectionForTest(null);
+    plainReply();
+
+    await ask("what's going on with revenue?");
+    await settle();
+
+    expect(analyzeModel).toHaveBeenCalledWith({ connectionId: "conn-1" });
+    expect(JSON.stringify(sentMessages(0).at(-1)!.content[1])).toContain("Revenue fell 4.1%");
+    expect(container.textContent).toContain('the model "Sales"');
+  });
+
+  it("keeps going without facts when the seam throws", async () => {
+    insightsProvider = {
+      analyzeRange: vi.fn(async () => { throw new Error("engine busy"); }),
+      analyzeModel: vi.fn(),
+      hasModel: () => false,
+      modelConnections: () => [],
+    };
+    __setSelectionForTest({ sheetIndex: 0, areas: [{ startRow: 1, startCol: 1, endRow: 20, endCol: 3 }] });
+    plainReply();
+
+    await ask("analyse this");
+    await settle();
+
+    const streamCalls = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream");
+    expect(streamCalls, "the chat must still reach the model").toHaveLength(1);
+    expect(sentMessages(0).at(-1)!.content).toHaveLength(1);
+  });
+
+  it("runs a salvaged analyze_range without asking — it reads and computes, nothing changes", async () => {
+    // The tool is in AUTORUN_TOOLS for the same reason run_bi_query is: it
+    // answers a question about cells the model could already have read. A
+    // salvaged call to it must not put a confirmation dialog in front of the
+    // user, or the cheap deterministic path costs a click the raw read does not.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        return nth === 1
+          ? textReply('```json\n{"name":"analyze_range","arguments":{"start_row":0,"start_col":0,"end_row":9,"end_col":1}}\n```')
+          : textReply("Column B rises.");
+      }
+      return "- Column B rises steadily.";
+    });
+
+    await ask("look at column B");
+    await settle();
+
+    expect(runToolCalls().map((c) => c.name)).toEqual(["analyze_range"]);
+    expect(confirmAsync).not.toHaveBeenCalled();
   });
 });
