@@ -128,6 +128,10 @@ import {
 } from "../components/sections/StrategySection";
 import type { RuleDraft } from "../components/sections/StrategySection";
 import { emptyStrategyDoc } from "../lib/strategyTypes";
+// The stylesheet is asserted as TEXT: the folder row's exemption from the
+// column-group rules lives in CSS, and jsdom applies none of it, so the only
+// way to pin the two halves together is to check the rule was written.
+import { MODEL_EDITOR_CSS } from "../components/theme";
 import type { SectionCtx } from "../components/editorShared";
 import type {
   ResolvedMeasure,
@@ -2563,5 +2567,604 @@ describe("the measures grid filters", () => {
     // Every column is still present and in the same order — hiding is done in
     // CSS against nth-child, so the DOM never changes shape.
     expect(headersOf()).toEqual(before);
+  });
+});
+
+// ===========================================================================
+// The trees
+// ===========================================================================
+//
+// WHY THIS BLOCK BUILDS ITS OWN MODEL. Every measure in the shared fixture has
+// `group: null`, so the folder tree renders nothing at all and the rest of this
+// suite exercises the FLAT path — which is correct, and is itself a property
+// worth having (a model with no display folders must look exactly as it did),
+// but it means the whole tree could have shipped with 106 green tests and no
+// coverage whatsoever. These build a model that actually has folders.
+//
+// THE ASSERTIONS ARE ABOUT REACHABILITY, NOT ABOUT CHEVRONS. Collapse is the
+// THIRD way a row can be missing from the DOM, after the "Needs review" filter
+// and the column groups, and each of them can hide a row a finding points at.
+// So the tests that matter are the ones proving a hidden row can still be
+// reached, and still gets written to — property (19).
+
+describe("the measures folder tree", () => {
+  /** A model whose measures carry display folders, including a nested one and
+   *  one measure deliberately left at the top level. */
+  function foldered(): ModelOverview {
+    const o = overview();
+    o.measures = [
+      { ...measure("Returns"), group: "Sales" },
+      { ...measure("Profit"), group: "Sales\\Margins" },
+      { ...measure("Headcount"), group: null },
+    ] as ModelMeasureInfo[];
+    return o;
+  }
+
+  async function mountFoldered(doc: StrategyDoc = { version: 1 }): Promise<void> {
+    vi.mocked(strategyGet).mockResolvedValue(doc);
+    await mount(ctxFor(foldered()));
+  }
+
+  // READ the attribute; do not put a folder path in a selector. A nested path
+  // is "Sales\Margins", and a backslash in a CSS attribute selector is an
+  // ESCAPE — `\M` means a literal M, so the selector silently looks for
+  // "SalesMargins" and finds nothing. The failure looks like a missing row,
+  // which is exactly the bug these tests exist to catch, so it would have been
+  // read as a real defect.
+  const byAttr = (attr: string, value: string): HTMLElement | null =>
+    ([...container.querySelectorAll(`tr[${attr}]`)] as HTMLElement[]).find(
+      (el) => el.getAttribute(attr) === value,
+    ) ?? null;
+
+  const folderRow = (path: string): HTMLElement | null => byAttr("data-folder-path", path);
+  const missing = (path: string): Element | null => byAttr("data-strategy-path", path);
+
+  /** A folder's disclosure button, found the same way and for the same reason. */
+  const folderButton = (path: string): HTMLButtonElement => {
+    const btn = ([...container.querySelectorAll("button[data-testid]")] as HTMLButtonElement[]).find(
+      (b) => b.getAttribute("data-testid") === `measure-folder-${path}`,
+    );
+    if (!btn) throw new Error(`no folder button for '${path}'`);
+    return btn;
+  };
+
+  it("groups measures under the display folder authored in the Measures tab", async () => {
+    await mountFoldered();
+
+    // Both folders are headers of their own, and the nested one is a separate
+    // row rather than a slash in the parent's name.
+    expect(folderRow("Sales"), "the root folder").not.toBeNull();
+    expect(folderRow("Sales\\Margins"), "the nested folder").not.toBeNull();
+
+    // Every measure is still present and still carries its own path hook — a
+    // tree that reorganised rows into something the rest of the tab cannot
+    // address would break every finding anchor in the document.
+    expect(measureRow("Returns")).not.toBeNull();
+    expect(measureRow("Profit")).not.toBeNull();
+    expect(measureRow("Headcount")).not.toBeNull();
+
+    // The ungrouped measure is NOT swept into a folder. It has no group; the
+    // grid must not invent one for it.
+    const rows = [...container.querySelectorAll("tbody tr")];
+    expect(rows.indexOf(measureRow("Headcount"))).toBeGreaterThan(
+      rows.indexOf(folderRow("Sales\\Margins") as HTMLElement),
+    );
+  });
+
+  it("counts a parent folder's WHOLE subtree, not its direct children", async () => {
+    await mountFoldered();
+    // "Sales" holds one measure directly (Returns) and one in a subfolder
+    // (Profit). A count of direct children would say 1 — and while collapsed
+    // that number is the only thing standing in for what is inside.
+    expect(folderButton("Sales").textContent).toContain("2");
+    expect(folderButton("Sales\\Margins").textContent).toContain("1");
+  });
+
+  it("collapsing a parent takes its descendants with it", async () => {
+    await mountFoldered();
+    await click(folderButton("Sales"));
+
+    // The parent's own measure, the SUBFOLDER, and the subfolder's measure all
+    // go. A tree that only hid direct children would leave "Margins" floating
+    // at the root under a shut parent.
+    expect(missing("measures['Returns']")).toBeNull();
+    expect(folderRow("Sales\\Margins")).toBeNull();
+    expect(missing("measures['Profit']")).toBeNull();
+
+    // The measure outside the folder is untouched — collapse is scoped, not a
+    // filter over the whole grid.
+    expect(measureRow("Headcount")).not.toBeNull();
+  });
+
+  it("starts every folder OPEN", async () => {
+    // The Set holds the CLOSED keys, so a folder that appears the moment
+    // someone types a display folder in the Measures tab is not born hidden.
+    await mountFoldered();
+    expect(folderButton("Sales").getAttribute("aria-expanded")).toBe("true");
+    expect(measureRow("Returns")).not.toBeNull();
+  });
+
+  it("renders no folder rows at all when no measure has a group", async () => {
+    // The shared fixture. A tree over a model with no tree is one more row of
+    // chrome per measure and nothing gained, so this grid must be exactly what
+    // it was before folders existed.
+    await mount();
+    expect(container.querySelector("tr[data-folder-path]")).toBeNull();
+    expect(container.querySelector('[data-testid="collapse-all-folders"]')).toBeNull();
+    expect(measureRow("Returns")).not.toBeNull();
+  });
+
+  it("hides a folder whose every measure the filter has hidden", async () => {
+    // Confirm everything in Sales, then re-apply the default filter. An empty
+    // folder header left behind would be a row promising contents it has none
+    // of — and clicking it would do nothing.
+    await mountFoldered({
+      version: 1,
+      measures: {
+        Returns: { direction: "lowerIsBetter", reviewed: true },
+        Profit: { direction: "higherIsBetter", reviewed: true },
+      },
+    });
+    const filter = byTestId<HTMLSelectElement>("measure-row-filter");
+    await act(async () => {
+      filter.value = "needsReview";
+      filter.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(folderRow("Sales"), "a folder with nothing left to show").toBeNull();
+    expect(folderRow("Sales\\Margins")).toBeNull();
+    // The unconfirmed one outside the folders survives, which is what stops
+    // this passing against a grid that rendered nothing at all.
+    expect(measureRow("Headcount")).not.toBeNull();
+  });
+
+  it("gives the folder header the SAME cell count as a measure row, and no colSpan", async () => {
+    // The alignment invariant, and the one that was got wrong first time. A
+    // colspan is counted in DECLARED columns while the column groups remove
+    // cells from the column structure with `display: none`, so a spanning
+    // folder row asked for eleven slots while the body occupied six — pushing
+    // the folder's pinned cell 24-45px to the RIGHT of the `reviewed` column in
+    // three of the four groups, and aligning only under "All columns".
+    //
+    // Eleven ordinary cells cannot drift: the group rules apply to this row
+    // exactly as they do to its neighbours.
+    await mountFoldered();
+    const tr = folderButton("Sales").closest("tr") as HTMLElement;
+    const cells = [...tr.children] as HTMLElement[];
+    const bodyCells = [...measureRow("Headcount").children] as HTMLElement[];
+
+    expect(cells).toHaveLength(bodyCells.length);
+    expect(cells.some((c) => c.hasAttribute("colspan")), "no cell may span").toBe(false);
+    // The trailing cell is the pinned one, in the same column as the body's.
+    expect(cells[cells.length - 1].style.position).toBe("sticky");
+    expect(cells[cells.length - 1].style.right).toBe("0px");
+    // ...and opaque, or the pinned column is a window onto the columns sliding
+    // under it.
+    expect(cells[cells.length - 1].style.background).not.toBe("");
+  });
+
+  it("has NO column-group exemption in the stylesheet", async () => {
+    // The absence is the design. An exemption is what the spanning shape needed
+    // and it is what let the row keep a cell count the body did not have; if
+    // one comes back, the row shape has probably regressed with it.
+    await mountFoldered();
+    const tr = folderButton("Sales").closest("tr") as HTMLElement;
+    expect(tr.getAttribute("data-tree-row"), "the hook stays, for styling and tests").toBe("folder");
+    expect(MODEL_EDITOR_CSS).not.toContain("tr[data-tree-row]");
+    // Guards the guard: the stylesheet is still the one with the group rules in
+    // it, so this is not passing over an empty string.
+    expect(MODEL_EDITOR_CSS).toContain('table[data-cols="slicing"]');
+  });
+
+  it("shuts and reopens every folder from one button", async () => {
+    await mountFoldered();
+    const all = (): HTMLButtonElement => byTestId<HTMLButtonElement>("collapse-all-folders");
+    expect(all().textContent).toBe("Collapse all folders");
+
+    await click(all());
+    expect(folderRow("Sales")).not.toBeNull();
+    expect(missing("measures['Returns']")).toBeNull();
+    // The label says what pressing it will do NEXT, so one button does both
+    // jobs and never lies about which one it is about to do.
+    expect(all().textContent).toBe("Expand all folders");
+
+    await click(all());
+    expect(measureRow("Returns")).not.toBeNull();
+    expect(all().textContent).toBe("Collapse all folders");
+  });
+
+  it("REVEALS a measure inside a shut folder when its finding is selected", async () => {
+    // Property (19). The findings strip is the one surface that survives every
+    // view, every filter and every collapse — so a finding whose row is inside
+    // a shut folder must open it. Otherwise clicking the finding does nothing
+    // at all and the strip is a list of dead links.
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        {
+          severity: "warning",
+          code: "stale",
+          path: "measures['Profit']",
+          message: "Profit disagrees with today's inference",
+        },
+      ],
+    });
+    await mount(ctxFor(foldered()));
+    await click(button("Validate"));
+
+    // Shut the folder Profit lives in, two levels down.
+    await click(folderButton("Sales"));
+    expect(missing("measures['Profit']")).toBeNull();
+
+    // Now click the finding. The row must come back.
+    await click(button("measures['Profit']"));
+    expect(
+      measureRow("Profit"),
+      "selecting a finding must open whatever is hiding its row",
+    ).not.toBeNull();
+
+    // ...and it is DERIVED, not written: deselecting shuts the folder again
+    // with no undo step, which is what stops a reveal leaving the tree in a
+    // state the user never chose.
+    await click(button("measures['Profit']"));
+    expect(missing("measures['Profit']")).toBeNull();
+  });
+
+  it("confirms a measure inside a COLLAPSED folder (Confirm all means all)", async () => {
+    // Property (8) wearing a different hat: a button called "Confirm all" that
+    // quietly meant "the ones you can see" would be the same defect as one that
+    // silently skipped a warned row.
+    await mountFoldered({
+      version: 1,
+      measures: { Profit: { direction: "higherIsBetter", reviewed: false } },
+    });
+    await click(folderButton("Sales"));
+    expect(missing("measures['Profit']")).toBeNull();
+
+    await click(button("Confirm all"));
+    // Open it back up and look.
+    await click(folderButton("Sales"));
+    expect(measureRow("Profit").getAttribute("data-unconfirmed")).toBe("false");
+  });
+});
+
+describe("the tables tree", () => {
+  it("collapses a table's columns, and the ignored summary with them", async () => {
+    // Sales needs an IGNORED column, or the summary row is absent whatever the
+    // chevron does and the assertion below passes over a grid that never had
+    // one. It did exactly that in the first draft of this test — the sabotage
+    // that removed the disclosure reddened nothing at all.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Sales: { reviewed: false, columns: { Note: { role: "ignore" } } } },
+    });
+    await mount();
+    await showView("tables");
+    expect(columnRow("Sales", "Amount"), "columns start visible").not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="ignored-summary-Sales"]'),
+      "the positive control: the summary is there to be hidden",
+    ).not.toBeNull();
+
+    await click(byTestId<HTMLButtonElement>("table-disclosure-Sales"));
+    expect(columnRow("Sales", "Amount")).toBeNull();
+    // The ignored-column disclosure is the INNER of two now. A summary of
+    // columns, left standing under a table that is not showing columns, would
+    // be a count of something invisible.
+    expect(container.querySelector('[data-testid="ignored-summary-Sales"]')).toBeNull();
+
+    // The table's OWN row stays — it carries the kind and the confirmation,
+    // which is the decision this grid exists to collect.
+    expect(container.querySelector(`tr[data-strategy-path="tables['Sales']"]`)).not.toBeNull();
+    // ...and the other table is untouched.
+    expect(columnRow("Dim", "Dept"), "collapse is scoped to one table").not.toBeNull();
+  });
+
+  it("says on the row what the chevron is hiding", async () => {
+    // A table's four-valued state can be produced ENTIRELY by its column map,
+    // so a shut table could show an authored tone with every cell on the row
+    // blank and nothing to explain it. The summary is that evidence.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Sales: { reviewed: false, columns: { Amount: { role: "measure" } } } },
+    });
+    await mount();
+    await showView("tables");
+    const summary = byTestId<HTMLElement>("table-columns-Sales").textContent ?? "";
+    expect(summary).toContain("3 columns");
+    expect(summary).toContain("1 set");
+  });
+
+  it("REVEALS a column inside a shut table when its finding is selected", async () => {
+    // A column's path is nested under its table's, so the reveal has to be a
+    // PREFIX test — an equality test would look for a table literally called
+    // "tables['Sales'].columns['Note']" and never open anything.
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        {
+          severity: "warning",
+          code: "unroled",
+          path: "tables['Sales'].columns['Note']",
+          message: "Note has no role",
+        },
+      ],
+    });
+    await mount();
+    await click(button("Validate"));
+    await showView("tables");
+    await click(byTestId<HTMLButtonElement>("table-disclosure-Sales"));
+    expect(columnRow("Sales", "Note")).toBeNull();
+
+    await click(button("tables['Sales'].columns['Note']"));
+    expect(
+      columnRow("Sales", "Note"),
+      "a finding on a column must open the table holding it",
+    ).not.toBeNull();
+  });
+
+  it("shuts and reopens every table from one button", async () => {
+    await mount();
+    await showView("tables");
+    const all = (): HTMLButtonElement => byTestId<HTMLButtonElement>("collapse-all-tables");
+    await click(all());
+    expect(columnRow("Sales", "Amount")).toBeNull();
+    expect(columnRow("Dim", "Dept")).toBeNull();
+    expect(all().textContent).toBe("Expand all tables");
+
+    await click(all());
+    expect(columnRow("Sales", "Amount")).not.toBeNull();
+  });
+
+  it("keeps the pinned reviewed cell on the ignored-columns summary row", async () => {
+    // It spanned all four columns and left a hole in the pinned column that
+    // the scrolled cells showed straight through — the defect property (17)
+    // was written to close, on the one row that had been missed.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      tables: { Sales: { reviewed: false, columns: { Note: { role: "ignore" } } } },
+    });
+    await mount();
+    await showView("tables");
+    const cells = [...byTestId<HTMLElement>("ignored-summary-Sales").children] as HTMLElement[];
+    expect(cells).toHaveLength(2);
+    expect(cells[0].getAttribute("colspan")).toBe("3");
+    expect(cells[1].style.position).toBe("sticky");
+  });
+});
+
+describe("collapse survives a view switch", () => {
+  // The grids are conditionally rendered, so a grid-owned Set is thrown away
+  // every time someone looks at another view. With fourteen tables, re-shutting
+  // them after each glance is worse than never having shut them — so the state
+  // lives in the section. These are the tests that tell the two apart; nothing
+  // else in the suite switches views and then looks at collapse.
+
+  it("keeps a collapsed table shut across a trip to Rules and back", async () => {
+    await mount();
+    await showView("tables");
+    await click(byTestId<HTMLButtonElement>("table-disclosure-Sales"));
+    expect(columnRow("Sales", "Amount")).toBeNull();
+
+    await showView("rules");
+    await showView("tables");
+    expect(
+      columnRow("Sales", "Amount"),
+      "a glance at another view must not re-open the tree",
+    ).toBeNull();
+
+    // ...and it is still the user's to undo, not stuck.
+    await click(byTestId<HTMLButtonElement>("table-disclosure-Sales"));
+    expect(columnRow("Sales", "Amount")).not.toBeNull();
+  });
+
+  it("keeps a collapsed measure folder shut across a trip to Tables and back", async () => {
+    const o = overview();
+    o.measures = [
+      { ...measure("Returns"), group: "Sales" },
+      { ...measure("Profit"), group: null },
+    ] as ModelMeasureInfo[];
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    await mount(ctxFor(o));
+
+    const folderBtn = (): HTMLButtonElement =>
+      ([...container.querySelectorAll("button[data-testid]")] as HTMLButtonElement[]).find(
+        (b) => b.getAttribute("data-testid") === "measure-folder-Sales",
+      ) as HTMLButtonElement;
+
+    await click(folderBtn());
+    expect(container.querySelector(`tr[data-strategy-path="measures['Returns']"]`)).toBeNull();
+
+    await showView("tables");
+    await showView("measures");
+    expect(
+      container.querySelector(`tr[data-strategy-path="measures['Returns']"]`),
+      "the folder must still be shut after a view switch",
+    ).toBeNull();
+    // The measure outside the folder proves the grid re-rendered at all.
+    expect(measureRow("Profit")).not.toBeNull();
+  });
+});
+
+// ===========================================================================
+// Property (19), the parts an adversarial review found unguarded
+// ===========================================================================
+//
+// The first version of the tree shipped a reveal that only worked for findings
+// anchored at the ROW path. The validator anchors most of them BELOW it —
+// `measures['Profit'].target`, `.direction`, `.aggregation`,
+// `.neverSliceBy[0]` — so the reveal was dead for the commonest kind of
+// finding there is, inside the very change that added the property forbidding
+// dead links. These tests are the ones that would have caught it.
+
+describe("a finding reaches its row however deep it is anchored", () => {
+  function foldered2(): ModelOverview {
+    const o = overview();
+    o.measures = [
+      { ...measure("Returns"), group: "Sales" },
+      { ...measure("Profit"), group: "Sales\\Margins" },
+    ] as ModelMeasureInfo[];
+    return o;
+  }
+
+  const folderButton2 = (path: string): HTMLButtonElement => {
+    const b = ([...container.querySelectorAll("button[data-testid]")] as HTMLButtonElement[]).find(
+      (x) => x.getAttribute("data-testid") === `measure-folder-${path}`,
+    );
+    if (!b) throw new Error(`no folder button for '${path}'`);
+    return b;
+  };
+
+  async function withFinding(path: string, o: ModelOverview = foldered2()): Promise<void> {
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [{ severity: "warning", code: "stale", path, message: "needs a look" }],
+    });
+    await mount(ctxFor(o));
+    await click(button("Validate"));
+  }
+
+  it("opens the folder for a finding anchored on an ATTRIBUTE, not the row", async () => {
+    await withFinding("measures['Profit'].target");
+    await click(folderButton2("Sales"));
+    expect(container.querySelector(`tr[data-strategy-path="measures['Profit']"]`)).toBeNull();
+
+    await click(button("measures['Profit'].target"));
+    expect(
+      measureRow("Profit"),
+      "a finding at measures['X'].target must open the folder holding X",
+    ).not.toBeNull();
+  });
+
+  it("outlines the ROW a sub-path finding names", async () => {
+    // The outline is how "highlight the row this finding names" is delivered.
+    // Matching the raw path would never find a row, because no row is called
+    // measures['Profit'].target.
+    await withFinding("measures['Profit'].neverSliceBy[0]");
+    await click(button("measures['Profit'].neverSliceBy[0]"));
+    expect(measureRow("Profit").style.outline).not.toBe("none");
+  });
+
+  it("shows a row the FILTER is hiding when its finding is selected", async () => {
+    // Collapse is only one of the three ways a row can go missing. The default
+    // filter keeps unconfirmed rows only, so a finding on a CONFIRMED measure
+    // pointed at a row the grid was not rendering at all.
+    const o = foldered2();
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      measures: { Profit: { direction: "higherIsBetter", reviewed: true } },
+    });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        { severity: "warning", code: "stale", path: "measures['Profit'].direction", message: "m" },
+      ],
+    });
+    await act(async () => {
+      root.render(<StrategySection ctx={ctxFor(o)} />);
+    });
+    await click(button("Validate"));
+    // NOT via mount(), so the default "Needs review" filter is still in force.
+    expect(
+      container.querySelector(`tr[data-strategy-path="measures['Profit']"]`),
+      "the positive control: the filter really is hiding it",
+    ).toBeNull();
+
+    await click(button("measures['Profit'].direction"));
+    expect(measureRow("Profit"), "a selection defeats the filter for that row").not.toBeNull();
+  });
+
+  it("lets the chevron shut a folder a selection is holding open", async () => {
+    // Openness is `revealed OR not closed`, so while a selection forced a
+    // folder open the chevron wrote to the closed set and the OR overrode it —
+    // in both directions. The control did nothing at all until the user
+    // deselected. Acting on the tree now dismisses the highlight.
+    await withFinding("measures['Profit'].target");
+    await click(button("measures['Profit'].target"));
+    expect(measureRow("Profit")).not.toBeNull();
+    expect(folderButton2("Sales").getAttribute("aria-expanded")).toBe("true");
+
+    await click(folderButton2("Sales"));
+    expect(
+      container.querySelector(`tr[data-strategy-path="measures['Profit']"]`),
+      "one click must shut it, not two and not none",
+    ).toBeNull();
+    expect(folderButton2("Sales").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("lets the chevron shut a TABLE a selection is holding open", async () => {
+    vi.mocked(strategyGet).mockResolvedValue({ version: 1 });
+    vi.mocked(strategyValidate).mockResolvedValue({
+      written: false,
+      findings: [
+        { severity: "warning", code: "unroled", path: "tables['Sales'].columns['Note']", message: "m" },
+      ],
+    });
+    await mount();
+    await click(button("Validate"));
+    await showView("tables");
+    await click(byTestId<HTMLButtonElement>("table-disclosure-Sales"));
+    await click(button("tables['Sales'].columns['Note']"));
+    expect(columnRow("Sales", "Note")).not.toBeNull();
+
+    await click(byTestId<HTMLButtonElement>("table-disclosure-Sales"));
+    expect(columnRow("Sales", "Note"), "one click must shut it again").toBeNull();
+  });
+
+  it("collapse-all counts the folders on SCREEN, not the ones the filter dropped", async () => {
+    // With a filter hiding every measure in one folder, that folder is not
+    // rendered — but it was still counted, so `allClosed` stayed false while
+    // every visible folder was shut and the button offered to collapse them a
+    // second time.
+    const o = foldered2();
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      measures: { Profit: { direction: "higherIsBetter", reviewed: true } },
+    });
+    await act(async () => {
+      root.render(<StrategySection ctx={ctxFor(o)} />);
+    });
+    // Default filter: Profit is confirmed, so "Sales\Margins" renders nothing
+    // and "Sales" is the only folder on screen.
+    const all = (): HTMLButtonElement => byTestId<HTMLButtonElement>("collapse-all-folders");
+    expect(all().textContent).toBe("Collapse all folders");
+    expect(
+      container.querySelectorAll("tr[data-folder-path]"),
+      "the positive control: exactly one folder is rendered",
+    ).toHaveLength(1);
+
+    // Shut it with its OWN chevron, not with the collapse-all button. Using the
+    // button would set the closed set from the same list the label is computed
+    // from, so the two would agree even when the list is wrong — which is how
+    // the first version of this test passed against the defect.
+    await click(folderButton2("Sales"));
+    expect(
+      all().textContent,
+      "every folder on screen is shut, so the button must offer the way back",
+    ).toBe("Expand all folders");
+  });
+
+  it("keeps the pinned column continuous across an ORPHAN row", async () => {
+    // An orphan spanned through the pinned column and left a hole in it that
+    // the scrolled cells showed straight through — the same gap property (17)
+    // was written to close, on a row that predates the trees.
+    vi.mocked(strategyGet).mockResolvedValue({
+      version: 1,
+      measures: { Vanished: { direction: "higherIsBetter", reviewed: false } },
+    });
+    vi.mocked(strategyPreview).mockResolvedValue({
+      measures: [{ measure: "Vanished", hasEntry: true, inModel: false, resolved: null }],
+      findings: [],
+    });
+    await mount();
+    await settle();
+    const row = container.querySelector('tr[data-strategy-orphan="true"]') as HTMLElement;
+    expect(row, "the positive control: an orphan row is on screen").not.toBeNull();
+    const cells = [...row.children] as HTMLElement[];
+    expect(cells[cells.length - 1].style.position).toBe("sticky");
+    expect(cells[cells.length - 1].style.right).toBe("0px");
   });
 });

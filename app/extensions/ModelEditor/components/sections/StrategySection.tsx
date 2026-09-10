@@ -3,7 +3,9 @@
 //          strategy they trust. Three grids (measures, tables+columns, rules),
 //          a findings strip, and the four actions: Validate, Run tests, Save,
 //          Infer.
-// CONTEXT: Eleven properties are the design, not decoration.
+// CONTEXT: Nineteen properties are the design, not decoration. (This line read
+//          "Eleven" for eight properties longer than it was true — if you add
+//          one, the count is part of the edit.)
 //
 //          (1) THE ROW STATE IS FOUR-VALUED, NOT TWO. `reviewed` alone cannot
 //          tell a row nobody has touched from a row a machine guessed, so both
@@ -101,20 +103,23 @@
 //          reversal, since re-adding a field once a formatter exists costs less
 //          than carrying one nobody uses. What is left is labelled rather than
 //          removed, because each has a designed reader written down and not yet
-//          built: `fiscalYearStart` (nothing outside its own format check), and
-//          in the measures grid `unit` (narration formatting a value) and
-//          `cadence` (period bucketing, seasonality lags). Someone will type
-//          into an ordinary-looking box and reasonably expect a downstream
-//          effect, so the model-block fields carry a VISIBLE note
-//          (`NotYetConsulted`) rather than a tooltip — a tooltip is not a
-//          promise anyone reads before typing — and the grid marks the COLUMN
-//          HEADER once instead of repeating one sentence per row. All stay
+//          built: today that is `fiscalYearStart` alone (nothing outside its
+//          own format check), and it carries a VISIBLE note (`NotYetConsulted`)
+//          rather than a tooltip, because someone will type into an
+//          ordinary-looking box and reasonably expect a downstream effect, and
+//          a tooltip is not a promise anyone reads before typing. It stays
 //          EDITABLE: the value is stored, travels with the model, and matters
 //          the moment something reads it, so disabling would discard authored
-//          intent and buy nothing. `defaultTimeAxis` and `priority` carry no
-//          note because both are read. WHEN ONE ACQUIRES A READER, DELETE ITS
-//          NOTE — a stale "nothing reads this" is the same lie pointed the
-//          other way.
+//          intent and buy nothing. WHEN ONE ACQUIRES A READER, DELETE ITS NOTE
+//          — a stale "nothing reads this" is the same lie pointed the other
+//          way. That has now happened twice: `defaultTimeAxis` and `priority`
+//          were always read, and the measures grid's `unit` and `cadence`
+//          acquired theirs on 2026-09-09 (`insights/model.rs:1701/1804` and
+//          `:1754`), so `NOT_YET_CONSULTED_MEASURE_FIELDS` is EMPTY and the
+//          grid marks no column header at all. The machinery stays because the
+//          next inert field is a matter of time; this paragraph named those two
+//          in the present tense for a day after their readers landed, which is
+//          the same defect one level up.
 //
 //          (11) THE RULES SECTION HAS TO INVITE ITS OWN ACTION. `Add rule` was
 //          a `smallBtn` beside a 13px heading and the empty state read "No
@@ -206,13 +211,35 @@
 //          answers that by discarding the WHOLE strategy. So the eight kinds
 //          are checkboxes, and `buildRuleFromDraft` still parses, because
 //          unsaved drafts outlive the control that wrote them.
+//
+//          (19) A ROW THAT CAN BE HIDDEN MUST STILL BE REACHABLE. Both grids
+//          are trees now — tables disclose their columns, measures group under
+//          the display folders authored in the Measures tab — and that makes
+//          collapse the THIRD way a row can be absent from the DOM, after the
+//          "Needs review" filter and the column groups. Each of those layers
+//          can hide a row a finding is attached to, and the findings strip is
+//          the surface that survives all of them. So selecting a finding OPENS
+//          whatever contains its row and scrolls to it — and it does that by
+//          DERIVING openness from the selection (`revealedFolders`,
+//          `tableIsOpen`) rather than by writing to the collapse state: a
+//          folder forced open by a selection shuts again on its own when the
+//          selection moves, and no code has to remember to undo it. Two
+//          corollaries. Folders and tables start OPEN, because the Set holds
+//          the CLOSED keys — so a folder that appears the moment someone types
+//          a display folder in the Measures tab is not born hidden. And
+//          collapse never narrows a WRITE: `Confirm all` still walks every
+//          measure and table in the model, because a button called "Confirm
+//          all" that quietly meant "the ones you can see" is property (8)'s
+//          defect wearing a different hat.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ModelOverview, ModelTableInfo } from "@api";
 import { confirmAsync } from "@api/dialogs";
 import { Badge, Field, Modal, styles } from "../editorShared";
 import type { SectionCtx } from "../editorShared";
-import { Chevron } from "../treeKit";
+import { Chevron, FolderIcon, TREE_INDENT } from "../treeKit";
+import type { FolderNode } from "../../lib/measureFolders";
+import { buildFolderTree, splitFolderPath, FOLDER_SEP } from "../../lib/measureFolders";
 import {
   strategyGet,
   strategyInfer,
@@ -1882,6 +1909,17 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
   const [status, setStatus] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ original: Rule | null } | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // The two trees' collapse state lives HERE rather than in the grids, because
+  // the grids are conditionally rendered: a glance at Rules would otherwise
+  // throw away a "collapse all tables" the user had just performed.
+  const folderDisclosure = useTreeDisclosure();
+  const tableDisclosure = useTreeDisclosure();
+  // The strip holds the RAW finding path (it highlights the finding you
+  // clicked); the grids get the ROW that path belongs to. One normalisation,
+  // three consumers — outline, scroll and reveal — so they cannot disagree
+  // about which row a finding is about.
+  const selectedRow = rowPathFor(overview, selectedPath);
+  const clearSelection = useCallback(() => setSelectedPath(null), []);
   // Which of the four views is showing. Measures first: it is the sweep this
   // tab exists for, and the one with 300 rows behind it.
   const [view, setView] = useState<StrategyView>("measures");
@@ -2290,9 +2328,11 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
             findings={findings}
             preview={preview}
             inferred={inferred}
-            selectedPath={selectedPath}
+            selectedPath={selectedRow}
             columnRefs={columnRefs}
             disabled={disabled}
+            folders={folderDisclosure}
+            onClearSelection={clearSelection}
             onEdit={edit}
             onConfirmAll={onConfirmAll}
           />
@@ -2303,8 +2343,10 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
             overview={overview}
             findings={findings}
             inferred={inferred}
-            selectedPath={selectedPath}
+            selectedPath={selectedRow}
             disabled={disabled}
+            tables={tableDisclosure}
+            onClearSelection={clearSelection}
             onEdit={edit}
           />
         )}
@@ -2312,7 +2354,7 @@ export function StrategySection({ ctx }: { ctx: SectionCtx }): React.ReactElemen
           <RulesGrid
             doc={doc}
             findings={findings}
-            selectedPath={selectedPath}
+            selectedPath={selectedRow}
             disabled={disabled}
             blockedReason={addRuleBlocked}
             onAdd={() => setEditing({ original: null })}
@@ -2460,6 +2502,346 @@ type MeasureRowFilter = "needsReview" | "all";
 const TARGET_HINT = "1000 | kpi | measure:Budget | band:0.8,1.2 | band:[0.8,1.2)";
 const MATERIALITY_HINT = "1000 | 2%";
 
+// ===========================================================================
+// Trees — the shared disclosure machinery for both grids
+// ===========================================================================
+
+/**
+ * Collapse state as a Set of the CLOSED keys.
+ *
+ * The polarity is the whole design. A NEGATIVE set means a key nobody has
+ * touched is OPEN — so a table that appears after a refresh, or a folder that
+ * appears the moment someone types a display folder in the Measures tab, shows
+ * its contents rather than hiding them behind a chevron the user never closed.
+ * A positive `expanded` set gets that backwards and would make every new thing
+ * arrive invisible. It is also the idiom the rest of this extension already
+ * uses (`MeasuresSection`, `CalcGroupsSection`).
+ *
+ * Deliberately NOT persisted. The only per-connection store in this tab is the
+ * unsaved strategy DRAFT, which is sent verbatim to the backend on Save —
+ * putting view state in there would make "which folders are shut" part of the
+ * document. Nothing else in this extension persists tree state either, so
+ * collapse resets when the TAB unmounts, exactly as the row filter and the
+ * column group already do.
+ *
+ * It must NOT reset when the VIEW changes, though, which is why the state is
+ * held by the section and handed to the grid rather than owned by the grid.
+ * The grids are conditionally rendered, so a grid-owned Set would be thrown
+ * away every time someone looked at Rules — and re-shutting fourteen tables
+ * after each glance is worse than never having shut them.
+ *
+ * The KEYS stay with the grid: only it knows what its own tree contains, so
+ * `setAll` and `allClosed` take them rather than the hook holding a second
+ * copy that could go stale.
+ */
+interface TreeDisclosure {
+  isClosed: (key: string) => boolean;
+  toggle: (key: string) => void;
+  /** Set one key's state outright. Needed because `toggle` answers the question
+   *  "is this key in the closed set", and while a SELECTION is forcing a row
+   *  open that is not the same question as "is this row open on screen" — a
+   *  toggle there flips the hidden half and leaves the visible half unchanged. */
+  setClosed: (key: string, closed: boolean) => void;
+  setAll: (keys: string[], closed: boolean) => void;
+  allClosed: (keys: string[]) => boolean;
+}
+
+function useTreeDisclosure(): TreeDisclosure {
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const setClosed = (key: string, closed: boolean): void =>
+    setCollapsed((prev) => {
+      if (prev.has(key) === closed) return prev;
+      const next = new Set(prev);
+      if (closed) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  return {
+    isClosed: (key) => collapsed.has(key),
+    toggle: (key) => setClosed(key, !collapsed.has(key)),
+    setClosed,
+    setAll: (keys, closed) => setCollapsed(closed ? new Set(keys) : new Set()),
+    allClosed: (keys) => keys.length > 0 && keys.every((k) => collapsed.has(k)),
+  };
+}
+
+/** The one-click "shut everything / open everything" control. Label flips, so
+ *  it is one button rather than two, and it says what pressing it WILL do. */
+function CollapseAllButton({
+  allClosed,
+  onSetAll,
+  what,
+}: {
+  allClosed: boolean;
+  onSetAll: (closed: boolean) => void;
+  /** Plural noun for the thing being opened or shut ("tables", "folders"). */
+  what: string;
+}): React.ReactElement {
+  return (
+    <button
+      type="button"
+      style={styles.smallBtn}
+      data-testid={`collapse-all-${what}`}
+      // NO `aria-pressed`. The label itself flips, so the accessible name is
+      // already the state — and a toggle that announces "Expand all folders,
+      // pressed" is telling a listener two contradictory things at once. A
+      // control whose name changes is a button, not a switch.
+      title={
+        allClosed
+          ? `Open every ${what.replace(/s$/, "")} again`
+          : `Shut every ${what.replace(/s$/, "")} so the list is one row each`
+      }
+      onClick={() => onSetAll(!allClosed)}
+    >
+      {allClosed ? `Expand all ${what}` : `Collapse all ${what}`}
+    </button>
+  );
+}
+
+/** The ground a folder header sits on. Named once because the row and its
+ *  pinned trailing cell must agree — a sticky cell floats over the columns
+ *  sliding beneath it, so a mismatch shows as a moving seam, not as a colour. */
+const FOLDER_ROW_BG = ME.sunken;
+
+/**
+ * A display-folder header row.
+ *
+ * ELEVEN CELLS, THE SAME AS EVERY OTHER ROW — no colSpan.
+ *
+ * The obvious shape is a spanning name cell plus a pinned trailing one, and it
+ * was wrong: a `colspan` is counted in DECLARED columns, but the column groups
+ * hide cells with `display: none`, so the folder row asked the table for
+ * eleven column slots while the header and the value rows occupied six, five or
+ * four. Measured in a real browser, that pushed the folder's pinned cell 24px
+ * (Meaning), 44px (Aggregation) and 45px (Slicing) to the RIGHT of the
+ * `reviewed` column it was supposed to sit on — aligning only under "All
+ * columns", which is the one group nobody works in. Property (17) asks for the
+ * pinned column to be continuous down the grid; a cell beside it is not that.
+ *
+ * With eleven ordinary cells the group rules apply to this row exactly as they
+ * do to the rows above and below it, and the arithmetic cannot drift: column 1
+ * (the folder name) and column 11 (pinned) are in every group by construction,
+ * and the nine in between are empty and hide alongside their neighbours.
+ *
+ * The chevron is a real <button> with `aria-expanded`, not a clickable <div>.
+ * Every other tree in this extension is a div and is therefore unreachable by
+ * keyboard; the one disclosure already in THIS file is a button, and matching
+ * the neighbour beats matching the extension.
+ */
+function MeasureFolderRow({
+  node,
+  depth,
+  open,
+  count,
+  onToggle,
+}: {
+  node: FolderNode;
+  depth: number;
+  open: boolean;
+  /** Measures shown UNDER this folder, subfolders included — the number that
+   *  matches what opening it reveals. A count of direct children only would
+   *  say "0" on a parent holding twelve, which is the one number a collapsed
+   *  row must not get wrong. */
+  count: number;
+  onToggle: () => void;
+}): React.ReactElement {
+  return (
+    <tr data-tree-row="folder" data-folder-path={node.path} style={{ background: FOLDER_ROW_BG }}>
+      <td style={{ ...cellStyle, paddingLeft: 6 + depth * TREE_INDENT }}>
+        <button
+          type="button"
+          data-testid={`measure-folder-${node.path}`}
+          aria-expanded={open}
+          onClick={onToggle}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            background: "none",
+            border: "none",
+            padding: 0,
+            font: "inherit",
+            fontWeight: 600,
+            color: ME.text2,
+            cursor: "pointer",
+          }}
+        >
+          <Chevron open={open} />
+          <FolderIcon />
+          {node.name}
+          <span style={{ ...styles.hint, ...TABULAR }}>{count}</span>
+        </button>
+      </td>
+      {/* Columns 2..10, empty. They exist so the group rules have the same
+          number of cells to count on this row as on the rows around it — that
+          is the whole reason the pinned cell below lands ON the `reviewed`
+          column instead of beside it. */}
+      {MEASURE_HEADERS.slice(1, -1).map((h) => (
+        <td key={h} style={cellStyle} />
+      ))}
+      <td style={{ ...cellStyle, ...STICKY_CONFIRM, background: FOLDER_ROW_BG }} />
+    </tr>
+  );
+}
+
+/** Where a measure's name sits when it is nested `depth` folders deep. The
+ *  extra 18px lines the name up past its folder's chevron+icon rather than
+ *  flush under them, which is the difference between a tree and a list with
+ *  headings in it. */
+function measureNamePad(depth: number): number {
+  return 6 + depth * TREE_INDENT + 18;
+}
+
+/** One row of the measures body: a folder header, or a measure. */
+type MeasureBodyRow =
+  | { kind: "folder"; node: FolderNode; depth: number; open: boolean; count: number }
+  | { kind: "measure"; measure: ModelOverview["measures"][number]; depth: number };
+
+/**
+ * Flatten the folder tree into the row order the tbody renders.
+ *
+ * A <tr> cannot nest, so the tree becomes a flat sequence carrying its own
+ * depth. Three rules do the work:
+ *
+ *  - a folder whose subtree shows NOTHING is not rendered at all, so the row
+ *    filter cannot leave a trail of empty headers behind it;
+ *  - a folder's count is its whole SUBTREE, not its direct children — a parent
+ *    holding twelve measures in subfolders and none of its own would otherwise
+ *    read "0" while collapsed, which is the one number a shut row must not get
+ *    wrong;
+ *  - a closed folder is not recursed into, which is what makes collapsing a
+ *    parent take its descendants with it.
+ */
+function measureTreeRows(
+  roots: FolderNode[],
+  shown: Set<string>,
+  isOpen: (path: string) => boolean,
+  depth = 0,
+): MeasureBodyRow[] {
+  const out: MeasureBodyRow[] = [];
+  for (const node of roots) {
+    const count = shownInSubtree(node, shown);
+    if (count === 0) continue;
+    const open = isOpen(node.path);
+    out.push({ kind: "folder", node, depth, open, count });
+    if (!open) continue;
+    for (const m of node.measures) {
+      if (shown.has(m.name)) out.push({ kind: "measure", measure: m, depth: depth + 1 });
+    }
+    out.push(...measureTreeRows(node.children, shown, isOpen, depth + 1));
+  }
+  return out;
+}
+
+/** How many of a folder's measures — its own and its descendants' — the current
+ *  filter is showing. */
+function shownInSubtree(node: FolderNode, shown: Set<string>): number {
+  let n = node.measures.filter((m) => shown.has(m.name)).length;
+  for (const child of node.children) n += shownInSubtree(child, shown);
+  return n;
+}
+
+/**
+ * Does `rowPath` name the row that `path` belongs to?
+ *
+ * The SAME rule `findingsAtPath` uses to decide which badge goes on which row,
+ * because the two must agree: a row that displays a finding must also be the
+ * row that finding reveals and scrolls to.
+ */
+function pathCovers(rowPath: string, path: string): boolean {
+  return path === rowPath || path.startsWith(`${rowPath}.`) || path.startsWith(`${rowPath}[`);
+}
+
+/**
+ * The ROW a selected path belongs to.
+ *
+ * THE VALIDATOR ANCHORS BELOW THE ROW. Most measure findings come back at
+ * `measures['Profit'].target`, `.direction`, `.aggregation`, `.neverSliceBy[0]`
+ * — not at `measures['Profit']` — and column findings at
+ * `tables['Sales'].columns['Note']` and deeper. Every consumer of a selection
+ * wants the row: the outline, the scroll, and the reveal that opens whatever is
+ * hiding it.
+ *
+ * So the prefix rule lives HERE, once, and everything downstream compares row
+ * paths for equality as it always did. The first version of this feature put
+ * the rule in the tables grid only and used equality in the measures grid,
+ * which made the reveal dead for the commonest kind of finding there is —
+ * exactly the "list of dead links" property (19) exists to forbid, shipped
+ * inside the change that introduced the property.
+ */
+function rowPathFor(overview: ModelOverview, path: string | null): string | null {
+  if (!path) return null;
+  for (const t of overview.tables) {
+    const tp = tablePath(t.name);
+    if (!pathCovers(tp, path)) continue;
+    // A column row is a row in its own right, so prefer it over its table.
+    for (const c of t.columns) {
+      const cp = `${tp}.columns['${c.name}']`;
+      if (pathCovers(cp, path)) return cp;
+    }
+    return tp;
+  }
+  for (const m of overview.measures) {
+    const mp = measurePath(m.name);
+    if (pathCovers(mp, path)) return mp;
+  }
+  // Rules and the document-level path have nothing to normalise to.
+  return path;
+}
+
+/**
+ * The folder paths that must be open for `selectedRow` to be on screen — the
+ * folder holding that measure, and every ancestor of it.
+ *
+ * Without this, clicking a finding for a measure inside a shut folder outlines
+ * a row that is not in the DOM: nothing happens at all, and the findings strip
+ * — which is the one surface that survives every view and every filter —
+ * becomes a list of dead links.
+ */
+function revealedFolders(
+  measures: ModelOverview["measures"],
+  selectedRow: string | null,
+): Set<string> {
+  const out = new Set<string>();
+  if (!selectedRow) return out;
+  const hit = measures.find((m) => measurePath(m.name) === selectedRow);
+  if (!hit?.group) return out;
+  const segs = splitFolderPath(hit.group);
+  for (let i = 0; i < segs.length; i++) out.add(segs.slice(0, i + 1).join(FOLDER_SEP));
+  return out;
+}
+
+/**
+ * Scroll the row a finding names into view.
+ *
+ * Revealing a collapsed row is not enough on its own: opening a folder can put
+ * a hundred rows above the one that was clicked, so the outline lands somewhere
+ * the user is not looking and the control reads as dead — which is what it did
+ * before collapse existed too, only then the row was at least in the DOM.
+ *
+ * Matches by READING the attribute rather than by putting `selectedPath` into a
+ * selector: a path is `measures['Margin %']`, quotes and all, and `CSS.escape`
+ * is undefined in jsdom — a selector-based version passes in a browser and
+ * throws in the suite.
+ */
+function useScrollSelectedIntoView(
+  root: React.RefObject<HTMLElement | null>,
+  selectedPath: string | null,
+): void {
+  useEffect(() => {
+    if (!selectedPath) return;
+    for (const candidate of root.current?.querySelectorAll("[data-strategy-path]") ?? []) {
+      if (candidate.getAttribute("data-strategy-path") !== selectedPath) continue;
+      // jsdom does not implement scrollIntoView at all, so this is a typeof
+      // check rather than an optional call — `?.()` still throws on a
+      // property that exists and is not callable.
+      const node = candidate as HTMLElement;
+      if (typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest" });
+      return;
+    }
+  }, [root, selectedPath]);
+}
+
 const NEVER_SLICE_TITLE =
   "Columns this measure must never be broken down by — a slice that is structurally valid but " +
   "semantically misleading (an average sliced by a key, a headcount sliced by an order line). " +
@@ -2475,6 +2857,8 @@ function MeasuresGrid({
   selectedPath,
   columnRefs,
   disabled,
+  folders,
+  onClearSelection,
   onEdit,
   onConfirmAll,
 }: {
@@ -2488,6 +2872,11 @@ function MeasuresGrid({
   selectedPath: string | null;
   columnRefs: string[];
   disabled: boolean;
+  /** Owned by the section so switching views does not re-open every folder. */
+  folders: TreeDisclosure;
+  /** Drop the finding highlight. Called when the user works the tree by hand,
+   *  so a folder held open by a selection becomes closable again. */
+  onClearSelection: () => void;
   /** `note` is shown in the status line when an edit does something besides
    *  what was asked — see the section's `edit`. */
   onEdit: (doc: StrategyDoc, note?: string | null) => void;
@@ -2497,6 +2886,8 @@ function MeasuresGrid({
   const [aggregating, setAggregating] = useState<string | null>(null);
   const [columnGroup, setColumnGroup] = useState<MeasureColumnGroup>("meaning");
   const [rowFilter, setRowFilter] = useState<MeasureRowFilter>("needsReview");
+  const cardRef = useRef<HTMLDivElement>(null);
+  useScrollSelectedIntoView(cardRef, selectedPath);
 
   // The rows this filter would show. Computed before the empty-state check so
   // "12 of 300" can be honest about both numbers.
@@ -2506,11 +2897,346 @@ function MeasuresGrid({
   });
   const shownMeasures = rowFilter === "all" ? overview.measures : unconfirmed;
 
+  // ---- the display-folder tree -------------------------------------------
+  //
+  // The folders are the ones authored in the MEASURES tab (`measure.group`, a
+  // backslash path) — this grid reads that axis, it does not invent a second
+  // one. `group` is model metadata, not part of the frozen strategy attribute
+  // surface (§13.8), so grouping by it adds no authorable field here.
+  //
+  // A model with no display folders at all produces no folder rows and this
+  // grid renders exactly as it did before — a flat list in model order. That
+  // is deliberate: a tree over a model that has no tree is one more row of
+  // chrome per measure and nothing gained.
+  const { roots, ungrouped } = buildFolderTree(overview.measures, []);
+  const hasFolders = roots.length > 0;
+  // A SELECTION DEFEATS THE FILTER, for exactly one row. The default filter
+  // keeps only unconfirmed rows, so a finding on a CONFIRMED measure — a stale
+  // target, a direction the validator disagrees with — pointed at a row the
+  // grid was not rendering, and clicking it did nothing. Collapse is only one
+  // of the three ways a row can be missing; property (19) is about all of them.
+  const shownNames = new Set(shownMeasures.map((m) => m.name));
+  if (selectedPath !== null) {
+    const picked = overview.measures.find((m) => measurePath(m.name) === selectedPath);
+    if (picked) shownNames.add(picked.name);
+  }
+  // Which folders must open regardless of what the user shut: the ones holding
+  // the row a finding named. Computed as a value rather than pushed into state
+  // — a folder forced open by a selection closes again on its own when the
+  // selection moves, and nothing has to remember to undo it.
+  const revealed = revealedFolders(overview.measures, selectedPath);
+  const folderIsOpen = (path: string): boolean => revealed.has(path) || !folders.isClosed(path);
+  // ACTING ON THE TREE DISMISSES THE HIGHLIGHT. Openness is `revealed OR not
+  // closed`, so while a selection is forcing a folder open the chevron had no
+  // visible effect at all — it wrote to the closed set and the OR overrode it,
+  // twice, in both directions. A disclosure that does nothing is worse than an
+  // absent one. Clearing the selection first makes the click mean what it looks
+  // like it means, and the highlight is a transient "look here" marker anyway:
+  // the moment you start opening and shutting things yourself, it has done its
+  // job.
+  const toggleFolder = (path: string): void => {
+    if (revealed.has(path)) {
+      // The row is open BECAUSE of the selection, so the click means "shut it".
+      // `toggle` would answer a different question — it flips membership of the
+      // CLOSED set, which for a folder the user had already shut means REMOVING
+      // it, so the folder stays open once the reveal goes away and the click
+      // reads as having done nothing.
+      onClearSelection();
+      folders.setClosed(path, true);
+      return;
+    }
+    folders.toggle(path);
+  };
+
+  // The body, in render order. Folders first, then the measures that belong to
+  // no folder — matching the Measures tab, and matching Power BI, where a
+  // display folder groups a subset and the rest stay at the top level. Without
+  // any folders at all this is just the filtered list, in model order, which is
+  // exactly what this grid rendered before.
+  const treeRows = hasFolders ? measureTreeRows(roots, shownNames, folderIsOpen) : [];
+  const measureBodyRows: MeasureBodyRow[] = hasFolders
+    ? [
+        ...treeRows,
+        ...ungrouped
+          .filter((m) => shownNames.has(m.name))
+          .map((m) => ({ kind: "measure" as const, measure: m, depth: 0 })),
+      ]
+    : overview.measures
+        .filter((m) => shownNames.has(m.name))
+        .map((m) => ({ kind: "measure" as const, measure: m, depth: 0 }));
+
+  // Collapse-all acts on the folders that are ON SCREEN, not on every folder
+  // the model has. With a filter active some folders are not rendered at all,
+  // and counting those made `allClosed` false while every visible folder was
+  // shut — so the button offered to "Collapse all folders" a second time and
+  // appeared to do nothing.
+  const visibleFolderKeys = treeRows
+    .filter((r): r is Extract<MeasureBodyRow, { kind: "folder" }> => r.kind === "folder")
+    .map((r) => r.node.path);
+
   // Entries naming a measure the model no longer has. They come from the
   // preview because the grid iterates the MODEL's measures — which is exactly
   // why an orphan was invisible until now, in a document where it is the one
   // thing that needs doing.
   const orphans = [...preview.values()].filter((p) => !p.inModel && p.hasEntry);
+
+  /**
+   * One measure's row.
+   *
+   * Hoisted out of the JSX because there are now two callers — the flat list
+   * a model with no display folders gets, and the folder tree. Two copies of
+   * a 240-line row would drift on the first change to a cell, and the drift
+   * would show up as one column behaving differently in one of the two
+   * shapes, which is exactly the kind of defect nobody reproduces.
+   */
+  const renderMeasureRow = (
+    m: ModelOverview["measures"][number],
+    depth: number,
+  ): React.ReactElement => {
+          const entry = measureEntry(doc, m.name);
+          const state = entryState(entry, measureHasValues(entry));
+          const path = measurePath(m.name);
+          const rowFindings = findingsAtPath(findings, path);
+          // The resolver's answer for this measure — absent when no preview
+          // has arrived, which every cell below treats as "show a blank",
+          // exactly as the grid behaved before inheritance existed.
+          const resolved = preview.get(m.name)?.resolved;
+          const inh = {
+            direction: inheritedFor(entry.direction, resolved?.direction, (d) => d),
+            unit: inheritedFor(entry.unit, resolved?.unit, (u) => u),
+            cadence: inheritedFor(entry.cadence, resolved?.cadence, (c) => c),
+            target: inheritedFor(entry.target, resolved?.target, (t) => formatTargetSpec(t)),
+            materiality: inheritedFor(entry.materiality, resolved?.materiality, (v) =>
+              formatMaterialitySpec(v),
+            ),
+          };
+          // What inference proposes for this measure TODAY, diffed against
+          // what the row says. Only a row a human has a stake in can be
+          // OVERTAKEN: an inferred row that disagrees with today's
+          // inference is a stale draft, not a decision worth interrupting
+          // anyone over.
+          const proposed = inferred?.measures?.[m.name];
+          const divergences = stateIsHumanDecision(state)
+            ? measureDivergences(entry, proposed)
+            : [];
+          // Computed BEFORE the direction changes, because it is the target
+          // that is about to be cleared and its old text is what the
+          // message has to name.
+          const nonBandTarget =
+            entry.target !== undefined && entry.target.type !== "band"
+              ? formatTargetSpec(entry.target)
+              : "";
+          const ruled = {
+            direction: overridingRule(entry.direction, resolved?.direction),
+            unit: overridingRule(entry.unit, resolved?.unit),
+            cadence: overridingRule(entry.cadence, resolved?.cadence),
+            target: overridingRule(entry.target, resolved?.target),
+            materiality: overridingRule(entry.materiality, resolved?.materiality),
+          };
+          return (
+            <tr
+              key={m.name}
+              data-strategy-path={path}
+              data-unconfirmed={entry.reviewed ? "false" : "true"}
+              data-strategy-state={state}
+              style={{
+                ...rowTone(state),
+                outline: selectedPath === path ? "2px solid #2f6fce" : "none",
+              }}
+            >
+              {/* Indented only when there is a tree to indent under. A model
+                  with no display folders keeps the cell's own padding, so its
+                  grid is pixel-for-pixel what it was before folders existed. */}
+              <td style={depth === 0 ? cellStyle : { ...cellStyle, paddingLeft: measureNamePad(depth) }}>
+                <strong>{m.name}</strong> <span style={styles.hint}>{m.table}</span>{" "}
+                <RowFindings findings={rowFindings} />
+                {resolved && <WhyCell measure={m.name} resolved={resolved} />}
+              </td>
+              <td style={cellStyle}>
+                {selectOf<Direction>(
+                  entry.direction ?? "",
+                  DIRECTIONS,
+                  (v) => {
+                    const patch: Partial<MeasureStrategy> = {
+                      direction: v === "" ? undefined : v,
+                    };
+                    // `targetBand` and a literal target are two answers to
+                    // one question. The band goes in the SAME control, so
+                    // choosing this direction takes the other answer away
+                    // rather than leaving the document holding both with
+                    // nothing to say which wins — and says it did.
+                    const clearing = v === "targetBand" && nonBandTarget !== "";
+                    if (clearing) patch.target = undefined;
+                    onEdit(
+                      withMeasure(doc, m.name, patch),
+                      clearing
+                        ? `Cleared ${m.name}'s target '${nonBandTarget}' — a band direction is judged against a low and a high, which you now set in the target cell.`
+                        : null,
+                    );
+                  },
+                  disabled,
+                  128,
+                  inh.direction,
+                )}
+                {ruled.direction !== null && (
+                  <RuleOverrideMark
+                    measure={m.name}
+                    attribute="direction"
+                    ruleId={ruled.direction}
+                  />
+                )}
+              </td>
+              <td style={cellStyle}>
+                <AggregationCell
+                  measure={m.name}
+                  spec={entry.aggregation}
+                  disabled={disabled}
+                  onOpen={() => setAggregating(m.name)}
+                />
+              </td>
+              <td style={cellStyle}>
+                {selectOf<Unit>(
+                  entry.unit ?? "",
+                  UNITS,
+                  (v) => onEdit(withMeasure(doc, m.name, { unit: v === "" ? undefined : v })),
+                  disabled,
+                  98,
+                  inh.unit,
+                )}
+                {ruled.unit !== null && (
+                  <RuleOverrideMark measure={m.name} attribute="unit" ruleId={ruled.unit} />
+                )}
+              </td>
+              <td style={cellStyle}>
+                {/* ONE control, two modes. A band direction is judged
+                    against bounds, so the target cell becomes the bounds —
+                    it does not grow a second field beside a first one that
+                    would then contradict it. */}
+                {entry.direction === "targetBand" ? (
+                  <BandTargetCell
+                    measure={m.name}
+                    band={entry.target?.type === "band" ? entry.target : undefined}
+                    disabled={disabled}
+                    onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
+                  />
+                ) : (
+                  <SpecInput<Target>
+                    value={formatTargetSpec(entry.target)}
+                    placeholder={inh.target ?? TARGET_HINT}
+                    hint={TARGET_HINT}
+                    disabled={disabled}
+                    parse={(t) => {
+                      const r = parseTargetSpec(t);
+                      return r.ok ? { ok: true, value: r.target } : r;
+                    }}
+                    onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
+                  />
+                )}
+                {bandDirectionIsIncomplete(entry) && <BandIncomplete measure={m.name} />}
+                {ruled.target !== null && (
+                  <RuleOverrideMark measure={m.name} attribute="target" ruleId={ruled.target} />
+                )}
+              </td>
+              <td style={cellStyle}>
+                <SpecInput<Materiality>
+                  value={formatMaterialitySpec(entry.materiality)}
+                  placeholder={inh.materiality ?? MATERIALITY_HINT}
+                  hint={MATERIALITY_HINT}
+                  disabled={disabled}
+                  width={90}
+                  parse={(t) => {
+                    const r = parseMaterialitySpec(t);
+                    return r.ok ? { ok: true, value: r.materiality } : r;
+                  }}
+                  onCommit={(materiality) => onEdit(withMeasure(doc, m.name, { materiality }))}
+                />
+                {ruled.materiality !== null && (
+                  <RuleOverrideMark
+                    measure={m.name}
+                    attribute="materiality"
+                    ruleId={ruled.materiality}
+                  />
+                )}
+              </td>
+              <td style={cellStyle}>
+                {selectOf<Cadence>(
+                  entry.cadence ?? "",
+                  CADENCES,
+                  (v) => onEdit(withMeasure(doc, m.name, { cadence: v === "" ? undefined : v })),
+                  disabled,
+                  104,
+                  inh.cadence,
+                )}
+                {ruled.cadence !== null && (
+                  <RuleOverrideMark
+                    measure={m.name}
+                    attribute="cadence"
+                    ruleId={ruled.cadence}
+                  />
+                )}
+              </td>
+              <td style={cellStyle}>
+                <input
+                  type="number"
+                  style={{ ...smallInput, width: 62 }}
+                  disabled={disabled}
+                  value={entry.priority !== undefined ? String(entry.priority) : ""}
+                  onChange={(e) =>
+                    onEdit(
+                      withMeasure(doc, m.name, {
+                        priority: e.target.value === "" ? undefined : Number(e.target.value),
+                      }),
+                    )
+                  }
+                />
+              </td>
+              <td style={styles.td}>
+                <ColumnRefList
+                  refs={entry.analysisDimensions ?? []}
+                  options={columnRefs}
+                  disabled={disabled}
+                  title="Columns worth breaking this measure down by."
+                  onChange={(refs) =>
+                    onEdit(withMeasure(doc, m.name, { analysisDimensions: refs }))
+                  }
+                />
+              </td>
+              <td style={styles.td} data-testid={`never-slice-${m.name}`}>
+                <ColumnRefList
+                  refs={entry.neverSliceBy ?? []}
+                  options={columnRefs}
+                  disabled={disabled}
+                  title={NEVER_SLICE_TITLE}
+                  addLabel="never slice by…"
+                  onChange={(refs) => onEdit(withMeasure(doc, m.name, { neverSliceBy: refs }))}
+                />
+              </td>
+              <td style={stickyConfirmCell(state)} data-sticky="reviewed">
+                <ReviewedCell
+                  id={m.name}
+                  state={state}
+                  disabled={disabled}
+                  label={m.name}
+                  onConfirm={() => onEdit(withMeasure(doc, m.name, { reviewed: true }))}
+                  onUnconfirm={() => onEdit(withMeasure(doc, m.name, { reviewed: false }))}
+                />
+                <DivergenceNote
+                  id={m.name}
+                  label={m.name}
+                  state={state}
+                  divergences={divergences}
+                  disabled={disabled}
+                  onTake={() => {
+                    if (proposed === undefined) return;
+                    onEdit(
+                      withMeasure(doc, m.name, inferenceTakePatch(proposed, divergences)),
+                    );
+                  }}
+                />
+              </td>
+            </tr>
+          );
+  };
 
   return (
     <section>
@@ -2546,6 +3272,16 @@ function MeasuresGrid({
           {unconfirmed.length} of {overview.measures.length} unconfirmed
         </span>
         <div style={{ flex: 1 }} />
+        {/* Only when there is something to collapse. A control that does
+            nothing is worse than an absent one: it invites a click and answers
+            with no change, which reads as a broken button. */}
+        {hasFolders && (
+          <CollapseAllButton
+            allClosed={folders.allClosed(visibleFolderKeys)}
+            onSetAll={(closed) => folders.setAll(visibleFolderKeys, closed)}
+            what="folders"
+          />
+        )}
         <button
           style={styles.smallBtn}
           disabled={disabled}
@@ -2555,7 +3291,7 @@ function MeasuresGrid({
           Confirm all
         </button>
       </div>
-      <div style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
+      <div ref={cardRef} style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
         <table
           style={{ borderCollapse: "collapse", width: "100%" }}
           data-cols={columnGroup}
@@ -2636,248 +3372,20 @@ function MeasuresGrid({
                 </td>
               </tr>
             )}
-            {shownMeasures.map((m) => {
-              const entry = measureEntry(doc, m.name);
-              const state = entryState(entry, measureHasValues(entry));
-              const path = measurePath(m.name);
-              const rowFindings = findingsAtPath(findings, path);
-              // The resolver's answer for this measure — absent when no preview
-              // has arrived, which every cell below treats as "show a blank",
-              // exactly as the grid behaved before inheritance existed.
-              const resolved = preview.get(m.name)?.resolved;
-              const inh = {
-                direction: inheritedFor(entry.direction, resolved?.direction, (d) => d),
-                unit: inheritedFor(entry.unit, resolved?.unit, (u) => u),
-                cadence: inheritedFor(entry.cadence, resolved?.cadence, (c) => c),
-                target: inheritedFor(entry.target, resolved?.target, (t) => formatTargetSpec(t)),
-                materiality: inheritedFor(entry.materiality, resolved?.materiality, (v) =>
-                  formatMaterialitySpec(v),
-                ),
-              };
-              // What inference proposes for this measure TODAY, diffed against
-              // what the row says. Only a row a human has a stake in can be
-              // OVERTAKEN: an inferred row that disagrees with today's
-              // inference is a stale draft, not a decision worth interrupting
-              // anyone over.
-              const proposed = inferred?.measures?.[m.name];
-              const divergences = stateIsHumanDecision(state)
-                ? measureDivergences(entry, proposed)
-                : [];
-              // Computed BEFORE the direction changes, because it is the target
-              // that is about to be cleared and its old text is what the
-              // message has to name.
-              const nonBandTarget =
-                entry.target !== undefined && entry.target.type !== "band"
-                  ? formatTargetSpec(entry.target)
-                  : "";
-              const ruled = {
-                direction: overridingRule(entry.direction, resolved?.direction),
-                unit: overridingRule(entry.unit, resolved?.unit),
-                cadence: overridingRule(entry.cadence, resolved?.cadence),
-                target: overridingRule(entry.target, resolved?.target),
-                materiality: overridingRule(entry.materiality, resolved?.materiality),
-              };
-              return (
-                <tr
-                  key={m.name}
-                  data-strategy-path={path}
-                  data-unconfirmed={entry.reviewed ? "false" : "true"}
-                  data-strategy-state={state}
-                  style={{
-                    ...rowTone(state),
-                    outline: selectedPath === path ? "2px solid #2f6fce" : "none",
-                  }}
-                >
-                  <td style={cellStyle}>
-                    <strong>{m.name}</strong> <span style={styles.hint}>{m.table}</span>{" "}
-                    <RowFindings findings={rowFindings} />
-                    {resolved && <WhyCell measure={m.name} resolved={resolved} />}
-                  </td>
-                  <td style={cellStyle}>
-                    {selectOf<Direction>(
-                      entry.direction ?? "",
-                      DIRECTIONS,
-                      (v) => {
-                        const patch: Partial<MeasureStrategy> = {
-                          direction: v === "" ? undefined : v,
-                        };
-                        // `targetBand` and a literal target are two answers to
-                        // one question. The band goes in the SAME control, so
-                        // choosing this direction takes the other answer away
-                        // rather than leaving the document holding both with
-                        // nothing to say which wins — and says it did.
-                        const clearing = v === "targetBand" && nonBandTarget !== "";
-                        if (clearing) patch.target = undefined;
-                        onEdit(
-                          withMeasure(doc, m.name, patch),
-                          clearing
-                            ? `Cleared ${m.name}'s target '${nonBandTarget}' — a band direction is judged against a low and a high, which you now set in the target cell.`
-                            : null,
-                        );
-                      },
-                      disabled,
-                      128,
-                      inh.direction,
-                    )}
-                    {ruled.direction !== null && (
-                      <RuleOverrideMark
-                        measure={m.name}
-                        attribute="direction"
-                        ruleId={ruled.direction}
-                      />
-                    )}
-                  </td>
-                  <td style={cellStyle}>
-                    <AggregationCell
-                      measure={m.name}
-                      spec={entry.aggregation}
-                      disabled={disabled}
-                      onOpen={() => setAggregating(m.name)}
-                    />
-                  </td>
-                  <td style={cellStyle}>
-                    {selectOf<Unit>(
-                      entry.unit ?? "",
-                      UNITS,
-                      (v) => onEdit(withMeasure(doc, m.name, { unit: v === "" ? undefined : v })),
-                      disabled,
-                      98,
-                      inh.unit,
-                    )}
-                    {ruled.unit !== null && (
-                      <RuleOverrideMark measure={m.name} attribute="unit" ruleId={ruled.unit} />
-                    )}
-                  </td>
-                  <td style={cellStyle}>
-                    {/* ONE control, two modes. A band direction is judged
-                        against bounds, so the target cell becomes the bounds —
-                        it does not grow a second field beside a first one that
-                        would then contradict it. */}
-                    {entry.direction === "targetBand" ? (
-                      <BandTargetCell
-                        measure={m.name}
-                        band={entry.target?.type === "band" ? entry.target : undefined}
-                        disabled={disabled}
-                        onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
-                      />
-                    ) : (
-                      <SpecInput<Target>
-                        value={formatTargetSpec(entry.target)}
-                        placeholder={inh.target ?? TARGET_HINT}
-                        hint={TARGET_HINT}
-                        disabled={disabled}
-                        parse={(t) => {
-                          const r = parseTargetSpec(t);
-                          return r.ok ? { ok: true, value: r.target } : r;
-                        }}
-                        onCommit={(target) => onEdit(withMeasure(doc, m.name, { target }))}
-                      />
-                    )}
-                    {bandDirectionIsIncomplete(entry) && <BandIncomplete measure={m.name} />}
-                    {ruled.target !== null && (
-                      <RuleOverrideMark measure={m.name} attribute="target" ruleId={ruled.target} />
-                    )}
-                  </td>
-                  <td style={cellStyle}>
-                    <SpecInput<Materiality>
-                      value={formatMaterialitySpec(entry.materiality)}
-                      placeholder={inh.materiality ?? MATERIALITY_HINT}
-                      hint={MATERIALITY_HINT}
-                      disabled={disabled}
-                      width={90}
-                      parse={(t) => {
-                        const r = parseMaterialitySpec(t);
-                        return r.ok ? { ok: true, value: r.materiality } : r;
-                      }}
-                      onCommit={(materiality) => onEdit(withMeasure(doc, m.name, { materiality }))}
-                    />
-                    {ruled.materiality !== null && (
-                      <RuleOverrideMark
-                        measure={m.name}
-                        attribute="materiality"
-                        ruleId={ruled.materiality}
-                      />
-                    )}
-                  </td>
-                  <td style={cellStyle}>
-                    {selectOf<Cadence>(
-                      entry.cadence ?? "",
-                      CADENCES,
-                      (v) => onEdit(withMeasure(doc, m.name, { cadence: v === "" ? undefined : v })),
-                      disabled,
-                      104,
-                      inh.cadence,
-                    )}
-                    {ruled.cadence !== null && (
-                      <RuleOverrideMark
-                        measure={m.name}
-                        attribute="cadence"
-                        ruleId={ruled.cadence}
-                      />
-                    )}
-                  </td>
-                  <td style={cellStyle}>
-                    <input
-                      type="number"
-                      style={{ ...smallInput, width: 62 }}
-                      disabled={disabled}
-                      value={entry.priority !== undefined ? String(entry.priority) : ""}
-                      onChange={(e) =>
-                        onEdit(
-                          withMeasure(doc, m.name, {
-                            priority: e.target.value === "" ? undefined : Number(e.target.value),
-                          }),
-                        )
-                      }
-                    />
-                  </td>
-                  <td style={styles.td}>
-                    <ColumnRefList
-                      refs={entry.analysisDimensions ?? []}
-                      options={columnRefs}
-                      disabled={disabled}
-                      title="Columns worth breaking this measure down by."
-                      onChange={(refs) =>
-                        onEdit(withMeasure(doc, m.name, { analysisDimensions: refs }))
-                      }
-                    />
-                  </td>
-                  <td style={styles.td} data-testid={`never-slice-${m.name}`}>
-                    <ColumnRefList
-                      refs={entry.neverSliceBy ?? []}
-                      options={columnRefs}
-                      disabled={disabled}
-                      title={NEVER_SLICE_TITLE}
-                      addLabel="never slice by…"
-                      onChange={(refs) => onEdit(withMeasure(doc, m.name, { neverSliceBy: refs }))}
-                    />
-                  </td>
-                  <td style={stickyConfirmCell(state)} data-sticky="reviewed">
-                    <ReviewedCell
-                      id={m.name}
-                      state={state}
-                      disabled={disabled}
-                      label={m.name}
-                      onConfirm={() => onEdit(withMeasure(doc, m.name, { reviewed: true }))}
-                      onUnconfirm={() => onEdit(withMeasure(doc, m.name, { reviewed: false }))}
-                    />
-                    <DivergenceNote
-                      id={m.name}
-                      label={m.name}
-                      state={state}
-                      divergences={divergences}
-                      disabled={disabled}
-                      onTake={() => {
-                        if (proposed === undefined) return;
-                        onEdit(
-                          withMeasure(doc, m.name, inferenceTakePatch(proposed, divergences)),
-                        );
-                      }}
-                    />
-                  </td>
-                </tr>
-              );
-            })}
+            {measureBodyRows.map((r) =>
+              r.kind === "folder" ? (
+                <MeasureFolderRow
+                  key={`folder-${r.node.path}`}
+                  node={r.node}
+                  depth={r.depth}
+                  open={r.open}
+                  count={r.count}
+                  onToggle={() => toggleFolder(r.node.path)}
+                />
+              ) : (
+                renderMeasureRow(r.measure, r.depth)
+              ),
+            )}
             {/* Orphans last, and NOT as editable rows: an entry whose measure
                 the model no longer has is the thing to clean up, and offering
                 dropdowns over it invites someone to keep tending a row that can
@@ -2894,11 +3402,18 @@ function MeasuresGrid({
                   <Badge tone="warn">not in the model</Badge>{" "}
                   <RowFindings findings={findingsAtPath(findings, measurePath(p.measure))} />
                 </td>
-                <td style={styles.td} colSpan={MEASURE_HEADERS.length - 1}>
+                <td style={styles.td} colSpan={MEASURE_HEADERS.length - 2}>
                   The strategy has an entry for &lsquo;{p.measure}&rsquo;, but this model has no
                   such measure — it was renamed or deleted. Nothing here can apply to anything;
                   remove the entry, or bring the measure back under its old name.
                 </td>
+                {/* Pinned and opaque, for the reason every other row's is
+                    (property 17): this row spanned through the pinned column
+                    and left a hole in it that the scrolled cells showed
+                    straight through. There is nothing to confirm on an orphan —
+                    the cell is empty — but the column still has to be
+                    continuous. */}
+                <td style={{ ...cellStyle, ...STICKY_CONFIRM, background: ME.warnBg }} />
               </tr>
             ))}
           </tbody>
@@ -3176,6 +3691,8 @@ function TablesGrid({
   inferred,
   selectedPath,
   disabled,
+  tables,
+  onClearSelection,
   onEdit,
 }: {
   doc: StrategyDoc;
@@ -3185,6 +3702,10 @@ function TablesGrid({
   inferred: StrategyDoc | null;
   selectedPath: string | null;
   disabled: boolean;
+  /** Owned by the section so switching views does not re-open every table. */
+  tables: TreeDisclosure;
+  /** Drop the finding highlight — see MeasuresGrid. */
+  onClearSelection: () => void;
   onEdit: (doc: StrategyDoc) => void;
 }): React.ReactElement {
   /** Tables whose ignored columns are currently disclosed. Same idiom as the
@@ -3198,12 +3719,49 @@ function TablesGrid({
       return next;
     });
 
+  const cardRef = useRef<HTMLDivElement>(null);
+  useScrollSelectedIntoView(cardRef, selectedPath);
+
+  // ---- the table tree ----------------------------------------------------
+  //
+  // Tables start OPEN, and the button beside the title shuts them all at once.
+  // The other way round — collapsed by default — would make the view smaller
+  // by making the column roles, the one decision this grid exists to collect,
+  // invisible on arrival. "Make the list smaller" is a gesture the user asks
+  // for, not a state they should have to undo.
+  const tableKeys = overview.tables.map((t) => t.name);
+  // A finding on a COLUMN has a path under its table's, so a prefix test is
+  // what reopens the right table — `tables['Sales'].columns['Note']` must open
+  // Sales, not look for a table called that.
+  const tableRevealed = (name: string): boolean =>
+    selectedPath !== null && pathCovers(tablePath(name), selectedPath);
+  const tableIsOpen = (name: string): boolean => tableRevealed(name) || !tables.isClosed(name);
+  /** See MeasuresGrid's toggleFolder: acting on the tree dismisses the
+   *  highlight, or the chevron is inert for as long as a finding inside the
+   *  table is selected. */
+  const toggleTable = (name: string): void => {
+    if (tableRevealed(name)) {
+      onClearSelection();
+      tables.setClosed(name, true);
+      return;
+    }
+    tables.toggle(name);
+  };
+
   return (
     <section>
       <div style={styles.sectionHeader}>
         <span style={{ ...styles.sectionTitle, fontSize: 13 }}>Tables and columns</span>
+        <div style={{ flex: 1 }} />
+        {overview.tables.length > 0 && (
+          <CollapseAllButton
+            allClosed={tables.allClosed(tableKeys)}
+            onSetAll={(closed) => tables.setAll(tableKeys, closed)}
+            what="tables"
+          />
+        )}
       </div>
-      <div style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
+      <div ref={cardRef} style={{ ...styles.card, padding: 0, overflowX: "auto" }}>
         <table style={{ borderCollapse: "collapse", width: "100%" }}>
           <thead>
             <tr>
@@ -3243,6 +3801,13 @@ function TablesGrid({
               const ignored = ordered.filter((c) => roleOf(c.name) === "ignore");
               const shown = ordered.filter((c) => roleOf(c.name) !== "ignore");
               const open = showIgnored.has(t.name);
+              const openTable = tableIsOpen(t.name);
+              // Columns this document has actually said something about — the
+              // evidence behind the table row's own state, and the number the
+              // summary reports so a collapsed row explains its own tone.
+              const decidedColumns = t.columns.filter(
+                (c) => entry.columns?.[c.name] !== undefined,
+              ).length;
               const columnRow = (c: ModelColumn): React.ReactElement => {
                 const col = entry.columns?.[c.name];
                 return (
@@ -3297,7 +3862,43 @@ function TablesGrid({
                     }}
                   >
                     <td style={cellStyle}>
-                      <strong>{t.name}</strong> <RowFindings findings={findingsAtPath(findings, path)} />
+                      {/* The chevron lives INSIDE the name cell rather than in
+                          a column of its own: the header is four literals and
+                          the ignored-columns summary spans four, so a fifth
+                          column would have to be added in three places that no
+                          test compares against each other. */}
+                      <button
+                        type="button"
+                        data-testid={`table-disclosure-${t.name}`}
+                        aria-expanded={openTable}
+                        onClick={() => toggleTable(t.name)}
+                        title={openTable ? `Hide ${t.name}'s columns` : `Show ${t.name}'s columns`}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          background: "none",
+                          border: "none",
+                          padding: 0,
+                          font: "inherit",
+                          color: "inherit",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <Chevron open={openTable} />
+                        <strong>{t.name}</strong>
+                      </button>{" "}
+                      {/* WHAT THE CHEVRON IS HIDING, said on the row that hides
+                          it. A table's own four-valued state can be produced
+                          entirely by its column map (`tableHasValues` counts
+                          it), so a shut table could show an authored tone with
+                          every cell on the row blank and nothing to explain it.
+                          The second number is that evidence. */}
+                      <span style={{ ...styles.hint, ...TABULAR }} data-testid={`table-columns-${t.name}`}>
+                        {t.columns.length} column{t.columns.length === 1 ? "" : "s"}
+                        {decidedColumns > 0 ? ` · ${decidedColumns} set` : ""}
+                      </span>{" "}
+                      <RowFindings findings={findingsAtPath(findings, path)} />
                     </td>
                     <td style={cellStyle} data-testid={`table-kind-${t.name}`} data-kind-origin={kindOrigin}>
                       {selectOf<TableKind>(
@@ -3370,15 +3971,20 @@ function TablesGrid({
                       />
                     </td>
                   </tr>
-                  {shown.map(columnRow)}
-                  {ignored.length > 0 && (
+                  {openTable && shown.map(columnRow)}
+                  {openTable && ignored.length > 0 && (
                     <tr data-testid={`ignored-summary-${t.name}`}>
-                      <td style={{ ...cellStyle, paddingLeft: 28 }} colSpan={4}>
-                        {/* A DISCLOSURE, not a filter: the summary is always
-                            visible so a count that changes is legible, and the
-                            columns behind it stay fully editable. */}
+                      <td style={{ ...cellStyle, paddingLeft: 28 }} colSpan={3}>
+                        {/* A DISCLOSURE, not a filter: the summary is visible
+                            whenever its table is open, so a count that changes
+                            is legible, and the columns behind it stay fully
+                            editable. It is the INNER of two disclosures now —
+                            shutting the table takes this row with it, which is
+                            right: the summary is a fact about columns, and a
+                            shut table is not showing columns. */}
                         <button
                           style={{ ...styles.smallBtn, display: "inline-flex", alignItems: "center", gap: 4 }}
+                          aria-expanded={open}
                           title="Columns marked 'ignore' — still editable, just not in the way of the ones that carry a decision"
                           onClick={() => toggleIgnored(t.name)}
                         >
@@ -3387,9 +3993,14 @@ function TablesGrid({
                           {ignored.length} ignored column{ignored.length === 1 ? "" : "s"}
                         </button>
                       </td>
+                      {/* Pinned and opaque for the reason the column rows are
+                          (property 17): this spanned four columns and left a
+                          hole in the pinned column that the scrolled cells
+                          showed straight through. */}
+                      <td style={{ ...cellStyle, ...STICKY_CONFIRM, background: ME.surface }} />
                     </tr>
                   )}
-                  {open && ignored.map(columnRow)}
+                  {openTable && open && ignored.map(columnRow)}
                 </React.Fragment>
               );
             })}

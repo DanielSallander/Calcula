@@ -73,7 +73,15 @@ export function buildFolderTree(
   measures: ModelMeasureInfo[],
   extraFolders: string[],
 ): { roots: FolderNode[]; ungrouped: ModelMeasureInfo[] } {
-  const ungrouped = measures.filter((m) => !m.group);
+  // NORMALISE, don't test truthiness. A group of "\\" or " " is non-empty — so
+  // a truthiness test called it grouped — but it yields no path segments, so
+  // `folderPathsWithAncestors` created no folder for it and the placement loop
+  // below looked up `byPath.get("")` and found nothing. The measure landed in
+  // neither bucket and simply disappeared. In a list that is a missing row; in
+  // Strategy's measures grid it is a row carrying a confirmation decision,
+  // vanishing while the "N of M unconfirmed" counter still counts it. Every
+  // measure must come out of here exactly once, and a test asserts it.
+  const ungrouped = measures.filter((m) => normalizeFolderPath(m.group ?? "") === "");
 
   const paths = folderPathsWithAncestors([
     ...measures.map((m) => m.group),
@@ -97,9 +105,11 @@ export function buildFolderTree(
   }
 
   for (const m of measures) {
-    if (!m.group) continue;
-    const node = byPath.get(normalizeFolderPath(m.group));
+    const path = normalizeFolderPath(m.group ?? "");
+    if (path === "") continue; // already in `ungrouped`
+    const node = byPath.get(path);
     if (node) node.measures.push(m);
+    else ungrouped.push(m); // unreachable by construction; never lose a measure
   }
 
   return { roots, ungrouped };

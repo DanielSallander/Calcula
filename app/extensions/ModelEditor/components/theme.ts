@@ -333,6 +333,21 @@ table[data-cols="slicing"] :is(th, td):nth-child(8) { display: none; }
    rules above — it has one cell, not eleven. */
 table[data-cols] :is(th, td)[colspan] { display: table-cell !important; }
 
+/* THERE IS DELIBERATELY NO EXEMPTION FOR THE FOLDER HEADER ROWS.
+   A folder row carries the same eleven cells as every other row (nine of them
+   empty), precisely so the rules above apply to it identically and its pinned
+   trailing cell lands ON the reviewed column rather than beside it. An earlier
+   version gave the folder a spanning cell plus a pinned one and exempted the
+   pair from these rules; a colspan is counted in DECLARED columns while these
+   rules remove cells from the column structure entirely, so the folder row
+   asked for eleven slots while the body occupied six — measured at 24px, 44px
+   and 45px of misalignment in three of the four groups, and correct only in
+   All columns. If you are tempted to add an exemption here, the row shape is
+   the thing to fix instead.
+   (NO BACKTICKS IN HERE. This whole stylesheet is a template literal, so a
+   backtick in a comment ends the string and the next words become code — the
+   first draft of this very comment did exactly that.) */
+
 @keyframes me-palette-in {
   from { opacity: 0; transform: scale(0.98); }
   to   { opacity: 1; transform: scale(1); }

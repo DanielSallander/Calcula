@@ -52,10 +52,18 @@ export function CalcGroupIcon({ size = 14 }: { size?: number }): React.ReactElem
   );
 }
 
-/** Fixed-width expand/collapse chevron, so rows with and without one align. */
+/** Fixed-width expand/collapse chevron, so rows with and without one align.
+ *
+ *  `aria-hidden` for the same reason FolderIcon and CalcGroupIcon are: it is a
+ *  glyph standing in for a picture, and a screen reader announcing "▾" says
+ *  nothing a listener can use. The open/closed state belongs on the control
+ *  that owns it, as `aria-expanded` — which is a state, not a character. */
 export function Chevron({ open }: { open: boolean }): React.ReactElement {
   return (
-    <span style={{ width: 12, flexShrink: 0, color: ME.text3, fontSize: 11, lineHeight: 1 }}>
+    <span
+      aria-hidden
+      style={{ width: 12, flexShrink: 0, color: ME.text3, fontSize: 11, lineHeight: 1 }}
+    >
       {open ? "▾" : "▸"}
     </span>
   );
