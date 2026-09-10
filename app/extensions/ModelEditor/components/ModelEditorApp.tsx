@@ -57,6 +57,7 @@ import { TestingGroundSection } from "./sections/TestingGroundSection";
 import { LineageSection } from "./sections/LineageSection";
 import { NewModelDialog } from "./NewModelDialog";
 import { TopBarMenu } from "./TopBarMenu";
+import { NAV_ICONS } from "./navIcons";
 import { SearchPalette } from "./SearchPalette";
 import { ProblemsChip, ProblemsDrawer } from "./ProblemsDrawer";
 import { useProblems } from "../lib/useProblems";
@@ -202,29 +203,47 @@ const readOnlyBannerStyle: React.CSSProperties = {
   flexShrink: 0,
 };
 
+/** Breathing room down each side, so the active pill floats in the rail
+ *  instead of butting against its edges. */
+const RAIL_GUTTER = 8;
+
 const navStyle: React.CSSProperties = {
   width: SIZE.railWidth,
   flexShrink: 0,
   borderRight: `1px solid ${ME.border}`,
   background: ME.sunken,
-  paddingTop: SPACE.sm,
-  paddingBottom: SPACE.sm,
+  paddingTop: SPACE.xs,
+  paddingBottom: SPACE.md,
+  paddingLeft: RAIL_GUTTER,
+  paddingRight: RAIL_GUTTER,
   overflowY: "auto",
 };
 
+// The group heading is a LABEL, not a row: quieter than any item under it, and
+// separated by space above rather than a rule. A rule here would draw six lines
+// across the rail and make the groups look like six panels.
 const navGroupTitleStyle: React.CSSProperties = {
-  padding: `${SPACE.md}px ${SPACE.md}px ${SPACE.xs}px`,
+  padding: `${SPACE.lg}px ${SPACE.sm}px ${SPACE.xs}px`,
   fontSize: FONT.xs,
-  fontWeight: 700,
-  letterSpacing: "0.06em",
+  fontWeight: 600,
+  letterSpacing: "0.05em",
   textTransform: "uppercase",
   color: ME.text3,
   userSelect: "none",
 };
 
-// The active item used to carry FOUR signals for one state: accent text, bold
-// weight, a white background and a left bar. One state, one emphasis — the
-// surface step plus the bar; the text stops shouting.
+// ONE STATE, ONE EMPHASIS — and the emphasis is now a PILL.
+//
+// The active item once carried four signals at once: accent text, bold weight,
+// a white background and a left bar. That went down to a surface step plus a
+// bar; this takes it to a single rounded fill, which is what every rail people
+// use daily settles on. The bar is gone with it: a bar and a fill say the same
+// thing twice, and the bar has to touch the rail's edge, which is exactly what
+// stops a rail looking composed.
+//
+// The icon does the work the weight used to. It is `text2` at rest and `text`
+// when active, so the row gains contrast without gaining boldness — a rail
+// where the current item is the only bold line reads as shouting.
 const navItemStyle = (active: boolean): React.CSSProperties => ({
   display: "flex",
   alignItems: "center",
@@ -232,17 +251,24 @@ const navItemStyle = (active: boolean): React.CSSProperties => ({
   width: "100%",
   boxSizing: "border-box",
   minHeight: SIZE.railRow,
-  padding: `0 ${SPACE.md}px 0 9px`,
+  padding: `0 ${SPACE.sm}px`,
+  borderRadius: RADIUS.control,
   fontSize: FONT.base,
   fontFamily: "inherit",
   textAlign: "left",
   cursor: "pointer",
   userSelect: "none",
   border: "none",
-  borderLeft: active ? `3px solid ${ACCENT}` : "3px solid transparent",
-  color: ME.text,
+  color: active ? ME.text : ME.text2,
   fontWeight: active ? 600 : 400,
-  background: active ? ME.surface : "transparent",
+  background: active ? ME.select : "transparent",
+});
+
+/** The icon's colour tracks the row's state; the label is what it labels. */
+const navIconStyle = (active: boolean): React.CSSProperties => ({
+  display: "flex",
+  alignItems: "center",
+  color: active ? ME.accent : ME.text3,
 });
 
 /** Counts are tabular so the column does not shimmer as they change. */
@@ -251,6 +277,16 @@ const navCountStyle: React.CSSProperties = {
   fontSize: FONT.sm,
   color: ME.text3,
   ...TABULAR,
+};
+
+/** The label truncates rather than wrapping: a two-line rail row breaks the
+ *  rhythm of every row under it, and "Calculation Groups" is one character from
+ *  the edge at 190px. */
+const navLabelStyle: React.CSSProperties = {
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  minWidth: 0,
 };
 
 const contentStyle: React.CSSProperties = {
@@ -911,7 +947,10 @@ export function ModelEditorApp(): React.ReactElement {
                     style={navItemStyle(isActive)}
                     onClick={() => navigate(item.id)}
                   >
-                    <span>{item.label}</span>
+                    <span style={navIconStyle(isActive)}>
+                      {React.createElement(NAV_ICONS[item.id])}
+                    </span>
+                    <span style={navLabelStyle}>{item.label}</span>
                     {severity && (
                       <span
                         aria-label={`${severity} in ${item.label}`}

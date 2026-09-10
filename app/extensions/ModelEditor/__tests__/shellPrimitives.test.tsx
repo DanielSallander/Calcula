@@ -13,6 +13,7 @@ import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Badge, Modal, quantiseModalWidth, isSectionId } from "../components/editorShared";
+import { NAV_ICONS } from "../components/navIcons";
 import { formatRouteHash, parseRouteHash, useSectionRoute } from "../lib/useSectionRoute";
 import {
   GEOMETRY_STORAGE_KEY,
@@ -393,5 +394,66 @@ describe("Badge", () => {
     const err = container.querySelector('[data-testid="e"] span') as HTMLElement;
     expect(err.style.background).not.toBe(warn.style.background);
     expect(err.style.color).not.toBe(warn.style.color);
+  });
+});
+
+// ===========================================================================
+// Rail icons
+// ===========================================================================
+//
+// COMPLETENESS IS THE TYPE'S JOB, and it does it: NAV_ICONS is
+// `Record<SectionId, …>`, so a section without an icon does not compile
+// (verified by removing one — TS2741). These test the two things a type cannot
+// see: that the drawings are actually drawings, and that they inherit colour
+// instead of carrying it.
+
+describe("the rail icons", () => {
+  it("has one for every section, and they are all distinct DRAWINGS", () => {
+    const ids = Object.keys(NAV_ICONS);
+    expect(ids.length).toBeGreaterThan(15);
+
+    // Render each and keep its path geometry. Two sections sharing a picture is
+    // the defect that shipped in the first draft — Overview and Calculation
+    // Groups were both a 2x2 grid of squares, which at 16px is one icon used
+    // twice. A type cannot notice that; a comparison can.
+    const shapes = new Map<string, string>();
+    for (const id of ids) {
+      const host = document.createElement("div");
+      const r = createRoot(host);
+      act(() => {
+        r.render(React.createElement(NAV_ICONS[id as keyof typeof NAV_ICONS]));
+      });
+      const svg = host.querySelector("svg");
+      expect(svg, `${id} must render an svg`).not.toBeNull();
+      const geometry = [...(svg?.children ?? [])]
+        .map((el) => `${el.tagName}:${[...el.attributes].map((a) => `${a.name}=${a.value}`).sort().join(",")}`)
+        .sort()
+        .join("|");
+      expect(geometry.length, `${id} must draw something`).toBeGreaterThan(0);
+      const clash = [...shapes.entries()].find(([, g]) => g === geometry);
+      expect(clash?.[0], `${id} draws exactly the same shape as ${clash?.[0]}`).toBeUndefined();
+      shapes.set(id, geometry);
+      act(() => r.unmount());
+    }
+  });
+
+  it("inherits its colour rather than carrying one", () => {
+    // The rail row sets the colour — muted at rest, accent when active — so an
+    // icon with its own would need a second rule per state and a third for the
+    // dark skin. Inheriting is also what keeps the whole set outside the hex
+    // ban by construction rather than by exemption.
+    const host = document.createElement("div");
+    const r = createRoot(host);
+    act(() => {
+      r.render(React.createElement(NAV_ICONS.strategy));
+    });
+    const svg = host.querySelector("svg") as SVGSVGElement;
+    expect(svg.getAttribute("stroke")).toBe("currentColor");
+    expect(svg.getAttribute("fill")).toBe("none");
+    // Decorative: the label beside it is the accessible name, and a screen
+    // reader announcing the picture as well would say everything twice.
+    expect(svg.getAttribute("aria-hidden")).toBe("true");
+    expect(host.innerHTML, "no literal colour anywhere in the drawing").not.toMatch(/#[0-9a-f]{3}/i);
+    act(() => r.unmount());
   });
 });
