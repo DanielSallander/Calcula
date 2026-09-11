@@ -1027,11 +1027,41 @@ narrated safely. It now emits the same document shape as the core path. Nothing 
 the field has no consumer yet — the inert-surface defect this document's own §2 rule exists to catch,
 one level down.
 
-**What is still not built, and is the rest of M6.** The prompt and schema that ask a model for
-tagged sentences; the surface that shows them; an eval that measures whether the on-board 1.5B can
-produce any that survive. And the prose boundary is still vacuous: `MeasureStrategy.context` remains
-read by nothing, because the checker does not read it — it is the NARRATOR that will, as wording
-guidance, and that is the commit which must also add the source-scan guard §2 describes.
+**Then it was measured, and the guard turned out to be load-bearing.** `narrate/prompt.rs` asks for
+`{sentences:[{text,factIds}]}` under a JSON schema and states the two rules the checker enforces, so
+a model that follows instructions is not punished by a rule nobody told it.
+`tests/eval/run-narration-eval.mjs` drives it over five real bundles — 41 facts, 12 kinds, produced
+by running the real engine over synthetic datasets — and pushes every reply back through the real
+check. On the built-in 1.5B:
+
+| | en-US | sv-SE |
+|---|---|---|
+| bundles with a showable sentence and nothing invented | 1 of 5 | 0 of 5 |
+| sentences surviving the check | 3 of 9 (33 %) | 6 of 23 (26 %) |
+| **numbers the cited facts could not account for** | **5 of 9 (56 %)** | **17 of 23 (74 %)** |
+| coverage of the ranked facts | 27 % | 17 % |
+| median latency | 30.4 s | 34.4 s |
+
+**So the narrator does not ship, and that is the smaller half of the finding.** The larger half is
+that across the two runs the check deleted **22 fabricated numbers** before any reader could see
+one. A narration feature built on this model without it would have shown a person invented figures
+in more than half its sentences — confidently, in the product's own voice, beside the cells they
+supposedly came from. The rule §12 wrote down years of this document ago is not a nicety; it is the
+only reason a model may be let near this surface at all.
+
+Latency says the same thing from another direction: half a minute per bundle against an 8-second
+gate, for a panel that is supposed to answer while someone looks at it.
+
+**Every run proves the harness before it reports a number.** The deterministic narration of all five
+bundles goes through the same check first, and the run stops with exit 3 if any of it is rejected —
+a narrator that only prints numbers its fact contains is the definition of what must pass, so a
+rejection there means the checker is wrong and the model's score would be fiction. It has never
+fired; all 41 survive.
+
+**What is still not built.** The surface that would show narrated sentences, and a reason to build
+it. And the prose boundary is still vacuous: `MeasureStrategy.context` remains read by nothing,
+because the checker does not read prose and the narrator that would — as wording guidance — is not
+shipping. That is still the commit which must also add the source-scan guard §2 describes.
 
 One more finding recorded rather than changed: `describeBundleForModel`
 (`app/src/api/insightsService.ts`) is the only live path that hands a bundle to a model, and it

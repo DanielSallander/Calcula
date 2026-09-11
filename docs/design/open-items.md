@@ -1491,10 +1491,34 @@ named test. **A defect in the way is fixed:** the model path's `facts_json`, who
 2.AI.5's explicit promise — so the model half could never have been narrated safely, and nothing
 said so because the field has no consumer yet.
 
-*Still open here:* the rest of Step 4 — the prompt and schema that ask a model for tagged sentences,
-the surface that shows them, and an eval that measures whether the on-board 1.5B produces any that
-survive. `MeasureStrategy.context` STILL has no reader: the checker does not read prose, the
-narrator will, and that is the commit which must also add the source-scan guard §2 describes.
+**And then Step 4 was MEASURED, and the narrator does not ship (2026-09-11).** `narrate/prompt.rs`
+asks for `{sentences:[{text,factIds}]}` under a JSON schema, stating the two rules the checker
+enforces so a model is not punished by a rule nobody told it;
+`tests/eval/run-narration-eval.mjs` drives it over five real bundles (41 facts, 12 kinds, the real
+engine over synthetic datasets) and pushes every reply back through the real check via the
+`narration` example — no JavaScript port of a check that has to agree with `number.rs` about
+rounding and the sv-SE non-breaking space. On the built-in 1.5B:
+
+| | en-US | sv-SE |
+|---|---|---|
+| bundles with a showable sentence and nothing invented | 1 of 5 | 0 of 5 |
+| sentences surviving the check | 3 of 9 (33 %) | 6 of 23 (26 %) |
+| **numbers the cited facts could not account for** | **5 of 9 (56 %)** | **17 of 23 (74 %)** |
+| coverage of the ranked facts | 27 % | 17 % |
+| median latency (gate: 8 s) | 30.4 s | 34.4 s |
+
+**The bigger finding is about the guard, not the model.** Across the two runs the check deleted
+**22 fabricated numbers**. A narration feature built on this model without it would have shown a
+reader invented figures in more than half its sentences, in the product's own voice, beside the
+cells they supposedly came from. Every run also proves the harness first — the deterministic
+narration of all five bundles goes through the same check and the run exits 3 if any of it is
+rejected, because a narrator that only prints numbers its fact contains is the definition of what
+must pass. All 41 survive.
+
+*Still open here:* a surface that shows narrated sentences, and a model worth pointing it at.
+`MeasureStrategy.context` STILL has no reader: the checker does not read prose, the narrator that
+would is not shipping, and that is still the commit which must add the source-scan guard §2
+describes.
 Recorded but not changed: `describeBundleForModel` (`app/src/api/insightsService.ts`) is the only
 live path handing a bundle to a model and it builds from `bundle.markdown` — the already-narrated
 sentences — so the chat paraphrases our prose instead of reading the numbers, which is what

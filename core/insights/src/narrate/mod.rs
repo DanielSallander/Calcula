@@ -8,6 +8,7 @@
 pub mod cite;
 pub mod en;
 pub mod number;
+pub mod prompt;
 
 use engine::LocaleSettings;
 use serde::{Deserialize, Serialize};

@@ -3,12 +3,13 @@
 Can a given model write Calcula object scripts? This answers it with a number
 instead of a vibe.
 
-Four siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
+Five siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
 engine — see `docs/design/formula-assist.md`), `run-design-query-eval.mjs`
 (design queries, graded by the DSL compiler and `canonical.ts`),
-`run-next-edit-eval.mjs` (the next-edit row's model chip) and
-`run-macro-fim-eval.mjs` (filling in a held-out line of a script) — the last two
-are described below:
+`run-next-edit-eval.mjs` (the next-edit row's model chip),
+`run-macro-fim-eval.mjs` (filling in a held-out line of a script) and
+`run-narration-eval.mjs` (wording computed facts without inventing numbers) —
+the last three are described below:
 
 ```
 node tests/eval/run-design-query-eval.mjs --provider ollama --model qwen2.5-coder:1.5b
@@ -40,6 +41,47 @@ node tests/eval/run-formula-eval.mjs --provider llamacpp --model calcula-builtin
 
 Those are the flags `ai/runtime.rs` starts it with, so a run on port 8080 is a
 run on the product's runtime; only the port differs.
+
+## `run-narration-eval.mjs` — can the on-board model word facts without inventing numbers?
+
+```
+node tests/eval/run-narration-eval.mjs --provider llamacpp
+node tests/eval/run-narration-eval.mjs --provider llamacpp --locale sv-SE --show-replies
+```
+
+Needs the `narration` helper built first (PowerShell, because the MSVC
+environment is a PowerShell script):
+
+```
+. .\core\setup-rust-env.ps1
+$env:CARGO_TARGET_DIR='C:\Users\Salle\AppData\Local\calcula-target'
+cd core; cargo build -p insights --example narration
+```
+
+**Nothing here re-implements the product.** The fixtures, the prompt, the reply
+schema and the citation check all come out of that helper, which is the same
+Rust the product calls. A JavaScript port of the check would be a second opinion
+about `number.rs`'s rounding bands, its scientific cut-off and the sv-SE
+non-breaking space, and the run would then measure the port.
+
+**The control is the engine itself.** Every run first pushes the DETERMINISTIC
+narration of all five bundles through the same check and stops with exit 3 if
+any of it is rejected — a narrator that only prints numbers its fact contains is
+the definition of what must pass, so a rejection means the checker is wrong and
+any model score would be fiction. All 41 survive.
+
+As measured 2026-09-11 (qwen2.5-coder-1.5b, 5 bundles, 41 facts, 12 kinds):
+
+| | en-US | sv-SE |
+|---|---|---|
+| bundles clean (a showable sentence, nothing invented) | 1/5 | 0/5 |
+| sentences surviving | 3/9 (33 %) | 6/23 (26 %) |
+| **numbers the cited facts could not account for** | **56 %** | **74 %** |
+| coverage of ranked facts | 27 % | 17 % |
+| median latency (gate 8 s) | 30.4 s | 34.4 s |
+
+So the narrator does not ship — and the check deleted **22 fabricated numbers**
+across the two runs, which is the more useful half of the result.
 
 ## `run-macro-fim-eval.mjs` — can the on-board model fill in a line of script?
 
