@@ -95,10 +95,16 @@ can produce usable scripts at all.
 
 ## 2. Anti-goals
 
+> **Two of these were reversed on 2026-09-10 — see §14.** The bundled runtime and the on-board
+> model exist; what survives of the first two bullets is the ARGUMENT, which still governs
+> everything beyond the one CPU build and the one Apache-2.0 model.
+
 - **No shipped weights.** Not in the installer, not downloaded by us. Licensing, size, and update
-  burden all belong to the user's inference runtime.
+  burden all belong to the user's inference runtime. *(Reversed in part, §14: ONE pinned model is
+  downloaded on consent; nothing else is.)*
 - **No GPU backend compiled by Calcula.** No CUDA, ROCm, Vulkan, Metal, or DirectML build matrix.
   See §4a — this is the single largest source of hardware lock-in and we decline all of it.
+  *(Still true: the bundled build is CPU-only, D7. A user with a GPU keeps their own runtime.)*
 - **No hardware detection.** We never read VRAM or enumerate adapters. See §4b.
 - **No unattended mounting.** A generated script is never mounted or executed as live code without
   a human action. `mcp/drafts.rs` already establishes this invariant and this design inherits it
@@ -1863,3 +1869,46 @@ screen. Deliberately NOT folded into `authorJobs.ts`: that module is the state o
 navigation — mixing them would mean a job's data could not be read without dragging in the UI's
 routing. `requestJobView()` is safe with nothing registered, because the status bar can outlive a
 deactivated extension and a click that quietly does nothing beats an exception in the shell's chrome.
+
+---
+
+## 14. The on-board runtime — §2 reversed in part, 2026-09-10
+
+§2 said no shipped weights and no runtime of our own, and §4a built the whole hardware-independence
+argument on "we never compile a GPU backend". The argument stands; the first two bullets do not.
+Owner decisions D6 and D7 (recorded in `open-items.md` 2.AI.10, with D2 of 2026-09-07 as the
+principle they amend) put a Tier-1 runtime in the product:
+
+- **The engine ships in the installer.** llama.cpp's `llama-server`, CPU build, one pinned release
+  (`app/scripts/fetch-llama-server.mjs` holds the build number and a sha256 per architecture).
+  About 20 MB on arm64, 40 on x64. It is a RESOURCE FOLDER (`llama-server/` under the resource
+  dir, mapped by `tauri.runtime-<arch>.conf.json` at release time), not a Tauri `externalBin`:
+  a sidecar must exist at every `cargo build` and carries only the executable, while the server
+  needs its DLLs beside it. A tree without the folder still builds and runs; the picker says the
+  runtime is not in this build. In a debug build the app also looks in the source tree, where
+  the fetch script puts it.
+- **The model does not ship; it is downloaded on first use, behind one sentence.**
+  Qwen2.5-Coder-1.5B-Instruct Q4_K_M (Apache-2.0, 1.04 GB) from Hugging Face, pinned by size and
+  sha256 in `ai/builtin_model.rs` and mirrored in `fetch-builtin-model.mjs` (a test diffs them).
+  The sentence names the size, licence, source, hash and folder; `confirmAsync` fails closed;
+  the command it reaches is on the governed denylist. The download resumes, refuses a server that
+  offers a different size, and deletes a file whose hash differs. It lands in
+  `%LOCALAPPDATA%\com.calcula.app\models`, not the roaming folder a gigabyte would sync from.
+  An offline installer bundles the file via `tauri.offline-<arch>.conf.json`.
+- **CPU only (D7).** No Vulkan, no CUDA. Measured on this arm64 laptop: the 1.5B loads in 1.6 s,
+  processes prompts at ~400 tok/s and decodes at ~47 tok/s. A user with a real GPU keeps their own
+  runtime, which the picker already lists; nothing about discovery or the probe changed.
+- **The process cannot outlive the app.** `ai/runtime.rs` starts it on a free loopback port the
+  first time a completion for the `calcula-builtin` provider needs it, assigns it to a Windows job
+  object with KILL_ON_JOB_CLOSE, waits on `/health` with the child's own last lines in the error
+  if it dies, and stops it after fifteen idle minutes with a visible reason. Every completion
+  still travels the OpenAI-compatible wire from `reqwest`; the webview's CSP is untouched.
+- **The grammar path is measured, not assumed.** The probe gained a fifth pre-flight
+  (`root ::= "OK"` with a question the grammar forbids answering) and the profile a
+  `honorsGrammar` verdict; the completion seam forwards a grammar only on a measured true or,
+  unmeasured, on llama.cpp identity. §4b's "probe behaviour, do not detect hardware" applies to the
+  runtime we ship exactly as it applies to the ones we do not.
+
+What §2 still forbids, unchanged: a hardware matrix, hardware detection, a vendor-by-feature
+table, a privileged vendor, and silent degradation. The built-in provider is one more entry in the
+same picker, measured by the same probe, and a user who never wants it never downloads it.

@@ -46,6 +46,20 @@ pub struct ProviderDef {
     pub note: String,
 }
 
+/// The on-board runtime's provider id (Tier 1, 2026-09-10).
+///
+/// The one provider whose server CALCULA runs: `ai::runtime` starts the bundled
+/// llama-server on a free loopback port the first time a completion needs it.
+/// Its registry entry therefore carries a PLACEHOLDER base URL that nothing
+/// ever sends to — `ai::base_for` swaps in the live port — and discovery
+/// never probes it, because "already running" means nothing for a server we
+/// start ourselves.
+pub const BUILTIN_ID: &str = "calcula-builtin";
+pub const BUILTIN_LABEL: &str = "Calcula built-in";
+/// A loopback URL so the registry's own invariants hold; port 0 so a request
+/// that reached it by mistake fails at once rather than hitting a stranger.
+pub const BUILTIN_PLACEHOLDER_URL: &str = "http://127.0.0.1:0/v1";
+
 /// Every provider Calcula ships knowing about.
 ///
 /// This list is a CONVENIENCE, not a gate. `custom-openai` accepts any base URL,
@@ -61,6 +75,17 @@ pub fn registry() -> Vec<ProviderDef> {
         is_local: true,
         note: note.into(),
     };
+    let builtin = ProviderDef {
+        id: BUILTIN_ID.into(),
+        label: BUILTIN_LABEL.into(),
+        kind: ProviderKind::OpenAiCompat,
+        base_url: BUILTIN_PLACEHOLDER_URL.into(),
+        requires_key: false,
+        is_local: true,
+        note: "Bundled with Calcula: a small model (Qwen2.5-Coder 1.5B, a 1.1 GB download the first \
+               time) running on this computer's processor. Your workbook never leaves this machine."
+            .into(),
+    };
     let cloud = |id: &str, label: &str, base: &str, kind: ProviderKind, note: &str| ProviderDef {
         id: id.into(),
         label: label.into(),
@@ -72,7 +97,8 @@ pub fn registry() -> Vec<ProviderDef> {
     };
 
     vec![
-        // ---- Local first, deliberately (§11.1) ----
+        // ---- Local first, deliberately (§11.1) — and the one we ship first of all ----
+        builtin,
         local("ollama", "Ollama", 11434, "Runs on this machine. Your workbook never leaves it."),
         local("lmstudio", "LM Studio", 1234, "Runs on this machine. Your workbook never leaves it."),
         local("llamacpp", "llama.cpp server", 8080, "Runs on this machine. Your workbook never leaves it."),
@@ -212,5 +238,21 @@ mod tests {
         assert!(find("ollama").is_some());
         assert!(find("anthropic").is_some());
         assert!(find("not-a-provider").is_none());
+    }
+
+    #[test]
+    fn the_builtin_provider_is_first_local_keyless_and_never_points_at_a_real_port() {
+        let all = registry();
+        let first = &all[0];
+        assert_eq!(first.id, BUILTIN_ID, "the runtime we ship leads the list the picker renders");
+        assert!(first.is_local);
+        assert!(!first.requires_key);
+        assert_eq!(first.kind, ProviderKind::OpenAiCompat, "it is llama-server: the compat wire");
+        // Port 0: a request that bypassed `ai::base_for` fails immediately
+        // instead of reaching whatever happens to listen on a real port.
+        assert_eq!(first.base_url, BUILTIN_PLACEHOLDER_URL);
+        assert!(first.base_url.starts_with("http://127.0.0.1:0/"));
+        assert!(first.note.contains("1.1 GB"), "the note names the download before anyone clicks: {}", first.note);
+        assert!(first.note.contains("never leaves"), "{}", first.note);
     }
 }

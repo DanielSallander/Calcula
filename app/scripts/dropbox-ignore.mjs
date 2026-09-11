@@ -87,6 +87,12 @@ export const DROPBOX_IGNORED_OUTPUT_TREES = [
   "app/test-results",
   "app/playwright-report",
   "app/e2e/results",
+  // Fetched, never authored: the bundled inference runtime (~20 MB per
+  // architecture) and the on-board model (1.1 GB). The fetch scripts mark
+  // these themselves the moment they create them, so a 1 GB model file never
+  // starts uploading; listed here so a re-run of this script covers them too.
+  "app/src-tauri/binaries",
+  "app/src-tauri/models",
 ];
 
 const STREAM = "com.dropbox.ignored";

@@ -12,6 +12,9 @@
 //          to default to and what to put in its prompt, and the honest way to
 //          settle that is a matrix rather than an argument:
 //            --schema on|off      does constraining the reply shape help?
+//            --grammar on|off     does constraining the formula's SYNTAX help,
+//                                 where the runtime honours a grammar? (llama.cpp
+//                                 only; refused elsewhere rather than ignored)
 //            --retrieval 0|3      do worked examples earn their ~120 tokens?
 //            --context on|off     does the ~300-token data description earn its
 //                                 seconds of prompt processing?
@@ -60,6 +63,10 @@ const useSchema = schemaMode !== "off";
 // `lean` drops the free-text `assumptions` list from the schema. See the note on
 // FORMULA_PROPOSAL_SCHEMA_LEAN: it is the field small models ramble in.
 const leanSchema = schemaMode === "lean";
+// A grammar REPLACES the schema on the wire: llama.cpp's server takes one or
+// the other, and the grammar describes the same envelope with the formula's
+// syntax constrained inside it. `lean` follows the schema mode.
+const useGrammar = String(arg("grammar", "off")) === "on";
 const retrievalK = Number(arg("retrieval", 3));
 const useContext = String(arg("context", "on")) !== "off";
 const repairRounds = Number(arg("repair", 0));
@@ -80,13 +87,19 @@ const requestTimeoutMs = Number(arg("timeout-ms", 180_000));
 if (!providerId || !model) {
   console.error(
     "Usage: node tests/eval/run-formula-eval.mjs --provider <id> --model <name>\n" +
-      "       [--schema on|off] [--retrieval N] [--context on|off] [--repair N]\n" +
+      "       [--schema on|off|lean] [--grammar on|off] [--retrieval N] [--context on|off] [--repair N]\n" +
       "       [--split all|hand|library] [--tag family] [--limit N] [--json out.json]",
   );
   process.exit(2);
 }
 if (!["all", "hand", "library"].includes(split)) {
   console.error(`--split must be all, hand or library (got ${split})`);
+  process.exit(2);
+}
+if (useGrammar && providerId !== "llamacpp") {
+  // Refused, not ignored: a run that believes it measured a grammar and did
+  // not is worse than no run.
+  console.error("--grammar on is only honoured by llama.cpp's server (--provider llamacpp).");
   process.exit(2);
 }
 
@@ -106,6 +119,7 @@ const { mod: fa } = await bundleAppModules({
 const {
   FORMULA_SYSTEM_PROMPT,
   buildFixtureContext,
+  buildFormulaGrammar,
   buildRepairPrompt,
   buildUserPrompt,
   buildIndex,
@@ -211,7 +225,8 @@ async function complete(messages) {
   if (key) headers.authorization = `Bearer ${key}`;
 
   const body = { model, max_tokens: maxTokens, temperature: 0, messages };
-  if (useSchema) body.response_format = responseFormat(leanSchema);
+  if (useGrammar) body.grammar = buildFormulaGrammar({ lean: leanSchema });
+  else if (useSchema) body.response_format = responseFormat(leanSchema);
 
   const started = Date.now();
   // A batch runner with no timeout hangs forever on a stalled endpoint, and the
@@ -310,8 +325,9 @@ const state = tasks.map((task) => {
 });
 
 console.log(
-  `[formula-eval] ${tasks.length} tasks | ${providerId}/${model} | schema=${schemaMode} ` +
-    `retrieval=${retrievalK} context=${useContext ? "on" : "off"} repair=${repairRounds} split=${split}`,
+  `[formula-eval] ${tasks.length} tasks | ${providerId}/${model} | schema=${useGrammar ? "off (grammar)" : schemaMode} ` +
+    `grammar=${useGrammar ? "on" : "off"} retrieval=${retrievalK} context=${useContext ? "on" : "off"} ` +
+    `repair=${repairRounds} split=${split}`,
 );
 
 for (let round = 0; round <= repairRounds; round++) {
@@ -406,7 +422,8 @@ const meanPrompt = ran.length ? Math.round(ran.reduce((a, s) => a + s.promptToke
 const summary = {
   provider: providerId,
   model,
-  schema: schemaMode,
+  schema: useGrammar ? "off" : schemaMode,
+  grammar: useGrammar,
   retrieval: retrievalK,
   context: useContext,
   repair: repairRounds,

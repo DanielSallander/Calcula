@@ -4884,6 +4884,9 @@ pub fn run() {
         .manage(pane_control::PaneControlState::new())
         .manage(timeline_slicer::TimelineSlicerState::new())
         .manage(mcp::McpState::new())
+        // The on-board inference runtime's process record and download slot.
+        // Transport bookkeeping, not document state: nothing here persists.
+        .manage(ai::runtime::RuntimeState::new())
         .manage(managed_policy::ManagedAppearanceState(std::sync::Mutex::new(appearance_policy)))
         .invoke_handler(tauri::generate_handler![
             // Grid commands
@@ -5025,6 +5028,13 @@ pub fn run() {
             ai::ai_chat_complete,
             ai::ai_chat_complete_stream,
             ai::ai_chat_cancel_stream,
+            // The on-board runtime (Tier 1)
+            ai::runtime::ai_builtin_status,
+            ai::runtime::ai_builtin_ensure_model,
+            ai::runtime::ai_builtin_cancel_download,
+            ai::runtime::ai_builtin_start,
+            ai::runtime::ai_builtin_stop,
+            ai::runtime::ai_builtin_delete_model,
             ai::dryrun::ai_dry_run_script,
             ai::preview_eval::preview_evaluate_formulas,
             ai::tools::ai_chat_run_tool,
@@ -5820,6 +5830,12 @@ pub fn run() {
                             token.cancel();
                         }
                     }
+                }
+
+                // Stop the on-board inference runtime. Its job object ends it
+                // when this process exits regardless; this frees the port now.
+                if let Some(state) = app_handle.try_state::<ai::runtime::RuntimeState>() {
+                    state.shutdown_blocking();
                 }
 
                 // Save all BI engine caches to disk before exit

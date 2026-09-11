@@ -55,9 +55,16 @@ pub fn parse_openai_models(raw: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether discovery probes this provider: local, and not the runtime we start
+/// ourselves — "already running" is a fact about the USER's servers, and the
+/// built-in one has no port until `ai::runtime` gives it one.
+pub fn is_discoverable(def: &ProviderDef) -> bool {
+    def.is_local && def.id != providers::BUILTIN_ID
+}
+
 /// Probe every local provider in the registry, concurrently.
 pub async fn discover() -> Vec<DiscoveredRuntime> {
-    let locals: Vec<ProviderDef> = providers::registry().into_iter().filter(|p| p.is_local).collect();
+    let locals: Vec<ProviderDef> = providers::registry().into_iter().filter(is_discoverable).collect();
     let Ok(http) = client(PROBE_TIMEOUT_MS) else {
         return Vec::new();
     };
@@ -178,8 +185,17 @@ mod tests {
     fn discovery_only_ever_probes_loopback() {
         // The privacy claim rests on this: "discover what is already running"
         // must never become an outbound request to a vendor.
-        for def in providers::registry().into_iter().filter(|p| p.is_local) {
+        for def in providers::registry().into_iter().filter(is_discoverable) {
             assert!(def.base_url.starts_with("http://127.0.0.1:"), "{} is not loopback", def.id);
         }
+    }
+
+    #[test]
+    fn the_builtin_runtime_is_never_probed_and_every_other_local_provider_is() {
+        let all = providers::registry();
+        let probed: Vec<&str> = all.iter().filter(|p| is_discoverable(p)).map(|p| p.id.as_str()).collect();
+        assert!(!probed.contains(&providers::BUILTIN_ID), "port 0 is a placeholder, not a server");
+        assert_eq!(probed, vec!["ollama", "lmstudio", "llamacpp", "vllm"]);
+        assert!(all.iter().filter(|p| !p.is_local).all(|p| !is_discoverable(p)));
     }
 }

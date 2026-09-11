@@ -35,7 +35,7 @@ import {
   buildRepairPrompt,
   buildUserPrompt,
   chooseCandidates,
-  DESIGN_QUERY_SYSTEM_PROMPT,
+  designQuerySystemPrompt,
   designQueryResponseSchema,
   extractDesignQuery,
   type CompilerFinding,
@@ -137,9 +137,13 @@ export async function draftDesignQuery(
 
   const grammar = deps.provider.honorsGrammar() === true ? buildDesignQueryGrammar(candidates) : null;
   const responseSchema = grammar ? undefined : designQueryResponseSchema();
+  // The grammar can only emit the bare query, so the prompt asks for exactly
+  // that; asking for JSON under a grammar that forbids it made every reply
+  // start with the most probable LEGAL token, which was an unasked LAYOUT.
+  const format = grammar ? "bare" : "json";
 
   const messages: Array<{ role: "user" | "assistant"; text: string }> = [
-    { role: "user", text: buildUserPrompt({ intent, candidates }) },
+    { role: "user", text: buildUserPrompt({ intent, candidates, format }) },
   ];
 
   let dsl = "";
@@ -151,7 +155,7 @@ export async function draftDesignQuery(
     deps.onPhase?.({ kind: "asking", model: modelLabel, round: round + 1 });
     const reply = await deps.provider.complete(
       {
-        system: DESIGN_QUERY_SYSTEM_PROMPT,
+        system: designQuerySystemPrompt(format),
         messages,
         maxTokens: MAX_REPLY_TOKENS,
         temperature: 0,
@@ -184,7 +188,7 @@ export async function draftDesignQuery(
     if (round < maxRepairs) {
       deps.onPhase?.({ kind: "repairing", round: round + 2 });
       messages.push({ role: "assistant", text: reply.text });
-      messages.push({ role: "user", text: buildRepairPrompt(dsl, findingsOf(compiled)) });
+      messages.push({ role: "user", text: buildRepairPrompt(dsl, findingsOf(compiled), format) });
     }
   }
 

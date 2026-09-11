@@ -37,14 +37,16 @@ export const DESIGN_QUERY_CHEAT_SHEET = [
 ].join("\n");
 
 /**
- * The system prompt. Byte-stable for a session.
+ * How the model is asked to answer. `json` is the schema path (every
+ * runtime); `bare` is the grammar path, where the runtime can only emit the
+ * query itself and a prompt that asked for JSON would be fighting the grammar
+ * from the first token — measured on the built-in runtime: every reply began
+ * with a LAYOUT line nobody asked for, because LAYOUT was the most probable
+ * legal continuation of an answer the model wanted to start with `{"dsl":`.
  */
-export const DESIGN_QUERY_SYSTEM_PROMPT = [
-  "You write ONE design query for Calcula, a spreadsheet with a semantic model. The query is compiled and run by Calcula, which checks every name.",
-  "",
-  DESIGN_QUERY_CHEAT_SHEET,
-  "",
-  "Rules:",
+export type DesignQueryReplyFormat = "json" | "bare";
+
+const RULES_COMMON = [
   "- Use ONLY the measures and dimensions listed in the request, spelled exactly as listed. Never invent a name; if nothing listed fits, choose the closest listed name.",
   "- Every query has VALUES and at least one of ROWS or COLUMNS.",
   "- When the request mentions a period (year, month, quarter, over time), group by the calendar columns listed under Time.",
@@ -53,8 +55,40 @@ export const DESIGN_QUERY_SYSTEM_PROMPT = [
   "- A bracketed label after a measure ([% of grand total], [difference], [running total]...) only when the request asks for a share, a percentage, a difference or a running total; never on a plain ranking.",
   "- FILTERS restricts the rows; do not also put the filtered column in ROWS or COLUMNS unless the request asks to see it.",
   "- Write a measure bare: [Customers], never count([Customers]) or [Customers] [average]. Aggregate only a listed numeric column: average(Sales.Amount).",
-  "- Reply with JSON matching the schema: \"dsl\" holds the whole query with real line breaks between clauses, \"explanation\" is one sentence.",
-].join("\n");
+];
+
+function systemPrompt(format: DesignQueryReplyFormat): string {
+  const reply =
+    format === "json"
+      ? "- Reply with JSON matching the schema: \"dsl\" holds the whole query with real line breaks between clauses, \"explanation\" is one sentence."
+      : "- Reply with the query only: the clauses, one per line, starting with the first clause. No JSON, no explanation, nothing before or after the query.";
+  return [
+    "You write ONE design query for Calcula, a spreadsheet with a semantic model. The query is compiled and run by Calcula, which checks every name.",
+    "",
+    DESIGN_QUERY_CHEAT_SHEET,
+    "",
+    "Rules:",
+    ...RULES_COMMON,
+    reply,
+  ].join("\n");
+}
+
+/** The system prompt for the schema path. Byte-stable for a session. */
+export const DESIGN_QUERY_SYSTEM_PROMPT = systemPrompt("json");
+
+/** The system prompt for the grammar path. Byte-stable for a session. */
+export const DESIGN_QUERY_SYSTEM_PROMPT_BARE = systemPrompt("bare");
+
+/** The prompt for a reply format. */
+export function designQuerySystemPrompt(format: DesignQueryReplyFormat): string {
+  return format === "bare" ? DESIGN_QUERY_SYSTEM_PROMPT_BARE : DESIGN_QUERY_SYSTEM_PROMPT;
+}
+
+/** One worked example in the reply format the model is asked for. */
+function example(request: string, dsl: string, explanation: string, format: DesignQueryReplyFormat): string {
+  if (format === "bare") return `Request: ${request}\n${dsl}`;
+  return `Request: ${request}\n${JSON.stringify({ dsl, explanation })}`;
+}
 
 /**
  * The shaped examples, built from the names the model was just shown.
@@ -65,8 +99,11 @@ export const DESIGN_QUERY_SYSTEM_PROMPT = [
  * their answers; the first share example carried a TOP 10 nobody asked for,
  * and that was copied too. A worked example is the strongest instruction a
  * small model receives, so each one shows exactly one thing and nothing extra.
+ *
+ * In the `bare` format the examples are the query text itself, the way the
+ * grammar path's reply must look.
  */
-export function buildExamples(c: DesignQueryCandidates): string[] {
+export function buildExamples(c: DesignQueryCandidates, format: DesignQueryReplyFormat = "json"): string[] {
   const m0 = c.measures[0];
   const m1 = c.measures[1] ?? c.measures[0];
   const d0 = c.dimensions[0];
@@ -74,30 +111,50 @@ export function buildExamples(c: DesignQueryCandidates): string[] {
   const time = c.timeGroupings[0] ?? null;
   const out: string[] = [];
   if (m0 && d0) {
-    out.push(`Request: ${wordsOf(m0)} by ${wordsOf(d0)}\n{"dsl":"ROWS: ${d0}\\nVALUES: [${m0}]","explanation":"${wordsOf(m0)} for each ${wordsOf(d0)}."}`);
+    out.push(example(`${wordsOf(m0)} by ${wordsOf(d0)}`, `ROWS: ${d0}\nVALUES: [${m0}]`, `${wordsOf(m0)} for each ${wordsOf(d0)}.`, format));
   }
   if (m0 && m1 && d0 && d1 && d1 !== d0 && m1 !== m0) {
-    out.push(`Request: ${wordsOf(m0)} and ${wordsOf(m1)} by ${wordsOf(d0)}, split by ${wordsOf(d1)}\n{"dsl":"ROWS: ${d0}\\nCOLUMNS: ${d1}\\nVALUES: [${m0}], [${m1}]","explanation":"${wordsOf(m0)} and ${wordsOf(m1)} by ${wordsOf(d0)} and ${wordsOf(d1)}."}`);
+    out.push(example(
+      `${wordsOf(m0)} and ${wordsOf(m1)} by ${wordsOf(d0)}, split by ${wordsOf(d1)}`,
+      `ROWS: ${d0}\nCOLUMNS: ${d1}\nVALUES: [${m0}], [${m1}]`,
+      `${wordsOf(m0)} and ${wordsOf(m1)} by ${wordsOf(d0)} and ${wordsOf(d1)}.`,
+      format,
+    ));
   }
   if (m0 && time) {
-    out.push(`Request: ${wordsOf(m0)} per ${wordsOf(time)}\n{"dsl":"ROWS: ${time}\\nVALUES: [${m0}]","explanation":"${wordsOf(m0)} over time."}`);
+    out.push(example(`${wordsOf(m0)} per ${wordsOf(time)}`, `ROWS: ${time}\nVALUES: [${m0}]`, `${wordsOf(m0)} over time.`, format));
   }
   // The share form, because a model shown only "[Measure]" puts the
   // show-values-as label where a measure goes (measured: `VALUES: [% of grand
   // total]` from both small coder models). Nothing else in it.
   if (m0 && d0) {
-    out.push(`Request: share of total ${wordsOf(m0)} by ${wordsOf(d0)}\n{"dsl":"ROWS: ${d0}\\nVALUES: [${m0}] [% of grand total]","explanation":"Each ${wordsOf(d0)}'s share of ${wordsOf(m0)}."}`);
+    out.push(example(
+      `share of total ${wordsOf(m0)} by ${wordsOf(d0)}`,
+      `ROWS: ${d0}\nVALUES: [${m0}] [% of grand total]`,
+      `Each ${wordsOf(d0)}'s share of ${wordsOf(m0)}.`,
+      format,
+    ));
   }
   // The ranking form, because "highest first" is otherwise written as a SORT
   // by a measure, which the compiler refuses.
   if (m0 && d0) {
-    out.push(`Request: the three ${wordsOf(d0)} with the highest ${wordsOf(m0)}\n{"dsl":"ROWS: ${d0}\\nVALUES: [${m0}]\\nTOP 3 BY [${m0}]","explanation":"The three ${wordsOf(d0)} with the most ${wordsOf(m0)}."}`);
+    out.push(example(
+      `the three ${wordsOf(d0)} with the highest ${wordsOf(m0)}`,
+      `ROWS: ${d0}\nVALUES: [${m0}]\nTOP 3 BY [${m0}]`,
+      `The three ${wordsOf(d0)} with the most ${wordsOf(m0)}.`,
+      format,
+    ));
   }
   // The aggregation form, because "average amount" is otherwise written as a
   // bracketed label or a bracketed call, neither of which is a thing.
   const n0 = c.numericColumns[0];
   if (n0 && d0) {
-    out.push(`Request: average ${wordsOf(n0)} by ${wordsOf(d0)}\n{"dsl":"ROWS: ${d0}\\nVALUES: average(${n0})","explanation":"The average ${wordsOf(n0)} for each ${wordsOf(d0)}."}`);
+    out.push(example(
+      `average ${wordsOf(n0)} by ${wordsOf(d0)}`,
+      `ROWS: ${d0}\nVALUES: average(${n0})`,
+      `The average ${wordsOf(n0)} for each ${wordsOf(d0)}.`,
+      format,
+    ));
   }
   return out;
 }
@@ -116,6 +173,8 @@ export interface UserPromptParts {
   readonly candidates: DesignQueryCandidates;
   /** Include the shaped examples. On by default; the eval runner can switch them off to measure them. */
   readonly examples?: boolean;
+  /** The reply format the examples are shown in. Defaults to the schema path's JSON. */
+  readonly format?: DesignQueryReplyFormat;
 }
 
 /** The user message: the names, the time axis, the examples, then the request. */
@@ -149,7 +208,7 @@ export function buildUserPrompt(parts: UserPromptParts): string {
   }
 
   if (parts.examples !== false) {
-    const examples = buildExamples(c);
+    const examples = buildExamples(c, parts.format ?? "json");
     if (examples.length) blocks.push(`Examples:\n${examples.join("\n")}`);
   }
 
@@ -167,7 +226,11 @@ export interface CompilerFinding {
  * The follow-up after a proposal failed to compile. Appended, never
  * substituted for the original message.
  */
-export function buildRepairPrompt(previousDsl: string, findings: readonly CompilerFinding[]): string {
+export function buildRepairPrompt(
+  previousDsl: string,
+  findings: readonly CompilerFinding[],
+  format: DesignQueryReplyFormat = "json",
+): string {
   return [
     "Your query was:",
     previousDsl,
@@ -175,7 +238,9 @@ export function buildRepairPrompt(previousDsl: string, findings: readonly Compil
     "Calcula's compiler reported:",
     ...findings.slice(0, 4).map((f) => `- ${f.line !== undefined ? `line ${f.line}: ` : ""}${f.message}`),
     "",
-    "Return a corrected query in the same JSON shape, using only the listed names.",
+    format === "json"
+      ? "Return a corrected query in the same JSON shape, using only the listed names."
+      : "Return the corrected query only, one clause per line, using only the listed names.",
   ].join("\n");
 }
 

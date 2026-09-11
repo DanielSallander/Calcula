@@ -114,6 +114,12 @@ const DELETE_COMMANDS: &[(&str, ObjectKind)] = &[
 /// and the standard — a one-line reason that a reviewer can disagree with.
 const OUT_OF_SCOPE: &[(&str, &str)] = &[
     (
+        "ai_builtin_delete_model",
+        "Deletes a FILE in the user's local app-data folder (the downloaded \
+         on-board model), not an object in the workbook. Nothing in a document \
+         can point at it; the runtime that had it loaded is stopped first.",
+    ),
+    (
         "delete_rows",
         "A RANGE operation, not an object deletion. What it does to objects \
          anchored in the deleted band is the structural-shift machinery \

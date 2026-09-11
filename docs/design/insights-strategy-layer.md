@@ -761,9 +761,9 @@ could never be offered; the corpus recall check caught it. `ignore` now excludes
 axis and nothing more.
 
 **The grammar in both directions.** `buildDesignQueryGrammar` renders a GBNF grammar per request
-from the candidate names, so a runtime that honours one (llama.cpp's server; the seam's
-`honorsGrammar()` is identity-gated until the bundled runtime brings a probe) cannot emit a name it
-was not shown. A mini GBNF engine in `gbnfTestKit.ts` samples the grammar three hundred times per
+from the candidate names, so a runtime that honours one (llama.cpp's server and, since Step 3, the
+bundled copy of it; the seam's `honorsGrammar()` answers from the probe's measurement first and
+from identity only when unmeasured) cannot emit a name it was not shown. A mini GBNF engine in `gbnfTestKit.ts` samples the grammar three hundred times per
 intent and compiles every sample, and matches every corpus reference against the grammar built
 from its own intent — so the grammar can neither produce a query the compiler refuses nor forbid
 one the corpus calls right. The seam gained `grammar`, forwarded only to llama.cpp; a grammar
@@ -804,6 +804,18 @@ the shaped examples bought the 3B nothing for 247 tokens. With four general rule
 layout, a share label only when a share is asked, a filtered column not repeated as COLUMNS, a
 measure never aggregated) the final numbers are **1.5B 21/40 at 5.5 s, 3B 27/40 at 11.5 s**, both
 compiling 36 and 38 of 40; the rest is judgement and SQL habit, which is the grammar's territory.
+
+**Step 3 measured the grammar's territory (2026-09-10).** On the bundled runtime — the same 1.5B,
+now on llama.cpp with the grammar honoured — every one of the forty drafts compiles (40/40 against
+34/40 for the schema on the same runtime) and the median halves (1.0 s against 2.1 s); 17/40 pass
+against 15/40, McNemar p = 0.77, so the pass rate is the same within noise. What the grammar removed
+is the whole compile-failure class; what it left is judgement — an unasked share label, an unasked
+TOP, an extra name — which no grammar decides. Two things the runtime taught the assistant: under a
+grammar the prompt has to ask for what the grammar allows (`DESIGN_QUERY_SYSTEM_PROMPT_BARE` and
+bare examples), or the reply opens with the most probable legal token, which was an unasked LAYOUT
+line three times out of three; and the grammar now holds the clauses to the serializer's order,
+each at most once, because the free-order version let a reply write VALUES twice. The numbers are
+in `open-items.md` 2.AI.10.
 
 ### 14.4 The tier rule this establishes
 

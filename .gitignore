@@ -170,6 +170,12 @@ test-results/
 app/e2e/.tauri-pid
 app/e2e/results/
 
+# The bundled inference runtime and the on-board model are FETCHED from pinned
+# releases (app/scripts/fetch-llama-server.mjs, fetch-builtin-model.mjs), never
+# committed. The pins are the source of truth; the bytes are reproducible.
+app/src-tauri/binaries/
+app/src-tauri/models/
+
 # Other
 context_manager/
 general_stuff/

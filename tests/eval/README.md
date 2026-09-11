@@ -19,7 +19,24 @@ Its corpus is `design-queries.json` over the sales-star fixture; Layer A is
 the PRODUCT's own loop (`draft.ts`) with a provider over a bare endpoint, so
 the number is about the model, never a port of the pipeline. `--grammar on` is
 refused for any provider but llama.cpp's server, which is the only one that
-honours the field.
+honours the field. `run-formula-eval.mjs` takes the same `--grammar on`, which
+replaces the reply schema with `buildFormulaGrammar` (the same envelope, the
+formula inside it constrained to formula syntax).
+
+**Measuring the BUILT-IN runtime.** The app's own copy of llama-server and the
+on-board model are fetched artifacts:
+
+```
+cd app && npm run fetch:llama-server && npm run fetch:builtin-model
+app/src-tauri/binaries/llama-server-<triple>/llama-server.exe \
+  -m app/src-tauri/models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf \
+  --host 127.0.0.1 --port 8080 -c 8192 -np 1 --jinja --no-webui
+node tests/eval/run-design-query-eval.mjs --provider llamacpp --model calcula-builtin --grammar on
+node tests/eval/run-formula-eval.mjs --provider llamacpp --model calcula-builtin --grammar on
+```
+
+Those are the flags `ai/runtime.rs` starts it with, so a run on port 8080 is a
+run on the product's runtime; only the port differs.
 
 The corpus is `tasks.json`. It ships in the repo deliberately (design doc
 §11.3): withholding it would make every claim about which models work

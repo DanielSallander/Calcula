@@ -36,6 +36,10 @@ const store = new Map<string, string>();
 vi.mock("@api", () => ({
   getSetting: (ext: string, k: string, d: string) => store.get(`${ext}:${k}`) ?? d,
   setSetting: (ext: string, k: string, v: string) => void store.set(`${ext}:${k}`, String(v)),
+  // The built-in provider's consent gate and its runtime events. Neither is
+  // exercised here; `modelPickerBuiltin.test.tsx` owns them.
+  confirmAsync: () => Promise.resolve(false),
+  listenTauriEvent: async () => () => undefined,
 }));
 
 const { ModelPicker } = await import("../components/ModelPicker");
@@ -96,6 +100,9 @@ function backend(opts: {
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === "ai_providers_list") return opts.providers ?? [OLLAMA, ANTHROPIC];
     if (cmd === "ai_discover_local_runtimes") return opts.discovered ?? [];
+    // Read on every mount. A build without the on-board runtime is the
+    // neutral answer here: nothing is preselected and nothing else changes.
+    if (cmd === "ai_builtin_status") throw new Error("not in this build");
     if (cmd === "ai_list_models") {
       if (opts.listed instanceof Error) throw opts.listed;
       return opts.listed ?? [];

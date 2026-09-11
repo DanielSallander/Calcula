@@ -135,6 +135,12 @@ describe("backend command capability model (A3)", () => {
     // Model-scoped BI reads are broker-only for non-trusted code (cap.bi.query).
     expect(commandCapability("bi_query")).toBe("biData");
     expect(isPrivilegedCommand("bi_get_connections")).toBe(true);
+    // The on-board runtime: a child process on this machine and a gigabyte
+    // download the user consents to once — every command of it is human-UI only.
+    for (const c of ["ai_builtin_status", "ai_builtin_ensure_model", "ai_builtin_cancel_download",
+      "ai_builtin_start", "ai_builtin_stop", "ai_builtin_delete_model"]) {
+      expect(commandCapability(c), c).toBe("localRuntime");
+    }
     // A normal data/feature command is open.
     expect(isPrivilegedCommand("get_charts")).toBe(false);
     expect(commandCapability("delete_columns")).toBeNull(); // grid op, not privileged

@@ -78,11 +78,17 @@ const PATTERNS: RetrievablePattern[] = [
   { id: "PV#1", fn: "PV", intent: "present value of an investment", formula: "=PV(0.05,10,-100)", result: "772" },
 ];
 
+interface RecordedCall {
+  messages: ReadonlyArray<{ role: string; text: string }>;
+  grammar?: string;
+  responseSchema?: unknown;
+}
+
 /** A model that answers with the scripted replies, in order. */
-function scriptedProvider(replies: string[]): AiCompletionProvider & {
-  calls: Array<{ messages: ReadonlyArray<{ role: string; text: string }> }>;
+function scriptedProvider(replies: string[], honorsGrammar: boolean | undefined = false): AiCompletionProvider & {
+  calls: RecordedCall[];
 } {
-  const calls: Array<{ messages: ReadonlyArray<{ role: string; text: string }> }> = [];
+  const calls: RecordedCall[] = [];
   let i = 0;
   return {
     calls,
@@ -90,8 +96,13 @@ function scriptedProvider(replies: string[]): AiCompletionProvider & {
     modelLabel: () => "qwen2.5-coder:1.5b",
     isLocal: () => true,
     honorsSchema: () => true,
+    honorsGrammar: () => honorsGrammar,
     complete: async (req) => {
-      calls.push({ messages: req.messages.map((m) => ({ role: m.role, text: m.text })) });
+      calls.push({
+        messages: req.messages.map((m) => ({ role: m.role, text: m.text })),
+        grammar: req.grammar,
+        responseSchema: req.responseSchema,
+      });
       const text = replies[Math.min(i, replies.length - 1)];
       i++;
       return { text, truncated: false, model: "qwen2.5-coder:1.5b", durationMs: 10 };
@@ -198,6 +209,31 @@ describe("the ladder puts worked examples in front of the model", () => {
 
     expect(proposal.status).toBe("verified");
     expect(provider.calls[0].messages[0].text).not.toContain("Similar verified formulas:");
+  });
+});
+
+describe("the ladder constrains where it can and requests where it must", () => {
+  it("sends the formula grammar, and no schema, to a runtime measured to honour one", async () => {
+    const provider = scriptedProvider([jsonReply("=SUM(B2:B6)")], true);
+    const h = harness({ provider });
+    const proposal = await assistFormula(REQUEST, h.deps);
+
+    expect(proposal.status).toBe("verified");
+    const call = provider.calls[0];
+    expect(call.grammar, "a grammar-honouring runtime gets the grammar").toContain('root ::=');
+    expect(call.grammar).toContain("expr");
+    expect(call.responseSchema, "and not the schema beside it").toBeUndefined();
+  });
+
+  it("sends the schema, and no grammar, everywhere else — including the unmeasured case", async () => {
+    for (const verdict of [false, undefined] as const) {
+      const provider = scriptedProvider([jsonReply("=SUM(B2:B6)")], verdict);
+      const h = harness({ provider });
+      await assistFormula(REQUEST, h.deps);
+      const call = provider.calls[0];
+      expect(call.grammar, `verdict ${String(verdict)}`).toBeUndefined();
+      expect(call.responseSchema, `verdict ${String(verdict)}`).toBeTruthy();
+    }
   });
 });
 
@@ -378,6 +414,7 @@ describe("a reply with no formula is a result", () => {
       modelLabel: () => "tiny",
       isLocal: () => true,
       honorsSchema: () => undefined,
+      honorsGrammar: () => undefined,
       complete: async () => ({
         text: "Here is what I would do: first consider",
         truncated: true,

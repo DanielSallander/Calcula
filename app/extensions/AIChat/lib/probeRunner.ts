@@ -119,6 +119,7 @@ async function preflight(
   message = "ready?",
   system = "Reply with the single word: ready.",
   responseSchema?: ResponseSchema,
+  grammar?: string,
 ): Promise<ChatResponse> {
   if (opts.isCancelled?.()) throw new Error("cancelled");
   return aiChatBackend.invoke<ChatResponse>("ai_chat_complete", {
@@ -130,9 +131,53 @@ async function preflight(
       tools,
       maxTokens: PREFLIGHT_MAX_TOKENS,
       ...(responseSchema ? { responseSchema } : {}),
+      ...(grammar ? { grammar } : {}),
     },
     baseUrlOverride: opts.baseUrl || null,
   });
+}
+
+/**
+ * The smallest grammar that can tell whether a runtime honours one: the only
+ * legal reply is the two letters OK. Exported so the test asserts the real
+ * string rather than a copy.
+ */
+export const GRAMMAR_CANARY = 'root ::= "OK"';
+
+/**
+ * Does this runtime honour a GBNF grammar on the reply?
+ *
+ * The question is one whose honest answer is NOT the grammar's only legal
+ * string, so the two outcomes cannot be confused: a runtime that answers
+ * exactly "OK" obeyed the grammar; one that answers "four" ignored it.
+ *
+ * THREE VERDICTS, and the third is the one that matters for cloud vendors: a
+ * request the server REFUSES (a 4xx naming an unknown field) after the plain
+ * pre-flight succeeded is a measured `false`, not a transport blip — the
+ * runtime told us it does not take the field. Only a failure that is not an
+ * HTTP refusal is left undecided.
+ */
+async function probeGrammarSupport(opts: RunProbeOptions): Promise<boolean | undefined> {
+  let text: string;
+  try {
+    const resp = await preflight(
+      opts,
+      [],
+      "What is 2+2? Answer in words.",
+      "Answer the question.",
+      undefined,
+      GRAMMAR_CANARY,
+    );
+    text = resp.blocks
+      .filter((b): b is Extract<ChatBlock, { type: "text" }> => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+  } catch (e) {
+    // `ai_chat_complete` renders an HTTP refusal as "<label> error <status>: …".
+    return /\berror 4\d\d\b/.test(String(e)) ? false : undefined;
+  }
+  return text === "OK";
 }
 
 /**
@@ -287,6 +332,12 @@ export async function runProbe(opts: RunProbeOptions): Promise<ModelProfile> {
   // a reply schema decides how the formula assistant asks it for anything, and
   // it costs a fraction of the canary run to find out.
   const honorsSchema = await probeSchemaSupport(opts);
+  // And one more: whether a grammar is honoured decides whether a drafted
+  // design query CAN name a column it was not shown, and whether the formula
+  // assistant's reply can fail to parse at all. Measured rather than assumed
+  // from the provider's name, because a proxy in front of llama.cpp may strip
+  // the field and a runtime nobody named may honour it.
+  const honorsGrammar = await probeGrammarSupport(opts);
 
   const profile = await probeModel({
     providerId: opts.providerId,
@@ -302,6 +353,7 @@ export async function runProbe(opts: RunProbeOptions): Promise<ModelProfile> {
     ...profile,
     ...(emitsNativeToolCalls === undefined ? {} : { emitsNativeToolCalls }),
     ...(honorsSchema === undefined ? {} : { honorsSchema }),
+    ...(honorsGrammar === undefined ? {} : { honorsGrammar }),
   };
   writeProfile(merged);
   return merged;

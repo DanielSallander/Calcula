@@ -79,6 +79,20 @@ export interface ModelProfile {
    * only the rate of usable replies changes.
    */
   honorsSchema?: boolean;
+  /**
+   * Whether the runtime honours a GBNF `grammar` on the reply.
+   *
+   * Same three-way reading as `honorsSchema`: undefined is "not measured".
+   * Measured by sending `root ::= "OK"` with a question whose honest answer
+   * is not "OK" — a runtime that answers exactly "OK" obeyed the grammar; one
+   * that answers the question ignored it; one that refuses the field with a
+   * 4xx does not honour it either. Measured TRUE is the only thing that lets
+   * the completion seam forward a grammar to a provider it does not know by
+   * identity, and measured FALSE overrides identity: a proxy in front of
+   * llama.cpp that strips the field is answered by the measurement, not the
+   * label.
+   */
+  honorsGrammar?: boolean;
   /** ISO date, so a stale profile can be re-run rather than trusted forever. */
   measuredAt: string;
 }
@@ -182,7 +196,15 @@ export function describeProfile(profile: ModelProfile): string {
       ? " It ignored a reply schema in the probe: expect formula suggestions to be extracted from " +
         "free text. They are checked by Calcula's engine either way."
       : "";
-  return `${planFor(profile).rationale}${speed}${toolCalls}${fencing}${schema}`;
+  // Stated only when measured TRUE: honouring a grammar is the exception among
+  // runtimes, and it is the property that lets a drafted query name only the
+  // columns it was shown. The common false is not worth a sentence.
+  const grammar =
+    profile.honorsGrammar === true
+      ? " It honours a reply grammar, so a drafted design query or formula is constrained to the " +
+        "names and syntax it was given."
+      : "";
+  return `${planFor(profile).rationale}${speed}${toolCalls}${fencing}${schema}${grammar}`;
 }
 
 const PROBE_SYSTEM = [

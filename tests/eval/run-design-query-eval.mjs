@@ -92,8 +92,11 @@ const { mod } = await bundleAppModules({
 });
 const {
   draftDesignQuery, compileDesignQuery, canonicalDesignQuery,
-  chooseCandidates, buildUserPrompt, DESIGN_QUERY_SYSTEM_PROMPT, estimateTokens,
+  chooseCandidates, buildUserPrompt, designQuerySystemPrompt, estimateTokens,
 } = mod;
+// The grammar path asks for the bare query and shows bare examples; the token
+// estimate below must count the prompt the loop actually sends.
+const replyFormat = useGrammar ? "bare" : "json";
 
 // ---------------------------------------------------------------------------
 // Fixture and tasks
@@ -182,8 +185,8 @@ const results = [];
 for (const task of tasks) {
   const candidates = chooseCandidates(biModel, task.intent);
   const promptTokens =
-    estimateTokens(DESIGN_QUERY_SYSTEM_PROMPT) +
-    estimateTokens(buildUserPrompt({ intent: task.intent, candidates, examples: useExamples }));
+    estimateTokens(designQuerySystemPrompt(replyFormat)) +
+    estimateTokens(buildUserPrompt({ intent: task.intent, candidates, examples: useExamples, format: replyFormat }));
   const started = Date.now();
   const row = {
     id: task.id, lang: task.lang, promptTokens, dsl: "", status: "", passed: false,

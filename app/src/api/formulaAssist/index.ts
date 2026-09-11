@@ -33,6 +33,9 @@ export {
   responseFormat,
 } from "./schema";
 
+export type { FormulaGrammarOptions } from "./grammar";
+export { FORMULA_EXPRESSION_RULES, buildFormulaGrammar } from "./grammar";
+
 export type { PatternIndex, RankedPattern, RetrievalQuery } from "./retrieval";
 export { buildIndex, namesFunction, rankPatterns, tokenize } from "./retrieval";
 

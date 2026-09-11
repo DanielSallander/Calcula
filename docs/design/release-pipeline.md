@@ -82,6 +82,21 @@ pushed to GitHub.**~~ *(Unverified as of 2026-08-16 and probably stale — an `o
 configured and three further workflows have since been added. See the status header; needs an
 owner answer rather than a guess.)*
 
+## The bundled inference runtime (2026-09-10)
+
+The release workflow fetches llama.cpp's `llama-server` (CPU build, one pinned release, sha256 per
+architecture — `app/scripts/fetch-llama-server.mjs`) before the build and passes
+`--config src-tauri/tauri.runtime-<arch>.conf.json`, which maps the fetched folder to the
+`llama-server/` resource folder the app looks in. Why an overlay rather than `tauri.conf.json`:
+`bundle.resources` is one static list, a resource glob that matches NOTHING fails the build
+(`GlobPathNotFound` in tauri-utils), and each architecture must ship only its own DLLs — so the
+per-target mapping lives in a per-target file that only the release build applies. A developer's
+`tauri dev` needs no overlay: the debug build looks in `app/src-tauri/binaries/llama-server-<triple>/`
+directly, and `npm run tauri …` fetches it first (`pretauri`, `--soft`, so being offline warns and
+continues). The model is NOT in the installer — it is downloaded on first use behind a consent
+sentence — except in an offline build: put the pinned `.gguf` in `app/src-tauri/models/`
+(`npm run fetch:builtin-model`) and build with `tauri.offline-<arch>.conf.json` instead.
+
 ## Follow-up 1: code signing
 
 Unsigned installers trigger a Windows SmartScreen "unknown publisher" warning,

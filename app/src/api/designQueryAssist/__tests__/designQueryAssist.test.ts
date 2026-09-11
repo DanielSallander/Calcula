@@ -18,6 +18,8 @@ import {
   chooseCandidates,
   DESIGN_QUERY_SCHEMA,
   DESIGN_QUERY_SYSTEM_PROMPT,
+  DESIGN_QUERY_SYSTEM_PROMPT_BARE,
+  designQuerySystemPrompt,
   DSL_LAYOUT_DIRECTIVES,
   DSL_SHOW_VALUES_AS,
   dslFieldRef,
@@ -228,6 +230,32 @@ describe("the prompt", () => {
     for (const label of DSL_SHOW_VALUES_AS) expect(DESIGN_QUERY_SYSTEM_PROMPT).toContain(`[${label}]`);
   });
 
+  it("asks for the bare query on the grammar path, and shows bare examples there", () => {
+    // Measured on the built-in runtime 2026-09-10: under a grammar that can
+    // only emit the query, a prompt asking for JSON made every reply begin
+    // with the most probable LEGAL token — an unasked LAYOUT line — three
+    // times out of three. The grammar path gets a prompt that asks for what
+    // the grammar allows.
+    expect(DESIGN_QUERY_SYSTEM_PROMPT_BARE).toBe(DESIGN_QUERY_SYSTEM_PROMPT_BARE.slice());
+    expect(DESIGN_QUERY_SYSTEM_PROMPT_BARE).not.toContain("JSON matching the schema");
+    expect(DESIGN_QUERY_SYSTEM_PROMPT_BARE).toContain("Reply with the query only");
+    expect(DESIGN_QUERY_SYSTEM_PROMPT).toContain("Reply with JSON matching the schema");
+    // Same rules, different last line: nothing else may drift between them.
+    const rulesOf = (p: string) => p.split("\n").filter((l) => l.startsWith("- ") && !l.startsWith("- Reply"));
+    expect(rulesOf(DESIGN_QUERY_SYSTEM_PROMPT_BARE)).toEqual(rulesOf(DESIGN_QUERY_SYSTEM_PROMPT));
+    expect(designQuerySystemPrompt("bare")).toBe(DESIGN_QUERY_SYSTEM_PROMPT_BARE);
+    expect(designQuerySystemPrompt("json")).toBe(DESIGN_QUERY_SYSTEM_PROMPT);
+
+    const c = chooseCandidates(star(), "revenue by region");
+    const bare = buildUserPrompt({ intent: "revenue by region", candidates: c, format: "bare" });
+    const json = buildUserPrompt({ intent: "revenue by region", candidates: c });
+    expect(json).toContain('{"dsl":');
+    expect(bare).not.toContain('{"dsl":');
+    expect(bare).toContain("Request: revenue by region");
+    expect(buildRepairPrompt("ROWS: X\nVALUES: [Y]", [{ message: "m" }], "bare")).not.toContain("JSON");
+    expect(buildRepairPrompt("ROWS: X\nVALUES: [Y]", [{ message: "m" }])).toContain("JSON");
+  });
+
   it("lists the names, the time groupings and the request, and states the caps", () => {
     const c = chooseCandidates(star(), "revenue by region");
     const text = buildUserPrompt({ intent: "revenue by region", candidates: { ...c, droppedDimensions: 7 } });
@@ -313,7 +341,10 @@ describe("the grammar", () => {
     for (const d of c.dimensions) expect(g).toContain(`"${d}"`);
     for (const m of c.measures) expect(g).toContain(`"[${m}]"`);
     for (const l of DSL_LAYOUT_DIRECTIVES) expect(g).toContain(`"${l}"`);
-    expect(g).toContain('root ::= clause ("\\n" clause)* "\\n"?');
+    // The canonical clause order, each at most once, VALUES required: the
+    // free-order root of the first version let a reply write VALUES twice.
+    expect(g).toContain('root ::= head "\\n" values (nl filters)? (nl sort)? (nl topn)? (nl layout)? "\\n"?');
+    expect(g).toContain('head ::= rows ("\\n" columns)? | columns');
     expect(g).toMatch(/^dim ::= /m);
     // A column the lead measure must never be sliced by is not in the grammar.
     expect(g).not.toContain('"Product.Name"');

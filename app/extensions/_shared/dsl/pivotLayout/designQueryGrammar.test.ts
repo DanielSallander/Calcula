@@ -103,6 +103,18 @@ describe("the design-query grammar", () => {
         expect(compiled.errors.map((e) => e.message), `example does not compile:\n${dsl}`).toEqual([]);
         expect(matchGbnf(grammar, dsl), `example outside the grammar:\n${dsl}`).toBe(true);
       }
+      // The grammar path shows the same examples as bare query text — what
+      // the grammar can actually emit — and each must be the same query.
+      const bare = buildExamples(candidates, "bare");
+      expect(bare.length).toBe(examples.length);
+      bare.forEach((text, i) => {
+        expect(text.startsWith("Request: "), text).toBe(true);
+        expect(text.includes("{"), `a bare example must carry no JSON:\n${text}`).toBe(false);
+        const dsl = text.slice(text.indexOf("\n") + 1);
+        const jsonDsl = (JSON.parse(examples[i].slice(examples[i].indexOf("{"))) as { dsl: string }).dsl;
+        expect(dsl, "the bare and JSON examples teach the same query").toBe(jsonDsl);
+        expect(matchGbnf(grammar, dsl), `bare example outside the grammar:\n${dsl}`).toBe(true);
+      });
     }
   });
 
@@ -114,5 +126,21 @@ describe("the design-query grammar", () => {
     expect(matchGbnf(grammar, "ROWS: Product.Name\nVALUES: [Revenue]")).toBe(false);
     expect(matchGbnf(grammar, "ROWS: Geography.Region\nVALUES: [Invented]")).toBe(false);
     expect(matchGbnf(grammar, "ROWS: Geography.Region\nVALUES: [Revenue]")).toBe(true);
+  });
+
+  it("holds the clauses to the canonical order, each at most once", () => {
+    // Measured on the built-in runtime 2026-09-10 with a free-order grammar:
+    // a second VALUES after COLUMNS, a LAYOUT first, a trailing TOP nobody
+    // asked for. The serializer's order is the only one the model may write.
+    const candidates = chooseCandidates(model as DesignQueryModel, "revenue by region");
+    const grammar = parseGbnf(buildDesignQueryGrammar(candidates)!);
+    const ok = (q: string) => matchGbnf(grammar, q);
+    expect(ok("ROWS: Geography.Region\nCOLUMNS: Product.Category\nVALUES: [Revenue]\nFILTERS: Geography.Region = (\"Europe\")\nSORT: Geography.Region DESC\nTOP 3 BY [Revenue]\nLAYOUT: tabular")).toBe(true);
+    expect(ok("COLUMNS: Product.Category\nVALUES: [Revenue]"), "COLUMNS alone is a valid head").toBe(true);
+    expect(ok("ROWS: Geography.Region\nVALUES: [Revenue]\nCOLUMNS: Product.Category\nVALUES: [Revenue]"), "a second VALUES").toBe(false);
+    expect(ok("LAYOUT: tabular\nROWS: Geography.Region\nVALUES: [Revenue]"), "LAYOUT before ROWS").toBe(false);
+    expect(ok("VALUES: [Revenue]"), "no ROWS or COLUMNS").toBe(false);
+    expect(ok("ROWS: Geography.Region"), "no VALUES").toBe(false);
+    expect(ok("ROWS: Geography.Region\nTOP 3 BY [Revenue]\nVALUES: [Revenue]"), "TOP before VALUES").toBe(false);
   });
 });

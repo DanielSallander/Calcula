@@ -60,15 +60,32 @@ function refreshLocalIds(): void {
 }
 
 /**
- * Runtimes whose OpenAI-compatible endpoint implements the GBNF `grammar`
- * field. llama.cpp's own server does; Ollama's compatible endpoint has no such
- * field and ignores it; every cloud vendor rejects an unknown key. Identity
- * for now — the bundled runtime brings a probe that measures it instead.
+ * Runtimes KNOWN BY IDENTITY to implement the GBNF `grammar` field: llama.cpp's
+ * own server, and the copy of it Calcula bundles. Ollama's compatible endpoint
+ * has no such field and ignores it; every cloud vendor rejects an unknown key.
+ *
+ * Identity is the PRIOR, not the verdict. `honorsGrammar` below answers from
+ * the probe's measurement first and falls back to this set only when the
+ * model was never tested — so a proxy that strips the field is caught by the
+ * measurement, and a runtime nobody named here can still earn a grammar by
+ * answering the canary.
  */
-const GRAMMAR_PROVIDERS: ReadonlySet<string> = new Set(["llamacpp"]);
+const GRAMMAR_PROVIDERS: ReadonlySet<string> = new Set(["llamacpp", "calcula-builtin"]);
 
 export function acceptsGrammar(providerId: string): boolean {
   return GRAMMAR_PROVIDERS.has(providerId);
+}
+
+/**
+ * Whether the selected model honours a grammar: measured if it was measured,
+ * identity if it was not, undefined when nothing is selected.
+ */
+export function grammarVerdict(): boolean | undefined {
+  const sel = readSelection();
+  if (!isComplete(sel)) return undefined;
+  const measured = readProfile(sel.providerId, sel.model)?.honorsGrammar;
+  if (measured !== undefined) return measured;
+  return acceptsGrammar(sel.providerId) ? true : undefined;
 }
 
 function textOf(blocks: ChatBlock[]): string {
@@ -101,9 +118,7 @@ export function buildCompletionProvider(): AiCompletionProvider {
     },
 
     honorsGrammar(): boolean | undefined {
-      const sel = readSelection();
-      if (!isComplete(sel)) return undefined;
-      return acceptsGrammar(sel.providerId);
+      return grammarVerdict();
     },
 
     async complete(
@@ -133,11 +148,13 @@ export function buildCompletionProvider(): AiCompletionProvider {
           // pinned the chat's tool-use temperature applies here.
           temperature: req.temperature ?? 0,
           ...(req.responseSchema ? { responseSchema: req.responseSchema } : {}),
-          // FORWARDED ONLY WHERE IT IS HONOURED. Ollama ignores an unknown
-          // key (verified, ai/wire.rs), but a cloud vendor rejects one with a
-          // 400 before any inference — so a grammar never leaves for a
-          // runtime that has not been named as accepting it.
-          ...(req.grammar && acceptsGrammar(sel.providerId) ? { grammar: req.grammar } : {}),
+          // FORWARDED ONLY WHERE IT IS HONOURED — measured true, or known by
+          // identity and never measured. Ollama ignores an unknown key
+          // (verified, ai/wire.rs), but a cloud vendor rejects one with a 400
+          // before any inference, and a measured FALSE on a llama.cpp id means
+          // something in front of it strips the field — so a grammar never
+          // leaves for a runtime the verdict is not `true` for.
+          ...(req.grammar && grammarVerdict() === true ? { grammar: req.grammar } : {}),
         },
         baseUrlOverride: sel.baseUrl || null,
       });

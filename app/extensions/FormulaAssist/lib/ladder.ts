@@ -46,6 +46,7 @@ import type {
 import type { RetrievablePattern } from "@api/formulaAssist";
 import {
   FORMULA_SYSTEM_PROMPT,
+  buildFormulaGrammar,
   buildIndex,
   buildRepairPrompt,
   buildUserPrompt,
@@ -275,6 +276,13 @@ export async function assistFormula(
     name: string;
     schema: Record<string, unknown>;
   };
+  // Where the runtime honours a grammar, the reply is CONSTRAINED rather than
+  // requested: the same envelope, with the formula inside it held to formula
+  // syntax, so it cannot fail to parse or use a locale separator. The schema
+  // is not sent alongside — llama.cpp's server takes one or the other, and
+  // the grammar is the stronger of the two. Measured on the built-in runtime
+  // in docs/design/formula-assist.md §7.
+  const grammar = provider.honorsGrammar() === true ? buildFormulaGrammar() : null;
 
   let rounds = 0;
   let lastFormula = "";
@@ -293,7 +301,7 @@ export async function assistFormula(
         messages,
         maxTokens: MAX_REPLY_TOKENS,
         temperature: 0,
-        responseSchema,
+        ...(grammar ? { grammar } : { responseSchema }),
       },
       { signal: req.signal },
     );

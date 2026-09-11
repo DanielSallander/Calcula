@@ -322,6 +322,45 @@ the feature is honest at 37 %, just often unhelpful. Closing the gap is a model
 and runtime question — grammar-constrained decoding, a larger local model, or a
 cloud provider — not more prompt engineering.
 
+### The grammar, measured on the built-in runtime — 2026-09-10 (Step 3 of 2.AI.10)
+
+The paragraph above named grammar-constrained decoding as the next lever and could not pull it:
+no runtime in the picker honoured a grammar. The bundled llama-server does
+(`local-model-script-authoring.md` §14). `app/src/api/formulaAssist/grammar.ts` describes the same
+JSON envelope the schema asks for, with the `formula` string held to formula syntax — numbers, text
+literals with doubled quotes, error literals, array constants, calls as a SUFFIX so
+`LAMBDA(a,b,a+b)(1,2)` parses, A1 and whole-row or whole-column ranges, quoted and bare sheet
+names, structured references with or without the table name, defined names, the operators, `%` and
+`#`, `@`. Function names are any identifier: the verifier refuses an invented one, and 526 names
+would cost more tokens than the prompt. `FormulaAssist/__tests__/formulaGrammar.test.ts` matches
+every corpus reference, every distractor and every pattern-library formula against it — as
+`JSON.stringify` renders them, which is the escaping the model must produce — samples it three
+hundred times into `extractProposal`, and pins what it refuses: `=SUMMA(A1;B1)`, an unbalanced
+call, an open text literal, a sheet name with parentheses in it.
+
+The same 97 tasks, the same runtime, the same day, the ladder's own prompt and retrieval:
+
+| | Schema | Grammar (bounded) |
+|---|---:|---:|
+| Passed | 35 / 97 | 37 / 97 |
+| Replies with no formula | 0 | 7 |
+| Truncated replies | 0 | 7 |
+| Median latency | 2 984 ms | 1 868 ms |
+| p90 latency | 4 278 ms | 6 056 ms |
+
+McNemar exact p = 0.69: 58 neither, 4 fixed by the grammar, 2 broken by it. **The grammar does
+not change correctness on this model. It changes the wait, and the shape of a failure.** Under the
+schema the runtime enforces `maxLength: 400` on the formula as a hard stop, so nothing loops. Under
+the grammar every REPETITION is bounded — the first version was not, and measured 12 truncations
+with a p90 of 11.6 s, one of them a single quote where a text literal belonged opening a "sheet
+name" that swallowed `|)` and never closed — but NESTING cannot be expressed as a bound in GBNF, and
+a 1.5B that starts `TEXTJOIN(TEXTJOIN(` runs to the 600-token limit inside the law seven times in
+ninety-seven. The ladder reports those as declined with the length-limit sentence; none is shown as
+a formula. The product keeps the grammar where the verdict is true, a third off the median for
+equal correctness, and records the number to beat: on this model the exit criterion (≥ 90 % at
+≤ 3 s) is as far away as it was, and the lever that remains is a larger model or a GPU — exactly
+what §7 concluded before the runtime existed, now with the runtime in hand to measure it on.
+
 ## 8. What M0 deliberately did not build
 
 The wire's structured-output field, the live `RegionContext` over a real sheet,

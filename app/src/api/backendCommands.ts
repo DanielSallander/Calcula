@@ -22,6 +22,7 @@ export type PrivilegedCapability =
   | "credentials"
   | "extensionManagement"
   | "mcpServer"
+  | "localRuntime"
   | "biData"
   | "distributionTrust";
 
@@ -112,6 +113,20 @@ export const PRIVILEGED_BACKEND_COMMANDS: Record<PrivilegedCapability, readonly 
   // Starting the local MCP server (exposes the live workbook to external
   // clients) and widening the AI tool-surface access ceiling.
   mcpServer: ["mcp_start", "mcp_stop", "mcp_set_port", "mcp_status", "set_mcp_access_level"],
+  // The on-board inference runtime: a child process Calcula starts on this
+  // machine, and a 1.1 GB download the user consents to ONCE, in the model
+  // picker. A third-party extension that could reach these would start a
+  // gigabyte download or a server process on the user's behalf with no
+  // sentence shown to anyone — so every one of them is human-UI only,
+  // including the status read, which names paths on the host filesystem.
+  localRuntime: [
+    "ai_builtin_status",
+    "ai_builtin_ensure_model",
+    "ai_builtin_cancel_download",
+    "ai_builtin_start",
+    "ai_builtin_stop",
+    "ai_builtin_delete_model",
+  ],
   // Model-scoped BI data reads over the workbook's connections. The script/
   // extension broker routes cap.bi.query -> bi_query / bi_get_connections behind
   // the declared-capability CEILING + JIT consent (broker.ts checkPolicy). A

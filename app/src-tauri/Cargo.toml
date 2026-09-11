@@ -61,7 +61,20 @@ reqwest = { version = "0.12", features = ["stream", "multipart", "json", "blocki
 tempfile = "3.10"
 zeroize = "1.8"
 rustc-hash = "2"
-windows = { version = "0.61", features = ["Win32_Security_Credentials", "Win32_Globalization"] }
+# The on-board model is downloaded on first use and refused unless its sha256
+# is the pinned one (ai/builtin_model.rs). Already in the lockfile via `calp`.
+sha2 = "0.10"
+# JobObjects + Threading: the bundled inference runtime is a child process held
+# in a job object with KILL_ON_JOB_CLOSE, so it cannot outlive the app
+# (ai/runtime.rs). Threading is needed because the extended limit struct
+# embeds IO_COUNTERS and windows-rs gates the struct on that feature.
+windows = { version = "0.61", features = [
+    "Win32_Security_Credentials",
+    "Win32_Globalization",
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [features]
 default = ["custom-protocol"]

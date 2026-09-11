@@ -14,6 +14,12 @@
 //          the compiler checks nothing about them either), and an alias is
 //          free text. CALC and SAVE are absent: a model is not taught them.
 //
+//          WHAT IT CONSTRAINS BEYOND THE NAMES: the clause ORDER. ROWS,
+//          COLUMNS, VALUES, FILTERS, SORT, TOP/BOTTOM, LAYOUT, each at most
+//          once, VALUES and one of ROWS/COLUMNS required — the serializer's
+//          order and every corpus reference's. The parser accepts any order
+//          from a person; the model gets only the one that carries meaning.
+//
 //          GBNF, in the subset llama.cpp documents: `name ::= ...`, quoted
 //          terminals with backslash escapes, character classes, `|`, `?`, `*`,
 //          `+` and parentheses. A test on the `_shared` side samples this
@@ -47,8 +53,15 @@ export function buildDesignQueryGrammar(c: DesignQueryCandidates): string | null
 
   const dims = [...new Set([...c.dimensions, ...c.timeGroupings])];
   const rules: string[] = [];
-  rules.push('root ::= clause ("\\n" clause)* "\\n"?');
-  rules.push("clause ::= rows | columns | values | filters | sort | topn | layout");
+  // THE CLAUSES COME IN THE CANONICAL ORDER, EACH AT MOST ONCE. The first
+  // version let any clause follow any other, and the built-in runtime's
+  // 1.5B used the freedom: a second VALUES after COLUMNS, LAYOUT first, a
+  // trailing TOP nobody asked for. The serializer writes this order, every
+  // corpus reference is in it, and a query is one of each — so the grammar
+  // says so, and the model's only choices are the ones that carry meaning.
+  rules.push('root ::= head "\\n" values (nl filters)? (nl sort)? (nl topn)? (nl layout)? "\\n"?');
+  rules.push('head ::= rows ("\\n" columns)? | columns');
+  rules.push('nl ::= "\\n"');
   rules.push('rows ::= "ROWS: " dims');
   rules.push('columns ::= "COLUMNS: " dims');
   rules.push('values ::= "VALUES: " val (", " val)*');

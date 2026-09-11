@@ -13,12 +13,30 @@
 //               Not a setup wall.
 //            3. Never interrupt a working setup — a stored key is used and the
 //               picker stays out of the way until asked for.
+//
+//          THE BUILT-IN PROVIDER (2026-09-10, owner decision D6). When nothing
+//          answers discovery and this build carries the on-board runtime, the
+//          built-in provider is PRESELECTED — that is rule 2's "local first"
+//          with a concrete local to offer — and its section shows the one
+//          consent sentence and a Download button. Nothing downloads until
+//          `confirmAsync` answers true; the model select fills the moment the
+//          verified file is in place. The runtime itself starts on the first
+//          request and says so here while it runs.
 
 import React, { useCallback, useEffect, useState } from "react";
+import { confirmAsync, listenTauriEvent } from "@api";
 import { aiChatBackend } from "../lib/aiChatBackend";
-import type { DiscoveredRuntime, ProviderStatus } from "../lib/aiTypes";
+import {
+  AI_BUILTIN_RUNTIME_EVENT, BUILTIN_PROVIDER_ID,
+  type BuiltinModelProgressEvent, type BuiltinRuntimeEvent, type BuiltinStatus,
+  type DiscoveredRuntime, type ProviderStatus,
+} from "../lib/aiTypes";
 import { readSelection, writeSelection, type ProviderSelection } from "../lib/providerSelection";
 import { readProfile, runProbe, summarizeProfile, type ModelProfile } from "../lib/probeRunner";
+import {
+  builtinBadge, cancelBuiltinDownload, consentSentence, deleteBuiltinModel, describeBuiltin,
+  downloadBuiltinModel, formatSize, readBuiltinStatus, stopBuiltinRuntime,
+} from "../lib/builtinRuntime";
 
 const h = React.createElement;
 
@@ -80,8 +98,28 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
   const [probing, setProbing] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const cancelRef = React.useRef(false);
+  // The on-board runtime's state, or null when the backend could not say
+  // (an older build, a guard refusal) — in which case the built-in provider
+  // is listed like any other and simply reports nothing about itself.
+  const [builtin, setBuiltin] = useState<BuiltinStatus | null>(null);
+  const [downloading, setDownloading] = useState<BuiltinModelProgressEvent | null>(null);
 
   const provider = providers.find((p) => p.id === sel.providerId);
+
+  const refreshBuiltin = useCallback(async (): Promise<BuiltinStatus | null> => {
+    try {
+      const status = await readBuiltinStatus();
+      setBuiltin(status);
+      return status;
+    } catch {
+      setBuiltin(null);
+      return null;
+    }
+  }, []);
+
+  /** The built-in provider's model list is a fact about disk, not a round-trip. */
+  const builtinModels = (status: BuiltinStatus | null): string[] =>
+    status && status.model.presence === "present" ? [status.model.pin.id] : [];
 
   /**
    * Read the provider list, probe for local runtimes, and — this is the part
@@ -118,11 +156,41 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
       }
       setDiscovered(found);
 
+      // Cheap and local: three file checks and a lock probe. Read on every
+      // mount so the badge on the built-in entry is current.
+      let status: BuiltinStatus | null = null;
+      try {
+        status = await readBuiltinStatus();
+        setBuiltin(status);
+      } catch {
+        status = null;
+      }
+
       const saved = readSelection();
       const def = list.find((p) => p.id === saved.providerId);
+
+      // First run with NOTHING answering discovery, in a build that carries
+      // the on-board runtime: preselect it. Rule 2 says local first; this is
+      // the local we can actually offer. It downloads nothing — the section
+      // below asks first — and a discovered runtime still takes precedence,
+      // because rule 1 says a working setup is left alone.
+      if (!def && !saved.providerId && found.length === 0 && status?.engine.present) {
+        const model = status.model.presence === "present" ? status.model.pin.id : "";
+        const next = { providerId: BUILTIN_PROVIDER_ID, model, baseUrl: "" };
+        setSel(next);
+        writeSelection(next);
+        setModels(builtinModels(status));
+        if (model) setProfile(readProfile(BUILTIN_PROVIDER_ID, model));
+        return;
+      }
+
       // No saved provider is FIRST RUN, and rule 1 governs there: say nothing,
       // load nothing. A provider still waiting for its key has nothing to list.
       if (!def || (def.requiresKey && !def.hasKey)) return;
+      if (def.id === BUILTIN_PROVIDER_ID) {
+        setModels(builtinModels(status));
+        return;
+      }
       setBusy(true);
       try {
         setModels(await fetchModels(def.id, saved.baseUrl, found));
@@ -158,16 +226,39 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
     }
   }, [discovered]);
 
+  // The runtime announces itself (starting, ready, stopped after idling) and
+  // the section below shows the current state rather than a stale one.
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let cancelled = false;
+    void listenTauriEvent<BuiltinRuntimeEvent>(AI_BUILTIN_RUNTIME_EVENT, () => {
+      void refreshBuiltin();
+    }).then((d) => {
+      if (cancelled) d();
+      else dispose = d;
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  }, [refreshBuiltin]);
+
   const chooseProvider = useCallback((providerId: string) => {
     const def = providers.find((p) => p.id === providerId);
     const baseUrl = def && def.id !== "custom-openai" ? "" : sel.baseUrl;
-    const next = { providerId, model: "", baseUrl };
+    // The built-in provider has one model, and whether it is on disk is
+    // already known: no round-trip, and no "listed no models" complaint for
+    // a runtime whose next step is a download button.
+    const model = providerId === BUILTIN_PROVIDER_ID ? (builtinModels(builtin)[0] ?? "") : "";
+    const next = { providerId, model, baseUrl };
     setSel(next);
     writeSelection(next);
-    setModels([]);
+    setModels(providerId === BUILTIN_PROVIDER_ID ? builtinModels(builtin) : []);
+    setProfile(model ? readProfile(providerId, model) : null);
     setError(null);
+    if (providerId === BUILTIN_PROVIDER_ID) return;
     if (def && (!def.requiresKey || def.hasKey)) void loadModels(providerId, baseUrl);
-  }, [providers, sel.baseUrl, loadModels]);
+  }, [providers, sel.baseUrl, loadModels, builtin]);
 
   const saveKey = useCallback(async () => {
     if (!provider) return;
@@ -191,6 +282,78 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
     writeSelection(next);
     setProfile(model ? readProfile(next.providerId, model) : null);
   }, [sel]);
+
+  /**
+   * The consented download (D6). The sentence names the size, the licence,
+   * the source, the hash and the folder; `confirmAsync` is awaited and fails
+   * CLOSED, so a dialog that cannot be shown is a refusal. The model becomes
+   * the selection the moment the verified file is in place — there is exactly
+   * one, and the person just agreed to fetch it.
+   */
+  const downloadModel = useCallback(async () => {
+    if (!builtin) return;
+    const ok = await confirmAsync(consentSentence(builtin.model.pin, builtin.model.downloadDir), {
+      title: "Download the built-in model?",
+      okLabel: "Download",
+      cancelLabel: "Not now",
+    });
+    if (!ok) return;
+    setError(null);
+    setDownloading({ phase: "downloading", bytes: 0, total: builtin.model.pin.sizeBytes });
+    try {
+      const status = await downloadBuiltinModel((event) => setDownloading(event));
+      setBuiltin(status);
+      const models = builtinModels(status);
+      setModels(models);
+      if (models[0]) {
+        const next = { providerId: BUILTIN_PROVIDER_ID, model: models[0], baseUrl: "" };
+        setSel(next);
+        writeSelection(next);
+        setProfile(readProfile(BUILTIN_PROVIDER_ID, models[0]));
+      }
+    } catch (e) {
+      setError(`${e}`);
+      void refreshBuiltin();
+    } finally {
+      setDownloading(null);
+    }
+  }, [builtin, refreshBuiltin]);
+
+  const stopDownload = useCallback(() => {
+    void cancelBuiltinDownload().catch(() => undefined);
+  }, []);
+
+  const stopRuntime = useCallback(async () => {
+    try {
+      setBuiltin(await stopBuiltinRuntime());
+    } catch (e) {
+      setError(`${e}`);
+    }
+  }, []);
+
+  /** Only a DOWNLOADED copy is offered for deletion; the backend refuses the rest anyway. */
+  const deleteModel = useCallback(async () => {
+    if (!builtin) return;
+    const ok = await confirmAsync(
+      `Delete the downloaded model (${formatSize(builtin.model.sizeOnDisk ?? builtin.model.pin.sizeBytes)}) ` +
+        `from ${builtin.model.downloadDir}? The built-in provider will need the download again before it can answer.`,
+      { title: "Delete the built-in model?", okLabel: "Delete", cancelLabel: "Keep it", kind: "warning" },
+    );
+    if (!ok) return;
+    try {
+      const status = await deleteBuiltinModel();
+      setBuiltin(status);
+      setModels(builtinModels(status));
+      if (sel.providerId === BUILTIN_PROVIDER_ID) {
+        const next = { ...sel, model: "" };
+        setSel(next);
+        writeSelection(next);
+        setProfile(null);
+      }
+    } catch (e) {
+      setError(`${e}`);
+    }
+  }, [builtin, sel]);
 
   /**
    * Run the built-in tasks against the chosen model.
@@ -242,14 +405,64 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
    */
   const savedModelGone = Boolean(sel.model) && models.length > 0 && !models.includes(sel.model);
 
+  const isBuiltin = provider?.id === BUILTIN_PROVIDER_ID;
+  const builtinHasEngine = Boolean(builtin?.engine.present);
+
+  /**
+   * The built-in provider's own block: what is on disk, what is running, and
+   * the one button that fetches the model after the consent sentence.
+   */
+  function renderBuiltinSection(): React.ReactElement | null {
+    if (!isBuiltin || !builtin) return null;
+    if (!builtin.engine.present) {
+      return h("p", { key: "bi-missing", style: warnBox }, describeBuiltin(builtin));
+    }
+    const { model } = builtin;
+    const needsDownload = model.presence !== "present";
+    return h("div", { key: "bi", style: { display: "flex", flexDirection: "column", gap: 6 } },
+      h("p", { key: "d", style: model.presence === "mismatch" ? warnBox : subtle }, describeBuiltin(builtin)),
+      needsDownload && downloading
+        ? h("div", { key: "dl", style: { display: "flex", alignItems: "center", gap: 8 } },
+            h("span", { key: "t", style: subtle },
+              downloading.phase === "downloading"
+                ? `Downloading… ${formatSize(downloading.bytes)} of ${formatSize(downloading.total)} ` +
+                  `(${Math.floor((downloading.bytes / Math.max(1, downloading.total)) * 100)}%)`
+                : downloading.phase === "verifying"
+                  ? "Checking the file against its published hash…"
+                  : "Finishing…"),
+            downloading.phase === "downloading"
+              ? h("button", { key: "c", style: linkBtn, onClick: stopDownload }, "Stop")
+              : null,
+          )
+        : needsDownload
+          ? h("button", {
+              key: "dlb", style: btn, disabled: busy,
+              onClick: () => void downloadModel(),
+            }, `${model.presence === "mismatch" ? "Replace and download" : "Download model"} (${formatSize(model.pin.sizeBytes)})`)
+          : h("div", { key: "ops", style: { display: "flex", gap: 12 } },
+              builtin.running
+                ? h("button", { key: "stop", style: linkBtn, onClick: () => void stopRuntime() }, "Stop the runtime now")
+                : null,
+              model.foundIn === "downloaded"
+                ? h("button", { key: "del", style: linkBtn, onClick: () => void deleteModel() }, "Delete downloaded model")
+                : null,
+            ),
+    );
+  }
+
   return h("div", { style: wrap },
     embedded ? null : h("h3", { key: "t", style: { margin: 0 } }, "Choose a model"),
 
-    // Rule 2: only when nothing answered. One line, not a setup wall.
+    // Rule 2: only when nothing answered. One line, not a setup wall — and
+    // it names the built-in runtime first when this build carries one.
     nothingLocalFound && !provider
       ? h("p", { key: "none", style: subtle },
-          "No local model found. Calcula can run one so your workbook never leaves this machine — " +
-          "install Ollama or LM Studio and it will appear here. Or connect a cloud provider below.")
+          builtinHasEngine
+            ? "No local model found. Calcula includes a small on-board model (a 1.1 GB download the " +
+              "first time) — choose \"Calcula built-in\" above. Or install Ollama or LM Studio, or " +
+              "connect a cloud provider below."
+            : "No local model found. Calcula can run one so your workbook never leaves this machine — " +
+              "install Ollama or LM Studio and it will appear here. Or connect a cloud provider below.")
       : null,
 
     h("label", { key: "pl", style: label }, "Provider"),
@@ -261,13 +474,17 @@ export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.React
       // Local first, always (§11.1) — and a running one says so.
       h("optgroup", { key: "l", label: "On this machine" },
         locals.map((p) => h("option", { key: p.id, value: p.id },
-          running.has(p.id) ? `${p.label} — running` : p.label))),
+          p.id === BUILTIN_PROVIDER_ID
+            ? (builtinBadge(builtin) ? `${p.label} — ${builtinBadge(builtin)}` : p.label)
+            : running.has(p.id) ? `${p.label} — running` : p.label))),
       h("optgroup", { key: "c", label: "Cloud" },
         clouds.map((p) => h("option", { key: p.id, value: p.id },
           p.hasKey ? `${p.label} — key saved` : p.label))),
     ),
 
     provider ? h("p", { key: "note", style: subtle }, provider.note) : null,
+
+    renderBuiltinSection(),
 
     provider && provider.id === "custom-openai"
       ? h("input", {

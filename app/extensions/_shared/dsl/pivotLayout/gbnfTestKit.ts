@@ -3,18 +3,20 @@
 //          that the grammar the assistant hands a runtime and the parser the
 //          product runs agree.
 // CONTEXT: TEST SUPPORT ONLY. Nothing in the product imports this. It covers
-//          the subset of llama.cpp's GBNF the assistant emits: rules `name ::=
-//          ...`, quoted terminals with `\"` `\\` `\n` `\t` escapes, character
-//          classes with ranges and `^` negation, alternation, parentheses and
-//          the `?` `*` `+` repetitions. Anything else is a parse error here,
-//          which is the right answer for a grammar the runtime would also
-//          refuse.
+//          the subset of llama.cpp's GBNF the assistants emit: rules `name ::=
+//          ...`, quoted terminals with `\"` `\\` `\n` `\t` `\xHH` `\uHHHH`
+//          escapes, character classes with ranges and `^` negation,
+//          alternation, parentheses, the `?` `*` `+` repetitions and the
+//          bounded `{m}` `{m,}` `{m,n}` forms the formula grammar uses for
+//          cell references and field lengths. Anything else is a parse error
+//          here, which is the right answer for a grammar the runtime would
+//          also refuse.
 //
 //          Sampling is deterministic from a seed and bounded in depth and
 //          repetition, so a run that finds a defect can be re-run to the same
 //          string. Matching is a backtracking search; the strings are short.
 
-export type GbnfRep = "" | "?" | "*" | "+";
+export type GbnfRep = "" | "?" | "*" | "+" | { min: number; max: number | null };
 
 export type GbnfItem =
   | { kind: "term"; text: string }
@@ -49,7 +51,15 @@ class Reader {
   }
 }
 
-function unescape(ch: string): string {
+/** The character after a backslash, with `\x` `\u` `\U` reading their hex digits. */
+function unescape(r: Reader): string {
+  const ch = r.next();
+  const hex = (n: number): string => {
+    let digits = "";
+    for (let i = 0; i < n; i++) digits += r.next();
+    if (!/^[0-9a-fA-F]+$/.test(digits) || digits.length !== n) throw new Error(`gbnf: bad hex escape \\${ch}${digits}`);
+    return String.fromCodePoint(parseInt(digits, 16));
+  };
   switch (ch) {
     case "n": return "\n";
     case "t": return "\t";
@@ -59,6 +69,9 @@ function unescape(ch: string): string {
     case "]": return "]";
     case "[": return "[";
     case "-": return "-";
+    case "x": return hex(2);
+    case "u": return hex(4);
+    case "U": return hex(8);
     default: throw new Error(`gbnf: unsupported escape \\${ch}`);
   }
 }
@@ -70,7 +83,7 @@ function parseTerminal(r: Reader): GbnfItem {
     if (r.done()) throw new Error("gbnf: unterminated terminal");
     const ch = r.next();
     if (ch === '"') break;
-    if (ch === "\\") text += unescape(r.next());
+    if (ch === "\\") text += unescape(r);
     else text += ch;
   }
   return { kind: "term", text };
@@ -88,18 +101,37 @@ function parseClass(r: Reader): GbnfItem {
     if (r.done()) throw new Error("gbnf: unterminated class");
     let ch = r.next();
     if (ch === "]") break;
-    if (ch === "\\") ch = unescape(r.next());
+    if (ch === "\\") ch = unescape(r);
     let lo = ch.codePointAt(0)!;
     let hi = lo;
     if (r.peek() === "-" && r.text[r.pos + 1] !== "]") {
       r.next();
       let end = r.next();
-      if (end === "\\") end = unescape(r.next());
+      if (end === "\\") end = unescape(r);
       hi = end.codePointAt(0)!;
     }
     ranges.push([lo, hi]);
   }
   return { kind: "class", negate, ranges };
+}
+
+/** `{m}`, `{m,}` or `{m,n}` after an item. The opening brace has been seen. */
+function parseBounds(r: Reader): GbnfRep {
+  r.next(); // {
+  let digits = "";
+  while (/[0-9]/.test(r.peek())) digits += r.next();
+  if (!digits) throw new Error("gbnf: repetition bound without a number");
+  const min = Number(digits);
+  let max: number | null = min;
+  if (r.peek() === ",") {
+    r.next();
+    let upper = "";
+    while (/[0-9]/.test(r.peek())) upper += r.next();
+    max = upper ? Number(upper) : null;
+  }
+  if (r.next() !== "}") throw new Error("gbnf: expected } after repetition bound");
+  if (max !== null && max < min) throw new Error(`gbnf: repetition bound {${min},${max}} is inverted`);
+  return { min, max };
 }
 
 function parseAlternatives(r: Reader, stopAtParen: boolean): GbnfSeq[] {
@@ -139,6 +171,8 @@ function parseAlternatives(r: Reader, stopAtParen: boolean): GbnfSeq[] {
     if (post === "?" || post === "*" || post === "+") {
       rep = post;
       r.next();
+    } else if (post === "{") {
+      rep = parseBounds(r);
     }
     seq.items.push({ item, rep });
   }
@@ -146,11 +180,41 @@ function parseAlternatives(r: Reader, stopAtParen: boolean): GbnfSeq[] {
   return alternatives;
 }
 
+/**
+ * Strip a `#` comment, but only a `#` OUTSIDE a quoted terminal or a character
+ * class: `"#N/A"` is an error literal, not a comment. llama.cpp's parser makes
+ * the same distinction; the first version of this kit did not, and reported
+ * the formula grammar's error literals as an unterminated terminal.
+ */
+function stripComment(line: string): string {
+  let inTerm = false;
+  let inClass = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "\\" && (inTerm || inClass)) {
+      i++;
+      continue;
+    }
+    if (inTerm) {
+      if (ch === '"') inTerm = false;
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      continue;
+    }
+    if (ch === '"') inTerm = true;
+    else if (ch === "[") inClass = true;
+    else if (ch === "#") return line.slice(0, i);
+  }
+  return line;
+}
+
 /** Parse a grammar. Throws on anything outside the supported subset. */
 export function parseGbnf(text: string): GbnfGrammar {
   const grammar: GbnfGrammar = new Map();
   for (const rawLine of text.split("\n")) {
-    const line = rawLine.replace(/#.*$/, "").trimEnd();
+    const line = stripComment(rawLine).trimEnd();
     if (!line.trim()) continue;
     const m = /^([A-Za-z0-9-]+)\s*::=\s*(.*)$/.exec(line);
     if (!m) throw new Error(`gbnf: not a rule: ${line}`);
@@ -204,9 +268,15 @@ function sampleClass(item: Extract<GbnfItem, { kind: "class" }>, rnd: () => numb
 }
 
 export interface SampleOptions {
-  /** Repetitions for `*` (0..maxRepeat) and `+` (1..maxRepeat). */
+  /**
+   * Repetitions for `*` (0..maxRepeat), `+` (1..maxRepeat), an open `{m,}`
+   * and — capped, never raised — a bounded `{m,n}`: the sampler explores
+   * shapes, and a grammar whose bounds exist to stop a model looping would
+   * otherwise make the sampler loop instead (a `{0,40}` operand chain nested
+   * three deep is a string no test needs).
+   */
   maxRepeat?: number;
-  /** Past this depth every `?`/`*` collapses to nothing and `+` to one. */
+  /** Past this depth every `?`/`*` collapses to nothing, `+` to one, `{m,n}` to m. */
   maxDepth?: number;
 }
 
@@ -227,6 +297,10 @@ export function sampleGbnf(grammar: GbnfGrammar, seed: number, opts: SampleOptio
     if (rep === "?") count = deep ? 0 : Math.floor(rnd() * 2);
     else if (rep === "*") count = deep ? 0 : Math.floor(rnd() * (maxRepeat + 1));
     else if (rep === "+") count = deep ? 1 : 1 + Math.floor(rnd() * maxRepeat);
+    else if (typeof rep === "object") {
+      const max = Math.max(rep.min, Math.min(rep.max ?? maxRepeat, maxRepeat));
+      count = deep ? rep.min : rep.min + Math.floor(rnd() * (max - rep.min + 1));
+    }
     let out = "";
     for (let i = 0; i < count; i++) out += one(item, depth + 1);
     return out;
@@ -263,12 +337,20 @@ export function matchGbnf(grammar: GbnfGrammar, text: string): boolean {
   }
 
   function repeat(item: GbnfItem, rep: GbnfRep, pos: number, k: K): boolean {
+    if (typeof rep === "object") return bounded(item, rep.min, rep.max, pos, k, 0);
     switch (rep) {
       case "": return one(item, pos, k);
       case "?": return one(item, pos, k) || k(pos);
       case "*": return one(item, pos, (p) => p > pos && repeat(item, "*", p, k)) || k(pos);
       case "+": return one(item, pos, (p) => repeat(item, "*", p, k));
     }
+  }
+
+  /** `{min,max}`: at least min, then optionally more up to max (null = unbounded). */
+  function bounded(item: GbnfItem, min: number, max: number | null, pos: number, k: K, done: number): boolean {
+    if (done < min) return one(item, pos, (p) => bounded(item, min, max, p, k, done + 1));
+    if (max !== null && done >= max) return k(pos);
+    return one(item, pos, (p) => p > pos && bounded(item, min, max, p, k, done + 1)) || k(pos);
   }
 
   function one(item: GbnfItem, pos: number, k: K): boolean {

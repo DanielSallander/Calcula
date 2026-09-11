@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "binaries/llama-server-aarch64-pc-windows-msvc/*": "llama-server/",
+      "models/*.gguf": "models/"
+    }
+  }
+}

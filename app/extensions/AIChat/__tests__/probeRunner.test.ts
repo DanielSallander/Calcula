@@ -14,7 +14,7 @@ vi.mock("@api", () => ({
   setSetting: (ext: string, k: string, v: string) => void store.set(`${ext}:${k}`, String(v)),
 }));
 
-const { readProfile, writeProfile, runProbe, summarizeProfile, TOOL_SURFACE_REFUSED } =
+const { readProfile, writeProfile, runProbe, summarizeProfile, TOOL_SURFACE_REFUSED, GRAMMAR_CANARY } =
   await import("../lib/probeRunner");
 const { TOOLS } = await import("../lib/chatTools");
 
@@ -26,12 +26,16 @@ const { TOOLS } = await import("../lib/chatTools");
  *      one as text? (The failure a user hit on 2026-08-22.)
  *   4. a trivial reply SCHEMA    — does it honour structured output? This is
  *      what decides how the formula assistant asks it for anything.
+ *   5. a trivial GRAMMAR         — does it honour one? This decides whether a
+ *      drafted design query can name a column it was not shown.
  */
-const PREFLIGHTS = 4;
+const PREFLIGHTS = 5;
 /** The index of the native-tool-call probe among them. */
 const TOOL_CALL_PROBE = 2;
 /** The index of the reply-schema probe among them. */
 const SCHEMA_PROBE = 3;
+/** The index of the grammar probe among them. */
+const GRAMMAR_PROBE = 4;
 
 /** What `probeRunner` posts to `ai_chat_complete`, as far as these tests read it. */
 interface CompleteArgs {
@@ -40,6 +44,7 @@ interface CompleteArgs {
     model?: string;
     tools?: Array<{ inputSchema?: unknown }>;
     maxTokens?: number;
+    grammar?: string;
   };
 }
 
@@ -127,6 +132,42 @@ describe("the probe drives the real provider command", () => {
     expect(schema, "the schema probe must actually send a schema").toBeTruthy();
     expect(schema?.name).toBe("probe_answer");
     expect(args.request.tools).toEqual([]);
+  });
+
+  it("measures whether the runtime honours a GRAMMAR, with a question the grammar forbids answering", async () => {
+    await runProbe({ providerId: "ollama", model: "qwen" });
+    const args = argsOf(GRAMMAR_PROBE);
+    expect(args.request.grammar, "the grammar probe must actually send a grammar").toBe(GRAMMAR_CANARY);
+    expect(args.request.tools).toEqual([]);
+    // GOOD_REPLY is a fenced script, not "OK": this runtime ignored the grammar.
+    expect(readProfile("ollama", "qwen")?.honorsGrammar).toBe(false);
+  });
+
+  it("records true only for a reply that is exactly the grammar's one legal string", async () => {
+    invoke.mockImplementation(async (_cmd: string, args: CompleteArgs) => {
+      if (args.request.grammar) {
+        return { blocks: [{ type: "text", text: "OK" }], stopReason: "endTurn", model: "m" };
+      }
+      return GOOD_REPLY;
+    });
+    const profile = await runProbe({ providerId: "llamacpp", model: "default" });
+    expect(profile.honorsGrammar).toBe(true);
+    expect(summarizeProfile(profile)).toContain("honours a reply grammar");
+  });
+
+  it("records FALSE when the server refuses the field, and NO verdict on a transport failure", async () => {
+    // A cloud vendor: the plain pre-flight succeeds, the grammar request is a 400.
+    invoke.mockImplementation(async (_cmd: string, args: CompleteArgs) => {
+      if (args.request.grammar) throw new Error('OpenAI error 400: {"error":"Unrecognized request argument supplied: grammar"}');
+      return GOOD_REPLY;
+    });
+    expect((await runProbe({ providerId: "openai", model: "gpt" })).honorsGrammar).toBe(false);
+    // A dropped connection on that one request says nothing about the runtime.
+    invoke.mockImplementation(async (_cmd: string, args: CompleteArgs) => {
+      if (args.request.grammar) throw new Error("error sending request: connection reset");
+      return GOOD_REPLY;
+    });
+    expect((await runProbe({ providerId: "openai", model: "gpt" })).honorsGrammar, "undecided, not false").toBeUndefined();
   });
 
   it("measures whether the model emits a NATIVE tool call", async () => {
@@ -316,8 +357,9 @@ describe("the probe proves the TOOL SURFACE, not just the model", () => {
       /cannot unmarshal number/,
     );
     // ...and it gave up at the SECOND pre-flight rather than burning a dozen
-    // completions — the tool-surface refusal is fatal, so the native-tool-call
-    // probe after it never runs either. Two calls per attempt, two attempts.
+    // completions — the tool-surface refusal is fatal, so the native-tool-call,
+    // schema and grammar probes after it never run either. Two calls per
+    // attempt, two attempts.
     const CALLS_BEFORE_REFUSAL = 2;
     expect(seen).toBe(CALLS_BEFORE_REFUSAL * 2);
   });

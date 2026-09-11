@@ -49,13 +49,15 @@ export {
   designQueryResponseSchema,
 } from "./schema";
 
-export type { CompilerFinding, UserPromptParts } from "./prompt";
+export type { CompilerFinding, DesignQueryReplyFormat, UserPromptParts } from "./prompt";
 export {
   DESIGN_QUERY_CHEAT_SHEET,
   DESIGN_QUERY_SYSTEM_PROMPT,
+  DESIGN_QUERY_SYSTEM_PROMPT_BARE,
   buildExamples,
   buildRepairPrompt,
   buildUserPrompt,
+  designQuerySystemPrompt,
   estimateTokens,
 } from "./prompt";
 

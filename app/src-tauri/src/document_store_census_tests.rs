@@ -2562,6 +2562,10 @@ const NOT_DOCUMENT_SCOPED: &[(&str, &str)] = &[
         "ManagedAppearanceState",
         "enterprise appearance POLICY, read from the machine at startup. It is the          administrator's, not the document's.",
     ),
+    (
+        "RuntimeState",
+        "the on-board inference runtime's process record (a child llama-server, its          port, its job object) and the model download's in-flight slot. Machine-scoped          transport bookkeeping, like McpState: the process outlives any one document          on purpose, and resetting it on File > New would kill a model mid-answer.",
+    ),
 ];
 
 /// Every `.manage(...)` State is censused or explicitly not the document's.

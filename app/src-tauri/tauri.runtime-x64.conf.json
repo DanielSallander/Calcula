@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "binaries/llama-server-x86_64-pc-windows-msvc/*": "llama-server/"
+    }
+  }
+}

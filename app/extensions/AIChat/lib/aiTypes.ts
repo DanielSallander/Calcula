@@ -168,3 +168,89 @@ export interface DiscoveredRuntime {
    */
   models: string[];
 }
+
+// ---------------------------------------------------------------------------
+// The on-board runtime (Tier 1) — mirrors app/src-tauri/src/ai/runtime.rs and
+// ai/builtin_model.rs
+// ---------------------------------------------------------------------------
+
+/** `providers::BUILTIN_ID`: the one provider whose server Calcula runs itself. */
+export const BUILTIN_PROVIDER_ID = "calcula-builtin";
+
+/** Mirrors `ModelPin`. Everything the consent sentence names comes from here. */
+export interface BuiltinModelPin {
+  id: string;
+  file: string;
+  label: string;
+  url: string;
+  sourceUrl: string;
+  licence: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export type BuiltinModelPresence = "present" | "absent" | "mismatch";
+/**
+ * Which folder the copy was found in. Only a DOWNLOADED copy is ever deleted
+ * by the app. The field is `foundIn`, not `origin`: a source-scan guard reads
+ * `.origin === "…"` anywhere as a script trust origin compared to a string.
+ */
+export type BuiltinModelFoundIn = "bundled" | "downloaded" | "dev";
+
+/** Mirrors `DownloadProgress`. */
+export interface BuiltinDownloadProgress {
+  bytes: number;
+  total: number;
+  /** The hashing pause after the last byte, which on a slow disk is visible. */
+  verifying: boolean;
+}
+
+/** Mirrors `BuiltinStatus`, what every `ai_builtin_*` command returns. */
+export interface BuiltinStatus {
+  providerId: string;
+  target: string;
+  engine: {
+    present: boolean;
+    path: string | null;
+    /** The llama.cpp build number from the stamp beside the executable. */
+    build: string | null;
+    searched: string[];
+  };
+  model: {
+    pin: BuiltinModelPin;
+    presence: BuiltinModelPresence;
+    path: string | null;
+    foundIn: BuiltinModelFoundIn | null;
+    sizeOnDisk: number | null;
+    downloadDir: string;
+  };
+  running: {
+    port: number;
+    baseUrl: string;
+    pid: number;
+    uptimeSecs: number;
+    idleSecs: number;
+    modelPath: string;
+  } | null;
+  /** True while a start holds the runtime lock (the health wait). */
+  starting: boolean;
+  download: BuiltinDownloadProgress | null;
+  idleUnloadSecs: number;
+}
+
+/** Mirrors `RuntimeEvent`, on `AI_BUILTIN_RUNTIME_EVENT`. */
+export type BuiltinRuntimeEvent =
+  | { state: "starting"; model: string }
+  | { state: "ready"; port: number; baseUrl: string; pid: number }
+  | { state: "stopped"; reason: string };
+
+/** Mirrors `ModelProgressEvent`, on `AI_BUILTIN_MODEL_PROGRESS_EVENT`. */
+export type BuiltinModelProgressEvent =
+  | { phase: "downloading"; bytes: number; total: number }
+  | { phase: "verifying"; bytes: number; total: number }
+  | { phase: "done"; path: string }
+  | { phase: "failed"; message: string }
+  | { phase: "cancelled"; bytes: number };
+
+export const AI_BUILTIN_RUNTIME_EVENT = "ai:builtin-runtime";
+export const AI_BUILTIN_MODEL_PROGRESS_EVENT = "ai:builtin-model-progress";

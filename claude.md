@@ -347,7 +347,18 @@ in `tests/regression/bug-ledger.json` via its allocator, which assigns ids and r
   a pure-CRLF file as LF, and `grep -c $'\x00'` degrades to an empty pattern that "matches" every
   line, so it can never detect a NUL byte. Measure endings and NUL bytes with node, not the shell.
 
-`generate_handler!` in `app/src-tauri/src/lib.rs` registers 800 commands (recounted 2026-09-07 after the AI programme added eight: the formula assistant's two, its audit row, the strategy document's one, and the insights subsystem's four; bracket-matched parse, comments stripped LINE-WISE, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). **How you strip the comments changes the answer**: a parse that splits the bracket on commas and strips `//` per chunk reads 789, because four doc comments in there contain a comma -- each swallows the command name after it AND leaves a fragment standing as an entry, net +4. That parse is where the "787" and "789" recounts came from. Nothing enforces this number, so re-run the parse -- line-wise -- rather than trusting the sentence. Its debug-build
+**The on-board AI runtime is a FETCHED artifact, never committed** (2026-09-10). `npm run
+fetch:llama-server` puts llama.cpp's `llama-server` (pinned build + sha256) under
+`app/src-tauri/binaries/llama-server-<triple>/`, and `npm run fetch:builtin-model` puts the pinned
+1.04 GB model under `app/src-tauri/models/`; both folders are git-ignored and marked
+`com.dropbox.ignored` by the scripts themselves. `npm run tauri …` fetches the runtime first
+(`pretauri`, soft); the app builds and runs without either and the model picker says so. Release
+builds pass `--config src-tauri/tauri.runtime-<arch>.conf.json` (see
+`docs/design/release-pipeline.md`); do not add the runtime to `tauri.conf.json` as an
+`externalBin` or a static resource — a sidecar must exist at every `cargo build`, and a resource
+glob that matches nothing FAILS the build.
+
+`generate_handler!` in `app/src-tauri/src/lib.rs` registers 806 commands (recounted 2026-09-10 after the on-board runtime added six `ai_builtin_*` commands; 800 on 2026-09-07 after the AI programme added eight; bracket-matched parse, comments stripped LINE-WISE, all unique -- the same figure docs/design/backend-facade.md reports independently, and BOTH were re-run together, because updating one of two "independent" counts is how they stop being independent). **How you strip the comments changes the answer**: a parse that splits the bracket on commas and strips `//` per chunk reads 789, because four doc comments in there contain a comma -- each swallows the command name after it AND leaves a fragment standing as an entry, net +4. That parse is where the "787" and "789" recounts came from. Nothing enforces this number, so re-run the parse -- line-wise -- rather than trusting the sentence. Its debug-build
 dispatch frame sits on the OS MAIN thread (tao requires the event loop there, so wrapping it in a
 larger-stack `thread::spawn` panics); `app/src-tauri/build.rs` links with `/STACK:33554432` (32 MB)
 to hold it. Adding commands in bulk eats that headroom -- the symptom is

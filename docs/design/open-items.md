@@ -1180,15 +1180,17 @@ enumerates the publish entry points and asks per path, with a positive control p
 tell a reached path from an unreached one. Sabotage-verified: removing the new call reds the
 coverage test naming `calp_publish_model`, where the old count would still have passed.
 
-**2.AI.5 — Deferred by decision, not by omission.** M2 (bundled llama.cpp runtime) is UNBUILT:
-no sidecar, no fetch script and no built-in provider exist (verified 2026-09-10 against
-`tauri.conf.json`, `app/scripts/` and `ai/providers.rs`; an earlier version of this row described
-the planned fetch step as if it existed). Its posture was decided 2026-09-10 — see 2.AI.10. M4
-(intent router) and M6 (Tier-1 narration, Swedish, grammars) keep their designs and their seams —
-`factsJson` carries fact ids precisely so a later narrator can be checked for coverage. M5 (the
-fine-tune flywheel) is dropped. M7 (usage aggregates back to an application's author) needs a new
-manifest declaration, a new submission kind and a consent sentence, and is the one telemetry-shaped
-feature in a product that is otherwise local by construction.
+**2.AI.5 — M2 BUILT 2026-09-10 (Step 3 of 2.AI.10); M4/M6 designed, M5 dropped, M7 open.** The
+bundled runtime exists: `app/scripts/fetch-llama-server.mjs` (pinned build, sha256 per
+architecture), `ai/runtime.rs` (job object, free port, health wait, idle unload, six
+`ai_builtin_*` commands), `ai/builtin_model.rs` (consented, resumable, hash-verified download), the
+`calcula-builtin` provider, the `tauri.runtime-<arch>` / `tauri.offline-<arch>` overlays and the
+release step. Design: `local-model-script-authoring.md` §14; measurements: 2.AI.10. M4 (intent
+router) and M6 (Tier-1 narration, Swedish) keep their designs and their seams — `factsJson`
+carries fact ids precisely so a later narrator can be checked for coverage. M5 (the fine-tune
+flywheel) is dropped. M7 (usage aggregates back to an application's author) needs a new manifest
+declaration, a new submission kind and a consent sentence, and is the one telemetry-shaped feature
+in a product that is otherwise local by construction.
 
 **2.AI.10 — AI consumers of the strategy, and the on-board runtime: decided 2026-09-10, Step 1
 SHIPPED.** Design: `docs/design/insights-strategy-layer.md` §14. The tier vocabulary, restated
@@ -1256,14 +1258,69 @@ ranking — plus SQL habits (`LAG()`, `!=`, `count([Measure])`) the grammar woul
 vocabulary on the 1.5B. The 3B clears the 95 % compile bar; neither clears the 80 % exactness bar;
 the grammar lever is unmeasured until Step 3 ships a runtime that honours one.
 
-Still open, in order: **Step 3** M2 under D6/D7 (`ai/runtime.rs`, a `calcula-builtin` provider,
-`externalBin`, model download with consent, an `honorsGrammar` probe replacing the identity gate);
-**Step 4** M6 narration with a fact-id coverage guard, which is what gives `ResolvedMeasure.context`
-its reader; **Step 5** M4 router absorbing `scriptIntent.ts` and `analysisIntent.ts`. Also: a pivot's
-cached metadata carries no strategy summary (the cache holds no model), so the pivot Design tab's
-row drafts without the strategy's ranking; and an inclusion filter (`= ("x")`) compiles to no filter
-when the compiler has no member list, which is the existing report behaviour and is why grading
-uses the parsed form.
+*Step 3 shipped 2026-09-10 — M2, the on-board runtime (D6/D7).* Design and the §2 reversal:
+`local-model-script-authoring.md` §14. What exists: `app/scripts/fetch-llama-server.mjs`
+(llama.cpp b10897 pinned by build number and a sha256 per architecture, a pure-Node zip reader in
+`scripts/lib/artifact.mjs`, the folder Dropbox-ignored the moment it exists),
+`fetch-builtin-model.mjs` (the same pin as Rust; `builtinRuntimePins.test.ts` diffs the two and the
+overlays and the workflow), `ai/runtime.rs` (a free loopback port, a Windows job object with
+KILL_ON_JOB_CLOSE proved by dropping the job on a `ping`, a `/health` wait that carries the child's
+last forty lines, a fifteen-minute idle unload with a visible reason, six `ai_builtin_*` commands
+denylisted under a new `localRuntime` capability), `ai/builtin_model.rs` (a resumable `Range`
+download that starts over when a server ignores the range, refuses a different `Content-Length`,
+deletes a hash mismatch and lands in `%LOCALAPPDATA%\com.calcula.app\models` — not the roaming
+folder a gigabyte would sync from), the `calcula-builtin` provider first in the registry with a
+port-0 placeholder that `ai::base_for` replaces on the first completion, and the picker's section
+with the one consent sentence (size, licence, source, hash, folder) behind `confirmAsync`, doubled in
+the Tauri shape by its test. **Not a Tauri `externalBin`**: a sidecar must exist at every
+`cargo build` and carries only the executable, while the server needs its DLLs beside it — so the
+runtime is a resource folder mapped by `tauri.runtime-<arch>.conf.json` at release time (a
+resource glob that matches nothing FAILS the build, tauri-utils `GlobPathNotFound`), and a debug
+build reads the source tree. The probe gained a fifth pre-flight (`root ::= "OK"` against a
+question the grammar forbids answering) and the profile a `honorsGrammar` verdict; the seam forwards
+a grammar on a measured true or, unmeasured, on llama.cpp identity, and a measured false overrides
+identity. A formula grammar (`@api/formulaAssist/grammar.ts`: the JSON envelope, the formula held to
+syntax, a call as a suffix, every repetition bounded) rides the ladder where the verdict is true.
+
+**Measured 2026-09-10 on the built-in runtime** (llama.cpp b10897, Qwen2.5-Coder-1.5B Q4_K_M, this
+arm64 CPU — loads in 1.6 s, ~400 tok/s prompt, ~47 tok/s decode — on port 8080 with the app's own
+flags; `tests/eval/README.md` has the commands):
+
+| corpus | path | passed | compiled / usable | median | p90 |
+|---|---|---:|---:|---:|---:|
+| design queries (40) | schema | 15/40 | 34/40 compiled | 2.1 s | 3.1 s |
+| design queries (40) | grammar, bare prompt | 17/40 | 40/40 compiled | 1.0 s | 1.4 s |
+| formulas (97) | schema | 35/97 | 0 truncated | 3.0 s | 4.3 s |
+| formulas (97) | grammar, bounded | 37/97 | 7 truncated, declined | 1.9 s | 6.1 s |
+
+McNemar on the paired outcomes: p = 0.77 (design queries), 0.69 (formulas). **The grammar does not
+change correctness on this model; it changes what a failure looks like and how long it takes.**
+Design queries: every reply compiles and the median halves; what is left is judgement alone — an
+unasked share label (6), an unasked TOP (6), an extra name (6), a filtered column repeated (2).
+Formulas: a third off the median; the seven truncations are a 1.5B looping on nested calls inside a
+grammar that bounds every repetition but cannot bound nesting, and the ladder reports them as
+declined, never as a formula. Three levers measured on the way, each a paired run: the free-order
+design-query grammar let one reply write VALUES twice, the canonical-order grammar fixed that and
+moved no task (17/40 both, p = 1.0); the first formula grammar was unbounded (12 truncations, p90
+11.6 s, one of them a quoted "sheet name" that swallowed `|)`) and the bounded one is the row above;
+and a prompt that asked for JSON under a grammar that forbids it opened every reply with an unasked
+LAYOUT line, three of three, so the grammar path now asks for the bare query. Neither bar (80 %
+exact design queries, 90 % verified formulas at 3 s) is met, and the gap is the model: the Ollama
+build of the same 1.5B scored 21/40 on the schema path earlier the same day, so runtime and
+quantisation are worth about three tasks of noise. The clean wins are structural: everything
+compiles, half the wait, and a runtime the app owns end to end.
+
+Still open, in order: **Step 4** M6 narration with a fact-id coverage guard, which is what gives
+`ResolvedMeasure.context` its reader; **Step 5** M4 router absorbing `scriptIntent.ts` and
+`analysisIntent.ts`. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to
+beat); an offline-installer build (`tauri.offline-<arch>.conf.json` exists, no workflow leg builds
+it); `builtin-runtime.spec.ts` in E2E (passed 2026-09-10 against a real debug build: the app
+starts its runtime on the first completion, answers a grammar exactly, stops it) needs the fetched
+runtime and model on the machine that runs it and skips, saying so, without them — the nightly
+runner has neither yet; a pivot's cached metadata carries no strategy summary (the
+cache holds no model), so the pivot Design tab's row drafts without the strategy's ranking; and an
+inclusion filter (`= ("x")`) compiles to no filter when the compiler has no member list, which is
+the existing report behaviour and is why grading uses the parsed form.
 
 ## 3. How to keep this file honest
 

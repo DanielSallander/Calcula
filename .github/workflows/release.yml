@@ -72,11 +72,28 @@ jobs:
         working-directory: app
         run: npm ci
 
+      # The on-board inference runtime (llama.cpp's llama-server, CPU build) is
+      # fetched from its PINNED release and verified by sha256, then bundled as
+      # the `llama-server/` resource folder by the per-architecture overlay
+      # passed to the build below. Not `--soft`: a tree without it still builds,
+      # but a release without it ships no built-in model runtime, and that is
+      # a failed release rather than a quiet one. The model itself is NOT
+      # bundled here — it is downloaded on first use behind a consent sentence
+      # (owner decision D6); `tauri.offline-<arch>.conf.json` is the overlay for
+      # an offline installer that carries it.
+      - name: Fetch the bundled inference runtime
+        working-directory: app
+        run: node scripts/fetch-llama-server.mjs --target ${{ matrix.target }}
+
       # Builds the frontend (via beforeBuildCommand) + the Rust backend in
       # release, then bundles the .msi and NSIS .exe installers.
       - name: Build installers
         working-directory: app
-        run: npm run tauri build -- --target ${{ matrix.target }}
+        env:
+          # The step above fetched the matrix target; the npm `pretauri` hook
+          # would otherwise fetch the runner's own architecture as well.
+          CALCULA_SKIP_LLAMA_FETCH: "1"
+        run: npm run tauri build -- --target ${{ matrix.target }} --config ${{ github.workspace }}/app/src-tauri/tauri.runtime-${{ matrix.arch }}.conf.json
 
       - name: Collect installers
         shell: bash

@@ -17,14 +17,24 @@
 //!          NOT the sandboxed `script_http_fetch`, which strips auth headers.
 //!          Local providers are loopback-only by construction (asserted in
 //!          providers.rs), so selecting one means nothing leaves the machine.
+//!
+//!          THE BUILT-IN PROVIDER (2026-09-10, Tier 1). `calcula-builtin` is
+//!          the one provider whose server Calcula runs itself: `runtime.rs`
+//!          starts the bundled llama-server on a free loopback port with the
+//!          on-board model the first time a completion asks for it, and
+//!          `base_for` below is where the registry's placeholder URL is
+//!          replaced by the live one. Everything after that point is the same
+//!          OpenAI-compatible wire every other local runtime speaks.
 
 pub mod audit;
+pub mod builtin_model;
 pub mod discovery;
 pub mod dryrun;
 pub mod formula_context;
 pub mod formula_verify;
 pub mod preview_eval;
 pub mod providers;
+pub mod runtime;
 pub mod stream;
 pub mod tools;
 pub mod wire;
@@ -266,6 +276,7 @@ pub async fn ai_discover_local_runtimes(
 
 #[tauri::command]
 pub async fn ai_list_models(
+    app: AppHandle,
     provider_id: String,
     base_url_override: Option<String>,
     window: tauri::Window,
@@ -273,6 +284,13 @@ pub async fn ai_list_models(
     crate::security::window_guard::require_label(&window, crate::security::window_guard::MAIN)?;
     let def = providers::find(&provider_id)
         .ok_or_else(|| format!("Unknown provider '{}'.", provider_id))?;
+    // The built-in provider answers from disk: the one model, when its file
+    // is in place. Listing must never START the runtime — the picker calls
+    // this on every mount, and a gigabyte should not load because a panel
+    // opened.
+    if def.id == providers::BUILTIN_ID {
+        return runtime::builtin_models(&app);
+    }
     let base = resolve_base(&def, base_url_override.as_deref())?;
     let key = get_key(&providers::credential_target(&provider_id));
     discovery::list_models(&def, &base, key.as_deref()).await
@@ -296,6 +314,19 @@ fn resolve_base(def: &ProviderDef, override_url: Option<&str>) -> Result<String,
     Ok(base.trim_end_matches('/').to_string())
 }
 
+/// The base URL a completion goes to.
+///
+/// For the built-in provider that is the on-board runtime's LIVE port — chosen
+/// when it starts, and starting it is a side effect of the first completion
+/// that needs it — so the registry's placeholder and any override are ignored.
+/// For every other provider it is `resolve_base`.
+async fn base_for(app: &AppHandle, def: &ProviderDef, override_url: Option<&str>) -> Result<String, String> {
+    if def.id == providers::BUILTIN_ID {
+        return runtime::ensure_running(app).await;
+    }
+    resolve_base(def, override_url)
+}
+
 /// Send one turn to the selected provider and return Calcula's normalized shape.
 ///
 /// The provider is named by the CALLER on every request: the backend keeps no
@@ -305,6 +336,7 @@ fn resolve_base(def: &ProviderDef, override_url: Option<&str>) -> Result<String,
 /// silently repoint the AI at a model you have no key for.
 #[tauri::command]
 pub async fn ai_chat_complete(
+    app: AppHandle,
     request: ChatRequest,
     base_url_override: Option<String>,
     window: tauri::Window,
@@ -313,7 +345,7 @@ pub async fn ai_chat_complete(
 
     let def = providers::find(&request.provider_id)
         .ok_or_else(|| format!("Unknown provider '{}'.", request.provider_id))?;
-    let base = resolve_base(&def, base_url_override.as_deref())?;
+    let base = base_for(&app, &def, base_url_override.as_deref()).await?;
 
     if request.model.trim().is_empty() {
         return Err(format!("No model selected for {}.", def.label));
@@ -476,7 +508,7 @@ pub async fn ai_chat_complete_stream(
 
     let def = providers::find(&request.provider_id)
         .ok_or_else(|| format!("Unknown provider '{}'.", request.provider_id))?;
-    let base = resolve_base(&def, base_url_override.as_deref())?;
+    let base = base_for(&app, &def, base_url_override.as_deref()).await?;
     if request.model.trim().is_empty() {
         return Err(format!("No model selected for {}.", def.label));
     }
