@@ -408,9 +408,11 @@ make the base fillable. That comes first.
 - **A numeric axis on a non-calendar dimension is still lost.** Declared metadata rescues the date
   table; a `Decimal` column that is really an axis on some other dimension needs the column
   statistics this codebase does not have. It falls to `ignore`, and a person has to say otherwise.
-- **Narration stays deterministic until M6.** A model writes no sentence in this feature. When one
-  does, it will be structurally checked: every sentence tagged with the fact ids it covers, and a
-  sentence citing a number that is not in its cited facts is dropped.
+- **Narration stays deterministic; the CHECK that would let it not be now exists (2026-09-11).** A
+  model still writes no sentence in this feature. But the rule this bullet has stated since the
+  beginning — every sentence tagged with the fact ids it covers, and a sentence citing a number that
+  is not in its cited facts is dropped — is now executable, in `core/insights/src/narrate/cite.rs`,
+  beside the facts rather than in the renderer. See §15.
 - **`fiscalYearStart` is settable and read by nothing, and says so on screen.** `unit` and `cadence`
   were beside it until 2026-09-09 and now have readers (§13.6a); `reportingCurrency` was deleted
   rather than labelled, because unlike them it had no designed reader coming. `cadence`'s OTHER
@@ -973,3 +975,67 @@ context per model URI, both hosts register their own, and the old globals surviv
 for the window before an editor mounts. `pivotDslLanguage.ts` had no test file at all, which is why
 nothing had ever said so; the registry and the whole suggestion decision are now in monaco-free
 modules with 35 tests, and the six guards were each sabotaged and each redded its own named test.
+
+## 15. The citation check — what has to exist before a model may narrate, 2026-09-11
+
+Step 4 of the AI programme is M6: let the on-board model write the sentences. This is not that. This
+is the thing M6 cannot be built without, and it is finished: **the rule §12 has stated since the
+beginning is now executable.**
+
+> every sentence tagged with the fact ids it covers, and a sentence citing a number that is not in
+> its cited facts is dropped
+
+`core/insights/src/narrate/cite.rs` takes a list of `TaggedSentence { text, fact_ids }` and the
+ranked run they were written from, and returns what a reader may see, what was deleted and why, and
+which facts nobody covered. A sentence dies three ways: it cites no fact, it names a fact the run
+never produced, or it prints a number its cited facts cannot account for. The third is the point —
+it is what makes "the model only chooses WORDING" a property rather than an intention.
+
+**It lives in Rust, beside the facts, for two reasons and the second decides it.** The numbers and
+their formatting are here: a checker anywhere else would re-implement `number.rs` — the rounding by
+magnitude, the scientific cut-off below a thousandth, the sv-SE non-breaking space — and one that
+disagreed with the formatter by a decimal place would delete the engine's own correct sentences. And
+it is a safety check on model output, so it belongs where the renderer cannot bypass it. That is the
+same answer this repo gave for the script interpreter, for the same reason.
+
+**It never parses a number back out of a sentence.** That would be lossy, locale-ambiguous, and a
+second opinion about what "1 234,5" means. Instead it RENDERS every number a fact holds through the
+very functions the narrator uses — `num`, `count`, `pct`, `signed_pct`, `ratio` — and compares
+strings. The allowed set is therefore by construction exactly what a correct sentence can contain.
+
+**The oracle is the deterministic narrator itself**, and it is what makes the checker trustworthy:
+`the_deterministic_narrator_survives_its_own_check` narrates all twenty fact kinds in both locales
+and asserts not one sentence is rejected. A narrator that only prints numbers its fact contains is
+the definition of what must pass, so any rejection is the checker being wrong. Two allowances exist
+because that test demanded them and each names the template that needs it: `|v|`, because Trend
+prints `num(slope_per_step.abs())` and the direction is already in the words; and `v + 1`, because
+Duplicates and Leader turn a 0-based index and an exclusive count into what a person counts. A
+number inside a LABEL the fact carries — "at Mar 2024" — is allowed too, or the checker would delete
+the narrator for quoting a label back at it.
+
+A sabotage found the gap the oracle could not: the shared all-kinds fixture happens to carry a
+POSITIVE slope, so with `|v| == v` the `abs` allowance could be deleted and everything stayed green.
+`a_falling_trend_prints_its_slope_without_a_minus_and_is_still_entitled_to_it` exists only because of
+that, and reds when the allowance goes.
+
+**One defect was in the way and is fixed.** The model path's `facts_json` — the field whose doc
+comment reads "Numbers only, no prose: what a Tier-1 narrator is given to work from" — emitted a bare
+array of fact kinds with **no ids at all**. `open-items.md` 2.AI.5 promises the opposite ("factsJson
+carries fact ids precisely so a later narrator can be checked for coverage"), and with no ids there
+is nothing to tag and nothing to check, so the model half of the product could never have been
+narrated safely. It now emits the same document shape as the core path. Nothing had noticed because
+the field has no consumer yet — the inert-surface defect this document's own §2 rule exists to catch,
+one level down.
+
+**What is still not built, and is the rest of M6.** The prompt and schema that ask a model for
+tagged sentences; the surface that shows them; an eval that measures whether the on-board 1.5B can
+produce any that survive. And the prose boundary is still vacuous: `MeasureStrategy.context` remains
+read by nothing, because the checker does not read it — it is the NARRATOR that will, as wording
+guidance, and that is the commit which must also add the source-scan guard §2 describes.
+
+One more finding recorded rather than changed: `describeBundleForModel`
+(`app/src/api/insightsService.ts`) is the only live path that hands a bundle to a model, and it
+builds its prompt from `bundle.markdown` — the already-narrated deterministic sentences. So today's
+chat paraphrases our prose instead of reading the numbers, which is exactly what `facts_json` was
+built to prevent. Changing it changes what the chat says, so it wants a measurement rather than a
+quiet edit.

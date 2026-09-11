@@ -5,6 +5,7 @@
 // model-written paragraph will be another, working from the same `facts_json`
 // rather than paraphrasing what is written here.
 
+pub mod cite;
 pub mod en;
 pub mod number;
 

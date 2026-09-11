@@ -1472,9 +1472,36 @@ machine now measures the DRAFTING eval at a ~4 s median where §14.3 recorded 1.
 pinned runtime and model and with the bound proved innocent by a paired run — so one of the two
 numbers was taken under conditions nobody wrote down.
 
-Still open, in order: **Step 4** M6 narration with a fact-id coverage guard, which is what gives
-`ResolvedMeasure.context` its reader; **Step 5** M4 router absorbing `scriptIntent.ts` and
-`analysisIntent.ts`. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to
+**Step 4's GUARD landed 2026-09-11; its narrator did not.** Design: `insights-strategy-layer.md`
+§15. The rule this programme has stated from the start — "every sentence tagged with the fact ids it
+covers, and a sentence citing a number that is not in its cited facts is dropped" — is now
+executable in `core/insights/src/narrate/cite.rs`. It lives in Rust beside the facts, not in the
+renderer, because the number formatting is there (a checker that disagreed with `number.rs` by a
+decimal place would delete the engine's own correct sentences) and because it is a safety check on
+model output, which the renderer must not be able to bypass. It never parses a number back out of a
+sentence; it RENDERS every number a fact holds through the narrator's own `num`/`count`/`pct`/
+`signed_pct`/`ratio` and compares strings, so the allowed set cannot drift from the formatter.
+**The oracle is the deterministic narrator**: all 20 fact kinds, both locales, not one sentence
+rejected. Two allowances exist only because that test demanded them (`|v|` for Trend's
+`num(slope.abs())`, `v + 1` for Duplicates and Leader), and a sabotage exposed that the shared
+all-kinds fixture carries a POSITIVE slope, so the `abs` allowance could be deleted with everything
+still green — hence a dedicated falling-trend test. Five guards, each sabotaged, each redding its own
+named test. **A defect in the way is fixed:** the model path's `facts_json`, whose doc comment reads
+"what a Tier-1 narrator is given to work from", emitted a bare array of kinds with NO IDS, against
+2.AI.5's explicit promise — so the model half could never have been narrated safely, and nothing
+said so because the field has no consumer yet.
+
+*Still open here:* the rest of Step 4 — the prompt and schema that ask a model for tagged sentences,
+the surface that shows them, and an eval that measures whether the on-board 1.5B produces any that
+survive. `MeasureStrategy.context` STILL has no reader: the checker does not read prose, the
+narrator will, and that is the commit which must also add the source-scan guard §2 describes.
+Recorded but not changed: `describeBundleForModel` (`app/src/api/insightsService.ts`) is the only
+live path handing a bundle to a model and it builds from `bundle.markdown` — the already-narrated
+sentences — so the chat paraphrases our prose instead of reading the numbers, which is what
+`facts_json` exists to prevent. Changing it changes what the chat says, so it wants a measurement.
+
+Still open, in order: the rest of **Step 4** above; **Step 5** M4 router absorbing `scriptIntent.ts`
+and `analysisIntent.ts`. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to
 beat); an offline-installer build (`tauri.offline-<arch>.conf.json` exists, no workflow leg builds
 it); `builtin-runtime.spec.ts` in E2E (passed 2026-09-10 against a real debug build: the app
 starts its runtime on the first completion, answers a grammar exactly, stops it) needs the fetched

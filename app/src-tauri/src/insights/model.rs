@@ -1916,9 +1916,49 @@ pub fn build_run(
 }
 
 /// Numbers only, no prose: what a Tier-1 narrator is given to work from.
+///
+/// IT MUST CARRY THE IDS, and for a while it did not. This function emitted a
+/// bare array of kinds — no id, no score, no evidence — while its own doc
+/// comment named the consumer it was for. The whole point of the field, stated
+/// in `open-items.md` 2.AI.5, is that "factsJson carries fact ids precisely so a
+/// later narrator can be checked for coverage": M6 asks a model for sentences
+/// each TAGGED with the facts it covers, and then deletes any sentence citing a
+/// number its cited facts do not contain. Without ids there is nothing to tag
+/// and nothing to check, so the model path could never have been narrated
+/// safely at all. The shape now matches the core path's `FactsDocument`
+/// (`core/insights/src/lib.rs`), because a narrator should not have to ask which
+/// half of the product a bundle came from.
+///
+/// `text` stays out deliberately. A narrator that can see our sentences
+/// paraphrases them instead of reading the numbers, which is the one thing this
+/// field exists to prevent.
 fn facts_json(run: &ModelRun) -> String {
-    let kinds: Vec<&ModelFactKind> = run.facts.iter().map(|f| &f.kind).collect();
-    serde_json::to_string(&kinds).unwrap_or_else(|_| "[]".to_string())
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Record<'a> {
+        id: &'a str,
+        score: f64,
+        kind: &'a ModelFactKind,
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Document<'a> {
+        model_label: &'a str,
+        facts: Vec<Record<'a>>,
+    }
+
+    let document = Document {
+        model_label: &run.model_label,
+        facts: run
+            .facts
+            .iter()
+            .map(|f| Record { id: &f.id, score: f.score, kind: &f.kind })
+            .collect(),
+    };
+    // A serialisation failure must not read as "nothing was found"; an empty
+    // array would. The core path makes the same choice for the same reason.
+    serde_json::to_string(&document)
+        .unwrap_or_else(|e| format!("{{\"error\":\"facts could not be serialised: {}\"}}", e))
 }
 
 fn markdown(run: &ModelRun) -> String {
@@ -3168,6 +3208,31 @@ mod tests {
         assert_eq!(a, b, "two runs over the same numbers must agree byte for byte");
         assert!(a.contains("\"source\":\"model\""));
         assert!(a.contains("\"factsJson\""), "the seam's spelling, not facts_json");
+
+        // FACTS JSON MUST CARRY THE IDS. For a while it did not: it emitted a
+        // bare array of kinds while its own doc comment named the Tier-1
+        // narrator as its consumer. M6 asks a model for sentences each TAGGED
+        // with the facts they cover and then deletes any sentence citing a
+        // number its cited facts do not contain — with no ids there is nothing
+        // to tag and nothing to check, so the model path could never have been
+        // narrated safely at all, and nothing said so because the field had no
+        // consumer yet.
+        let bundle: serde_json::Value = serde_json::from_str(&a).expect("bundle parses");
+        let facts_doc: serde_json::Value =
+            serde_json::from_str(bundle["factsJson"].as_str().expect("factsJson is a string"))
+                .expect("factsJson parses");
+        let records = facts_doc["facts"].as_array().expect("facts is an array");
+        assert!(!records.is_empty(), "this fixture must produce facts");
+        for record in records {
+            let id = record["id"].as_str().unwrap_or_default();
+            assert!(!id.is_empty(), "every fact record carries its id: {record}");
+            assert!(record["score"].is_number(), "and its score: {record}");
+            assert!(record["kind"].is_object(), "and its numbers: {record}");
+            assert!(
+                record.get("text").is_none(),
+                "but never our sentence — a narrator that can read it paraphrases instead: {record}"
+            );
+        }
     }
 
     // -- the AST walk ------------------------------------------------------
