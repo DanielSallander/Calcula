@@ -33,8 +33,11 @@ export {
   MAX_CANDIDATE_DIMENSIONS,
   MAX_CANDIDATE_MEASURES,
   MAX_CANDIDATE_NUMERIC_COLUMNS,
+  TIME_GRAIN_NONE,
+  TIME_GRAIN_YEAR,
   chooseCandidates,
   dslFieldRef,
+  timeGrain,
   intentOverlap,
   intentTokens,
   nameTokens,
@@ -49,18 +52,48 @@ export {
   designQueryResponseSchema,
 } from "./schema";
 
-export type { CompilerFinding, DesignQueryReplyFormat, UserPromptParts } from "./prompt";
+export type { CompilerFinding, DesignQueryReplyFormat, NextClauseRequest, UserPromptParts } from "./prompt";
 export {
   DESIGN_QUERY_CHEAT_SHEET,
+  DESIGN_QUERY_NEXT_CLAUSE_PROMPT,
   DESIGN_QUERY_SYSTEM_PROMPT,
   DESIGN_QUERY_SYSTEM_PROMPT_BARE,
+  NEXT_CLAUSE_MAX_TOKENS,
   buildExamples,
+  buildNextClauseRequest,
+  buildNextClauseUserPrompt,
   buildRepairPrompt,
   buildUserPrompt,
   designQuerySystemPrompt,
   estimateTokens,
 } from "./prompt";
 
-export { buildDesignQueryGrammar, gbnfTerminal } from "./grammar";
+export type { GrammarClause, PresentClauses } from "./grammar";
+export {
+  GRAMMAR_CLAUSES,
+  allowedNextClauses,
+  buildDesignQueryGrammar,
+  buildNextClauseGrammar,
+  gbnfTerminal,
+} from "./grammar";
 
 export { extractDesignQuery, looksLikeDsl, normalizeDsl } from "./extract";
+
+export type {
+  AxisClause,
+  EditOp,
+  FactField,
+  FactFilter,
+  FactSort,
+  FactValue,
+  NextEditKind,
+  NextEditSuggestion,
+  QueryFacts,
+} from "./nextEdit";
+export {
+  MODEL_CLAUSE_PRIORITY,
+  NEXT_EDIT_RULES,
+  nextClauseSuggestion,
+  normalizeRef,
+  suggestNextEdits,
+} from "./nextEdit";

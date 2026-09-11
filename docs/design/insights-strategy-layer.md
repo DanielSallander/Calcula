@@ -827,3 +827,111 @@ as computed and the model that words them. The user decides the model, in one pl
 itself, restated because it was being used the other way round: **Tier 0 is no model**; **Tier 1 is
 the bundled on-board model** (M2 + M6, unbuilt); Tier 2 is a larger optional model the picker
 already covers; Tier 3 is a bring-your-own key.
+
+### 14.5 Next-edit suggestions — the strategy as an editor, 2026-09-11
+
+The fourth consumer, and the first that is Tier 0 end to end: no model, no latency, and a sentence
+under every suggestion naming the field it read. The owner asked whether Calcula would behave like
+Copilot's Next Edit Suggestions for the design query; most of what such a surface does for a
+six-line language turns out to be deterministic, because the document already says which measures
+matter, which way is good, what a measure is analysed by, what it must never be sliced by, which
+column a table's rows are recognised by, and which table is the calendar.
+
+Seven rules, each one function in a list so the owner's later ideas are one more entry each: a
+missing VALUES gets the strategy's first measure; a measure with no breakdown gets its first
+analysis dimension; a column in a measure's `neverSliceBy` is offered for removal, naming the
+measure; `TOP N BY` a lower-is-better measure is offered as `BOTTOM`; a month or quarter with no
+year anywhere gets the year; a column FILTERS pins to one value is offered for removal from the
+axis; and a key column is offered its table's label column. The chips sit under the editor at every
+DSL mount and accepting one edits the TEXT — never a re-serialisation, so the person's own spacing
+and ordering survive — while Create, Save and Apply stay their click.
+
+**Two invariants, and the first is a gate.** A rule may never fire on a complete, correct query: a
+suggestion that fights a right answer is a defect, and `nextEditCorpus.test.ts` runs every rule over
+all 44 references and alternatives of the drafting corpus and fails on any chip at all. The gate
+earned its keep immediately — a first draft had an "also analyse by the next dimension" rule that
+fired on 44 of 44. The second invariant is that every reason names its source; a rule that cannot
+say why is not a rule this engine wants.
+
+**What the rules cannot do, measured.** Prefix recall over the corpus's own references is 21 of 86,
+and every hit is the missing-VALUES rule. Rules supply the measure the strategy ranks first and can
+never guess which dimension the person wanted — the gap §14.6 then asked a model to fill, and
+measured it not filling.
+
+**The strategy's reach changed twice here.** A pivot's cached metadata carries no strategy at all —
+the cache holds no model to read one from — so the pivot's Design tab had been drafting without the
+strategy's ranking since §14.3. It now arrives on `PivotEditor`'s existing connection-level fetch,
+which already cleared stale state and already re-fetched on `bi:model-changed`; giving the Design
+tab its own fetch instead (the first attempt) was a second round trip, went stale, and could hand
+one connection's strategy to another connection's pivot. Separately, `strategy` had reached only one
+of the two TypeScript mirrors of the Rust `BiPivotModelInfo`, so the facade's own type could not see
+it; the two are now diffed by a test.
+
+### 14.6 The model's chip — built, measured, and off, 2026-09-11
+
+Milestone B asked the built-in model for the one clause the rules could not guess. Everything about
+the plumbing worked. The answer was still no, and the number is the point of writing this section.
+
+**The shape.** No new backend command and no new endpoint: the existing completion seam, a grammar
+of the single clause that may legally come next, and the bare next-clause prompt.
+`buildNextClauseRequest` assembles prompt, names and grammar in ONE place, `nextClauseSuggestion`
+turns a reply into a suggestion in one place, and `rulesChips` — the row's own Tier-0 loop, moved
+out of the component — is what the row, the corpus gate and the offline runner all call. That is
+deliberate: `tests/eval/run-next-edit-eval.mjs` measures the pipeline the product runs, and a
+runner that rebuilt any of those three steps would have measured its own copy. The chip is asked
+for only after the rules, only where the rules left room on the row, and only where
+`honorsGrammar()` is a measured yes.
+
+**Measured on the built-in runtime** (llama.cpp b10897 + qwen2.5-coder-1.5b-instruct Q4_K_M,
+grammar honoured, prefix warm), over every prefix of the 52 correct queries in the drafting corpus:
+
+| | |
+|---|---|
+| exact next clause | **0 of 80** (a perfect model scores 79; see below) |
+| the same prefixes, rules alone | 19 of 80 |
+| what the model added over the rules | **0** |
+| quiet on a query that was already finished | **0 of 52** |
+| median latency | **686 ms** (the milestone's gate was 400 ms) |
+| p90 latency | 848 ms |
+
+Not one right answer, a chip on every finished query, and twice the latency budget. So
+`MODEL_CHIP_DEFAULT` is false: the chip stays built, wired and off, and the runner is what decides
+when a better model earns it. Owner decision D10 puts the interesting models between the small
+local ones and the cloud, and this is the harness that will judge them — one command, three numbers.
+
+**A zero is a claim about the harness until proven otherwise.** The runner refuses to run at all
+unless it can score its own oracle: each reference's own next line is fed through the same
+`nextClauseSuggestion` → `applyEditOp` → `sameDesignQuery` path the model's reply takes, and a
+single failure exits 3 with "the harness cannot score its own oracle" rather than reporting a
+flawless zero. It also runs the oracle through the row's compile VETO, which is where it found
+that one task is unwinnable for anybody: the corpus's own next clause there is `LAYOUT:
+subtotals-off`, the compiler has no case for `subtotals-*` and warns, and the veto refuses any chip
+that adds a warning. So the ceiling is 79, not 80, and the runner prints it rather than scoring an
+impossible task as a miss. The directive gap is filed in `open-items.md` 2.AI.11 — the language
+teaches three directives its own compiler warns about, and `LayoutConfig` has nowhere to put them.
+
+**Two defects the measurement found before the number did.**
+
+*The prompt promised something the grammar forbade.* Its last line is "if the query is already
+complete, reply with nothing at all", and the root rule was `root ::= (clause) "\n"?` — exactly one
+clause, mandatory. The model could not obey however well it understood, so the no-clause rate could
+only ever have been zero, and on a finished query the only thing between the person and an unwanted
+chip was the compile veto — which passes a syntactically fine LAYOUT, because it adds no error and
+no warning. The root is now `root ::= nextclause?`, and the runtime honours it: a probe with a
+grammar whose only content is optional returns the empty string with finish reason `stop`. The
+model then declined to use it 52 times out of 52, which is a fact about the model rather than about
+the grammar — and only measurable once the grammar stopped lying.
+
+*An unbounded repetition is an invitation.* `values ::= "VALUES: " val (", " val)*` let the 1.5B
+answer `VALUES: [Revenue], [MarginPct], [Margin], [Cost], [Customers], [Quantity]` — every measure
+it had been shown, in the order it had been shown them — on every prefix of every query. It is the
+formula grammar's lesson a second time. Every clause repetition is now `{0,3}`; the widest clause in
+all 52 correct queries lists two. Bounding cut the next-clause median from 838 ms to 674 ms and
+moved the exact rate not at all, and a paired run of the DRAFTING eval either side of the change
+(16/40 passed, 40/40 compiled, ~4 s median both ways) says the shared grammar lost nothing.
+
+**What the corpus gate learned from the row.** The gate had re-implemented the chip loop with an
+ABSOLUTE compile bar while the row uses "no worse". It was therefore quietly weaker than the thing
+it guards, and it was hiding a fixture: an `ALSO_CORRECT` shape named `Date.Quarter`, a column this
+model does not have, so that row never compiled and gated nothing. Both are fixed, and the gate now
+calls `rulesChips` rather than a copy of it.

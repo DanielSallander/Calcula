@@ -2,13 +2,14 @@
 // PURPOSE: Monaco-based DSL editor for the "Design" tab of the pivot field pane.
 // CONTEXT: Parses DSL text in real-time, compiles to zone state, and shows inline errors.
 
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
 import Editor, { type OnMount, type OnChange } from '@monaco-editor/react';
 import type * as monaco from 'monaco-editor';
 import { processDsl, serialize, type CompileContext } from '../../_shared/dsl/pivotLayout';
 import { getControlValue, type ControlValue } from '@api/controlValues';
 import { LANGUAGE_ID, registerPivotDslLanguage, setDslEditorContext } from '../../_shared/dsl/pivotLayout/pivotDslLanguage';
 import { DescribeQueryRow } from '../../_shared/dsl/pivotLayout/DescribeQueryRow';
+import { NextEditRow } from '../../_shared/dsl/pivotLayout/NextEditRow';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
 import type { LayoutConfig, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from './types';
 import type { DslError } from '../../_shared/dsl/pivotLayout/errors';
@@ -101,6 +102,18 @@ export function DesignEditor({
   // state change that the editor itself caused).
   const editorIsSource = useRef(false);
 
+  // The editor's current text, for the suggestion row. Monaco owns the buffer;
+  // this mirrors it on every change, programmatic or typed.
+  const [dslText, setDslText] = useState('');
+
+  // The strategy the assistant rows read arrives ON `biModel`: `PivotEditor`
+  // passes its live connection-level model (`fieldListModel`), which carries
+  // the summary a pivot's cached metadata never has. This component fetched it
+  // itself for one afternoon, which was a second full-model round trip on every
+  // pivot open, went stale when the model changed, and — because it did not
+  // clear the previous value first — could hand one connection's strategy to
+  // another connection's pivot. The parent's fetch already solves all three.
+
   // Register the language once
   useEffect(() => {
     registerPivotDslLanguage();
@@ -125,6 +138,7 @@ export function DesignEditor({
     const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields });
     if (text === lastSerializedText.current) return;
     lastSerializedText.current = text;
+    setDslText(text);
 
     const editor = editorRef.current;
     if (editor) {
@@ -154,6 +168,7 @@ export function DesignEditor({
     // The sync effect may have set it to true in the same render batch.
     isProgrammaticEdit.current = false;
     lastSerializedText.current = externalDslText;
+    setDslText(externalDslText);
     const fullRange = model.getFullModelRange();
     model.pushEditOperations(
       [],
@@ -162,14 +177,16 @@ export function DesignEditor({
     );
   }, [externalDslText]);
 
-  // A drafted query from the "describe it in words" row: loaded the way Load
-  // Layout loads text, so onChange compiles it and the markers show.
+  // A drafted query from the "describe it in words" row, or a query with a
+  // suggested edit accepted: loaded the way Load Layout loads text, so
+  // onChange compiles it and the markers show.
   const applyDraft = useCallback((dsl: string) => {
     const editor = editorRef.current;
     const model = editor?.getModel();
     if (!editor || !model) return;
     isProgrammaticEdit.current = false;
     lastSerializedText.current = dsl;
+    setDslText(dsl);
     model.pushEditOperations([], [{ range: model.getFullModelRange(), text: dsl }], () => null);
   }, []);
 
@@ -191,12 +208,14 @@ export function DesignEditor({
     // Set initial content by serializing current zone state
     const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields });
     lastSerializedText.current = text;
+    setDslText(text);
     // setValue during mount doesn't trigger onChange (listener not attached yet)
     editor.setValue(text);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleEditorChange: OnChange = useCallback((value) => {
+    setDslText(value ?? '');
     if (!value) return;
 
     // If this change was triggered by programmatic text sync (not user typing),
@@ -319,6 +338,16 @@ export function DesignEditor({
         }}
       />
     </div>
+    {/* The next-edit suggestions (rules over the strategy). Model pivots only:
+        a range pivot has no strategy and no measures for the rules to read. */}
+    {biModel ? (
+      <NextEditRow
+        text={dslText}
+        biModel={biModel}
+        connectionId={biModel.connectionId ?? ''}
+        onApply={applyDraft}
+      />
+    ) : null}
     </div>
   );
 }

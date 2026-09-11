@@ -170,6 +170,33 @@ function calendarOf(model: DesignQueryModel): DesignQueryTable | null {
  * that is not a key — minus any column a chosen measure must never be sliced
  * by. Both lists are capped and the cap is reported.
  */
+/** `timeGrain` for a column that names no period at all. */
+export const TIME_GRAIN_NONE = 9;
+/** The grain a year column has. Nothing is coarser. */
+export const TIME_GRAIN_YEAR = 0;
+
+/**
+ * How coarse a calendar column is: year 0, quarter 1, month 2, week 3, and
+ * `TIME_GRAIN_NONE` for a name that does not announce a period.
+ *
+ * NAME-BASED AND DELIBERATELY NARROW. It matches a name that STARTS with the
+ * period word, in English or Swedish, which is what an inferred calendar's
+ * columns are called in every model this has been run against. It therefore
+ * answers `TIME_GRAIN_NONE` for `CalendarYear` and `MonthNumberOfYear`, and
+ * that is the honest answer: this function is how the time rules decide
+ * whether they may claim anything about years, and a rule that guesses wrong
+ * about a column's grain states a falsehood to the user. Exported so those
+ * rules ask instead of assuming that the first grouping is the year.
+ */
+export function timeGrain(columnName: string): number {
+  const n = columnName.toLowerCase();
+  if (/^(year|år)/.test(n)) return TIME_GRAIN_YEAR;
+  if (/^(quarter|kvartal)/.test(n)) return 1;
+  if (/^(month|månad)/.test(n)) return 2;
+  if (/^(week|vecka)/.test(n)) return 3;
+  return TIME_GRAIN_NONE;
+}
+
 export function chooseCandidates(
   model: DesignQueryModel,
   intent: string,
@@ -271,21 +298,12 @@ export function chooseCandidates(
   }
   const timeGroupings: string[] = [];
   if (calendar) {
-    // Coarse first, the way a person reads a period: year, quarter, month, week.
-    const grain = (name: string): number => {
-      const n = name.toLowerCase();
-      if (/^(year|år)/.test(n)) return 0;
-      if (/^(quarter|kvartal)/.test(n)) return 1;
-      if (/^(month|månad)/.test(n)) return 2;
-      if (/^(week|vecka)/.test(n)) return 3;
-      return 9;
-    };
     const candidates = calendar.columns
       .filter((c) => {
         const role = roles[`${calendar.name}[${c.name}]`];
-        return grain(c.name) < 9 && !KEY_SUFFIX.test(c.name) && role !== "ignore" && role !== "key";
+        return timeGrain(c.name) < TIME_GRAIN_NONE && !KEY_SUFFIX.test(c.name) && role !== "ignore" && role !== "key";
       })
-      .sort((a, b) => grain(a.name) - grain(b.name) || a.name.localeCompare(b.name));
+      .sort((a, b) => timeGrain(a.name) - timeGrain(b.name) || a.name.localeCompare(b.name));
     for (const c of candidates) timeGroupings.push(dslFieldRef(calendar.name, c.name));
   }
 

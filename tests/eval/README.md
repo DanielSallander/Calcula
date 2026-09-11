@@ -3,9 +3,10 @@
 Can a given model write Calcula object scripts? This answers it with a number
 instead of a vibe.
 
-Two siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
-engine — see `docs/design/formula-assist.md`) and `run-design-query-eval.mjs`
-(design queries, graded by the DSL compiler and `canonical.ts`):
+Three siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
+engine — see `docs/design/formula-assist.md`), `run-design-query-eval.mjs`
+(design queries, graded by the DSL compiler and `canonical.ts`) and
+`run-next-edit-eval.mjs` (the next-edit row's model chip — see below):
 
 ```
 node tests/eval/run-design-query-eval.mjs --provider ollama --model qwen2.5-coder:1.5b
@@ -37,6 +38,61 @@ node tests/eval/run-formula-eval.mjs --provider llamacpp --model calcula-builtin
 
 Those are the flags `ai/runtime.rs` starts it with, so a run on port 8080 is a
 run on the product's runtime; only the port differs.
+
+## `run-next-edit-eval.mjs` — is the model's next-clause chip worth showing?
+
+```
+node tests/eval/run-next-edit-eval.mjs --provider llamacpp --model default
+node tests/eval/run-next-edit-eval.mjs --provider ollama --model qwen2.5-coder:3b --limit 20
+node tests/eval/run-next-edit-eval.mjs --provider llamacpp --model default --grammar off
+```
+
+A different question from drafting. The person is TYPING a design query, not
+describing one, so there is no request to interpret — only "what comes next".
+Every prefix of every correct query in `design-queries.json` becomes a task, and
+each complete query becomes one more where the right answer is **silence**.
+
+It reports three things, and they are separate on purpose:
+
+- **exact next clause**, over prefixes — what the chip is for;
+- **quiet on a finished query** — a chip here is a nag, and a nag is how a
+  person learns to ignore the row the RULES are also on;
+- **median and p90 latency**, warm. The gate is `--gate-median-ms` (400 by
+  default) and the process exits non-zero when it is missed.
+
+Beside them it runs the Tier-0 rules over the same prefixes, so one run answers
+the question the milestone actually asks: what does the model ADD over rules
+that read the strategy?
+
+Nothing in it is a re-implementation. `buildNextClauseRequest` builds the same
+prompt and grammar the row sends (including its token budget),
+`nextClauseSuggestion` reads the reply the same way, `rulesChips` is the row's
+own chip loop and `worseThan` its own compile veto. **And it refuses to run
+unless it can score its own oracle**: each reference's own next line goes
+through that same scorer first, and a single miss exits 3 rather than reporting
+a flawless zero. A scorer that cannot recognise a right answer produces exactly
+the number a bad model produces. The Tier-0 baseline is computed the same way,
+up front and loudly, because a crashed baseline reads as a baseline of zero and
+turns every model hit into "something the model added".
+
+It also runs the oracle through the compile veto, which is how it knows the
+ceiling is 79 rather than 80: one corpus task's correct next clause is `LAYOUT:
+subtotals-off`, the compiler has no case for `subtotals-*` and warns, and the
+veto refuses a chip that adds a warning. The runner prints the ceiling instead
+of scoring an unwinnable task as a miss.
+
+`--grammar` is refused for any provider but llama.cpp's server, for the reason
+the sibling gives: every other runtime ignores an unknown body key in silence,
+so the run would report `grammar=on` having measured no grammar at all. Request
+errors fail the gate too — a server that dies mid-run otherwise shrinks every
+denominator and the survivors can look fine.
+
+As measured 2026-09-11 on the built-in runtime (qwen2.5-coder-1.5b, grammar
+honoured): exact 0/80, rules alone 19/80, quiet 0/52, median 686 ms. The chip
+therefore ships OFF (`MODEL_CHIP_DEFAULT`), and this runner is what will decide
+when a better model turns it on. Layer A is
+`app/extensions/_shared/dsl/pivotLayout/nextEditCorpus.test.ts`, which runs the
+same rules over the same prefixes in CI with no model at all.
 
 The corpus is `tasks.json`. It ships in the repo deliberately (design doc
 §11.3): withholding it would make every claim about which models work

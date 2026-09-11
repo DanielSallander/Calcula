@@ -1310,6 +1310,107 @@ build of the same 1.5B scored 21/40 on the schema path earlier the same day, so 
 quantisation are worth about three tasks of noise. The clean wins are structural: everything
 compiles, half the wait, and a runtime the app owns end to end.
 
+**2.AI.11 — Next-edit suggestions for the design query: Milestones A and B SHIPPED 2026-09-11
+(A is Tier 0 and on; B is the model's chip, measured and OFF).** Design:
+`insights-strategy-layer.md` §14.5 and §14.6. The owner asked whether Calcula's AI would
+behave like GitHub Copilot's Next Edit Suggestions for the design query language and for macros.
+It did not: every AI surface built so far is request-shaped (type a sentence, press Draft, wait one
+to three seconds, get a whole artifact), while NES is edit-triggered, predicts an edit at another
+location, and answers in a few hundred milliseconds. Measured on the built-in runtime 2026-09-11
+with the prompt prefix cached, an infill completion of one clause takes 100–360 ms and a
+grammar-constrained chat completion 33–150 ms, so SPEED was never the obstacle for this language;
+the raw model inventing keywords was. Three owner decisions: **D8** the design query first and
+macros as a separate later milestone; **D9** suggestions everywhere the DSL is edited, starting as
+a row of accept-able chips BELOW the editor (in-editor ghost text and edits at another location are
+a later iteration, and the owner has further ideas for a richer strategy — the rule engine is a
+list so each is one more entry); **D10** no in-app 7B download, because almost nobody can run one
+today and a 7B belongs with the user's own runtime (Ollama and the like) between the small local
+models and the cloud.
+
+*Milestone A is Tier 0 — rules over the strategy, no model at all.* `@api/designQueryAssist/nextEdit.ts`
+holds seven pure rules over a neutral `QueryFacts` shape (`@api` may not import the DSL parser);
+`_shared/dsl/pivotLayout/nextEditFacts.ts` parses the text into those facts and applies the chosen
+edit to the TEXT, never by re-serialising the person's query; `NextEditRow.tsx` renders at most three
+chips, each with the sentence naming the strategy field it read. It mounts under the shared editor
+(Report from Design Query, the edit-report dialog, the chart data tab) and on the model pivot's
+Design tab. **Measured, Layer A over the same 40-task corpus:** zero suggestions on any of the 44
+complete correct references and alternatives (the gate), and a prefix recall of **21 of 86 (24.4 %),
+every hit from the one rule that supplies a missing VALUES**. That number is the argument for
+Milestone B: rules can supply the measure the strategy ranks first and can never guess which
+dimension the person wanted.
+
+*What the adversarial review changed, and it was most of the value.* Six reviewers over six
+dimensions produced 39 findings; 18 survived three independent refutation attempts each. Five were
+defects a user would have suffered: an apostrophe in a bracketed field name (`[Customer.Owner's Key]`)
+put the field splitter into a quote state the closing bracket never ended, so ONE accepted edit
+deleted every later field in that clause; a `#` comment line was treated as a continuation of the
+clause above it, so removing that clause's last field deleted the comment; the time rule looked for
+the year on ROWS only, so it called the most ordinary shape in the language — months down, years
+across — wrong and its edit put the year on BOTH axes; the same rule claimed to fix years on a
+calendar whose columns are named `MonthNumberOfYear`/`WeekNumberOfYear`, where no year column is in
+the list at all; and the chip's compile veto used an absolute bar, so every query using the Reports
+`@Name` parameter binding failed it and the whole row vanished. Four more were contradictions
+between rules (key-to-label proposing the very column never-slice-by would then demand you remove;
+remove-filtered-axis and add-rows walking the person in a circle; two rules rendering one edit as
+two identical chips) and three were spellings the pivot's own serializer writes (`LOOKUP Table.Column`,
+a quoted name, a schema-qualified `BI.dim_product.Name` split at the first dot rather than with
+`splitBiFieldKey`) against which every edit silently did nothing. All are fixed, each with a test,
+and fifteen sabotages each redded its own named test. Two further defects fell out of the work
+itself: `@api/pivotTypes.ts` and `_shared/components/types.ts` both mirror the Rust
+`BiPivotModelInfo` and `strategy` had reached only the second, so the facade's own type could not
+see a field the wire was already sending (`biPivotModelInfoMirrors.test.ts` now diffs the two field
+lists); and the pivot's Design tab briefly had its own `get_connection_bi_model` fetch, which was a
+second full-model round trip per pivot open, never refreshed on `bi:model-changed`, and could hand
+one connection's strategy to another connection's pivot — `PivotEditor`'s existing `liveModelMeta`
+fetch now carries the strategy instead and the Design tab is passed `fieldListModel`.
+
+*Milestone B is BUILT, MEASURED and OFF (2026-09-11).* Design: `insights-strategy-layer.md` §14.6.
+The model's chip goes through the existing completion seam — no new command — with
+`buildNextClauseRequest` assembling prompt, names and grammar in one place and
+`nextClauseSuggestion` reading the reply in one place, so `tests/eval/run-next-edit-eval.mjs`
+drives the product's pipeline rather than a copy. `rulesChips` moved out of `NextEditRow.tsx` into
+`nextEditFacts.ts` for the same reason: the row, the corpus gate and the runner now run ONE chip
+loop. **Measured on the built-in runtime over every prefix of the 52 correct corpus queries:
+exact next clause 0 of 80 — with a CEILING of 79, since one task's correct answer is refused by the
+row's own veto (below) — against 19 of 80 for the rules alone, so the model added nothing; quiet on
+a finished query 0 of 52, it proposed a clause every single time; median 686 ms, p90 848 ms against
+the milestone's 400 ms gate.** So `MODEL_CHIP_DEFAULT` is `false`: built, wired, off, and the runner
+decides when a better model earns it (D10 puts that between the small local models and the cloud).
+The runner refuses to run unless it can score its own oracle — each reference's own next line
+through the same scorer — and exits 3 if it cannot, because a broken scorer reports a flawless
+zero. Two defects surfaced on the way: the prompt told the model it could reply with nothing while
+the grammar's root demanded a clause, so the no-clause rate was zero by construction (the root is
+now `root ::= nextclause?` and a probe confirms the runtime returns the empty string with finish
+reason `stop`); and every clause repetition was an unbounded `*`, which the 1.5B filled with every
+measure it had been shown, so all are now `{0,3}` — the widest clause in the corpus lists two, and
+a paired drafting run either side of the bound (16/40 passed, 40/40 compiled both ways) says the
+shared grammar lost nothing. The corpus gate had also re-implemented the row's veto with a stricter
+absolute bar, which hid an `ALSO_CORRECT` fixture naming a column the model does not have
+(`Date.Quarter`); both fixed.
+
+*A defect the Layer B harness surfaced, filed not fixed.* **The DSL teaches three layout directives
+its own compiler warns about.** `DSL_LAYOUT_DIRECTIVES` lists `subtotals-top`, `subtotals-bottom`
+and `subtotals-off`; the next-clause prompt's cheat sheet names `subtotals-off` explicitly; the
+grammar therefore lets a model emit it; a corpus reference (`cost-by-category-subtotals-off`) uses
+it as the RIGHT answer; and `canonical.ts` deliberately carries `subtotals-*` through as
+"unrepresented" directives. But `compileLayout` (`_shared/dsl/pivotLayout/compiler.ts:340`) has no
+case for any of the three, so all three fall to `default` and emit `Unknown layout directive`. The
+consequence for the next-edit row is concrete: its veto refuses a chip that adds a new warning, so
+the one corpus task whose correct next clause is `LAYOUT: subtotals-off` is unreachable for ANY
+model — the runner now prints that as a ceiling of 79 rather than 80 instead of scoring it as a
+miss. Not fixed here because it is not a one-liner: `LayoutConfig` (`@api/pivotTypes.ts:184`) has no
+subtotals field at all — `showSubtotals` and `SubtotalLocationType` are per-FIELD — so honouring the
+directive means applying it across the row and column field configs, which is a pivot change rather
+than a DSL one.
+
+*Still open here:* **Milestone C**, in-editor ghost text and edits at another location; **Milestone
+D**, macros — fill-in-the-middle is achievable on-board for single lines, while NES-grade next-edit
+prediction for TypeScript needs an edit-sequence-trained model, which is 7B class and stays with
+the user's own runtime by D10. Also unresolved and worth a look before quoting a latency: this
+machine now measures the DRAFTING eval at a ~4 s median where §14.3 recorded 1.0 s, on the same
+pinned runtime and model and with the bound proved innocent by a paired run — so one of the two
+numbers was taken under conditions nobody wrote down.
+
 Still open, in order: **Step 4** M6 narration with a fact-id coverage guard, which is what gives
 `ResolvedMeasure.context` its reader; **Step 5** M4 router absorbing `scriptIntent.ts` and
 `analysisIntent.ts`. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to

@@ -18,6 +18,7 @@
 //          about eighty tokens.
 
 import type { DesignQueryCandidates } from "./types";
+import { buildNextClauseGrammar, type PresentClauses } from "./grammar";
 import { DSL_LAYOUT_DIRECTIVES, DSL_SHOW_VALUES_AS, DSL_TAUGHT_AGGREGATIONS } from "./vocabulary";
 
 /** The clause reference a model is shown. Kept short: every line is prompt tokens on a CPU. */
@@ -175,6 +176,109 @@ export interface UserPromptParts {
   readonly examples?: boolean;
   /** The reply format the examples are shown in. Defaults to the schema path's JSON. */
   readonly format?: DesignQueryReplyFormat;
+}
+
+/**
+ * The system prompt for a NEXT-CLAUSE completion. Byte-stable for a session.
+ *
+ * A different job from drafting, and a much smaller one: the person is typing a
+ * query, not describing one, so there is no request to interpret — only "what
+ * plausibly comes next, given what is already there". The grammar can emit
+ * exactly one clause and nothing else, so the prompt asks for exactly that; a
+ * prompt asking for more under a grammar that forbids it is what made every
+ * drafted reply open with an unasked LAYOUT line (§14.3).
+ *
+ * It is also allowed to answer NOTHING. A finished query is the common case in
+ * an editor, and a model that must always say something will always say
+ * something.
+ */
+export const DESIGN_QUERY_NEXT_CLAUSE_PROMPT = [
+  "You complete a design query for Calcula, a spreadsheet with a semantic model. The query is compiled and run by Calcula, which checks every name.",
+  "",
+  DESIGN_QUERY_CHEAT_SHEET,
+  "",
+  "Rules:",
+  "- Reply with ONE more clause for the query below, and nothing else. No JSON, no explanation, no repetition of the clauses already there.",
+  "- Use ONLY the measures and dimensions listed, spelled exactly as listed. Never invent a name.",
+  "- Add only a clause the query plainly wants: a measure when it has none, a breakdown when it has none, a filter or a ranking the wording of the names suggests.",
+  "- If the query is already complete, reply with nothing at all.",
+].join("\n");
+
+/** The names, as the drafting prompt lists them. Shared by both user messages. */
+function nameBlocks(c: DesignQueryCandidates): string[] {
+  const blocks: string[] = [];
+  const measureLine = c.measures.length
+    ? `Measures (most important first): ${c.measures.map((m) => `[${m}]`).join(", ")}` +
+      (c.droppedMeasures > 0 ? ` (and ${c.droppedMeasures} more not listed)` : "")
+    : "Measures: none declared.";
+  blocks.push(measureLine);
+
+  const dimensionLine = c.dimensions.length
+    ? `Dimensions: ${c.dimensions.join(", ")}` +
+      (c.droppedDimensions > 0 ? ` (and ${c.droppedDimensions} more not listed)` : "")
+    : "Dimensions: none.";
+  blocks.push(dimensionLine);
+
+  if (c.numericColumns.length) {
+    blocks.push(
+      `Numeric columns you may aggregate with ${DSL_TAUGHT_AGGREGATIONS.join("/")}: ${c.numericColumns.join(", ")}`,
+    );
+  }
+
+  if (c.timeGroupings.length || c.timeAxis) {
+    const groupings = c.timeGroupings.length ? ` Group time by: ${c.timeGroupings.join(", ")}.` : "";
+    blocks.push(`Time: ${c.timeAxis ?? "the calendar"}.${groupings}`);
+  } else {
+    blocks.push("Time: this model has no calendar; do not group by time.");
+  }
+  return blocks;
+}
+
+/** The user message for a next-clause completion: the names, then the query so far. */
+export function buildNextClauseUserPrompt(candidates: DesignQueryCandidates, dsl: string): string {
+  return [...nameBlocks(candidates), `Query so far:\n${dsl.trim()}`].join("\n\n");
+}
+
+/**
+ * The reply budget for one clause.
+ *
+ * A clause is a few tokens; a model that starts explaining fills whatever it is
+ * given. It lives on the request rather than at each call site because the row
+ * and the offline runner must send the same number — a runner with its own copy
+ * measures a budget the product does not use.
+ */
+export const NEXT_CLAUSE_MAX_TOKENS = 48;
+
+/** Everything one next-clause request needs, or null when none should be sent. */
+export interface NextClauseRequest {
+  system: string;
+  user: string;
+  grammar: string;
+  maxTokens: number;
+}
+
+/**
+ * Assemble the whole next-clause request: prompt, names and grammar.
+ *
+ * ONE definition, so the product's row and the offline runner send the same
+ * bytes. A runner that rebuilt the request would measure a port of the
+ * pipeline rather than the pipeline — the mistake the design-query runner was
+ * written to avoid, and the reason that one drives `draftDesignQuery` itself.
+ * Null when the query is already complete or the model cannot express one.
+ */
+export function buildNextClauseRequest(
+  candidates: DesignQueryCandidates,
+  present: PresentClauses,
+  dsl: string,
+): NextClauseRequest | null {
+  const grammar = buildNextClauseGrammar(candidates, present);
+  if (!grammar) return null;
+  return {
+    system: DESIGN_QUERY_NEXT_CLAUSE_PROMPT,
+    user: buildNextClauseUserPrompt(candidates, dsl),
+    grammar,
+    maxTokens: NEXT_CLAUSE_MAX_TOKENS,
+  };
 }
 
 /** The user message: the names, the time axis, the examples, then the request. */

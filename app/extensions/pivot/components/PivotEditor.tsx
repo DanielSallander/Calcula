@@ -14,6 +14,7 @@ import { pivot, savePivotLayout } from '@api/pivot';
 import { openTaskPane, getBiConnectionService } from '@api';
 import { onAppEvent } from '@api/events';
 import type { SavePivotLayoutRequest } from '@api/pivot';
+import type { DesignStrategySummary } from '@api/designQueryAssist';
 import { TableFieldList } from '../../_shared/components/TableFieldList';
 import { getConnectionBiModel, setPivotPerspective } from '../lib/pivot-api';
 import type {
@@ -293,6 +294,12 @@ export function PivotEditor({
     perspectives?: BiPerspectiveInfo[];
     cultures?: BiCultureInfo[];
     calculationGroups?: BiCalcGroup[];
+    /** The strategy summary, which a pivot's CACHED metadata never carries —
+     *  the cache holds no model to read one from. Taken from the same
+     *  connection-level fetch as the three above, so the Design tab's
+     *  suggestion and drafting rows get it without a second round trip and
+     *  inherit this effect's `bi:model-changed` refresh. */
+    strategy?: DesignStrategySummary | null;
   } | null>(null);
   useEffect(() => {
     // Drop any previous connection's overlay so a failed fetch can never show
@@ -309,6 +316,7 @@ export function PivotEditor({
               perspectives: m.perspectives,
               cultures: m.cultures,
               calculationGroups: m.calculationGroups,
+              strategy: m.strategy,
             });
           }
         })
@@ -336,6 +344,7 @@ export function PivotEditor({
       cultures: liveModelMeta.cultures ?? biModel.cultures,
       calculationGroups:
         liveModelMeta.calculationGroups ?? biModel.calculationGroups,
+      strategy: liveModelMeta.strategy ?? biModel.strategy,
     };
   }, [biModel, liveModelMeta]);
   // Calculation groups are placed as DIMENSION fields (Power BI-style). Their
@@ -1010,9 +1019,12 @@ export function PivotEditor({
           pivotId={pivotId}
           onLoadDsl={handleLoadDsl}
         />
+        {/* `fieldListModel`, not the pivot's cached `biModel`: it is the only
+            one that carries the strategy the Design tab's suggestion and
+            drafting rows read, and it refreshes on `bi:model-changed`. */}
         <DesignEditor
           sourceFields={sourceFields}
-          biModel={biModel}
+          biModel={fieldListModel}
           rows={rows}
           columns={columns}
           values={values}

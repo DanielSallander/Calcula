@@ -8,6 +8,7 @@
 //       extensions/Pivot/components/types.ts) so the contract is self-contained.
 
 import type { BiHierarchyMeta } from "./backend";
+import type { DesignStrategySummary } from "./designQueryAssist/types";
 
 /** Inline calculated field definition. */
 export interface CalculatedFieldDef {
@@ -452,6 +453,19 @@ export interface BiPivotModelInfo {
   /** Cultures defined in the BI model (per-locale metadata translations,
    *  display-only — keys and queries always use raw names). */
   cultures?: BiCultureInfo[];
+  /** The model's strategy document reduced to what the design-query assistant
+   *  and the next-edit rules need (Rust `insights/describe.rs`). Present on
+   *  connection-level metadata (`get_connection_bi_model`); a pivot's cached
+   *  metadata carries none, because the cache holds no model to read one from.
+   *
+   *  ADDED HERE 2026-09-11, a day late. Step 2 added it to the OTHER mirror of
+   *  this same Rust struct (`extensions/_shared/components/types.ts`) and not
+   *  to this one, so every caller typed through the facade — `pivot-api`'s
+   *  `getConnectionBiModel` among them — could not see a field the wire was
+   *  already carrying. `biPivotModelInfoMirrors.test.ts` now diffs the two
+   *  declarations, so the next field added to one is a red test rather than a
+   *  type error in whichever file happens to read it first. */
+  strategy?: DesignStrategySummary | null;
 }
 
 /** A perspective: a named presentation subset of the model (display-only —

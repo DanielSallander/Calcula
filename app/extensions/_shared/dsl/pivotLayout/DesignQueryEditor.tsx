@@ -16,6 +16,7 @@ import {
   type DslControlHint,
 } from "./pivotDslLanguage";
 import { DescribeQueryRow, type DesignQueryAssistHost } from "./DescribeQueryRow";
+import { NextEditRow } from "./NextEditRow";
 import type { BiPivotModelInfo } from "../../components/types";
 
 interface DesignQueryEditorProps {
@@ -35,6 +36,12 @@ interface DesignQueryEditorProps {
    * backend channel of its own.
    */
   assist?: DesignQueryAssistHost;
+  /**
+   * The row of next-edit suggestions under the editor (rules over the
+   * strategy; no model needed). On by default whenever a model is supplied,
+   * because the rules read the strategy that rides on it.
+   */
+  suggest?: boolean;
 }
 
 export function DesignQueryEditor({
@@ -44,6 +51,7 @@ export function DesignQueryEditor({
   controlHints,
   height = "160px",
   assist,
+  suggest,
 }: DesignQueryEditorProps): React.ReactElement {
   useEffect(() => {
     registerPivotDslLanguage();
@@ -129,6 +137,9 @@ export function DesignQueryEditor({
         }}
       />
     </div>
+    {(suggest ?? Boolean(biModel)) ? (
+      <NextEditRow text={value} biModel={biModel} connectionId={assist?.connectionId ?? biModel?.connectionId ?? ""} onApply={onChange} />
+    ) : null}
     </>
   );
 }
