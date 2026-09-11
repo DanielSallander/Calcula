@@ -112,6 +112,13 @@ export interface NextEditRowProps {
    * clause, and the grammar is what makes a wrong NAME impossible.
    */
   askModel?: boolean;
+  /**
+   * Dismissed suggestion ids, when the host wants to SHARE them with the
+   * editor's ghost text (Milestone C). Two sets would mean dismissing a
+   * suggestion here and finding it still sitting in the text. Omitted, the row
+   * keeps its own for its lifetime, exactly as before.
+   */
+  dismissed?: Set<string>;
 }
 
 /**
@@ -194,10 +201,16 @@ export function NextEditRow({
   compile,
   debounceMs = DEBOUNCE_MS,
   askModel = MODEL_CHIP_DEFAULT,
+  dismissed: sharedDismissed,
 }: NextEditRowProps): React.ReactElement | null {
   const [chips, setChips] = useState<NextEditChip[]>([]);
   const [modelChip, setModelChip] = useState<NextEditChip | null>(null);
-  const dismissed = useRef<Set<string>>(new Set());
+  const ownDismissed = useRef<Set<string>>(new Set());
+ // The set the row reads and writes. A host that also renders ghost text passes
+  // its own so the two surfaces share one; otherwise the row keeps its own for
+  // its lifetime, exactly as before. Both references are stable, so this is not
+  // a new object per render even though it is computed in the body.
+  const dismissed = sharedDismissed ?? ownDismissed.current;
   // The editor's text as of the last commit. Accept reads THIS, not the string
   // a chip was built from, so a chip accepted after another chip (or after more
   // typing) edits what is actually in the editor.
@@ -207,7 +220,7 @@ export function NextEditRow({
   }, [text]);
 
   const recompute = useCallback(() => {
-    setChips(chipsFor(text, biModel, connectionId, dismissed.current, compile));
+    setChips(chipsFor(text, biModel, connectionId, dismissed, compile));
   }, [text, biModel, connectionId, compile]);
 
   useEffect(() => {
@@ -233,11 +246,11 @@ export function NextEditRow({
     const controller = new AbortController();
     let cancelled = false;
     const timer = setTimeout(() => {
-      const current = chipsFor(text, biModel, connectionId, dismissed.current, compile);
+      const current = chipsFor(text, biModel, connectionId, dismissed, compile);
       if (current.length >= MAX_CHIPS) return;
       void askModelForNextClause(text, biModel as DesignQueryModel, controller.signal)
         .then((suggestion) => {
-          if (cancelled || !suggestion || dismissed.current.has(suggestion.id)) return;
+          if (cancelled || !suggestion || dismissed.has(suggestion.id)) return;
           const applied = applyEditOp(text, suggestion.op);
           if (applied === text) return;
           // NOT A SECOND CHIP FOR THE SAME EDIT. A rule that already proposes
@@ -280,7 +293,7 @@ export function NextEditRow({
   }, [onApply, drop]);
 
   const dismiss = useCallback((chip: NextEditChip) => {
-    dismissed.current.add(chip.suggestion.id);
+    dismissed.add(chip.suggestion.id);
     drop(chip.suggestion.id);
   }, [drop]);
 

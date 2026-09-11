@@ -9,6 +9,36 @@ import type { SourceField } from '../../components/types';
 import type { BiPivotModelInfo } from '../../components/types';
 import { AGGREGATION_NAMES, CALC_FUNCTION_ALIASES, LAYOUT_DIRECTIVES, SHOW_VALUES_AS_NAMES, TRANSFORM_FUNCTIONS, VISUAL_CALC_FUNCTIONS, VISUAL_CALC_RESET_OPTIONS } from './tokens';
 import { BARE_PARAM_NAME_RE, paramReference } from './paramNames';
+import { inlineItemsFor } from './nextEditInline';
+import {
+  dslContextForUri,
+  type DslControlHint,
+  type DslModelContext,
+} from './dslModelContexts';
+
+// The registry itself lives in `dslModelContexts` — no monaco import there, so
+// it is unit-testable. These are the names the editors already import here.
+export {
+  clearDslModelContext,
+  dslModelContextCount,
+  setDslControlHints,
+  setDslEditorContext,
+  setDslModelContext,
+  type DslControlHint,
+  type DslModelContext,
+} from './dslModelContexts';
+import { compileDesignQuery } from './designQuery';
+
+/**
+ * How many ghost-text suggestions Monaco is offered at once: ONE.
+ *
+ * Monaco's handling of a list that mixes plain completions with inline EDITS is
+ * not something to rely on — an inline edit and a ghost-text item cannot both be
+ * rendered, and which survives is an implementation detail. One item is also
+ * what the surface means: the next edit, where the cursor is. The row below the
+ * editor is where a person sees the alternatives, with the reason for each.
+ */
+const MAX_INLINE_SUGGESTIONS = 1;
 
 // Monaco worker setup (local, no CDN)
 self.MonacoEnvironment = {
@@ -22,42 +52,11 @@ loader.config({ monaco });
 const LANGUAGE_ID = 'pivot-layout-dsl';
 let languageRegistered = false;
 let completionDisposable: monaco.IDisposable | null = null;
+let inlineDisposable: monaco.IDisposable | null = null;
 
-/**
- * A named control/ribbon-filter that a DSL FILTERS clause can reference by
- * `@Name` (e.g. `Category = @Region`). Supplied by the Reports editor only;
- * the language module stays feature-neutral (no @api dependency).
- */
-export interface DslControlHint {
-  name: string;
-  /** Short family label shown in the completion description (e.g. "filter"). */
-  kind?: string;
-  /** Current-value preview shown as completion detail. */
-  detail?: string;
-}
-
-/** Mutable refs for autocomplete context (updated when pivot data changes). */
-let currentSourceFields: SourceField[] = [];
-let currentBiModel: BiPivotModelInfo | undefined;
-let currentControlHints: DslControlHint[] = [];
-
-/** Update the field context used for autocomplete suggestions. `controlHints`
- *  enables `@Name` completion (Reports @param binding); omit it (pivot/chart
- *  editors) to clear it. */
-export function setDslEditorContext(
-  sourceFields: SourceField[],
-  biModel?: BiPivotModelInfo,
-  controlHints?: DslControlHint[],
-): void {
-  currentSourceFields = sourceFields;
-  currentBiModel = biModel;
-  currentControlHints = controlHints ?? [];
-}
-
-/** Update only the control hints (used by the Reports editor's unmount cleanup,
- *  so stale hints never leak into a pivot/chart editor sharing this module). */
-export function setDslControlHints(controlHints: DslControlHint[]): void {
-  currentControlHints = controlHints;
+/** The context for a document: its own if registered, else the fallback. */
+function contextFor(model: monaco.editor.ITextModel): DslModelContext {
+  return dslContextForUri(model.uri?.toString());
 }
 
 /**
@@ -118,15 +117,16 @@ function findCurrentClause(
 
 /** Add field name suggestions from current context. */
 function addFieldSuggestions(
+  ctx: DslModelContext,
   suggestions: monaco.languages.CompletionItem[],
   range: monaco.IRange,
   numericOnly: boolean,
 ): void {
-  if (currentBiModel) {
+  if (ctx.biModel) {
     // Calculation groups place as dimension fields (Power BI-style) — suggest
     // them alongside columns in ROWS/COLUMNS/FILTERS.
     if (!numericOnly) {
-      for (const g of currentBiModel.calculationGroups ?? []) {
+      for (const g of ctx.biModel.calculationGroups ?? []) {
         suggestions.push({
           label: { label: g.name, description: 'Calculation group' },
           kind: monaco.languages.CompletionItemKind.Class,
@@ -138,7 +138,7 @@ function addFieldSuggestions(
       }
     }
     let tableIdx = 0;
-    for (const table of currentBiModel.tables) {
+    for (const table of ctx.biModel.tables) {
       const prefix = String(tableIdx).padStart(2, '0');
       let colIdx = 0;
       for (const col of table.columns) {
@@ -160,7 +160,7 @@ function addFieldSuggestions(
       tableIdx++;
     }
   } else {
-    for (const field of currentSourceFields) {
+    for (const field of ctx.sourceFields) {
       if (numericOnly && !field.isNumeric) continue;
       suggestions.push({
         label: field.name,
@@ -268,16 +268,26 @@ export function registerPivotDslLanguage(): void {
     });
   }
 
-  // Dispose previous completion provider (allows re-registration on HMR)
+  // Dispose previous providers (allows re-registration on HMR). Both are
+  // registered per LANGUAGE, so there is exactly one of each however many
+  // editors are open; which document each answers for is decided by
+  // `contextFor`, not by re-registering.
   if (completionDisposable) {
     completionDisposable.dispose();
     completionDisposable = null;
   }
+  if (inlineDisposable) {
+    inlineDisposable.dispose();
+    inlineDisposable = null;
+  }
+  inlineDisposable = registerInlineNextEdits();
 
   // Register completion provider
   completionDisposable = monaco.languages.registerCompletionItemProvider(LANGUAGE_ID, {
     triggerCharacters: [' ', ':', ',', '.', '(', '[', '@'],
     provideCompletionItems(model, position) {
+      // THIS document's context, not "whichever editor wrote last".
+      const ctx = contextFor(model);
       const lineText = model.getValueInRange({
         startLineNumber: position.lineNumber,
         startColumn: 1,
@@ -319,7 +329,7 @@ export function registerPivotDslLanguage(): void {
       // inside an in-progress `@` token — but not inside string values or
       // comments. Only the Reports editor supplies control hints, so this is
       // naturally inert in pivot/chart editors.
-      if (currentControlHints.length > 0) {
+      if (ctx.controlHints.length > 0) {
         const atIdx = findOpenParamToken(lineText);
         if (atIdx !== null) {
           // Replace the WHOLE token including the '@' — the default word range
@@ -330,7 +340,7 @@ export function registerPivotDslLanguage(): void {
             startColumn: atIdx + 1, // columns are 1-based; atIdx is 0-based
             endColumn: position.column,
           };
-          for (const hint of currentControlHints) {
+          for (const hint of ctx.controlHints) {
             const insert = paramReference(hint.name);
             if (!insert) continue; // names containing '"' are not expressible
             suggestions.push({
@@ -374,13 +384,13 @@ export function registerPivotDslLanguage(): void {
             });
           }
           // Also suggest field names for field-level reset
-          addFieldSuggestions(suggestions, fieldRange, false);
+          addFieldSuggestions(ctx, suggestions, fieldRange, false);
           return { suggestions };
         }
         // 1st argument (or aggregation function) → suggest fields + measures
-        addFieldSuggestions(suggestions, fieldRange, funcParenCtx.isAggregation);
-        if (currentBiModel) {
-          addMeasureSuggestions(suggestions, fieldRange);
+        addFieldSuggestions(ctx, suggestions, fieldRange, funcParenCtx.isAggregation);
+        if (ctx.biModel) {
+          addMeasureSuggestions(ctx, suggestions, fieldRange);
         }
         return { suggestions };
       }
@@ -396,8 +406,8 @@ export function registerPivotDslLanguage(): void {
         case 'ROWS':
         case 'COLUMNS':
         case 'FILTERS':
-          addFieldSuggestions(suggestions, fieldRange, false);
-          if (currentBiModel) {
+          addFieldSuggestions(ctx, suggestions, fieldRange, false);
+          if (ctx.biModel) {
             suggestions.push({
               label: 'LOOKUP',
               kind: monaco.languages.CompletionItemKind.Keyword,
@@ -405,7 +415,7 @@ export function registerPivotDslLanguage(): void {
               range,
             });
           }
-          if (clause !== 'FILTERS' && currentBiModel) {
+          if (clause !== 'FILTERS' && ctx.biModel) {
             // VIA Table.Column — relationship path for ambiguous joins
             suggestions.push({
               label: 'VIA',
@@ -467,13 +477,13 @@ export function registerPivotDslLanguage(): void {
               range,
             });
           }
-          if (currentBiModel) {
-            addMeasureSuggestions(suggestions, fieldRange);
+          if (ctx.biModel) {
+            addMeasureSuggestions(ctx, suggestions, fieldRange);
           }
           return { suggestions };
 
         case 'SORT':
-          addFieldSuggestions(suggestions, fieldRange, false);
+          addFieldSuggestions(ctx, suggestions, fieldRange, false);
           suggestions.push(
             { label: 'ASC', kind: monaco.languages.CompletionItemKind.Keyword, insertText: 'ASC', range },
             { label: 'DESC', kind: monaco.languages.CompletionItemKind.Keyword, insertText: 'DESC', range },
@@ -493,9 +503,9 @@ export function registerPivotDslLanguage(): void {
 
         case 'CALC':
           // CALC expressions can reference dimensions, measures, and visual calc functions
-          addFieldSuggestions(suggestions, fieldRange, false);
-          if (currentBiModel) {
-            addMeasureSuggestions(suggestions, fieldRange);
+          addFieldSuggestions(ctx, suggestions, fieldRange, false);
+          if (ctx.biModel) {
+            addMeasureSuggestions(ctx, suggestions, fieldRange);
           }
           // Transformation functions (IF/SWITCH/math/text) — post-aggregation.
           for (const [fn, desc] of TRANSFORM_FUNCTIONS) {
@@ -557,16 +567,99 @@ export function registerPivotDslLanguage(): void {
   });
 }
 
+/**
+ * Ghost text for the next edit the strategy wants (Milestone C).
+ *
+ * EDIT-TRIGGERED, which is the whole point: Monaco asks this on every keystroke,
+ * so a suggestion appears where the person is typing rather than waiting on a
+ * row below. Two shapes come out of it, and the second is the one the owner's
+ * original question was about:
+ *
+ *   AT THE CURSOR'S LINE — plain ghost text, accepted with Tab.
+ *   AT ANOTHER LINE      — `isInlineEdit` plus a `hint` carrying
+ *                          `jumpToEdit`, which Monaco renders as "there is an
+ *                          edit over there" and jumps to on Tab. That is
+ *                          Copilot's Next-Edit-Suggestion behaviour, and this
+ *                          Monaco (0.55) implements it natively; nothing here
+ *                          hand-rolls it out of decorations.
+ *
+ * NO MODEL IS ASKED. Milestone B measured the built-in 1.5B at 0 of 80 next
+ * clauses, so ghost text from it would be wrong every time it appeared. These
+ * come from the same rules, the same compile veto and the same edit functions
+ * as the chip row — `inlineNextEdits` calls `rulesChips` — so the two surfaces
+ * cannot propose different things, and a suggestion dismissed on the row is
+ * dismissed here too through the shared `dismissed` set.
+ */
+function registerInlineNextEdits(): monaco.IDisposable {
+  return monaco.languages.registerInlineCompletionsProvider(LANGUAGE_ID, {
+    displayName: 'Calcula design-query suggestions',
+    provideInlineCompletions(model, position) {
+      const ctx = contextFor(model);
+      if (!ctx.inlineNextEdits || !ctx.biModel) return { items: [] };
+      const biModel = ctx.biModel;
+
+      // EVERY decision is made by `inlineItemsFor`: which line, what replaces
+      // it, ghost text or inline edit, hint or no hint. All that is left here is
+      // turning a line number into a Monaco range, which needs the live model.
+      // The split is what makes the behaviour testable — this module imports
+      // `monaco-editor`, `@monaco-editor/react` and a `?worker` module, and a
+      // test that mocked all three to assert a line number would be testing the
+      // mocks.
+      const decided = inlineItemsFor(
+        model.getValue(),
+        position.lineNumber,
+        biModel,
+        biModel.tables.map((t) => t.name),
+        (dsl: string) => compileDesignQuery(dsl, ctx.connectionId ?? '', biModel),
+        ctx.dismissed ?? new Set(),
+        MAX_INLINE_SUGGESTIONS,
+      );
+
+      const items: monaco.languages.InlineCompletion[] = decided.map((item) => ({
+        insertText: item.insertText,
+        // The whole anchor line is replaced. A whole-line range always ends at
+        // the end of a line, which is what lets `insertText` contain a break.
+        range: {
+          startLineNumber: item.line,
+          startColumn: 1,
+          endLineNumber: item.line,
+          endColumn: model.getLineMaxColumn(item.line),
+        },
+        isInlineEdit: item.isInlineEdit,
+        showInlineEditMenu: item.elsewhere,
+        hint: item.elsewhere
+          ? {
+              range: {
+                startLineNumber: position.lineNumber,
+                startColumn: 1,
+                endLineNumber: position.lineNumber,
+                endColumn: model.getLineMaxColumn(position.lineNumber),
+              },
+              style: monaco.languages.InlineCompletionHintStyle.Label,
+              content: item.label,
+              jumpToEdit: true,
+            }
+          : undefined,
+      }));
+      return { items };
+    },
+    disposeInlineCompletions() {
+      /* nothing retained: every item is rebuilt from the model's text */
+    },
+  });
+}
+
 /** Add BI measure suggestions grouped by table. */
 function addMeasureSuggestions(
+  ctx: DslModelContext,
   suggestions: monaco.languages.CompletionItem[],
   range: monaco.IRange,
 ): void {
-  if (!currentBiModel) return;
+  if (!ctx.biModel) return;
 
   // Group measures by table
-  const measuresByTable = new Map<string, typeof currentBiModel.measures>();
-  for (const m of currentBiModel.measures) {
+  const measuresByTable = new Map<string, typeof ctx.biModel.measures>();
+  for (const m of ctx.biModel.measures) {
     const table = m.table || '(Measures)';
     if (!measuresByTable.has(table)) {
       measuresByTable.set(table, []);

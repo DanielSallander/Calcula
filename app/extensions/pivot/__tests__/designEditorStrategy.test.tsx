@@ -69,6 +69,10 @@ vi.mock("@api", () => ({
 
 const { DesignEditor } = await import("../components/DesignEditor");
 
+// React 18 warns and stops flushing effects synchronously without this, which
+// makes every debounce in the file a race. Each React test file sets it itself.
+Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
+
 let container: HTMLDivElement;
 let root: Root;
 

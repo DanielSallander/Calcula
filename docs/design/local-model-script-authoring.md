@@ -1912,3 +1912,76 @@ principle they amend) put a Tier-1 runtime in the product:
 What §2 still forbids, unchanged: a hardware matrix, hardware detection, a vendor-by-feature
 table, a privileged vendor, and silent degradation. The built-in provider is one more entry in the
 same picker, measured by the same probe, and a user who never wants it never downloads it.
+
+## 15. Fill-in-the-middle in the script editor — measured, not built (2026-09-11)
+
+The Object Script Editor has had a REQUEST-shaped AI composer since 2026-08-25: say what you want
+changed, watch it work, get a diff (`AiEditStrip.tsx`). What it has never had is anything
+edit-triggered at the cursor — which is exactly the gap the owner named when asking whether Calcula
+would behave like Copilot's Next Edit Suggestions. Milestone D of that plan says a fill-in-the-middle
+corpus comes before any code, so the corpus and the measurement are what exist.
+
+`tests/eval/run-macro-fim-eval.mjs` derives its tasks: every `reference` in `tasks.json` is a correct
+object script stored as lines, so holing out each eligible line from the second onward gives 141
+tasks with a known answer and real surrounding context. It refuses to run unless prefix + the right
+answer + suffix rebuilds the original byte for byte.
+
+**The surface triples the score, and the reason is not the obvious one.** The first run, with no API
+surface in the prompt, scored 8 of 141 — and the misses were not nonsense, they were INVENTED NAMES:
+`getValue` for `getCellValue`, `getCells` for `getRangeValues`, `context.api.on('cellChanged', …)`
+for `context.onClick`. Handing the model `buildSurfacePrompt`'s ranked surface as llama-server's
+`input_extra`:
+
+| surface budget | reachable | exact of 141 | median | McNemar exact vs 600 |
+|---|---|---|---|---|
+| off | — | 8 (5.7 %) | 712 ms | 0.0001 |
+| 300 tokens | 38/103 | 13 (9.2 %) | 924 ms | 0.0018 |
+| **600 tokens** | 42/103 | **25 (17.7 %)** | **1033 ms** | — |
+| 1500 tokens | 60/103 | 20 (14.2 %) | 1360 ms | 0.1797 |
+| 2500 tokens | **98/103** | 26 (18.4 %) | 1558 ms | **1.0000** |
+
+"Reachable" counts how many of the 103 answers naming a `context.<chain>` had every chain they name
+in the surface actually sent. It is in the table because without it the easy story is irresistible
+and wrong.
+
+**I wrote the easy story first, and the 2500 row refutes it.** The claim was that this is §11's
+tool-count finding again — show the model the API and it stops inventing names. But `rankSurface`
+orders the capability chains ahead of every grid member, so no budget under 1500 contains a single
+`api.*` method and `getCellValue`/`setCellValue` do not appear until 2500. So at the budget that
+scored best, the model had never been shown the methods it was inventing. And when it finally IS
+shown them — 98 of 103 answers fully covered instead of 42 — the score moves from 25 to 26, **p =
+1.0000**. Vocabulary coverage is not what was limiting it.
+
+What the first ~600 tokens actually buy is the CAPABILITY names and the `onClick` idiom: the tasks
+that flip are `cap-fetch-rate`, `cap-schedule-refresh`, `cap-dialog-confirm-*`, `cap-dialog-prompt-*`,
+`cap-two-capabilities`, `cap-form-*`, and the three idiom traps. The model stops reaching for
+`window.alert` and starts declaring what it uses. Past that it simply cannot infer the line, however
+much of the API it is holding — so **better retrieval is not the lever for fill-in-the-middle at this
+model size**, and the obvious nudge agrees: `--hints buffer`, re-ranking toward identifiers the open
+document already mentions, measured **18 of 141, worse than no hints at all (p = 0.0391)**.
+
+One more caution for anyone reading the floor: the naive "repeat the line above" predictor scores 0
+of 141, but STRUCTURALLY — the corpus has exactly five positions where a line repeats the one above
+and all five are closers the eligibility filter removes. A floor that cannot fire is not a cleared
+bar, and the runner now says so in its own output rather than presenting it as evidence.
+
+**Why no product code yet, and it is not the score.** 17.7 % is far above the design-query model
+chip's 0 of 80 and would be worth showing on demand. But the runtime runs with `-np 1`: one slot. An
+infill fired 150 ms into a chat generation took 3238 ms, returning only when the chat finished. And
+`ai_chat_cancel_stream` reaches only the streaming path, so a superseded keystroke's buffered
+completion runs to completion still holding that slot. Automatic per-keystroke ghost text on this
+runtime would queue behind itself. An explicitly invoked completion is the shape the measurement
+supports.
+
+**And it needs its own command.** `/infill` is at the ROOT of llama-server while the built-in
+runtime's base URL hardcodes `/v1`; `ChatRequest` carries no prefix/suffix fields and picks its URL
+from a closed two-armed match on provider kind; and the runtime is started with `--jinja`, so a chat
+request wraps the prompt in Qwen's chat template and destroys the FIM conditioning outright — the
+same bytes came back as a conversational fenced block through chat and as a cursor continuation
+through `/infill`. So `ai_infill_complete` is the minimum new surface when the call is made, and it
+must not reuse `Running::base_url()`, the 600-second request timeout, or `push_openai` (infill frames
+are llama.cpp-native `{"content":…}`, not OpenAI `choices[].delta`).
+
+This is Tier-1-first by nature, not by choice: Ollama serves FIM only on its native `/api/generate`
+with a `suffix` field and 404s `/v1/infill`, and Anthropic and OpenAI have no infill at all. Reaching
+Tier 2 means a per-runtime rendering, not one more URL.

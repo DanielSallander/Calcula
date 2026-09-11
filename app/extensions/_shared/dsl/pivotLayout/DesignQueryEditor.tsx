@@ -6,13 +6,15 @@
 //   the model itself (that needs an extension-scoped backend channel) — the
 //   parent passes `biModel` (e.g. from get_connection_bi_model).
 
-import React, { useEffect, useCallback, useRef } from "react";
-import Editor, { type OnChange } from "@monaco-editor/react";
+import React, { useEffect, useCallback, useRef, useState } from "react";
+import Editor, { type OnChange, type OnMount } from "@monaco-editor/react";
 import {
   LANGUAGE_ID,
+  clearDslModelContext,
   registerPivotDslLanguage,
   setDslEditorContext,
   setDslControlHints,
+  setDslModelContext,
   type DslControlHint,
 } from "./pivotDslLanguage";
 import { DescribeQueryRow, type DesignQueryAssistHost } from "./DescribeQueryRow";
@@ -82,13 +84,45 @@ export function DesignQueryEditor({
     };
   }, []);
 
-  // The DSL editor context is module-global (shared with the pivot Design view);
-  // re-set it whenever the supplied model or control hints change, and clear the
-  // hints on unmount so they never leak into a pivot/chart editor that reuses
-  // the shared language module.
+  // WHICH DOCUMENT THIS EDITOR'S SUGGESTIONS ARE ABOUT.
+  //
+  // Monaco registers providers per LANGUAGE, so the language module must be able
+  // to map the model it is handed back to the host that owns it. This editor and
+  // the pivot's Design tab can be open at once — a Reports dialog over a pivot —
+  // and while the context was a single module-level "current model", the last
+  // one to render won and the other autocompleted against the wrong schema.
+  // Registering per model URI makes that impossible.
+  const [modelUri, setModelUri] = useState<string | null>(null);
+  const handleMount: OnMount = useCallback((editor) => {
+    setModelUri(editor.getModel()?.uri?.toString() ?? null);
+  }, []);
+
+  // One dismissed set, shared by the chip row and the ghost text. Two sets would
+  // mean dismissing a suggestion on the row and finding it still sitting in the
+  // text, which is precisely the nagging the row was built to avoid.
+  const dismissed = useRef<Set<string>>(new Set());
+
+  const showSuggestions = suggest ?? Boolean(biModel);
+  const connectionId = assist?.connectionId ?? biModel?.connectionId ?? "";
+
   useEffect(() => {
+    // The fallback stays written for the window before this editor mounts.
     setDslEditorContext([], biModel ?? undefined, controlHints);
-  }, [biModel, controlHints]);
+    if (!modelUri) return;
+    setDslModelContext(modelUri, {
+      sourceFields: [],
+      biModel: biModel ?? undefined,
+      controlHints: controlHints ?? [],
+      connectionId,
+      inlineNextEdits: showSuggestions,
+      dismissed: dismissed.current,
+    });
+  }, [biModel, controlHints, modelUri, connectionId, showSuggestions]);
+
+  useEffect(() => {
+    if (!modelUri) return;
+    return () => clearDslModelContext(modelUri);
+  }, [modelUri]);
   useEffect(() => () => setDslControlHints([]), []);
 
   const handleChange: OnChange = useCallback((v) => onChange(v ?? ""), [onChange]);
@@ -112,7 +146,16 @@ export function DesignQueryEditor({
         theme="vs"
         value={value}
         onChange={handleChange}
+        onMount={handleMount}
         options={{
+          // Ghost text for the next edit the strategy wants (Milestone C).
+          // `mode` is left at its default `prefix`, which shows ghost text only
+          // when the replaced text is a prefix of the suggestion — the reason
+          // `nextEditInline` anchors an insertion to the line ABOVE it. A
+          // suggestion that is NOT a prefix is declared `isInlineEdit` instead
+          // and Monaco renders it as an edit with a jump, which is the
+          // Next-Edit-Suggestion shape and needs no option here.
+          inlineSuggest: { enabled: true, showToolbar: "onHover" },
           minimap: { enabled: false },
           lineNumbers: "off",
           glyphMargin: false,
@@ -137,8 +180,14 @@ export function DesignQueryEditor({
         }}
       />
     </div>
-    {(suggest ?? Boolean(biModel)) ? (
-      <NextEditRow text={value} biModel={biModel} connectionId={assist?.connectionId ?? biModel?.connectionId ?? ""} onApply={onChange} />
+    {showSuggestions ? (
+      <NextEditRow
+        text={value}
+        biModel={biModel}
+        connectionId={connectionId}
+        onApply={onChange}
+        dismissed={dismissed.current}
+      />
     ) : null}
     </>
   );

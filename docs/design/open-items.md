@@ -1310,9 +1310,10 @@ build of the same 1.5B scored 21/40 on the schema path earlier the same day, so 
 quantisation are worth about three tasks of noise. The clean wins are structural: everything
 compiles, half the wait, and a runtime the app owns end to end.
 
-**2.AI.11 — Next-edit suggestions for the design query: Milestones A and B SHIPPED 2026-09-11
-(A is Tier 0 and on; B is the model's chip, measured and OFF).** Design:
-`insights-strategy-layer.md` §14.5 and §14.6. The owner asked whether Calcula's AI would
+**2.AI.11 — Next-edit suggestions: A, B and C SHIPPED 2026-09-11; D measured, not built.**
+A is Tier 0 and on, B is the model's chip (measured and OFF), C puts A in the text and at another
+line, D is the macro fill-in-the-middle measurement. Design: `insights-strategy-layer.md`
+§14.5, §14.6 and §14.7. The owner asked whether Calcula's AI would
 behave like GitHub Copilot's Next Edit Suggestions for the design query language and for macros.
 It did not: every AI surface built so far is request-shaped (type a sentence, press Draft, wait one
 to three seconds, get a whole artifact), while NES is edit-triggered, predicts an edit at another
@@ -1403,9 +1404,69 @@ subtotals field at all — `showSubtotals` and `SubtotalLocationType` are per-FI
 directive means applying it across the row and column field configs, which is a pivot change rather
 than a DSL one.
 
-*Still open here:* **Milestone C**, in-editor ghost text and edits at another location; **Milestone
-D**, macros — fill-in-the-middle is achievable on-board for single lines, while NES-grade next-edit
-prediction for TypeScript needs an edit-sequence-trained model, which is 7B class and stays with
+*Milestone C SHIPPED 2026-09-11 — in the text, and at another line.* Design:
+`insights-strategy-layer.md` §14.7. The suggestions now appear as ghost text on the line being
+typed, and where the strategy wants a change elsewhere, as a hint at the cursor that jumps to it —
+which is the Next Edit Suggestion behaviour the owner asked about. Still Tier 0: §14.6 measured the
+model at 0 of 80, so nothing here asks it. Monaco 0.55 implements the shape natively
+(`isInlineEdit`, `hint.jumpToEdit`, Tab bound to `editor.action.inlineSuggest.jump`), so no
+decorations or widgets were needed; what was needed was obeying its narrow range contract, which
+`nextEditInline.ts` does by expressing every suggestion as a replacement of ONE whole line — an
+insertion anchored to the line above so the old text is a prefix, a rewrite declared an inline edit,
+and a line-DELETING suggestion reported rather than shown (it is a two-line range however it is
+sliced) so it keeps the chip row. **A latent bug blocked it and is now fixed:** a Monaco provider is
+registered per LANGUAGE, and the DSL language module kept its completion context in module-level
+"current" fields written by whichever editor rendered last — so a Reports dialog open over a pivot's
+Design tab made one of them autocomplete against the other's schema. `dslModelContexts.ts` keys a
+context per model URI and both hosts register their own. `pivotDslLanguage.ts` had no test file at
+all; the registry and the suggestion decision now live in monaco-free modules under 35 tests, and
+six sabotages each redded their own named test.
+
+*Milestone D MEASURED, NOT BUILT 2026-09-11 — the number decides the milestone.* The plan called for
+a fill-in-the-middle corpus before any code, and that is what exists:
+`tests/eval/run-macro-fim-eval.mjs` holes out each eligible line of the 37 script references in
+`tasks.json` (141 tasks, from the second line on — an empty prefix asks a model to invent a file,
+not fill a gap) and asks llama-server's `/infill` for it. It refuses to run unless prefix + the right
+answer + suffix rebuilds the original byte for byte, because otherwise every task is graded against
+a file the corpus never held. **Measured on the built-in runtime, with the number that matters being
+what the API surface buys:**
+
+| surface budget | reachable | exact | median | p vs 600 |
+|---|---|---|---|---|
+| off | — | 8 of 141 (5.7 %) | 712 ms | 0.0001 |
+| 300 tok | 38/103 | 13 (9.2 %) | 924 ms | 0.0018 |
+| **600 tok** | 42/103 | **25 (17.7 %)** | **1033 ms** | — |
+| 1500 tok | 60/103 | 20 (14.2 %) | 1360 ms | 0.1797 |
+| 2500 tok | **98/103** | 26 (18.4 %) | 1558 ms | **1.0000** |
+
+"Reachable" is how many of the 103 answers naming a `context.<chain>` had every chain they name in
+the surface actually sent — a ceiling the runner now prints, because scoring an answer whose
+vocabulary was withheld is scoring the harness. **The obvious story is wrong, and the 2500 row is
+what refutes it.** `rankSurface` puts the capability chains ahead of every grid member, so no budget
+below 1500 carries a single `api.*` method and `getCellValue`/`setCellValue` first appear at 2500 —
+yet covering 98 of 103 answers instead of 42 moved the score by ONE task (p = 1.0000). Vocabulary
+coverage is not the binding constraint. What the first ~600 tokens buy is the capability names and
+the `onClick` idiom, and the flipped tasks say so exactly: `cap-fetch-rate`, `cap-schedule-refresh`,
+`cap-dialog-*`, `cap-two-capabilities`, `cap-form-*`, plus `trap-office-js-idiom`,
+`trap-browser-fetch`, `trap-window-alert`. Past that the model cannot infer the line however much of
+the API it holds — so there is no point investing in better retrieval for this at this model size,
+and the obvious nudge confirms it: hints re-ranked from the open buffer measured WORSE (18 of 141,
+p = 0.0391). The naive "repeat the line above" floor is 0 of 141, but structurally so: the
+eligibility filter removes every repeated line, which are all closers, so it licenses nothing.
+**Fill-in-the-middle cannot go through the existing seam:** `/infill` is at the ROOT while the
+runtime's base URL hardcodes `/v1`, `ChatRequest` has no prefix/suffix fields and its URL is a closed
+two-armed match, and `--jinja` wraps a chat request in Qwen's template, which destroys the FIM
+conditioning outright (measured: the same bytes came back as a conversational fenced block through
+chat and as a cursor continuation through `/infill`). **And the runtime shape rules out automatic
+ghost text** more than the score does: `-np 1` means one slot, an infill fired during a chat
+generation measured 3238 ms, and `ai_chat_cancel_stream` reaches only the streaming path — so a
+superseded keystroke holds the slot to completion. An ON-DEMAND completion is the shape the
+measurement supports; a new `ai_infill_complete` command is the minimum surface, and it is not
+written until that is the call. FIM is also not portable: Ollama serves it only on its native
+`/api/generate` with a `suffix` field, and the cloud providers have none.
+
+*Still open here:* Milestone D's product surface, on the decision above; and NES-grade next-edit
+prediction for TypeScript, which needs an edit-sequence-trained model, is 7B class, and stays with
 the user's own runtime by D10. Also unresolved and worth a look before quoting a latency: this
 machine now measures the DRAFTING eval at a ~4 s median where §14.3 recorded 1.0 s, on the same
 pinned runtime and model and with the bound proved innocent by a paired run — so one of the two

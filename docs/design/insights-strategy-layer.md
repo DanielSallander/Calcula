@@ -935,3 +935,41 @@ ABSOLUTE compile bar while the row uses "no worse". It was therefore quietly wea
 it guards, and it was hiding a fixture: an `ALSO_CORRECT` shape named `Date.Quarter`, a column this
 model does not have, so that row never compiled and gated nothing. Both are fixed, and the gate now
 calls `rulesChips` rather than a copy of it.
+
+### 14.7 In the text, and at another line — the Next Edit Suggestion shape, 2026-09-11
+
+Milestone C answers the owner's original question literally. Copilot's Next Edit Suggestions are
+edit-triggered, show inline, and predict an edit at ANOTHER location; the chip row of §14.5 is
+none of those. This puts the same suggestions in the text itself: ghost text on the line being
+typed, and — where the strategy wants a change somewhere else — a hint at the cursor that jumps to
+it. **Still no model.** §14.6 measured the built-in 1.5B at 0 of 80 next clauses, and ghost text
+from it would be wrong every time it appeared, in the one place a wrong suggestion is hardest to
+ignore. The rules answer instantly and are already right about 19 of 80.
+
+**Monaco 0.55 already implements the shape, which changed the design.** `InlineCompletion` carries
+`isInlineEdit`, `showRange` and a `hint` with `jumpToEdit`, and
+`editor.action.inlineSuggest.jump` is bound to Tab. So "an edit over there you can jump to" needed
+no decorations, no content widgets and no view zones — none of which this app had ever used outside
+the script debugger's breakpoint glyphs. What it did need was obedience to a narrow contract: an
+inline completion's range must begin and end on ONE line, must end at the end of a line if the text
+contains a break, and the replaced text must be a prefix of the inserted text unless the item is
+declared an inline edit.
+
+`nextEditInline.ts` bends every suggestion into that one shape: replace ONE whole line, whose new
+text may contain breaks. An insertion is anchored to the line ABOVE it, which makes the old text a
+prefix for free and lets it render as plain appended ghost text; a rewrite cannot be a prefix and is
+declared `isInlineEdit`. An edit that DELETES a line is a two-line range however it is sliced, so
+those are reported rather than shown, and keep the chip row. The line span itself comes from a
+generic head/tail diff of the text before and after, not from threading a range out of
+`applyEditOp` — the edit functions already decide where a clause goes, and asking them to report it
+too would be a second source of truth about one decision.
+
+**A latent bug had to be fixed first, and it was the interesting part.** A Monaco provider is
+registered per LANGUAGE and handed a `model`, so one provider serves every open DSL editor. The
+language module's completion context was a set of module-level "current" fields written by whichever
+editor rendered last — and a Reports dialog can sit over a pivot's Design tab, both writing on every
+model change. The loser autocompleted against the winner's schema. `dslModelContexts.ts` now keys a
+context per model URI, both hosts register their own, and the old globals survive only as a fallback
+for the window before an editor mounts. `pivotDslLanguage.ts` had no test file at all, which is why
+nothing had ever said so; the registry and the whole suggestion decision are now in monaco-free
+modules with 35 tests, and the six guards were each sabotaged and each redded its own named test.

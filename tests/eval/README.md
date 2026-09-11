@@ -3,10 +3,12 @@
 Can a given model write Calcula object scripts? This answers it with a number
 instead of a vibe.
 
-Three siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
+Four siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
 engine — see `docs/design/formula-assist.md`), `run-design-query-eval.mjs`
-(design queries, graded by the DSL compiler and `canonical.ts`) and
-`run-next-edit-eval.mjs` (the next-edit row's model chip — see below):
+(design queries, graded by the DSL compiler and `canonical.ts`),
+`run-next-edit-eval.mjs` (the next-edit row's model chip) and
+`run-macro-fim-eval.mjs` (filling in a held-out line of a script) — the last two
+are described below:
 
 ```
 node tests/eval/run-design-query-eval.mjs --provider ollama --model qwen2.5-coder:1.5b
@@ -38,6 +40,56 @@ node tests/eval/run-formula-eval.mjs --provider llamacpp --model calcula-builtin
 
 Those are the flags `ai/runtime.rs` starts it with, so a run on port 8080 is a
 run on the product's runtime; only the port differs.
+
+## `run-macro-fim-eval.mjs` — can the on-board model fill in a line of script?
+
+```
+node tests/eval/run-macro-fim-eval.mjs --provider llamacpp
+node tests/eval/run-macro-fim-eval.mjs --provider llamacpp --surface 0   (the baseline)
+node tests/eval/run-macro-fim-eval.mjs --provider llamacpp --json out/fim.json
+```
+
+The corpus is DERIVED: every `reference` in `tasks.json` is a correct object
+script stored as lines, so holing out each eligible line gives 141 tasks whose
+right answer is known and whose context is real. From the SECOND line on — an
+empty prefix asks a model to invent a file rather than fill a gap, and measured,
+it answered `filename='src/components/MyComponent.js'`. The coupling is worth
+saying out loud: those references exist to grade authoring, so improving them
+moves this number too.
+
+It refuses to run unless prefix + the right answer + suffix rebuilds the original
+byte for byte, and it prints a naive "repeat the line above" baseline first, for
+the same reason the next-edit runner prints its Tier-0 one: a score means nothing
+until something says what it is worth.
+
+**This one does NOT go through the completion seam, and cannot.** `/infill` is at
+the ROOT of llama-server, not under `/v1`; `ChatRequest` has no prefix/suffix
+fields and picks its URL from a closed match; and the runtime runs `--jinja`, so
+a chat request wraps the prompt in Qwen's template and destroys the
+fill-in-the-middle conditioning outright. `--provider` is refused for anything
+but llama.cpp: Ollama serves FIM only on its native `/api/generate` with a
+`suffix` field, and the cloud providers have none.
+
+As measured 2026-09-11 (qwen2.5-coder-1.5b, 141 tasks, p is McNemar exact
+against the 600-token run). "Reachable" is how many of the 103 answers naming a
+`context.<chain>` had every chain in the surface actually sent:
+
+| budget | reachable | exact | median | p |
+|---|---|---|---|---|
+| off | — | 8 (5.7 %) | 712 ms | 0.0001 |
+| 300 | 38/103 | 13 (9.2 %) | 924 ms | 0.0018 |
+| **600** | 42/103 | **25 (17.7 %)** | 1033 ms | — |
+| 1500 | 60/103 | 20 (14.2 %) | 1360 ms | 0.1797 |
+| 2500 | 98/103 | 26 (18.4 %) | 1558 ms | 1.0000 |
+
+Read the reachable column first. `rankSurface` puts capability chains ahead of
+every grid member, so `getCellValue` does not appear below 2500 — and covering
+98 of 103 answers instead of 42 moves the score by ONE task. Vocabulary is not
+the constraint; the first ~600 tokens win by supplying capability names and the
+`onClick` idiom, and the flipped tasks are the `cap-*` and `trap-*` ones. Better
+retrieval is not the lever here: `--hints buffer` scored 18 (p 0.0391, WORSE).
+The naive floor is 0 of 141, but structurally — the eligibility filter removes
+every repeated line — so it licenses nothing.
 
 ## `run-next-edit-eval.mjs` — is the model's next-clause chip worth showing?
 

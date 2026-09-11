@@ -7,7 +7,7 @@ import Editor, { type OnMount, type OnChange } from '@monaco-editor/react';
 import type * as monaco from 'monaco-editor';
 import { processDsl, serialize, type CompileContext } from '../../_shared/dsl/pivotLayout';
 import { getControlValue, type ControlValue } from '@api/controlValues';
-import { LANGUAGE_ID, registerPivotDslLanguage, setDslEditorContext } from '../../_shared/dsl/pivotLayout/pivotDslLanguage';
+import { LANGUAGE_ID, clearDslModelContext, registerPivotDslLanguage, setDslEditorContext, setDslModelContext } from '../../_shared/dsl/pivotLayout/pivotDslLanguage';
 import { DescribeQueryRow } from '../../_shared/dsl/pivotLayout/DescribeQueryRow';
 import { NextEditRow } from '../../_shared/dsl/pivotLayout/NextEditRow';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
@@ -105,6 +105,12 @@ export function DesignEditor({
   // The editor's current text, for the suggestion row. Monaco owns the buffer;
   // this mirrors it on every change, programmatic or typed.
   const [dslText, setDslText] = useState('');
+  // The mounted document's URI, so the language module knows which editor's
+  // suggestions it is being asked for. Known only after mount.
+  const [dslModelUri, setDslModelUri] = useState<string | null>(null);
+  // One dismissed set for the chip row AND the ghost text: dismissing a
+  // suggestion on the row must not leave it sitting in the text.
+  const dismissedSuggestions = useRef<Set<string>>(new Set());
 
   // The strategy the assistant rows read arrives ON `biModel`: `PivotEditor`
   // passes its live connection-level model (`fieldListModel`), which carries
@@ -119,10 +125,32 @@ export function DesignEditor({
     registerPivotDslLanguage();
   }, []);
 
-  // Update autocomplete context when fields change
+  // Update autocomplete context when fields change.
+  //
+  // The fallback write stays for the window before Monaco mounts; the per-model
+  // registration is what the providers actually read. Both this tab and a
+  // Reports dialog can be open at once, and while the context was one
+  // module-level "current model" the last render won and one editor
+  // autocompleted against the other's schema.
   useEffect(() => {
     setDslEditorContext(sourceFields, biModel);
-  }, [sourceFields, biModel]);
+    if (!dslModelUri) return;
+    setDslModelContext(dslModelUri, {
+      sourceFields,
+      biModel,
+      controlHints: [],
+      connectionId: biModel?.connectionId ?? '',
+      // Ghost text needs a model to read the strategy from; a range pivot has
+      // neither, exactly as the chip row below already decides.
+      inlineNextEdits: Boolean(biModel),
+      dismissed: dismissedSuggestions.current,
+    });
+  }, [sourceFields, biModel, dslModelUri]);
+
+  useEffect(() => {
+    if (!dslModelUri) return;
+    return () => clearDslModelContext(dslModelUri);
+  }, [dslModelUri]);
 
   // Sync visual editor state -> DSL text when the tab becomes active
   // or when zone state changes externally (from the Fields tab).
@@ -204,6 +232,7 @@ export function DesignEditor({
   const handleEditorMount: OnMount = useCallback((editor, monacoInstance) => {
     editorRef.current = editor;
     monacoRef.current = monacoInstance;
+    setDslModelUri(editor.getModel()?.uri?.toString() ?? null);
 
     // Set initial content by serializing current zone state
     const text = serialize(rows, columns, values, filters, layout, { biModel, filterUniqueValues, calculatedFields });
@@ -315,6 +344,8 @@ export function DesignEditor({
         onMount={handleEditorMount}
         onChange={handleEditorChange}
         options={{
+          // Ghost text for the next edit the strategy wants (Milestone C).
+          inlineSuggest: { enabled: true, showToolbar: 'onHover' },
           minimap: { enabled: false },
           lineNumbers: 'off',
           glyphMargin: false,
@@ -346,6 +377,7 @@ export function DesignEditor({
         biModel={biModel}
         connectionId={biModel.connectionId ?? ''}
         onApply={applyDraft}
+        dismissed={dismissedSuggestions.current}
       />
     ) : null}
     </div>
