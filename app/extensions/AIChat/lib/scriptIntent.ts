@@ -52,7 +52,7 @@ const SCRIPT_WORDS = [
  * yellow" should never offer to write a macro. A message with no script word at
  * all never reaches here.
  */
-const ONE_OFF_WORDS = ["just ", "right now", "one-off", "one off", "quickly", "for now"];
+const ONE_OFF_WORDS = ["just", "right now", "one-off", "one off", "quickly", "for now"];
 
 export interface ScriptIntent {
   /** True when the message reads as a request to author something durable. */
@@ -63,11 +63,23 @@ export interface ScriptIntent {
 
 export function detectScriptIntent(message: string): ScriptIntent {
   const text = message.toLowerCase();
-  const matched = SCRIPT_WORDS.find((w) => text.includes(w)) ?? null;
+  // AS WORDS, NOT SUBSTRINGS — the rule `mentionsWord` below already states and
+  // the only one this function was not following. `includes` made *description*,
+  // *subscription*, *transcript* and *prescription* all match the trigger
+  // "script", and *macroeconomic* match "macro"; each one rendered a script
+  // offer card and built a ~6,000-token API surface for a message that wanted
+  // neither. The suppressor was worse because it failed SILENTLY: "just" was
+  // spelled `"just "` and matched inside *adjust* and *readjust*, so "adjust the
+  // totals automatically whenever the source changes" — three separate
+  // automation signals — was thrown away with no trace.
+  //
+  // Measured on `tests/eval/intents.json` (170 utterances) before this change:
+  // 5 false scripts, and 7 of the 9 regression cases routed wrongly.
+  const matched = SCRIPT_WORDS.find((w) => mentionsWord(text, w)) ?? null;
   if (!matched) return { looksLikeScript: false, matched: null };
   // An explicit "just do it now" beats the keyword: the user has said which of
   // the two things they want, and guessing past that is worse than not guessing.
-  if (ONE_OFF_WORDS.some((w) => text.includes(w))) {
+  if (ONE_OFF_WORDS.some((w) => mentionsWord(text, w))) {
     return { looksLikeScript: false, matched: null };
   }
   return { looksLikeScript: true, matched };

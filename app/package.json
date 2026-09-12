@@ -22,6 +22,7 @@
     "gen:formula-patterns": "node scripts/gen-formula-patterns.mjs --emit",
     "check:formula-patterns": "node scripts/gen-formula-patterns.mjs --check",
     "gen:model-fixture": "node ../tests/fixtures/model/gen-sales-star.mjs",
+    "check:intents": "node ../tests/eval/gen-intents.mjs --check",
     "check:model-fixture": "node ../tests/fixtures/model/gen-sales-star.mjs --check",
     "fetch:llama-server": "node scripts/fetch-llama-server.mjs",
     "check:llama-server": "node scripts/fetch-llama-server.mjs --check",

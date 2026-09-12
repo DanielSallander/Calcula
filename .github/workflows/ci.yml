@@ -44,6 +44,10 @@ jobs:
       # about data nobody can reproduce. The generator is deterministic (an
       # explicit LCG, no Math.random), so this is a byte comparison.
       - run: npm run check:model-fixture
+      # The intent corpus is generated from tasks.json and design-queries.json
+      # plus a curated label table. A stale copy would score the router
+      # against utterances its own sources no longer contain.
+      - run: npm run check:intents
 
   unit:
     runs-on: ubuntu-latest

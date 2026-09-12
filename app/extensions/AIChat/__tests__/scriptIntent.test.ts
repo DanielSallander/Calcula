@@ -142,3 +142,56 @@ describe("the guess is what the model's API surface is built from", () => {
     expect(section).toContain("context.onClick");
   });
 });
+
+describe("the trigger list is matched AS WORDS, not as substrings", () => {
+  // The file's own `mentionsWord` header has said since 2026-08-24 that
+  // `includes` "was WRONG, not merely loose" — and the trigger list went on
+  // using `includes` anyway. Measured on `tests/eval/intents.json`: 5 messages
+  // that wanted nothing of the sort were offered a script AND had a
+  // ~6,000-token API surface built for them, and 2 genuine automation requests
+  // were thrown away silently. These pin both directions.
+  const CONTAINS_BUT_IS_NOT = [
+    ["add a description to the chart", "description"],
+    ["put the subscription total in B4", "subscription"],
+    ["paste the transcript into column A", "transcript"],
+    ["format the prescription column as text", "prescription"],
+    ["chart the macroeconomic indicators by quarter", "macroeconomic"],
+  ] as const;
+
+  for (const [message, word] of CONTAINS_BUT_IS_NOT) {
+    it(`does not offer a script for "${word}"`, () => {
+      const intent = detectScriptIntent(message);
+      expect(intent.looksLikeScript, `${message} → matched ${intent.matched}`).toBe(false);
+      expect(intent.matched).toBeNull();
+    });
+  }
+
+  it("the suppressor is a word too, so 'adjust' does not silently kill a real request", () => {
+    // The worst of the set, because it failed with no trace: `"just "` matched
+    // inside *adjust*, so a message carrying THREE automation signals was
+    // discarded and the user saw nothing at all.
+    const adjust = detectScriptIntent("adjust the totals automatically whenever the source changes");
+    expect(adjust.looksLikeScript).toBe(true);
+    const readjust = detectScriptIntent("readjust the column widths every time the data loads");
+    expect(readjust.looksLikeScript).toBe(true);
+  });
+
+  it("still suppresses a genuine one-off", () => {
+    // The positive control: the suppressor must keep working as a WORD, or this
+    // change has simply deleted it.
+    expect(detectScriptIntent("just automate the totals right now").looksLikeScript).toBe(false);
+    expect(detectScriptIntent("quickly automate this").looksLikeScript).toBe(false);
+    expect(detectScriptIntent("automate this for now").looksLikeScript).toBe(false);
+  });
+
+  it("still matches every multi-word trigger, which \b must not have broken", () => {
+    for (const message of [
+      "refresh the totals every time the sheet opens",
+      "when i click this, copy A1 to B1",
+      "I want a button that refreshes the sales block",
+      "recalculate whenever the source changes",
+    ]) {
+      expect(detectScriptIntent(message).looksLikeScript, message).toBe(true);
+    }
+  });
+});

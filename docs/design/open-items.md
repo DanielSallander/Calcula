@@ -1187,7 +1187,11 @@ architecture), `ai/runtime.rs` (job object, free port, health wait, idle unload,
 `calcula-builtin` provider, the `tauri.runtime-<arch>` / `tauri.offline-<arch>` overlays and the
 release step. Design: `local-model-script-authoring.md` §14; measurements: 2.AI.10. M4 (intent
 router) and M6 (Tier-1 narration, Swedish) keep their designs and their seams — `factsJson`
-carries fact ids precisely so a later narrator can be checked for coverage. M5 (the fine-tune
+carries fact ids precisely so a later narrator can be checked for coverage. **M4's design is
+`ai-intent-router.md`, and it only became a file on 2026-09-11.** This sentence had claimed it
+"keeps its design" while citing nothing, because the design was in a plan snapshot under a user
+profile, outside the repository — a reader following the docs alone concluded none existed. That is
+the citation rot this document warns about, happening to this document. M5 (the fine-tune
 flywheel) is dropped. M7 (usage aggregates back to an application's author) needs a new manifest
 declaration, a new submission kind and a consent sentence, and is the one telemetry-shaped feature
 in a product that is otherwise local by construction.
@@ -1525,7 +1529,13 @@ sentences — so the chat paraphrases our prose instead of reading the numbers, 
 `facts_json` exists to prevent. Changing it changes what the chat says, so it wants a measurement.
 
 Still open, in order: the rest of **Step 4** above; **Step 5** M4 router absorbing `scriptIntent.ts`
-and `analysisIntent.ts`. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to
+and `analysisIntent.ts` — design now in `ai-intent-router.md`, which also records the five defects a
+read of those two modules turned up (both detectors fire with no arbitration; `scriptIntent` matches
+its triggers with `includes` where its own comment says that "was WRONG", so *description* fires the
+script offer and *adjust* silently suppresses it; the formula veto has no destination; a ~6,000-token
+API surface is built for every message including a pure "analyse"). **The corpus comes first**:
+`tests/eval/intents.json`, ≥ 120 utterances and ≥ 40 Swedish, exactly as the design-query corpus
+preceded the drafting loop and the citation check preceded the narrator. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to
 beat); an offline-installer build (`tauri.offline-<arch>.conf.json` exists, no workflow leg builds
 it); `builtin-runtime.spec.ts` in E2E (passed 2026-09-10 against a real debug build: the app
 starts its runtime on the first completion, answers a grammar exactly, stops it) needs the fetched

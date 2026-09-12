@@ -928,6 +928,31 @@ Per-cluster evidence is in `docs/design/open-decisions-2026-08.md` §3a/§3b.
 
 ## Known limitations
 
+- **THE SUITE ASSUMES A DOT DECIMAL SEPARATOR, AND THIS MACHINE'S REGION IS
+  sv-SE.** Measured on the 2026-09-11 nightly: 5 functional failures, all of them
+  this. The specs type `"0.42"`, `"0.75"`, `"0.5"`, `"3.14159"`; the app reads the
+  Windows REGIONAL FORMAT (deliberately — `lib.rs:859-869`, and its comment calls
+  out exactly this case), which here is sv-SE with a decimal COMMA. So those
+  strings are not numbers and are stored as TEXT. Percentage formatting then
+  legitimately does nothing, because `format_text_with_color` ignores a numeric
+  format — which is why `stress-tests.spec.ts` can assert `numberFormat` contains
+  `Percentage` AND read a display of `0.5` in the same breath, from the same
+  style, with no product defect anywhere. The decisive evidence is
+  `regression-scenarios.spec.ts:179`: `0.15 - 0.08` returns `#VALUE!`, which only
+  happens if both operands are text. **None of these five is a regression.** A fix
+  is either locale-aware input (ask the backend for its decimal separator and type
+  accordingly) or a documented E2E-only regional override; there is no override
+  hook today. Sibling of the formula-separator gotcha, where sv-SE uses `;`.
+- **EVERY GRID GOLDEN FAILS AT devicePixelRatio 2.** Measured on the same run: 33
+  of the 38 functional failures. The guard in `helpers/screenshots.ts` says it
+  itself — "none of those failures is about the product" — because the grid
+  hairline is stroked at one DEVICE pixel and captured at CSS scale, painting
+  241,241,241 here against 226,226,226 in goldens recorded at dpr 1: about 39,400
+  pixels against a 200-pixel budget. Run the app on a 100 % display, or re-record
+  the corpus and update `e2e/captureEnvironment.ts` in the same change. Do not run
+  the `visual` project at dpr 2 at all — it is hours of noise with no signal. The
+  bug ledger already records a case whose outcome flips with dpr, so this is not
+  new, only newly quantified.
 - **Canvas interaction.** The grid is a `<canvas>`, so cells cannot be targeted
   by DOM selector. `GridHelper` computes pixel coordinates — but it reads live
   geometry from `__CALCULA_GRID_STATE__` every time, not from constants.

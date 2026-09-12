@@ -1,0 +1,1716 @@
+{
+  "version": 1,
+  "intents": [
+    "formula",
+    "format",
+    "data-op",
+    "analyze",
+    "chart",
+    "script",
+    "bi-query",
+    "question",
+    "unclear"
+  ],
+  "utterances": [
+    {
+      "id": "task:grid-read-write-cell",
+      "lang": "en",
+      "text": "When this button is clicked, copy the value in A1 into B1.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "a button click is durable, not a one-off edit",
+      "source": "tasks.json#grid-read-write-cell"
+    },
+    {
+      "id": "task:grid-sum-column",
+      "lang": "en",
+      "text": "Put a SUM formula in B101 that totals column B rows 2 to 100.",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "asks for a formula in a cell, by name",
+      "source": "tasks.json#grid-sum-column"
+    },
+    {
+      "id": "task:grid-sum-in-script",
+      "lang": "en",
+      "text": "Add up column B from row 2 to row 100 in the script itself (not with a formula) and write the number into B101.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "formula",
+      "why": "says 'in the script itself (not with a formula)'",
+      "source": "tasks.json#grid-sum-in-script"
+    },
+    {
+      "id": "task:grid-bold-header-row",
+      "lang": "en",
+      "text": "Make the header row (row 1, columns A to F) bold with a light grey background.",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "a one-off appearance change",
+      "source": "tasks.json#grid-bold-header-row"
+    },
+    {
+      "id": "task:grid-used-range-report",
+      "lang": "en",
+      "text": "Tell me how big the data on this sheet is.",
+      "intent": "question",
+      "decisive": false,
+      "confusableWith": "analyze",
+      "why": "wants a fact about the sheet, not a change",
+      "source": "tasks.json#grid-used-range-report"
+    },
+    {
+      "id": "task:grid-sort-by-first-column",
+      "lang": "en",
+      "text": "Sort rows 2 to 500, columns A to E, by column A ascending. Row 1 is a header.",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "one sort, now",
+      "source": "tasks.json#grid-sort-by-first-column"
+    },
+    {
+      "id": "task:grid-find-and-replace",
+      "lang": "en",
+      "text": "Replace every occurrence of 'N/A' with an empty cell on this sheet.",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "one replace across the sheet",
+      "source": "tasks.json#grid-find-and-replace"
+    },
+    {
+      "id": "task:grid-count-matches",
+      "lang": "en",
+      "text": "Count how many cells contain the word 'overdue' and report the number.",
+      "intent": "question",
+      "decisive": false,
+      "confusableWith": "formula",
+      "why": "a count reported back; COUNTIF would also answer it",
+      "source": "tasks.json#grid-count-matches"
+    },
+    {
+      "id": "task:grid-add-sheet",
+      "lang": "en",
+      "text": "Create a new sheet called 'Summary'.",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "one structural change",
+      "source": "tasks.json#grid-add-sheet"
+    },
+    {
+      "id": "task:grid-create-table",
+      "lang": "en",
+      "text": "Turn A1:D50 into a structured table named Orders. The first row is headers.",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "one structural change",
+      "source": "tasks.json#grid-create-table"
+    },
+    {
+      "id": "task:grid-recalculate",
+      "lang": "en",
+      "text": "Force a full recalculation of the workbook.",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a single command, no durability",
+      "source": "tasks.json#grid-recalculate"
+    },
+    {
+      "id": "task:grid-act-on-selection",
+      "lang": "en",
+      "text": "Bold whatever the user currently has selected.",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "appearance, applied once, to the selection",
+      "source": "tasks.json#grid-act-on-selection"
+    },
+    {
+      "id": "task:cap-storage-counter",
+      "lang": "en",
+      "text": "Count how many times this button has been clicked, remembering the count across sessions, and show it in A1.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "'remembering across sessions' is durable by definition",
+      "source": "tasks.json#cap-storage-counter"
+    },
+    {
+      "id": "task:cap-fetch-rate",
+      "lang": "en",
+      "text": "Download the current USD rate from https://api.example.com/rates and put it in B2.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "reaching the network needs a declared capability",
+      "source": "tasks.json#cap-fetch-rate"
+    },
+    {
+      "id": "task:cap-schedule-refresh",
+      "lang": "en",
+      "text": "Refresh the totals every 15 minutes, and keep doing it after the workbook is reopened.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "'every 15 minutes' and 'after reopening'",
+      "source": "tasks.json#cap-schedule-refresh"
+    },
+    {
+      "id": "task:cap-dialog-confirm-before-clearing",
+      "lang": "en",
+      "text": "Ask the user to confirm before clearing A1:D100, and only clear it if they say yes.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "asks a question of the user at run time",
+      "source": "tasks.json#cap-dialog-confirm-before-clearing"
+    },
+    {
+      "id": "task:cap-dialog-prompt-for-name",
+      "lang": "en",
+      "text": "Ask the user for a report title and write it into A1.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "prompts the user at run time",
+      "source": "tasks.json#cap-dialog-prompt-for-name"
+    },
+    {
+      "id": "task:cap-two-capabilities",
+      "lang": "en",
+      "text": "Download the daily figures into A1 and remember when we last did it, so we can show the age of the data.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "network plus remembered state",
+      "source": "tasks.json#cap-two-capabilities"
+    },
+    {
+      "id": "task:cap-form-customer-quantity",
+      "lang": "en",
+      "text": "Make a form with a Customer text box bound to B2 and a Quantity number bound to B3, and show it when the script is run.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a form is an authored object",
+      "source": "tasks.json#cap-form-customer-quantity"
+    },
+    {
+      "id": "task:obj-sheet-context",
+      "lang": "en",
+      "text": "Whenever this sheet is used, log its name once at setup.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "'whenever this sheet is used' is a lifecycle hook",
+      "source": "tasks.json#obj-sheet-context"
+    },
+    {
+      "id": "task:obj-workbook-context",
+      "lang": "en",
+      "text": "Expose a command that recalculates everything and tells the user it is done.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "'expose a command' is durable",
+      "source": "tasks.json#obj-workbook-context"
+    },
+    {
+      "id": "task:obj-named-range-values",
+      "lang": "en",
+      "text": "Read the values in this named range and log how many rows it has.",
+      "intent": "script",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "'log' implies code; the ask itself is a read",
+      "source": "tasks.json#obj-named-range-values"
+    },
+    {
+      "id": "task:trap-vba-cells-idiom",
+      "lang": "en",
+      "text": "Set cell A1 to Hello. Do it the simplest way.",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "setting one cell is the outcome, not automation",
+      "source": "tasks.json#trap-vba-cells-idiom"
+    },
+    {
+      "id": "task:trap-office-js-idiom",
+      "lang": "en",
+      "text": "Read A1 and show it to the user in a message.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "'show it to the user in a message' needs a dialog",
+      "source": "tasks.json#trap-office-js-idiom"
+    },
+    {
+      "id": "task:trap-console-log",
+      "lang": "en",
+      "text": "Log the value of A1 for debugging.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "logging for debugging is a script activity",
+      "source": "tasks.json#trap-console-log"
+    },
+    {
+      "id": "task:trap-undeclared-capability",
+      "lang": "en",
+      "text": "Save the note 'hello' in the workbook so it survives reopening, then read it back and log it.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "'survives reopening' is stored state",
+      "source": "tasks.json#trap-undeclared-capability"
+    },
+    {
+      "id": "task:trap-browser-fetch",
+      "lang": "en",
+      "text": "Get JSON from https://api.example.com/data and put the count in A1.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "network access needs a capability",
+      "source": "tasks.json#trap-browser-fetch"
+    },
+    {
+      "id": "task:trap-window-alert",
+      "lang": "en",
+      "text": "Pop up a message saying the import finished.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a pop-up message needs a dialog capability",
+      "source": "tasks.json#trap-window-alert"
+    },
+    {
+      "id": "task:shape-multi-step-report",
+      "lang": "en",
+      "text": "Build a small summary: put a Totals header in A1, sum column C into B1, and bold both.",
+      "intent": "data-op",
+      "decisive": false,
+      "confusableWith": "format",
+      "why": "several one-off edits, one of them formatting",
+      "source": "tasks.json#shape-multi-step-report"
+    },
+    {
+      "id": "task:shape-guard-empty-input",
+      "lang": "en",
+      "text": "Copy A1 into B1, but do nothing if A1 is empty.",
+      "intent": "data-op",
+      "decisive": false,
+      "confusableWith": "script",
+      "why": "conditional, but still once",
+      "source": "tasks.json#shape-guard-empty-input"
+    },
+    {
+      "id": "task:shape-loop-over-rows",
+      "lang": "en",
+      "text": "For rows 2 to 50, if column C is greater than 100 write 'HIGH' in column D, otherwise leave it alone.",
+      "intent": "data-op",
+      "decisive": false,
+      "confusableWith": "formula",
+      "why": "a rule over a range; an IF formula also answers it",
+      "source": "tasks.json#shape-loop-over-rows"
+    },
+    {
+      "id": "task:shape-format-number-columns",
+      "lang": "en",
+      "text": "Format B2:B200 as currency with two decimals.",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a number format over a range",
+      "source": "tasks.json#shape-format-number-columns"
+    },
+    {
+      "id": "task:shape-named-handler",
+      "lang": "en",
+      "text": "Expose two commands: one that clears A1:A10 and one that fills it with the numbers 1 to 10.",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "'expose two commands' is durable",
+      "source": "tasks.json#shape-named-handler"
+    },
+    {
+      "id": "task:shape-report-errors",
+      "lang": "en",
+      "text": "Copy A1 to B1 and tell the user if something goes wrong.",
+      "intent": "script",
+      "decisive": false,
+      "confusableWith": "data-op",
+      "why": "'tell the user if something goes wrong' needs code",
+      "source": "tasks.json#shape-report-errors"
+    },
+    {
+      "id": "task:shape-read-format-back",
+      "lang": "en",
+      "text": "Check whether A1 is bold and log the answer.",
+      "intent": "script",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "'log the answer' implies code",
+      "source": "tasks.json#shape-read-format-back"
+    },
+    {
+      "id": "task:shape-formula-read",
+      "lang": "en",
+      "text": "Read the formula in C10 and copy the same formula into C11.",
+      "intent": "data-op",
+      "decisive": false,
+      "confusableWith": "formula",
+      "why": "copies an existing formula; one edit",
+      "source": "tasks.json#shape-formula-read"
+    },
+    {
+      "id": "task:shape-no-capability-needed",
+      "lang": "en",
+      "text": "Write today's date into A1. Do not use any privileged capability.",
+      "intent": "data-op",
+      "decisive": false,
+      "confusableWith": "formula",
+      "why": "writing today's date; =TODAY() also answers it",
+      "source": "tasks.json#shape-no-capability-needed"
+    },
+    {
+      "id": "dq:revenue-by-category",
+      "lang": "en",
+      "text": "revenue by product category",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-category"
+    },
+    {
+      "id": "dq:revenue-and-cost-by-region",
+      "lang": "en",
+      "text": "revenue and cost by region",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-and-cost-by-region"
+    },
+    {
+      "id": "dq:top-3-segments-by-margin",
+      "lang": "en",
+      "text": "the three customer segments with the highest margin",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-3-segments-by-margin"
+    },
+    {
+      "id": "dq:revenue-per-year",
+      "lang": "en",
+      "text": "revenue per year",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-per-year"
+    },
+    {
+      "id": "dq:revenue-by-year-and-month",
+      "lang": "en",
+      "text": "revenue by year and month",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-year-and-month"
+    },
+    {
+      "id": "dq:marginpct-by-category-split-by-region",
+      "lang": "en",
+      "text": "margin percentage by category, with the regions as columns",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#marginpct-by-category-split-by-region"
+    },
+    {
+      "id": "dq:top-5-countries-by-revenue",
+      "lang": "en",
+      "text": "top 5 countries by revenue",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-5-countries-by-revenue"
+    },
+    {
+      "id": "dq:bottom-3-categories-by-margin",
+      "lang": "en",
+      "text": "bottom 3 categories by margin",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-3-categories-by-margin"
+    },
+    {
+      "id": "dq:customers-by-segment",
+      "lang": "en",
+      "text": "number of customers by segment",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#customers-by-segment"
+    },
+    {
+      "id": "dq:quantity-by-category-consumer-only",
+      "lang": "en",
+      "text": "quantity sold by category for the Consumer segment only",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#quantity-by-category-consumer-only"
+    },
+    {
+      "id": "dq:revenue-by-region-excluding-europe",
+      "lang": "en",
+      "text": "revenue by region excluding Europe",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-region-excluding-europe"
+    },
+    {
+      "id": "dq:share-of-revenue-by-category",
+      "lang": "en",
+      "text": "share of total revenue by category",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#share-of-revenue-by-category"
+    },
+    {
+      "id": "dq:running-total-revenue-by-month",
+      "lang": "en",
+      "text": "running total of revenue by year and month",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#running-total-revenue-by-month"
+    },
+    {
+      "id": "dq:revenue-by-category-pct-of-region",
+      "lang": "en",
+      "text": "revenue by category as a percentage of each region column",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-category-pct-of-region"
+    },
+    {
+      "id": "dq:cost-and-margin-by-country-tabular",
+      "lang": "en",
+      "text": "cost and margin by country, tabular layout without grand totals",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cost-and-margin-by-country-tabular"
+    },
+    {
+      "id": "dq:average-amount-per-segment",
+      "lang": "en",
+      "text": "average sales amount per customer segment",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#average-amount-per-segment"
+    },
+    {
+      "id": "dq:sum-of-amount-column-by-year",
+      "lang": "en",
+      "text": "the sum of the Amount column by year",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sum-of-amount-column-by-year"
+    },
+    {
+      "id": "dq:revenue-by-category-and-segment",
+      "lang": "en",
+      "text": "revenue by category and segment",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-category-and-segment"
+    },
+    {
+      "id": "dq:revenue-per-country-region-columns",
+      "lang": "en",
+      "text": "revenue per country with the regions as columns",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-per-country-region-columns"
+    },
+    {
+      "id": "dq:margin-and-marginpct-by-year-desc",
+      "lang": "en",
+      "text": "margin and margin percentage by year, latest year first",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#margin-and-marginpct-by-year-desc"
+    },
+    {
+      "id": "dq:top-3-regions-by-customers",
+      "lang": "en",
+      "text": "the three regions with the most customers",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-3-regions-by-customers"
+    },
+    {
+      "id": "dq:revenue-by-segment-for-2024",
+      "lang": "en",
+      "text": "revenue by segment for 2024",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-segment-for-2024"
+    },
+    {
+      "id": "dq:revenue-per-month-in-2024",
+      "lang": "en",
+      "text": "revenue per month in 2024",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-per-month-in-2024"
+    },
+    {
+      "id": "dq:cost-by-category-subtotals-off",
+      "lang": "en",
+      "text": "cost by category with subtotals switched off",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cost-by-category-subtotals-off"
+    },
+    {
+      "id": "dq:revenue-renamed-sales-by-region",
+      "lang": "en",
+      "text": "revenue by region, with the revenue column headed Sales",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-renamed-sales-by-region"
+    },
+    {
+      "id": "dq:revenue-difference-month-on-month",
+      "lang": "en",
+      "text": "the change in revenue from one month to the next, by year and month",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-difference-month-on-month"
+    },
+    {
+      "id": "dq:top-3-categories-by-marginpct",
+      "lang": "en",
+      "text": "which three categories have the highest margin percentage",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-3-categories-by-marginpct"
+    },
+    {
+      "id": "dq:revenue-by-category-months-as-columns",
+      "lang": "en",
+      "text": "revenue by category with the months as columns",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-category-months-as-columns"
+    },
+    {
+      "id": "dq:customers-per-country",
+      "lang": "en",
+      "text": "count of customers per country",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#customers-per-country"
+    },
+    {
+      "id": "dq:revenue-and-quantity-by-segment-europe",
+      "lang": "en",
+      "text": "revenue and quantity by segment in Europe only",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-and-quantity-by-segment-europe"
+    },
+    {
+      "id": "dq:sv-omsattning-per-kategori",
+      "lang": "sv",
+      "text": "omsättning per produktkategori",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-omsattning-per-kategori"
+    },
+    {
+      "id": "dq:sv-kostnad-och-marginal-per-region",
+      "lang": "sv",
+      "text": "kostnad och marginal per region",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-kostnad-och-marginal-per-region"
+    },
+    {
+      "id": "dq:sv-antal-kunder-per-segment",
+      "lang": "sv",
+      "text": "antal kunder per segment",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-antal-kunder-per-segment"
+    },
+    {
+      "id": "dq:sv-omsattning-per-ar",
+      "lang": "sv",
+      "text": "omsättning per år",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-omsattning-per-ar"
+    },
+    {
+      "id": "dq:sv-fem-storsta-landerna",
+      "lang": "sv",
+      "text": "de fem största länderna efter omsättning",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-fem-storsta-landerna"
+    },
+    {
+      "id": "dq:sv-tre-kategorier-hogst-marginal",
+      "lang": "sv",
+      "text": "de tre kategorier som har högst marginal",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-tre-kategorier-hogst-marginal"
+    },
+    {
+      "id": "dq:sv-omsattning-per-kategori-region-kolumner",
+      "lang": "sv",
+      "text": "omsättning per kategori med region som kolumner",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-omsattning-per-kategori-region-kolumner"
+    },
+    {
+      "id": "dq:sv-omsattning-per-manad-2024",
+      "lang": "sv",
+      "text": "omsättning per månad under 2024",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-omsattning-per-manad-2024"
+    },
+    {
+      "id": "dq:sv-andel-av-omsattningen-per-segment",
+      "lang": "sv",
+      "text": "andel av den totala omsättningen per segment",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-andel-av-omsattningen-per-segment"
+    },
+    {
+      "id": "dq:sv-kvantitet-per-land-utan-totalsummor",
+      "lang": "sv",
+      "text": "kvantitet per land utan totalsummor",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#sv-kvantitet-per-land-utan-totalsummor"
+    },
+    {
+      "id": "an-1",
+      "lang": "en",
+      "text": "analyse this data",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "the word the existing detector already matches",
+      "source": "written"
+    },
+    {
+      "id": "an-2",
+      "lang": "en",
+      "text": "what is going on with these numbers",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "a reported phrase; asks the data to explain itself",
+      "source": "written"
+    },
+    {
+      "id": "an-3",
+      "lang": "en",
+      "text": "anything unusual in this range?",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "outlier language without the word",
+      "source": "written"
+    },
+    {
+      "id": "an-4",
+      "lang": "en",
+      "text": "are there any outliers in column C",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "names the statistic",
+      "source": "written"
+    },
+    {
+      "id": "an-5",
+      "lang": "en",
+      "text": "is there a trend in the last twelve months",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": "bi-query",
+      "why": "trend is an analysis word; 'last twelve months' is not a grouping",
+      "source": "written"
+    },
+    {
+      "id": "an-6",
+      "lang": "en",
+      "text": "explain these numbers to me",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "a reported phrase",
+      "source": "written"
+    },
+    {
+      "id": "an-7",
+      "lang": "en",
+      "text": "what stands out here",
+      "intent": "analyze",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "vague, but the analysis phrase list carries it",
+      "source": "written"
+    },
+    {
+      "id": "an-8",
+      "lang": "en",
+      "text": "check whether spend and leads move together",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "correlation without the word",
+      "source": "written"
+    },
+    {
+      "id": "an-sv-1",
+      "lang": "sv",
+      "text": "analysera det här området",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish for the same request",
+      "source": "written"
+    },
+    {
+      "id": "an-sv-2",
+      "lang": "sv",
+      "text": "finns det några avvikelser i kolumn C",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "avvikelse is in the Swedish word list",
+      "source": "written"
+    },
+    {
+      "id": "an-sv-3",
+      "lang": "sv",
+      "text": "vad säger de här siffrorna",
+      "intent": "analyze",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "Swedish 'what do these numbers say'",
+      "source": "written"
+    },
+    {
+      "id": "an-sv-4",
+      "lang": "sv",
+      "text": "visa mönster i försäljningen över tid",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": "bi-query",
+      "why": "mönster is an analysis word; 'över tid' pulls toward a report",
+      "source": "written"
+    },
+    {
+      "id": "fo-1",
+      "lang": "en",
+      "text": "=SUM(B2:B100)",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a leading equals sign is decisive on its own",
+      "source": "written"
+    },
+    {
+      "id": "fo-2",
+      "lang": "en",
+      "text": "what formula gives the average of column D ignoring blanks",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "asks for a formula by name",
+      "source": "written"
+    },
+    {
+      "id": "fo-3",
+      "lang": "en",
+      "text": "write a formula to look up the price for the product in A2",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "'write a formula' is explicit",
+      "source": "written"
+    },
+    {
+      "id": "fo-4",
+      "lang": "en",
+      "text": "why does C7 show #DIV/0!",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "an error in a cell is formula territory",
+      "source": "written"
+    },
+    {
+      "id": "fo-5",
+      "lang": "en",
+      "text": "explain the formula in C10",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "explicitly about a formula",
+      "source": "written"
+    },
+    {
+      "id": "fo-6",
+      "lang": "en",
+      "text": "how do I count cells that are not empty",
+      "intent": "formula",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "a how-to that a formula answers",
+      "source": "written"
+    },
+    {
+      "id": "fo-sv-1",
+      "lang": "sv",
+      "text": "vilken formel ger medelvärdet av kolumn D",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish, asks for a formula",
+      "source": "written"
+    },
+    {
+      "id": "fo-sv-2",
+      "lang": "sv",
+      "text": "förklara formeln i C10",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "Swedish, explicitly about a formula",
+      "source": "written"
+    },
+    {
+      "id": "fm-1",
+      "lang": "en",
+      "text": "make A1:D1 bold",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "appearance only",
+      "source": "written"
+    },
+    {
+      "id": "fm-2",
+      "lang": "en",
+      "text": "give the totals row a light grey background",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "appearance only",
+      "source": "written"
+    },
+    {
+      "id": "fm-3",
+      "lang": "en",
+      "text": "show column E as a percentage with one decimal",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "formula",
+      "why": "a number format, not a calculation",
+      "source": "written"
+    },
+    {
+      "id": "fm-4",
+      "lang": "en",
+      "text": "centre the headers and freeze the top row",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "alignment plus a view setting",
+      "source": "written"
+    },
+    {
+      "id": "fm-5",
+      "lang": "en",
+      "text": "colour any cell over 100 red",
+      "intent": "format",
+      "decisive": false,
+      "confusableWith": "script",
+      "why": "conditional formatting, not automation",
+      "source": "written"
+    },
+    {
+      "id": "fm-sv-1",
+      "lang": "sv",
+      "text": "gör rubrikraden fet",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish, appearance only",
+      "source": "written"
+    },
+    {
+      "id": "fm-sv-2",
+      "lang": "sv",
+      "text": "visa kolumn E som procent med en decimal",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "formula",
+      "why": "Swedish number format",
+      "source": "written"
+    },
+    {
+      "id": "ch-1",
+      "lang": "en",
+      "text": "make a line chart of revenue by month",
+      "intent": "chart",
+      "decisive": true,
+      "confusableWith": "bi-query",
+      "why": "names the chart type",
+      "source": "written"
+    },
+    {
+      "id": "ch-2",
+      "lang": "en",
+      "text": "plot these two columns against each other",
+      "intent": "chart",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "'plot' is chart language",
+      "source": "written"
+    },
+    {
+      "id": "ch-3",
+      "lang": "en",
+      "text": "add a trendline to the sales chart",
+      "intent": "chart",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "a chart object change; 'trend' is nearby",
+      "source": "written"
+    },
+    {
+      "id": "ch-4",
+      "lang": "en",
+      "text": "which chart type suits this data",
+      "intent": "chart",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "advice about charts",
+      "source": "written"
+    },
+    {
+      "id": "ch-sv-1",
+      "lang": "sv",
+      "text": "gör ett linjediagram över omsättning per månad",
+      "intent": "chart",
+      "decisive": true,
+      "confusableWith": "bi-query",
+      "why": "Swedish, names the chart type",
+      "source": "written"
+    },
+    {
+      "id": "ch-sv-2",
+      "lang": "sv",
+      "text": "lägg till en trendlinje i diagrammet",
+      "intent": "chart",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "Swedish chart object change",
+      "source": "written"
+    },
+    {
+      "id": "do-1",
+      "lang": "en",
+      "text": "delete the empty rows between 40 and 60",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "one structural edit",
+      "source": "written"
+    },
+    {
+      "id": "do-2",
+      "lang": "en",
+      "text": "split column A into first and last name",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "text to columns",
+      "source": "written"
+    },
+    {
+      "id": "do-3",
+      "lang": "en",
+      "text": "remove duplicate rows keeping the first",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "one clean-up",
+      "source": "written"
+    },
+    {
+      "id": "do-sv-1",
+      "lang": "sv",
+      "text": "ta bort dubbletter och behåll den första",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish, one clean-up",
+      "source": "written"
+    },
+    {
+      "id": "do-sv-2",
+      "lang": "sv",
+      "text": "sortera raderna efter kolumn A stigande",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "Swedish sort",
+      "source": "written"
+    },
+    {
+      "id": "sc-1",
+      "lang": "en",
+      "text": "every time this sheet opens, refresh the totals",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "'every time' is the durability signal",
+      "source": "written"
+    },
+    {
+      "id": "sc-2",
+      "lang": "en",
+      "text": "write a macro that emails the summary when I click the button",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "macro plus a click handler",
+      "source": "written"
+    },
+    {
+      "id": "sc-sv-1",
+      "lang": "sv",
+      "text": "skriv ett makro som uppdaterar totalerna varje gång arket öppnas",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "Swedish, macro plus a lifecycle hook",
+      "source": "written"
+    },
+    {
+      "id": "sc-sv-2",
+      "lang": "sv",
+      "text": "när knappen klickas, kopiera A1 till B1",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "Swedish button click",
+      "source": "written"
+    },
+    {
+      "id": "qu-1",
+      "lang": "en",
+      "text": "what does a pivot table do",
+      "intent": "question",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a question about the product",
+      "source": "written"
+    },
+    {
+      "id": "qu-2",
+      "lang": "en",
+      "text": "how do I share this workbook with my team",
+      "intent": "question",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a how-to with no cell target",
+      "source": "written"
+    },
+    {
+      "id": "qu-3",
+      "lang": "en",
+      "text": "can Calcula open an Excel file",
+      "intent": "question",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a capability question",
+      "source": "written"
+    },
+    {
+      "id": "qu-sv-1",
+      "lang": "sv",
+      "text": "vad gör en pivottabell",
+      "intent": "question",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish product question",
+      "source": "written"
+    },
+    {
+      "id": "qu-sv-2",
+      "lang": "sv",
+      "text": "hur delar jag den här arbetsboken",
+      "intent": "question",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish how-to",
+      "source": "written"
+    },
+    {
+      "id": "un-1",
+      "lang": "en",
+      "text": "fix this",
+      "intent": "unclear",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "no object, no verb that names a surface",
+      "source": "written"
+    },
+    {
+      "id": "un-2",
+      "lang": "en",
+      "text": "the numbers look wrong",
+      "intent": "unclear",
+      "decisive": false,
+      "confusableWith": "analyze",
+      "why": "a complaint; could be analysis or a formula error",
+      "source": "written"
+    },
+    {
+      "id": "un-3",
+      "lang": "en",
+      "text": "can you help",
+      "intent": "unclear",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "no content at all",
+      "source": "written"
+    },
+    {
+      "id": "un-4",
+      "lang": "en",
+      "text": "do the thing we discussed",
+      "intent": "unclear",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "refers to context the router does not have",
+      "source": "written"
+    },
+    {
+      "id": "un-sv-1",
+      "lang": "sv",
+      "text": "fixa det här",
+      "intent": "unclear",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish, no object",
+      "source": "written"
+    },
+    {
+      "id": "un-sv-2",
+      "lang": "sv",
+      "text": "kan du hjälpa mig",
+      "intent": "unclear",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "Swedish, no content",
+      "source": "written"
+    },
+    {
+      "id": "sv-fo-1",
+      "lang": "sv",
+      "text": "=SUMMA(B2:B100)",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a leading equals sign, with the Swedish function name",
+      "source": "written"
+    },
+    {
+      "id": "sv-fo-2",
+      "lang": "sv",
+      "text": "hur räknar jag celler som inte är tomma",
+      "intent": "formula",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "a how-to a formula answers",
+      "source": "written"
+    },
+    {
+      "id": "sv-fo-3",
+      "lang": "sv",
+      "text": "varför visar C7 #DIVISION/0!",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "a Swedish error literal in a cell",
+      "source": "written"
+    },
+    {
+      "id": "sv-fm-1",
+      "lang": "sv",
+      "text": "centrera rubrikerna och lås översta raden",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "alignment plus a view setting",
+      "source": "written"
+    },
+    {
+      "id": "sv-fm-2",
+      "lang": "sv",
+      "text": "färga celler över 100 röda",
+      "intent": "format",
+      "decisive": false,
+      "confusableWith": "script",
+      "why": "conditional formatting, not automation",
+      "source": "written"
+    },
+    {
+      "id": "sv-do-1",
+      "lang": "sv",
+      "text": "dela kolumn A i förnamn och efternamn",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "text to columns",
+      "source": "written"
+    },
+    {
+      "id": "sv-do-2",
+      "lang": "sv",
+      "text": "ta bort tomma rader mellan 40 och 60",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "one structural edit",
+      "source": "written"
+    },
+    {
+      "id": "sv-do-3",
+      "lang": "sv",
+      "text": "skapa ett nytt blad som heter Sammanfattning",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "one structural change",
+      "source": "written"
+    },
+    {
+      "id": "sv-sc-1",
+      "lang": "sv",
+      "text": "fråga användaren innan A1:D100 rensas",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "asks the user at run time",
+      "source": "written"
+    },
+    {
+      "id": "sv-sc-2",
+      "lang": "sv",
+      "text": "uppdatera totalerna var femtonde minut",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "a schedule is durable",
+      "source": "written"
+    },
+    {
+      "id": "sv-sc-3",
+      "lang": "sv",
+      "text": "gör ett formulär med kundnamn bundet till B2",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a form is an authored object",
+      "source": "written"
+    },
+    {
+      "id": "sv-qu-1",
+      "lang": "sv",
+      "text": "kan Calcula öppna en Excel-fil",
+      "intent": "question",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "a capability question",
+      "source": "written"
+    },
+    {
+      "id": "sv-qu-2",
+      "lang": "sv",
+      "text": "hur stor är datamängden på det här bladet",
+      "intent": "question",
+      "decisive": false,
+      "confusableWith": "analyze",
+      "why": "wants a fact about the sheet",
+      "source": "written"
+    },
+    {
+      "id": "sv-ch-1",
+      "lang": "sv",
+      "text": "vilken diagramtyp passar den här datan",
+      "intent": "chart",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "advice about charts",
+      "source": "written"
+    },
+    {
+      "id": "sv-un-1",
+      "lang": "sv",
+      "text": "siffrorna ser fel ut",
+      "intent": "unclear",
+      "decisive": false,
+      "confusableWith": "analyze",
+      "why": "a complaint; analysis or a formula error",
+      "source": "written"
+    },
+    {
+      "id": "sv-an-1",
+      "lang": "sv",
+      "text": "hänger utgifterna ihop med antalet leads",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": null,
+      "why": "correlation without the word",
+      "source": "written"
+    },
+    {
+      "id": "pf-1",
+      "lang": "en",
+      "text": "bold the header row every time new data is imported",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "format",
+      "why": "formatting, but automated",
+      "source": "written"
+    },
+    {
+      "id": "pf-2",
+      "lang": "en",
+      "text": "make overdue rows red whenever the status column changes",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "format",
+      "why": "formatting, but on an event",
+      "source": "written"
+    },
+    {
+      "id": "pf-3",
+      "lang": "en",
+      "text": "apply our house number format to this sheet",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "a one-off style application",
+      "source": "written"
+    },
+    {
+      "id": "pf-4",
+      "lang": "en",
+      "text": "add a button that formats the selection as currency",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "format",
+      "why": "a button is an authored object",
+      "source": "written"
+    },
+    {
+      "id": "pf-5",
+      "lang": "en",
+      "text": "reformat these dates as YYYY-MM-DD",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "one number-format change",
+      "source": "written"
+    },
+    {
+      "id": "pf-sv-1",
+      "lang": "sv",
+      "text": "gör rubrikraden fet varje gång data importeras",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "format",
+      "why": "Swedish: formatting, automated",
+      "source": "written"
+    },
+    {
+      "id": "pf-sv-2",
+      "lang": "sv",
+      "text": "formatera om datumen som ÅÅÅÅ-MM-DD",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "Swedish: one format change",
+      "source": "written"
+    },
+    {
+      "id": "pq-1",
+      "lang": "en",
+      "text": "is there a function for the median",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "asks whether a function exists",
+      "source": "written"
+    },
+    {
+      "id": "pq-2",
+      "lang": "en",
+      "text": "what does VLOOKUP's last argument do",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "about a formula's semantics",
+      "source": "written"
+    },
+    {
+      "id": "pq-3",
+      "lang": "en",
+      "text": "should I use SUMIF or SUMPRODUCT here",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "choosing between two functions",
+      "source": "written"
+    },
+    {
+      "id": "pq-sv-1",
+      "lang": "sv",
+      "text": "finns det en funktion för median",
+      "intent": "formula",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "Swedish: does a function exist",
+      "source": "written"
+    },
+    {
+      "id": "pa-1",
+      "lang": "en",
+      "text": "is this month better or worse than last month",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "a comparison the data answers",
+      "source": "written"
+    },
+    {
+      "id": "pa-2",
+      "lang": "en",
+      "text": "how healthy does this look to you",
+      "intent": "analyze",
+      "decisive": false,
+      "confusableWith": "question",
+      "why": "vague, but asks the data to speak",
+      "source": "written"
+    },
+    {
+      "id": "pa-3",
+      "lang": "en",
+      "text": "summarise what changed this quarter",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "a summary of the data, not of the product",
+      "source": "written"
+    },
+    {
+      "id": "pa-sv-1",
+      "lang": "sv",
+      "text": "är den här månaden bättre eller sämre än förra",
+      "intent": "analyze",
+      "decisive": true,
+      "confusableWith": "question",
+      "why": "Swedish comparison",
+      "source": "written"
+    },
+    {
+      "id": "rg-description",
+      "lang": "en",
+      "text": "add a description to the chart",
+      "intent": "chart",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "'description' contains 'script' — must not fire the script offer",
+      "source": "written"
+    },
+    {
+      "id": "rg-subscription",
+      "lang": "en",
+      "text": "put the subscription total in B4",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "'subscription' contains 'script'",
+      "source": "written"
+    },
+    {
+      "id": "rg-transcript",
+      "lang": "en",
+      "text": "paste the transcript into column A",
+      "intent": "data-op",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "'transcript' contains 'script'",
+      "source": "written"
+    },
+    {
+      "id": "rg-prescription",
+      "lang": "en",
+      "text": "format the prescription column as text",
+      "intent": "format",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "'prescription' contains 'script'",
+      "source": "written"
+    },
+    {
+      "id": "rg-macroeconomic",
+      "lang": "en",
+      "text": "chart the macroeconomic indicators by quarter",
+      "intent": "chart",
+      "decisive": true,
+      "confusableWith": "script",
+      "why": "'macroeconomic' contains 'macro'",
+      "source": "written"
+    },
+    {
+      "id": "rg-adjust",
+      "lang": "en",
+      "text": "adjust the totals automatically whenever the source changes",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "data-op",
+      "why": "'adjust' contains 'just ' — the suppressor must not fire",
+      "source": "written"
+    },
+    {
+      "id": "rg-readjust",
+      "lang": "en",
+      "text": "readjust the column widths every time the data loads",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "format",
+      "why": "'readjust' contains 'just '",
+      "source": "written"
+    },
+    {
+      "id": "rg-both",
+      "lang": "en",
+      "text": "write a macro that flags outliers every month",
+      "intent": "script",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "matches BOTH detectors today; the router must pick one",
+      "source": "written"
+    },
+    {
+      "id": "rg-both-2",
+      "lang": "en",
+      "text": "analyse the sales and then automate the report every week",
+      "intent": "script",
+      "decisive": false,
+      "confusableWith": "analyze",
+      "why": "genuinely two requests; the design says ask",
+      "source": "written"
+    }
+  ]
+}
