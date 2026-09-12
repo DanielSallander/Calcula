@@ -1294,6 +1294,7 @@ export {
   loadAndInstallCustomFunctions,
   validateFunctionName,
   validateParam,
+  validateFunctionBody,
   // Distributed-package consent gate for custom functions that arrived in a
   // .calp (the CustomFunctions extension owns the prompt; the gate itself is
   // enforced inside the install path, so nothing here can be bypassed).

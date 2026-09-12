@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { generateLibrarySource, validateParam, validateFunctionName } from "../customFunctions";
+import {
+  generateLibrarySource,
+  validateParam,
+  validateFunctionName,
+  validateFunctionBody,
+} from "../customFunctions";
 
 describe("generateLibrarySource", () => {
   it("exposes each function NON-public with its params, uppercased", () => {
@@ -170,5 +175,76 @@ describe("validators", () => {
     expect(validateParam("price", "F")).toBeNull();
     expect(validateParam("cube", "F")).not.toBeNull();
     expect(validateParam("a=1", "F")).not.toBeNull();
+  });
+});
+
+describe("validateFunctionBody — a body must stay inside its wrapper", () => {
+  // The generator splices the body between the braces of
+  // `fns[NAME] = async (...) => { … }`. These bodies close that arrow and keep
+  // going, so the trailing statements become siblings inside `setup(context)`
+  // and run once per MOUNT — every workbook open — instead of per cell call.
+  // The UDF still registers and still answers, so nothing looks wrong.
+  const ESCAPES: Array<[string, string]> = [
+    ["plain statement after the brace", "return 1; };  globalThis.PWNED = 1;  const _ = async () => {"],
+    [
+      "re-exposes itself as public",
+      'return 1; }; context.expose("X", fns["X"], { public: true }); const _ = async () => {',
+    ],
+    ["hidden behind a comment", "return 1; }; /* quiet */ sideEffect(); const _ = async () => {"],
+    ["closes and stops", "return 1; }"],
+  ];
+
+  it.each(ESCAPES)("refuses: %s", (_label, body) => {
+    expect(validateFunctionBody(body, ["a"], "F")).not.toBeNull();
+  });
+
+  it("says WHEN the escaped code would run, because that is the whole defect", () => {
+    const msg = validateFunctionBody(ESCAPES[0][1], ["a"], "TAX");
+    expect(msg).toContain("runs when the workbook opens");
+    expect(msg).toContain("TAX");
+  });
+
+  it("generateLibrarySource refuses to emit an escaping body at all", () => {
+    expect(() =>
+      generateLibrarySource([{ name: "PWN", params: [], body: ESCAPES[0][1] }]),
+    ).toThrow(/workbook opens/);
+  });
+
+  // THE FALSE-REJECTION HALF, and the reason this is a parse rather than a
+  // brace count. Every one of these carries a `}` that closes nothing, and a
+  // counter would reject all of them — rejecting a legitimate body is the worse
+  // failure, because the author has no way to satisfy it.
+  const LEGITIMATE: Array<[string, string]> = [
+    ["brace in a string", 'const s = "}"; return s + a;'],
+    ["brace in a template literal", "const s = `${a}}`; return s;"],
+    ["brace in a regex literal", "const r = /}/; return r.test(String(a));"],
+    ["brace in a line comment", "// closes } here\nreturn a;"],
+    ["brace in a block comment", "/* } */ return a;"],
+    ["nested blocks and an object literal", "if (a) { const o = { x: 1 }; return o.x; }\nreturn 0;"],
+    ["an inner arrow function", "const f = (n) => { return n * 2; };\nreturn f(a);"],
+    ["await and a try/catch", "try { return await cube.value(a); } catch (e) { return cellError('#N/A'); }"],
+  ];
+
+  it.each(LEGITIMATE)("accepts: %s", (_label, body) => {
+    expect(validateFunctionBody(body, ["a"], "F")).toBeNull();
+  });
+
+  it("a body with braces in strings still MOUNTS and runs per call", async () => {
+    const src = generateLibrarySource([
+      { name: "BRACY", params: ["a"], body: 'const s = "}"; return String(a) + s;' },
+    ]);
+    const exposed = new Map<string, (...a: unknown[]) => unknown>();
+    const context = {
+      caps: {},
+      expose: (name: string, fn: (...a: unknown[]) => unknown) => exposed.set(name, fn),
+    };
+    // eslint-disable-next-line no-new-func
+    new Function("context", `${src}\n; return setup(context);`)(context);
+    await expect(exposed.get("BRACY")!(7)).resolves.toBe("7}");
+  });
+
+  it("the parameter list is part of the probe, so a bad body is caught with real params", () => {
+    expect(validateFunctionBody("return price * 1.25;", ["price"], "TAX")).toBeNull();
+    expect(validateFunctionBody("return price; }; evil();  const _ = async () => {", ["price"], "TAX")).not.toBeNull();
   });
 });

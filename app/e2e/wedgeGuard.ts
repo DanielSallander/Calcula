@@ -218,8 +218,22 @@ function writeLatch(verdict: WedgeVerdict, testTitle: string): void {
     "Every failure in this run after this point is the SAME FACT, not " +
       "independent evidence. Do not read the failure count as a defect count.",
     "",
-    "The app's own log is the best next evidence. Note that it is truncated on " +
-      "every app start, so copy it BEFORE relaunching.",
+    // This paragraph told readers the app log is truncated on every app start
+    // and to copy it before relaunching. That stopped being true on 2026-08-17,
+    // when `init_log_file` began ROTATING instead of truncating
+    // (app/src-tauri/src/logging.rs, RETAINED_SESSION_LOGS = 10). The marker is
+    // the one artefact a future reader is told to trust, so a false instruction
+    // in it is worse than none -- and it also named the wrong file: the harness
+    // archives `results/app-dev.log`, the `cargo tauri dev` stdout tee, not the
+    // backend's own log.
+    "TWO DIFFERENT LOGS, and you want both:",
+    "  1. The BACKEND's own log, context_manager/log.log. It is ROTATED, not " +
+      "truncated, so relaunching does NOT destroy it -- the previous session " +
+      "lands in context_manager/history/log-<stamp>.log and the last 10 are " +
+      "kept. The harness does NOT archive this one; copy it yourself.",
+    "  2. The harness tee, e2e/results/app-dev.log (`cargo tauri dev` stdout " +
+      "and stderr). global-teardown archives it to the run's archive dir, but " +
+      "it is OVERWRITTEN at the start of every run.",
     "",
   ].join("\n");
 

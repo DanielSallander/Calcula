@@ -82,6 +82,10 @@ pub mod merge_commands;
 pub mod pivot;
 pub mod bi;
 pub mod scripting;
+/// The script-frame loader, served on its own URI scheme so the `ui.html`
+/// bridge gets a policy container of its own rather than a clone of the app's
+/// (BUG-0113).
+pub mod script_frame;
 pub mod named_ranges;
 /// Excel-parity named-range resolution: a stored formula keeps its NAME and the
 /// name is expanded at EVALUATION, with a name -> dependents edge of its own.
@@ -4871,6 +4875,24 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // BUG-0113. A real fetch response carries its own `Content-Security-Policy`
+        // header, so the script-frame document gets its OWN policy container
+        // instead of the clone of ours that `srcdoc` inherits — and the app's
+        // policy stays exactly as tight as it is. See `script_frame.rs` for why
+        // no nonce can work here and why the loader IS the bridge.
+        //
+        // The body is constant, so this closure allocates nothing per frame and
+        // ignores the request entirely.
+        .register_uri_scheme_protocol(script_frame::SCRIPT_FRAME_SCHEME, |_ctx, _req| {
+            tauri::http::Response::builder()
+                .header(
+                    tauri::http::header::CONTENT_TYPE,
+                    "text/html; charset=utf-8",
+                )
+                .header("Content-Security-Policy", script_frame::SCRIPT_FRAME_CSP)
+                .body(script_frame::SCRIPT_FRAME_LOADER.as_bytes().to_vec())
+                .expect("script-frame loader response is built from constants")
+        })
         .manage(create_app_state())
         .manage(FileState::default())
         .manage(UserFilesState::default())

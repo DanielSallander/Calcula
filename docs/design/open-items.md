@@ -14,11 +14,16 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**106 entries, 104 fixed, 2 open** as of
-2026-08-19 — recounted from the file, not carried forward; it moved three times in two days). The
-two open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open deliberately — the
-guards now make a recurrence diagnosable, and it is explicitly not closeable by a speculative fix)
-and **BUG-0104** (sort and filter by conditional-formatting icon). Its ENGINES both work as of
+reproduction live in `tests/regression/bug-ledger.json` (**113 entries, 109 fixed, 4 open** as of
+2026-09-12 — recounted from the file, not carried forward; it moved three times in two days, and
+the figure this sentence carried before today said 106/104/2, which was 7 entries and 2 open bugs
+behind). The four open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open
+deliberately — the guards now make a recurrence diagnosable, and it is explicitly not closeable by
+a speculative fix), **BUG-0104** (sort and filter by conditional-formatting icon), **BUG-0108**
+(percent-of-visible-total measures are wrong in a slicer-filtered BI pivot — level-1 slicers still
+use the host-side mask, so the engine's denominator includes rows the host hides afterwards) and
+**BUG-0113** (every shipped `ui.html` bridge is inert under the built CSP; see §2.ab). BUG-0104's
+ENGINES both work as of
 2026-08-19 — the sort keys on the icon that was on screen when it was invoked, the filter resolves
 once per pass — and both are reachable over IPC. What is left is the SURFACE: the script validator
 has a closed allowlist so a script can say `sortOn:"icon"` but can never name the icon, and neither
@@ -256,7 +261,7 @@ Each is scoped, understood, and deliberately not done. They need a slot, not a d
 |---|---|
 | **The APPROXIMATE (sorted) lookup comparators rank values differently from the exact ones, so `=MATCH(1,A1:A4,1)` answers the wrong row.** MEASURED 2026-08-24 during the Excel-symbol programme, on a column holding `{1, "1", TRUE, "apple"}`: `=MATCH(1,A1:A4,1)` answers **3** where Excel answers **1**. The exact family was unified in that programme (`=`, `MATCH` type 0, VLOOKUP/HLOOKUP FALSE, XLOOKUP and the pass cache now share one predicate and agree); the APPROXIMATE family was deliberately left, and it is the last surface that disagrees with the ladder. `compare_values` ranks Number vs Text on its own rules rather than Excel's `number < text < FALSE < TRUE`. **WHY IT WAS NOT DONE WITH THE REST, and why it needs its own slot rather than a batch:** this is not a predicate swap. `SortedKeys::build` (`core/engine/src/lookup_cache.rs`) only permits binary search over HOMOGENEOUS, verified-sorted key vectors under one comparator class, so changing the ordering changes that precondition — and a binary search over a vector that is no longer sorted under its own comparator does not error, it returns THE WRONG ROW, silently, on the exact code path built to make lookups fast. It is the one remaining formula-engine change that can break lookups across the board without reddening anything. Wants a dedicated pass with a differential harness over both paths (scan vs cache) before the ordering moves at all — `lookup_cache::tests::exact_index_answers_exactly_what_the_scan_path_would`, added by that programme, is the shape to copy for the approximate path. | `core/engine/src/evaluator.rs` (`compare_values`), `core/engine/src/lookup_cache.rs` (`SortedKeys::build`), surface-vs-answer table in `memory/project_excel_symbol_alignment.md` |
 | **Column-header separators are not device-pixel snapped — the same defect just fixed for cell borders.** `headers.ts:168,330` stroke at a hand-rolled logical `+0.5` instead of snapping into DEVICE space the way `grid.ts:189-191` has always done for the gridline hairline. Column boundaries are `22 + k*64.29`, so at dpr 1 every column-header tick smears across two device pixels at partial alpha rather than landing on one. Row-header ticks are on the integral axis and are fine — the identical top-crisp/side-blurred asymmetry that BUG-0101 turned out to be. **Deliberately excluded from BUG-0101's fix**, which is why this row exists: the file has 18 stroke calls and NO unit tests, and the change moves grid-bearing goldens (BUG-0101's design review estimated 49; a later byte census said 51 — recount before scheduling, and note `headers.ts` is pure CRLF while `grid.ts` and `cellBorders.test.ts` are LF). The fix itself is the parity-snap helper from `cells.ts` applied three times. | `headers.ts:165-168,327-330,442-445`, `grid.ts:189-191`, BUG-0101 |
-| **`model-engine-lib` is run by no CI workflow at all.** 2,230 `#[test]`/`#[tokio::test]` functions across 145 files, executed by zero gates. `ci.yml`'s `rust-core` job sets `working-directory: core`, and `core/Cargo.toml` lists 11 members — `model-engine-lib` is not among them; `link-check.yml` builds the app crate (which COMPILES `bi-engine` through the path dependency but runs none of its tests); `release.yml` names the directory only as a cache path. So the entire BI/semantic-model engine — the thing every pivot, CUBE formula and measure evaluates through — has no automated correctness gate on any branch. Worse, **75 of those tests are `#[ignore]`d behind a live AdventureWorks database and they are the whole differential-vs-SQL corpus**, i.e. the engine's only ground truth for DAX semantics, so even a manual `cargo test` there proves less than it appears to. Adding the job is hours; deciding what to do about the DB-gated corpus is the owner's call. | `.github/workflows/ci.yml:58-72`, `core/Cargo.toml`, `model-engine-lib/` |
+| ~~**`model-engine-lib` is run by no CI workflow at all.**~~ **CLOSED 2026-09-12 — `ci.yml` now carries a `rust-model-engine` job.** Same shape as `rust-core`: `ubuntu-latest`, `working-directory: model-engine-lib`, `Swatinem/rust-cache` keyed on that workspace, `cargo test --workspace`. Linux is safe for THIS workspace unlike the app crate — the only `#[cfg(windows)]` in it is SQL Server integrated auth, which carries an explicit `#[cfg(not(windows))]` refusal arm (`engine-connectors/src/sqlserver.rs:184`), so the two Windows-only tests simply do not run there. Measured on the dev box before the job was added: **2,660 passing test cases, 0 assertion failures, 75 ignored**. The only reds were three `engine-core` DOCTESTS failing `LNK1102: out of memory` under parallel linking on this ARM64 host; they pass at `--test-threads=1`, so it is a dev-box hazard of exactly the class `ci.yml`'s header says Linux sidesteps, not a defect. **The DB-gated half is UNCHANGED and remains the owner call this row always said it was:** those 75 `#[ignore]`d tests are the whole differential-vs-SQL corpus — the engine's only ground truth for DAX semantics — and `cargo test` prints "75 ignored" and passes anyway, so the job's comment says that out loud rather than letting a green be read as more than it is. Two figure corrections while closing: the "2,230 tests across 145 files" came from a `#[test]` grep and cargo's own count supersedes it; the **75 was right** and a grep saying 76 is counting a doc comment in `rest_connector/tests.rs:4` that literally reads "no `#[ignore]`". | `.github/workflows/ci.yml` (`rust-model-engine` job), `model-engine-lib/`, measured 2026-09-12 |
 | **Table transformations ship without the ROW-MULTIPLYING multi-table steps — `mergeTable` (join) and `appendTable` (union).** **Narrowed 2026-08-28: the half that was "the actual work" is DONE.** `lookupColumn` shipped (model v28) and with it every piece this row said was missing — refresh **ordering** (`pipeline_refresh_order`, Kahn, driving both `refresh_all_in_memory` phase 2 and `refresh_stale`), **cycle rejection at model build** naming the members, the data-provider seam (`TableSchemas` for columns / `StepInputs` for rows, so schema derivation stays offline and row access stays in the facade), transitive cache invalidation (`drop_table_cache_and_dependents`), and dependency-aware cache identity on disk (`cache_identity`, a post-order fold). All four are step-agnostic: a merge adds an arm to `step_dependencies` and inherits them. What remains is only what a lookup structurally CANNOT do — **multiply rows** — which is a different downstream contract (`keepRows`/`removeDuplicates`/`fillDown` mean something else once the row count can change) and must be its own step tag, never an option on `lookupColumn`. Until then a user who needs a true join does it in a SQL-source import (`source_query`) or a calculated table. | `docs/design/table-transformations.md` §"Looking across tables", `engine-core/src/transform/mod.rs` (`pipeline_refresh_order`, `cache_identity`), `engine-core/src/transform/catalog.rs` |
 | **One engine mutex per BI connection serializes every query on it, held ACROSS the network round-trip.** Not new and not specific to transformations — `bi_execute_sql` has always held `engine_arc.lock().await` while awaiting `connector.execute_query`, and every sibling path does the same. What made it worth a row is that the REST connector and the transform PREVIEW extend how long a single holder can keep it: a preview fetches through the connector under the guard, so a slow or hanging endpoint blocks unrelated pivots and measures on that connection for up to the source's `timeout_secs`. Mitigated today by a 500-row preview cap and a cancellable `queryId`, neither of which helps the OTHER queries waiting behind it. The fix is to take the connector `Arc` out from under the guard and drop the guard before awaiting — the same "clone the Arc out, then await" move `close_document_bi_connections` already documents one level up — which is mechanical per call site but touches ~13 of them. | `bi/model_editor.rs:6165`, `bi/commands.rs:2723-2732`, `bi/commands.rs:981-988` |
 | **No query folding: a transformation pipeline always runs locally, over every fetched row.** A leading prefix could fold into the existing `FetchRequest` — `selectColumns` → `columns`, an AND-of-comparisons `filterRows` → `filters` (the `fold_refresh_filter_now` machinery already folds exactly that shape), `keepRows FirstN` → `limit`, `sort` → `order_by`, and for a SQL source an arbitrary prefix → a generated `source_query`. The cost of not having it is bandwidth and memory on a large source, never a wrong answer. The seam is `fold_prefix(steps, capabilities)` gated on a new `ConnectorCapabilities` flag (`#[non_exhaustive]`, false defaults, so adding one is non-breaking) failing **soft** to local evaluation. Nothing in the shipped design blocks it — steps are declarative, evaluated front-to-back, and the evaluator already takes an arbitrary sub-range. | `engine-connectors/src/traits.rs` (`FetchRequest`, `ConnectorCapabilities`), `engine-core/src/compute/incremental.rs` |
@@ -500,10 +505,13 @@ actionability wait exists that could burn 300 s. Every step goes through `page.e
 call sites, both in `global-setup.ts` (`:128`, `:288`), pinned by `startupBarrierWired.test.ts:43-46`.
 What re-ran on each of the 64 worker rebuilds is the worker-scoped `sharedPage` fixture:
 `connectWithRetry` plus a 60 s `waitForSelector` on the spreadsheet container
-(`fixtures.ts:244`, `:316`). Same shape, equally blind — it reported healthy every time. And nothing
-sets `maxFailures` or `globalTimeout` anywhere in the harness; Playwright's defaults (0/0, meaning
-unlimited failures and no global deadline) apply, so there was no bail-out and every remaining test
-paid its **full** 300 s (`playwright.config.ts:120,124`).
+(`fixtures.ts:244`, `:316`). Same shape, equally blind — it reported healthy every time. As for
+blast radius: **`globalTimeout` is now 2 h** (`playwright.config.ts:39`) — this paragraph said
+nothing set it, which was true when written and is not now — but **`maxFailures` is still unset**,
+so Playwright's default of unlimited failures applies and nothing bails out on a run that has
+clearly gone wrong. The latch in `checkForWedge` is what actually bounds the cost today: two bad
+probes and every later test fails in ~0 ms instead of paying its full 300 s
+(`playwright.config.ts:120,124`).
 
 **What was ruled out, by running it.** `document-store-leak` alone: 7/7 pass. Specs 7-8 + dsl: 13
 pass. Specs 1-6 + dsl: 33 pass. The **full journey project, unmodified: 156 passed in 27.8 minutes.**
@@ -533,6 +541,32 @@ test, and a rebuilt worker re-imports the module with fresh state — so on a we
 test fails) a module-level `let` resets between every pair of probes, the count never reaches two,
 and the guard degrades into a log line while the run still costs 5.4 hours. An in-process unit test
 cannot see it; `wedgeGuard.test.ts` re-imports the module between probes to reproduce the restart.
+
+**Two holes in the guard closed 2026-09-12, both found by asking what the 16 existing tests do NOT
+assert.** Neither changes the bug's status — it is still unreproduced and still not closeable by a
+speculative fix — but both were ways the guard could have been absent without anything saying so.
+
+- **The wiring was unpinned.** All of the guard's value rides on one line, the `checkForWedge` call
+  in the `appPage` fixture (`fixtures.ts:388`), and neither `wedgeGuard.test.ts` (8 cases) nor
+  `wedgeInstrumentation.test.ts` (8 cases) reads `fixtures.ts` at all — they exercise the module
+  against a fake page. **Measured: replacing that call with `const wedged = null` leaves all 16
+  green** while the guard never runs on a single test. `wedgeGuardWired.test.ts` now pins it, on the
+  model of `startupBarrierWired.test.ts` and for the reason that file's own header gives — a guard
+  that is correct and unwired is decorative, and its absence is silent. It asserts the import, that
+  both call sites exist, that both THROW the verdict rather than computing and dropping it, and
+  that the probe precedes the fixture's page operations. Position is asserted rather than assumed
+  because it is the whole economy of the thing: those operations are what hang on a wedged backend,
+  so a probe moved after them waits out their timeouts first and the run costs hours anyway — which
+  is the failure this bug IS.
+- **`gridPersistent` had no probe.** It deliberately does not depend on `appPage` (its purpose is
+  skipping that fixture's per-test reset), so it inherited nothing, and
+  `workflow-dashboard.spec.ts` — **7 tests, its only caller** — was the one journey file a wedged
+  backend could still burn in full. It now probes `sharedPage` directly before handing over the
+  helper.
+
+Still open on the harness side, deliberately: **`maxFailures` is unset**, so nothing bails out on a
+run that has plainly gone wrong for some reason the wedge latch does not recognise.
+
 
 **To close it:** a reproduction. The next occurrence leaves `e2e/results/APP-WEDGED.txt` naming the
 test it was first seen before, and an archived app log. Start there.
@@ -609,6 +643,83 @@ syntax error, or the Vite dep-optimizer 504 of §37c happens before there is a b
 The E2E startup guard can now *detect* that state and fail the run; the **product** still shows the
 user nothing.
 
+### 2.7 Engine performance audit — what was never built, and was tracked nowhere (filed 2026-09-12)
+
+`docs/design/engine-performance-audit.md` is a 33-agent audit from 2026-07-12: 22 findings, every
+one adversarially verified, criterion benches run live, 0 refuted. Waves 0 and 1 shipped
+2026-07-13. **The rest was tracked by nothing.** Until this section existed, no row in this file
+mentioned any PERF-nn finding, and — worse — **nothing in the repo cited that document at all**, so
+not even the doc-to-doc trail that would let a reader find it existed. It survived in one
+out-of-repo memory file. That is the failure mode this file exists to prevent, so the status below
+was re-derived by opening the code on 2026-09-12 rather than by reading either the audit's §0 or
+its §5b.
+
+**Re-verified tally: 8 findings are genuinely unbuilt, not 10.** Two of the audit's own "NOT BUILT"
+rows are stale in the already-fixed direction, which §3.3 calls the costlier one:
+
+- **PERF-19 (volatile tracking) is BUILT** and should be read as closed. `core/engine/src/volatility.rs`
+  (`contains_volatile_call`, `:91`) plus `volatile_cells_on_active_sheet`
+  (`app/src-tauri/src/commands/data.rs:314-352`) and `splice_volatile_cascade_roots` (`:382-405`),
+  wired at five cascade sites and pinned by a census test at `:8741`; its own doc comment names
+  PERF-19 by id. **Residual, narrower than the original:** active sheet only (`data.rs:311-313`),
+  and LAMBDA bodies are not walked (`volatility.rs:47-49`).
+- **PERF-18 (per-column ordered index) is MOSTLY obsolete but NOT closeable.** The scan-and-sort it
+  targeted is gone from the main path: `eval_column_ref` (`evaluator.rs:1980-1997`) and
+  `eval_row_ref` (`:2010-2022`) both delegate to `materialize_axis_rect` (`:2032-2081`), which walks
+  a bounded rect with per-coordinate probes — no map iteration, no sort — and the proposed
+  `BTreeSet` index could not serve the new contract anyway, which is DENSE over the used range by
+  deliberate design (`:1948-1979`, and the reason is a correctness one: compacted output made SUMIF
+  pair two columns from different rows). **But one arm was missed and still scans:** the `ColumnRef`
+  branch of the SUBTOTAL/AGGREGATE collector does `for (&(r, c), cell) in &grid.cells`
+  (`evaluator.rs:4478`) for a whole-column reference and charges fuel for `grid.cells.len()` up
+  front (`:4467-4473`). Close PERF-18 as specified; keep that arm as its own small row.
+
+**The eight that are unbuilt**, each with the file that decides it:
+
+| finding | what | where it stands |
+|---|---|---|
+| PERF-02 | recalc drivers stop re-parsing the world | `calculation.rs:159` still `parser::parse(formula)` per cell; `:176-177` still clones both dimension maps per cell; both drivers render every AST back to a string first (`:1174`, `:1866`) |
+| PERF-07 | rect nodes for range dependencies | finite rects still expand per cell — nested `for r … for c … refs.cells.insert()` at `lib.rs:1511-1523` |
+| PERF-08 | `Arc` AST + in-place write-back + retire the grid mirror | `pub ast: Option<Box<Expression>>` (`cell.rs:296`), `Cell::clone` deep-copies the tree (`:307-316`); no `Grid::set_value`; the BUG-0016 mirror is intact and still whole-grid-cloned (`calculation.rs:1107`, `:2311`, `:2392`) |
+| PERF-10 | number-format parse cache | `parse_custom_format` (`custom_format.rs:220`) has no memo; both entry points call it unconditionally (`:1911`, `:1923`) |
+| PERF-13 | box the `Lambda` payload | all three fields inline at `evaluator.rs:576-580`. **The audit's "80 → 32 bytes, 2.5x less traffic" is NOT a verified figure** — it was inherited from the 2026-07-12 verifier, never re-measured, and no `size_of::<EvalResult>()` assertion exists anywhere in `core/engine/src`. Measure before scheduling |
+| PERF-15 | conditional-formatting tick | the frontend debounce exists (`cfStore.ts:37`, `:146-166`) and a viewport is tracked; the BACKEND is unchanged — `collect_range_stats` runs for every enabled stats rule regardless of viewport (`conditional_formatting.rs:1037-1046`) and probes every coordinate of every rule range (`:1228-1248`) holding `state.grids.read()` |
+| PERF-17 | DataValidation refresh | HALF solved, differently: the N+1 round-trips went via `@api/coalescedRefresh`, not the proposed debounce. The other half stands — `get_invalid_cells` (`data_validation.rs:827`) probes every coordinate of every range, and the per-range invariants are still recomputed per CELL (`:416-429`) |
+| PERF-04(c) | full `RangeView<'g>` yielding `&CellValue` | no `RangeView` symbol anywhere in the repo. (a) and (b) shipped |
+
+**Deferred residue inside findings that DID ship**, none of it tracked either:
+
+- **PERF-03**: XMATCH is entirely uncached and linear in every mode (`evaluator.rs:14424-14512`);
+  multi-column `ColumnRef` bypasses the cache (`:15501-15512`).
+- **PERF-14**: SUMIFS, COUNTIFS, AVERAGEIF, AVERAGEIFS, MINIFS and MAXIFS still full-scan, building
+  a `Vec<EvalResult>` per criteria range per call.
+- **PERF-11**: compiled wildcard patterns not built — `xlookup_wildcard_match` allocates a
+  `Vec<char>` for pattern AND text on every call (`:5948-5952`) and `matches_criteria` additionally
+  allocates `to_uppercase()` per cell; `as_text_into(&mut String)` does not exist.
+- **PERF-22**: the two benches the audit called *the gate* are still missing — there is no app-crate
+  end-to-end recalc bench (no `app/src-tauri/benches`, no `[[bench]]` in its manifest) and no
+  parse/extract throughput bench (no `core/parser/benches`).
+
+**Three traps for whoever picks any of this up**, all measured:
+
+1. **A comment in the engine says PERF-02 is already done.** `core/engine/src/cell.rs:7-8` states as
+   a performance header: "The AST is the canonical formula storage - it is parsed once and never
+   re-parsed on recalculation." That is true of the cascade path and FALSE of both full-recalc
+   drivers. Fix the comment whether or not the work is scheduled.
+2. **A bulk grid assignment inside a live lookup pass bypasses cache invalidation.**
+   `calculation.rs:2392` does `grids[active_sheet] = grid.clone()` through no `Grid` mutator, so
+   none of the four `notify_write`/`notify_write_rect` hooks fires. Harmless today; **PERF-10(a) is
+   precisely the change that would make it serve wrong answers.**
+3. **`fn_vlookup`/`fn_hlookup` over 1-D rects deliberately bypass the fast path** (it requires
+   `rows>1 && cols>1`, because `table_row_views` treats a flat vector as ONE row). Do not "fix" that
+   by including them — the audit records it as a trap and it still is one.
+
+Also stale and worth correcting in passing: **four** comments in `evaluator.rs` (`:15459-15461`,
+`:15472-15474`, the `cache_vector` doc at `:15544`, and `literal_vector_desc`'s own) still describe
+whole-column refs as using "the populated-only compacted ordering", which `materialize_axis_rect`
+replaced with a dense one.
+
+
 ### 2.x On-grid CONTROLS have no reachable right-click menu — **CLOSED 2026-09-04 as M3a**
 
 **CLOSED.** Controls now owns a capture-phase `contextmenu` listener of its own
@@ -675,6 +786,64 @@ default — but it is undeclared, and "the publisher changed the report and you 
 is the kind of silence this program exists to remove. Decide whether refresh should adopt v2's
 definitions (matching reset) or keep the subscriber's (matching today), then SAY which in the
 preview.
+
+**OWNER DECISION 2026-09-12: ADOPT.** A refresh takes the publisher's v2 pivot definitions,
+matching `calp_reset_subscription` and the pull path. Add and delete land under this too — they
+always had to, since a pivot ADDED in v2 has no local counterpart to keep and one DELETED has no
+publisher version to adopt; only "changed" was ever the choice.
+
+**What decided it.** Not "the subscriber's layout is worth less" — it is real, it persists, and it
+is genuinely theirs: no pivot mutation command carries a subscription or protection gate (the only
+`check_sheet_action` in `pivot/commands.rs` is on `create_pivot_table:354`; `move_pivot_field`,
+`set_pivot_aggregation`, `update_pivot_layout`, `sort_pivot_field`, `set_pivot_item_visibility` and
+`delete_pivot_table` have none), and `pivot_tables` is `Persisted` and round-trips through save.
+What decided it is that **KEEPING is not neutral, it is a correctness risk.** `PivotField.source_index`
+is a source COLUMN ORDINAL and `source_start`/`source_end` are stored coordinates
+(`definition.rs:52-54`, `:634-638`). A v2 that inserts a source column or widens the table leaves
+the v1 definition aimed at the old ordinal and the old rectangle, and `build_cache_from_grid`
+(`pivot/commands.rs:2052`) re-renders it confidently against the new data. "You keep your layout"
+quietly becomes "you keep a wrong number". Two supporting facts: a pivot re-layout is invisible to
+every subscriber-facing surface (`record_subscription_override_edits` is reached only from
+cell-edit paths, so it is never in the Overrides pane, never counted as a conflict, never revertible
+cell-by-cell), and reset ALREADY discards it wholesale under a confirm that lists "Every cell,
+format, size and merge" and never mentions pivot layouts. Refresh preserved it silently, reset
+discarded it silently, and neither surface said which — that asymmetry had to close whichever way
+the decision went.
+
+**The first fix design was REFUTED, and is recorded here so nobody builds it.** Adversarial review
+on 2026-09-12 found five independent defects in it, each traced. Anyone implementing this must
+start from these, not from the obvious reading:
+
+1. **The sheet-name remap is backwards, destructively.** Keying `pkg_name_to_local` on
+   `pulled.name` is wrong because `resolve_sheet_name_collisions` MUTATES the name in place
+   (`core/calp/src/pull.rs:241`) and `PulledSheet` has only one name field. A v2-ADDED sheet that
+   collided would write the publisher's pivot output over the subscriber's own same-named sheet.
+   The pull path captures `original_names` BEFORE the collision pass (`calp_commands.rs:3824-3838`);
+   refresh captures none (`:7117-7134`). Capture them and union with the already-tracked mapping.
+2. **The output would be written and then destroyed.** `restore_pulled_pivots` passes `None` for
+   the active-grid dual-write (`:16538-16544`), which is safe on a PULL (destination is always an
+   appended sheet) and not on a REFRESH, where the destination can be the ACTIVE sheet — whose read
+   path is `state.grid`, and `run_calculation_pass` overwrites `grids[active]` from the mirror
+   (`calculation.rs:1105-1107`) on the `calculateNow()` the dialog runs. Use `update_pivot_in_grid`
+   (`pivot/operations.rs:950-1029`), which dual-writes AND repairs `state.merged_regions`.
+3. **It would red an enforced lock-order test.** See §2.8 — copying `restore_pulled_pivots`' order
+   (`pivot_tables` then `grids`) into `calp_refresh_apply` plants exactly the shape the census
+   asserts against. Take `grid` -> `grids` -> `style_registry` first and `pivot_tables` after, per
+   `pivot/operations.rs:961-965`.
+4. **Every BI pivot would lose its connection.** The `data_source_id` -> `ConnectionId` routing
+   resolves through `embedded_connection_ids`, and `refresh_embedded_data_sources` returns only
+   NEWLY created ones (`:16079`, `:16183`) — empty for every data source that already existed.
+5. **The preview manifest is NOT signature-verified.** `compute_preview` calls
+   `registry.get_version_manifest` (`core/calp/src/refresh.rs:404`), which for the local transport
+   is read-file-and-deserialize with no signature check (`core/calp/src/workspace.rs:319-334`). A
+   delta computed there is a hint for the dialog, not an authority; the authority is the signed
+   manifest on the apply path.
+
+Also: the same `o.kind` filter carries `dataSource` and `extensionData`, so those two were frozen
+at v1 by the same line — data sources ARE re-materialized (`:7999-8012`), so only their LEDGER
+entry is stale, and the comment at `:8201-8218` claiming refresh "does not touch" them is wrong and
+should be corrected while this is open.
+
 
 ### ~~2.aa Per-cell selection on the PUSH side needs a state-agnostic evaluator~~ — **CLOSED 2026-09-02**
 
@@ -784,6 +953,7 @@ delivered, and one doc-drift row found on the way. Every row was verified agains
 
 | item | verified at |
 |---|---|
+| **BUG-0113 — the `ui.html` bridge is inert under the built CSP. HALF FIXED 2026-09-12: the endpoint exists and is pinned; NO FRAME USES IT YET, so the defect still reproduces.** Diagnosis re-verified and one load-bearing sentence in the ledger entry CORRECTED: it is not that a `srcdoc` child "has no origin". TWO rules compose. (1) `determine navigation params policy container` returns a CLONE OF THE INITIATOR's when the response URL is `about:srcdoc`, so the app's `script-src 'self' blob:` lands inside the frame verbatim. (2) `initialize a Document's CSP list` sets each policy's self-origin to the new document's origin, and `sandbox="allow-scripts"` without `allow-same-origin` makes that origin OPAQUE — so the inherited `'self'` matches nothing and the frame is left with effectively `script-src blob:`. That second half is what kills the two obvious fixes: an external `<script src>` served from `'self'` is refused for the same reason the inline one is. **BUILT SO FAR:** `app/src-tauri/src/script_frame.rs` serves a CONSTANT loader over a `calcula-frame` URI scheme with its own `Content-Security-Policy` RESPONSE HEADER, so that document gets its OWN policy container instead of a clone; `frame-src` gained the origin in BOTH `csp` and `devCsp` (the parent's policy is consulted first, so a missing entry refuses the frame before its own policy is ever read); `frameDocument.ts` gained the host half (`SCRIPT_FRAME_LOADER_URL`, the ready/set-content message names, `buildScriptFrameContent`, `scriptFrameThemeCss`); `scriptFrameLoader.test.ts` (15 tests) pins the two halves against each other ACROSS the language boundary. **THE DESIGN THAT WAS REFUTED, recorded so nobody rebuilds it:** having the loader install pushed content with `document.open()/write()/close()`. HTML's document-open steps erase every event listener on the Window, so the loader loses its own `message` handler on the FIRST push and every later one is dropped silently — and both shipped interactive surfaces re-render on interaction, so the counter would paint "0", the click would reach the script, and the display would never update. That is BUG-0113's own user-visible symptom, reproduced by its fix, and it would pass a naive first-paint check. Content therefore arrives as a BODY SWAP: `innerHTML` never executes `<script>` (irrelevant — the bridge is already installed and no shipped template carries one) and DOES install inline `onclick=`, which the frame's own `script-src 'unsafe-inline'` permits. **STILL TO DO:** switch `shapeRenderer.ts`, `CustomControlHost.tsx` and the `PropertiesPane` preview from `srcdoc` to `src` + a ready-gated content push (the host must hold the newest pending payload until the loader announces itself — a sandboxed frame's load event is not reliably observable from the embedder); re-point `csp-srcdoc-bridge.spec.ts` at the loader as M6b re-pointed it rather than deleting it; and MEASURE against a real release build, because `tauri dev` enforces no CSP and every functional E2E run to date has exercised an unprotected build. **One risk that cannot be settled by reading:** wry 0.53.5 registers the resource filter with `AddWebResourceRequestedFilterWithRequestSourceKinds(..., SOURCE_KINDS_ALL)` only when it can cast to `ICoreWebView2_22`, and falls back to an API whose own comment says it does NOT cover iframes (`wry/src/webview2/mod.rs:929-942`). Evergreen runtimes since ~121 are fine; a fixed-version deployment older than that would get a blank frame. Needs a measured floor. | `app/src-tauri/src/script_frame.rs`, `app/src-tauri/src/lib.rs` (`register_uri_scheme_protocol`), `app/src-tauri/tauri.conf.json` (`frame-src` in `csp` and `devCsp`), `app/extensions/_shared/scriptFrame/frameDocument.ts`, `app/extensions/_shared/scriptFrame/__tests__/scriptFrameLoader.test.ts` |
 | **CLOSED 2026-09-03: the editor preview now seeds range-fed content and control bindings too.** The rung resolves `options: { range }` and a table's `rows: { range }` against the SAME grid copy the run used and returns them on `WorkerPreviewReport.formSources` — they cannot be resolved by the caller, because the copy never leaves the rung and a caller re-reading those ranges would be seeding widgets from the LIVE workbook. A `{ control }` value is live app state, so it is read in the trusted caller and seeded read-only. An image still resolves to nothing in a preview and says so rather than inventing a URL. The procedure is shared: `previewFormLayout`. | `app/src/api/scriptFormPreview.ts`, `app/src/api/scriptHost/scriptPreview/formSources.ts`, `scriptPreview/report.ts` (`WorkerPreviewReport.formSources`) |
 | **CLOSED 2026-09-03: the form journeys RUN and pass against the live app.** 26 journey tests green: `script-form.spec.ts` 9/9 (Insert > Form mints a UUID instanceId; the band names script and sheet; a required field blocks Submit; Enter writes TYPED values in ONE undo step with a second-edit positive control; Escape writes nothing; an `onSubmit` verdict keeps the form open; a cell changed by another script updates the widget; a second script's `caps.dialog.alert` is refused while the form is up; and a button script's `caps.forms.show` survives 33 s past the 30 s relay deadline and receives the answers), `script-form-distributed.spec.ts` 2/2 (decline then approve a published `.calp`), and `script-preview.spec.ts` 15/15 including the editor's Preview form. ONE spec defect was found by running them: the consent prompt was asserted with `capabilities.ts`'s sentence while that surface renders the ScriptableObjects one — three phrase tables exist per surface, all pinned by `formConsentHonesty.test.ts`. | `app/e2e/journeys/script-form.spec.ts`, `app/e2e/journeys/script-form-distributed.spec.ts`, `app/e2e/journeys/script-preview.spec.ts` |
 | **CLOSED 2026-09-03: the `writeOn: "change"` stale-marker echo was real, and is fixed.** The post-write refresh now passes `{ echo: false }`, so the form is not told its own write was an outside edit, and `refreshScriptFormSeeds` applies the RENDERER's untouched rule before it adopts a value — a widget the user is editing keeps what is on screen and `form.values` agrees with it. Pinned by two cases in `scriptForms.test.ts`. | `scriptForms.ts` (refreshScriptFormSeeds), `host.ts` (writeFormBindings), `src/api/scriptHost/__tests__/scriptForms.test.ts` |
@@ -832,7 +1002,7 @@ binary — a text-search census of this area reports five and is wrong).
 | **CLOSED 2026-09-04: the UDF consent prompt says when the code runs, and `onOpen` is delivered.** "Runs whenever a cell uses it" was false in the adversarial case: the body is spliced inside an arrow function but nothing refuses a body whose `}` closes it early, and what follows runs at every load. The sentence now names both triggers. And "handlers that run when this workbook opens" was promised but never delivered — this realm never passed `mountCause`, so the host's one-shot `onOpen` replay (`openReplayPending`) was never armed for it; the open-driven install now threads `cause: "open"` all the way to `hostMountScript`. The honesty test's `sheet.*` clause is now one explicit case per row, not a prefix rule that would let a new sheet row with different reach pass under an old sentence. | `app/extensions/CustomFunctions/components/DistributedFunctionsConsentDialog.tsx`, `app/src/api/customFunctions.ts` (`mountCause: opts.cause`), `app/extensions/CustomFunctions/index.ts`, `app/extensions/CustomFunctions/__tests__/distributedFunctionsConsentHonesty.test.tsx` |
 | **CLOSED 2026-09-04: the button planner's notices and shadows tell the truth.** A local module that merely *existed* shadowed a distributed namesake even when empty or unreadable — `Name()` then ran with nothing defined and no word why; the shadow set is now built from the modules that will actually be wrapped. And composed code naming a name two applications answer to got one notice per module, each telling the user to "set the action to exactly Name()" — the one thing the planner then refuses as ambiguous; it is now one notice per name carrying the refusal's own remedy. | `app/extensions/_shared/lib/buttonScriptRun.ts` (`planInlineButtonRun`), `app/extensions/_shared/lib/__tests__/buttonScriptRun.test.ts` |
 | **CLOSED 2026-09-04: every module picker shows provenance, and the autocomplete offers only calls that do what its rows say.** The OnSelect autocomplete offered a distributed row whose inserted `Name()` ran the user's LOCAL module of the same name (local-wins), and two identical `Report()` rows for two applications, each claiming its own — a call the planner refuses. A shadowed distributed row is no longer offered, and a tie collapses into one row that says the name is claimed by several applications. The two view-bookmark overlays declared a private `ScriptSummary { id; name }` that dropped `sourcePackage` and rendered bare names; both now label through `scriptPickerLabel` and say through `describeDistributedScriptChoice` when the chosen module is a publisher's. Its test pinned the defect ("the run planner decides by provenance, not spelling" — it decides by name) and was rewritten. | `app/extensions/Controls/PropertiesPane/CodePropertyInput.tsx` (`buildScriptSuggestions`), `app/extensions/BuiltIn/CellBookmarks/components/ViewBookmark{Create,Edit}Overlay.tsx`, `app/extensions/Controls/__tests__/scriptPickerProvenance.test.tsx`, `app/extensions/BuiltIn/CellBookmarks/__tests__/viewBookmarkScriptPicker.test.ts` |
-| **OPEN — a custom-function body whose `}` closes its wrapper early runs at LOAD, inside the same sandbox.** `generateLibrarySource` splices the publisher's body inside `fns[NAME] = async (...) => { BODY }` and nothing refuses a body that closes that function and continues at top level — so code can run every time the workbook's functions load, not only when a cell calls one. Same reach, same tier, so not an escalation; a timing-and-transparency gap, and the prompt now says so. Refusing such a body at install needs a real parser: the shipped CSP has no `unsafe-eval`, so `new Function` as a parser is exactly the mistake the button planner already made and reverted. A brace-balance check is defeated by strings and comments. | `app/src/api/customFunctions.ts` (`generateLibrarySource`), `app/extensions/CustomFunctions/components/DistributedFunctionsConsentDialog.tsx` |
+| ~~**OPEN — a custom-function body whose `}` closes its wrapper early runs at LOAD, inside the same sandbox.**~~ **CLOSED 2026-09-12 — refused at generation, by a real parser.** `validateFunctionBody` (`app/src/api/customFunctions.ts`) wraps the body the way `generateLibrarySource` does — `(async (<params>) => {\n<body>\n})` — parses that probe with **acorn**, and requires the result to be exactly one `ArrowFunctionExpression`. An escaping body cannot survive it: parentheses admit one expression, so the escape is a SyntaxError rather than a well-formed program. `generateLibrarySource` calls it beside the existing name/param checks and throws, and `planCustomFunctionRealms` already ran BEFORE any teardown, so a refusal leaves the previously-installed library standing. **The row's own objections both held and both are answered.** A brace count would indeed have been defeated by strings, template literals, regex literals and comments — so the guard is tested against all four plus nested blocks, an inner arrow, and `try`/`catch`, because wrongly REJECTING a legitimate body is the worse failure here (the author has no way to satisfy it). And `new Function` as the parser would indeed have been the button planner's mistake repeated: the shipped CSP has no `unsafe-eval`, so it works in `tauri dev`, which enforces no CSP, and throws in a built app. Acorn needed no new dependency — it is already in `dependencies` and already parses object scripts one directory over (`scriptHost/scriptValidation/analyze.ts:23`). One behaviour worth knowing, pre-existing rather than introduced: one bad definition refuses the whole plan, so a publisher's malformed body disables the subscriber's own functions until the package is fixed — an invalid NAME has always done that, and refusing is the safe direction. Both sabotages verified: neutering the validator reds the 7 refusal tests while all 8 acceptance tests stay green, and removing only its call site reds exactly the one wiring test. | `app/src/api/customFunctions.ts` (`validateFunctionBody`, called from `generateLibrarySource`), `app/src/api/index.ts`, `app/src/api/__tests__/customFunctions.test.ts` (34 tests) |
 | **OPEN — a module stamped with a BLANK application name fails closed on both sides and can never be approved.** Reachable only by hand-editing a `.cala` (pull always stamps a real name). TypeScript now reads a blank stamp as "distributed, placeholder name" and deliberately leaves such a module OFF the consent prompt rather than promise a run; Rust's module gate keys `consent_granted_in` on the raw `"   "`, which no record will ever carry. Consistent, fail-closed, and a dead end. Closing it means Rust normalising the stamp to the same placeholder TypeScript uses AND the prompt admitting the module under that key — not worth a Rust change for a hand-edit corner, but it must not be mistaken for "blank means local", which is the direction that would be a hole. | `app/src-tauri/src/scripting/commands.rs` (`distributed_module_refusal`), `app/extensions/ScriptableObjects/lib/packageConsentSet.ts` (`consentPackageKey`), `app/src/api/scriptHost/scriptOrigin.ts` |
 | **OPEN — two DISPLAY-only provenance chips still read a blank stamp as local while every gate reads it as distributed.** `app/src/api/codeInventory.ts:435` and `:536`, and `app/extensions/ScriptNotebook/components/NotebookToolbar.tsx:39`. (MacroRecorder and the chart loaders were in this list and are closed above — the MacroRecorder one turned out not to be display-only at all: three gates hung off it.) Same hand-edit-only corner as the row above; the consequence is a chip saying "local" for a module the gates refuse as distributed — wrong in the safe direction, but wrong. Route both through `scriptOriginForStoredRecord`. | the two sites above, `app/src/api/scriptHost/scriptOrigin.ts` (`scriptOriginForStoredRecord`) |
 | **CLOSED 2026-09-04 (M2 S1): the host now applies event backpressure — hold at 256, release below 64, and a stall is a crash.** `EVENT_QUEUE_HIGH_WATER` had been declared and read nowhere; the realm has always acknowledged every dispatch with `{t:"eventDone"}`, and the production message loop ignored it (only the preview runner counted acks), so a hook that stopped returning let the host post for as long as the workbook stayed open. `postEvent` counts outstanding dispatches; past high water the host posts nothing — discrete hooks queue in order in `heldEvents` (hard cap 4× high water, oldest dropped and counted), coalesced hooks keep merging; `onEventDone` releases only once the realm has drained below `EVENT_QUEUE_LOW_WATER` (hysteresis — one threshold flaps on every ack); and a held realm that acknowledges nothing for `EVENT_STALL_MS` (30 s) goes through `crashWorker` exactly as a crash does (one respawn, then fault). The watchdog arms only while held, so an ordinary backlog is never a stall. The crash handler was factored out of `onerror` into `crashWorker` for that reuse — three source pins that sliced the old inline body were re-pointed. `refreshScriptFormSeeds` caps the per-refresh `onChange` fan-out at 32 (`MAX_FORM_CHANGE_FANOUT`; the mirror is still updated in full). Sabotage-verified both ways: neutering the hold reds exactly the five hold-dependent probes; disabling the watchdog callback reds exactly "the wedged realm was left running". | `app/src/api/scriptHost/host.ts` (`postEvent`, `onEventDone`, `releaseHeldEvents`, `armStallWatchdog`, `crashWorker`, `forwardEvent`), `app/src/api/scriptHost/protocol.ts` (`EVENT_QUEUE_LOW_WATER`, `EVENT_STALL_MS`), `app/src/api/scriptHost/scriptForms.ts`, `app/src/api/scriptHost/__tests__/eventBackpressure.test.ts` |

@@ -469,7 +469,14 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     await use(helper);
   },
 
-  gridPersistent: async ({ sharedPage }, use) => {
+  // gridPersistent deliberately does NOT depend on appPage -- its whole reason
+  // for existing is skipping appPage's per-test reset. That also skipped the
+  // wedge probe, so workflow-dashboard.spec.ts (7 tests) was the one journey
+  // file a wedged backend could still burn in full. Probe here too, on
+  // sharedPage directly, so no fixture is a hole in the guard.
+  gridPersistent: async ({ sharedPage }, use, testInfo) => {
+    const wedged = await checkForWedge(sharedPage, testInfo.title);
+    if (wedged) throw new Error(wedged);
     const helper = new GridHelper(sharedPage);
     await use(helper);
   },

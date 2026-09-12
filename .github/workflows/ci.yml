@@ -1,4 +1,6 @@
-# Core CI: type-check, unit tests, and Rust tests + bench compile.
+# Core CI: type-check, unit tests, and Rust tests + bench compile, across BOTH
+# Rust workspaces — `core/` and `model-engine-lib/`. They are separate Cargo
+# workspaces, so each needs its own job; one `--workspace` cannot span them.
 #
 # Complements architecture-boundaries.yml (the focused boundary gate, kept
 # separate so unrelated debt can't mask a boundary regression). All jobs run on
@@ -86,3 +88,38 @@ jobs:
       # (integer literals where PivotId became an EntityId newtype) completely
       # unseen, because benches are outside `cargo check` and `cargo test`.
       - run: cargo check --workspace --benches
+
+  # The BI/semantic-model engine — the thing every pivot, CUBE formula and
+  # measure evaluates through. It is its OWN Cargo workspace (`model-engine-lib/`,
+  # merged in 2026-07-24) and `rust-core` above cannot reach it: that job is
+  # rooted at `core`, whose members do not include it. Until this job existed the
+  # engine was gated by NOTHING on any branch — `link-check.yml` COMPILES it
+  # through the app crate's `bi-engine` path dependency but runs none of its
+  # tests, and `release.yml` names the directory only as a cache path.
+  #
+  # Linux is safe here, unlike the app crate: the only `#[cfg(windows)]` in the
+  # workspace is SQL Server integrated auth, which has an explicit
+  # `#[cfg(not(windows))]` refusal arm (engine-connectors/src/sqlserver.rs:184).
+  # Two Windows-only tests do not run here; everything else does.
+  #
+  # WHAT THIS JOB DOES NOT COVER, stated because a green here must not be read as
+  # more than it is: 75 tests sit behind `#[ignore]` because they need a live
+  # AdventureWorks database, and they are the whole differential-vs-SQL corpus —
+  # the engine's only ground truth for DAX semantics. `cargo test` prints them as
+  # "75 ignored" on every run and passes anyway. Deciding what to do about that
+  # corpus is an open owner call (docs/design/open-items.md 2.1).
+  #
+  # Measured locally before this job was added (2026-09-12, Windows ARM64):
+  # 2,660 passing test cases, 0 assertion failures, 75 ignored.
+  rust-model-engine:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: model-engine-lib
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: model-engine-lib
+      - run: cargo test --workspace

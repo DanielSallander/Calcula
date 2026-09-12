@@ -247,3 +247,114 @@ export function buildScriptFrameDocument(
 </script>
 </head><body>${userHtml}</body></html>`;
 }
+
+// ---------------------------------------------------------------------------
+// The LOADER route (BUG-0113)
+// ---------------------------------------------------------------------------
+//
+// `buildScriptFrameDocument` above is the SRCDOC route, and under the shipped
+// CSP its bridge never runs: a `srcdoc` child gets a clone of the embedder's
+// policy container, and the app ships `script-src 'self' blob:` with no
+// `'unsafe-inline'`, no nonce and no hash. The frame paints, so display-only
+// templates look perfect and only the ones that talk back are dead.
+//
+// The replacement serves a CONSTANT loader from a Rust URI-scheme handler
+// (`app/src-tauri/src/script_frame.rs`), which carries its own
+// `Content-Security-Policy` response header and therefore gets its own policy
+// container. The loader IS the bridge, installed once per frame load; content
+// arrives afterwards as a message and is applied as a BODY SWAP.
+//
+// Why a body swap and not a document rewrite: `document.open()` erases every
+// event listener on the Window, so a loader that rewrote its own document would
+// lose the listener that receives the next push. Both shipped interactive
+// surfaces re-render on interaction, so the counter would paint "0", the click
+// would reach the script, and the display would never update — which is
+// BUG-0113's user-visible symptom, reproduced by its own fix.
+
+/**
+ * Where the loader is served. Windows spells a custom scheme
+ * `http://<scheme>.localhost`; other platforms use `<scheme>://localhost`. This
+ * project is Windows-native (CLAUDE.md), and the assumption lives HERE rather
+ * than being discovered in a blank frame on another platform.
+ *
+ * Must appear in `frame-src` in BOTH `csp` and `devCsp`
+ * (`app/src-tauri/tauri.conf.json`), or the PARENT's policy refuses the frame
+ * before the frame's own policy is ever consulted.
+ */
+export const SCRIPT_FRAME_LOADER_URL = "http://calcula-frame.localhost/";
+
+/**
+ * Posted BY the loader, to the host, once its bridge is installed.
+ *
+ * The host cannot infer this: a sandboxed frame's `load` event is not reliably
+ * observable from the embedder, and pushing content before the listener exists
+ * drops it silently. So the loader announces itself and the host holds the
+ * newest pending content until it hears this.
+ */
+export const SCRIPT_FRAME_READY_MESSAGE = "calcula.frameReady";
+
+/** Posted BY the host, to the loader, to install or replace the frame's content. */
+export const SCRIPT_FRAME_SET_CONTENT_MESSAGE = "calcula.setContent";
+
+/** The payload of a {@link SCRIPT_FRAME_SET_CONTENT_MESSAGE}. */
+export interface ScriptFrameContentPayload {
+  /**
+   * Told to the frame rather than baked into it, because the loader is one
+   * constant document shared by every frame. Until the first push the frame
+   * knows no id and `window.calcula.sendMessage` stays silent — which is the
+   * right failure: a message with no id could not be routed anyway.
+   */
+  instanceId: string;
+  /** The script's own HTML, applied with `innerHTML`. */
+  html: string;
+  /** The `--calcula-*` declarations, as CSS text for the theme `<style>`. */
+  themeCss: string;
+  /** Optional floor on the body height, in CSS pixels (the pane card wants one). */
+  minHeightPx?: number;
+}
+
+/**
+ * Render the theme contract as the CSS text the loader installs.
+ *
+ * Split out of `buildScriptFrameDocument`'s inline construction so BOTH routes
+ * filter the tokens through `isSafeScriptFrameTokenValue` and emit them in the
+ * CONTRACT's order — the same reason that function gives: a skin must always
+ * produce the same text, or the hosts' content-hash comparison sees spurious
+ * changes.
+ */
+export function scriptFrameThemeCss(themeTokens: Record<string, string> = {}): string {
+  const decls = SCRIPT_FRAME_THEME_TOKENS.filter(
+    ({ frameVar }) =>
+      Object.prototype.hasOwnProperty.call(themeTokens, frameVar) &&
+      typeof themeTokens[frameVar] === "string" &&
+      isSafeScriptFrameTokenValue(themeTokens[frameVar]),
+  )
+    .map(({ frameVar }) => `\n    ${frameVar}: ${themeTokens[frameVar]};`)
+    .join("");
+  return `:root {${decls}\n  }`;
+}
+
+/** Build the content push for a frame. Pure; the host decides when to send it. */
+export function buildScriptFrameContent(
+  instanceId: string,
+  userHtml: string,
+  options: ScriptFrameDocumentOptions = {},
+): ScriptFrameContentPayload {
+  const payload: ScriptFrameContentPayload = {
+    instanceId,
+    html: userHtml,
+    themeCss: scriptFrameThemeCss(options.themeTokens),
+  };
+  if (options.minHeightPx !== undefined) payload.minHeightPx = options.minHeightPx;
+  return payload;
+}
+
+/** Is this a loader-ready announcement from `frame`'s content window? */
+export function isScriptFrameReadyMessage(e: MessageEvent): boolean {
+  const d = e.data as { source?: unknown; type?: unknown } | null;
+  return (
+    !!d &&
+    d.source === SCRIPT_FRAME_MESSAGE_TAG &&
+    d.type === SCRIPT_FRAME_READY_MESSAGE
+  );
+}

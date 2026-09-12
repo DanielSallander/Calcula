@@ -34,6 +34,11 @@
 // function.
 
 import { invoke } from "@tauri-apps/api/core";
+// The parser that decides whether a body stays inside its wrapper. Same acorn
+// the object-script validator uses (scriptHost/scriptValidation/analyze.ts), and
+// a parser rather than `new Function` because the shipped CSP has no
+// `unsafe-eval` — see `validateFunctionBody`.
+import { parse as acornParse, type Program as AcornProgram } from "acorn";
 import { registerFunction, UDF_ERROR_KEY } from "./formulaFunctions";
 import { hostMountScript, hostUnmountScript } from "./scriptHost/host";
 import { applyConsentedCapabilities, revokeScriptGrants } from "./scriptHost/capabilities";
@@ -185,6 +190,70 @@ export function validateParam(param: string, fnName: string): string | null {
   return null;
 }
 
+/**
+ * Does this body stay INSIDE the arrow function it is spliced into?
+ *
+ * `generateLibrarySource` splices the body as raw TEXT between the `{` and `}`
+ * of `fns[NAME] = async (...) => { … }`. A body whose own `}` closes that arrow
+ * early does not fail — it PARSES, and everything after the brace becomes a
+ * sibling statement in `setup(context)`, which the realm runs once per MOUNT.
+ * So the author's code executes on every workbook open, before and without any
+ * cell ever calling the function, and the UDF still works, so nothing looks
+ * wrong. Same realm, same tier, same grant set, so it is not an escalation —
+ * it is a TIMING and TRANSPARENCY gap, and a consent prompt that says "runs
+ * whenever a cell uses it" is then not true.
+ *
+ * WHY A REAL PARSE. Brace counting is defeated by `}` inside a string, a
+ * template literal, a regex literal or a comment — all of which are ordinary in
+ * a function body, so a counter would REJECT legitimate code, which is the
+ * worse failure here. `new Function` cannot be the parser either: the shipped
+ * CSP carries no `unsafe-eval`, so constructing one throws in a built app while
+ * working perfectly in `tauri dev`, which enforces no CSP. Acorn is already a
+ * runtime dependency and already parses object scripts one directory over
+ * (`scriptHost/scriptValidation/analyze.ts`), so it is the parser that is
+ * demonstrably allowed to run here.
+ *
+ * The probe wraps the body the same way the generator does and requires the
+ * result to be EXACTLY one arrow-function expression: an escaped body either
+ * fails to parse or yields more than one statement.
+ */
+export function validateFunctionBody(
+  body: string,
+  params: string[],
+  fnName: string,
+): string | null {
+  const probe = `(async (${params.join(", ")}) => {\n${body}\n})`;
+  // Said on BOTH refusal paths. An escaping body is a syntax error in the probe
+  // rather than a well-formed program — the parentheses admit exactly one
+  // expression — so the parser's own message is what an author actually sees,
+  // and "Unexpected token (2:11)" teaches nothing about why it is refused. The
+  // phrasing is conditional because this path also catches an ordinary typo,
+  // and claiming an escape that is not there would be its own dishonesty.
+  const consequence =
+    `If the body closes its own "}", everything after it runs when the workbook ` +
+    `opens instead of when a cell calls ${fnName}.`;
+  let program: AcornProgram;
+  try {
+    program = acornParse(probe, { ecmaVersion: "latest" });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `${fnName} is not a valid function body: ${msg}. ${consequence}`;
+  }
+  // Belt and braces, and honestly labelled as such: a parenthesised expression
+  // admits exactly one arrow, so reaching here would mean acorn parsed
+  // something this function's premise says it cannot. Kept because the premise
+  // is the guard — if it ever stops holding, refusing is the safe answer.
+  const only = program.body.length === 1 ? program.body[0] : null;
+  if (
+    !only ||
+    only.type !== "ExpressionStatement" ||
+    only.expression.type !== "ArrowFunctionExpression"
+  ) {
+    return `${fnName} does not parse as a single function body. ${consequence}`;
+  }
+  return null;
+}
+
 /** Indent each line of a body by two spaces for readable generated source. */
 function indent(body: string): string {
   return body
@@ -248,6 +317,11 @@ export function generateLibrarySource(
         const perr = validateParam(p, d.name);
         if (perr) throw new Error(perr);
       }
+      // Last, because it is the only check that needs the final parameter list:
+      // the body must stay inside the arrow this splices it into, or code that
+      // was meant to run per call runs once per MOUNT instead.
+      const berr = validateFunctionBody(d.body, params, d.name);
+      if (berr) throw new Error(berr);
       const name = JSON.stringify(normalizeName(d.name));
       return (
         `  fns[${name}] = async (${params.join(", ")}) => {\n` +
@@ -350,8 +424,16 @@ export function customFunctionsInstalled(): boolean {
 
 /**
  * Split a library into one realm per trust origin, generating each realm's
- * source. Pure (and exported for tests); THROWS on an invalid name/param, which
- * is why `doInstall` calls it BEFORE any teardown.
+ * source. Pure (and exported for tests); THROWS on an invalid name, param, or
+ * BODY (one that does not stay inside the arrow it is spliced into — see
+ * `validateFunctionBody`), which is why `doInstall` calls it BEFORE any
+ * teardown. A refusal therefore leaves the previously-installed library
+ * standing rather than half-torn-down.
+ *
+ * One bad definition refuses the WHOLE plan, including realms it is not in.
+ * That is pre-existing — an invalid name has always done it — and it is the
+ * safe direction, but it does mean a publisher's malformed function disables
+ * the subscriber's own until the package is fixed or removed.
  *
  * The subscriber's realm comes first and applications follow in name order, so
  * the mount order — and therefore the audit ring — is deterministic.
