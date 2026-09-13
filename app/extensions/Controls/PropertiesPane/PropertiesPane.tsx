@@ -644,6 +644,13 @@ export const PropertiesPane: React.FC<TaskPaneViewProps> = ({ data }) => {
       {isShape && activeTab === "preview" && (
         <div style={propertiesListStyle}>
           {htmlContent ? (
+            // DELIBERATELY still srcdoc, and not a BUG-0113 oversight. That bug
+            // is about the postMessage BRIDGE being refused under the app's
+            // inherited CSP; this document carries no bridge, no <script> and no
+            // `window.calcula` — it is the author looking at their own markup.
+            // Painting works under srcdoc and always did. Moving it to the
+            // loader would hand the preview a live bridge wired to no router,
+            // which is a worse answer than no bridge.
             <iframe
               ref={markPreviewFrameInert}
               style={previewFrameStyle}

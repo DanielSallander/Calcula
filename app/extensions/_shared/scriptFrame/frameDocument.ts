@@ -181,8 +181,24 @@ export interface ScriptFrameDocumentOptions {
  * Build the complete document for a script frame: the theme contract, the base
  * stylesheet, the postMessage bridge, and the script's own HTML in the body.
  *
- * The returned string is a whole document on purpose — see the header: the
- * delivery mechanism is the part that has to change, not the content.
+ * **NO PRODUCTION CALLER since BUG-0113 (2026-09-12).** Both hosts moved to the
+ * loader route — `scriptFrameLoaderUrl` + a pushed `ScriptFrameContentPayload`
+ * — because the `<script>` this builds was refused in every built app: a srcdoc
+ * child inherits the embedder's policy container, and the app ships
+ * `script-src 'self' blob:` with no `'unsafe-inline'`, no nonce and no hash.
+ *
+ * It survives ON PURPOSE, and only until one thing happens. It is the harness
+ * `app/e2e/tests/csp-srcdoc-bridge.spec.ts` uses to MEASURE the defect against a
+ * real bundled build; deleting it before the loader route has been measured the
+ * same way would destroy the only before/after this project can point at.
+ * Once that measurement exists, delete this function, its options' srcdoc-only
+ * prose, and that spec's srcdoc half together.
+ *
+ * Until then it is what this repo files as a defect elsewhere — a second
+ * implementation kept alive by its own tests — so it is named as such here
+ * rather than left to look live. `scriptFrame.test.ts` no longer boots ITS
+ * bridge; it boots the Rust loader's, because testing the retired one proved
+ * the protocol agreed with a bridge nobody runs.
  */
 export function buildScriptFrameDocument(
   instanceId: string,
@@ -281,7 +297,23 @@ export function buildScriptFrameDocument(
  * (`app/src-tauri/tauri.conf.json`), or the PARENT's policy refuses the frame
  * before the frame's own policy is ever consulted.
  */
-export const SCRIPT_FRAME_LOADER_URL = "http://calcula-frame.localhost/";
+export const SCRIPT_FRAME_LOADER_ORIGIN = "http://calcula-frame.localhost";
+
+/**
+ * The `src` for one frame. The instance id travels in the URL, not in the first
+ * message, and that is load-bearing rather than convenient: the host's router
+ * refuses any message without a string `instanceId` and then checks
+ * `event.source === frame.contentWindow`. A frame that had to be TOLD its id
+ * could not satisfy that on its own ready announcement, so it would have needed
+ * a second channel with no source check. Reading it from the URL keeps ready an
+ * ordinary frame message.
+ *
+ * The served document is still ONE constant for every frame — the Rust scheme
+ * handler ignores the request — so the query costs nothing on that side.
+ */
+export function scriptFrameLoaderUrl(instanceId: string): string {
+  return `${SCRIPT_FRAME_LOADER_ORIGIN}/?id=${encodeURIComponent(instanceId)}`;
+}
 
 /**
  * Posted BY the loader, to the host, once its bridge is installed.
@@ -296,15 +328,14 @@ export const SCRIPT_FRAME_READY_MESSAGE = "calcula.frameReady";
 /** Posted BY the host, to the loader, to install or replace the frame's content. */
 export const SCRIPT_FRAME_SET_CONTENT_MESSAGE = "calcula.setContent";
 
-/** The payload of a {@link SCRIPT_FRAME_SET_CONTENT_MESSAGE}. */
+/**
+ * The `data` of a {@link SCRIPT_FRAME_SET_CONTENT_MESSAGE}.
+ *
+ * It carries no `instanceId`: the push rides `postToScriptFrame`'s existing
+ * envelope, which already puts one in, and the frame already knows its own from
+ * its URL. Two spellings of the same id is a thing that can disagree.
+ */
 export interface ScriptFrameContentPayload {
-  /**
-   * Told to the frame rather than baked into it, because the loader is one
-   * constant document shared by every frame. Until the first push the frame
-   * knows no id and `window.calcula.sendMessage` stays silent — which is the
-   * right failure: a message with no id could not be routed anyway.
-   */
-  instanceId: string;
   /** The script's own HTML, applied with `innerHTML`. */
   html: string;
   /** The `--calcula-*` declarations, as CSS text for the theme `<style>`. */
@@ -336,25 +367,13 @@ export function scriptFrameThemeCss(themeTokens: Record<string, string> = {}): s
 
 /** Build the content push for a frame. Pure; the host decides when to send it. */
 export function buildScriptFrameContent(
-  instanceId: string,
   userHtml: string,
   options: ScriptFrameDocumentOptions = {},
 ): ScriptFrameContentPayload {
   const payload: ScriptFrameContentPayload = {
-    instanceId,
     html: userHtml,
     themeCss: scriptFrameThemeCss(options.themeTokens),
   };
   if (options.minHeightPx !== undefined) payload.minHeightPx = options.minHeightPx;
   return payload;
-}
-
-/** Is this a loader-ready announcement from `frame`'s content window? */
-export function isScriptFrameReadyMessage(e: MessageEvent): boolean {
-  const d = e.data as { source?: unknown; type?: unknown } | null;
-  return (
-    !!d &&
-    d.source === SCRIPT_FRAME_MESSAGE_TAG &&
-    d.type === SCRIPT_FRAME_READY_MESSAGE
-  );
 }

@@ -207,8 +207,13 @@ describe("File > Open with a pane tile on screen", () => {
 
   it("does not paint workbook A's html in a card the new workbook reuses the id of", () => {
     renderTile(WORKBOOK_A_HTML);
-    expect(host.querySelector("iframe")?.getAttribute("srcdoc")).toContain(
-      "Workbook A revenue",
+    // Workbook A's tile has a frame. Asserted through `src` rather than the old
+    // `srcdoc` content since BUG-0113 — the html is pushed to the loader now,
+    // and that handshake does not run in jsdom. The property this test is about
+    // is unaffected: what must NOT survive the swap is the ELEMENT, and its
+    // absence below is what proves the previous workbook's tile is gone.
+    expect(host.querySelector("iframe")?.getAttribute("src")).toContain(
+      encodeURIComponent(paneControlInstanceId(CONTROL.id)),
     );
 
     openAnotherWorkbook();

@@ -72,6 +72,10 @@ import {
   parkedScriptFrameCount,
   resetScriptFrameBudget,
   scriptFrameBudgetUsage,
+  markScriptFrameReady,
+  isScriptFrameReady,
+  SCRIPT_FRAME_SET_CONTENT_MESSAGE,
+  resetScriptFrameContentState,
 } from "../../_shared/scriptFrame";
 
 // ---------------------------------------------------------------------------
@@ -437,6 +441,141 @@ describe("two html shapes whose ids collide after a structural edit", () => {
     expect(scriptFrameBudgetUsage()).toEqual({ frames: 0, bytes: 0 });
     expect(frameCount()).toBe(0);
   });
+
+  it("re-points a migrated frame's URL, or it announces itself under the dead id forever", () => {
+    // BUG-0113 REGRESSION. The loader reads its instanceId from its query ONCE,
+    // at load. Move the element to a new id and leave the URL alone and the
+    // frame goes on posting the OLD id — every size report, every script
+    // message, and the ready announcement the content push waits for. The
+    // router resolves the dead id to nothing, answers "not-this-host", and
+    // drops all of it in silence.
+    //
+    // Under srcdoc this cost the shape its MESSAGES (the id was baked into the
+    // document and did not migrate either — a pre-existing defect this fixes in
+    // passing). Under the loader it costs the shape its PIXELS: content arrives
+    // over the same channel now, so a frame that never announces under the live
+    // id is never sent anything, and the content hash would tell the next paint
+    // there was nothing to do.
+    const oldId = "shape-old";
+    const newId = "shape-new";
+    setShapeHtmlContent(oldId, "<b>hello</b>");
+    paint(oldId, 0, 1);
+    const frame = getShapeOverlayFrame(oldId);
+    expect(frame, "the shape has no frame to migrate").not.toBeNull();
+    expect(frame!.getAttribute("src")).toContain(encodeURIComponent(oldId));
+
+    migrateShapeInstanceId(oldId, newId);
+
+    // Same element — the migration must not throw the document away...
+    expect(getShapeOverlayFrame(newId)).toBe(frame);
+    // ...but it must be reloaded under the live id, or nothing it says can be
+    // routed and nothing can be said to it.
+    expect(
+      frame!.getAttribute("src"),
+      "the migrated frame still loads under the OLD id, so its loader will " +
+        "announce a dead id and the content pushed under the new one is never sent",
+    ).toContain(encodeURIComponent(newId));
+    expect(frame!.getAttribute("src")).not.toContain(encodeURIComponent(oldId));
+  });
+
+  it("keeps feeding a frame across repaints — a content change must not strand the next push", () => {
+    // BUG-0113 REGRESSION, and the one that would have hurt most: this is the
+    // main interactive path, not a corner. `render.setHtmlContent` is what every
+    // interactive template calls on every click, and it runs through
+    // `setShapeHtmlContent`.
+    //
+    // Under srcdoc a content change re-assigned `srcdoc` and reloaded the
+    // document, so dropping the frame's readiness along with its content hash
+    // was correct. Under the loader a content change reloads NOTHING. Clearing
+    // readiness there left every later push waiting for an announcement the
+    // loader had already made and would never make again: the shape froze at
+    // whatever it first rendered, with no error anywhere. The shipped
+    // Interactive Counter would paint "0", take the click, and never move.
+    const id = "shape-repaint";
+    setShapeHtmlContent(id, "<b>0</b>");
+    paint(id, 0, 3);
+    const frame = getShapeOverlayFrame(id);
+    expect(frame, "the shape never got a frame").not.toBeNull();
+
+    // The loader boots and announces itself. Everything held so far goes out.
+    markScriptFrameReady(id, frame);
+    expect(isScriptFrameReady(id)).toBe(true);
+
+    // The script re-renders, the way a click on a counter does.
+    setShapeHtmlContent(id, "<b>1</b>");
+    paint(id, 0, 3);
+
+    // THE ASSERTION. The document did not reload, so the frame is still
+    // listening — and the next push must be able to reach it. A false here is a
+    // shape frozen at its first render forever.
+    expect(
+      isScriptFrameReady(id),
+      "a content change cleared the frame's readiness. The loader does not " +
+        "reload on a content change, so it will never announce itself again " +
+        "and every push from here on is held forever — the shape is frozen.",
+    ).toBe(true);
+    // ...and the element is the same one, which is what makes that true.
+    expect(getShapeOverlayFrame(id)).toBe(frame);
+  });
+
+  it("feeds a frame re-keyed onto an OCCUPIED id, even when both shapes drew the same html", () => {
+    // BUG-0113 REGRESSION, the narrow half of the re-key case. A re-anchor can
+    // land a pinned control's id on one an unpinned control already holds. The
+    // arriving frame is reloaded under the new id — and the content hash still
+    // sitting under that id describes the DISPLACED shape's document.
+    //
+    // Identical html is the case that bites, and two tiles built from the same
+    // template have it: the hash comparison then reads "nothing to do", so the
+    // reloaded frame is never pushed anything and stays blank forever.
+    //
+    // This asserts the PUSH, not the readiness flag. An earlier draft checked
+    // only `isScriptFrameReady` and passed with the defect still in place —
+    // both variants clear readiness, so the flag could not tell them apart.
+    const same = "<b>same</b>";
+    const free = "shape-free";
+    const pinned = "shape-pinned";
+    setShapeHtmlContent(free, same);
+    paint(free, 0, 6);
+    setShapeHtmlContent(pinned, same);
+    paint(pinned, 0, 7);
+    markScriptFrameReady(free, getShapeOverlayFrame(free));
+    markScriptFrameReady(pinned, getShapeOverlayFrame(pinned));
+
+    migrateShapeInstanceId(pinned, free);
+
+    const arriving = getShapeOverlayFrame(free);
+    expect(arriving, "the migrated shape has no frame").not.toBeNull();
+    expect(arriving!.getAttribute("src")).toContain(encodeURIComponent(free));
+
+    // Watch what the host actually sends the reloaded document.
+    const posted: Record<string, unknown>[] = [];
+    const win = arriving!.contentWindow as unknown as { postMessage: (d: unknown) => void };
+    expect(win, "jsdom gave the appended iframe no contentWindow").toBeTruthy();
+    win.postMessage = (d: unknown) => {
+      posted.push(d as Record<string, unknown>);
+    };
+
+    // The next paint must rebuild the payload for the arriving shape...
+    paint(free, 0, 6);
+    // ...and the reloaded loader announcing itself must deliver it.
+    markScriptFrameReady(free, arriving);
+
+    const sent = posted.filter((m) => m.type === SCRIPT_FRAME_SET_CONTENT_MESSAGE);
+    expect(
+      sent.length,
+      "the re-keyed frame was never sent its content. The destination id's " +
+        "stale content hash made the next paint believe the document already " +
+        "showed this html, so the shape is blank forever.",
+    ).toBeGreaterThan(0);
+    expect(sent[sent.length - 1]).toMatchObject({
+      instanceId: free,
+      data: { html: same },
+    });
+  });
+
+
+
+
 
   it("takes the displaced shape's pointer claims with it too", () => {
     // A shim is not keyed to the frame it covers — it CLOSES OVER the element —

@@ -148,9 +148,25 @@ function scriptHtmlHosts(): string[] {
       }
       if (!/\.tsx?$/.test(entry.name)) continue;
       const src = fs.readFileSync(full, "utf8");
-      // A JSX attribute (`srcDoc={…}`) or a DOM assignment (`el.srcdoc = …`).
-      // Prose mentioning `srcdoc` in backticks does not match.
-      if (/\bsrcDoc=\{|\bsrcdoc\s*=[^=]/.test(src)) {
+      // THREE ways to mount a script's document, and the scan must know all of
+      // them or it silently stops guarding a host.
+      //
+      //   1. `srcDoc={…}` — a JSX attribute.
+      //   2. `el.srcdoc = …` — a DOM assignment. (Prose mentioning `srcdoc` in
+      //      backticks does not match either, which is deliberate.)
+      //   3. `scriptFrameLoaderUrl(…)` — the LOADER route (BUG-0113), where the
+      //      document is fetched from Rust so it carries its own CSP and the
+      //      script's HTML is pushed in afterwards.
+      //
+      // (3) was added when the two real hosts moved off srcdoc. Without it this
+      // scan found ONE host — the Properties-pane preview, which has no bridge
+      // and takes no input — and the two that actually matter, the on-grid
+      // overlay and the pane card, were no longer checked at all. The test
+      // below that asserts "only a gated claim buys pointer-events: auto" would
+      // have gone on passing over an empty-ish list, which is precisely the
+      // failure its own name warns about: a scan that finds nothing guards
+      // nothing.
+      if (/\bsrcDoc=\{|\bsrcdoc\s*=[^=]|\bscriptFrameLoaderUrl\(/.test(src)) {
         out.push(path.relative(APP, full).replace(/\\/g, "/"));
       }
     }

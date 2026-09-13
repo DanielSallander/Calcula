@@ -22,6 +22,8 @@
  * cannot be camelCase and are the literal strings the product emits; the same
  * repo-wide exception vite.config.ts takes for its `'@api'` alias key. */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   buildScriptFrameDocument,
@@ -41,6 +43,7 @@ import {
   MAX_LIVE_SCRIPT_FRAME_BYTES,
   SCRIPT_FRAME_MESSAGE_TAG,
   SCRIPT_FRAME_SIZE_MESSAGE,
+  SCRIPT_FRAME_SET_CONTENT_MESSAGE,
   SCRIPT_FRAME_THEME_TOKENS,
   type ScriptFrameIntrinsicSize,
   type ScriptFrameMessage,
@@ -308,8 +311,14 @@ interface BootedBridge {
   dispatched: CustomEvent[];
   /** Deliver a host -> frame message, as the browser's `message` event would. */
   receive: (data: unknown) => void;
-  /** Fire the frame's `load`, which is what triggers the first size report. */
-  load: () => void;
+  /** Deliver a message from a window that is NOT the embedder. */
+  fromForeignWindow: (data: unknown) => void;
+  /** Push content, as `setScriptFrameContent` does once the loader is ready. */
+  setContent: (payload: Record<string, unknown>) => void;
+  /** What the body swap actually installed, so a test can see the content land. */
+  body: { innerHTML: string; style: { minHeight: string } };
+  /** The theme <style>'s text, likewise. */
+  themeCss: () => string;
   /** Call `window.calcula.sendMessage`, as the script's own HTML does. */
   send: (type: string, data: unknown) => void;
 }
@@ -323,18 +332,42 @@ interface BootedBridge {
  * parameters, which shadows the globals of the same name — the bridge cannot
  * reach jsdom's real window by accident and quietly pass a test on it.
  */
+/**
+ * The loader document Rust serves, read from source.
+ *
+ * Scoped to the raw-string LITERAL, not the whole file: that file DISCUSSES the
+ * spellings it forbids in its own prose, and a textual guard handed the file
+ * would red on the comments explaining it.
+ */
+const SCRIPT_FRAME_LOADER_TEXT = (() => {
+  const src = readFileSync(join(process.cwd(), "src-tauri/src/script_frame.rs"), "utf8");
+  const at = src.indexOf('SCRIPT_FRAME_LOADER: &str = r#"');
+  if (at < 0) throw new Error("script_frame.rs no longer declares SCRIPT_FRAME_LOADER");
+  const start = src.indexOf('r#"', at) + 3;
+  const end = src.indexOf('"#', start);
+  return src.slice(start, end);
+})();
 function bootFrameBridge(
   instanceId: string,
   scroll: { width: number; height: number } = { width: 321, height: 177 },
 ): BootedBridge {
-  const doc = buildScriptFrameDocument(instanceId, "<b>hi</b>");
-  const body = /<script[^>]*>([\s\S]*?)<\/script>/.exec(doc);
-  expect(body, "the built document carries no <script> bridge").not.toBeNull();
+  // The LOADER, read out of the Rust file that serves it (BUG-0113). It used to
+  // be `buildScriptFrameDocument`'s <script>, and that document no longer
+  // reaches a user: a srcdoc child inherits the app's CSP, so its inline bridge
+  // was refused in every built app. Booting the text that actually ships is the
+  // whole point of this block — a harness pointed at the retired builder would
+  // have proved the protocol agreed with a bridge nobody runs.
+  const body = /<script[^>]*>([\s\S]*?)<\/script>/.exec(SCRIPT_FRAME_LOADER_TEXT);
+  expect(body, "the Rust loader carries no <script> bridge").not.toBeNull();
 
   const listeners = new Map<string, ((event: unknown) => void)[]>();
   const dispatched: CustomEvent[] = [];
   const posted: Record<string, unknown>[] = [];
   const frameWindow: Record<string, unknown> = {
+    // The loader reads its own id from the URL rather than waiting to be told,
+    // so the ready message it posts can carry one and pass the router's source
+    // check like any other frame message.
+    location: { search: `?id=${encodeURIComponent(instanceId)}` },
     addEventListener(type: string, fn: (event: unknown) => void): void {
       const list = listeners.get(type) ?? [];
       list.push(fn);
@@ -350,7 +383,15 @@ function bootFrameBridge(
       posted.push(data);
     },
   };
-  const frameDocument = { documentElement: { scrollWidth: scroll.width, scrollHeight: scroll.height } };
+  // Enough document for the loader's body swap: the theme <style> it fills, the
+  // body it writes into, and the element it measures.
+  const themeStyle = { textContent: "" };
+  const frameBody = { innerHTML: "", style: { minHeight: "" } };
+  const frameDocument = {
+    documentElement: { scrollWidth: scroll.width, scrollHeight: scroll.height },
+    body: frameBody,
+    getElementById: (id: string) => (id === "calcula-frame-theme" ? themeStyle : null),
+  };
   // A constructor-shaped stand-in: `typeof` must be "function" or the bridge
   // skips the branch, and `new` must yield something with `observe`.
   const resizeObserver = function ResizeObserverDouble(): { observe: () => void } {
@@ -370,13 +411,46 @@ function bootFrameBridge(
   return {
     posted,
     dispatched,
-    receive: (data) => fire("message", { data }),
-    load: () => fire("load", {}),
+    receive: (data) => fire("message", { data, source: parentWindow }),
+    fromForeignWindow: (data) => fire("message", { data, source: { hostile: true } }),
+    setContent: (payload) =>
+      fire("message", {
+        source: parentWindow,
+        data: {
+          target: SCRIPT_FRAME_MESSAGE_TAG,
+          instanceId,
+          type: SCRIPT_FRAME_SET_CONTENT_MESSAGE,
+          data: payload,
+        },
+      }),
+    body: frameBody,
+    themeCss: () => themeStyle.textContent,
     send: (type, data) => calcula.sendMessage(type, data),
   };
 }
 
 describe("the frame's own bridge and the host's router are ONE protocol", () => {
+  it("announces itself the moment it boots, so the host can release its content", () => {
+    // The loader's FIRST act, and the thing the whole delivery gate turns on:
+    // the bridge is fetched now, so the host cannot know when it exists. It is
+    // asserted here, against the real text, because a loader that stopped
+    // announcing would leave every frame blank with nothing logged.
+    const bridge = bootFrameBridge("shape-1");
+    const win = fakeWindow("frame-1");
+    const ready: string[] = [];
+    const route = createScriptFrameRouter({
+      resolveFrame: (id) => (id === "shape-1" ? fakeFrame(win) : null),
+      deliver: () => {
+        throw new Error("the ready announcement must never reach the script");
+      },
+      onReady: (id) => ready.push(id),
+    });
+
+    expect(bridge.posted).toHaveLength(1);
+    expect(route(frameMessage(win, bridge.posted[0]))).toBe("ready");
+    expect(ready).toEqual(["shape-1"]);
+  });
+
   it("carries a script's message out of the frame and into deliver()", () => {
     const bridge = bootFrameBridge("shape-1");
     bridge.send("increment", { by: 2 });
@@ -386,13 +460,16 @@ describe("the frame's own bridge and the host's router are ONE protocol", () => 
     const route = createScriptFrameRouter({
       resolveFrame: (id) => (id === "shape-1" ? fakeFrame(win) : null),
       deliver: (m) => delivered.push(m),
+      onReady: () => undefined,
     });
 
-    expect(bridge.posted).toHaveLength(1);
+    // posted[0] is the loader's ready announcement; the script's own message is
+    // the one after it.
+    expect(bridge.posted).toHaveLength(2);
     // THE ASSERTION THAT MATTERS: the router's verdict on the envelope the
     // DOCUMENT produced. "not-a-frame-message" here means the two ends stopped
     // agreeing — which in the app is a script whose messages vanish.
-    expect(route(frameMessage(win, bridge.posted[0]))).toBe("delivered");
+    expect(route(frameMessage(win, bridge.posted[1]))).toBe("delivered");
     expect(delivered).toEqual([
       { instanceId: "shape-1", type: "increment", data: { by: 2 } },
     ]);
@@ -433,7 +510,11 @@ describe("the frame's own bridge and the host's router are ONE protocol", () => 
 
   it("carries the bridge's own size report to onIntrinsicSize, never to the script", () => {
     const bridge = bootFrameBridge("shape-1", { width: 321, height: 177 });
-    bridge.load();
+    // Reported when CONTENT lands, not on `load`. Under srcdoc the content was
+    // in the document at load time, so `load` was the moment its size settled;
+    // the loader boots empty and the body swap is the moment now. Reporting on
+    // load would measure an empty document and publish 0x0.
+    bridge.setContent({ html: "<b>hi</b>", themeCss: ":root {\n  }" });
 
     const win = fakeWindow("frame-1");
     const delivered: ScriptFrameMessage[] = [];
@@ -442,13 +523,63 @@ describe("the frame's own bridge and the host's router are ONE protocol", () => 
       resolveFrame: () => fakeFrame(win),
       deliver: (m) => delivered.push(m),
       onIntrinsicSize: (s) => sizes.push(s),
+      onReady: () => undefined,
     });
 
-    expect(bridge.posted).toHaveLength(1);
-    expect(route(frameMessage(win, bridge.posted[0]))).toBe("resized");
+    // posted[0] is the ready announcement; posted[1] is the size report the
+    // body swap triggered.
+    expect(bridge.posted).toHaveLength(2);
+    expect(route(frameMessage(win, bridge.posted[1]))).toBe("resized");
     expect(sizes).toEqual([{ instanceId: "shape-1", width: 321, height: 177 }]);
     expect(delivered).toEqual([]);
   });
+
+  it("REFUSES a message from a window that is not its embedder", () => {
+    // The frame's half of the identity check, and the mirror of the host-side
+    // one above. `e.data` is attacker-controlled: a sandboxed sibling can reach
+    // `parent[i]` — indexed child WindowProxies stay cross-origin-accessible
+    // even from an opaque origin — and instance ids are derived from the anchor
+    // cell, so they are guessable rather than secret.
+    //
+    // Without this check one script's frame could post `calcula.setContent` at
+    // ANOTHER script's frame and have its markup installed there by the body
+    // swap: HTML that passed neither that script's `ui.html` grant nor `vHtml`,
+    // painted inside a control the user trusts — and able to call the victim
+    // frame's own `window.calcula.sendMessage`, which posts under the VICTIM's
+    // id from the VICTIM's window, so the HOST's source check passes and the
+    // message reaches the victim's script as if its own UI had sent it.
+    const bridge = bootFrameBridge("shape-1");
+    const before = bridge.body.innerHTML;
+
+    bridge.fromForeignWindow({
+      target: SCRIPT_FRAME_MESSAGE_TAG,
+      instanceId: "shape-1",
+      type: SCRIPT_FRAME_SET_CONTENT_MESSAGE,
+      data: { html: "<img src=x onerror='stealTheCredential()'>" },
+    });
+    expect(
+      bridge.body.innerHTML,
+      "a foreign window replaced this frame's DOM — the body swap ran for a " +
+        "message the embedder never sent",
+    ).toBe(before);
+
+    // ...and an ordinary message from a foreign window is not re-dispatched to
+    // the page either. That half was already reachable before the loader route
+    // (the srcdoc bridge had no source check), so it is closed here too.
+    bridge.fromForeignWindow({
+      target: SCRIPT_FRAME_MESSAGE_TAG,
+      instanceId: "shape-1",
+      type: "refresh",
+      data: null,
+    });
+    expect(bridge.dispatched).toEqual([]);
+
+    // POSITIVE CONTROL: the same message from the embedder IS applied, so the
+    // check is refusing the right thing rather than everything.
+    bridge.setContent({ html: "<b>legitimate</b>", themeCss: ":root {\n  }" });
+    expect(bridge.body.innerHTML).toBe("<b>legitimate</b>");
+  });
+
 });
 
 // ---------------------------------------------------------------------------

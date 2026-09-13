@@ -25,16 +25,22 @@ import {
 } from "./shapeHitRegions";
 import { onFloatingControlRegionsPublished } from "../lib/regionPublication";
 import {
-  buildScriptFrameDocument,
+  buildScriptFrameContent,
   claimScriptFrameSlot,
   createScriptFrameRouter,
+  markScriptFrameReady,
   migrateScriptFrameSlot,
   parkScriptFrameSlot,
   readScriptFrameThemeTokens,
+  releaseScriptFrameContent,
   releaseScriptFrameSlot,
   scriptFrameBudgetUsage,
+  scriptFrameContentBytes,
+  scriptFrameLoaderUrl,
+  setScriptFrameContent,
   setScriptFrameInert,
   unparkScriptFrameSlot,
+  type ScriptFrameContentPayload,
   type ScriptFrameSlotRefusal,
 } from "../../_shared/scriptFrame";
 import { resolveControlProperties } from "../lib/controlApi";
@@ -57,6 +63,14 @@ const routeShapeFrameMessage = createScriptFrameRouter({
   // No onIntrinsicSize: an on-grid shape is the size the user drew it. The
   // report is still CONSUMED rather than forwarded — bridge plumbing must not
   // arrive at a script as if its own page had sent it.
+  //
+  // The loader announcing itself is what releases this frame's held content.
+  // Until it arrives the frame is a blank document: its bridge is FETCHED now
+  // rather than inlined, so there is a real gap between assigning `src` and
+  // anything being able to hear a push (BUG-0113).
+  onReady: (instanceId) => {
+    markScriptFrameReady(instanceId, htmlOverlayElements.get(instanceId) ?? null);
+  },
 });
 
 window.addEventListener("message", (e) => {
@@ -111,6 +125,42 @@ const htmlOverlayElements = new Map<string, HTMLIFrameElement>();
 
 /** Track content hash per controlId to avoid unnecessary iframe reloads. */
 const overlayContentHash = new Map<string, string>();
+
+/**
+ * The script changed its HTML: the frame must be re-fed, but its DOCUMENT is
+ * still there and still listening.
+ *
+ * THE HASH AND THE READINESS FLAG HAVE DIFFERENT LIFETIMES, and conflating them
+ * was a real defect for as long as this comment claimed otherwise. Under srcdoc
+ * they looked identical, because a content change re-assigned `srcdoc` and so
+ * reloaded the document; dropping both together was right. Under the loader a
+ * content change reloads NOTHING — that is the point of the route — so a
+ * content change that also cleared readiness left the next push held forever,
+ * waiting for an announcement the loader had already made and will never make
+ * again. The shape froze at whatever it first rendered.
+ *
+ * That is not a corner: `setShapeHtmlContent` is what `render.setHtmlContent`
+ * calls, so it is every repaint of every interactive template. The shipped
+ * Interactive Counter would have painted "0", taken the click, and never moved
+ * — which is precisely the symptom BUG-0113 is about, reintroduced by its own
+ * fix one layer down.
+ */
+function invalidateOverlayContent(instanceId: string): void {
+  overlayContentHash.delete(instanceId);
+}
+
+/**
+ * The frame's DOCUMENT is gone (element removed, or `src` re-pointed).
+ *
+ * Drops the content hash AND the loader-readiness flag, because a new document
+ * will announce itself again and must not be pushed into before it does. Use
+ * this only where the element really is going away; for a mere content change
+ * use `invalidateOverlayContent`.
+ */
+function forgetOverlayDocument(instanceId: string): void {
+  invalidateOverlayContent(instanceId);
+  releaseScriptFrameContent(instanceId);
+}
 
 // ----------------------------------------------------------------------------
 // A refused frame budget
@@ -215,8 +265,11 @@ export function removeCustomCanvasRenderer(instanceId: string): void {
 /** Set HTML content for a shape (will skip canvas rendering). */
 export function setShapeHtmlContent(instanceId: string, html: string): void {
   customHtmlContent.set(instanceId, html);
-  // Mark hash as stale so the iframe reloads on next render
-  overlayContentHash.delete(instanceId);
+  // Stale hash only. The frame is NOT reloaded — the next paint pushes the new
+  // html into the document that is already there, which is what lets a script
+  // keep its in-frame state across a re-render. Clearing readiness here instead
+  // would strand every push after the first (see `invalidateOverlayContent`).
+  invalidateOverlayContent(instanceId);
 }
 
 /** Get HTML content for a shape. */
@@ -242,7 +295,7 @@ export function removeShapeHtmlOverlay(instanceId: string): void {
     htmlOverlayElements.delete(instanceId);
   }
   customHtmlContent.delete(instanceId);
-  overlayContentHash.delete(instanceId);
+  forgetOverlayDocument(instanceId);
   // A shape with no html has nothing left to refuse, and leaving the record
   // behind would keep the "already announced" latch shut for a budget that has
   // just been given room.
@@ -333,7 +386,7 @@ function evictParkedShapeFrame(instanceId: string): void {
     el.remove();
     htmlOverlayElements.delete(instanceId);
   }
-  overlayContentHash.delete(instanceId);
+  forgetOverlayDocument(instanceId);
   // Belt and braces: a parked shape's shims were already dropped by the sweep
   // above, but an evictor that leaves DOM behind is exactly the class of defect
   // this function exists to close.
@@ -377,6 +430,7 @@ export function releaseAllShapeHtmlOverlays(): void {
   }
   htmlOverlayElements.clear();
   customHtmlContent.clear();
+  for (const id of overlayContentHash.keys()) releaseScriptFrameContent(id);
   overlayContentHash.clear();
   frameRefusals.clear();
   announcedRefusalKinds.clear();
@@ -425,12 +479,38 @@ export function migrateShapeInstanceId(oldId: string, newId: string): void {
     // sitting in the canvas parent is traced back to a control, and one still
     // naming the dead id makes a migrated frame and an orphan look alike.
     frame.dataset.shapeOverlay = newId;
+    // AND SO MUST ITS URL. The loader reads its instanceId from the query once,
+    // at load, so a migrated element goes on announcing itself — and posting
+    // every size report and every script message — under the DEAD id. The
+    // router resolves that id to nothing and answers "not-this-host", so all of
+    // it is dropped in silence.
+    //
+    // That half was already true of the srcdoc document, whose id was likewise
+    // baked in at build time and likewise did not migrate: a re-keyed shape's
+    // messages have always stopped working. What is NEW is that the content
+    // arrives over the same channel now, so the frame would not merely go mute,
+    // it would go BLANK — and stay blank, because the content hash below would
+    // tell the next paint there was nothing to do.
+    //
+    // Re-pointing `src` reloads the frame under the right id. That costs the
+    // script's in-frame state, which is the honest price of an identity change
+    // and is what the old srcdoc route paid on every content change anyway.
+    releaseScriptFrameContent(oldId);
+    // The DESTINATION's whole document record, not just its readiness. A re-key
+    // can land on an id that already owned a frame (the collision this block
+    // exists for), and that id's content hash describes the document just
+    // removed above. Leave it and the next paint compares the arriving shape's
+    // html against the DISPLACED shape's — equal html, which two tiles built
+    // from the same template have, reads as "nothing to do", so the frame that
+    // was just reloaded under a new id is never fed and stays blank.
+    forgetOverlayDocument(newId);
+    frame.src = scriptFrameLoaderUrl(newId);
   }
-  const hash = overlayContentHash.get(oldId);
-  if (hash !== undefined) {
-    overlayContentHash.delete(oldId);
-    overlayContentHash.set(newId, hash);
-  }
+  // The hash is deliberately NOT migrated. It means "the document already shows
+  // this html", and after the reload above it does not — dropping it is what
+  // makes the next paint rebuild the payload and push it once the reloaded
+  // loader announces itself.
+  forgetOverlayDocument(oldId);
   // A standing refusal moves with the control too. Left under the old id it
   // would re-announce itself on the new id's very next paint, and
   // `getShapeFrameRefusal` would answer for a control that no longer exists.
@@ -447,15 +527,21 @@ export function migrateShapeInstanceId(oldId: string, newId: string): void {
 }
 
 /**
- * Build the full document for the overlay iframe.
+ * Build the CONTENT for the overlay iframe.
  *
- * The document itself — bridge, protocol spellings, theme contract — is built
- * by extensions/_shared/scriptFrame, shared byte-for-byte with the pane card
- * host. Only the on-grid flavour is decided here: no min-height, because an
- * on-grid shape is exactly the box the user drew.
+ * Was a whole document baked into `srcdoc`; it is now a payload pushed to the
+ * loader, which is served from Rust with its own CSP because a `srcdoc` child
+ * inherits the app's and the bridge was therefore refused in every built app
+ * (BUG-0113). The split — bridge served, content pushed — is what lets the
+ * frame keep the state its own scripts built across a content change, which
+ * `srcdoc` could never do.
+ *
+ * The shared half still lives in extensions/_shared/scriptFrame, byte-for-byte
+ * with the pane-card host. Only the on-grid flavour is decided here: no
+ * min-height, because an on-grid shape is exactly the box the user drew.
  */
-function buildOverlayDocument(controlId: string, userHtml: string): string {
-  return buildScriptFrameDocument(controlId, userHtml, {
+function buildOverlayContent(userHtml: string): ScriptFrameContentPayload {
+  return buildScriptFrameContent(userHtml, {
     themeTokens: readScriptFrameThemeTokens(),
   });
 }
@@ -506,11 +592,13 @@ function updateHtmlOverlay(
   // has to be: this runs from the render loop.
   unparkScriptFrameSlot(controlId);
 
-  // The document is rebuilt only when the content actually changed (or there is
-  // no frame yet) — this runs from the render loop, and re-assigning `srcdoc`
-  // reloads the frame and throws away whatever state its own scripts built.
+  // The payload is rebuilt only when the content actually changed (or there is
+  // no frame yet) — this runs from the render loop, so it must not do work per
+  // paint. The gate ALSO used to protect the frame's own state, because
+  // re-assigning `srcdoc` reloaded the document; a pushed content change no
+  // longer reloads anything, so that half is now a bonus rather than the point.
   const needsDocument = !el || overlayContentHash.get(controlId) !== html;
-  let overlayDocument: string | null = null;
+  let overlayContent: ScriptFrameContentPayload | null = null;
   if (needsDocument) {
     // A refusal that nothing has changed since is answered from the record
     // rather than by rebuilding a document (up to 5 MB of it) and asking a
@@ -521,7 +609,7 @@ function updateHtmlOverlay(
     if (standing && standing.html === html && standing.budgetStamp === currentBudgetStamp()) {
       return false;
     }
-    overlayDocument = buildOverlayDocument(controlId, html);
+    overlayContent = buildOverlayContent(html);
     // The frame budget, charged BEFORE the element exists. A workbook has no
     // limit on shapes and a frame is a whole document with its own event loop,
     // so an app that puts one on every shape it owns spends the user's memory
@@ -530,12 +618,20 @@ function updateHtmlOverlay(
     // refusal tears down the frame — no frame, no shims, no half-built element
     // to strand — and answers `false`, which is what makes the caller paint the
     // shape from the catalog instead of leaving a hole in the grid.
-    const slot = claimScriptFrameSlot(controlId, overlayDocument.length);
+    //
+    // The charge is the CONTENT, where it used to be the whole srcdoc document.
+    // That is the honest measure now: the bridge is one constant response the
+    // webview serves to every frame, so it is not a per-frame cost any more.
+    // It does mean the same workbook fits marginally more frames than before —
+    // by the boilerplate's weight, a fixed ~2 KB each — which is a loosening,
+    // not a tightening, and is why it is said out loud rather than left to be
+    // noticed as drift against the old figure.
+    const slot = claimScriptFrameSlot(controlId, scriptFrameContentBytes(overlayContent));
     if (!slot.granted) {
       if (el) {
         el.remove();
         htmlOverlayElements.delete(controlId);
-        overlayContentHash.delete(controlId);
+        forgetOverlayDocument(controlId);
         releaseScriptFrameSlot(controlId);
       }
       removeShapeHitDom(controlId);
@@ -556,9 +652,12 @@ function updateHtmlOverlay(
   if (!el) {
     el = document.createElement("iframe");
     el.dataset.shapeOverlay = controlId;
-    // allow-scripts only: with srcdoc this gives the iframe an opaque origin,
-    // so its scripts cannot reach the parent window, app-origin storage, or
-    // __TAURI__. The postMessage bridge below is the only communication path.
+    // allow-scripts and NOT allow-same-origin, which is what gives the frame an
+    // opaque origin: its scripts cannot reach the parent window, app-origin
+    // storage, or __TAURI__, and postMessage is the only path. That is true of
+    // the loader URL exactly as it was of srcdoc — the opaque origin comes from
+    // the sandbox, not from the scheme — so the isolation is unchanged by
+    // BUG-0113's fix. What changed is only where the document's CSP comes from.
     el.sandbox.add("allow-scripts");
     el.style.position = "absolute";
     el.style.overflow = "hidden";
@@ -589,10 +688,20 @@ function updateHtmlOverlay(
     // document still receives.
     setScriptFrameInert(el, true);
     el.style.zIndex = "5";
-    el.srcdoc = overlayDocument as string;
+    // A NEW navigation, so any readiness remembered for a previous element with
+    // this id is stale. Released before `src` is assigned, never after: the
+    // loader can announce itself as soon as the document runs, and a release
+    // that landed later would throw that announcement away and leave the frame
+    // permanently blank.
+    releaseScriptFrameContent(controlId);
+    el.src = scriptFrameLoaderUrl(controlId);
     overlayContentHash.set(controlId, html);
     canvasParent.appendChild(el);
     htmlOverlayElements.set(controlId, el);
+    // Held until the loader says it is listening. `setScriptFrameContent` keeps
+    // only the newest payload, so a shape edited three times while its frame is
+    // still loading paints the third state rather than replaying all three.
+    setScriptFrameContent(controlId, el, overlayContent as ScriptFrameContentPayload);
   }
 
   // Check visibility: hide if off-screen or behind headers
@@ -635,11 +744,12 @@ function updateHtmlOverlay(
   el.style.width = `${box.width}px`;
   el.style.height = `${box.height}px`;
 
-  // Update content only if changed (avoid iframe reload on every render).
-  // `overlayDocument` is non-null exactly when it did change — the budget was
-  // charged for that document above.
-  if (overlayDocument !== null && overlayContentHash.get(controlId) !== html) {
-    el.srcdoc = overlayDocument;
+  // Update content only if changed. `overlayContent` is non-null exactly when
+  // it did change — the budget was charged for that payload above. This no
+  // longer reloads the frame: the document stays, the body is swapped, and the
+  // script's own state survives the change.
+  if (overlayContent !== null && overlayContentHash.get(controlId) !== html) {
+    setScriptFrameContent(controlId, el, overlayContent);
     overlayContentHash.set(controlId, html);
   }
 
@@ -946,7 +1056,7 @@ export function renderFloatingShape(overlayCtx: OverlayRenderContext): void {
     if (existingOverlay) {
       existingOverlay.remove();
       htmlOverlayElements.delete(controlId);
-      overlayContentHash.delete(controlId);
+      forgetOverlayDocument(controlId);
       releaseScriptFrameSlot(controlId);
       // ...and the claim that frame carried. A shim over a frame that is no
       // longer painted is an invisible element eating clicks on bare grid.

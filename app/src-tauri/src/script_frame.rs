@@ -109,7 +109,23 @@ pub const SCRIPT_FRAME_LOADER: &str = r#"<!DOCTYPE html>
   // mounted script's own HTML already posts, so it is a compatibility
   // constraint rather than a name anyone is free to pick.
   var TAG = 'shape-html';
-  var instanceId = null;
+  var RESERVED = 'calcula.';
+
+  // The id arrives in the URL rather than in the first message, and that is
+  // what lets BOTH directions keep the envelopes the host already has. The
+  // host's router refuses any message without a string `instanceId` and then
+  // checks `event.source === frame.contentWindow`; a frame that had to be TOLD
+  // its id could not satisfy that on its own ready announcement, so it would
+  // have needed a second, unchecked channel. Reading it here means the ready
+  // message is an ordinary frame message and gets the ordinary source check.
+  //
+  // The response body is still one constant for every frame -- the scheme
+  // handler ignores the request -- so this costs no per-frame work in Rust.
+  var instanceId = (function () {
+    var m = /[?&]id=([^&]*)/.exec(window.location.search);
+    if (!m) return null;
+    try { return decodeURIComponent(m[1]); } catch (err) { return null; }
+  })();
 
   // Installed ONCE, on this Window, and never replaced. Content arrives as a
   // body swap precisely so this listener survives every push.
@@ -130,7 +146,7 @@ pub const SCRIPT_FRAME_LOADER: &str = r#"<!DOCTYPE html>
   }
 
   function applyContent(payload) {
-    if (typeof payload.instanceId === 'string') instanceId = payload.instanceId;
+    if (!payload) return;
     if (typeof payload.themeCss === 'string') {
       var themeEl = document.getElementById('calcula-frame-theme');
       if (themeEl) themeEl.textContent = payload.themeCss;
@@ -151,18 +167,38 @@ pub const SCRIPT_FRAME_LOADER: &str = r#"<!DOCTYPE html>
     reportSize();
   }
 
+  // The host -> frame envelope is `postToScriptFrame`'s, unchanged:
+  // { target, instanceId, type, data }.
   window.addEventListener('message', function (e) {
+    // THE IDENTITY CHECK, and it is the mirror of the host router's own
+    // (`event.source !== frame.contentWindow` in frameBridge.ts). `e.data` is
+    // attacker-controlled: a sandboxed sibling can reach `parent[i]` -- indexed
+    // child WindowProxies stay cross-origin-accessible even from an opaque
+    // origin -- and instance ids are derived from the anchor cell, so they are
+    // guessable rather than secret. `e.source` is not forgeable; the browser
+    // sets it.
+    //
+    // Without this, one script's frame could post `calcula.setContent` at
+    // ANOTHER script's frame and have its HTML installed there by the body swap
+    // below: markup that passed neither that script's `ui.html` grant nor
+    // `vHtml`, painted inside a control the user trusts, and able to call the
+    // victim frame's own `window.calcula.sendMessage` -- which posts under the
+    // VICTIM's id from the VICTIM's window, so the host's source check passes
+    // and the message is delivered to the victim's script as if its own UI had
+    // sent it. Every legitimate message comes from the embedder, so the test is
+    // exact rather than a heuristic.
+    if (e.source !== parent) return;
     var d = e.data;
-    if (!d) return;
-    // Content push from the host.
-    if (d.target === TAG && d.kind === 'calcula.setContent') {
-      applyContent(d.payload || {});
+    if (!d || d.target !== TAG || instanceId === null || d.instanceId !== instanceId) return;
+    var type = typeof d.type === 'string' ? d.type : '';
+    if (type.indexOf(RESERVED) === 0) {
+      // Plumbing, never handed to the script -- the mirror of the host router's
+      // own rule, so a template cannot be confused by frame machinery arriving
+      // as if the app had sent it.
+      if (type === 'calcula.setContent') applyContent(d.data);
       return;
     }
-    // Ordinary host -> script message, re-dispatched for the template to hear.
-    if (d.target === TAG && instanceId !== null && d.instanceId === instanceId) {
-      window.dispatchEvent(new CustomEvent('shape-message', { detail: d }));
-    }
+    window.dispatchEvent(new CustomEvent('shape-message', { detail: d }));
   });
 
   if (typeof ResizeObserver === 'function') {
@@ -172,8 +208,10 @@ pub const SCRIPT_FRAME_LOADER: &str = r#"<!DOCTYPE html>
   // The host cannot push until this document exists, and it has no other way to
   // learn that: a sandboxed frame's load event is not reliably observable from
   // the embedder. So the loader announces itself, and the host holds the newest
-  // pending content until it hears this.
-  parent.postMessage({ source: TAG, type: 'calcula.frameReady' }, '*');
+  // pending content until it hears this. Sent through `sendMessage` so it
+  // carries the instanceId and passes the host router's source check like any
+  // other frame message.
+  window.calcula.sendMessage('calcula.frameReady', null);
 })();
 </script>
 </head><body></body></html>

@@ -33,7 +33,10 @@ import {
   SCRIPT_FRAME_MESSAGE_TAG,
   SCRIPT_FRAME_RESERVED_TYPE_PREFIX,
   SCRIPT_FRAME_SIZE_MESSAGE,
+  SCRIPT_FRAME_READY_MESSAGE,
+  SCRIPT_FRAME_SET_CONTENT_MESSAGE,
 } from "./frameDocument";
+import type { ScriptFrameContentPayload } from "./frameDocument";
 
 /** A frame -> host message that survived the integrity check. */
 export interface ScriptFrameMessage {
@@ -68,6 +71,20 @@ export interface ScriptFrameRouterOptions {
    * rather than forwarded to the script as if it were page content.
    */
   onIntrinsicSize?: (size: ScriptFrameIntrinsicSize) => void;
+  /**
+   * The loader has installed its bridge and can receive content (BUG-0113).
+   *
+   * A host MUST hold its content until this fires. The frame's document is
+   * fetched over a URI scheme now, so it exists some time after `src` is
+   * assigned, and a push sent before the listener is installed is dropped in
+   * silence — there is no error and no retry. The frame's `load` event is not a
+   * usable substitute: with an opaque origin the embedder cannot see inside,
+   * and `load` says the response arrived, not that the script ran.
+   *
+   * Fires once per NAVIGATION, so a host that re-points `src` (an id change,
+   * or a re-created element) will hear it again and must re-push.
+   */
+  onReady?: (instanceId: string) => void;
 }
 
 /** Why a message was not delivered. Returned so tests can assert the reason
@@ -76,6 +93,7 @@ export interface ScriptFrameRouterOptions {
 export type ScriptFrameRouteResult =
   | "delivered"
   | "resized"
+  | "ready"
   | "not-a-frame-message"
   | "not-this-host"
   | "source-mismatch";
@@ -110,6 +128,10 @@ export function createScriptFrameRouter(
 
     const type = typeof data.type === "string" ? data.type : "";
     if (type.startsWith(SCRIPT_FRAME_RESERVED_TYPE_PREFIX)) {
+      if (type === SCRIPT_FRAME_READY_MESSAGE) {
+        options.onReady?.(instanceId);
+        return "ready";
+      }
       if (type === SCRIPT_FRAME_SIZE_MESSAGE && options.onIntrinsicSize) {
         const payload = data.data as { width?: unknown; height?: unknown } | undefined;
         const width = typeof payload?.width === "number" ? payload.width : NaN;
@@ -463,4 +485,121 @@ export function resetScriptFrameBudget(): void {
   liveFrameBytes.clear();
   parkedFrames.clear();
   liveBytesTotal = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Ready-gated content delivery (BUG-0113)
+// ---------------------------------------------------------------------------
+//
+// One place, three hosts. Under the srcdoc route a host could assign content
+// synchronously and be done; under the loader route the document is FETCHED, so
+// there is a window between assigning `src` and the bridge existing, and a push
+// sent inside it is dropped with no error and no retry. Every host needs the
+// same "hold the newest payload until ready" logic, and three hand-written
+// copies of it would drift — the shape recipe in the Seam Rule is the standing
+// example of what that costs.
+
+/** Per-instance delivery state. Module-scoped: frames outlive any one render. */
+const frameReady = new Set<string>();
+const pendingContent = new Map<string, ScriptFrameContentPayload>();
+/**
+ * What each instance was LAST asked to show, kept so a frame whose element was
+ * replaced can be re-fed on its next ready. Cleared by
+ * `releaseScriptFrameContent`, so it lives only as long as the host still
+ * considers the instance live -- a script's html can reach megabytes and the
+ * whole point of the frame budget is not holding those forever.
+ */
+const lastContent = new Map<string, ScriptFrameContentPayload>();
+
+/**
+ * Note that a frame's loader has announced itself, and flush whatever the host
+ * wanted to show it. Call from the router's `onReady`.
+ */
+export function markScriptFrameReady(
+  instanceId: string,
+  frame: HTMLIFrameElement | null,
+): void {
+  frameReady.add(instanceId);
+  // Whatever is waiting — or, when nothing is, whatever this instance was LAST
+  // shown. A ready fires once per NAVIGATION, so hearing one means a document
+  // that has never been fed is now listening, and the right answer is always to
+  // (re-)send the current content rather than to assume a previous push reached
+  // a previous document.
+  //
+  // That fallback is what covers a frame ELEMENT being replaced without the
+  // host noticing: React can commit a new iframe for the same instance (a
+  // budget refusal lifting, a document swap that leaves the card mounted), and
+  // a host that did not release readiness would otherwise post into the new
+  // frame's empty initial document, get `true` back because a contentWindow
+  // exists, drop the pending payload, and leave the card blank forever. Hosts
+  // must still release on navigation — this is the belt, not the braces.
+  const payload = pendingContent.get(instanceId) ?? lastContent.get(instanceId);
+  if (payload === undefined) return;
+  if (postToScriptFrame(frame, instanceId, SCRIPT_FRAME_SET_CONTENT_MESSAGE, payload)) {
+    pendingContent.delete(instanceId);
+  }
+}
+
+/**
+ * Show `payload` in `frame`, now if it can hear us and on ready if it cannot.
+ *
+ * Returns true when it went out immediately. Only the NEWEST payload is held:
+ * a frame that is still loading while the user edits three times should paint
+ * the third state, not replay all three.
+ */
+export function setScriptFrameContent(
+  instanceId: string,
+  frame: HTMLIFrameElement | null,
+  payload: ScriptFrameContentPayload,
+): boolean {
+  lastContent.set(instanceId, payload);
+  if (
+    frameReady.has(instanceId) &&
+    postToScriptFrame(frame, instanceId, SCRIPT_FRAME_SET_CONTENT_MESSAGE, payload)
+  ) {
+    pendingContent.delete(instanceId);
+    return true;
+  }
+  pendingContent.set(instanceId, payload);
+  return false;
+}
+
+/**
+ * Forget a frame's delivery state.
+ *
+ * Call on teardown AND whenever the element is re-pointed at a new URL: the
+ * loader announces itself once per NAVIGATION, so a frame that is reloaded is
+ * not ready any more, and a host that kept the old flag would push into the gap
+ * and paint nothing. Release is the failure-safe direction — a stale "not
+ * ready" costs one held payload that the next ready flushes; a stale "ready"
+ * costs the content silently.
+ */
+export function releaseScriptFrameContent(instanceId: string): void {
+  frameReady.delete(instanceId);
+  pendingContent.delete(instanceId);
+  lastContent.delete(instanceId);
+}
+
+/**
+ * What one frame's content weighs, for the budget.
+ *
+ * Shared so both hosts price a frame the same way. Under the srcdoc route each
+ * host charged its whole generated document; the bridge is now one constant
+ * response served to every frame, so it is no longer a per-frame cost and only
+ * the pushed content is charged.
+ */
+export function scriptFrameContentBytes(payload: ScriptFrameContentPayload): number {
+  return payload.html.length + payload.themeCss.length;
+}
+
+/** Is this frame's loader known to be listening? Exported for tests and hosts. */
+export function isScriptFrameReady(instanceId: string): boolean {
+  return frameReady.has(instanceId);
+}
+
+/** Test seam: drop all delivery state. */
+export function resetScriptFrameContentState(): void {
+  frameReady.clear();
+  pendingContent.clear();
+  lastContent.clear();
 }

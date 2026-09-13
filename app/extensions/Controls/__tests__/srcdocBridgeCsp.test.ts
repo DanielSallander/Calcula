@@ -235,10 +235,14 @@ describe("the ui.html bridge is inline script, and only inline script", () => {
       ["CustomControlHost.tsx", PANE_HOST],
     ] as const) {
       const src = fs.readFileSync(file, "utf8");
+      // `buildScriptFrameContent` since BUG-0113: the bridge moved out of the
+      // hosts' documents entirely and is served from Rust with its own CSP, so
+      // what a host builds now is the CONTENT it pushes. The property under
+      // test is unchanged — one shared builder, not a per-host one.
       expect(
         src,
         `${name} no longer imports the shared script-frame builder — it has forked the protocol.`,
-      ).toContain("buildScriptFrameDocument");
+      ).toContain("buildScriptFrameContent");
       expect(
         /<script[^>]*>/.test(src),
         `${name} builds a <script> block of its own again. The bridge is ONE module ` +

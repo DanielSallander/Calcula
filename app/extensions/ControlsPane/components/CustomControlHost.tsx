@@ -75,13 +75,19 @@ import {
 } from "@api/scriptHost/shapeHitRegionSpec";
 import type { ControlValue } from "@api/controlValues";
 import {
-  buildScriptFrameDocument,
+  buildScriptFrameContent,
   claimScriptFrameSlot,
   createScriptFrameRouter,
+  markScriptFrameReady,
   postToScriptFrame,
   readScriptFrameThemeTokens,
+  releaseScriptFrameContent,
   releaseScriptFrameSlot,
+  scriptFrameContentBytes,
+  scriptFrameLoaderUrl,
+  setScriptFrameContent,
   setScriptFrameInert,
+  type ScriptFrameContentPayload,
 } from "../../_shared/scriptFrame";
 import type { PaneControl, PaneControlConfig } from "../lib/controlsPaneTypes";
 import {
@@ -267,6 +273,7 @@ export function removeCustomControlRuntime(controlId: string): void {
   runtimes.delete(controlId);
   paneFrames.delete(controlId);
   releaseScriptFrameSlot(controlId);
+  releaseScriptFrameContent(paneControlInstanceId(controlId));
 }
 
 // ============================================================================
@@ -467,6 +474,15 @@ export function ensureCustomControlWiring(): void {
     // A pane card is laid out by the pane, not by the frame's content, so the
     // intrinsic-size report is consumed and dropped rather than forwarded to
     // the script as if its own page had sent it.
+    //
+    // The loader's announcement is what releases this card's held content. The
+    // bridge is FETCHED now rather than inlined into a srcdoc (BUG-0113), so
+    // there is a real gap between React committing the element and anything
+    // inside it being able to hear a push.
+    onReady: (instanceId) => {
+      const controlId = controlIdOfInstance(instanceId);
+      markScriptFrameReady(instanceId, controlId ? paneFrames.get(controlId) ?? null : null);
+    },
   });
   window.addEventListener("message", onWindowMessage);
   wiringCleanups.push(() => window.removeEventListener("message", onWindowMessage));
@@ -501,7 +517,13 @@ export function releaseAllPaneControlFrames(): void {
   const controlIds = new Set<string>([...runtimes.keys(), ...paneFrames.keys()]);
   runtimes.clear();
   paneFrames.clear();
-  for (const controlId of controlIds) releaseScriptFrameSlot(controlId);
+  for (const controlId of controlIds) {
+    releaseScriptFrameSlot(controlId);
+    // ...and the frame delivery state, which is keyed by INSTANCE id. The
+    // cards stay mounted across a document swap, so without this a re-created
+    // frame would be pushed into before its loader announced itself.
+    releaseScriptFrameContent(paneControlInstanceId(controlId));
+  }
   for (const controlId of controlIds) notifyRuntime(controlId);
 }
 
@@ -528,14 +550,19 @@ export function disposeCustomControlWiring(): void {
 // Sandboxed iframe document (SHARED builder — see header CONTEXT note)
 // ============================================================================
 
-/** The pane card's flavour of the shared script-frame document: a 40px body
+/** The pane card's flavour of the shared script-frame CONTENT: a 40px body
  *  floor, because rich content renders badly in the ribbon band (56px) and a
  *  card with no floor collapses to nothing while a script is still starting.
  *  Everything else — bridge, protocol, theme contract — is the one definition
  *  in extensions/_shared/scriptFrame, so a script's HTML works unchanged here
- *  and on the grid. */
-function buildCardDocument(instanceId: string, userHtml: string): string {
-  return buildScriptFrameDocument(instanceId, userHtml, {
+ *  and on the grid.
+ *
+ *  This used to build a whole `srcdoc` document. The bridge inside it never ran
+ *  in a built app, because a srcdoc child inherits the embedder's CSP and the
+ *  app ships no `'unsafe-inline'` (BUG-0113). The bridge is now served from
+ *  Rust with a policy of its own and only the content is pushed here. */
+function buildCardContent(userHtml: string): ScriptFrameContentPayload {
+  return buildScriptFrameContent(userHtml, {
     minHeightPx: 40,
     themeTokens: readScriptFrameThemeTokens(),
   });
@@ -872,13 +899,25 @@ export function CustomControlHost({
   const frameCallbackRef = useCallback(
     (el: HTMLIFrameElement | null) => {
       frameElementRef.current = el;
+      // READINESS BELONGS TO THE ELEMENT, NOT TO THIS COMPONENT (BUG-0113).
+      // Releasing it only on unmount was wrong: React replaces this iframe
+      // while the card stays mounted — a budget refusal lifting, a File > Open
+      // that clears the runtime and then re-declares it, `removeCustomControlRuntime`
+      // — and each of those is a NEW navigation whose loader has not announced
+      // itself yet. With stale readiness the push effect below would post into
+      // the new frame's empty initial document, get `true` back because a
+      // contentWindow exists, drop the payload, and leave the card blank
+      // forever with nothing logged. The on-grid host has always released
+      // before every `src` assignment; this is the same rule, expressed where
+      // this host actually learns the element changed.
+      releaseScriptFrameContent(instanceId);
       if (el) {
         paneFrames.set(control.id, el);
       } else {
         paneFrames.delete(control.id);
       }
     },
-    [control.id],
+    [control.id, instanceId],
   );
 
   // ---- worker-realm canvas bitmap blit (single-flight + short poll) ----
@@ -949,13 +988,42 @@ export function CustomControlHost({
   // one, so React's double-invoked render costs nothing. The matching release
   // is an unmount effect below — a charge that outlives its frame is a slow
   // leak that eventually refuses a frame nothing is holding.
-  const frameDocument = html != null ? buildCardDocument(instanceId, html) : null;
+  const frameContent = html != null ? buildCardContent(html) : null;
   const frameSlot =
-    frameDocument !== null ? claimScriptFrameSlot(control.id, frameDocument.length) : null;
+    frameContent !== null
+      ? claimScriptFrameSlot(control.id, scriptFrameContentBytes(frameContent))
+      : null;
   useEffect(() => {
-    if (frameDocument === null) releaseScriptFrameSlot(control.id);
-  }, [frameDocument, control.id]);
-  useEffect(() => () => releaseScriptFrameSlot(control.id), [control.id]);
+    if (frameContent === null) releaseScriptFrameSlot(control.id);
+  }, [frameContent, control.id]);
+  useEffect(
+    () => () => {
+      releaseScriptFrameSlot(control.id);
+      // The readiness flag is keyed by instance, not by React element, so it
+      // has to go when the card unmounts — otherwise a card remounted for the
+      // same instance would look ready before its NEW frame's loader has said
+      // anything, and the push that followed would land in the gap and paint
+      // nothing.
+      releaseScriptFrameContent(instanceId);
+    },
+    [control.id, instanceId],
+  );
+
+  // Push content to the loader: now if the frame is listening, held if not.
+  // Deliberately an effect rather than a render-time call — a push is a side
+  // effect on another document, and React may render twice.
+  useEffect(() => {
+    if (frameContent === null || frameSlot?.granted === false) return;
+    setScriptFrameContent(instanceId, frameElementRef.current, frameContent);
+    // `frameContent` is rebuilt every render, so the dependency is its VALUE
+    // (`html`, plus whether the budget granted the frame), not its identity.
+    // Depending on the object would push on EVERY render, and a push is a body
+    // swap — it would cost the frame its own scripts' state on every unrelated
+    // re-render of the pane, which is the property the loader route exists to
+    // preserve. The theme half is likewise deliberate: a skin change repaints on
+    // the next content change, exactly as it did under srcdoc.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [instanceId, html, frameSlot?.granted]);
 
   // ---- the input gate's KEYBOARD half ----
   // `pointerEvents` below is the mouse half and ONLY the mouse half: an iframe
@@ -972,23 +1040,31 @@ export function CustomControlHost({
   // rather than as a JSX prop because React 18's typings carry no `inert`.
   useEffect(() => {
     setScriptFrameInert(frameElementRef.current, !inputClaimed);
-  }, [inputClaimed, frameDocument]);
+  }, [inputClaimed, frameContent]);
 
   // ---- shared content: iframe / canvas / placeholder ----
   const body =
-    frameDocument !== null && frameSlot?.granted === false ? (
+    frameContent !== null && frameSlot?.granted === false ? (
       <div style={styles.placeholder}>
         <div style={styles.placeholderName}>{control.name}</div>
         <div style={styles.placeholderHint}>{frameSlot.message}</div>
       </div>
-    ) : frameDocument !== null ? (
+    ) : frameContent !== null ? (
       <iframe
         ref={frameCallbackRef}
-        // allow-scripts only: with srcdoc this gives the iframe an opaque
-        // origin, so its scripts cannot reach the parent window, app-origin
-        // storage, or __TAURI__. The postMessage bridge is the only path.
+        // allow-scripts and NOT allow-same-origin: that is what gives the frame
+        // an opaque origin, so its scripts cannot reach the parent window,
+        // app-origin storage, or __TAURI__, and postMessage is the only path.
+        // Unchanged by the move off srcdoc — the opaque origin comes from the
+        // sandbox, not from where the document was fetched.
         sandbox="allow-scripts"
-        srcDoc={frameDocument}
+        // The LOADER, not the content. It carries the bridge and its own CSP
+        // (served from Rust), because a srcdoc child inherits the app's policy
+        // and the inline bridge was refused in every built app (BUG-0113). The
+        // script's HTML is pushed to it by the effect above, once it says it is
+        // listening. The id rides in the URL so the frame can name itself in
+        // that announcement and pass the router's source check.
+        src={scriptFrameLoaderUrl(instanceId)}
         // THE INPUT GATE. Paint-only by default — `ui.html` promises drawing
         // and nothing else, so the frame is hit-transparent to the mouse here
         // and `inert` to the keyboard in the effect above (hit-transparency

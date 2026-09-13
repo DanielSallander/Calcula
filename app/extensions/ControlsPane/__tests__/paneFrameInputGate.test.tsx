@@ -155,9 +155,20 @@ function claim(regions: ShapeHitRegion[], instanceId = paneControlInstanceId(CON
 describe("a pane card whose script holds only ui.html", () => {
   it("paints the document and takes none of the user's input", () => {
     renderCard();
-    // The document really is on the card — this is a paint-only frame, not a
-    // frame that failed to render.
-    expect(frame().getAttribute("srcdoc")).toContain("type=password");
+    // The frame really is on the card — this is a paint-only frame, not a frame
+    // that failed to render. It is asserted through `src` rather than `srcdoc`
+    // since BUG-0113: the document is the loader, fetched from Rust so it
+    // carries its own CSP, and the script's HTML is PUSHED into it once the
+    // loader announces itself. That handshake does not happen in jsdom, so what
+    // reaches the body is covered where it belongs — the delivery tests in
+    // `_shared/scriptFrame/__tests__/scriptFrameLoader.test.ts`. What matters
+    // HERE is that the card built a frame for this instance at all, because the
+    // input-gate assertions below are meaningless against a frame that is
+    // missing.
+    expect(frame().getAttribute("srcdoc")).toBeNull();
+    expect(frame().getAttribute("src")).toContain(
+      encodeURIComponent(paneControlInstanceId(CONTROL.id)),
+    );
     // ...and it is hit-transparent, so the field cannot be clicked into or
     // selected in. `auto` here is the defect: every click would land in a
     // distributed author's page under a grant whose sentence says "render
