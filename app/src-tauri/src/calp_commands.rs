@@ -16427,13 +16427,30 @@ fn restore_pulled_pivots(
     use crate::pivot::operations::{build_cache_from_grid, safe_calculate_pivot, write_pivot_to_grid, update_pivot_region};
     use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
 
-    let mut pivot_tables = match pivot_state.pivot_tables.write(effect) {
-        Ok(pt) => pt,
+    // LOCK ORDER: the grid locks FIRST, everything else after.
+    //
+    // This function used to take `pivot_tables` and only then `grids`, which is
+    // the inverted shape the crate's lock-order census plants as its own
+    // positive control (`state_digest_lock_order_tests.rs`). The recalculation
+    // pass takes `grid`, then `grids`, and only then everything else — and it
+    // runs on a background thread, so a function holding one of those
+    // "everything else" locks while it waits for a grid lock closes a cycle and
+    // the app stops answering with no panic, no crash and nothing in the log.
+    // That is the measured 2026-08-11 wedge, one lock pair over.
+    //
+    // It survived because the census could not SEE this function: its
+    // `#[cfg(test)]` stripper counted braces per line, and 195 lines in one of
+    // this file's test modules carry a brace inside a string literal, so the
+    // skip ran to EOF and took 5,363 lines of production code with it. The
+    // census passed by not looking. Fixing the stripper made it fire here, and
+    // here only.
+    let mut grids = match state.grids.write(effect) {
+        Ok(g) => g,
         Err(_) => return,
     };
 
-    let mut grids = match state.grids.write(effect) {
-        Ok(g) => g,
+    let mut pivot_tables = match pivot_state.pivot_tables.write(effect) {
+        Ok(pt) => pt,
         Err(_) => return,
     };
 

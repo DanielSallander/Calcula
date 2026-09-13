@@ -720,6 +720,59 @@ whole-column refs as using "the populated-only compacted ordering", which `mater
 replaced with a dense one.
 
 
+### 2.8 The lock-order census was blind to 28% of its biggest file — CLOSED 2026-09-13
+
+**A crate-wide, exemption-free guard that passed by not looking.** `state_digest_lock_order_tests.rs`
+blanks `#[cfg(test)]` items before scanning, and its stripper counted `{` and `}` per line to find
+each module's end. Real test code defeats that: format strings (`"{}"`), JSON fixtures and embedded
+JS carry unbalanced braces INSIDE STRING LITERALS. Measured on `calp_commands.rs` — **195 lines in
+one test module carry such a brace, the running count ended at +3 rather than 0, and the skip ran to
+EOF.** The census scanned 11,044 of 19,308 lines; **5,363 lines of PRODUCTION code were silently
+exempt**.
+
+It hid exactly one real violation, and it was the worst possible one: `restore_pulled_pivots`
+(`calp_commands.rs`) took `pivot_state.pivot_tables.write()` and then `state.grids.write()` — **the
+precise shape this census plants as its own positive control** (`state_digest_lock_order_tests.rs`,
+"a non-AppState state object counts too"). The recalculation pass takes `grid` then `grids` and runs
+on a background thread, so that inversion closes a cycle: no panic, no crash, nothing in the log,
+just a window that stops answering. It is the 2026-08-11 wedge one lock pair over, sitting in the
+`.calp` reset path.
+
+**Fixed both halves.** The stripper now ends a module at the first line that is EXACTLY `}` —
+column-zero, which inside a top-level `mod` can only be that module's own close, and which no string
+literal can forge. That is the shape `document_store_census_tests.rs::strip_test_modules` already
+used in this crate, so the fix adopts a proven local idiom rather than inventing one. And
+`restore_pulled_pivots` now takes `grids` before `pivot_tables`. The census went from "passes,
+scanning 57%" to "fires on one violation, scanning 100%" to "passes, scanning 100%" — and 2,583
+app-lib tests pass.
+
+**This is the SECOND time this helper family has had exactly this defect.** Its own doc comment
+records §3bu: a brace-less `#[cfg(test)] mod x;` declaration ran the skip to EOF, in one of the other
+three near-copies. The self-test written then, `the_censuss_stripper_handles_both_module_shapes`,
+pinned both MODULE SHAPES — and said nothing about module CONTENT, which is where the next instance
+came from. `the_censuss_stripper_survives_braces_inside_string_literals` now pins that, with the four
+literal shapes that actually defeated it; sabotage-verified (restoring the brace counter reds it with
+"the census would report no violations because it never looked, not because there are none").
+
+**Still open, deliberately narrow:** the three near-copies named in that doc comment
+(`spill_map_tests`, `bulk_rewrite_recalc_tests`, `document_store_census_tests`) were checked.
+`document_store_census_tests` uses the column-zero rule already and is safe. The other two do not
+appear as separate files in the crate today, so there was nothing to fix — but any FIFTH copy should
+start from the column-zero rule, and the standing argument in that doc comment ("the property that
+matters is not one copy but each copy self-tested against that exact input") now has a second
+worked example.
+
+**And the harness lied while this was being fixed, which is worth more than the fix.**
+`fix-test-manifest.ps1` rewrites the test .exe to embed its manifest, bumping the exe's mtime past
+every source file; the next `cargo test --no-run` then reports `Finished in 0.60s`, rebuilds nothing,
+and runs the PREVIOUS binary while looking like a fresh run. A restored source file kept producing
+the sabotaged binary's results, and three reported failures — two of them naming real files —
+**did not exist**. Any harness that builds, patches and runs must force the build (touch the crate
+root) and confirm the log says `Compiling app`. The sibling failure mode, a later `cargo test`
+throwing the manifest away, is loud (`0xC0000139`); this one is silent and hands back fictional
+results.
+
+
 ### 2.x On-grid CONTROLS have no reachable right-click menu — **CLOSED 2026-09-04 as M3a**
 
 **CLOSED.** Controls now owns a capture-phase `contextmenu` listener of its own

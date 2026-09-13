@@ -328,19 +328,39 @@ fn strip_cfg_test_items(text: &str) -> String {
             out.push('\n');
             continue;
         }
-        let mut depth: i32 = 0;
         let mut started = false;
         for inner in lines.by_ref() {
-            depth += inner.matches('{').count() as i32;
-            depth -= inner.matches('}').count() as i32;
-            if inner.contains('{') {
-                started = true;
+            if !started {
+                if inner.trim_end().ends_with(';') {
+                    // `#[cfg(test)] #[path = "..."] mod x;` — no body to skip.
+                    break;
+                }
+                if inner.contains('{') {
+                    started = true;
+                }
+                continue;
             }
-            if started && depth <= 0 {
-                break;
-            }
-            if !started && inner.trim_end().ends_with(';') {
-                // `#[cfg(test)] #[path = "..."] mod x;` — no body to skip.
+            // THE END IS A COLUMN-ZERO `}`, NOT A BRACE COUNT.
+            //
+            // Counting braces per line is wrong on real test code and it failed
+            // silently: `{` and `}` appear inside string literals, format
+            // strings (`"{}"`), JSON fixtures and embedded JS constantly, so the
+            // count never returns to zero and the skip runs to EOF. Measured on
+            // `calp_commands.rs` — 195 lines in one test module carry a brace
+            // inside a literal, the depth ended at +3, and the census therefore
+            // scanned 11,044 of 19,308 lines. **5,363 lines of PRODUCTION code
+            // were exempt from a crate-wide, exemption-free guard**, including a
+            // real `pivot_tables`-before-`grids` inversion in
+            // `restore_pulled_pivots`, which is the exact shape this census
+            // plants as its own positive control.
+            //
+            // A top-level `mod tests { … }` closes with a `}` in column zero,
+            // and everything nested inside it is indented, so the first such
+            // line is the module's own end. That is the shape
+            // `document_store_census_tests.rs::strip_test_modules` already used
+            // in this crate, and it is immune to literals because a line that is
+            // EXACTLY `}` cannot be part of one.
+            if inner == "}" {
                 break;
             }
         }
@@ -606,6 +626,53 @@ mod tests {
          defect) or the real test module was enumerated as product code",
     );
 }
+
+#[test]
+fn the_censuss_stripper_survives_braces_inside_string_literals() {
+    // THE DEFECT THIS CENSUS ACTUALLY HAD, found 2026-09-12. The stripper used
+    // to count `{` and `}` per line, which is wrong on real test code: format
+    // strings (`"{}"`), JSON fixtures and embedded JS carry unbalanced braces
+    // inside literals, so the depth never returns to zero and the skip runs to
+    // EOF — taking every product function after the first test module with it.
+    //
+    // Measured on the real `calp_commands.rs`: 195 lines in one test module
+    // carry a brace inside a literal, the count ended at +3, and the census saw
+    // 11,044 of 19,308 lines. 5,363 lines of PRODUCTION code were silently
+    // exempt from a guard that is crate-wide and has no exemptions — including
+    // a real inversion in `restore_pulled_pivots`.
+    //
+    // The failure was invisible in the worst way: the census went on passing,
+    // so it read as "no violations" rather than "not looked".
+    const SRC: &str = "\
+#[cfg(test)]
+mod tests {
+    fn fixture(state: &AppState) {
+        // Every one of these carries an UNBALANCED brace inside a literal,
+        // which is what defeated the counter.
+        assert!(err.contains(\"x\"), \"{}\", err);
+        let json = r#\"{ \"scripts\": [{ \"id\": 1 }\"#;
+        let js = validator(\"(value) => { throw new Error('boom'); }\");
+        let opener = \"{\";
+    }
+}
+
+pub fn after_the_test_module(state: &AppState) {
+    let grids = state.grids.read().unwrap();
+    let active = state.grid.read().unwrap();
+}
+";
+    let holders = inverted_grid_lock_holders("planted.rs", SRC);
+    assert_eq!(
+        holders.len(),
+        1,
+        "the stripper ran past the test module's end and swallowed the product \
+         code after it — the census would report no violations because it never \
+         looked, not because there are none: {:?}",
+        holders
+    );
+    assert_eq!(holders[0].function, "after_the_test_module");
+}
+
 
 // ===========================================================================
 // THE SECOND DEADLOCK: `open_file` vs the gather-refresh worker (2026-08-11)
