@@ -595,6 +595,7 @@ export {
   getConditionalFormat,
   getAllConditionalFormats,
   evaluateConditionalFormats,
+  getRangeIcons,
   clearConditionalFormatsInRange,
 } from "./backend";
 

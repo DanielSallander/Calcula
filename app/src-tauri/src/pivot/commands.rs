@@ -3557,6 +3557,27 @@ pub async fn apply_pivot_filter(
         request.field_index
     );
 
+    // BUG-0108 ROUTING IS BUILT BUT DELIBERATELY NOT WIRED HERE.
+    //
+    // `crate::pivot::mask_safety` decides correctly which pivots cannot survive
+    // host-side masking, and sending an ordinary slicer down the pin path below
+    // does fix the filed denominator defect. An adversarial pass on 2026-09-13
+    // found it regresses more than it repairs, so the call is ABSENT rather
+    // than disabled behind a flag — a flag would be a second, untested
+    // configuration of a path we already know is wrong.
+    //
+    // The decisive blocker: a COMPOUND measure whose `RESET`/`CLEAR` must remove
+    // a request filter is a TYPED REFUSAL in the engine, pinned by its own test
+    // `reset_with_slicer_on_cleared_table_fails_closed`
+    // (model-engine-lib/crates/engine/src/clear_reset_tests.rs). Routing would
+    // turn today's CORRECT percent-of-grand-total answers into a hard query
+    // error on an ordinary slicer click. Eight further blockers — the slicer's
+    // own value domain collapsing, the header dropdown then reporting "not
+    // filtered", bare-column-name mis-attribution, YTD truncation, boolean and
+    // float value spelling, a refused query leaving the filter persisted, the
+    // 24-grain totals cap, and undo not undoing the routed filter — are listed
+    // with citations in docs/design/open-items.md under BUG-0108.
+
     // All lock-holding work happens in this block so no guard can live across
     // the await below (the Tauri command future must be Send).
     // `None` = the changed field is a calculation group and needs a BI
@@ -3592,6 +3613,10 @@ pub async fn apply_pivot_filter(
         // measure CLEAR/RESET semantics honor them: a pin survives bare
         // clears and is stripped only by `CLEAR(…, LEVEL n)` at or above its
         // level. Origin-preserving: the owning slicer id is carried along.
+        //
+        // ORDINARY (level-1) filtering does NOT come down here — see the
+        // "built but deliberately not wired" note at the top of this command
+        // for why routing it would regress more than it repairs.
         let pinned_routed: bool = if request.filter_level >= 2 {
             crate::slicer::types::validate_filter_level(request.filter_level)?;
             let Some(ref manual) = request.filters.manual_filter else {
@@ -6702,7 +6727,12 @@ pub async fn update_bi_pivot_fields(
         measures: query_measures.clone(),
         group_by: query_group_by,
         filters: vec![],
-        scoped_in_filters,
+        // CLONED, not moved: the engine-evaluated totals block below must send
+        // the SAME filters with every grain query. It used to send none, so a
+        // pinned slicer produced engine-filtered leaves and engine-unfiltered
+        // totals — and, because a pin makes `include_leaf` true, the unfiltered
+        // leaf grain then overwrote the filtered leaves.
+        scoped_in_filters: scoped_in_filters.clone(),
         lookups: query_lookups,
         calculation_group: calc_group_app,
         ..Default::default()
@@ -7012,6 +7042,11 @@ pub async fn update_bi_pivot_fields(
                     .iter()
                     .map(|v| (v.measure_name.clone(), None))
                     .collect(),
+                // The grains must answer the question the main query asked.
+                // These are the pivot's pinned (level-2+) filters; the gate
+                // above guarantees no host-side mask is active, so this is the
+                // complete filter context — nothing else is being applied.
+                scoped_in_filters: scoped_in_filters.clone(),
             };
             // Filter/slicer dims are part of the main query's GROUP BY, so
             // even the pivot's leaf cells are roll-ups when they exist —

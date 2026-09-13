@@ -1006,6 +1006,92 @@ pub(crate) fn resolve_icons(
 /// Evaluate conditional formats over a rectangle, for an EXPLICITLY NAMED sheet
 /// and an explicit rule list.
 ///
+/// The distinct icons a range actually SHOWS, for the Sort dialog's icon picker.
+///
+/// WHY THIS IS A COMMAND AND NOT A FRONTEND SCAN OVER
+/// `evaluate_conditional_formats`. The two paths disagree, and the disagreement
+/// is invisible from the frontend:
+///
+///   - `evaluate_conditional_formats_for` pushes ONE RESULT PER MATCHING RULE
+///     and breaks only on `stop_if_true`, in the rules' STORAGE order.
+///   - `resolve_icons` — which sorting and filtering key on — sorts by PRIORITY
+///     and takes the FIRST icon-producing rule, then stops.
+///
+/// So over a column covered by two enabled icon-set rules, a flat scan of the
+/// evaluate results lists icons from the second rule as well. Those icons can
+/// never be what a cell shows, so choosing one yields a sort that matches no
+/// rows, moves nothing, and reports success — BUG-0104's own defect class,
+/// recreated one layer up in the fix for it.
+///
+/// Asking the ONE evaluator the sort keys on removes the possibility by
+/// construction: every icon this returns is an icon a sort can match.
+///
+/// `Interactive` for the same reason the sort passes it: the user opened a
+/// dropdown and is waiting, and a tripped fuel budget here costs a missing
+/// OPTION rather than a missing highlight.
+#[tauri::command]
+pub fn get_range_icons(
+    state: State<AppState>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Vec<IconRef> {
+    let active_sheet = *state.active_sheet.read().unwrap();
+    // Taken and released before the grid guards, the way this module's other
+    // callers do it, so no CF guard is alive across a long-lived grid borrow.
+    let rules = match state.conditional_formats.read().unwrap().get(&active_sheet) {
+        Some(r) => r.clone(),
+        None => return Vec::new(),
+    };
+    if rules.is_empty() {
+        return Vec::new();
+    }
+
+    let grids = state.grids.read().unwrap();
+    let sheet_names = state.sheet_names.read().unwrap();
+    let grid = match grids.get(active_sheet) {
+        Some(g) => g,
+        None => return Vec::new(),
+    };
+
+    let min_row = start_row.min(end_row);
+    let max_row = start_row.max(end_row);
+    let min_col = start_col.min(end_col);
+    let max_col = start_col.max(end_col);
+    let mut cells: Vec<(u32, u32)> = Vec::new();
+    for row in min_row..=max_row {
+        for col in min_col..=max_col {
+            cells.push((row, col));
+        }
+    }
+
+    let resolved = resolve_icons(
+        grid,
+        &grids,
+        &sheet_names,
+        active_sheet,
+        &rules,
+        &cells,
+        crate::eval_budget::EvalSurface::Interactive,
+    );
+
+    // Distinct, and ordered by set then by the icon's own position within it, so
+    // the dropdown reads the way the set does rather than in scan order.
+    let mut seen: Vec<IconRef> = Vec::new();
+    for icon in resolved.into_values().flatten() {
+        if !seen.contains(&icon) {
+            seen.push(icon);
+        }
+    }
+    seen.sort_by(|a, b| {
+        format!("{:?}", a.icon_set)
+            .cmp(&format!("{:?}", b.icon_set))
+            .then(a.icon_index.cmp(&b.icon_index))
+    });
+    seen
+}
+
 /// The pure twin of the `evaluate_conditional_formats` command, which is wired to
 /// `State<AppState>` and to the ACTIVE sheet. Two things need this shape:
 ///

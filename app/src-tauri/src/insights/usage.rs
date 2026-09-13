@@ -308,6 +308,12 @@ pub fn observe_bi_pivot(
     // Engine-routed (pinned) filters already carry table and column separately,
     // so no split is needed - and they are genuine usage: a pinned filter is a
     // deliberate, surviving constraint on the measure.
+    //
+    // These are ALL pins today. If level-1 routing is ever enabled (BUG-0108 in
+    // docs/design/open-items.md), this list starts mixing levels - and both
+    // should still count, because a routed level-1 selection is a constraint
+    // the user applied by clicking. Gating on `level > 1` then would
+    // UNDER-count exactly the pivots that do the most filtering.
     for filter in &definition.engine_filters {
         let qc = QualifiedColumn::new(&filter.table, &filter.column);
         if model

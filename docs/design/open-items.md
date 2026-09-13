@@ -14,22 +14,93 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**113 entries, 110 fixed, 3 open** as of
+reproduction live in `tests/regression/bug-ledger.json` (**113 entries, 111 fixed, 2 open** as of
 2026-09-13 — recounted from the file, not carried forward; it moved three times in two days, and
 the figure this sentence carried before today said 106/104/2, which was 7 entries and 2 open bugs
-behind). The three open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open
+behind). The two open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open
 deliberately — the guards now make a recurrence diagnosable, and it is explicitly not closeable by
-a speculative fix), **BUG-0104** (sort and filter by conditional-formatting icon), **BUG-0108**
-(percent-of-visible-total measures are wrong in a slicer-filtered BI pivot — level-1 slicers still
-use the host-side mask, so the engine's denominator includes rows the host hides afterwards).
-**BUG-0113 closed 2026-09-13**, MEASURED against a real `tauri build` rather than argued. BUG-0104's
-ENGINES both work as of
-2026-08-19 — the sort keys on the icon that was on screen when it was invoked, the filter resolves
-once per pass — and both are reachable over IPC. What is left is the SURFACE: the script validator
-has a closed allowlist so a script can say `sortOn:"icon"` but can never name the icon, and neither
-the Sort dialog nor the AutoFilter dropdown can express an icon choice yet, so both still refuse.
-Nothing lies to a user in the meantime; the remaining refusals are validations naming what is
-missing. BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
+a speculative fix) and **BUG-0108** (percent-of-visible-total measures are wrong in a
+slicer-filtered BI pivot — level-1 slicers still use the host-side mask, so the engine's
+denominator includes rows the host hides afterwards). **BUG-0108's documented workaround was
+itself broken and is FIXED 2026-09-13**, which is a separate defect from the entry: the
+engine-evaluated totals plan built every grain query with `filters: vec![]` and no
+`scoped_in_filters`, so a PINNED (level-2) slicer produced engine-filtered leaf rows and
+engine-UNFILTERED totals. Worse than wrong subtotals — a pin CLEARS the host masks (which is what
+opens the totals gate and passes `apply_total_overrides`' all-visible check) and an out-of-zone
+pinned field leaves a zero-mask `SlicerFilter` so it stays in GROUP BY, which makes `include_leaf`
+true; since `apply_total_overrides` REPLACES an accumulator, the unfiltered full-depth grain
+overwrote the pin-filtered LEAF cells. Pinning a slicer made the pivot ignore that slicer
+entirely. `BiTotalsPlan` now carries the pivot's own `scoped_in_filters` and every grain sends
+them (`app/src-tauri/src/pivot/totals.rs`, `grain_request`; populated at
+`app/src-tauri/src/pivot/commands.rs`). THE ENTRY STAYS OPEN: this repairs the mitigation, it does
+not close the bug — an ordinary level-1 slicer click still never re-queries the engine.
+
+**The fix for the entry itself was BUILT, MEASURED AGAINST ITS OWN CONSEQUENCES, AND WITHDRAWN on
+2026-09-13.** Owner decision that day: route ordinary (level-1) slicers into the engine for pivots
+whose measures are filter-context sensitive, fail closed when undecidable. The detector was built
+and is correct — `app/src-tauri/src/pivot/mask_safety.rs`, expands measure refs first (a bare
+`[Share Pct]` looks additive until inlined) and routes on context ops / window / time-intelligence
+/ `ISFILTERED` — the routing was implemented through the existing pin path, and an adversarial
+pass over four lenses then found NINE defects it introduces. The module is KEPT and tested; the
+call site is ABSENT rather than flagged off, because a flag is a second untested configuration of
+a path already known to be wrong. `apply_pivot_filter` carries a note where the call would go, and
+`this_detector_is_still_unwired_and_says_so_where_it_would_be_wired` fails if that note is removed
+without a real wiring guard replacing it.
+
+The blockers, in the order they must be dealt with:
+
+1. **A compound `RESET`/`ALL` measure plus a request filter is a TYPED REFUSAL in the engine** —
+   `reset_with_slicer_on_cleared_table_fails_closed`
+   (`model-engine-lib/crates/engine/src/clear_reset_tests.rs`), refused in
+   `engine-query/src/executor/pipeline/local_aggregation.rs`. A
+   `% of grand total = DIVIDE(SUM(x), SUM(x, RESET()))` pivot MASKS CORRECTLY TODAY; routing turns
+   it into a hard query error on an ordinary click. This one alone disqualifies the change: it
+   converts right answers into failures. Either narrow the detector to exclude what the engine
+   will refuse, or extend per-measure filter removal to compound sub-expression contexts.
+2. **The slicer's own value domain collapses.** A routed query rebuilds the cache from the
+   filtered result, so the column holds only the SELECTED members. The escape hatch for exactly
+   this exists — `slicer/commands.rs` fetches the full domain from the model instead of cache
+   uniques, and its comment says "the slicer could never re-expand" — but it is gated on
+   `slicer.filter_level >= 2`, and a routed slicer stays at level 1. Siblings collapse too; in
+   exclusive mode the user cannot move between members without clearing first; and multi-select's
+   "all selected ⇒ clear" test (frontend AND `set_slicer_item_selected`) then compares against a
+   one-element list.
+3. **The pivot's own header dropdown reports a filtered pivot as unfiltered.** `get_pivot_field_info`
+   derives `is_filtered` / visible items / manual filter solely from `hidden_items`, which routing
+   deliberately clears, and `get_pivot_field_unique_values` reads cache uniques. That command
+   already carries a precedent escape hatch for calculation groups; routing needs the equivalent.
+4. **Bare cache column names are attributed to the first model table owning that name.** A star
+   schema with `dim_date[Year]` and `dim_budget[Year]` sends the filter to the wrong table with no
+   error. Pre-existing for pins; routing makes it reachable from an ordinary click, where the old
+   host mask was keyed by `source_index` and could not be mis-attributed.
+5. **Time-intelligence truncation.** `YTD(SUM(x))` over months sliced Mar–Jun accumulates only
+   Mar–Jun. Replacing one wrong number with a different wrong number — arguably `has_window` and
+   `contains_time_intelligence` should NOT route at all.
+6. **Boolean and Float dimension values are spelled differently by host and engine**, so a routed
+   IN-list matches zero rows and the pivot comes back empty (`pivot/utils.rs`).
+7. **A refused routed query leaves the engine filter persisted**, so the pivot stays broken across
+   refresh and reopen until the user finds Clear Filter.
+8. **Above `MAX_TOTAL_GRAINS` (24) the leaf override is silently discarded** (`pivot/totals.rs`),
+   so a wide routed pivot displays BUG-0108's exact symptom again — now with a slower click.
+9. **Undo does not undo a routed filter**: the repaint uses the pre-click cache so it LOOKS undone
+   while `definition.engine_filters` keeps the filter, which then persists on save.
+
+Items 4, 6, 7 and 9 are REAL TODAY for explicit pins — routing did not create them, it would only
+widen their reach — and so is 8 now that the totals plan depends on that override. They are worth
+fixing whether or not routing is ever enabled. Also noted: `.calp` publish validates every pivot
+field name against the published model EXCEPT `engine_filters` (`app/src-tauri/src/calp_commands.rs`),
+and non-additive aggregates (AVERAGE/DISTINCTCOUNT declared as measures without a context op) are
+classified mask-safe, so their totals stay wrong under any slicer.
+**BUG-0113 closed 2026-09-13**, MEASURED against a real `tauri build` rather than argued.
+**BUG-0104 closed 2026-09-13.** Its engines had both worked since 2026-08-19; the last dead half
+was the Sort dialog, which offered "Conditional Formatting Icon" and then showed "A to Z" for the
+order, so it never named an icon and the backend refused every such sort with a correct message
+about a choice the UI never offered. The dialog now lists the icons the column actually shows.
+WHAT REMAINS IS A MISSING FEATURE, NOT A LIE, and is filed in §2.1 rather than in the ledger: the
+AutoFilter dropdown still cannot express an icon choice, and a script can say `sortOn:"icon"` but
+cannot name the icon. Nothing reports success while doing something else — the icon filter fails
+CLOSED and its door validator refuses — which is the property that entry existed to restore.
+BUG-0095, BUG-0096 and BUG-0097 were fixed 2026-08-17; BUG-0099,
 filed and fixed the same day, is the sibling of BUG-0086 — that fix turned out to be
 SPELLING-SPECIFIC, and a capitalised `;BASE64,` tag or a percent-escaped body bypassed it entirely.
 Nothing in this file duplicates a ledger entry. **Recount before restating**: the histogram is one line of node, and this figure has
@@ -259,6 +330,7 @@ Each is scoped, understood, and deliberately not done. They need a slot, not a d
 
 | item | verified at |
 |---|---|
+| **Filtering by conditional-formatting ICON works in the engine and cannot be reached from the UI. FILED 2026-09-13, when BUG-0104's other half closed.** `FilterOn::Icon` is fully implemented — `resolve_filter_icons` computes one `RangeStats` per rule per pass (asking per row would re-walk every rule's range for every row and make the pass quadratic), `icon_criteria_keeps` decides, and `validate_icon_criteria` refuses at the door the three shapes that cannot be honoured. It also FAILS CLOSED: a criteria naming nothing HIDES the row rather than showing every one, deliberately, because the whole `auto_filters` map is written into `.cala` and restored verbatim, so a malformed criteria re-enters state on LOAD without passing the door — and showing every row there would report a filter as applied while filtering nothing, which is exactly the lie BUG-0104 was. **So nothing here is wrong; it is unreachable.** Three pieces are missing and they are independent: (1) the AutoFilter dropdown has no "Filter by Icon" submenu, and unlike sort there is no filter-by-COLOUR submenu to copy, so it is genuinely new UI — it also needs Excel's "No Cell Icon" entry, which the backend already models as `icon.noIcon`; (2) `AutoFilterColumnCriteria` (`app/src/api/autoFilterService.ts`) has no `icon` kind, so the seam cannot carry one; (3) the `vSortRange` key allowlist (`app/src/api/scriptHost/validators.ts`) still omits `icon`, so a script can say `sortOn:"icon"` and never name one — and whoever adds that key MUST land its shape check in the same commit (`iconSet` in the existing `CF_ICON_SET_TYPES`, `iconIndex` a non-negative integer), because a new key in that allowlist defaults to UNVALIDATED, which is the hazard CLAUDE.md names by example. A script also cannot read back an icon it set (`ScriptAutoFilterColumn`). The Sort dialog's picker is the worked example to copy: it calls `getRangeIcons`, which wraps `resolve_icons` — the SAME cascade the sort and filter key on — rather than scanning `evaluate_conditional_formats`, because that command returns one result per MATCHING RULE in STORAGE order while `resolve_icons` sorts by PRIORITY and takes the first, so a picker built on it can offer an icon no cell shows. | `app/src-tauri/src/autofilter.rs` (`FilterOn::Icon`, `icon_criteria_keeps`, `validate_icon_criteria`), `app/src-tauri/src/conditional_formatting.rs` (`get_range_icons`), `app/extensions/AutoFilter/components/FilterDropdownOverlay.tsx`, `app/src/api/autoFilterService.ts`, `app/src/api/scriptHost/validators.ts` |
 | **The APPROXIMATE (sorted) lookup comparators rank values differently from the exact ones, so `=MATCH(1,A1:A4,1)` answers the wrong row.** MEASURED 2026-08-24 during the Excel-symbol programme, on a column holding `{1, "1", TRUE, "apple"}`: `=MATCH(1,A1:A4,1)` answers **3** where Excel answers **1**. The exact family was unified in that programme (`=`, `MATCH` type 0, VLOOKUP/HLOOKUP FALSE, XLOOKUP and the pass cache now share one predicate and agree); the APPROXIMATE family was deliberately left, and it is the last surface that disagrees with the ladder. `compare_values` ranks Number vs Text on its own rules rather than Excel's `number < text < FALSE < TRUE`. **WHY IT WAS NOT DONE WITH THE REST, and why it needs its own slot rather than a batch:** this is not a predicate swap. `SortedKeys::build` (`core/engine/src/lookup_cache.rs`) only permits binary search over HOMOGENEOUS, verified-sorted key vectors under one comparator class, so changing the ordering changes that precondition — and a binary search over a vector that is no longer sorted under its own comparator does not error, it returns THE WRONG ROW, silently, on the exact code path built to make lookups fast. It is the one remaining formula-engine change that can break lookups across the board without reddening anything. Wants a dedicated pass with a differential harness over both paths (scan vs cache) before the ordering moves at all — `lookup_cache::tests::exact_index_answers_exactly_what_the_scan_path_would`, added by that programme, is the shape to copy for the approximate path. | `core/engine/src/evaluator.rs` (`compare_values`), `core/engine/src/lookup_cache.rs` (`SortedKeys::build`), surface-vs-answer table in `memory/project_excel_symbol_alignment.md` |
 | **Column-header separators are not device-pixel snapped — the same defect just fixed for cell borders.** `headers.ts:168,330` stroke at a hand-rolled logical `+0.5` instead of snapping into DEVICE space the way `grid.ts:189-191` has always done for the gridline hairline. Column boundaries are `22 + k*64.29`, so at dpr 1 every column-header tick smears across two device pixels at partial alpha rather than landing on one. Row-header ticks are on the integral axis and are fine — the identical top-crisp/side-blurred asymmetry that BUG-0101 turned out to be. **Deliberately excluded from BUG-0101's fix**, which is why this row exists: the file has 18 stroke calls and NO unit tests, and the change moves grid-bearing goldens (BUG-0101's design review estimated 49; a later byte census said 51 — recount before scheduling, and note `headers.ts` is pure CRLF while `grid.ts` and `cellBorders.test.ts` are LF). The fix itself is the parity-snap helper from `cells.ts` applied three times. | `headers.ts:165-168,327-330,442-445`, `grid.ts:189-191`, BUG-0101 |
 | ~~**`model-engine-lib` is run by no CI workflow at all.**~~ **CLOSED 2026-09-12 — `ci.yml` now carries a `rust-model-engine` job.** Same shape as `rust-core`: `ubuntu-latest`, `working-directory: model-engine-lib`, `Swatinem/rust-cache` keyed on that workspace, `cargo test --workspace`. Linux is safe for THIS workspace unlike the app crate — the only `#[cfg(windows)]` in it is SQL Server integrated auth, which carries an explicit `#[cfg(not(windows))]` refusal arm (`engine-connectors/src/sqlserver.rs:184`), so the two Windows-only tests simply do not run there. Measured on the dev box before the job was added: **2,660 passing test cases, 0 assertion failures, 75 ignored**. The only reds were three `engine-core` DOCTESTS failing `LNK1102: out of memory` under parallel linking on this ARM64 host; they pass at `--test-threads=1`, so it is a dev-box hazard of exactly the class `ci.yml`'s header says Linux sidesteps, not a defect. **The DB-gated half is UNCHANGED and remains the owner call this row always said it was:** those 75 `#[ignore]`d tests are the whole differential-vs-SQL corpus — the engine's only ground truth for DAX semantics — and `cargo test` prints "75 ignored" and passes anyway, so the job's comment says that out loud rather than letting a green be read as more than it is. Two figure corrections while closing: the "2,230 tests across 145 files" came from a `#[test]` grep and cargo's own count supersedes it; the **75 was right** and a grep saying 76 is counting a doc comment in `rest_connector/tests.rs:4` that literally reads "no `#[ignore]`". | `.github/workflows/ci.yml` (`rust-model-engine` job), `model-engine-lib/`, measured 2026-09-12 |

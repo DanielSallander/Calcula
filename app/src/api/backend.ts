@@ -2416,6 +2416,36 @@ export async function evaluateConditionalFormats(
 }
 
 /**
+ * The distinct icons a range actually SHOWS, in the set's own order.
+ *
+ * NOT derivable from `evaluateConditionalFormats`, and the difference is the
+ * point. That command returns ONE RESULT PER MATCHING RULE in the rules' storage
+ * order; the sort and filter key on `resolve_icons`, which sorts by PRIORITY and
+ * takes the first icon-producing rule. Over a column covered by two enabled
+ * icon-set rules the two disagree, and a picker built on the former would offer
+ * an icon no cell can ever show — a sort matching zero rows that reports success,
+ * which is precisely the defect BUG-0104 is about.
+ *
+ * @param startRow - Start row
+ * @param startCol - Start column
+ * @param endRow - End row
+ * @param endCol - End column
+ */
+export async function getRangeIcons(
+  startRow: number,
+  startCol: number,
+  endRow: number,
+  endCol: number
+): Promise<{ iconSet: IconSetType; iconIndex: number }[]> {
+  return invoke<{ iconSet: IconSetType; iconIndex: number }[]>("get_range_icons", {
+    startRow,
+    startCol,
+    endRow,
+    endCol,
+  });
+}
+
+/**
  * Clear conditional formats in a range (on the active sheet, or `sheetIndex`).
  * @param startRow - Start row
  * @param startCol - Start column

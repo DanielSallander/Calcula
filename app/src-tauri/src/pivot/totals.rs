@@ -71,6 +71,29 @@ pub(crate) struct BiTotalsPlan {
     /// Per value-field position: (base measure, calculation item) key used to
     /// locate the measure's column in each grain result.
     pub vf_keys: Vec<(String, Option<String>)>,
+    /// The SAME level-tagged IN-lists the main pivot query carries.
+    ///
+    /// WHY THIS FIELD EXISTS. The grain queries used to be built with
+    /// `filters: vec![]` and no scoped filters at all, so they described the
+    /// WHOLE model while the pivot beside them was engine-filtered. A pinned
+    /// (level-2+) slicer is exactly that situation, and it is the workaround
+    /// BUG-0108 points users at:
+    ///
+    ///   - A pin CLEARS every host-side `hidden_items` for its field, which is
+    ///     what makes the totals gate open at all (`request_filters_active`
+    ///     is then false) and what makes `apply_total_overrides`' all-visible
+    ///     mask check pass.
+    ///   - An out-of-zone pinned field leaves a zero-mask `SlicerFilter`
+    ///     behind so it stays in GROUP BY, which on refresh makes
+    ///     `include_leaf` true.
+    ///   - `apply_total_overrides` REPLACES an accumulator rather than adding
+    ///     to it, and happily inserts a slot that did not exist.
+    ///
+    /// Together those three mean the unfiltered grain results overwrote the
+    /// pin-filtered LEAF values: pinning a slicer made the pivot ignore that
+    /// slicer completely. The fix is not to skip the totals — it is to ask the
+    /// same question the main query asked.
+    pub scoped_in_filters: Vec<bi_engine::ScopedInFilter>,
 }
 
 /// Grains beyond this count keep rolled-up totals (avoids surprise refresh
@@ -212,6 +235,30 @@ pub(crate) fn overrides_from_grain_result(
     out
 }
 
+/// Builds the `QueryRequest` for ONE total grain.
+///
+/// Extracted from the loop below purely so it is testable: the loop needs a
+/// live `bi_engine::Engine`, and the defect this guards against was invisible
+/// precisely because nothing could look at the request that was being sent.
+pub(crate) fn grain_request(
+    plan: &BiTotalsPlan,
+    group_by: Vec<bi_engine::ColumnRef>,
+) -> bi_engine::QueryRequest {
+    bi_engine::QueryRequest {
+        measures: plan.measures.clone(),
+        group_by,
+        filters: vec![],
+        // The pivot's own engine filters travel with every grain. Omitting
+        // them computed each subtotal and grand total over the whole model
+        // and spliced it over an engine-filtered pivot — see the field's
+        // own doc comment for why that also corrupted the LEAF cells.
+        scoped_in_filters: plan.scoped_in_filters.clone(),
+        lookups: vec![],
+        calculation_group: None,
+        ..Default::default()
+    }
+}
+
 /// Runs one point query per total grain and collects the resulting overrides.
 /// Grains are evaluated coarse-to-fine so a (harmless) key collision resolves
 /// in favour of the finer grain. Per-grain failures keep the rolled-up totals
@@ -243,14 +290,7 @@ pub(crate) async fn query_bi_total_overrides(
             .chain(plan.col_fields[..e].iter())
             .map(|gf| bi_engine::ColumnRef::new(&gf.table, &gf.column))
             .collect();
-        let request = bi_engine::QueryRequest {
-            measures: plan.measures.clone(),
-            group_by,
-            filters: vec![],
-            lookups: vec![],
-            calculation_group: None,
-            ..Default::default()
-        };
+        let request = grain_request(plan, group_by);
         match engine.query_with_meta(request).await {
             Ok((batches, result_columns)) => {
                 out.extend(overrides_from_grain_result(
@@ -383,6 +423,7 @@ mod tests {
                 ("Revenue".to_string(), None),
                 ("Pct".to_string(), None),
             ],
+            scoped_in_filters: vec![],
         }
     }
 
@@ -410,6 +451,115 @@ mod tests {
         assert_eq!(overrides[0].row_key, vec![VALUE_ID_EMPTY]);
         assert!(overrides[0].col_key.is_empty());
         assert_eq!(overrides[0].values, vec![Some(300.0), Some(1.0)]);
+    }
+
+    /// A plan carrying the pinned filters a real pinned pivot would have.
+    fn pinned_plan() -> BiTotalsPlan {
+        let mut plan = test_plan();
+        plan.scoped_in_filters = vec![bi_engine::ScopedInFilter {
+            table: Some("Sales".to_string()),
+            filter: bi_engine::InFilter::new("Region", ["North"]),
+            level: 2,
+        }];
+        plan
+    }
+
+    #[test]
+    fn every_total_grain_carries_the_pivots_own_engine_filters() {
+        // THE DEFECT. Each grain request was built with `filters: vec![]` and
+        // no scoped filters at all, so every subtotal and grand total was
+        // computed over the WHOLE model and then spliced over a pivot whose
+        // leaf rows WERE engine-filtered. Pinning a slicer is the documented
+        // workaround for BUG-0108, so the mitigation produced the wrong
+        // numbers it was pointed at to avoid.
+        let plan = pinned_plan();
+        let grains = enumerate_grains(plan.row_fields.len(), plan.col_fields.len(), true);
+        assert!(grains.len() >= 2, "need more than one grain to be meaningful");
+
+        for (d, e) in grains {
+            let group_by: Vec<bi_engine::ColumnRef> = plan.row_fields[..d]
+                .iter()
+                .chain(plan.col_fields[..e].iter())
+                .map(|gf| bi_engine::ColumnRef::new(&gf.table, &gf.column))
+                .collect();
+            let req = grain_request(&plan, group_by);
+            assert_eq!(
+                req.scoped_in_filters.len(),
+                1,
+                "grain ({}, {}) dropped the pivot's engine filters",
+                d,
+                e
+            );
+            assert_eq!(req.scoped_in_filters[0].level, 2);
+            assert_eq!(req.scoped_in_filters[0].table.as_deref(), Some("Sales"));
+            assert_eq!(req.scoped_in_filters[0].filter.column, "Region");
+            assert_eq!(req.scoped_in_filters[0].filter.values, vec!["North"]);
+        }
+    }
+
+    #[test]
+    fn the_leaf_grain_is_filtered_too_because_a_pin_makes_it_reachable() {
+        // Why the leaf grain matters, and why this is worse than "totals are
+        // wrong". An out-of-zone pinned field keeps a zero-mask `SlicerFilter`
+        // so it stays in GROUP BY; on refresh that makes `include_leaf` TRUE,
+        // so `enumerate_grains` emits the FULL-DEPTH grain. And
+        // `apply_total_overrides` REPLACES an accumulator rather than adding
+        // to it. An unfiltered full-depth grain therefore overwrote the
+        // pin-filtered leaf cells: the pivot displayed all-rows numbers while
+        // showing an active slicer.
+        let plan = pinned_plan();
+        let leaf = (plan.row_fields.len(), plan.col_fields.len());
+        let with_leaf = enumerate_grains(leaf.0, leaf.1, true);
+        assert!(
+            with_leaf.contains(&leaf),
+            "include_leaf must emit the full-depth grain — that is the grain a pin reaches"
+        );
+
+        let group_by: Vec<bi_engine::ColumnRef> = plan
+            .row_fields
+            .iter()
+            .map(|gf| bi_engine::ColumnRef::new(&gf.table, &gf.column))
+            .collect();
+        let req = grain_request(&plan, group_by);
+        assert!(
+            !req.scoped_in_filters.is_empty(),
+            "the leaf grain is unfiltered, so it will overwrite the pivot's own filtered leaves"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_pivot_still_sends_no_filters() {
+        // The fix must not invent a filter context. A pivot with no engine
+        // filters is the ordinary case and its grains describe the whole
+        // model, which is correct there: the totals gate only opens when no
+        // host-side mask is active either.
+        let req = grain_request(&test_plan(), vec![]);
+        assert!(req.scoped_in_filters.is_empty());
+        assert!(req.filters.is_empty());
+    }
+
+    #[test]
+    fn the_totals_plan_is_populated_from_the_main_querys_filters() {
+        // WIRING, which the three tests above cannot see: they prove the
+        // request carries whatever the PLAN holds, not that the caller ever
+        // puts anything in the plan. `update_bi_pivot_fields` builds
+        // `scoped_in_filters` once and used to MOVE it into the main query —
+        // so a plan built afterwards had nothing to copy and the field would
+        // sit permanently empty while every test above still passed.
+        let src = include_str!("commands.rs");
+        assert!(
+            src.contains("scoped_in_filters: scoped_in_filters.clone()"),
+            "update_bi_pivot_fields no longer clones its engine filters into \
+             BOTH the main query and the totals plan; the grain queries are \
+             describing the unfiltered model again"
+        );
+        let occurrences = src.matches("scoped_in_filters: scoped_in_filters.clone()").count();
+        assert_eq!(
+            occurrences, 2,
+            "expected exactly two sites — the main QueryRequest and the \
+             BiTotalsPlan — found {}",
+            occurrences
+        );
     }
 
     #[test]

@@ -5447,6 +5447,7 @@ pub fn run() {
             conditional_formatting::get_conditional_format,
             conditional_formatting::get_all_conditional_formats,
             conditional_formatting::evaluate_conditional_formats,
+            conditional_formatting::get_range_icons,
             conditional_formatting::clear_conditional_formats_in_range,
             // Table commands
             tables::create_table,

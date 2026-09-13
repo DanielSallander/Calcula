@@ -228,6 +228,14 @@ pub fn write_calcula_bytes(workbook: &Workbook) -> Result<Vec<u8>, FormatError> 
     // wrong numbers with no error anywhere (see
     // PINNED_FILTER_MIN_FORMAT_VERSION). Stamped only when something is
     // actually pinned, so ordinary workbooks stay v1-v7.
+    //
+    // The `engine_filters` probe below is a synonym for "a pin exists" ONLY
+    // while level-1 routing stays off (BUG-0108 in docs/design/open-items.md).
+    // Enabling it would stamp v8 for ordinary BI workbooks — which would be
+    // correct rather than incidental, since an older reader drops the engine
+    // filter and the pivot comes back UNFILTERED with no error anywhere,
+    // whatever level the filter sat on — but this sentence would need saying
+    // differently.
     if workbook.slicers.iter().any(|s| s.filter_level > 1)
         || workbook.ribbon_filters.iter().any(|f| f.filter_level > 1)
         || workbook.pivot_definitions.iter().any(|d| {

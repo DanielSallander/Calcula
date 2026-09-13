@@ -174,6 +174,10 @@ export function SortDialog(props: DialogProps): React.ReactElement | null {
         ascending: level.ascending,
         sortOn: level.sortOn,
         color: level.color,
+        // The icon the user picked. The backend REQUIRES it for an icon level
+        // and refuses without one, so omitting it here is what made the Sort
+        // dialog's icon option dead for as long as it existed (BUG-0104).
+        icon: level.icon,
         dataOption: level.dataOption,
         customOrder: level.customOrder,
       }));
