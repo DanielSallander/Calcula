@@ -305,13 +305,29 @@ describe("the gate is wired into the spec", () => {
     ).toBe(true);
   });
 
-  it("keeps all three assertions — the gate replaces none of them", () => {
-    // The gate is about WHICH BUILD, never about what was observed in it. In
-    // particular `mainInlineRan` must still be asserted: it is what catches
-    // 'unsafe-inline' being added to script-src, and a gate that skipped on a
-    // missing CSP instead of on a dev URL would swallow exactly that.
-    expect(spec).toContain("result.mainInlineRan");
-    expect(spec).toContain("result.frameBootRan");
-    expect(spec).toContain("result.gestureArrived && result.gesturePassedIdentityCheck");
+  it("keeps its observations — the gate replaces none of them", () => {
+    // The gate is about WHICH BUILD, never about what was observed in it.
+    //
+    // These names changed on 2026-09-13, when BUG-0113 was fixed and MEASURED.
+    // The spec used to probe the SRCDOC bridge and was expected to fail; that
+    // half is retired, because a test that can only ever fail is how a suite
+    // acquires a known-failures list — and once it has one, the day someone
+    // adds 'unsafe-inline' to script-src and it turns green for the wrong
+    // reason goes unnoticed. `srcdocBridgeCsp.test.ts` pins the app's policy
+    // against exactly that, and it is a unit test rather than a build-gated
+    // one, so it runs on every commit.
+    //
+    // What must still be ASSERTED rather than merely logged, because each one
+    // is a different way the loader route can be broken while looking fine:
+    //   - `ready`      the custom scheme served the frame AND its inline
+    //                  <script> executed under the frame's own CSP. This is the
+    //                  one that catches the wry ICoreWebView2_22 iframe floor.
+    //   - `received`   an INLINE onclick= reached the host — the shape no nonce
+    //                  could ever rescue, and the reason the route exists.
+    //   - `identityOk` the message came from this frame's own window, so the
+    //                  host router would accept it in the product.
+    expect(spec).toContain("beforeClick.ready");
+    expect(spec).toContain("result.received");
+    expect(spec).toContain("result.identityOk");
   });
 });

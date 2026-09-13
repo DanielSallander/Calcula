@@ -187,9 +187,27 @@ pub const SCRIPT_FRAME_LOADER: &str = r#"<!DOCTYPE html>
     // and the message is delivered to the victim's script as if its own UI had
     // sent it. Every legitimate message comes from the embedder, so the test is
     // exact rather than a heuristic.
-    if (e.source !== parent) return;
     var d = e.data;
-    if (!d || d.target !== TAG || instanceId === null || d.instanceId !== instanceId) return;
+    // Not ours at all: stay silent. Every window in the app shares this bus.
+    if (!d || d.target !== TAG) return;
+
+    // Ours by tag, so from here a refusal is worth SAYING. A frame that drops a
+    // message in silence is indistinguishable from one that never got it, and
+    // that is the single hardest thing to diagnose about this whole channel --
+    // the host has no way to see inside an opaque-origin document.
+    var sourceOk = e.source === parent;
+    var idOk = instanceId !== null && d.instanceId === instanceId;
+    if (!sourceOk || !idOk) {
+      if (instanceId !== null) {
+        window.calcula.sendMessage('calcula.frameRefused', {
+          type: typeof d.type === 'string' ? d.type : '',
+          sourceOk: sourceOk,
+          idOk: idOk,
+          claimed: typeof d.instanceId === 'string' ? d.instanceId : null
+        });
+      }
+      return;
+    }
     var type = typeof d.type === 'string' ? d.type : '';
     if (type.indexOf(RESERVED) === 0) {
       // Plumbing, never handed to the script -- the mirror of the host router's

@@ -482,6 +482,20 @@ export function RefreshPreviewDialog({ onClose, data }: DialogProps) {
 
         {!loading && !result && hasUpdates && preview && (
           <>
+            {/* SAY WHAT HAPPENS TO PIVOTS (§2.z, owner decision 2026-09-13).
+                Refresh ADOPTS the publisher's pivot definitions, and until this
+                sentence existed the two surfaces disagreed in silence: refresh
+                kept the subscriber's layout without saying so and reset
+                discarded it without saying so. The decision itself is not a
+                preference — a v1 definition aimed at v2's data keeps a stale
+                source COLUMN ORDINAL, so "you keep your layout" quietly becomes
+                "you keep a wrong number" — but a user who re-arranged a pivot
+                is entitled to know it is about to go back. */}
+            <p style={{ margin: "0 0 10px 0", fontSize: "12px", ...secondary }}>
+              Pivot tables from these applications are updated to the publisher&apos;s
+              version, including ones you have re-arranged. Your own pivots are not
+              touched.
+            </p>
             {preview.subscriptionPreviews.map((sp) => (
               <div
                 key={sp.packageName}

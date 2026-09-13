@@ -14,15 +14,15 @@ pass that fixes a defect writes its own section and does not go back and strike 
 paragraphs that called it open. Read it for the WHY. Read this file for the WHAT.
 
 **Scope of this list.** Product and test-infrastructure items only. Individual defects with a
-reproduction live in `tests/regression/bug-ledger.json` (**113 entries, 109 fixed, 4 open** as of
-2026-09-12 — recounted from the file, not carried forward; it moved three times in two days, and
+reproduction live in `tests/regression/bug-ledger.json` (**113 entries, 110 fixed, 3 open** as of
+2026-09-13 — recounted from the file, not carried forward; it moved three times in two days, and
 the figure this sentence carried before today said 106/104/2, which was 7 entries and 2 open bugs
-behind). The four open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open
+behind). The three open are **BUG-0098** (the unreproduced backend wedge in §2.5, kept open
 deliberately — the guards now make a recurrence diagnosable, and it is explicitly not closeable by
 a speculative fix), **BUG-0104** (sort and filter by conditional-formatting icon), **BUG-0108**
 (percent-of-visible-total measures are wrong in a slicer-filtered BI pivot — level-1 slicers still
-use the host-side mask, so the engine's denominator includes rows the host hides afterwards) and
-**BUG-0113** (every shipped `ui.html` bridge is inert under the built CSP; see §2.ab). BUG-0104's
+use the host-side mask, so the engine's denominator includes rows the host hides afterwards).
+**BUG-0113 closed 2026-09-13**, MEASURED against a real `tauri build` rather than argued. BUG-0104's
 ENGINES both work as of
 2026-08-19 — the sort keys on the icon that was on screen when it was invoked, the filter resolves
 once per pass — and both are reachable over IPC. What is left is the SURFACE: the script validator
@@ -812,7 +812,75 @@ that is *already inside the current selection* leaves the object selection intac
 (`app/src/core/hooks/useMouseSelection/selection/cellSelectionHandlers.ts:107`), so the object's
 items can appear on a cell far from the object — which looks like the menu working.
 
-### 2.z Refresh never re-materializes a subscribed application's PIVOTS (2026-09-01)
+### ~~2.z Refresh never re-materializes a subscribed application's PIVOTS (2026-09-01)~~ — **CLOSED 2026-09-13**
+
+**CLOSED 2026-09-13 — refresh ADOPTS the publisher's pivots.** `apply_refreshed_pivots`
+(`app/src-tauri/src/calp_commands.rs`) is called from `calp_refresh_apply` for every payload, and
+the ledger merge no longer carries `"pivot"` forward — the fresh entries are the full truth, like
+tables and charts, so a surviving pivot is not duplicated and a deleted one is not resurrected.
+Add, delete and re-layout all land. Five behaviour tests plus three wiring tests in
+`calp_refresh_pivot_tests.rs`; 2,591 app-lib tests pass.
+
+**Six things the implementation does that the obvious one does not**, each a defect the review
+found before it shipped and each verified against the code:
+
+1. **The sheet rename map is captured BEFORE the collision pass.** `resolve_sheet_name_collisions`
+   rewrites `ps.name` IN PLACE and `PulledSheet` has one name field, so the publisher's spelling is
+   gone the moment it runs. The pull path has always captured the originals first; refresh never
+   had to until now. Reusing the post-collision names would have made the remap a no-op and sent a
+   v2-ADDED sheet's pivot to the SUBSCRIBER's own same-named sheet — writing over it.
+2. **The write goes through `update_pivot_in_grid`, not `restore_pulled_pivots`' path.** That path
+   passes `None` for the active-grid dual-write, which is safe on a PULL (the destination is always
+   a freshly appended sheet) and wrong on a REFRESH, where the destination can be the ACTIVE sheet:
+   `run_calculation_pass` opens by overwriting `grids[active]` from `state.grid`, so output written
+   only into `grids` is destroyed by the `calculateNow()` the dialog itself runs.
+   `update_pivot_in_grid` dual-writes and repairs `state.merged_regions` too.
+3. **It holds NO locks while it writes.** `update_pivot_in_grid` takes `grid` -> `grids` ->
+   `style_registry` -> `merged_regions` itself, so holding any of them across the call deadlocks,
+   and holding `pivot_tables` across it is the inverted shape §2.8's census plants as its own
+   positive control. The function is therefore the project's standing two-phase shape: compute
+   under short-lived guards, drop everything, then write.
+4. **BI pivots route through the FULL data-source map.** `embedded_connection_ids` holds only
+   sources ADDED in this version and is empty for every application that already had one, so every
+   BI pivot would have landed on `ConnectionId::default()` and queried nothing. It reuses the
+   `ds_to_conn` map the ribbon-filter/slicer re-bind already builds from the live connections.
+5. **The source sheet resolves BY NAME.** `source_sheet_index` indexes the PUBLISHER's sheet list;
+   the pull path can add `sheet_offset` because it appends contiguously and refresh cannot, because
+   it updates in place. A miss degrades to an empty cache rather than reading whatever sheet sits
+   at that ordinal, and the destination keeps `restore_pulled_pivots`' case-insensitive
+   resolve-or-SKIP (an `.unwrap_or(0)` there once wrote a pivot over the subscriber's first sheet).
+6. **A withdrawn pivot's CELLS are cleared before it is forgotten**, or the subscriber keeps a
+   rectangle of the deleted report's last numbers with nothing behind it. Withdrawal is scoped to
+   `previously_provided` — this subscription's own pivot ledger — so the subscriber's own pivots
+   and other applications' survive a v2 that ships none. That scoping has its own test, because
+   getting it wrong destroys the user's work rather than merely failing to update it.
+
+**The recalculation is inherited, and the claim is checked rather than assumed.**
+`apply_refreshed_pivots` writes cells and does not recalculate, which the crate's
+`every_cell_writing_function_either_recalculates_or_is_exempt_with_a_reason` census caught
+immediately. It is EXEMPT with a stated reason: `calp_refresh_apply` runs `recalculate_sheet_values`
+over every refreshed sheet index before returning, and an adopted pivot writes to its application's
+own destination sheet while a withdrawn one's cleared region sits on the sheet it was written to —
+both, by construction, in that set. A pivot naming a destination this workbook lacks is SKIPPED
+before any write, so it cannot escape it.
+
+**Declared, not silent.** The refresh dialog now says pivots are updated to the publisher's version
+"including ones you have re-arranged", and that the subscriber's own are untouched. That sentence is
+the half of this row that was never about code: refresh preserved silently and
+`calp_reset_subscription` discarded silently, and the two surfaces disagreeing without saying so is
+what the row objected to.
+
+**Left open deliberately:** the preview does not yet enumerate WHICH pivots change. The owner chose
+plain adopt over the flag-each-one variant, so the standing sentence is the disclosure; a per-pivot
+delta would need `compute_preview` to diff two manifests, and that manifest is NOT
+signature-verified (`core/calp/src/workspace.rs` reads and deserializes it), so any delta shown
+there is a hint for the dialog rather than an authority. The authority is the signed manifest on the
+apply path.
+
+**Also corrected while here:** the same `o.kind` filter carried `dataSource` and `extensionData`,
+and the comment above it said refresh "does not touch" them. Data sources ARE re-materialized —
+only their LEDGER entry was carried — so the comment was wrong about its own code.
+
 
 `calp_refresh_apply` (`app/src-tauri/src/calp_commands.rs`) never reads
 `pull_result.pivot_definitions` and never writes `pivot_state.pivot_tables`. It deliberately

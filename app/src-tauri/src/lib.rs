@@ -259,6 +259,8 @@ mod document_effect_objects_tests;
 
 #[cfg(test)]
 mod calp_materialize_tests;
+#[cfg(test)]
+mod calp_refresh_pivot_tests;
 
 #[cfg(test)]
 mod calp_push_gate_tests;

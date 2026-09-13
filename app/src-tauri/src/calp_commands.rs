@@ -7115,6 +7115,18 @@ pub fn calp_refresh_apply(
     // (sheet_names is cloned and released before the subscriptions lock is
     // taken — no lock-order coupling with the materialization block below.)
     let mut payloads = payloads;
+    // publisher's original sheet name -> this workbook's resolved name, per
+    // payload. CAPTURED BEFORE the collision pass, because
+    // `resolve_sheet_name_collisions` rewrites `ps.name` IN PLACE
+    // (`core/calp/src/pull.rs`) and `PulledSheet` has only the one name field —
+    // after it runs, the publisher's spelling is simply gone.
+    //
+    // A pivot anchors its output by sheet NAME, so without this map a v2-ADDED
+    // sheet that collided would send the publisher's pivot to the subscriber's
+    // OWN same-named sheet and write over it. The pull path has always captured
+    // these; the refresh path never had to until pivots were adopted.
+    let mut sheet_rename_maps: Vec<std::collections::HashMap<String, String>> =
+        Vec::with_capacity(payloads.len());
     {
         let mut taken = state.sheet_names.read().map_err(|e| e.to_string())?.clone();
         let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
@@ -7124,11 +7136,25 @@ pub fn calp_refresh_apply(
                 .get(payload.subscription_index)
                 .map(|sub| sub.sheets.iter().map(|s| s.package_sheet_id).collect())
                 .unwrap_or_default();
+            let original_names: Vec<String> = payload
+                .pull_result
+                .sheets
+                .iter()
+                .map(|ps| ps.name.clone())
+                .collect();
             calp::pull::resolve_sheet_name_collisions(
                 &mut payload.pull_result.sheets,
                 &mut payload.pull_result.subscription.sheets,
                 &mut taken,
                 &skip,
+            );
+            sheet_rename_maps.push(
+                original_names
+                    .into_iter()
+                    .zip(payload.pull_result.sheets.iter())
+                    .filter(|(orig, ps)| *orig != ps.name)
+                    .map(|(orig, ps)| (orig, ps.name.clone()))
+                    .collect(),
             );
         }
     }
@@ -8034,6 +8060,61 @@ pub fn calp_refresh_apply(
             );
             remap_slicer_bi_connections(&effect, &slicer_state, &ds_to_conn);
         }
+
+        // §2.z — ADOPT the refreshed application's pivots.
+        //
+        // HERE, and not earlier, for two reasons that are both orderings rather
+        // than preferences. The TABLES have to have landed already (their
+        // ledger-scoped replace runs above), because a table-linked pivot
+        // re-derives its source range from `state.table_names`/`state.tables`.
+        // And `ds_to_conn` — the FULL data-source map, built just above from the
+        // live connections — has to exist, because `embedded_connection_ids`
+        // holds only sources ADDED in this version and is empty for every
+        // application that already had one.
+        // Each subscription's own pivot ledger — the ids it provided BEFORE
+        // this refresh. Read in ONE short-lived borrow here, before the merge
+        // below rebuilds them, and used so that a v2 deletion deletes only this
+        // application's pivot and never the subscriber's own. Collected up front
+        // rather than read per payload because the guard must not still be held
+        // when `apply_refreshed_pivots` takes the grid locks.
+        let prior_pivot_ledgers: Vec<std::collections::HashSet<String>> = {
+            let subs = state.subscriptions.read().map_err(|e| e.to_string())?;
+            payloads
+                .iter()
+                .map(|payload| {
+                    subs.subscriptions
+                        .get(payload.subscription_index)
+                        .map(|sub| {
+                            sub.objects
+                                .iter()
+                                .filter(|o| o.kind == "pivot")
+                                .map(|o| o.id.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
+        let empty_rename_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (i, payload) in payloads.iter().enumerate() {
+            let previously_provided = prior_pivot_ledgers
+                .get(i)
+                .cloned()
+                .unwrap_or_default();
+            let entries = refresh_ledgers.entry(payload.subscription_index).or_default();
+            apply_refreshed_pivots(
+                &effect,
+                &state,
+                &pivot_state,
+                &payload.pull_result.pivot_definitions,
+                &payload.pull_result.bi_pivot_metadata,
+                &ds_to_conn,
+                sheet_rename_maps.get(i).unwrap_or(&empty_rename_map),
+                &previously_provided,
+                Some(entries),
+            );
+        }
     }
 
     // Capture the pre-refresh writeback declarations BEFORE the index is
@@ -8222,7 +8303,14 @@ pub fn calp_refresh_apply(
                 .objects
                 .iter()
                 .filter(|o| {
-                    o.kind == "pivot" || o.kind == "dataSource" || o.kind == "extensionData"
+                    // "pivot" is NO LONGER carried (§2.z, 2026-09-13). Pivots
+                    // are re-materialized for every payload above and push their
+                    // own fresh entries, so those entries are the full truth —
+                    // exactly like tables and charts. Carrying the old rows too
+                    // would duplicate every surviving pivot AND resurrect a
+                    // ledger row for one the v2 deletion just removed, which is
+                    // the same defect the pane-control comment above describes.
+                    o.kind == "dataSource" || o.kind == "extensionData"
                 })
                 .cloned()
                 .collect();
@@ -16410,6 +16498,325 @@ pub fn calp_get_application_connection_skips(
         .map(|s| s.clone())
         .map_err(|e| e.to_string())
 }
+
+/// Adopt a refreshed application's PIVOT definitions (owner decision, 2026-09-13).
+///
+/// §2.z. `calp_refresh_apply` materialized twelve kinds out of the pull result
+/// and never touched `pull_result.pivot_definitions`; the ledger merge then
+/// carried the v1 pivot rows forward verbatim, so a publisher who added,
+/// deleted or re-laid-out a pivot in v2 shipped it and the subscriber kept v1
+/// for ever, with nothing in the preview or the result saying so.
+///
+/// THE DECISION WAS *ADOPT*, and it was not a toss-up. Keeping the subscriber's
+/// layout is not the friendly option it looks like: `PivotField.source_index` is
+/// a source COLUMN ORDINAL and `source_start`/`source_end` are stored
+/// coordinates, so a v2 that inserts a source column or widens the table leaves
+/// the v1 definition aimed at the old ordinal and the old rectangle — and the
+/// cache is then rebuilt confidently against the new data. "You keep your
+/// layout" quietly becomes "you keep a wrong number". Reset already adopts
+/// wholesale, so refresh preserving silently and reset discarding silently were
+/// two surfaces disagreeing, with nothing said either way.
+///
+/// FIVE THINGS HERE ARE NOT WHAT THE OBVIOUS IMPLEMENTATION DOES, each one a
+/// defect found by review before it shipped:
+///
+/// 1. **The write goes through `update_pivot_in_grid`, not `write_pivot_to_grid`.**
+///    `restore_pulled_pivots` is the worked example for the PULL path and passes
+///    `None` for the active-grid dual-write, which is safe there because a
+///    pulled pivot's destination is always a freshly appended sheet. On REFRESH
+///    the destination can be the ACTIVE sheet, whose read path is `state.grid` —
+///    and `run_calculation_pass` opens by overwriting `grids[active]` from that
+///    mirror, so output written only into `grids` is destroyed by the
+///    `calculateNow()` the refresh dialog runs. `update_pivot_in_grid` dual-
+///    writes and repairs `state.merged_regions`, which the pull path never
+///    needed to.
+///
+/// 2. **It holds NO locks while it writes.** `update_pivot_in_grid` takes
+///    `grid` -> `grids` -> `style_registry` -> `merged_regions` itself, in the
+///    canonical order. Holding any of those across the call would deadlock
+///    against it, and holding `pivot_tables` across it is the inverted shape the
+///    crate's lock-order census plants as its own positive control (§2.8). So
+///    this is the project's standing two-phase shape: read and compute under
+///    short-lived guards, DROP everything, then write.
+///
+/// 3. **BI pivots route through the FULL connection map.** The obvious source is
+///    `embedded_connection_ids`, and on refresh it holds only data sources ADDED
+///    in this version — empty for every application that already had one, so
+///    every BI pivot would land on `ConnectionId::default()` and query nothing.
+///    The caller passes the same `ds_to_conn` map the ribbon-filter/slicer
+///    re-bind already builds from the live connections.
+///
+/// 4. **The source sheet is resolved BY NAME, not by index.**
+///    `SavedPivotDefinition::source_sheet_index` is an index into the
+///    PUBLISHER's sheet list; the pull path can add `sheet_offset` because it
+///    appends contiguously, and refresh cannot, because it updates sheets in
+///    place. The name is already remapped by `sheet_rename_map`, and a miss
+///    degrades to an empty cache (visible, honest) rather than reading whatever
+///    sheet happens to sit at that ordinal.
+///
+/// 5. **Adopt means REPLACE, so a v2 DELETION has to delete.** `previously_provided`
+///    is this subscription's own pivot ledger, so only pivots this application
+///    put here are removed — the subscriber's own and other applications' are
+///    keyed by their own ids and never touched. A definition left behind would
+///    keep rendering, and `calp_get_application_objects` would keep reporting
+///    the application as providing a pivot it no longer ships.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_refreshed_pivots(
+    effect: &crate::document_effect::DocumentEffect,
+    state: &AppState,
+    pivot_state: &crate::pivot::types::PivotState,
+    pivot_defs: &[persistence::SavedPivotDefinition],
+    bi_pivot_metadata: &[serde_json::Value],
+    ds_to_conn: &std::collections::HashMap<String, crate::bi::types::ConnectionId>,
+    sheet_rename_map: &std::collections::HashMap<String, String>,
+    previously_provided: &std::collections::HashSet<String>,
+    mut ledger: Option<&mut Vec<calp::manifest::SubscribedObject>>,
+) {
+    use pivot_engine::{PivotCache, PivotDefinition, PivotId};
+    use crate::pivot::operations::{
+        build_cache_from_grid, clear_pivot_region_from_grid, get_pivot_region,
+        safe_calculate_pivot, update_pivot_in_grid, update_pivot_region,
+    };
+    use crate::pivot::types::{BiPivotMetadata, SavedBiPivotMetadata};
+
+    // ---- PHASE A: read and compute, under short-lived guards ----------------
+    //
+    // Everything the write needs is worked out here so that not one guard is
+    // still alive when `update_pivot_in_grid` takes its own.
+    struct Planned {
+        def: PivotDefinition,
+        cache: PivotCache,
+        view: pivot_engine::PivotView,
+        dest_sheet_idx: usize,
+    }
+    let mut planned: Vec<Planned> = Vec::new();
+    let mut adopted: Vec<PivotId> = Vec::new();
+
+    {
+        let sheet_names = match state.sheet_names.read() {
+            Ok(sn) => sn.clone(),
+            Err(_) => return,
+        };
+        let grids = match state.grids.read() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        for saved in pivot_defs {
+            let mut def: PivotDefinition = match serde_json::from_value(saved.definition.clone()) {
+                Ok(d) => d,
+                Err(e) => {
+                    crate::log_warn!("CALP", "refresh: failed to deserialize pivot {}: {}", saved.id, e);
+                    continue;
+                }
+            };
+            let pivot_id = def.id;
+
+            // Both anchors are sheet NAMES and both need the collision remap,
+            // or a v2-added sheet that was renamed on arrival would send the
+            // pivot to the subscriber's same-named sheet.
+            if let Some(ref dest) = def.destination_sheet {
+                if let Some(renamed) = sheet_rename_map.get(dest) {
+                    def.destination_sheet = Some(renamed.clone());
+                }
+            }
+            if let Some(ref src) = def.source_sheet {
+                if let Some(renamed) = sheet_rename_map.get(src) {
+                    def.source_sheet = Some(renamed.clone());
+                }
+            }
+            if saved.source_type == "bi" && def.source_range_display.is_none() {
+                def.source_range_display = Some("BI Model".to_string());
+            }
+
+            // Destination: case-insensitive, and a MISS IS A SKIP. The same two
+            // halves `restore_pulled_pivots` gets right — a case-only tab rename
+            // updates no pivot definition, and an `.unwrap_or(0)` would write
+            // the whole output over whatever the subscriber's first sheet is.
+            let dest_name = def.destination_sheet.as_deref().unwrap_or("");
+            let Some(dest_sheet_idx) = sheet_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(dest_name))
+            else {
+                crate::log_warn!(
+                    "CALP",
+                    "refresh: pivot {} names destination sheet '{}', which this workbook does \
+                     not have — skipped rather than written over sheet 0",
+                    pivot_id,
+                    dest_name
+                );
+                continue;
+            };
+
+            // Source: by name (see the header). No name, or a name this
+            // workbook does not have, means an empty cache — the pivot renders
+            // empty rather than rendering someone else's data.
+            let source_idx = def
+                .source_sheet
+                .as_deref()
+                .and_then(|n| sheet_names.iter().position(|s| s.eq_ignore_ascii_case(n)));
+            let mut cache = match source_idx.and_then(|i| grids.get(i)) {
+                Some(source_grid) => match build_cache_from_grid(
+                    source_grid,
+                    def.source_start,
+                    def.source_end,
+                    def.source_has_headers,
+                ) {
+                    Ok((c, _fields)) => c,
+                    Err(e) => {
+                        crate::log_warn!(
+                            "CALP",
+                            "refresh: failed to build cache for pivot {}: {}",
+                            pivot_id,
+                            e
+                        );
+                        PivotCache::new(pivot_id, 0)
+                    }
+                },
+                None => PivotCache::new(pivot_id, 0),
+            };
+
+            let view = safe_calculate_pivot(&def, &mut cache);
+            adopted.push(pivot_id);
+            planned.push(Planned { def, cache, view, dest_sheet_idx });
+        }
+    }
+    // ---- every guard from PHASE A is dropped here ---------------------------
+
+    // Pivots this application provided before and does NOT ship in v2.
+    let adopted_strs: std::collections::HashSet<String> =
+        adopted.iter().map(|id| id.to_string()).collect();
+    let withdrawn: Vec<String> = previously_provided
+        .iter()
+        .filter(|id| !adopted_strs.contains(*id))
+        .cloned()
+        .collect();
+
+    if planned.is_empty() && withdrawn.is_empty() && bi_pivot_metadata.is_empty() {
+        return;
+    }
+
+    // ---- PHASE B: write, holding nothing ------------------------------------
+    for p in &planned {
+        update_pivot_in_grid(state, effect, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view);
+        update_pivot_region(state, p.def.id, p.dest_sheet_idx, p.def.destination, &p.view);
+    }
+
+    // Withdrawn pivots: clear the cells they own before forgetting them, or the
+    // subscriber keeps a rectangle of the deleted report's last numbers with
+    // nothing behind it.
+    for id_str in &withdrawn {
+        let Some(pivot_id) = identity::EntityId::parse(id_str) else { continue };
+        let Some(region) = get_pivot_region(state, pivot_id) else { continue };
+        {
+            // CANONICAL GRID LOCK ORDER: `grid` before `grids`.
+            let mut grid = match state.grid.write(effect) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let mut grids = match state.grids.write(effect) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            if let Some(dest_grid) = grids.get_mut(region.sheet_index) {
+                clear_pivot_region_from_grid(
+                    dest_grid,
+                    region.start_row,
+                    region.start_col,
+                    region.end_row,
+                    region.end_col,
+                );
+                let active_sheet = state.active_sheet.read().map(|a| *a).unwrap_or(usize::MAX);
+                if region.sheet_index == active_sheet {
+                    for row in region.start_row..=region.end_row {
+                        for col in region.start_col..=region.end_col {
+                            grid.clear_cell(row, col);
+                        }
+                    }
+                    grid.recalculate_bounds();
+                }
+            }
+        }
+        if let Ok(mut regions) = state.protected_regions.lock() {
+            regions.retain(|r| !(r.region_type == "pivot" && r.owner_id == pivot_id));
+        }
+        if let Ok(mut views) = pivot_state.views.lock() {
+            views.remove(&pivot_id);
+        }
+        if let Ok(mut active) = pivot_state.active_pivot_id.lock() {
+            if *active == Some(pivot_id) {
+                *active = None;
+            }
+        }
+    }
+
+    // ---- PHASE C: the definition store, taken alone -------------------------
+    if let Ok(mut pivot_tables) = pivot_state.pivot_tables.write(effect) {
+        for id_str in &withdrawn {
+            if let Some(pivot_id) = identity::EntityId::parse(id_str) {
+                pivot_tables.remove(&pivot_id);
+            }
+        }
+        for p in planned {
+            pivot_tables.insert(p.def.id, (p.def, p.cache));
+        }
+    }
+
+    if let Ok(mut bi_meta) = pivot_state.bi_metadata.write(effect) {
+        for id_str in &withdrawn {
+            if let Some(pivot_id) = identity::EntityId::parse(id_str) {
+                bi_meta.remove(&pivot_id);
+            }
+        }
+        for meta_json in bi_pivot_metadata {
+            let Ok(saved) = serde_json::from_value::<SavedBiPivotMetadata>(meta_json.clone()) else {
+                continue;
+            };
+            // The FULL map (see the header): `embedded_connection_ids` holds
+            // only data sources added in THIS version, so on refresh it is
+            // empty for every application that already had one.
+            let conn_id = saved
+                .data_source_id
+                .as_deref()
+                .and_then(|id| ds_to_conn.get(id))
+                .copied()
+                .or_else(|| ds_to_conn.values().next().copied())
+                .unwrap_or_default();
+            bi_meta.insert(
+                saved.pivot_id,
+                BiPivotMetadata {
+                    connection_id: conn_id,
+                    data_source_id: saved.data_source_id.clone(),
+                    model_tables: saved.model_tables,
+                    measures: saved.measures,
+                    hierarchies: saved.hierarchies,
+                    calculation_groups: saved.calculation_groups,
+                    data_as_of: saved.data_as_of,
+                    last_query: None,
+                    lookup_columns: saved.lookup_columns.into_iter().collect(),
+                    drill_through: saved.drill_through,
+                    perspectives: saved.perspectives,
+                    selected_perspective: saved.selected_perspective,
+                    cultures: saved.cultures,
+                },
+            );
+        }
+    }
+
+    // The ledger is now the FULL truth for this kind, which is why the merge's
+    // carry-forward filter must stop carrying "pivot" forward.
+    if let Some(entries) = ledger.as_deref_mut() {
+        for id in &adopted {
+            entries.push(calp::manifest::SubscribedObject {
+                kind: "pivot".to_string(),
+                id: id.to_string(),
+                name: String::new(),
+                extra: Default::default(),
+            });
+        }
+    }
+}
+
 
 /// Restore pivot definitions from a pulled .calp application: deserialize, rebuild
 /// cache from source grid data, calculate the view, and write output cells.
