@@ -93,10 +93,20 @@ describe("the shared token table names only real theme tokens", () => {
 });
 
 describe("shared surfaces do not invent token names", () => {
+  // A GROWING LIST, NOT A SWEEP. Phantom token names are spread widely enough
+  // across `extensions/` that scanning everything would red the build on
+  // defects this change is not fixing, and a red that nobody can act on gets
+  // suppressed rather than fixed. Each file lands here as it is cleaned, which
+  // at least makes the cleaned ones stay clean.
   const FILES = [
     "extensions/_shared/components/ModelChooserRow.tsx",
     "extensions/_shared/dsl/pivotLayout/DesignQueryEditor.tsx",
     "extensions/_shared/dsl/pivotLayout/NextEditRow.tsx",
+    // Both read `--bg-primary`, `--border-color`, `--input-bg`, `--error-color`
+    // and `--bg-secondary` — five names, none declared — so neither dialog ever
+    // followed the skin.
+    "extensions/Reports/components/CreateReportDialog.tsx",
+    "extensions/Reports/components/EditReportDialog.tsx",
   ];
 
   for (const rel of FILES) {

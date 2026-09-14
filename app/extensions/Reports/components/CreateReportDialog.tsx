@@ -20,6 +20,7 @@ import { buildControlHints } from "../../_shared/dsl/pivotLayout/controlHints";
 import { refreshReportRegions } from "../lib/reportRegions";
 import { colLetter } from "../lib/cellRef";
 import { dryRunDesignQuery } from "../lib/dryRunDesignQuery";
+import { TOKENS } from "../../_shared/lib/themeTokens";
 
 const DSL_TEMPLATE =
   "# Report — ROWS become row groups, VALUES become measure columns.\n" +
@@ -164,17 +165,30 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
     >
       <div
         style={{
-          width: "560px",
-          maxWidth: "92vw",
-          background: "var(--bg-primary, #fff)",
-          color: "var(--text-primary, #1a1a1a)",
-          border: "1px solid var(--border-color, #d0d7de)",
+          // WIDE ENOUGH FOR THE CONVERSATION TO SIT BESIDE THE QUERY. At 560px
+          // the AI panel was stacked above a 180px editor and its side-by-side
+          // diff was clipped mid-line, which reads as "the change is smaller
+          // than it is". Two columns need roughly double.
+          width: "1060px",
+          maxWidth: "96vw",
+          // A HEIGHT BUDGET, which this dialog never had. It was a flat padded
+          // box with no `maxHeight` and no `overflow`, so a growing transcript
+          // pushed the footer — and the Create button with it — off the bottom
+          // of the screen with no way to scroll to it.
+          maxHeight: "90vh",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+          background: TOKENS.surfaceBg,
+          color: TOKENS.textPrimary,
+          border: `1px solid ${TOKENS.border}`,
           borderRadius: "8px",
           boxShadow: "0 8px 32px rgba(0,0,0,0.25)",
           padding: "18px 20px",
+          boxSizing: "border-box",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexShrink: 0 }}>
           <h2 style={{ margin: 0, fontSize: 16 }}>New report from design query</h2>
           <button
             onClick={onClose}
@@ -185,13 +199,16 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
           </button>
         </div>
 
+        {/* THE SCROLLING BODY. Everything that can grow lives here, so the
+            footer below stays reachable however long the conversation gets. */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingRight: 2 }}>
         <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Name</label>
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
           style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
-            border: "1px solid var(--border-color, #d0d7de)", borderRadius: 4, background: "var(--input-bg, #fff)", color: "inherit" }}
+            border: "1px solid ${TOKENS.border}", borderRadius: 4, background: `${TOKENS.inputBg}`, color: "inherit" }}
         />
 
         <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Connection</label>
@@ -199,7 +216,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
           value={connectionId}
           onChange={(e) => setConnectionId(e.target.value)}
           style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
-            border: "1px solid var(--border-color, #d0d7de)", borderRadius: 4, background: "var(--input-bg, #fff)", color: "inherit" }}
+            border: "1px solid ${TOKENS.border}", borderRadius: 4, background: `${TOKENS.inputBg}`, color: "inherit" }}
         >
           <option value="">— Select a BI connection —</option>
           {connections.map((c) => (
@@ -215,10 +232,11 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
           onChange={setDslText}
           biModel={biModel}
           controlHints={controlHints}
-          height="180px"
+          height="300px"
           assist={{ connectionId, dryRun: dryRunDesignQuery }}
+          assistPlacement="blade"
         />
-        <div style={{ fontSize: 11, color: "var(--text-secondary, #666)", margin: "6px 0 12px" }}>
+        <div style={{ fontSize: 11, color: `${TOKENS.textSecondary}`, margin: "6px 0 12px" }}>
           Materializes at <strong>{destination}</strong>. Bind a Controls-pane value or ribbon
           filter in FILTERS with <code>@Name</code> — quote names with spaces or dots:{" "}
           <code>@"Products.Category"</code> (type <code>@</code> for suggestions). The report
@@ -228,16 +246,18 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
         </div>
 
         {error && (
-          <div style={{ fontSize: 12, color: "var(--error-color, #b42318)", whiteSpace: "pre-wrap", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: `${TOKENS.dangerFg}`, whiteSpace: "pre-wrap", marginBottom: 12 }}>
             {error}
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexShrink: 0, paddingTop: 12 }}>
           <button
             onClick={onClose}
-            style={{ padding: "6px 14px", borderRadius: 4, border: "1px solid var(--border-color, #d0d7de)",
-              background: "var(--bg-secondary, #f3f4f6)", color: "inherit", cursor: "pointer" }}
+            style={{ padding: "6px 14px", borderRadius: 4, border: "1px solid ${TOKENS.border}",
+              background: `${TOKENS.panelBg}`, color: "inherit", cursor: "pointer" }}
           >
             Cancel
           </button>
@@ -245,7 +265,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
             onClick={handleCreate}
             disabled={busy}
             style={{ padding: "6px 14px", borderRadius: 4, border: "none",
-              background: busy ? "#8bbf9f" : "var(--accent-color, #2e7d5b)", color: "#fff", cursor: busy ? "default" : "pointer" }}
+              background: busy ? "#8bbf9f" : `${TOKENS.accent}`, color: "#fff", cursor: busy ? "default" : "pointer" }}
           >
             {busy ? "Creating…" : "Create report"}
           </button>

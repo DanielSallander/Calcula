@@ -59,6 +59,16 @@ export interface DescribeQueryPanelProps {
   currentDsl: string;
   /** Put a query into the editor. Called from an Accept, or on an empty editor. */
   onApply: (dsl: string) => void;
+  /**
+   * Take the height the parent gives instead of the remembered transcript size.
+   *
+   * For the BLADE layout, where the panel owns a whole column and the host has
+   * already decided how tall the dialog is. Dragging a height inside a column
+   * that is itself sized by the dialog would fight the dialog, so the grip is
+   * hidden here — the panel grows with the window instead, which is what makes
+   * a blade worth having.
+   */
+  fill?: boolean;
 }
 
 /** One sentence per phase, naming the round so a repair is visibly a repair. */
@@ -82,6 +92,7 @@ export function DescribeQueryPanel({
   host,
   currentDsl,
   onApply,
+  fill,
 }: DescribeQueryPanelProps): React.ReactElement | null {
   const [intent, setIntent] = useState("");
   const [busy, setBusy] = useState(false);
@@ -286,12 +297,19 @@ export function DescribeQueryPanel({
   if (!hasAiCompletionProvider()) return null;
 
   return (
-    <div style={S.panel} data-testid="describe-query-row">
+    <div
+      style={fill ? { ...S.panel, flex: 1, minHeight: 0 } : S.panel}
+      data-testid="describe-query-row"
+      data-fill={fill ? "true" : undefined}
+    >
       {turns.length > 0 || busy ? (
         <>
           <div
             ref={transcriptRef}
-            style={{ ...S.transcript, height }}
+            // In a blade the column's height IS the budget, so the transcript
+            // takes what is left after the composer. Outside one there is no
+            // budget to take, so it keeps the height the person dragged.
+            style={fill ? { ...S.transcript, flex: 1, minHeight: 0 } : { ...S.transcript, height }}
             data-testid="describe-query-transcript"
           >
             {turns.map((turn) => (
@@ -318,17 +336,19 @@ export function DescribeQueryPanel({
               </div>
             ) : null}
           </div>
-          <div
-            className="calcula-dq-grip"
-            style={S.grip}
-            onPointerDown={onGripDown}
-            onPointerMove={onGripMove}
-            onPointerUp={onGripUp}
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label="Resize the transcript"
-            data-testid="describe-query-grip"
-          />
+          {fill ? null : (
+            <div
+              className="calcula-dq-grip"
+              style={S.grip}
+              onPointerDown={onGripDown}
+              onPointerMove={onGripMove}
+              onPointerUp={onGripUp}
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize the transcript"
+              data-testid="describe-query-grip"
+            />
+          )}
         </>
       ) : null}
 

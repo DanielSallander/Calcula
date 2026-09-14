@@ -8,6 +8,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import type { DialogProps } from "@api";
 import { DesignQueryEditor } from "../../_shared/dsl/pivotLayout/DesignQueryEditor";
+import { TOKENS } from "../../_shared/lib/themeTokens";
 import type { DslControlHint } from "../../_shared/dsl/pivotLayout/pivotDslLanguage";
 import type { BiPivotModelInfo } from "../../_shared/components/types";
 import { buildControlHints } from "../../_shared/dsl/pivotLayout/controlHints";
@@ -107,17 +108,27 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
     >
       <div
         style={{
-          width: "560px",
-          maxWidth: "92vw",
-          background: "var(--bg-primary, #fff)",
-          color: "var(--text-primary, #1a1a1a)",
-          border: "1px solid var(--border-color, #d0d7de)",
+          // Room for the conversation to sit BESIDE the query rather than
+          // above it; at 560px the side-by-side diff was clipped mid-line.
+          width: "1060px",
+          maxWidth: "96vw",
+          // The height budget this dialog never had: it was a flat padded box
+          // with no maxHeight and no overflow, so a growing transcript pushed
+          // Save off the bottom of the screen with no way to scroll to it.
+          maxHeight: "90vh",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+          background: TOKENS.surfaceBg,
+          color: TOKENS.textPrimary,
+          border: `1px solid ${TOKENS.border}`,
           borderRadius: "8px",
           boxShadow: "0 8px 32px rgba(0,0,0,0.25)",
           padding: "18px 20px",
+          boxSizing: "border-box",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexShrink: 0 }}>
           <h2 style={{ margin: 0, fontSize: 16 }}>Edit report</h2>
           <button
             onClick={onClose}
@@ -128,6 +139,9 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
           </button>
         </div>
 
+        {/* THE SCROLLING BODY, so the footer stays reachable however long the
+            conversation gets. */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", paddingRight: 2 }}>
         {report && (
           <>
             <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Name</label>
@@ -136,7 +150,7 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
               value={name}
               onChange={(e) => setName(e.target.value)}
               style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
-                border: "1px solid var(--border-color, #d0d7de)", borderRadius: 4, background: "var(--input-bg, #fff)", color: "inherit" }}
+                border: `1px solid ${TOKENS.border}`, borderRadius: 4, background: TOKENS.inputBg, color: "inherit" }}
             />
 
             <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Design query</label>
@@ -145,10 +159,11 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
               onChange={setDslText}
               biModel={biModel}
               controlHints={controlHints}
-              height="180px"
+              height="300px"
               assist={{ connectionId: report.connectionId, dryRun: dryRunDesignQuery }}
+              assistPlacement="blade"
             />
-            <div style={{ fontSize: 11, color: "var(--text-secondary, #666)", margin: "6px 0 12px" }}>
+            <div style={{ fontSize: 11, color: TOKENS.textSecondary, margin: "6px 0 12px" }}>
               Anchored at <strong>{cellRef(report.anchorRow, report.anchorCol)}</strong>. Saving
               re-runs the query and replaces the report's cells (one Ctrl+Z step).
             </div>
@@ -156,16 +171,18 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
         )}
 
         {error && (
-          <div style={{ fontSize: 12, color: "var(--error-color, #b42318)", whiteSpace: "pre-wrap", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: TOKENS.dangerFg, whiteSpace: "pre-wrap", marginBottom: 12 }}>
             {error}
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexShrink: 0, paddingTop: 12 }}>
           <button
             onClick={onClose}
-            style={{ padding: "6px 14px", borderRadius: 4, border: "1px solid var(--border-color, #d0d7de)",
-              background: "var(--bg-secondary, #f3f4f6)", color: "inherit", cursor: "pointer" }}
+            style={{ padding: "6px 14px", borderRadius: 4, border: `1px solid ${TOKENS.border}`,
+              background: TOKENS.panelBg, color: "inherit", cursor: "pointer" }}
           >
             Cancel
           </button>
@@ -173,7 +190,7 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
             onClick={handleSave}
             disabled={busy || !report}
             style={{ padding: "6px 14px", borderRadius: 4, border: "none",
-              background: busy ? "#8bbf9f" : "var(--accent-color, #2e7d5b)", color: "#fff",
+              background: busy ? "#8bbf9f" : TOKENS.accent, color: "#fff",
               cursor: busy || !report ? "default" : "pointer" }}
           >
             {busy ? "Saving…" : "Save & refresh"}

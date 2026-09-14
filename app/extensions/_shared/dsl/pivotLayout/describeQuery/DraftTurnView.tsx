@@ -84,7 +84,12 @@ export function DraftTurnView({
       {withDiff && draft ? (
         <div style={S.diffBox} data-testid="describe-query-diff">
           <DiffEditor
-            height="150px"
+            // Tall enough for a whole short query rather than the two visible
+            // lines the 560px dialog allowed — a diff clipped mid-line is worse
+            // than no diff, because it looks like the change is smaller than it
+            // is. Side-by-side halves the usable width, so this is the one place
+            // in the panel that genuinely needs the blade's room.
+            height="220px"
             original={currentDsl}
             modified={draft.dsl}
             language={LANGUAGE_ID}

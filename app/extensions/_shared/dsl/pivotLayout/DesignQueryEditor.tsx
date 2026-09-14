@@ -45,6 +45,23 @@ interface DesignQueryEditorProps {
    * because the rules read the strategy that rides on it.
    */
   suggest?: boolean;
+  /**
+   * Where the AI conversation goes.
+   *
+   * `inline` (default) stacks it above the editor — the original shape, and the
+   * only one that fits a narrow task pane like the pivot's Design tab.
+   *
+   * `blade` puts it in its own column beside the editor. A transcript with a
+   * side-by-side diff in it needs roughly as much width as the query does, and
+   * stacking the two inside a 560px dialog left the diff clipped mid-line.
+   *
+   * THE BLADE WRAPS BY ITSELF. Both columns are `flex: 1 1 <basis>`, so when
+   * the container is too narrow to hold both they fall back to stacked with no
+   * media query, no `ResizeObserver` (jsdom has none) and no measurement pass.
+   * A host may therefore ask for a blade without knowing how much room it will
+   * actually get.
+   */
+  assistPlacement?: "inline" | "blade";
 }
 
 export function DesignQueryEditor({
@@ -55,6 +72,7 @@ export function DesignQueryEditor({
   height = "160px",
   assist,
   suggest,
+  assistPlacement = "inline",
 }: DesignQueryEditorProps): React.ReactElement {
   useEffect(() => {
     registerPivotDslLanguage();
@@ -128,16 +146,19 @@ export function DesignQueryEditor({
 
   const handleChange: OnChange = useCallback((v) => onChange(v ?? ""), [onChange]);
 
-  return (
-    <>
-    {assist && assist.connectionId ? (
+  const assistPanel =
+    assist && assist.connectionId ? (
       <DescribeQueryPanel
         biModel={biModel}
         host={assist}
         currentDsl={value}
         onApply={onChange}
+        fill={assistPlacement === "blade"}
       />
-    ) : null}
+    ) : null;
+
+  const editorAndChips = (
+    <>
     <div
       style={{
         height,
@@ -198,6 +219,40 @@ export function DesignQueryEditor({
         dismissed={dismissed.current}
       />
     ) : null}
+    </>
+  );
+
+  if (assistPlacement === "blade" && assistPanel) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 14,
+          alignItems: "stretch",
+          minHeight: 0,
+        }}
+        data-testid="design-query-blade-layout"
+      >
+        {/* The query keeps the larger basis: it is the thing being authored,
+            and the conversation is how you get there. */}
+        <div style={{ flex: "1 1 420px", minWidth: 0, display: "flex", flexDirection: "column" }}>
+          {editorAndChips}
+        </div>
+        <div
+          style={{ flex: "1 1 360px", minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}
+          data-testid="design-query-blade"
+        >
+          {assistPanel}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {assistPanel}
+      {editorAndChips}
     </>
   );
 }
