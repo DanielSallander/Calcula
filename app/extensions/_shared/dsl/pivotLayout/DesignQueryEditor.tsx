@@ -17,8 +17,9 @@ import {
   setDslModelContext,
   type DslControlHint,
 } from "./pivotDslLanguage";
-import { DescribeQueryRow, type DesignQueryAssistHost } from "./DescribeQueryRow";
+import { DescribeQueryPanel, type DesignQueryAssistHost } from "./describeQuery";
 import { NextEditRow } from "./NextEditRow";
+import { TOKENS } from "../../lib/themeTokens";
 import type { BiPivotModelInfo } from "../../components/types";
 
 interface DesignQueryEditorProps {
@@ -130,12 +131,20 @@ export function DesignQueryEditor({
   return (
     <>
     {assist && assist.connectionId ? (
-      <DescribeQueryRow biModel={biModel} host={assist} onDraft={onChange} />
+      <DescribeQueryPanel
+        biModel={biModel}
+        host={assist}
+        currentDsl={value}
+        onApply={onChange}
+      />
     ) : null}
     <div
       style={{
         height,
-        border: "1px solid var(--border-color)",
+        // `--border-color` was never a declared token, and with no fallback the
+        // whole shorthand was invalid — so this box had NO border at all
+        // wherever a skin did not happen to define one, which was everywhere.
+        border: `1px solid ${TOKENS.border}`,
         borderRadius: "4px",
         overflow: "hidden",
       }}

@@ -106,8 +106,37 @@ export type NextEditKind =
   | "add-coarser-time"
   | "remove-filtered-axis"
   | "key-to-label"
+  // --- EXPLORATIONS: offered when the query is already correct ---------------
+  | "explore-columns"
+  | "explore-time"
+  | "explore-rank"
+  | "explore-companion-measure"
+  | "explore-share-of-total"
+  | "explore-drill-level"
+  | "explore-sort"
   /** Not a rule: the whole clause a model proposed, constrained by the grammar. */
   | "model-clause";
+
+/**
+ * What kind of thing a suggestion IS, which decides where it may appear and
+ * when it may be offered.
+ *
+ * - `correction` — the query is incomplete, or it contradicts the strategy.
+ *   Every original rule is one of these, which is why the row was silent on a
+ *   finished query: measured over the corpus, 0 of 52 complete correct queries
+ *   produced a chip, and stripping the strategy to null changed that number not
+ *   at all. The quiet was the rule set, not the model's annotations.
+ *
+ * - `exploration` — the query is FINE, and here is something else worth looking
+ *   at. These are the answer to "why does it so rarely say anything", and they
+ *   are held to a different standard in two ways. They are offered only when no
+ *   correction is outstanding, because "fix this" and "you could also…" in the
+ *   same row makes the important one look optional. And they never reach the
+ *   ghost text (owner decision 2026-09-14): a chip can be ignored at no cost,
+ *   text at the cursor cannot, and the inline surface already refused a
+ *   suggestion source for exactly that reason.
+ */
+export type NextEditRole = "correction" | "exploration";
 
 export interface NextEditSuggestion {
   /** Stable for the same edit on the same query shape; what a dismissal remembers. */
@@ -123,7 +152,14 @@ export interface NextEditSuggestion {
    * say WHY from the document, and a model can only say that it seemed likely.
    */
   source: "strategy" | "structure" | "model";
+  /** Defaults to `correction` so an untagged suggestion keeps the old behaviour. */
+  role?: NextEditRole;
   priority: number;
+}
+
+/** A suggestion's role, with the default applied. */
+export function roleOfSuggestion(s: NextEditSuggestion): NextEditRole {
+  return s.role ?? "correction";
 }
 
 /** Every rule-sourced suggestion outranks the model's, whatever it proposes. */
@@ -275,6 +311,36 @@ function suggestion(
   priority: number,
 ): NextEditSuggestion {
   return { id: `${kind}:${JSON.stringify(op)}`, kind, text, reason, op, source, priority };
+}
+
+/**
+ * An EXPLORATION, which differs from `suggestion` in two ways that matter.
+ *
+ * Its priority is capped below every correction's, so the sort can never put
+ * "you could also add a time axis" above "this query has no VALUES and cannot
+ * compile". And it is tagged, which is what lets the ghost text drop the whole
+ * family without knowing any individual rule.
+ */
+const EXPLORATION_MAX_PRIORITY = 40;
+
+function exploration(
+  kind: NextEditKind,
+  text: string,
+  reason: string,
+  op: EditOp,
+  source: NextEditSuggestion["source"],
+  priority: number,
+): NextEditSuggestion {
+  return {
+    id: `${kind}:${JSON.stringify(op)}`,
+    kind,
+    text,
+    reason,
+    op,
+    source,
+    role: "exploration",
+    priority: Math.min(priority, EXPLORATION_MAX_PRIORITY),
+  };
 }
 
 type Rule = (ctx: RuleContext) => NextEditSuggestion[];
@@ -498,6 +564,232 @@ const keyToLabel: Rule = (ctx) => {
   return out;
 };
 
+// ---------------------------------------------------------------------------
+// The explorations
+// ---------------------------------------------------------------------------
+//
+// WHAT MAKES THESE HARDER THAN THE RULES ABOVE, and the reason they were left
+// out of the first version.
+//
+// A correction is safe by construction: it fires because the query is broken, so
+// applying it cannot make the query worse. An exploration fires on a query that
+// is already RIGHT, which means every one of them is a guess about what the
+// person wants next — and the corpus gate exists precisely to stop a rule
+// fighting a correct query. One earlier rule was deleted by name for firing on
+// 44 of 44 correct references.
+//
+// Three properties keep them honest, and each is checked by a test:
+//
+//  1. EVERY EXPLORATION TERMINATES. Applying it must make its own precondition
+//     false, or the row offers the same idea forever. Each rule below adds
+//     something and keys on that thing's absence.
+//  2. EVERY EXPLORATION NAMES ITS EVIDENCE. The reason sentence cites a strategy
+//     field or a fact about the model — never "this is common". A suggestion
+//     that cannot say why is a nag.
+//  3. NONE OF THEM REMOVES ANYTHING. An exploration only ever ADDS. That is what
+//     makes the two-tier corpus gate possible: an addition the reference query
+//     happens not to have is a difference of taste, while a removal of something
+//     the reference keeps is a rule fighting a correct query.
+
+/** E1. A single breakdown on ROWS and nothing on COLUMNS: a cross-tab is one click away. */
+const exploreColumns: Rule = (ctx) => {
+  if (ctx.measures.length === 0) return [];
+  if (ctx.facts.rows.length === 0 || ctx.facts.columns.length > 0) return [];
+  const lead = ctx.measures[0];
+  const hints = hintsFor(ctx.strategy, lead);
+  const fromStrategy = (hints?.analysisDimensions ?? [])
+    .filter((q) => modelHasColumn(ctx.model, q))
+    .filter((q) => !isForbidden(ctx, q))
+    .map(qualifiedToDsl)
+    .filter((ref) => !onAnAxis(ctx, ref) && !ctx.pinned.has(normalizeRef(ref)));
+  const pick =
+    fromStrategy[0] ??
+    ctx.fallbackDimensions.find(
+      (ref) =>
+        !onAnAxis(ctx, ref) &&
+        !ctx.pinned.has(normalizeRef(ref)) &&
+        !ctx.forbiddenRefs.has(normalizeRef(ref)),
+    );
+  if (!pick) return [];
+  return [
+    exploration(
+      "explore-columns",
+      `Add COLUMNS: ${pick}`,
+      fromStrategy[0]
+        ? `The strategy also analyses ${lead} by ${pick}; on COLUMNS it crosses with ${ctx.facts.rows[0].ref}.`
+        : `${pick} is another dimension in the model; on COLUMNS it crosses with ${ctx.facts.rows[0].ref}.`,
+      { op: "add-field", clause: "COLUMNS", text: pick },
+      fromStrategy[0] ? "strategy" : "structure",
+      38,
+    ),
+  ];
+};
+
+/** E2. The model has a calendar and the query ignores it entirely. */
+const exploreTime: Rule = (ctx) => {
+  if (ctx.measures.length === 0 || ctx.timeGroupings.length === 0) return [];
+  // "No time anywhere" means no time grouping on either axis. A query already
+  // grouped by time is the coarser-grain rule's business, not this one's.
+  const anyTime = ctx.timeGroupings.some((g) => onAnAxis(ctx, g));
+  if (anyTime) return [];
+  const coarsest = ctx.timeGroupings[0];
+  if (ctx.pinned.has(normalizeRef(coarsest)) || ctx.forbiddenRefs.has(normalizeRef(coarsest))) {
+    return [];
+  }
+  // COLUMNS when free, ROWS otherwise: time reads naturally across the top, and
+  // a second ROWS field nests rather than crosses.
+  const clause: AxisClause = ctx.facts.columns.length === 0 ? "COLUMNS" : "ROWS";
+  return [
+    exploration(
+      "explore-time",
+      `Add ${clause}: ${coarsest}`,
+      ctx.strategy?.timeAxis
+        ? `This model's time axis is ${ctx.strategy.timeAxis} and the query has no time in it yet.`
+        : `The model has a calendar and the query has no time in it yet.`,
+      { op: "add-field", clause, text: coarsest },
+      ctx.strategy?.timeAxis ? "strategy" : "structure",
+      36,
+    ),
+  ];
+};
+
+/** E3. A breakdown with no ranking: the long tail is usually not the point. */
+const exploreRank: Rule = (ctx) => {
+  if (ctx.facts.topN) return [];
+  if (ctx.facts.rows.length === 0 || ctx.measures.length === 0) return [];
+  const measure = ctx.measures[0];
+  const hints = hintsFor(ctx.strategy, measure);
+  // A measure the strategy says is better LOW is ranked from the bottom; the
+  // correction rule for getting this backwards already exists, and an
+  // exploration that walked into it would be offering its own bug.
+  const lower = hints?.direction === "lowerIsBetter";
+  const keyword = lower ? "BOTTOM" : "TOP";
+  return [
+    exploration(
+      "explore-rank",
+      `Add ${keyword} 10 BY [${measure}]`,
+      lower
+        ? `The strategy says ${measure} is better when lower, so the interesting end is the bottom.`
+        : `${ctx.facts.rows[0].ref} may have a long tail; ranking shows the ${measure} that matter.`,
+      { op: "add-clause", clause: keyword, line: `${keyword} 10 BY [${measure}]` },
+      lower ? "strategy" : "structure",
+      34,
+    ),
+  ];
+};
+
+/** E4. The strategy ranks another measure next to this one and it is not shown. */
+const exploreCompanionMeasure: Rule = (ctx) => {
+  const order = ctx.strategy?.measureOrder ?? [];
+  if (order.length < 2 || ctx.measures.length === 0) return [];
+  const shown = new Set(ctx.measures.map((m) => m.toLowerCase()));
+  const lead = ctx.measures[0].toLowerCase();
+  const leadAt = order.findIndex((m) => m.toLowerCase() === lead);
+  if (leadAt < 0) return [];
+  // The neighbour in the strategy's own priority order — the measure whoever
+  // annotated this model put next to the one on screen.
+  const companion = order
+    .slice(leadAt + 1)
+    .find((m) => !shown.has(m.toLowerCase()) && ctx.model.measures.some((x) => x.name === m));
+  if (!companion) return [];
+  return [
+    exploration(
+      "explore-companion-measure",
+      `Add VALUES: [${companion}]`,
+      `The strategy ranks ${companion} next after ${ctx.measures[0]}.`,
+      { op: "add-field", clause: "VALUES", text: `[${companion}]` },
+      "strategy",
+      32,
+    ),
+  ];
+};
+
+/** E5. One measure over a breakdown: the share is usually the question. */
+const exploreShareOfTotal: Rule = (ctx) => {
+  if (ctx.facts.values.length !== 1) return [];
+  const only = ctx.facts.values[0];
+  if (!only.isMeasure || only.showAs) return [];
+  if (ctx.facts.rows.length === 0 && ctx.facts.columns.length === 0) return [];
+  // The show-values-as is a BRACKETED SUFFIX, not an `AS` clause — `AS "Name"`
+  // is the alias, a different thing entirely, and the serializer writes this
+  // form as `[Revenue] [% of Grand Total]`. The first draft of this rule used
+  // `AS` and produced a value field the compiler rejected, so the veto dropped
+  // it and the rule was silently dead across the whole corpus.
+  const text = `[${only.ref}] [% of Grand Total]`;
+  return [
+    exploration(
+      "explore-share-of-total",
+      `Add VALUES: ${text}`,
+      `With one measure over a breakdown, the share of the total is often the readable form.`,
+      { op: "add-field", clause: "VALUES", text },
+      "structure",
+      30,
+    ),
+  ];
+};
+
+/** E6. An axis sits on a hierarchy level that has a level beneath it. */
+const exploreDrillLevel: Rule = (ctx) => {
+  const hierarchies = ctx.model.hierarchies ?? [];
+  if (hierarchies.length === 0) return [];
+  for (const axis of ctx.axes) {
+    const qualified = axis.field.qualified;
+    if (!qualified) continue;
+    for (const h of hierarchies) {
+      const levels = h.levels ?? [];
+      const at = levels.findIndex(
+        (l) => `${h.table}[${l.column}]`.toLowerCase() === qualified.toLowerCase(),
+      );
+      if (at < 0 || at + 1 >= levels.length) continue;
+      const child = qualifiedToDsl(`${h.table}[${levels[at + 1].column}]`);
+      if (onAnAxis(ctx, child) || ctx.forbiddenRefs.has(normalizeRef(child))) continue;
+      return [
+        exploration(
+          "explore-drill-level",
+          `Add ${axis.clause}: ${child}`,
+          `${h.name} goes ${axis.field.ref} → ${child}; adding the next level drills in.`,
+          { op: "add-field", clause: axis.clause, text: child },
+          "structure",
+          28,
+        ),
+      ];
+    }
+  }
+  return [];
+};
+
+/** E7. A ranked-looking report with no SORT reads in whatever order the model returns. */
+const exploreSort: Rule = (ctx) => {
+  if (ctx.facts.sort.length > 0 || ctx.facts.topN) return [];
+  if (ctx.facts.rows.length === 0 || ctx.measures.length === 0) return [];
+  const measure = ctx.measures[0];
+  const lower = hintsFor(ctx.strategy, measure)?.direction === "lowerIsBetter";
+  const dir = lower ? "ASC" : "DESC";
+  return [
+    exploration(
+      "explore-sort",
+      `Add SORT: [${measure}] ${dir}`,
+      lower
+        ? `Nothing orders these rows yet; ${measure} is better when lower, so ascending puts the best first.`
+        : `Nothing orders these rows yet; sorting by ${measure} puts the largest first.`,
+      { op: "add-clause", clause: "SORT", line: `SORT: [${measure}] ${dir}` },
+      lower ? "strategy" : "structure",
+      26,
+    ),
+  ];
+};
+
+/** The explorations, offered only when no correction is outstanding. */
+export const EXPLORE_RULES: ReadonlyArray<{ name: NextEditKind; rule: Rule }> = [
+  { name: "explore-columns", rule: exploreColumns },
+  { name: "explore-time", rule: exploreTime },
+  { name: "explore-rank", rule: exploreRank },
+  { name: "explore-companion-measure", rule: exploreCompanionMeasure },
+  { name: "explore-share-of-total", rule: exploreShareOfTotal },
+  { name: "explore-drill-level", rule: exploreDrillLevel },
+  { name: "explore-sort", rule: exploreSort },
+];
+
 /** The list. Order here is not rank; `priority` is. */
 export const NEXT_EDIT_RULES: ReadonlyArray<{ name: NextEditKind; rule: Rule }> = [
   { name: "add-values", rule: missingValues },
@@ -566,6 +858,22 @@ export function suggestNextEdits(facts: QueryFacts, model: DesignQueryModel): Ne
 
   const all: NextEditSuggestion[] = [];
   for (const { rule } of NEXT_EDIT_RULES) all.push(...rule(ctx));
+
+  // EXPLORATIONS ONLY WHEN NOTHING IS WRONG.
+  //
+  // Corrections and explorations in the same row make the important one look
+  // optional: "this query has no VALUES" and "you could also add a time axis"
+  // are not two items on one list. So the explorations are asked only when the
+  // corrections found nothing — which is also exactly the state the row used to
+  // render as silence, and the state the person is in when they want ideas
+  // rather than fixes.
+  //
+  // A query that does not parse gets nothing here either. Explorations reason
+  // about a query's SHAPE, and the shape of a half-typed query is not a fact.
+  if (all.length === 0 && !facts.hasParseErrors) {
+    for (const { rule } of EXPLORE_RULES) all.push(...rule(ctx));
+  }
+
   all.sort((a, b) => b.priority - a.priority || a.text.localeCompare(b.text));
 
   const seenEdit = new Set<string>();

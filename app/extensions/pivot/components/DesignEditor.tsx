@@ -8,7 +8,7 @@ import type * as monaco from 'monaco-editor';
 import { processDsl, serialize, type CompileContext } from '../../_shared/dsl/pivotLayout';
 import { getControlValue, type ControlValue } from '@api/controlValues';
 import { LANGUAGE_ID, clearDslModelContext, registerPivotDslLanguage, setDslEditorContext, setDslModelContext } from '../../_shared/dsl/pivotLayout/pivotDslLanguage';
-import { DescribeQueryRow } from '../../_shared/dsl/pivotLayout/DescribeQueryRow';
+import { DescribeQueryPanel } from '../../_shared/dsl/pivotLayout/describeQuery';
 import { NextEditRow } from '../../_shared/dsl/pivotLayout/NextEditRow';
 import type { SourceField, ZoneField } from '../../_shared/components/types';
 import type { LayoutConfig, BiPivotModelInfo, CalculatedFieldDef, ValueColumnRefDef } from './types';
@@ -323,14 +323,20 @@ export function DesignEditor({
       {/* Model pivots only: a range pivot has no BI model to draft against. The
           pivot compiles live, so no dry run is needed here. */}
       {biModel ? (
-        <DescribeQueryRow
+        <DescribeQueryPanel
           biModel={biModel}
           host={{ connectionId: biModel.connectionId ?? '' }}
-          onDraft={applyDraft}
+          currentDsl={dslText}
+          onApply={applyDraft}
         />
       ) : null}
+    {/* `minHeight: 0` is load-bearing here and was not before. A flex child's
+        default `min-height: auto` refuses to shrink below its content, so with
+        a transcript above it this column would push the editor past the pane
+        and clip it rather than sharing the space. */}
     <div style={{
       flex: 1,
+      minHeight: 0,
       display: 'flex',
       flexDirection: 'column',
       overflow: 'hidden',

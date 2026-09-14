@@ -8,9 +8,11 @@
 import { describe, it, expect } from "vitest";
 import {
   MODEL_CLAUSE_PRIORITY,
+  EXPLORE_RULES,
   NEXT_EDIT_RULES,
   nextClauseSuggestion,
   normalizeRef,
+  roleOfSuggestion,
   suggestNextEdits,
   type DesignQueryModel,
   type FactField,
@@ -130,12 +132,21 @@ describe("rule 2: a measure with no breakdown", () => {
     expect(rows.text).not.toContain("Vanished");
   });
 
-  it("never volunteers a further breakdown once one exists", () => {
-    // The corpus gate refused an "also analyse by" rule on its first run:
-    // "revenue by category" is finished, and a chip saying "also by segment"
-    // fires on every complete, correct query.
+  it("never volunteers a further breakdown once one exists — as a CORRECTION", () => {
+    // The original assertion, narrowed rather than dropped. `add-rows` fires
+    // because a measure has NO breakdown; once it has one this rule is finished
+    // and must stay finished. An earlier "also analyse by" CORRECTION was
+    // deleted for firing on every complete, correct query, and that remains the
+    // right answer for a rule that presents itself as a fix.
+    //
+    // What changed on 2026-09-14 is that the same idea is now offered as an
+    // EXPLORATION — tagged, ranked below every correction, absent from the ghost
+    // text, and offered only when nothing is actually wrong. The row was
+    // measured silent on 0 of 52 correct queries before this, which was the
+    // complaint.
     const s = suggestNextEdits(facts({ rows: [f("Product.Category")], values: [m("Revenue")] }), model);
-    expect(kinds(s)).toEqual([]);
+    expect(s.filter((x) => roleOfSuggestion(x) === "correction")).toEqual([]);
+    expect(s.every((x) => roleOfSuggestion(x) === "exploration")).toBe(true);
   });
 });
 
@@ -194,7 +205,10 @@ describe("rule 5: a fine time grain without the year", () => {
     // axes. The years are already separated across the columns.
     const s = suggestNextEdits(facts({ rows: [f("Date.MonthName")], columns: [f("Date.Year")], values: [m("Revenue")] }), model);
     expect(kinds(s)).not.toContain("add-coarser-time");
-    expect(kinds(s)).toEqual([]);
+    // No CORRECTION at all: the shape is right. Explorations may still offer
+    // something here, and that is the 2026-09-14 change — this test is about
+    // `add-coarser-time` not misreading a correct cross-tab.
+    expect(s.filter((x) => roleOfSuggestion(x) === "correction")).toEqual([]);
   });
 
   it("is silent when the calendar's coarsest grouping is not a YEAR", () => {
@@ -274,12 +288,62 @@ describe("rule 7: a key column as an axis", () => {
 });
 
 describe("the list as a whole", () => {
-  it("is empty for a complete, well-formed query", () => {
+  it("offers no CORRECTION for a complete, well-formed query", () => {
     const s = suggestNextEdits(
       facts({ rows: [f("Product.Category")], columns: [f("Customer.Segment")], values: [m("Revenue")], filters: [filter("Geography.Region", 2)] }),
       model,
     );
-    expect(kinds(s)).toEqual([]);
+    expect(s.filter((x) => roleOfSuggestion(x) === "correction")).toEqual([]);
+  });
+
+  it("DOES offer explorations for a complete query — the row is not silent any more", () => {
+    // The positive half, and the one that would otherwise be missing: every
+    // other assertion in this file says what must NOT appear, so the whole
+    // exploration family could be switched off by a stray filter and this
+    // suite would stay green while the feature was gone.
+    const s = suggestNextEdits(
+      facts({ rows: [f("Product.Category")], columns: [f("Customer.Segment")], values: [m("Revenue")], filters: [filter("Geography.Region", 2)] }),
+      model,
+    );
+    expect(s.length).toBeGreaterThan(0);
+    expect(s.every((x) => roleOfSuggestion(x) === "exploration")).toBe(true);
+  });
+
+  it("holds explorations BELOW every correction, so a fix is never outranked", () => {
+    // A query with no VALUES cannot compile. If an exploration could outrank
+    // that, the row would lead with "you could add a time axis" over "this
+    // query is missing its measure".
+    const s = suggestNextEdits(facts({ rows: [f("Product.Category")] }), model);
+    const corrections = s.filter((x) => roleOfSuggestion(x) === "correction");
+    const explorations = s.filter((x) => roleOfSuggestion(x) === "exploration");
+    expect(corrections.length).toBeGreaterThan(0);
+    for (const c of corrections) {
+      for (const e of explorations) expect(c.priority).toBeGreaterThan(e.priority);
+    }
+  });
+
+  it("asks for no exploration while a correction is outstanding", () => {
+    // "This query slices Revenue by something the strategy forbids" and "you
+    // could also add a time axis" are not two items on one list; showing them
+    // together makes the important one look optional.
+    //
+    // THE FIXTURE MATTERS AND THE FIRST ONE WAS USELESS. `rows` with no
+    // `values` produces a correction, but every exploration except drill-level
+    // requires a measure — so nothing would have been suppressed and the test
+    // passed with the suppression deleted. This shape has BOTH: Product.Name is
+    // never-slice-by (a correction) and the query is otherwise complete enough
+    // for explore-columns, explore-rank and explore-sort to want a turn.
+    const f2 = facts({ rows: [f("Product.Name"), f("Product.Category")], values: [m("Revenue")] });
+    expect(
+      EXPLORE_RULES.some(({ rule }) => rule !== undefined) && true,
+      "sanity: the exploration family exists",
+    ).toBe(true);
+    const s = suggestNextEdits(f2, model);
+    expect(s.some((x) => roleOfSuggestion(x) === "correction")).toBe(true);
+    expect(
+      s.filter((x) => roleOfSuggestion(x) === "exploration"),
+      "an exploration was offered beside a correction",
+    ).toEqual([]);
   });
 
   it("orders by priority and never repeats an edit", () => {

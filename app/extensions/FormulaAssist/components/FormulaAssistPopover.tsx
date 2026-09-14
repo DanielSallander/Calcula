@@ -39,6 +39,7 @@ import {
 import { useDialogWindow } from "@api/dialogWindow";
 import { getGridStateSnapshot } from "@api/grid";
 import type { FormulaProposal } from "@api/formulaAssistService";
+import { ModelChooserRow } from "../../_shared/components/ModelChooserRow";
 import { POPOVER_WIDTH, popoverPosition } from "../lib/anchor";
 import { assistFormula, defaultLadderDeps } from "../lib/ladder";
 import type { LadderPhase } from "../lib/ladder";
@@ -481,6 +482,15 @@ export const FormulaAssistPopover: React.FC<OverlayProps> = () => {
             {modelLabel && modelLabel !== proposal.model ? ` (model has since changed to ${modelLabel})` : ""}
           </div>
         )}
+
+        {/* The model is changeable from EVERY AI surface, not just the chat and
+            the report designer. A weak answer here is most often a weak MODEL,
+            and being sent to another panel to fix that is the moment people give
+            up on the feature. The chooser reaches the same one application
+            preference, so switching here switches everywhere. */}
+        <div style={{ marginTop: 6 }}>
+          <ModelChooserRow hideScopeNote />
+        </div>
       </div>
       {win.resizeHandles}
     </div>

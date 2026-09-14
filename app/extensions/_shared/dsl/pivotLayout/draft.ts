@@ -72,6 +72,18 @@ export interface DraftDeps {
   onPhase?: (phase: DraftPhase) => void;
   signal?: AbortSignal;
   maxRepairs?: number;
+  /**
+   * The turn this one refines. Absent for a first ask.
+   *
+   * Two things change when it is present, and the second is the one that is
+   * easy to miss: the prompt carries the previous query as the thing to modify,
+   * AND the candidate names are ranked from BOTH intents joined. Ranking from
+   * the new intent alone is the trap — "make it monthly" mentions no measure and
+   * no dimension, so `chooseCandidates` would score every name at zero and could
+   * hand the follow-up a NARROWER list than the turn it is refining, dropping
+   * the very columns the query already uses.
+   */
+  prior?: { intent: string; dsl: string };
 }
 
 export interface DesignQueryDraft {
@@ -133,7 +145,14 @@ export async function draftDesignQuery(
 ): Promise<DesignQueryDraft> {
   const maxRepairs = deps.maxRepairs ?? MAX_REPAIR_ROUNDS;
   const modelLabel = deps.provider.modelLabel() || "the model";
-  const candidates = chooseCandidates(model, intent);
+  // BOTH intents rank the candidates on a follow-up. See `DraftDeps.prior`:
+  // a refinement like "make it monthly" names nothing the ranker can score, so
+  // ranking from it alone would narrow the list below what the query it is
+  // editing already uses.
+  const candidates = chooseCandidates(
+    model,
+    deps.prior ? `${deps.prior.intent}\n${intent}` : intent,
+  );
 
   const grammar = deps.provider.honorsGrammar() === true ? buildDesignQueryGrammar(candidates) : null;
   const responseSchema = grammar ? undefined : designQueryResponseSchema();
@@ -143,7 +162,7 @@ export async function draftDesignQuery(
   const format = grammar ? "bare" : "json";
 
   const messages: Array<{ role: "user" | "assistant"; text: string }> = [
-    { role: "user", text: buildUserPrompt({ intent, candidates, format }) },
+    { role: "user", text: buildUserPrompt({ intent, candidates, format, prior: deps.prior }) },
   ];
 
   let dsl = "";

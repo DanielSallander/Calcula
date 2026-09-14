@@ -45,6 +45,7 @@ import {
   buildNextClauseRequest,
   chooseCandidates,
   nextClauseSuggestion,
+  roleOfSuggestion,
   type DesignQueryModel,
   type NextEditSuggestion,
 } from "@api/designQueryAssist";
@@ -179,19 +180,19 @@ const rowStyle: React.CSSProperties = {
 };
 const chipStyle: React.CSSProperties = {
   display: "flex", flexDirection: "column", gap: 2, padding: "4px 8px", fontSize: 11,
-  border: "1px solid var(--border-color, #d0d7de)", borderRadius: 4,
-  background: "var(--panel-bg, #f6f8fa)", color: "inherit", maxWidth: 360,
+  border: "1px solid var(--border-default, #d1d5db)", borderRadius: 4,
+  background: "var(--panel-bg, #f9fafb)", color: "inherit", maxWidth: 360,
 };
 const chipHeadStyle: React.CSSProperties = { display: "flex", gap: 6, alignItems: "center" };
 const acceptStyle: React.CSSProperties = {
   padding: "2px 8px", fontSize: 11, borderRadius: 3, border: "none", cursor: "pointer",
-  background: "var(--accent-color, #2e7d5b)", color: "#fff", whiteSpace: "nowrap",
+  background: "var(--accent-color, #1a5fb4)", color: "#fff", whiteSpace: "nowrap",
 };
 const dismissStyle: React.CSSProperties = {
-  padding: "2px 6px", fontSize: 11, borderRadius: 3, border: "1px solid var(--border-color, #d0d7de)",
+  padding: "2px 6px", fontSize: 11, borderRadius: 3, border: "1px solid var(--border-default, #d1d5db)",
   background: "transparent", color: "inherit", cursor: "pointer",
 };
-const reasonStyle: React.CSSProperties = { color: "var(--text-secondary, #666)", margin: 0 };
+const reasonStyle: React.CSSProperties = { color: "var(--text-secondary, #6b7280)", margin: 0 };
 
 export function NextEditRow({
   text,
@@ -304,7 +305,17 @@ export function NextEditRow({
   return (
     <div style={rowStyle} data-testid="next-edit-row" aria-label="Suggested next edits">
       {shown.map((chip) => (
-        <div key={chip.suggestion.id} style={chipStyle} data-testid="next-edit-chip" data-kind={chip.suggestion.kind} data-source={chip.suggestion.source}>
+        <div
+          key={chip.suggestion.id}
+          style={chipStyle}
+          data-testid="next-edit-chip"
+          data-kind={chip.suggestion.kind}
+          data-source={chip.suggestion.source}
+          // Corrections and explorations look alike and mean different things:
+          // one says the query is wrong, the other that it could go further.
+          // Exposed so a test can tell them apart without parsing the label.
+          data-role={roleOfSuggestion(chip.suggestion)}
+        >
           <div style={chipHeadStyle}>
             <button type="button" style={acceptStyle} onClick={() => accept(chip)} data-testid="next-edit-accept">
               {chip.suggestion.text}

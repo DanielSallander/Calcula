@@ -2680,6 +2680,7 @@ export type {
   AiCompletionProvider,
   AiCompletionRequest,
   AiCompletionResult,
+  AiModelOption,
   AiResponseSchema,
 } from "./aiCompletionService";
 

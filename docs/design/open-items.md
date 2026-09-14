@@ -1707,6 +1707,35 @@ every hit from the one rule that supplies a missing VALUES**. That number is the
 Milestone B: rules can supply the measure the strategy ranks first and can never guess which
 dimension the person wanted.
 
+**2026-09-14 — the row was measured SILENT on a finished query, and that is now fixed.** The owner
+reported the chips appearing only rarely and asked whether the strategy was too thin. Measured, not
+argued: over the corpus only three of the seven rules ever fire (`add-values` 63, `add-coarser-time`
+10, `key-to-label` 1), **0 of 52 complete correct queries produced a chip**, and stripping `strategy`
+to `null` changed the chip-bearing prefix count NOT AT ALL (67 of 86 either way; only `key-to-label`
+moved, 1 -> 0). The strategy was not the cause. Every rule was CORRECTIVE by construction — each
+fires only because the query is incomplete or contradicts the strategy — and the corpus gate
+actively FORBADE a chip on a correct query, which is why an earlier "also analyse by" rule was
+deleted by name for firing on 44 of 44 references.
+
+So a second family was added: **explorations** (`NextEditRole`), seven rules that fire on a query
+that is already right — a second breakdown on COLUMNS, a time axis the model has and the query
+ignores, a ranking, the strategy's next-ranked companion measure, share-of-total, a hierarchy level
+to drill into, and a sort. **Measured: 221 offered across 55 correct queries, all seven kinds**,
+against 0 before. They are held to a DIFFERENT standard than corrections, and the gate is now two
+tiers: a correction on a correct query is still zero-tolerance, while an exploration must only ADD
+(never remove what the person wrote) and must TERMINATE — a walk that keeps accepting the top
+exploration has to run out of ideas, which a sabotage removing one rule's stop condition reds on 47
+queries. Three policies keep them from nagging: they are never offered while a correction is
+outstanding, they are capped below every correction's priority, and they never reach the ghost text
+(owner decision: a chip can be ignored, text at the cursor cannot). One consequence recorded rather
+than discovered: the row asks the model only when the rules left a free slot, so with explorations
+filling a finished query the Milestone B chip no longer appears there — acceptable, since it is off
+by default on a measurement of 0 of 80.
+
+Also fixed while measuring: `tests/eval/lib/modelFixture.mjs` hardcoded `hierarchies: []` while
+`sales_star.json` declares a real one, so every drill-down path was silently untestable and the
+eval runner was blind the same way.
+
 *What the adversarial review changed, and it was most of the value.* Six reviewers over six
 dimensions produced 39 findings; 18 survived three independent refutation attempts each. Five were
 defects a user would have suffered: an apostrophe in a bracketed field name (`[Customer.Owner's Key]`)

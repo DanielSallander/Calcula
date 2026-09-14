@@ -16,7 +16,7 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
-import type { DesignQueryModel } from "@api/designQueryAssist";
+import { roleOfSuggestion, type DesignQueryModel } from "@api/designQueryAssist";
 import { factsFromDsl, rulesChips } from "./nextEditFacts";
 import { compileDesignQuery } from "./designQuery";
 import { sameDesignQuery } from "./canonical";
@@ -107,14 +107,142 @@ for (const task of corpus.tasks) {
 }
 correct.push(...ALSO_CORRECT);
 
+/**
+ * Every field reference a query carries, tagged by clause and sorted.
+ *
+ * Module-level because three tests need it: the additive-edit check, and the
+ * two that hold explorations to "adds only". Counting CONTENT rather than
+ * asking the compiler is the point — every editing defect the adversarial
+ * review found was a silent loss (an apostrophe that swallowed the rest of a
+ * clause, a `#` comment an edit deleted), and a query missing a field still
+ * compiles perfectly well.
+ */
+function refsOf(dsl: string): string[] {
+  const f = factsFromDsl(dsl, TABLE_NAMES);
+  return [
+    ...f.rows.map((x) => `r:${x.ref}`),
+    ...f.columns.map((x) => `c:${x.ref}`),
+    ...f.values.map((x) => `v:${x.ref}`),
+    ...f.filters.map((x) => `f:${x.ref}`),
+    ...f.sort.map((x) => `s:${x.ref}`),
+  ].sort();
+}
+
 describe("the next-edit rules against the corpus", () => {
-  it("never fight a complete, correct query (the gate)", () => {
+  it("no CORRECTION fights a complete, correct query (the gate)", () => {
+    // THE ORIGINAL GATE, unchanged in strength and narrowed in scope.
+    //
+    // A correction fires because the query is broken. On a query that is right,
+    // any correction at all is a rule fighting a correct query — the defect that
+    // got an earlier rule deleted by name for firing on 44 of 44 references.
+    // Explorations are held to a different standard below; they are the point
+    // of the family, since this gate is precisely what kept the row silent.
     const harmful: string[] = [];
     for (const { id, dsl } of correct) {
-      for (const { s } of liveSuggestions(dsl)) harmful.push(`${id}: ${s.text} (${s.kind})`);
+      for (const { s } of liveSuggestions(dsl)) {
+        if (roleOfSuggestion(s) !== "correction") continue;
+        harmful.push(`${id}: ${s.text} (${s.kind})`);
+      }
     }
     expect(correct.length).toBeGreaterThan(40);
-    expect(harmful, "suggestions offered on a query that is already right").toEqual([]);
+    expect(harmful, "corrections offered on a query that is already right").toEqual([]);
+  });
+
+  it("every EXPLORATION only ever ADDS — it never removes what the person wrote", () => {
+    // The standard an exploration is held to instead.
+    //
+    // An addition a reference query happens not to have is a difference of
+    // taste: the corpus records one good answer to a request, not the only one,
+    // and "you could also break this down by region" is not wrong merely
+    // because the reference stopped earlier. A REMOVAL is different in kind —
+    // it deletes something a person typed on a query that was already correct,
+    // and no amount of taste makes that acceptable.
+    const losses: string[] = [];
+    for (const { id, dsl } of correct) {
+      const before = refsOf(dsl);
+      for (const { s, applied } of liveSuggestions(dsl)) {
+        if (roleOfSuggestion(s) !== "exploration") continue;
+        const after = refsOf(applied);
+        for (const ref of before) {
+          if (!after.includes(ref)) losses.push(`${id}: ${s.kind} dropped ${ref}`);
+        }
+      }
+    }
+    expect(losses, "an exploration removed something the query already had").toEqual([]);
+  });
+
+  it("every EXPLORATION terminates — accepting down the row runs out of ideas", () => {
+    // The failure this prevents is a row that never runs out of ideas: accept
+    // one and it offers another, accept that and the first comes back. Nothing
+    // else in the suite can see it, because every individual suggestion looks
+    // perfectly reasonable.
+    //
+    // TWO ASSERTIONS, AND THE SECOND IS THE LOAD-BEARING ONE. "The same id is
+    // not re-offered" is nearly free — `applyEditOp` refuses to add a clause
+    // that already exists, so the edit becomes a no-op and `rulesChips` drops
+    // it upstream whatever the rule's own precondition says. A sabotage that
+    // deleted an exploration's stop condition passed that check untouched.
+    // What it cannot mask is the COUNT: a rule that keeps finding new things to
+    // propose makes the list grow or hold steady instead of shrinking, and a
+    // chain between two rules shows up here and nowhere else.
+    // WHY A WALK AND NOT A COUNT. Taking one exploration can legitimately
+    // ENABLE another — adding COLUMNS gives the time rule somewhere to put a
+    // year, adding a field gives the drill rule a level to descend from — so
+    // the number offered can hold steady for several steps while still
+    // converging. Measured: a "strictly fewer each time" rule reds on 20 corpus
+    // queries that all terminate perfectly well. What must be true is that the
+    // process ENDS: keep taking the top exploration and the row eventually has
+    // nothing left to say, without ever repeating itself on the way.
+    const STEPS = 12;
+    const loops: string[] = [];
+    const nonterminating: string[] = [];
+    for (const { id, dsl } of correct) {
+      let text = dsl;
+      const seen = new Set<string>();
+      let step = 0;
+      for (; step < STEPS; step++) {
+        const next = liveSuggestions(text).filter(({ s }) => roleOfSuggestion(s) === "exploration");
+        if (next.length === 0) break;
+        const { s, applied } = next[0];
+        if (seen.has(s.id)) {
+          loops.push(`${id}: ${s.kind} offered twice in one walk (step ${step})`);
+          break;
+        }
+        seen.add(s.id);
+        if (applied === text) {
+          loops.push(`${id}: ${s.kind} was offered but changes nothing`);
+          break;
+        }
+        text = applied;
+      }
+      if (step >= STEPS) {
+        nonterminating.push(`${id}: still offering explorations after ${STEPS} accepts`);
+      }
+    }
+    expect(loops, "an exploration repeated itself while accepting down the row").toEqual([]);
+    expect(nonterminating, "the row never runs out of ideas for this query").toEqual([]);
+  });
+
+  it("explorations are OFFERED on correct queries — the whole point of the family", () => {
+    // Without this the family could be silently disabled — by a role filter, a
+    // priority cap, or an `all.length === 0` guard that stops being reachable —
+    // and every other test here would still pass, because all of them only
+    // assert that explorations do no HARM.
+    let offered = 0;
+    const kinds = new Set<string>();
+    for (const { dsl } of correct) {
+      for (const { s } of liveSuggestions(dsl)) {
+        if (roleOfSuggestion(s) !== "exploration") continue;
+        offered++;
+        kinds.add(s.kind);
+      }
+    }
+    console.log(
+      `[next-edit] explorations on ${correct.length} correct queries: ${offered} ` +
+        `across ${kinds.size} kinds — ${[...kinds].sort().join(", ")}`,
+    );
+    expect(offered, "the row is silent on correct queries again").toBeGreaterThan(0);
+    expect(kinds.size, "one rule doing all the work is a rule, not a family").toBeGreaterThan(2);
   });
 
   it("recall on the corpus's own prefixes is measured, non-zero, and written down", () => {
@@ -164,16 +292,7 @@ describe("the next-edit rules against the corpus", () => {
     // still compiles perfectly well. So: count the field references before and
     // after, and hold each kind of op to what it promised. An ADDITIVE edit may
     // never drop one.
-    const refs = (dsl: string): string[] => {
-      const f = factsFromDsl(dsl, TABLE_NAMES);
-      return [
-        ...f.rows.map((x) => `r:${x.ref}`),
-        ...f.columns.map((x) => `c:${x.ref}`),
-        ...f.values.map((x) => `v:${x.ref}`),
-        ...f.filters.map((x) => `f:${x.ref}`),
-        ...f.sort.map((x) => `s:${x.ref}`),
-      ].sort();
-    };
+    const refs = refsOf;
     let additive = 0;
     let removing = 0;
     for (const { id, dsl } of correct) {

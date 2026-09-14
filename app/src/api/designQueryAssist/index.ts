@@ -14,6 +14,7 @@ export type {
   DesignMeasureHints,
   DesignQueryCandidates,
   DesignQueryColumn,
+  DesignQueryHierarchy,
   DesignQueryMeasure,
   DesignQueryModel,
   DesignQueryProposal,
@@ -87,13 +88,16 @@ export type {
   FactSort,
   FactValue,
   NextEditKind,
+  NextEditRole,
   NextEditSuggestion,
   QueryFacts,
 } from "./nextEdit";
 export {
+  EXPLORE_RULES,
   MODEL_CLAUSE_PRIORITY,
   NEXT_EDIT_RULES,
   nextClauseSuggestion,
   normalizeRef,
+  roleOfSuggestion,
   suggestNextEdits,
 } from "./nextEdit";

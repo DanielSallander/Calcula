@@ -31,6 +31,7 @@ import {
   type BuiltinModelProgressEvent, type BuiltinRuntimeEvent, type BuiltinStatus,
   type DiscoveredRuntime, type ProviderStatus,
 } from "../lib/aiTypes";
+import { fetchModels } from "../lib/modelCatalog";
 import { readSelection, writeSelection, type ProviderSelection } from "../lib/providerSelection";
 import { readProfile, runProbe, summarizeProfile, type ModelProfile } from "../lib/probeRunner";
 import {
@@ -55,28 +56,6 @@ export interface ModelPickerProps {
   onDone: () => void;
   /** Rendered inside the chat as a settings view rather than a first-run gate. */
   embedded?: boolean;
-}
-
-/**
- * A provider's model list: discovery already knows it for a local runtime,
- * otherwise ask the backend.
- *
- * Module-level and taking `discovered` as an ARGUMENT rather than reading state,
- * because it has two callers whose knowledge differs: `loadModels` (below) holds
- * the discovery result in state, while the mount effect has only just awaited it
- * and its `[]`-dep closure would still see `null`. One function, no stale read.
- */
-async function fetchModels(
-  providerId: string,
-  baseUrl: string,
-  discovered: DiscoveredRuntime[] | null,
-): Promise<string[]> {
-  const hit = discovered?.find((d) => d.providerId === providerId);
-  if (hit && hit.models.length > 0) return hit.models;
-  return aiChatBackend.invoke<string[]>("ai_list_models", {
-    providerId,
-    baseUrlOverride: baseUrl || null,
-  });
 }
 
 export function ModelPicker({ onDone, embedded }: ModelPickerProps): React.ReactElement {

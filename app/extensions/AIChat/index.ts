@@ -17,9 +17,11 @@ import { aiChatBackend } from "./lib/aiChatBackend";
 import { registerJobViewOpener } from "./lib/jobFocus";
 import { buildScriptAssistant } from "./lib/scriptAssistant";
 import { installCompletionProvider } from "./lib/completionProvider";
+// Declared in `lib/` rather than here: `completionProvider.openModelPicker()`
+// must raise the model pane from a module-level function with no
+// `ExtensionContext`, and a re-typed id there would drift on the first rename.
+import { AI_CHAT_LLM_PANE_ID, AI_CHAT_PANE_ID } from "./lib/paneIds";
 
-const AI_CHAT_PANE_ID = "ai-chat";
-const AI_CHAT_LLM_PANE_ID = "ai-chat-llm";
 const AUTHOR_STATUS_ITEM_ID = "ai-chat:authoring";
 
 // ============================================================================

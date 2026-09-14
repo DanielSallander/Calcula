@@ -15,6 +15,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+// Safe inside the hoisted `vi.mock("@api")` factory below: the factory is
+// registered at hoist time but only CALLED on the first import of `@api`, which
+// happens when the component module is evaluated further down — by which point
+// this binding is initialized. The helper's own `@api` import is type-only and
+// therefore erased, so there is no runtime cycle.
+import { makeFakeCompletionProvider } from "../../_shared/lib/fakeCompletionProvider";
 
 const insertProposalMock = vi.fn();
 const dispatchGridActionMock = vi.fn();
@@ -25,18 +31,19 @@ vi.mock("@api", () => ({
   columnToLetter: (col: number) => String.fromCharCode(65 + col),
   dispatchGridAction: (...args: unknown[]) => dispatchGridActionMock(...args),
   startEditing: (cell: unknown) => startEditingMock(cell),
+  // The SHARED factory, not a hand-rolled object. This fake was missing
+  // `selectedModelKey` the moment the popover grew a model chooser, and the
+  // failure arrived as `undefined is not a function` in ten tests about
+  // inserting formulas. `makeFakeCompletionProvider` is production-path code, so
+  // `check-types` compiles it against the real interface and the NEXT member
+  // added breaks one file at build time instead of many at run time.
   getAiCompletionProvider: () =>
     configuredModel === null
       ? null
-      : {
-          isConfigured: () => true,
-          modelLabel: () => configuredModel,
-          isLocal: () => true,
-          honorsSchema: () => true,
-          complete: async () => {
-            throw new Error("the popover must not call the model directly");
-          },
-        },
+      : makeFakeCompletionProvider({
+          modelLabel: configuredModel,
+          fail: "the popover must not call the model directly",
+        }),
   getAllFunctions: async () => ({ functions: [] }),
   getFormulaEvalPlan: async () => {
     throw new Error("not used here");

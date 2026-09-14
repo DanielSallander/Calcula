@@ -82,6 +82,33 @@ export interface AiCompletionResult {
   durationMs: number;
 }
 
+/**
+ * One model a caller can switch to.
+ *
+ * `key` is OPAQUE. The provider encodes whatever identifies the model to it —
+ * today a provider id, a model id and a base URL — and decodes it again in
+ * `selectModel`. A caller shows the label, remembers the key, and hands it back
+ * unchanged; it never parses it. That is what keeps `baseUrl`, a detail only a
+ * custom endpoint or a non-default port cares about, out of this facade
+ * entirely.
+ */
+export interface AiModelOption {
+  key: string;
+  /** The model as its runtime names it, e.g. "qwen3:8b". */
+  model: string;
+  /** Who serves it, for a caption: "Ollama", "Calcula built-in", "Anthropic". */
+  providerLabel: string;
+  /** Runs on this machine, so a caller may say so before sending column names. */
+  isLocal: boolean;
+  /**
+   * Whether THIS model honours a GBNF grammar — measured where it has been
+   * measured, the runtime's identity where it has not, `undefined` when neither
+   * says. Per (provider, model) rather than per provider, because a measurement
+   * overrides identity in both directions.
+   */
+  honorsGrammar: boolean | undefined;
+}
+
 export interface AiCompletionProvider {
   /**
    * False when no provider or model has been chosen.
@@ -90,6 +117,46 @@ export interface AiCompletionProvider {
    * mode this whole programme has been fixing.
    */
   isConfigured(): boolean;
+  /**
+   * Every model that can answer RIGHT NOW, best first (local before cloud).
+   *
+   * READY ONLY. A provider whose key is missing, a local runtime that is not
+   * running, a bundled model that has not been downloaded — none of them appear.
+   * A picker that lists a model it cannot use is the "disabled control with no
+   * reason" failure wearing a different hat, and setting those up costs consent
+   * dialogs and credential slots that belong in the owning extension's own UI.
+   *
+   * Costs round trips (a loopback probe, one call per keyed cloud provider), so
+   * call it when the user ASKS for the list — never on mount.
+   */
+  listModels(): Promise<readonly AiModelOption[]>;
+  /**
+   * The `key` of the current selection, or `""` when nothing is chosen.
+   *
+   * Comparable against `AiModelOption.key` and nothing else. It is not a label
+   * and not a model id; `modelLabel()` remains the thing to show.
+   */
+  selectedModelKey(): string;
+  /**
+   * Switch models. The key must be one `listModels` issued.
+   *
+   * THIS IS AN APPLICATION PREFERENCE, so the change is global: every surface
+   * that asks a model a question uses the new one, including the owning
+   * extension's own panel. Callers that record which model answered a given
+   * answer should read `AiCompletionResult.model` at the time, not this.
+   *
+   * Throws on a key the provider did not issue, rather than silently selecting
+   * nothing — a selection that quietly failed reads exactly like one that
+   * worked until the next request fails.
+   */
+  selectModel(key: string): void;
+  /**
+   * Raise the owning extension's full model UI — key entry, downloads, probes.
+   *
+   * The escape hatch for everything `listModels` deliberately omits. A caller
+   * with an empty list offers this instead of pretending it can do setup.
+   */
+  openModelPicker(): void;
   /** e.g. "qwen2.5-coder:1.5b", for a caption. */
   modelLabel(): string;
   /** True when the model runs on this machine, so a caller can say so. */

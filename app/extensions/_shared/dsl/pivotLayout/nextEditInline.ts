@@ -170,7 +170,13 @@ export function inlineNextEdits(
   dismissed: ReadonlySet<string> = new Set(),
 ): InlineNextEdits {
   const model = (biModel as DesignQueryModel | null | undefined) ?? { tables: [], measures: [] };
-  const chips: NextEditChip[] = rulesChips(text, model, tableNames, compile, dismissed, 8);
+  // CORRECTIONS ONLY. Explorations are ideas about a query that is already
+  // right, and ghost text at the cursor is the one place a person cannot
+  // ignore them. Owner decision 2026-09-14; the row below the editor is where
+  // the family belongs, at three at a time rather than the eight asked for here.
+  const chips: NextEditChip[] = rulesChips(text, model, tableNames, compile, dismissed, 8, [
+    "correction",
+  ]);
   const edits: InlineNextEdit[] = [];
   const dropsALine: NextEditSuggestion[] = [];
   for (const chip of chips) {

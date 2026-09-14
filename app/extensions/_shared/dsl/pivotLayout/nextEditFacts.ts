@@ -36,7 +36,9 @@ import type { FieldNode } from "./ast";
 import { splitBiFieldKey } from "../../lib/biFieldKey";
 import {
   normalizeRef,
+  roleOfSuggestion,
   suggestNextEdits,
+  type NextEditRole,
   type DesignQueryModel,
   type EditOp,
   type FactField,
@@ -461,12 +463,24 @@ export function rulesChips(
   compile: ((dsl: string) => CompileVerdict) | null,
   dismissed: ReadonlySet<string> = new Set(),
   max: number = MAX_CHIPS,
+  /**
+   * Which roles may be returned. Defaults to both.
+   *
+   * The GHOST TEXT passes `["correction"]`. Owner decision 2026-09-14: an
+   * exploration is an idea you can ignore, and a chip lets you ignore it, while
+   * text at the cursor does not. The inline surface also asks for up to EIGHT
+   * suggestions against the row's three, so letting the family through there
+   * would put the most speculative material in the most intrusive place at
+   * nearly triple the volume.
+   */
+  roles: ReadonlyArray<NextEditRole> = ["correction", "exploration"],
 ): NextEditChip[] {
   if (!text.trim()) return [];
   const facts = factsFromDsl(text, tableNames);
   const before = compile ? compile(text) : null;
   const chips: NextEditChip[] = [];
   for (const suggestion of suggestNextEdits(facts, model)) {
+    if (!roles.includes(roleOfSuggestion(suggestion))) continue;
     if (dismissed.has(suggestion.id)) continue;
     const applied = applyEditOp(text, suggestion.op);
     if (applied === text) continue;

@@ -41,7 +41,16 @@ export function modelInfoFromFixture(bundle) {
     tables,
     measures,
     lookupColumns: [],
-    hierarchies: [],
+    // CARRIED THROUGH, not blanked. This was hardcoded `[]` while
+    // `sales_star.json` declares a real "Region to Country" hierarchy, so every
+    // rule and every eval that reads a drill-down path was silently untestable
+    // — the code looked exercised and was not. Both the corpus gate and
+    // `run-next-edit-eval.mjs` derive their model from here.
+    hierarchies: (model.hierarchies ?? []).map((h) => ({
+      name: h.name,
+      table: h.table,
+      levels: (h.levels ?? []).map((l) => ({ column: l.column })),
+    })),
     calculationGroups: [],
     perspectives: [],
     cultures: [],

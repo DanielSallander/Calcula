@@ -13,16 +13,21 @@
 //          good answer looks like.
 
 import {
+  openTaskPane,
   registerAiCompletionProvider,
+  showTaskPaneContainer,
   type AiCompletionProvider,
   type AiCompletionRequest,
   type AiCompletionResult,
+  type AiModelOption,
 } from "@api";
 
 import { aiChatBackend } from "./aiChatBackend";
 import type { ChatBlock, ChatResponse } from "./aiTypes";
+import { decodeModelKey, encodeModelKey, listReadyModels } from "./modelCatalog";
+import { AI_CHAT_LLM_PANE_ID } from "./paneIds";
 import { readProfile } from "./probeRunner";
-import { isComplete, readSelection } from "./providerSelection";
+import { isComplete, readSelection, writeSelection } from "./providerSelection";
 
 /** Default reply budget. Generous enough that truncation is rare, small enough to stay quick. */
 const DEFAULT_MAX_TOKENS = 600;
@@ -103,6 +108,34 @@ export function buildCompletionProvider(): AiCompletionProvider {
 
     modelLabel(): string {
       return readSelection().model || "";
+    },
+
+    async listModels(): Promise<readonly AiModelOption[]> {
+      return listReadyModels();
+    },
+
+    selectedModelKey(): string {
+      const sel = readSelection();
+      if (!isComplete(sel)) return "";
+      return encodeModelKey({
+        providerId: sel.providerId,
+        model: sel.model,
+        baseUrl: sel.baseUrl,
+      });
+    },
+
+    selectModel(key: string): void {
+      // `decodeModelKey` throws on a key this module did not issue, and the
+      // throw is deliberately not caught: a selection that quietly failed is
+      // indistinguishable from one that worked until the next request errors
+      // against a provider the user never chose.
+      const entry = decodeModelKey(key);
+      writeSelection(entry);
+    },
+
+    openModelPicker(): void {
+      openTaskPane(AI_CHAT_LLM_PANE_ID);
+      showTaskPaneContainer();
     },
 
     isLocal(): boolean {

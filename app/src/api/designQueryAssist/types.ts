@@ -58,9 +58,34 @@ export interface DesignStrategySummary {
 }
 
 /** A model as the assistant needs it. `BiPivotModelInfo` satisfies this. */
+/**
+ * One drill-down path on a model table, coarsest level first.
+ *
+ * A deliberately narrower mirror of the pivot's `BiHierarchyMeta`: the rules
+ * need the ORDER of the levels and nothing else, and copying `raggedBehavior`
+ * into a type the rules never read would invite a reader to think it mattered
+ * here. `BiPivotModelInfo` is structurally assignable to `DesignQueryModel`
+ * with this field, which is how every caller already passes its model through.
+ */
+export interface DesignQueryHierarchy {
+  name: string;
+  table: string;
+  levels: Array<{ column: string }>;
+}
+
 export interface DesignQueryModel {
   tables: DesignQueryTable[];
   measures: DesignQueryMeasure[];
+  /**
+   * Drill-down paths, when the host supplies them.
+   *
+   * OPTIONAL on purpose, and the rules must behave with it absent: a range
+   * pivot has no model at all, and `tests/eval/lib/modelFixture.mjs` derived
+   * `hierarchies: []` for every fixture until this was noticed — so a rule that
+   * assumed the field was populated would have been untestable AND silently
+   * dead against the eval corpus.
+   */
+  hierarchies?: DesignQueryHierarchy[];
   strategy?: DesignStrategySummary | null;
 }
 

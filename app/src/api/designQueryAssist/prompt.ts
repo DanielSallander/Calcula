@@ -176,6 +176,20 @@ export interface UserPromptParts {
   readonly examples?: boolean;
   /** The reply format the examples are shown in. Defaults to the schema path's JSON. */
   readonly format?: DesignQueryReplyFormat;
+  /**
+   * The turn this one refines: what was asked, and the query that came back.
+   *
+   * WHY IT IS THE QUERY AND NOT THE WHOLE TRANSCRIPT. "Make it monthly" is
+   * meaningless on its own and the model would answer it by inventing a whole
+   * report, but what it actually needs is one thing — the query it is editing.
+   * Sending every previous turn would grow the prompt without bound, and worse,
+   * would re-send abandoned drafts as though they were still wanted.
+   *
+   * Rendered as a block the model is told to MODIFY, because a query shown
+   * without that instruction is read as another example to imitate — the same
+   * failure that made every reply open with an unasked LAYOUT line.
+   */
+  readonly prior?: { readonly intent: string; readonly dsl: string };
 }
 
 /**
@@ -314,6 +328,20 @@ export function buildUserPrompt(parts: UserPromptParts): string {
   if (parts.examples !== false) {
     const examples = buildExamples(c, parts.format ?? "json");
     if (examples.length) blocks.push(`Examples:\n${examples.join("\n")}`);
+  }
+
+  // The prior turn goes AFTER the examples and BEFORE the request, so the last
+  // thing the model reads before the ask is the query it is editing. It is
+  // labelled as the current query and the request is labelled as a change to
+  // it, because an unlabelled query in this position is read as one more
+  // example to imitate.
+  if (parts.prior && parts.prior.dsl.trim() !== "") {
+    blocks.push(
+      `The person already asked for: ${parts.prior.intent.trim()}\n` +
+        `That produced this query, which is the one to CHANGE:\n${parts.prior.dsl.trim()}`,
+    );
+    blocks.push(`Change it so that: ${parts.intent.trim()}\nReply with the COMPLETE changed query, not just the part that changed.`);
+    return blocks.join("\n\n");
   }
 
   blocks.push(`Request: ${parts.intent.trim()}`);

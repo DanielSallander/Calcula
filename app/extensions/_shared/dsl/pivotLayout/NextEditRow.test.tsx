@@ -70,11 +70,27 @@ afterEach(async () => {
 });
 
 describe("NextEditRow", () => {
-  it("renders nothing for empty text or a query with nothing to add", async () => {
+  it("renders nothing for empty text", async () => {
+    // An empty editor has no query to reason about. The describe box is the
+    // affordance there, not a row of suggestions about nothing.
     await render("");
     expect(container.querySelector("[data-testid='next-edit-row']")).toBeNull();
+  });
+
+  it("DOES render for a complete, correct query — explorations (2026-09-14)", async () => {
+    // This assertion is the reverse of what it was, and deliberately so. The
+    // row used to be silent here, which was measured: 0 chips across 52
+    // complete correct corpus queries, unchanged by stripping the strategy.
+    // Every rule was corrective, so a finished query produced nothing — the
+    // complaint that prompted the exploration family.
     await render("ROWS: Product.Category\nCOLUMNS: Customer.Segment\nVALUES: [Revenue]");
-    expect(container.querySelector("[data-testid='next-edit-row']")).toBeNull();
+    expect(container.querySelector("[data-testid='next-edit-row']")).not.toBeNull();
+    // ...and what it offers is an exploration, not a correction: nothing here
+    // is wrong.
+    expect(chips().length).toBeGreaterThan(0);
+    for (const chip of chips()) {
+      expect(chip.getAttribute("data-role")).toBe("exploration");
+    }
   });
 
   it("offers the strategy's breakdown for a bare measure, with its reason", async () => {
@@ -309,10 +325,30 @@ describe("the model's chip (Milestone B)", () => {
 
   it("accepting it adds the clause in canonical position", async () => {
     provider({ reply: 'FILTERS: Geography.Region = ("Europe")' });
-    await ask("ROWS: Product.Category\nVALUES: [Revenue]\nLAYOUT: tabular");
+    const text = "ROWS: Product.Category\nVALUES: [Revenue]\nLAYOUT: tabular";
+    // ROOM HAS TO BE MADE FOR IT NOW, and that is a real change rather than a
+    // test inconvenience. The row asks the model only when the rules left a
+    // free slot (`current.length >= MAX_CHIPS` returns early), and since
+    // 2026-09-14 explorations fill the row on precisely the finished queries
+    // Milestone B was aimed at — so in practice the model's chip no longer
+    // appears there. That is the intended ordering (a rule cites the document,
+    // a model says a clause seemed likely) and it costs little, since the chip
+    // is off by default on a measurement of 0 of 80 next clauses correct. It is
+    // pinned here so the day someone turns it on and sees nothing, this test
+    // says why.
+    const dismissed = new Set(
+      suggestNextEdits(
+        factsFromDsl(text, model.tables.map((t) => t.name)),
+        model as never,
+      ).map((s) => s.id),
+    );
+    await ask(text, { dismissed });
     await settle();
-    const accept = [...container.querySelectorAll("[data-testid='next-edit-accept']")].pop()!;
-    await click(accept);
+    // THE MODEL'S chip specifically. "the last one" used to identify it, because
+    // a finished query produced no rule chips at all; explorations now sit
+    // beside it, so the selector has to name what it means.
+    const modelChip = container.querySelector("[data-source='model'] [data-testid='next-edit-accept']")!;
+    await click(modelChip);
     expect(onApply).toHaveBeenCalledWith(
       'ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Geography.Region = ("Europe")\nLAYOUT: tabular',
     );
@@ -351,7 +387,10 @@ describe("the model's chip (Milestone B)", () => {
     provider({ reply: "   " });
     await ask("ROWS: Product.Category\nVALUES: [Revenue]");
     await settle();
-    expect(accepts().some((l) => l?.startsWith("Add "))).toBe(false);
+    // Scoped to the MODEL's chip. The row itself is no longer silent on a
+    // finished query — explorations are exactly what it says there now — so
+    // "no chip says Add" stopped being a statement about the model at all.
+    expect(container.querySelector("[data-source='model']")).toBeNull();
   });
 
   it("is OFF unless a caller asks for it, and the rules' chips are unaffected", async () => {
