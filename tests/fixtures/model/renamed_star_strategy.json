@@ -1,0 +1,530 @@
+{
+  "version": 1,
+  "model": {
+    "defaultTimeAxis": "Date[Date]",
+    "fiscalYearStart": "01-01",
+    "priority": [
+      "NetValue",
+      "SurplusPct",
+      "Surplus",
+      "Spend"
+    ]
+  },
+  "measures": {
+    "NetValue": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "currency",
+      "target": {
+        "type": "literal",
+        "value": 1500000
+      },
+      "materiality": {
+        "type": "absolute",
+        "value": 15000
+      },
+      "cadence": "monthly",
+      "priority": 1,
+      "analysisDimensions": [
+        "Item[Family]",
+        "Account[Tier]",
+        "Territory[Zone]"
+      ],
+      "neverSliceBy": [
+        "Item[Name]"
+      ],
+      "context": "Gross amount, before freight and before the annual rebate accrual.",
+      "reviewed": true
+    },
+    "Spend": {
+      "direction": "lowerIsBetter",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "currency",
+      "materiality": {
+        "type": "absolute",
+        "value": 10000
+      },
+      "cadence": "monthly",
+      "priority": 4,
+      "analysisDimensions": [
+        "Item[Family]",
+        "Account[Tier]"
+      ],
+      "context": "Spend of goods sold. Lower is better everywhere except where a rule says otherwise.",
+      "reviewed": true
+    },
+    "Surplus": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "currency",
+      "materiality": {
+        "type": "absolute",
+        "value": 8000
+      },
+      "cadence": "monthly",
+      "priority": 3,
+      "analysisDimensions": [
+        "Item[Family]",
+        "Item[Name]",
+        "Territory[Zone]"
+      ],
+      "context": "NetValue less cost. Slicing by Item[Name] is allowed here and forbidden on NetValue — that asymmetry is the positive control for the never-slice-by guard.",
+      "reviewed": true
+    },
+    "SurplusPct": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "nonAdditive",
+        "byDimension": {
+          "Date": "lastValue"
+        }
+      },
+      "unit": "percent",
+      "target": {
+        "type": "kpi"
+      },
+      "materiality": {
+        "type": "absolute",
+        "value": 0.005
+      },
+      "cadence": "monthly",
+      "priority": 2,
+      "analysisDimensions": [
+        "Item[Family]",
+        "Account[Tier]",
+        "Territory[Zone]"
+      ],
+      "neverSliceBy": [
+        "Account[Name]"
+      ],
+      "context": "A ratio: it never carries a contribution share. Q1 reads structurally weak because the annual price reset lands in January.",
+      "reviewed": true
+    },
+    "Units": {
+      "direction": "targetBand",
+      "aggregation": {
+        "default": "additive",
+        "byDimension": {}
+      },
+      "unit": "count",
+      "target": {
+        "type": "band",
+        "low": 90000,
+        "high": 140000
+      },
+      "materiality": {
+        "type": "relative",
+        "value": 0.03
+      },
+      "cadence": "monthly",
+      "priority": 5,
+      "analysisDimensions": [
+        "Item[Family]",
+        "Territory[Zone]",
+        "Line[LineName]"
+      ],
+      "context": "Units shipped. The band is warehouse capacity, not a sales goal: both ends are bad.",
+      "reviewed": true
+    },
+    "Accounts": {
+      "direction": "higherIsBetter",
+      "aggregation": {
+        "default": "nonAdditive",
+        "byDimension": {
+          "Date": "lastValue"
+        }
+      },
+      "unit": "count",
+      "materiality": {
+        "type": "relative",
+        "value": 0.1
+      },
+      "cadence": "monthly",
+      "priority": 6,
+      "analysisDimensions": [
+        "Account[Tier]",
+        "Territory[Zone]"
+      ],
+      "context": "A distinct count: it does not sum across periods or across segments.",
+      "reviewed": false
+    }
+  },
+  "tables": {
+    "Ledger": {
+      "kind": "fact",
+      "columns": {
+        "Date": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "ItemKey": {
+          "role": "key"
+        },
+        "AccountKey": {
+          "role": "key"
+        },
+        "TerritoryKey": {
+          "role": "key"
+        },
+        "Value": {
+          "role": "ignore"
+        },
+        "Spend": {
+          "role": "ignore"
+        },
+        "Units": {
+          "role": "ignore"
+        }
+      },
+      "reviewed": true
+    },
+    "Item": {
+      "kind": "dimension",
+      "labelColumn": "Name",
+      "columns": {
+        "ItemKey": {
+          "role": "key"
+        },
+        "Family": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "LineKey": {
+          "role": "key"
+        },
+        "Name": {
+          "role": "analysis",
+          "priority": 2
+        }
+      },
+      "reviewed": true
+    },
+    "Line": {
+      "kind": "dimension",
+      "labelColumn": "LineName",
+      "columns": {
+        "LineKey": {
+          "role": "key"
+        },
+        "LineName": {
+          "role": "analysis",
+          "priority": 1
+        }
+      },
+      "reviewed": true
+    },
+    "Account": {
+      "kind": "dimension",
+      "labelColumn": "Name",
+      "columns": {
+        "AccountKey": {
+          "role": "key"
+        },
+        "Tier": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "Name": {
+          "role": "label"
+        }
+      },
+      "reviewed": true
+    },
+    "Territory": {
+      "kind": "dimension",
+      "labelColumn": "Market",
+      "columns": {
+        "TerritoryKey": {
+          "role": "key"
+        },
+        "Zone": {
+          "role": "hierarchy",
+          "priority": 1
+        },
+        "Market": {
+          "role": "hierarchy",
+          "priority": 2
+        }
+      },
+      "hierarchies": [
+        [
+          "Zone",
+          "Market"
+        ]
+      ],
+      "reviewed": true
+    },
+    "Date": {
+      "kind": "calendar",
+      "labelColumn": "MonthName",
+      "columns": {
+        "Date": {
+          "role": "analysis",
+          "priority": 1
+        },
+        "Year": {
+          "role": "analysis",
+          "priority": 2
+        },
+        "Month": {
+          "role": "analysis",
+          "priority": 3
+        },
+        "MonthName": {
+          "role": "analysis",
+          "priority": 4
+        },
+        "MonthNumber": {
+          "role": "ignore"
+        }
+      },
+      "reviewed": true
+    }
+  },
+  "rules": [
+    {
+      "id": "gadgets-launch-window",
+      "measure": "NetValue",
+      "scope": {
+        "Item[Family]": [
+          "Gadgets"
+        ]
+      },
+      "set": {
+        "materiality": {
+          "type": "absolute",
+          "value": 25000
+        }
+      },
+      "note": "Gadgets ships in launch waves, so month-to-month swings under 25k are the release calendar, not news."
+    },
+    {
+      "id": "nordics-margin-floor",
+      "measure": "SurplusPct",
+      "scope": {
+        "Territory[Zone]": [
+          "Nordics"
+        ],
+        "Date[Date]": {
+          "from": "2025-01-01"
+        }
+      },
+      "set": {
+        "target": {
+          "type": "literal",
+          "value": 0.38
+        },
+        "materiality": {
+          "type": "absolute",
+          "value": 0.002
+        }
+      },
+      "note": "The Nordics contract floor took effect in 2025 and is stricter than the model-wide KPI target."
+    },
+    {
+      "id": "public-sector-cost-buildout",
+      "measure": "Spend",
+      "scope": {
+        "Account[Tier]": [
+          "Public Sector"
+        ]
+      },
+      "set": {
+        "direction": "higherIsBetter"
+      },
+      "note": "Public Sector is in deliberate build-out: spend going up is the plan being executed."
+    },
+    {
+      "id": "public-sector-nordics-cost-hold",
+      "measure": "Spend",
+      "scope": {
+        "Account[Tier]": [
+          "Public Sector"
+        ],
+        "Territory[Zone]": [
+          "Nordics"
+        ]
+      },
+      "set": {
+        "direction": "lowerIsBetter"
+      },
+      "note": "The Nordics public-sector framework is already won, so the build-out exemption does not apply there. Two constrained columns beat the one-column build-out rule."
+    },
+    {
+      "id": "enterprise-margin-push",
+      "measure": "Surplus",
+      "scope": {
+        "Account[Tier]": [
+          "Enterprise"
+        ]
+      },
+      "set": {
+        "rankWeight": 1.5
+      },
+      "note": "Enterprise margin is the board metric this year; rank its facts above the rest."
+    },
+    {
+      "id": "smb-margin-watch",
+      "measure": "Surplus",
+      "scope": {
+        "Account[Tier]": [
+          "SMB"
+        ]
+      },
+      "set": {
+        "rankWeight": 1.2
+      },
+      "note": "Disjoint from enterprise-margin-push: same measure, same attribute, same column, non-overlapping members. Equal specificity is only a conflict when the scopes intersect."
+    },
+    {
+      "id": "dach-quantity-rampdown",
+      "measure": "Units",
+      "scope": {
+        "Territory[Zone]": [
+          "DACH"
+        ]
+      },
+      "set": {
+        "direction": "lowerIsBetter"
+      },
+      "note": "DACH is being deliberately wound down to free warehouse capacity. Sets direction ONLY — materiality and the capacity band stay inherited."
+    }
+  ],
+  "periods": [
+    {
+      "id": "summer-shutdown-2025",
+      "measure": "Units",
+      "scope": {
+        "Date[Date]": {
+          "from": "2025-07-01",
+          "to": "2025-08-31"
+        }
+      },
+      "note": "Volumes are low because the Malmo line was down for the annual rebuild."
+    }
+  ],
+  "tests": [
+    {
+      "measure": "Spend",
+      "scope": {
+        "Account[Tier]": [
+          "Public Sector"
+        ],
+        "Territory[Zone]": [
+          "Benelux"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "favourable",
+        "decidedBy": "public-sector-cost-buildout"
+      }
+    },
+    {
+      "measure": "Spend",
+      "scope": {
+        "Account[Tier]": [
+          "Public Sector"
+        ],
+        "Territory[Zone]": [
+          "Nordics"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "unfavourable",
+        "decidedBy": "public-sector-nordics-cost-hold"
+      }
+    },
+    {
+      "measure": "Spend",
+      "scope": {
+        "Account[Tier]": [
+          "Public Sector"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "suppressed"
+      }
+    },
+    {
+      "measure": "Spend",
+      "scope": {
+        "Account[Tier]": [
+          "SMB"
+        ],
+        "Territory[Zone]": [
+          "Benelux"
+        ]
+      },
+      "given": {
+        "delta": 45000,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "unfavourable"
+      }
+    },
+    {
+      "measure": "Spend",
+      "scope": {
+        "Account[Tier]": [
+          "SMB"
+        ],
+        "Territory[Zone]": [
+          "Benelux"
+        ]
+      },
+      "given": {
+        "delta": 900,
+        "baseline": 600000
+      },
+      "expect": {
+        "status": "immaterial"
+      }
+    },
+    {
+      "measure": "NetValue",
+      "scope": {},
+      "given": {
+        "delta": -120000,
+        "value": 1280000,
+        "baseline": 1400000
+      },
+      "expect": {
+        "status": "unfavourable"
+      }
+    },
+    {
+      "measure": "NetValue",
+      "scope": {},
+      "given": {
+        "delta": 5000,
+        "value": 1405000,
+        "baseline": 1400000
+      },
+      "expect": {
+        "status": "unfavourable"
+      }
+    }
+  ]
+}
