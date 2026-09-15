@@ -107,27 +107,6 @@
       "distractor": "ROWS: Account.Name\nVALUES: [Accounts]"
     },
     {
-      "id": "quantity-by-category-consumer-only",
-      "lang": "en",
-      "tags": [
-        "filter"
-      ],
-      "intent": "units sold by family for the Consumer tier only",
-      "reference": "ROWS: Item.Family\nVALUES: [Units]\nFILTERS: Account.Tier = (\"Consumer\")",
-      "distractor": "ROWS: Item.Family, Account.Tier\nVALUES: [Units]"
-    },
-    {
-      "id": "revenue-by-region-excluding-europe",
-      "lang": "en",
-      "tags": [
-        "filter",
-        "exclude"
-      ],
-      "intent": "net value by zone excluding Europe",
-      "reference": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Territory.Zone NOT IN (\"Europe\")",
-      "distractor": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Territory.Zone = (\"Europe\")"
-    },
-    {
       "id": "share-of-revenue-by-category",
       "lang": "en",
       "tags": [
@@ -332,17 +311,6 @@
       "distractor": "ROWS: Territory.Market\nVALUES: count(Ledger.AccountKey)"
     },
     {
-      "id": "revenue-and-quantity-by-segment-europe",
-      "lang": "en",
-      "tags": [
-        "filter",
-        "two-measures"
-      ],
-      "intent": "net value and units by tier in Europe only",
-      "reference": "ROWS: Account.Tier\nVALUES: [NetValue], [Units]\nFILTERS: Territory.Zone = (\"Europe\")",
-      "distractor": "ROWS: Account.Tier\nVALUES: [NetValue], [Units]\nFILTERS: Territory.Market = (\"Europe\")"
-    },
-    {
       "id": "categories-sorted-by-name",
       "lang": "en",
       "tags": [
@@ -453,6 +421,1083 @@
       "intent": "units by account tier, without any totals",
       "reference": "ROWS: Account.Tier\nVALUES: [Units]\nLAYOUT: no-grand-totals",
       "distractor": "ROWS: Account.Tier\nVALUES: [Units]"
+    },
+    {
+      "id": "five-biggest-countries-listed-alphabetically",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "top"
+      ],
+      "intent": "our five biggest markets by net value, but printed in alphabetical order rather than by size",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nSORT: Territory.Market ASC\nTOP 5 BY [NetValue]",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 5 BY [NetValue]"
+    },
+    {
+      "id": "countries-reverse-alphabetical",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "sort"
+      ],
+      "intent": "the markets in reverse alphabetical order, each with its net value",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nSORT: Territory.Market DESC",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nSORT: [NetValue] DESC"
+    },
+    {
+      "id": "cost-and-margin-by-segment-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "two-measures"
+      ],
+      "intent": "I want spend and surplus for every account tier, with the tiers coming out in name order",
+      "reference": "ROWS: Account.Tier\nVALUES: [Spend], [Surplus]\nSORT: Account.Tier ASC",
+      "distractor": "ROWS: Account.Tier\nVALUES: [Spend], [Surplus]\nSORT: [Spend] ASC"
+    },
+    {
+      "id": "revenue-by-year-oldest-first",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "time"
+      ],
+      "intent": "net value per year with the oldest year at the top",
+      "reference": "ROWS: Date.Year\nVALUES: [NetValue]\nSORT: Date.Year ASC",
+      "distractor": "ROWS: Date.Year\nVALUES: [NetValue]\nSORT: Date.Year DESC"
+    },
+    {
+      "id": "revenue-by-month-newest-first",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "time"
+      ],
+      "intent": "net value per month with the months written as 2025-03, most recent month at the top",
+      "reference": "ROWS: Date.Month\nVALUES: [NetValue]\nSORT: Date.Month DESC",
+      "distractor": "ROWS: Date.Month\nVALUES: [NetValue]\nSORT: Date.Month ASC"
+    },
+    {
+      "id": "revenue-by-year-and-month-newest-year-first",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "two-levels",
+        "time"
+      ],
+      "intent": "net value by year and month name, most recent year first",
+      "reference": "ROWS: Date.Year, Date.MonthName\nVALUES: [NetValue]\nSORT: Date.Year DESC",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [NetValue]\nSORT: Date.MonthName DESC",
+      "alternatives": [
+        "ROWS: Date.Year, Date.Month\nVALUES: [NetValue]\nSORT: Date.Year DESC"
+      ]
+    },
+    {
+      "id": "revenue-by-month-name-2024-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "filter",
+        "time"
+      ],
+      "intent": "net value for each month name in 2024, months listed alphabetically so it lines up with our export",
+      "reference": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")\nSORT: Date.MonthName ASC",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")\nSORT: [NetValue] ASC"
+    },
+    {
+      "id": "margin-by-country-nordics-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "filter"
+      ],
+      "intent": "surplus by market, just the Nordics, markets in alphabetical order",
+      "reference": "ROWS: Territory.Market\nVALUES: [Surplus]\nFILTERS: Territory.Zone = (\"Nordics\")\nSORT: Territory.Market ASC",
+      "distractor": "ROWS: Territory.Market\nVALUES: [Surplus]\nFILTERS: Territory.Zone = (\"Nordics\")\nSORT: Territory.Zone ASC",
+      "alternatives": [
+        "ROWS: Territory.Market\nVALUES: [Surplus]\nFILTERS: Territory.Market = (\"Sweden\", \"Denmark\")\nSORT: Territory.Market ASC"
+      ]
+    },
+    {
+      "id": "category-and-subcategory-both-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "two-levels"
+      ],
+      "intent": "net value by family and then subcategory, with both levels in alphabetical order",
+      "reference": "ROWS: Item.Family, Line.LineName\nVALUES: [NetValue]\nSORT: Item.Family ASC, Line.LineName ASC",
+      "distractor": "ROWS: Item.Family, Line.LineName\nVALUES: [NetValue]\nSORT: Item.Family ASC"
+    },
+    {
+      "id": "revenue-and-quantity-by-region-reverse-no-totals",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "layout",
+        "two-measures"
+      ],
+      "intent": "net value and units per zone, zone names starting at the end of the alphabet, and without any totals",
+      "reference": "ROWS: Territory.Zone\nVALUES: [NetValue], [Units]\nSORT: Territory.Zone DESC\nLAYOUT: no-grand-totals",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [NetValue], [Units]\nBOTTOM 4 BY [NetValue]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "bottom-5-subcategories-by-revenue",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "the five subcategories bringing in the least net value",
+      "reference": "ROWS: Line.LineName\nVALUES: [NetValue]\nBOTTOM 5 BY [NetValue]",
+      "distractor": "ROWS: Line.LineName\nVALUES: [NetValue]\nTOP 5 BY [NetValue]"
+    },
+    {
+      "id": "worst-segment-by-margin-percentage",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "show me only our worst account tier for surplus percentage",
+      "reference": "ROWS: Account.Tier\nVALUES: [SurplusPct]\nBOTTOM 1 BY [SurplusPct]",
+      "distractor": "ROWS: Account.Tier\nVALUES: [SurplusPct]\nTOP 1 BY [SurplusPct]"
+    },
+    {
+      "id": "bottom-5-countries-by-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "which five markets move the fewest units",
+      "reference": "ROWS: Territory.Market\nVALUES: [Units]\nBOTTOM 5 BY [Units]",
+      "distractor": "ROWS: Territory.Market\nVALUES: [Units]\nSORT: Territory.Market ASC"
+    },
+    {
+      "id": "bottom-3-months-by-revenue-2025",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "filter",
+        "time"
+      ],
+      "intent": "the three weakest months for net value in 2025",
+      "reference": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\")\nBOTTOM 3 BY [NetValue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\")\nTOP 3 BY [NetValue]",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\")\nBOTTOM 3 BY [NetValue]"
+      ]
+    },
+    {
+      "id": "bottom-3-categories-by-quantity-nordics",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "filter"
+      ],
+      "intent": "in the Nordics, which three item families sell the fewest units",
+      "reference": "ROWS: Item.Family\nVALUES: [Units]\nFILTERS: Territory.Zone = (\"Nordics\")\nBOTTOM 3 BY [Units]",
+      "distractor": "ROWS: Item.Family\nVALUES: [Units]\nFILTERS: Territory.Zone = (\"Nordics\")\nTOP 3 BY [Units]"
+    },
+    {
+      "id": "bottom-3-subcategories-by-margin-with-revenue",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "two-measures"
+      ],
+      "intent": "the three subcategories with the smallest surplus, and show their net value next to it",
+      "reference": "ROWS: Line.LineName\nVALUES: [Surplus], [NetValue]\nBOTTOM 3 BY [Surplus]",
+      "distractor": "ROWS: Line.LineName\nVALUES: [Surplus], [NetValue]\nBOTTOM 3 BY [NetValue]",
+      "alternatives": [
+        "ROWS: Line.LineName\nVALUES: [NetValue], [Surplus]\nBOTTOM 3 BY [Surplus]"
+      ]
+    },
+    {
+      "id": "bottom-2-segments-by-customers",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "the two tiers we have the fewest accounts in",
+      "reference": "ROWS: Account.Tier\nVALUES: [Accounts]\nBOTTOM 2 BY [Accounts]",
+      "distractor": "ROWS: Account.Tier\nVALUES: [Accounts]\nTOP 2 BY [Accounts]"
+    },
+    {
+      "id": "worst-country-by-margin",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "I want to see the single market where we make the least surplus",
+      "reference": "ROWS: Territory.Market\nVALUES: [Surplus]\nBOTTOM 1 BY [Surplus]",
+      "distractor": "ROWS: Territory.Market\nVALUES: [Surplus]\nSORT: [Surplus] ASC"
+    },
+    {
+      "id": "bottom-2-regions-by-revenue-2024",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "filter",
+        "time"
+      ],
+      "intent": "which two zones were our weakest on net value in 2024",
+      "reference": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")\nBOTTOM 2 BY [NetValue]",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")\nTOP 2 BY [NetValue]"
+    },
+    {
+      "id": "bottom-4-months-by-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "time"
+      ],
+      "intent": "taking both years together, which four months of the year are quietest for units shipped",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Units]\nBOTTOM 4 BY [Units]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Units]\nSORT: Date.MonthName ASC"
+    },
+    {
+      "id": "layout-tabular-category-subcategory",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "show me net value by family and subcategory as a plain flat table - each of the two levels in its own column, nothing indented and no heading rows in between",
+      "reference": "ROWS: Item.Family, Line.LineName\nVALUES: [NetValue]\nLAYOUT: tabular",
+      "distractor": "ROWS: Item.Family, Line.LineName\nVALUES: [NetValue]"
+    },
+    {
+      "id": "layout-outline-revenue-region-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "break net value down by zone and market, each of them in its own column, but I want the zone name sitting on a line of its own above its markets rather than sharing the first market's row",
+      "reference": "ROWS: Territory.Zone, Territory.Market\nVALUES: [NetValue]\nLAYOUT: outline",
+      "distractor": "ROWS: Territory.Zone, Territory.Market\nVALUES: [NetValue]\nLAYOUT: tabular"
+    },
+    {
+      "id": "layout-no-totals-top5-countries",
+      "lang": "en",
+      "tags": [
+        "top",
+        "layout"
+      ],
+      "intent": "the five markets with the biggest net value, and leave the total line off the bottom",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 5 BY [NetValue]\nLAYOUT: no-grand-totals",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 5 BY [NetValue]",
+      "alternatives": [
+        "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 5 BY [NetValue]\nLAYOUT: no-row-totals"
+      ]
+    },
+    {
+      "id": "layout-no-row-totals-country-by-year",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "columns",
+        "time",
+        "layout"
+      ],
+      "intent": "net value for each market with a column for each year, and leave off the total row at the very bottom of the table",
+      "reference": "ROWS: Territory.Market\nCOLUMNS: Date.Year\nVALUES: [NetValue]\nLAYOUT: no-row-totals",
+      "distractor": "ROWS: Territory.Market\nCOLUMNS: Date.Year\nVALUES: [NetValue]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "layout-tabular-no-column-totals-segment-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "columns",
+        "layout"
+      ],
+      "intent": "spend for every account tier with the item families running across the top - flat table style, and drop the total column on the far right",
+      "reference": "ROWS: Account.Tier\nCOLUMNS: Item.Family\nVALUES: [Spend]\nLAYOUT: tabular, no-column-totals",
+      "distractor": "ROWS: Account.Tier\nCOLUMNS: Item.Family\nVALUES: [Spend]\nLAYOUT: tabular, no-row-totals"
+    },
+    {
+      "id": "layout-no-row-totals-keep-subtotals-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "units by tier and market - I still want each tier's own summary line, but drop the overall total at the foot of the table",
+      "reference": "ROWS: Account.Tier, Territory.Market\nVALUES: [Units]\nLAYOUT: no-row-totals",
+      "distractor": "ROWS: Account.Tier, Territory.Market\nVALUES: [Units]\nLAYOUT: subtotals-off",
+      "alternatives": [
+        "ROWS: Account.Tier, Territory.Market\nVALUES: [Units]\nLAYOUT: no-grand-totals"
+      ]
+    },
+    {
+      "id": "layout-no-column-totals-margin-segment-year",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "columns",
+        "time",
+        "layout"
+      ],
+      "intent": "I'd like surplus by account tier with the years across the top. The summary line at the foot is useful, but that extra total column on the right-hand edge is just noise - get rid of it.",
+      "reference": "ROWS: Account.Tier\nCOLUMNS: Date.Year\nVALUES: [Surplus]\nLAYOUT: no-column-totals",
+      "distractor": "ROWS: Account.Tier\nCOLUMNS: Date.Year\nVALUES: [Surplus]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "layout-no-totals-no-subtotals-margin-category-region",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "surplus by family and zone with no totals anywhere - nothing at the foot of the table, and don't roll each family up into its own line either",
+      "reference": "ROWS: Item.Family, Territory.Zone\nVALUES: [Surplus]\nLAYOUT: no-grand-totals, subtotals-off",
+      "distractor": "ROWS: Item.Family, Territory.Zone\nVALUES: [Surplus]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "layout-tabular-subtotals-off-customers-region-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "a flat uninterrupted list of how many accounts we have by zone and market, with no summary lines breaking up the zones",
+      "reference": "ROWS: Territory.Zone, Territory.Market\nVALUES: [Accounts]\nLAYOUT: tabular, subtotals-off",
+      "distractor": "ROWS: Territory.Zone, Territory.Market\nVALUES: [Accounts]\nLAYOUT: tabular, no-grand-totals"
+    },
+    {
+      "id": "top-10-products-by-margin",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "two-measures"
+      ],
+      "intent": "which ten items earn us the most surplus, and what do they spend us",
+      "reference": "ROWS: Item.Name\nVALUES: [Surplus], [Spend]\nTOP 10 BY [Surplus]",
+      "distractor": "ROWS: Item.Name\nVALUES: [Surplus], [Spend]\nTOP 10 BY [Spend]"
+    },
+    {
+      "id": "top-5-countries-by-revenue-enterprise-only",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "filter"
+      ],
+      "intent": "our five strongest markets for net value, looking at Enterprise accounts alone",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nFILTERS: Account.Tier = (\"Enterprise\")\nTOP 5 BY [NetValue]",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nFILTERS: Account.Tier = (\"Enterprise\")\nTOP 10 BY [NetValue]"
+    },
+    {
+      "id": "top-3-subcategories-by-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "one-measure"
+      ],
+      "intent": "which three subcategories shift the most units",
+      "reference": "ROWS: Line.LineName\nVALUES: [Units]\nTOP 3 BY [Units]",
+      "distractor": "ROWS: Line.LineName\nVALUES: [Units]\nSORT: Line.LineName DESC"
+    },
+    {
+      "id": "biggest-single-month-of-2024",
+      "lang": "en",
+      "tags": [
+        "top",
+        "filter",
+        "time"
+      ],
+      "intent": "which single month of 2024 had the highest net value",
+      "reference": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")\nTOP 1 BY [NetValue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")\nTOP 1 BY [NetValue]"
+      ]
+    },
+    {
+      "id": "top-2-segments-by-marginpct",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "one-measure"
+      ],
+      "intent": "the two account tiers with the best surplus percentage",
+      "reference": "ROWS: Account.Tier\nVALUES: [SurplusPct]\nTOP 2 BY [SurplusPct]",
+      "distractor": "ROWS: Account.Tier\nVALUES: [Surplus]\nTOP 2 BY [Surplus]"
+    },
+    {
+      "id": "top-3-categories-by-revenue-regions-across",
+      "lang": "en",
+      "tags": [
+        "top",
+        "columns"
+      ],
+      "intent": "the three biggest families by net value, with each zone getting its own column",
+      "reference": "ROWS: Item.Family\nCOLUMNS: Territory.Zone\nVALUES: [NetValue]\nTOP 3 BY [NetValue]",
+      "distractor": "ROWS: Territory.Zone\nCOLUMNS: Item.Family\nVALUES: [NetValue]\nTOP 3 BY [NetValue]"
+    },
+    {
+      "id": "revenue-in-the-three-best-margin-countries",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "one-measure"
+      ],
+      "intent": "show me net value in the three markets where we make the most surplus",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 3 BY [Surplus]",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 3 BY [NetValue]",
+      "alternatives": [
+        "ROWS: Territory.Market\nVALUES: [NetValue], [Surplus]\nTOP 3 BY [Surplus]"
+      ]
+    },
+    {
+      "id": "top-3-subcategories-by-margin-outside-nordics",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "exclude",
+        "filter"
+      ],
+      "intent": "outside the Nordics, which three subcategories earn us the most surplus",
+      "reference": "ROWS: Line.LineName\nVALUES: [Surplus]\nFILTERS: Territory.Zone NOT IN (\"Nordics\")\nTOP 3 BY [Surplus]",
+      "distractor": "ROWS: Line.LineName\nVALUES: [Surplus]\nFILTERS: Territory.Zone = (\"Nordics\")\nTOP 3 BY [Surplus]"
+    },
+    {
+      "id": "category-against-segment-grid",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "one-measure"
+      ],
+      "intent": "a grid of family against tier, with net value in every cell",
+      "reference": "ROWS: Item.Family\nCOLUMNS: Account.Tier\nVALUES: [NetValue]",
+      "distractor": "ROWS: Item.Family, Account.Tier\nVALUES: [NetValue]",
+      "alternatives": [
+        "ROWS: Account.Tier\nCOLUMNS: Item.Family\nVALUES: [NetValue]"
+      ]
+    },
+    {
+      "id": "cost-and-margin-by-country-years-across",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time",
+        "two-measures"
+      ],
+      "intent": "spend and surplus for each market, with a separate column for each year",
+      "reference": "ROWS: Territory.Market\nCOLUMNS: Date.Year\nVALUES: [Spend], [Surplus]",
+      "distractor": "ROWS: Territory.Market\nVALUES: [Spend], [Surplus]\nLAYOUT: values-on-columns"
+    },
+    {
+      "id": "quantity-per-segment-months-across-2025",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time",
+        "filter"
+      ],
+      "intent": "units sold per tier during 2025, with the months across the top",
+      "reference": "ROWS: Account.Tier\nCOLUMNS: Date.MonthName\nVALUES: [Units]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Account.Tier, Date.Year\nCOLUMNS: Date.MonthName\nVALUES: [Units]",
+      "alternatives": [
+        "ROWS: Account.Tier\nCOLUMNS: Date.Month\nVALUES: [Units]\nFILTERS: Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "revenue-by-country-segment-across-share-of-whole",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "show-as"
+      ],
+      "intent": "net value for each market broken out by tier across the top, every cell as a share of the whole",
+      "reference": "ROWS: Territory.Market\nCOLUMNS: Account.Tier\nVALUES: [NetValue] [% of grand total]",
+      "distractor": "ROWS: Territory.Market\nCOLUMNS: Account.Tier\nVALUES: [NetValue] [% of column]"
+    },
+    {
+      "id": "revenue-by-region-then-country-one-list",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "unrequested-columns"
+      ],
+      "intent": "net value broken down by zone and then by market underneath it, all in one list",
+      "reference": "ROWS: Territory.Zone, Territory.Market\nVALUES: [NetValue]",
+      "distractor": "ROWS: Territory.Zone\nCOLUMNS: Territory.Market\nVALUES: [NetValue]"
+    },
+    {
+      "id": "margin-by-segment-then-category-one-list",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "unrequested-columns"
+      ],
+      "intent": "I want surplus in a single list by account tier, with each tier's item families beneath it",
+      "reference": "ROWS: Account.Tier, Item.Family\nVALUES: [Surplus]",
+      "distractor": "ROWS: Account.Tier\nCOLUMNS: Item.Family\nVALUES: [Surplus]"
+    },
+    {
+      "id": "revenue-per-year-column-per-region",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time"
+      ],
+      "intent": "I'd like to see net value for each year, with a column per zone",
+      "reference": "ROWS: Date.Year\nCOLUMNS: Territory.Zone\nVALUES: [NetValue]",
+      "distractor": "ROWS: Territory.Zone\nCOLUMNS: Date.Year\nVALUES: [NetValue]"
+    },
+    {
+      "id": "revenue-region-country-rows-years-across",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time",
+        "two-levels"
+      ],
+      "intent": "net value for each zone with its markets listed underneath it, and the years across the top",
+      "reference": "ROWS: Territory.Zone, Territory.Market\nCOLUMNS: Date.Year\nVALUES: [NetValue]",
+      "distractor": "ROWS: Territory.Zone, Territory.Market, Date.Year\nVALUES: [NetValue]"
+    },
+    {
+      "id": "quantity-by-category-enterprise-only",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter"
+      ],
+      "intent": "units sold by family, Enterprise accounts only",
+      "reference": "ROWS: Item.Family\nVALUES: [Units]\nFILTERS: Account.Tier = (\"Enterprise\")",
+      "distractor": "ROWS: Item.Family, Account.Tier\nVALUES: [Units]"
+    },
+    {
+      "id": "revenue-by-region-excluding-benelux",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "exclude"
+      ],
+      "intent": "net value by zone, leaving Benelux out",
+      "reference": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Territory.Zone NOT IN (\"Benelux\")",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Territory.Zone = (\"Benelux\")"
+    },
+    {
+      "id": "revenue-and-quantity-by-segment-nordics",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "two-measures"
+      ],
+      "intent": "net value and units by tier in the Nordics only",
+      "reference": "ROWS: Account.Tier\nVALUES: [NetValue], [Units]\nFILTERS: Territory.Zone = (\"Nordics\")",
+      "distractor": "ROWS: Account.Tier\nVALUES: [NetValue], [Units]\nFILTERS: Territory.Market = (\"Nordics\")"
+    },
+    {
+      "id": "revenue-by-country-widgets-and-gadgets",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "multi-value"
+      ],
+      "intent": "how much net value each market brings in from Widgets and Gadgets combined",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nFILTERS: Item.Family = (\"Widgets\", \"Gadgets\")",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nFILTERS: Item.Family = (\"Widgets\")"
+    },
+    {
+      "id": "margin-by-category-skipping-three-countries",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "exclude"
+      ],
+      "intent": "surplus by family, but skip Germany, Austria and Ireland",
+      "reference": "ROWS: Item.Family\nVALUES: [Surplus]\nFILTERS: Territory.Market NOT IN (\"Germany\", \"Austria\", \"Ireland\")",
+      "distractor": "ROWS: Item.Family\nVALUES: [Surplus]\nFILTERS: Territory.Market = (\"Germany\", \"Austria\", \"Ireland\")"
+    },
+    {
+      "id": "marginpct-by-subcategory-2025",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "time"
+      ],
+      "intent": "surplus percentage for each subcategory, 2025 only",
+      "reference": "ROWS: Line.LineName\nVALUES: [SurplusPct]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Line.LineName, Date.Year\nVALUES: [SurplusPct]"
+    },
+    {
+      "id": "revenue-by-region-in-december",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "time"
+      ],
+      "intent": "December net value for each zone",
+      "reference": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Date.MonthName = (\"December\")",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [NetValue]\nFILTERS: Date.Month = (\"2024-12\")"
+    },
+    {
+      "id": "revenue-by-category-2025-without-public-sector",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "exclude",
+        "time"
+      ],
+      "intent": "2025 net value by family, but don't count Public Sector accounts",
+      "reference": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\"), Account.Tier NOT IN (\"Public Sector\")",
+      "distractor": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\")\nFILTERS: Account.Tier NOT IN (\"Public Sector\")",
+      "alternatives": [
+        "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Account.Tier NOT IN (\"Public Sector\"), Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "revenue-by-category-in-sweden",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter"
+      ],
+      "intent": "net value by family for Sweden",
+      "reference": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Territory.Market = (\"Sweden\")",
+      "distractor": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Territory.Zone = (\"Sweden\")"
+    },
+    {
+      "id": "revenue-by-country-share-of-its-region",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "two-levels"
+      ],
+      "intent": "net value for every market, expressed as its share of the zone it belongs to",
+      "reference": "ROWS: Territory.Zone, Territory.Market\nVALUES: [NetValue] [% of parent row]",
+      "distractor": "ROWS: Territory.Zone, Territory.Market\nVALUES: [NetValue] [% of grand total]"
+    },
+    {
+      "id": "quantity-percent-change-year-over-year",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "time"
+      ],
+      "intent": "units, year on year, as a percentage change",
+      "reference": "ROWS: Date.Year\nVALUES: [Units] [% difference]",
+      "distractor": "ROWS: Date.Year\nVALUES: [Units] [difference]"
+    },
+    {
+      "id": "revenue-index-category-by-segment",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "columns"
+      ],
+      "intent": "net value by family and account tier, showing for each combination how far above or below the figure you would expect from that tier's overall size",
+      "reference": "ROWS: Item.Family\nCOLUMNS: Account.Tier\nVALUES: [NetValue] [index]",
+      "distractor": "ROWS: Item.Family\nCOLUMNS: Account.Tier\nVALUES: [index]"
+    },
+    {
+      "id": "revenue-month-share-of-its-year-columns",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "columns",
+        "time",
+        "two-levels"
+      ],
+      "intent": "monthly net value by family, with each month shown as a share of its own year",
+      "reference": "ROWS: Item.Family\nCOLUMNS: Date.Year, Date.MonthName\nVALUES: [NetValue] [% of parent column]",
+      "distractor": "ROWS: Item.Family\nCOLUMNS: Date.Year, Date.MonthName\nVALUES: [NetValue] [% of column]",
+      "alternatives": [
+        "ROWS: Item.Family\nCOLUMNS: Date.Year, Date.Month\nVALUES: [NetValue] [% of parent column]"
+      ]
+    },
+    {
+      "id": "revenue-split-across-categories-per-segment",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "columns"
+      ],
+      "intent": "how each account tier's net value divides up across the item families, so every tier's line comes to a hundred percent",
+      "reference": "ROWS: Account.Tier\nCOLUMNS: Item.Family\nVALUES: [NetValue] [% of row]",
+      "distractor": "ROWS: Account.Tier\nCOLUMNS: Item.Family\nVALUES: [NetValue] [% of column]"
+    },
+    {
+      "id": "cumulative-quantity-through-2025",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "time",
+        "filter"
+      ],
+      "intent": "a cumulative units figure running through the months of 2025",
+      "reference": "ROWS: Date.Month\nVALUES: [Units] [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Date.Month\nVALUES: [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "alternatives": [
+        "ROWS: Date.MonthName\nVALUES: [Units] [running total]\nFILTERS: Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "customer-share-of-total-by-region",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "one-measure"
+      ],
+      "intent": "I'd like to know what proportion of all our accounts sits in each zone",
+      "reference": "ROWS: Territory.Zone\nVALUES: [Accounts] [% of grand total]",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [Accounts]"
+    },
+    {
+      "id": "amount-column-by-country-headed-turnover",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "alias",
+        "aggregate-column"
+      ],
+      "intent": "sum of the Value column by market, headed \"Turnover\"",
+      "reference": "ROWS: Territory.Market\nVALUES: sum(Ledger.Value) AS \"Turnover\"",
+      "distractor": "ROWS: Territory.Market\nVALUES: sum(Ledger.Value)"
+    },
+    {
+      "id": "revenue-and-margin-by-category-margin-called-profit",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures",
+        "alias"
+      ],
+      "intent": "break net value and surplus down by item family, and call the surplus column Profit",
+      "reference": "ROWS: Item.Family\nVALUES: [NetValue], [Surplus] AS \"Profit\"",
+      "distractor": "ROWS: Item.Family\nVALUES: [NetValue] AS \"Profit\", [Surplus]"
+    },
+    {
+      "id": "revenue-and-cost-by-segment-both-headers-changed",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures",
+        "alias"
+      ],
+      "intent": "for each account tier show net value and spend, headed \"Net Ledger\" and \"Spend of Ledger\"",
+      "reference": "ROWS: Account.Tier\nVALUES: [NetValue] AS \"Net Ledger\", [Spend] AS \"Spend of Ledger\"",
+      "distractor": "ROWS: Account.Tier\nVALUES: [NetValue] AS \"Spend of Ledger\", [Spend] AS \"Net Ledger\""
+    },
+    {
+      "id": "region-share-of-revenue-headed-share-of-total",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "alias",
+        "show-as"
+      ],
+      "intent": "each zone as a percentage of all net value, with that column headed \"Share of Total\"",
+      "reference": "ROWS: Territory.Zone\nVALUES: [NetValue] AS \"Share of Total\" [% of grand total]",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [NetValue] [% of grand total]"
+    },
+    {
+      "id": "enterprise-only-revenue-by-country-headed",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "alias",
+        "filter"
+      ],
+      "intent": "I only care about Enterprise accounts - net value by market, with that column labelled \"Enterprise NetValue\"",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue] AS \"Enterprise NetValue\"\nFILTERS: Account.Tier = (\"Enterprise\")",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nFILTERS: Account.Tier = (\"Enterprise\")"
+    },
+    {
+      "id": "marginpct-by-year-headed-margin-percent",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures",
+        "alias"
+      ],
+      "intent": "net value and surplus percentage by year, with the percentage column headed \"Surplus %\"",
+      "reference": "ROWS: Date.Year\nVALUES: [NetValue], [SurplusPct] AS \"Surplus %\"",
+      "distractor": "ROWS: Date.Year\nVALUES: [NetValue], [SurplusPct] AS \"Surplus\""
+    },
+    {
+      "id": "largest-single-amount-by-region",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "the biggest amount on any single sale in each zone",
+      "reference": "ROWS: Territory.Zone\nVALUES: max(Ledger.Value)",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [NetValue]"
+    },
+    {
+      "id": "count-sales-rows-per-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "how many sales did we make in each market",
+      "reference": "ROWS: Territory.Market\nVALUES: count(Ledger.Value)",
+      "distractor": "ROWS: Territory.Market\nVALUES: [Accounts]",
+      "alternatives": [
+        "ROWS: Territory.Market\nVALUES: count(Ledger.Units)",
+        "ROWS: Territory.Market\nVALUES: count(Ledger.Spend)"
+      ]
+    },
+    {
+      "id": "smallest-quantity-by-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "the smallest units on a single sale in each item family",
+      "reference": "ROWS: Item.Family\nVALUES: min(Ledger.Units)",
+      "distractor": "ROWS: Item.Family\nVALUES: [Units]"
+    },
+    {
+      "id": "cost-column-total-by-segment",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "add up the Spend column for every account tier",
+      "reference": "ROWS: Account.Tier\nVALUES: sum(Ledger.Spend)",
+      "distractor": "ROWS: Account.Tier\nVALUES: [Spend]"
+    },
+    {
+      "id": "average-quantity-per-sale-by-subcategory",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "the average units per sale for each subcategory",
+      "reference": "ROWS: Line.LineName\nVALUES: average(Ledger.Units)",
+      "distractor": "ROWS: Line.LineName\nVALUES: [Units] [average]"
+    },
+    {
+      "id": "count-sales-per-month-2024",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "filter",
+        "time"
+      ],
+      "intent": "I want to see how busy each month of 2024 was, measured as the number of individual sales",
+      "reference": "ROWS: Date.MonthName\nVALUES: count(Ledger.Value)\nFILTERS: Date.Year = (\"2024\")",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Units]\nFILTERS: Date.Year = (\"2024\")",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: count(Ledger.Value)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.MonthName\nVALUES: count(Ledger.Units)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.Month\nVALUES: count(Ledger.Units)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.MonthName\nVALUES: count(Ledger.Spend)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.Month\nVALUES: count(Ledger.Spend)\nFILTERS: Date.Year = (\"2024\")"
+      ]
+    },
+    {
+      "id": "revenue-by-region-then-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "hierarchy"
+      ],
+      "intent": "net value by zone, and within each zone the markets underneath",
+      "reference": "ROWS: Territory.Zone, Territory.Market\nVALUES: [NetValue]",
+      "distractor": "ROWS: Territory.Zone\nCOLUMNS: Territory.Market\nVALUES: [NetValue]"
+    },
+    {
+      "id": "margin-by-segment-then-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "I want surplus for each account tier, with the markets it came from listed underneath",
+      "reference": "ROWS: Account.Tier, Territory.Market\nVALUES: [Surplus]",
+      "distractor": "ROWS: Account.Tier\nCOLUMNS: Territory.Market\nVALUES: [Surplus]"
+    },
+    {
+      "id": "cost-by-year-then-region",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "time"
+      ],
+      "intent": "spend per year, with each zone shown beneath the year it belongs to",
+      "reference": "ROWS: Date.Year, Territory.Zone\nVALUES: [Spend]",
+      "distractor": "ROWS: Territory.Zone, Date.Year\nVALUES: [Spend]"
+    },
+    {
+      "id": "revenue-by-segment-then-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "start with the account tier and put the item families inside each one, with net value",
+      "reference": "ROWS: Account.Tier, Item.Family\nVALUES: [NetValue]",
+      "distractor": "ROWS: Item.Family, Account.Tier\nVALUES: [NetValue]"
+    },
+    {
+      "id": "quantity-by-region-then-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "units sold in each zone, split further by item family underneath each zone",
+      "reference": "ROWS: Territory.Zone, Item.Family\nVALUES: [Units]",
+      "distractor": "ROWS: Territory.Zone\nCOLUMNS: Item.Family\nVALUES: [Units]"
+    },
+    {
+      "id": "revenue-region-country-segment-three-levels",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "three-levels",
+        "hierarchy"
+      ],
+      "intent": "net value for each zone, then the markets in it, and the account tiers within each market",
+      "reference": "ROWS: Territory.Zone, Territory.Market, Account.Tier\nVALUES: [NetValue]",
+      "distractor": "ROWS: Territory.Zone, Territory.Market\nCOLUMNS: Account.Tier\nVALUES: [NetValue]"
+    },
+    {
+      "id": "cost-per-month-across-both-years",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "time"
+      ],
+      "intent": "spend month by month over the whole two-year period, all going down the side, and January 2025 must not be lumped in with January 2024",
+      "reference": "ROWS: Date.Month\nVALUES: [Spend]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Spend]",
+      "alternatives": [
+        "ROWS: Date.Year, Date.MonthName\nVALUES: [Spend]",
+        "ROWS: Date.Year, Date.Month\nVALUES: [Spend]"
+      ]
+    },
+    {
+      "id": "revenue-by-month-with-years-as-columns",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time"
+      ],
+      "intent": "put each month down the side and the two years side by side, so I can compare net value for the same month in each year",
+      "reference": "ROWS: Date.MonthName\nCOLUMNS: Date.Year\nVALUES: [NetValue]",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [NetValue]"
+    },
+    {
+      "id": "best-three-months-of-2025-by-revenue",
+      "lang": "en",
+      "tags": [
+        "time",
+        "filter",
+        "top"
+      ],
+      "intent": "which three months of 2025 brought in the most net value?",
+      "reference": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\")\nTOP 3 BY [NetValue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [NetValue]\nTOP 3 BY [NetValue]",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2025\")\nTOP 3 BY [NetValue]"
+      ]
+    },
+    {
+      "id": "cumulative-revenue-by-region-months-across",
+      "lang": "en",
+      "tags": [
+        "time",
+        "columns",
+        "show-as",
+        "filter"
+      ],
+      "intent": "for each zone I want the cumulative net value as 2025 goes on, with the months spread along the top",
+      "reference": "ROWS: Territory.Zone\nCOLUMNS: Date.MonthName\nVALUES: [NetValue] [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Date.MonthName\nCOLUMNS: Territory.Zone\nVALUES: [NetValue] [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "alternatives": [
+        "ROWS: Territory.Zone\nCOLUMNS: Date.Month\nVALUES: [NetValue] [running total]\nFILTERS: Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "revenue-by-category-march-2024",
+      "lang": "en",
+      "tags": [
+        "time",
+        "filter"
+      ],
+      "intent": "net value by item family, March 2024 only",
+      "reference": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.Month = (\"2024-03\")",
+      "distractor": "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.MonthName = (\"March\")",
+      "alternatives": [
+        "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\"), Date.MonthName = (\"March\")",
+        "ROWS: Item.Family\nVALUES: [NetValue]\nFILTERS: Date.MonthName = (\"March\"), Date.Year = (\"2024\")"
+      ]
+    },
+    {
+      "id": "revenue-every-month-most-recent-first",
+      "lang": "en",
+      "tags": [
+        "time",
+        "sort"
+      ],
+      "intent": "net value for every month we have data for, starting with the most recent one",
+      "reference": "ROWS: Date.Month\nVALUES: [NetValue]\nSORT: Date.Month DESC",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [NetValue]\nSORT: Date.MonthName DESC"
     }
   ]
 }

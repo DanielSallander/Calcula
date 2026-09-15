@@ -1,5 +1,5 @@
 {
-  "$comment": "THE DESIGN-QUERY EVAL CORPUS.,,Each task states a request a person would type into the 'describe the,report in words' row over the sales-star fixture model,(tests/fixtures/model/sales_star.json + sales_star_strategy.json), the,query that answers it, and a `distractor`: the plausible wrong query a,model reaches for, which MUST NOT be equal to the reference. A task whose,distractor equals its reference measures nothing and is a defect.,,Layer A (CI, no model): every reference parses and compiles against the,fixture with no errors; every distractor differs from its reference in,canonical form; every name a reference uses is among the candidates the,assistant would show a model for that intent.,,Equality is CANONICAL (canonical.ts): names case-insensitive, layout,directives unordered, SORT and TOP N included.,,SORT orders row and column LABELS only; the DSL ranks by a measure's,value solely through TOP/BOTTOM N BY [Measure]. Every 'highest first',task therefore expects TOP N, never SORT: [Measure].,,Filter values are plausible member names; the fixture carries no rows, so,they are not verified against data. Subcategory is snowflaked and is left,out of the references: the query engine refuses paths longer than one hop.,,A task may list `alternatives`: other queries that answer the request,equally well (Date.Month vs Date.MonthName; the Swedish \"marginal\" that is,either margin measure). Layer A requires each to compile, to differ from,the reference and from the distractor; Layer B grades any of them as a pass. 2026-09-15: the ten Swedish tasks were REMOVED and replaced with ten English ones (owner decision: the AI programme is English only). The count is held at 40 on purpose — McNemar needs six clean flips for p<0.05 whatever the corpus size, so dropping to 30 would have meant a fifth of the corpus flipping instead of a seventh. The replacements cover what the Swedish tasks covered and additionally shore up sort, alias and exclude, which had one task each.",
+  "$comment": "Design-query eval corpus. GROWN AND BALANCED 2026-09-15: 40 -> 122 tasks. The old corpus could measure 'is this model better overall' and could never measure 'better at WHAT' — McNemar needs six clean flips at any corpus size and that applies to every subset, so SORT=2, BOTTOM=2, LAYOUT=3 and TOP=4 were unmeasurable by construction. Every capability now carries at least twelve tasks. Three shipped tasks were REMOVED rather than edited because they filtered on members the fixture does not contain (there is no 'Europe' region and no 'Consumer' segment); the compiler checks names, not values, so they compiled and passed every gate while being unanswerable. Same-shape replacements over real members are in the filters batch.",
   "version": 1,
   "tasks": [
     {
@@ -105,27 +105,6 @@
       "intent": "number of customers by segment",
       "reference": "ROWS: Customer.Segment\nVALUES: [Customers]",
       "distractor": "ROWS: Customer.Name\nVALUES: [Customers]"
-    },
-    {
-      "id": "quantity-by-category-consumer-only",
-      "lang": "en",
-      "tags": [
-        "filter"
-      ],
-      "intent": "quantity sold by category for the Consumer segment only",
-      "reference": "ROWS: Product.Category\nVALUES: [Quantity]\nFILTERS: Customer.Segment = (\"Consumer\")",
-      "distractor": "ROWS: Product.Category, Customer.Segment\nVALUES: [Quantity]"
-    },
-    {
-      "id": "revenue-by-region-excluding-europe",
-      "lang": "en",
-      "tags": [
-        "filter",
-        "exclude"
-      ],
-      "intent": "revenue by region excluding Europe",
-      "reference": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Geography.Region NOT IN (\"Europe\")",
-      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Geography.Region = (\"Europe\")"
     },
     {
       "id": "share-of-revenue-by-category",
@@ -332,17 +311,6 @@
       "distractor": "ROWS: Geography.Country\nVALUES: count(Sales.CustomerKey)"
     },
     {
-      "id": "revenue-and-quantity-by-segment-europe",
-      "lang": "en",
-      "tags": [
-        "filter",
-        "two-measures"
-      ],
-      "intent": "revenue and quantity by segment in Europe only",
-      "reference": "ROWS: Customer.Segment\nVALUES: [Revenue], [Quantity]\nFILTERS: Geography.Region = (\"Europe\")",
-      "distractor": "ROWS: Customer.Segment\nVALUES: [Revenue], [Quantity]\nFILTERS: Geography.Country = (\"Europe\")"
-    },
-    {
       "id": "categories-sorted-by-name",
       "lang": "en",
       "tags": [
@@ -453,6 +421,1083 @@
       "intent": "quantity by customer segment, without any totals",
       "reference": "ROWS: Customer.Segment\nVALUES: [Quantity]\nLAYOUT: no-grand-totals",
       "distractor": "ROWS: Customer.Segment\nVALUES: [Quantity]"
+    },
+    {
+      "id": "five-biggest-countries-listed-alphabetically",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "top"
+      ],
+      "intent": "our five biggest countries by revenue, but printed in alphabetical order rather than by size",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nSORT: Geography.Country ASC\nTOP 5 BY [Revenue]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 5 BY [Revenue]"
+    },
+    {
+      "id": "countries-reverse-alphabetical",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "sort"
+      ],
+      "intent": "the countries in reverse alphabetical order, each with its revenue",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nSORT: Geography.Country DESC",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nSORT: [Revenue] DESC"
+    },
+    {
+      "id": "cost-and-margin-by-segment-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "two-measures"
+      ],
+      "intent": "I want cost and margin for every customer segment, with the segments coming out in name order",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Cost], [Margin]\nSORT: Customer.Segment ASC",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Cost], [Margin]\nSORT: [Cost] ASC"
+    },
+    {
+      "id": "revenue-by-year-oldest-first",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "time"
+      ],
+      "intent": "revenue per year with the oldest year at the top",
+      "reference": "ROWS: Date.Year\nVALUES: [Revenue]\nSORT: Date.Year ASC",
+      "distractor": "ROWS: Date.Year\nVALUES: [Revenue]\nSORT: Date.Year DESC"
+    },
+    {
+      "id": "revenue-by-month-newest-first",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "time"
+      ],
+      "intent": "revenue per month with the months written as 2025-03, most recent month at the top",
+      "reference": "ROWS: Date.Month\nVALUES: [Revenue]\nSORT: Date.Month DESC",
+      "distractor": "ROWS: Date.Month\nVALUES: [Revenue]\nSORT: Date.Month ASC"
+    },
+    {
+      "id": "revenue-by-year-and-month-newest-year-first",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "two-levels",
+        "time"
+      ],
+      "intent": "revenue by year and month name, most recent year first",
+      "reference": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]\nSORT: Date.Year DESC",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]\nSORT: Date.MonthName DESC",
+      "alternatives": [
+        "ROWS: Date.Year, Date.Month\nVALUES: [Revenue]\nSORT: Date.Year DESC"
+      ]
+    },
+    {
+      "id": "revenue-by-month-name-2024-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "filter",
+        "time"
+      ],
+      "intent": "revenue for each month name in 2024, months listed alphabetically so it lines up with our export",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")\nSORT: Date.MonthName ASC",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")\nSORT: [Revenue] ASC"
+    },
+    {
+      "id": "margin-by-country-nordics-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "filter"
+      ],
+      "intent": "margin by country, just the Nordics, countries in alphabetical order",
+      "reference": "ROWS: Geography.Country\nVALUES: [Margin]\nFILTERS: Geography.Region = (\"Nordics\")\nSORT: Geography.Country ASC",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Margin]\nFILTERS: Geography.Region = (\"Nordics\")\nSORT: Geography.Region ASC",
+      "alternatives": [
+        "ROWS: Geography.Country\nVALUES: [Margin]\nFILTERS: Geography.Country = (\"Sweden\", \"Denmark\")\nSORT: Geography.Country ASC"
+      ]
+    },
+    {
+      "id": "category-and-subcategory-both-alphabetical",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "two-levels"
+      ],
+      "intent": "revenue by category and then subcategory, with both levels in alphabetical order",
+      "reference": "ROWS: Product.Category, Subcategory.SubcategoryName\nVALUES: [Revenue]\nSORT: Product.Category ASC, Subcategory.SubcategoryName ASC",
+      "distractor": "ROWS: Product.Category, Subcategory.SubcategoryName\nVALUES: [Revenue]\nSORT: Product.Category ASC"
+    },
+    {
+      "id": "revenue-and-quantity-by-region-reverse-no-totals",
+      "lang": "en",
+      "tags": [
+        "sort",
+        "layout",
+        "two-measures"
+      ],
+      "intent": "revenue and quantity per region, region names starting at the end of the alphabet, and without any totals",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue], [Quantity]\nSORT: Geography.Region DESC\nLAYOUT: no-grand-totals",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue], [Quantity]\nBOTTOM 4 BY [Revenue]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "bottom-5-subcategories-by-revenue",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "the five subcategories bringing in the least revenue",
+      "reference": "ROWS: Subcategory.SubcategoryName\nVALUES: [Revenue]\nBOTTOM 5 BY [Revenue]",
+      "distractor": "ROWS: Subcategory.SubcategoryName\nVALUES: [Revenue]\nTOP 5 BY [Revenue]"
+    },
+    {
+      "id": "worst-segment-by-margin-percentage",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "show me only our worst customer segment for margin percentage",
+      "reference": "ROWS: Customer.Segment\nVALUES: [MarginPct]\nBOTTOM 1 BY [MarginPct]",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [MarginPct]\nTOP 1 BY [MarginPct]"
+    },
+    {
+      "id": "bottom-5-countries-by-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "which five countries move the fewest units",
+      "reference": "ROWS: Geography.Country\nVALUES: [Quantity]\nBOTTOM 5 BY [Quantity]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Quantity]\nSORT: Geography.Country ASC"
+    },
+    {
+      "id": "bottom-3-months-by-revenue-2025",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "filter",
+        "time"
+      ],
+      "intent": "the three weakest months for revenue in 2025",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\")\nBOTTOM 3 BY [Revenue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\")\nTOP 3 BY [Revenue]",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\")\nBOTTOM 3 BY [Revenue]"
+      ]
+    },
+    {
+      "id": "bottom-3-categories-by-quantity-nordics",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "filter"
+      ],
+      "intent": "in the Nordics, which three product categories sell the fewest units",
+      "reference": "ROWS: Product.Category\nVALUES: [Quantity]\nFILTERS: Geography.Region = (\"Nordics\")\nBOTTOM 3 BY [Quantity]",
+      "distractor": "ROWS: Product.Category\nVALUES: [Quantity]\nFILTERS: Geography.Region = (\"Nordics\")\nTOP 3 BY [Quantity]"
+    },
+    {
+      "id": "bottom-3-subcategories-by-margin-with-revenue",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "two-measures"
+      ],
+      "intent": "the three subcategories with the smallest margin, and show their revenue next to it",
+      "reference": "ROWS: Subcategory.SubcategoryName\nVALUES: [Margin], [Revenue]\nBOTTOM 3 BY [Margin]",
+      "distractor": "ROWS: Subcategory.SubcategoryName\nVALUES: [Margin], [Revenue]\nBOTTOM 3 BY [Revenue]",
+      "alternatives": [
+        "ROWS: Subcategory.SubcategoryName\nVALUES: [Revenue], [Margin]\nBOTTOM 3 BY [Margin]"
+      ]
+    },
+    {
+      "id": "bottom-2-segments-by-customers",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "the two segments we have the fewest customers in",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Customers]\nBOTTOM 2 BY [Customers]",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Customers]\nTOP 2 BY [Customers]"
+    },
+    {
+      "id": "worst-country-by-margin",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom"
+      ],
+      "intent": "I want to see the single country where we make the least margin",
+      "reference": "ROWS: Geography.Country\nVALUES: [Margin]\nBOTTOM 1 BY [Margin]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Margin]\nSORT: [Margin] ASC"
+    },
+    {
+      "id": "bottom-2-regions-by-revenue-2024",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "filter",
+        "time"
+      ],
+      "intent": "which two regions were our weakest on revenue in 2024",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")\nBOTTOM 2 BY [Revenue]",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")\nTOP 2 BY [Revenue]"
+    },
+    {
+      "id": "bottom-4-months-by-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "bottom",
+        "time"
+      ],
+      "intent": "taking both years together, which four months of the year are quietest for units shipped",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Quantity]\nBOTTOM 4 BY [Quantity]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Quantity]\nSORT: Date.MonthName ASC"
+    },
+    {
+      "id": "layout-tabular-category-subcategory",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "show me revenue by category and subcategory as a plain flat table - each of the two levels in its own column, nothing indented and no heading rows in between",
+      "reference": "ROWS: Product.Category, Subcategory.SubcategoryName\nVALUES: [Revenue]\nLAYOUT: tabular",
+      "distractor": "ROWS: Product.Category, Subcategory.SubcategoryName\nVALUES: [Revenue]"
+    },
+    {
+      "id": "layout-outline-revenue-region-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "break revenue down by region and country, each of them in its own column, but I want the region name sitting on a line of its own above its countries rather than sharing the first country's row",
+      "reference": "ROWS: Geography.Region, Geography.Country\nVALUES: [Revenue]\nLAYOUT: outline",
+      "distractor": "ROWS: Geography.Region, Geography.Country\nVALUES: [Revenue]\nLAYOUT: tabular"
+    },
+    {
+      "id": "layout-no-totals-top5-countries",
+      "lang": "en",
+      "tags": [
+        "top",
+        "layout"
+      ],
+      "intent": "the five countries with the biggest revenue, and leave the total line off the bottom",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 5 BY [Revenue]\nLAYOUT: no-grand-totals",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 5 BY [Revenue]",
+      "alternatives": [
+        "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 5 BY [Revenue]\nLAYOUT: no-row-totals"
+      ]
+    },
+    {
+      "id": "layout-no-row-totals-country-by-year",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "columns",
+        "time",
+        "layout"
+      ],
+      "intent": "revenue for each country with a column for each year, and leave off the total row at the very bottom of the table",
+      "reference": "ROWS: Geography.Country\nCOLUMNS: Date.Year\nVALUES: [Revenue]\nLAYOUT: no-row-totals",
+      "distractor": "ROWS: Geography.Country\nCOLUMNS: Date.Year\nVALUES: [Revenue]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "layout-tabular-no-column-totals-segment-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "columns",
+        "layout"
+      ],
+      "intent": "cost for every customer segment with the product categories running across the top - flat table style, and drop the total column on the far right",
+      "reference": "ROWS: Customer.Segment\nCOLUMNS: Product.Category\nVALUES: [Cost]\nLAYOUT: tabular, no-column-totals",
+      "distractor": "ROWS: Customer.Segment\nCOLUMNS: Product.Category\nVALUES: [Cost]\nLAYOUT: tabular, no-row-totals"
+    },
+    {
+      "id": "layout-no-row-totals-keep-subtotals-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "quantity by segment and country - I still want each segment's own summary line, but drop the overall total at the foot of the table",
+      "reference": "ROWS: Customer.Segment, Geography.Country\nVALUES: [Quantity]\nLAYOUT: no-row-totals",
+      "distractor": "ROWS: Customer.Segment, Geography.Country\nVALUES: [Quantity]\nLAYOUT: subtotals-off",
+      "alternatives": [
+        "ROWS: Customer.Segment, Geography.Country\nVALUES: [Quantity]\nLAYOUT: no-grand-totals"
+      ]
+    },
+    {
+      "id": "layout-no-column-totals-margin-segment-year",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "columns",
+        "time",
+        "layout"
+      ],
+      "intent": "I'd like margin by customer segment with the years across the top. The summary line at the foot is useful, but that extra total column on the right-hand edge is just noise - get rid of it.",
+      "reference": "ROWS: Customer.Segment\nCOLUMNS: Date.Year\nVALUES: [Margin]\nLAYOUT: no-column-totals",
+      "distractor": "ROWS: Customer.Segment\nCOLUMNS: Date.Year\nVALUES: [Margin]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "layout-no-totals-no-subtotals-margin-category-region",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "margin by category and region with no totals anywhere - nothing at the foot of the table, and don't roll each category up into its own line either",
+      "reference": "ROWS: Product.Category, Geography.Region\nVALUES: [Margin]\nLAYOUT: no-grand-totals, subtotals-off",
+      "distractor": "ROWS: Product.Category, Geography.Region\nVALUES: [Margin]\nLAYOUT: no-grand-totals"
+    },
+    {
+      "id": "layout-tabular-subtotals-off-customers-region-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "layout"
+      ],
+      "intent": "a flat uninterrupted list of how many customers we have by region and country, with no summary lines breaking up the regions",
+      "reference": "ROWS: Geography.Region, Geography.Country\nVALUES: [Customers]\nLAYOUT: tabular, subtotals-off",
+      "distractor": "ROWS: Geography.Region, Geography.Country\nVALUES: [Customers]\nLAYOUT: tabular, no-grand-totals"
+    },
+    {
+      "id": "top-10-products-by-margin",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "two-measures"
+      ],
+      "intent": "which ten products earn us the most margin, and what do they cost us",
+      "reference": "ROWS: Product.Name\nVALUES: [Margin], [Cost]\nTOP 10 BY [Margin]",
+      "distractor": "ROWS: Product.Name\nVALUES: [Margin], [Cost]\nTOP 10 BY [Cost]"
+    },
+    {
+      "id": "top-5-countries-by-revenue-enterprise-only",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "filter"
+      ],
+      "intent": "our five strongest countries for revenue, looking at Enterprise customers alone",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nFILTERS: Customer.Segment = (\"Enterprise\")\nTOP 5 BY [Revenue]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nFILTERS: Customer.Segment = (\"Enterprise\")\nTOP 10 BY [Revenue]"
+    },
+    {
+      "id": "top-3-subcategories-by-quantity",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "one-measure"
+      ],
+      "intent": "which three subcategories shift the most units",
+      "reference": "ROWS: Subcategory.SubcategoryName\nVALUES: [Quantity]\nTOP 3 BY [Quantity]",
+      "distractor": "ROWS: Subcategory.SubcategoryName\nVALUES: [Quantity]\nSORT: Subcategory.SubcategoryName DESC"
+    },
+    {
+      "id": "biggest-single-month-of-2024",
+      "lang": "en",
+      "tags": [
+        "top",
+        "filter",
+        "time"
+      ],
+      "intent": "which single month of 2024 had the highest revenue",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")\nTOP 1 BY [Revenue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\")\nTOP 1 BY [Revenue]"
+      ]
+    },
+    {
+      "id": "top-2-segments-by-marginpct",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "one-measure"
+      ],
+      "intent": "the two customer segments with the best margin percentage",
+      "reference": "ROWS: Customer.Segment\nVALUES: [MarginPct]\nTOP 2 BY [MarginPct]",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Margin]\nTOP 2 BY [Margin]"
+    },
+    {
+      "id": "top-3-categories-by-revenue-regions-across",
+      "lang": "en",
+      "tags": [
+        "top",
+        "columns"
+      ],
+      "intent": "the three biggest categories by revenue, with each region getting its own column",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Geography.Region\nVALUES: [Revenue]\nTOP 3 BY [Revenue]",
+      "distractor": "ROWS: Geography.Region\nCOLUMNS: Product.Category\nVALUES: [Revenue]\nTOP 3 BY [Revenue]"
+    },
+    {
+      "id": "revenue-in-the-three-best-margin-countries",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "one-measure"
+      ],
+      "intent": "show me revenue in the three countries where we make the most margin",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 3 BY [Margin]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nTOP 3 BY [Revenue]",
+      "alternatives": [
+        "ROWS: Geography.Country\nVALUES: [Revenue], [Margin]\nTOP 3 BY [Margin]"
+      ]
+    },
+    {
+      "id": "top-3-subcategories-by-margin-outside-nordics",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top",
+        "exclude",
+        "filter"
+      ],
+      "intent": "outside the Nordics, which three subcategories earn us the most margin",
+      "reference": "ROWS: Subcategory.SubcategoryName\nVALUES: [Margin]\nFILTERS: Geography.Region NOT IN (\"Nordics\")\nTOP 3 BY [Margin]",
+      "distractor": "ROWS: Subcategory.SubcategoryName\nVALUES: [Margin]\nFILTERS: Geography.Region = (\"Nordics\")\nTOP 3 BY [Margin]"
+    },
+    {
+      "id": "category-against-segment-grid",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "one-measure"
+      ],
+      "intent": "a grid of category against segment, with revenue in every cell",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Customer.Segment\nVALUES: [Revenue]",
+      "distractor": "ROWS: Product.Category, Customer.Segment\nVALUES: [Revenue]",
+      "alternatives": [
+        "ROWS: Customer.Segment\nCOLUMNS: Product.Category\nVALUES: [Revenue]"
+      ]
+    },
+    {
+      "id": "cost-and-margin-by-country-years-across",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time",
+        "two-measures"
+      ],
+      "intent": "cost and margin for each country, with a separate column for each year",
+      "reference": "ROWS: Geography.Country\nCOLUMNS: Date.Year\nVALUES: [Cost], [Margin]",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Cost], [Margin]\nLAYOUT: values-on-columns"
+    },
+    {
+      "id": "quantity-per-segment-months-across-2025",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time",
+        "filter"
+      ],
+      "intent": "units sold per segment during 2025, with the months across the top",
+      "reference": "ROWS: Customer.Segment\nCOLUMNS: Date.MonthName\nVALUES: [Quantity]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Customer.Segment, Date.Year\nCOLUMNS: Date.MonthName\nVALUES: [Quantity]",
+      "alternatives": [
+        "ROWS: Customer.Segment\nCOLUMNS: Date.Month\nVALUES: [Quantity]\nFILTERS: Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "revenue-by-country-segment-across-share-of-whole",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "show-as"
+      ],
+      "intent": "revenue for each country broken out by segment across the top, every cell as a share of the whole",
+      "reference": "ROWS: Geography.Country\nCOLUMNS: Customer.Segment\nVALUES: [Revenue] [% of grand total]",
+      "distractor": "ROWS: Geography.Country\nCOLUMNS: Customer.Segment\nVALUES: [Revenue] [% of column]"
+    },
+    {
+      "id": "revenue-by-region-then-country-one-list",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "unrequested-columns"
+      ],
+      "intent": "revenue broken down by region and then by country underneath it, all in one list",
+      "reference": "ROWS: Geography.Region, Geography.Country\nVALUES: [Revenue]",
+      "distractor": "ROWS: Geography.Region\nCOLUMNS: Geography.Country\nVALUES: [Revenue]"
+    },
+    {
+      "id": "margin-by-segment-then-category-one-list",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "unrequested-columns"
+      ],
+      "intent": "I want margin in a single list by customer segment, with each segment's product categories beneath it",
+      "reference": "ROWS: Customer.Segment, Product.Category\nVALUES: [Margin]",
+      "distractor": "ROWS: Customer.Segment\nCOLUMNS: Product.Category\nVALUES: [Margin]"
+    },
+    {
+      "id": "revenue-per-year-column-per-region",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time"
+      ],
+      "intent": "I'd like to see revenue for each year, with a column per region",
+      "reference": "ROWS: Date.Year\nCOLUMNS: Geography.Region\nVALUES: [Revenue]",
+      "distractor": "ROWS: Geography.Region\nCOLUMNS: Date.Year\nVALUES: [Revenue]"
+    },
+    {
+      "id": "revenue-region-country-rows-years-across",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time",
+        "two-levels"
+      ],
+      "intent": "revenue for each region with its countries listed underneath it, and the years across the top",
+      "reference": "ROWS: Geography.Region, Geography.Country\nCOLUMNS: Date.Year\nVALUES: [Revenue]",
+      "distractor": "ROWS: Geography.Region, Geography.Country, Date.Year\nVALUES: [Revenue]"
+    },
+    {
+      "id": "quantity-by-category-enterprise-only",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter"
+      ],
+      "intent": "quantity sold by category, Enterprise customers only",
+      "reference": "ROWS: Product.Category\nVALUES: [Quantity]\nFILTERS: Customer.Segment = (\"Enterprise\")",
+      "distractor": "ROWS: Product.Category, Customer.Segment\nVALUES: [Quantity]"
+    },
+    {
+      "id": "revenue-by-region-excluding-benelux",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "exclude"
+      ],
+      "intent": "revenue by region, leaving Benelux out",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Geography.Region NOT IN (\"Benelux\")",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Geography.Region = (\"Benelux\")"
+    },
+    {
+      "id": "revenue-and-quantity-by-segment-nordics",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "two-measures"
+      ],
+      "intent": "revenue and quantity by segment in the Nordics only",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Revenue], [Quantity]\nFILTERS: Geography.Region = (\"Nordics\")",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Revenue], [Quantity]\nFILTERS: Geography.Country = (\"Nordics\")"
+    },
+    {
+      "id": "revenue-by-country-widgets-and-gadgets",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "multi-value"
+      ],
+      "intent": "how much revenue each country brings in from Widgets and Gadgets combined",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue]\nFILTERS: Product.Category = (\"Widgets\", \"Gadgets\")",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nFILTERS: Product.Category = (\"Widgets\")"
+    },
+    {
+      "id": "margin-by-category-skipping-three-countries",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "exclude"
+      ],
+      "intent": "margin by category, but skip Germany, Austria and Ireland",
+      "reference": "ROWS: Product.Category\nVALUES: [Margin]\nFILTERS: Geography.Country NOT IN (\"Germany\", \"Austria\", \"Ireland\")",
+      "distractor": "ROWS: Product.Category\nVALUES: [Margin]\nFILTERS: Geography.Country = (\"Germany\", \"Austria\", \"Ireland\")"
+    },
+    {
+      "id": "marginpct-by-subcategory-2025",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "time"
+      ],
+      "intent": "margin percentage for each subcategory, 2025 only",
+      "reference": "ROWS: Subcategory.SubcategoryName\nVALUES: [MarginPct]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Subcategory.SubcategoryName, Date.Year\nVALUES: [MarginPct]"
+    },
+    {
+      "id": "revenue-by-region-in-december",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "time"
+      ],
+      "intent": "December revenue for each region",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Date.MonthName = (\"December\")",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]\nFILTERS: Date.Month = (\"2024-12\")"
+    },
+    {
+      "id": "revenue-by-category-2025-without-public-sector",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter",
+        "exclude",
+        "time"
+      ],
+      "intent": "2025 revenue by category, but don't count Public Sector customers",
+      "reference": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\"), Customer.Segment NOT IN (\"Public Sector\")",
+      "distractor": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\")\nFILTERS: Customer.Segment NOT IN (\"Public Sector\")",
+      "alternatives": [
+        "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Customer.Segment NOT IN (\"Public Sector\"), Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "revenue-by-category-in-sweden",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "filter"
+      ],
+      "intent": "revenue by category for Sweden",
+      "reference": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Geography.Country = (\"Sweden\")",
+      "distractor": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Geography.Region = (\"Sweden\")"
+    },
+    {
+      "id": "revenue-by-country-share-of-its-region",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "two-levels"
+      ],
+      "intent": "revenue for every country, expressed as its share of the region it belongs to",
+      "reference": "ROWS: Geography.Region, Geography.Country\nVALUES: [Revenue] [% of parent row]",
+      "distractor": "ROWS: Geography.Region, Geography.Country\nVALUES: [Revenue] [% of grand total]"
+    },
+    {
+      "id": "quantity-percent-change-year-over-year",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "time"
+      ],
+      "intent": "quantity, year on year, as a percentage change",
+      "reference": "ROWS: Date.Year\nVALUES: [Quantity] [% difference]",
+      "distractor": "ROWS: Date.Year\nVALUES: [Quantity] [difference]"
+    },
+    {
+      "id": "revenue-index-category-by-segment",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "columns"
+      ],
+      "intent": "revenue by category and customer segment, showing for each combination how far above or below the figure you would expect from that segment's overall size",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Customer.Segment\nVALUES: [Revenue] [index]",
+      "distractor": "ROWS: Product.Category\nCOLUMNS: Customer.Segment\nVALUES: [index]"
+    },
+    {
+      "id": "revenue-month-share-of-its-year-columns",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "columns",
+        "time",
+        "two-levels"
+      ],
+      "intent": "monthly revenue by category, with each month shown as a share of its own year",
+      "reference": "ROWS: Product.Category\nCOLUMNS: Date.Year, Date.MonthName\nVALUES: [Revenue] [% of parent column]",
+      "distractor": "ROWS: Product.Category\nCOLUMNS: Date.Year, Date.MonthName\nVALUES: [Revenue] [% of column]",
+      "alternatives": [
+        "ROWS: Product.Category\nCOLUMNS: Date.Year, Date.Month\nVALUES: [Revenue] [% of parent column]"
+      ]
+    },
+    {
+      "id": "revenue-split-across-categories-per-segment",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "columns"
+      ],
+      "intent": "how each customer segment's revenue divides up across the product categories, so every segment's line comes to a hundred percent",
+      "reference": "ROWS: Customer.Segment\nCOLUMNS: Product.Category\nVALUES: [Revenue] [% of row]",
+      "distractor": "ROWS: Customer.Segment\nCOLUMNS: Product.Category\nVALUES: [Revenue] [% of column]"
+    },
+    {
+      "id": "cumulative-quantity-through-2025",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "time",
+        "filter"
+      ],
+      "intent": "a cumulative quantity figure running through the months of 2025",
+      "reference": "ROWS: Date.Month\nVALUES: [Quantity] [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Date.Month\nVALUES: [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "alternatives": [
+        "ROWS: Date.MonthName\nVALUES: [Quantity] [running total]\nFILTERS: Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "customer-share-of-total-by-region",
+      "lang": "en",
+      "tags": [
+        "show-as",
+        "rows",
+        "one-measure"
+      ],
+      "intent": "I'd like to know what proportion of all our customers sits in each region",
+      "reference": "ROWS: Geography.Region\nVALUES: [Customers] [% of grand total]",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Customers]"
+    },
+    {
+      "id": "amount-column-by-country-headed-turnover",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "alias",
+        "aggregate-column"
+      ],
+      "intent": "sum of the Amount column by country, headed \"Turnover\"",
+      "reference": "ROWS: Geography.Country\nVALUES: sum(Sales.Amount) AS \"Turnover\"",
+      "distractor": "ROWS: Geography.Country\nVALUES: sum(Sales.Amount)"
+    },
+    {
+      "id": "revenue-and-margin-by-category-margin-called-profit",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures",
+        "alias"
+      ],
+      "intent": "break revenue and margin down by product category, and call the margin column Profit",
+      "reference": "ROWS: Product.Category\nVALUES: [Revenue], [Margin] AS \"Profit\"",
+      "distractor": "ROWS: Product.Category\nVALUES: [Revenue] AS \"Profit\", [Margin]"
+    },
+    {
+      "id": "revenue-and-cost-by-segment-both-headers-changed",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures",
+        "alias"
+      ],
+      "intent": "for each customer segment show revenue and cost, headed \"Net Sales\" and \"Cost of Sales\"",
+      "reference": "ROWS: Customer.Segment\nVALUES: [Revenue] AS \"Net Sales\", [Cost] AS \"Cost of Sales\"",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Revenue] AS \"Cost of Sales\", [Cost] AS \"Net Sales\""
+    },
+    {
+      "id": "region-share-of-revenue-headed-share-of-total",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "alias",
+        "show-as"
+      ],
+      "intent": "each region as a percentage of all revenue, with that column headed \"Share of Total\"",
+      "reference": "ROWS: Geography.Region\nVALUES: [Revenue] AS \"Share of Total\" [% of grand total]",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue] [% of grand total]"
+    },
+    {
+      "id": "enterprise-only-revenue-by-country-headed",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "alias",
+        "filter"
+      ],
+      "intent": "I only care about Enterprise customers - revenue by country, with that column labelled \"Enterprise Revenue\"",
+      "reference": "ROWS: Geography.Country\nVALUES: [Revenue] AS \"Enterprise Revenue\"\nFILTERS: Customer.Segment = (\"Enterprise\")",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Revenue]\nFILTERS: Customer.Segment = (\"Enterprise\")"
+    },
+    {
+      "id": "marginpct-by-year-headed-margin-percent",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures",
+        "alias"
+      ],
+      "intent": "revenue and margin percentage by year, with the percentage column headed \"Margin %\"",
+      "reference": "ROWS: Date.Year\nVALUES: [Revenue], [MarginPct] AS \"Margin %\"",
+      "distractor": "ROWS: Date.Year\nVALUES: [Revenue], [MarginPct] AS \"Margin\""
+    },
+    {
+      "id": "largest-single-amount-by-region",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "the biggest amount on any single sale in each region",
+      "reference": "ROWS: Geography.Region\nVALUES: max(Sales.Amount)",
+      "distractor": "ROWS: Geography.Region\nVALUES: [Revenue]"
+    },
+    {
+      "id": "count-sales-rows-per-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "how many sales did we make in each country",
+      "reference": "ROWS: Geography.Country\nVALUES: count(Sales.Amount)",
+      "distractor": "ROWS: Geography.Country\nVALUES: [Customers]",
+      "alternatives": [
+        "ROWS: Geography.Country\nVALUES: count(Sales.Quantity)",
+        "ROWS: Geography.Country\nVALUES: count(Sales.Cost)"
+      ]
+    },
+    {
+      "id": "smallest-quantity-by-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "the smallest quantity on a single sale in each product category",
+      "reference": "ROWS: Product.Category\nVALUES: min(Sales.Quantity)",
+      "distractor": "ROWS: Product.Category\nVALUES: [Quantity]"
+    },
+    {
+      "id": "cost-column-total-by-segment",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "add up the Cost column for every customer segment",
+      "reference": "ROWS: Customer.Segment\nVALUES: sum(Sales.Cost)",
+      "distractor": "ROWS: Customer.Segment\nVALUES: [Cost]"
+    },
+    {
+      "id": "average-quantity-per-sale-by-subcategory",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "one-measure"
+      ],
+      "intent": "the average quantity per sale for each subcategory",
+      "reference": "ROWS: Subcategory.SubcategoryName\nVALUES: average(Sales.Quantity)",
+      "distractor": "ROWS: Subcategory.SubcategoryName\nVALUES: [Quantity] [average]"
+    },
+    {
+      "id": "count-sales-per-month-2024",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column",
+        "filter",
+        "time"
+      ],
+      "intent": "I want to see how busy each month of 2024 was, measured as the number of individual sales",
+      "reference": "ROWS: Date.MonthName\nVALUES: count(Sales.Amount)\nFILTERS: Date.Year = (\"2024\")",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Quantity]\nFILTERS: Date.Year = (\"2024\")",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: count(Sales.Amount)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.MonthName\nVALUES: count(Sales.Quantity)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.Month\nVALUES: count(Sales.Quantity)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.MonthName\nVALUES: count(Sales.Cost)\nFILTERS: Date.Year = (\"2024\")",
+        "ROWS: Date.Month\nVALUES: count(Sales.Cost)\nFILTERS: Date.Year = (\"2024\")"
+      ]
+    },
+    {
+      "id": "revenue-by-region-then-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "hierarchy"
+      ],
+      "intent": "revenue by region, and within each region the countries underneath",
+      "reference": "ROWS: Geography.Region, Geography.Country\nVALUES: [Revenue]",
+      "distractor": "ROWS: Geography.Region\nCOLUMNS: Geography.Country\nVALUES: [Revenue]"
+    },
+    {
+      "id": "margin-by-segment-then-country",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "I want margin for each customer segment, with the countries it came from listed underneath",
+      "reference": "ROWS: Customer.Segment, Geography.Country\nVALUES: [Margin]",
+      "distractor": "ROWS: Customer.Segment\nCOLUMNS: Geography.Country\nVALUES: [Margin]"
+    },
+    {
+      "id": "cost-by-year-then-region",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "time"
+      ],
+      "intent": "cost per year, with each region shown beneath the year it belongs to",
+      "reference": "ROWS: Date.Year, Geography.Region\nVALUES: [Cost]",
+      "distractor": "ROWS: Geography.Region, Date.Year\nVALUES: [Cost]"
+    },
+    {
+      "id": "revenue-by-segment-then-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "start with the customer segment and put the product categories inside each one, with revenue",
+      "reference": "ROWS: Customer.Segment, Product.Category\nVALUES: [Revenue]",
+      "distractor": "ROWS: Product.Category, Customer.Segment\nVALUES: [Revenue]"
+    },
+    {
+      "id": "quantity-by-region-then-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "units sold in each region, split further by product category underneath each region",
+      "reference": "ROWS: Geography.Region, Product.Category\nVALUES: [Quantity]",
+      "distractor": "ROWS: Geography.Region\nCOLUMNS: Product.Category\nVALUES: [Quantity]"
+    },
+    {
+      "id": "revenue-region-country-segment-three-levels",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels",
+        "three-levels",
+        "hierarchy"
+      ],
+      "intent": "revenue for each region, then the countries in it, and the customer segments within each country",
+      "reference": "ROWS: Geography.Region, Geography.Country, Customer.Segment\nVALUES: [Revenue]",
+      "distractor": "ROWS: Geography.Region, Geography.Country\nCOLUMNS: Customer.Segment\nVALUES: [Revenue]"
+    },
+    {
+      "id": "cost-per-month-across-both-years",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "time"
+      ],
+      "intent": "cost month by month over the whole two-year period, all going down the side, and January 2025 must not be lumped in with January 2024",
+      "reference": "ROWS: Date.Month\nVALUES: [Cost]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Cost]",
+      "alternatives": [
+        "ROWS: Date.Year, Date.MonthName\nVALUES: [Cost]",
+        "ROWS: Date.Year, Date.Month\nVALUES: [Cost]"
+      ]
+    },
+    {
+      "id": "revenue-by-month-with-years-as-columns",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time"
+      ],
+      "intent": "put each month down the side and the two years side by side, so I can compare revenue for the same month in each year",
+      "reference": "ROWS: Date.MonthName\nCOLUMNS: Date.Year\nVALUES: [Revenue]",
+      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [Revenue]"
+    },
+    {
+      "id": "best-three-months-of-2025-by-revenue",
+      "lang": "en",
+      "tags": [
+        "time",
+        "filter",
+        "top"
+      ],
+      "intent": "which three months of 2025 brought in the most revenue?",
+      "reference": "ROWS: Date.MonthName\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\")\nTOP 3 BY [Revenue]",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Revenue]\nTOP 3 BY [Revenue]",
+      "alternatives": [
+        "ROWS: Date.Month\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2025\")\nTOP 3 BY [Revenue]"
+      ]
+    },
+    {
+      "id": "cumulative-revenue-by-region-months-across",
+      "lang": "en",
+      "tags": [
+        "time",
+        "columns",
+        "show-as",
+        "filter"
+      ],
+      "intent": "for each region I want the cumulative revenue as 2025 goes on, with the months spread along the top",
+      "reference": "ROWS: Geography.Region\nCOLUMNS: Date.MonthName\nVALUES: [Revenue] [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Date.MonthName\nCOLUMNS: Geography.Region\nVALUES: [Revenue] [running total]\nFILTERS: Date.Year = (\"2025\")",
+      "alternatives": [
+        "ROWS: Geography.Region\nCOLUMNS: Date.Month\nVALUES: [Revenue] [running total]\nFILTERS: Date.Year = (\"2025\")"
+      ]
+    },
+    {
+      "id": "revenue-by-category-march-2024",
+      "lang": "en",
+      "tags": [
+        "time",
+        "filter"
+      ],
+      "intent": "revenue by product category, March 2024 only",
+      "reference": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.Month = (\"2024-03\")",
+      "distractor": "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.MonthName = (\"March\")",
+      "alternatives": [
+        "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.Year = (\"2024\"), Date.MonthName = (\"March\")",
+        "ROWS: Product.Category\nVALUES: [Revenue]\nFILTERS: Date.MonthName = (\"March\"), Date.Year = (\"2024\")"
+      ]
+    },
+    {
+      "id": "revenue-every-month-most-recent-first",
+      "lang": "en",
+      "tags": [
+        "time",
+        "sort"
+      ],
+      "intent": "revenue for every month we have data for, starting with the most recent one",
+      "reference": "ROWS: Date.Month\nVALUES: [Revenue]\nSORT: Date.Month DESC",
+      "distractor": "ROWS: Date.MonthName\nVALUES: [Revenue]\nSORT: Date.MonthName DESC"
     }
   ]
 }

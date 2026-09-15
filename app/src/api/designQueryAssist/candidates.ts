@@ -197,6 +197,34 @@ export function timeGrain(columnName: string): number {
   return TIME_GRAIN_NONE;
 }
 
+/**
+ * Does this calendar column REPEAT every year, or does it carry its own year?
+ *
+ * `timeGrain` answers how COARSE a column is and says nothing about this, and
+ * conflating the two states a falsehood. `Month` in the fixture calendar holds
+ * `"2024-01"`, `"2025-01"` — already year-qualified, so it never merges one
+ * January into another. `MonthName` holds `"January"` and does. Both are grain 2.
+ *
+ * The coarser-time rule exists to warn that a fine grain "adds the same period
+ * across every year". That sentence is TRUE of a cyclical column and FALSE of an
+ * absolute one, and the rule stated it about `Date.Month` for three tasks before
+ * this function existed (found 2026-09-15 when the corpus grew to 122 and gained
+ * tasks that group by the absolute month).
+ *
+ * DELIBERATELY NARROW, AND THE ASYMMETRY IS THE POINT. It answers true only for a
+ * period word carrying an explicit cyclical qualifier — `MonthName`,
+ * `MonthNumber`, `QuarterOfYear`, `WeekNumber`, `DayOfWeek`. A BARE `Month` or
+ * `Quarter` answers FALSE even though some model somewhere surely numbers its
+ * months 1-12, because the two mistakes do not cost the same: saying "cyclical"
+ * wrongly makes a CORRECTION fight a correct query, which the corpus gate forbids
+ * outright, while saying "absolute" wrongly merely withholds a suggestion.
+ */
+export function isCyclicalPeriod(columnName: string): boolean {
+  if (timeGrain(columnName) === TIME_GRAIN_NONE) return false;
+  const n = columnName.toLowerCase();
+  return /(name|namn|number|nummer|nr|ofyear|ofweek|ofmonth|index)/.test(n);
+}
+
 export function chooseCandidates(
   model: DesignQueryModel,
   intent: string,

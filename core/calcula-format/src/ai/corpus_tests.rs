@@ -25,6 +25,7 @@
 
 use super::formula_verify::{compare, evaluate_fixture, parse_a1, Expectation, FixtureCell, FormulaJob};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 const CORPUS_JSON: &str = include_str!("../../../../tests/eval/formulas.json");
 const PATTERNS_JSON: &str = include_str!("../../../../tests/eval/formula-patterns.verified.json");
@@ -33,9 +34,23 @@ const PATTERNS_JSON: &str = include_str!("../../../../tests/eval/formula-pattern
 /// truncated file fails LOUDLY rather than passing vacuously — a validator that
 /// examines nothing and reports a clean bill of health is the failure mode this
 /// repo has already paid for once.
-const MIN_TASKS: usize = 50;
+const MIN_TASKS: usize = 140;
 const MIN_FAMILIES: usize = 10;
 const MIN_PATTERNS: usize = 300;
+
+/// Tasks each family must carry before a difference IN THAT FAMILY is measurable.
+///
+/// McNemar's exact test needs SIX clean flips for p < 0.05 at ANY corpus size,
+/// and that applies to every SUBSET — so a family of five could never reach
+/// significance however much compute was spent on it. Every family held exactly
+/// five until 2026-09-15, which meant the corpus could report "this model is
+/// better overall" and could never report "better at WHAT". A model bake-off ran
+/// aground on exactly that: the two candidates were COMPLEMENTARY rather than
+/// ranked, and nothing here could say in which direction.
+///
+/// Twelve is the working floor — six flips is then half the family rather than
+/// all of it.
+const MIN_PER_FAMILY: usize = 12;
 
 #[derive(Debug, Deserialize)]
 struct CorpusFile {
@@ -221,6 +236,37 @@ fn the_corpus_is_substantial_enough_to_measure_anything() {
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(before, ids.len(), "two corpus tasks share an id");
+}
+
+#[test]
+fn every_family_is_sampled_often_enough_to_measure_a_difference_in_it() {
+    let corpus: CorpusFile = serde_json::from_str(CORPUS_JSON).expect("the corpus parses");
+
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for task in &corpus.tasks {
+        *counts.entry(task.family.as_str()).or_insert(0) += 1;
+    }
+
+    // Guard the guard: an empty tally would make every assertion below vacuous.
+    assert!(
+        counts.len() >= MIN_FAMILIES,
+        "only {} families were counted; the tally did not read the corpus",
+        counts.len()
+    );
+
+    let thin: Vec<String> = counts
+        .iter()
+        .filter(|(_, &n)| n < MIN_PER_FAMILY)
+        .map(|(fam, n)| format!("{}={}", fam, n))
+        .collect();
+
+    assert!(
+        thin.is_empty(),
+        "these families are sampled too thinly for a difference in them to reach p<0.05: {}\n\
+         Each needs at least {} tasks; see MIN_PER_FAMILY for why the number is what it is.",
+        thin.join(", "),
+        MIN_PER_FAMILY
+    );
 }
 
 #[test]

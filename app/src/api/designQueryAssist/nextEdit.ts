@@ -34,6 +34,7 @@ import {
   TIME_GRAIN_YEAR,
   chooseCandidates,
   dslFieldRef,
+  isCyclicalPeriod,
   qualifiedToDsl,
   splitQualified,
   timeGrain,
@@ -482,6 +483,20 @@ const rankDirection: Rule = (ctx) => {
  *    fixed the years.
  *  - It must not fire when a filter already pins the year to one value.
  *
+ * TWO MORE, found on 2026-09-15 when the corpus grew from 40 to 122 and finally
+ * contained the shapes that expose them:
+ *
+ *  - It must not fire on an ABSOLUTE fine grain. `Date.Month` holds `"2024-01"`,
+ *    so it never merges one January into another, and the rule's own sentence —
+ *    "adds the same period across every year" — is simply false about it. It said
+ *    so on three separate corpus tasks. `isCyclicalPeriod` is the discriminator
+ *    and `timeGrain` alone is NOT: both columns are grain 2.
+ *  - It must not fire when the query RANKS. `TOP/BOTTOM N BY` ranks the rows as
+ *    grouped, so inserting a coarser level above changes what is being ranked —
+ *    the four quietest months of the year becomes the four quietest year-months,
+ *    a different question with a different answer. A correction may refine a
+ *    query; it may never replace the question.
+ *
  * The fine grain is still looked for on ROWS only: a fine grain on COLUMNS is
  * a deliberate layout, not a mistake.
  */
@@ -490,7 +505,12 @@ const coarserTimeGrain: Rule = (ctx) => {
   const coarsest = ctx.timeGroupings[0];
   if (timeGrain(lastSegment(coarsest)) !== TIME_GRAIN_YEAR) return [];
   if (onAnAxis(ctx, coarsest)) return [];
-  const fine = ctx.facts.rows.find((r) => ctx.timeGroupings.slice(1).some((g) => sameRef(g, r.ref)));
+  if (ctx.facts.topN) return [];
+  const fine = ctx.facts.rows.find(
+    (r) =>
+      ctx.timeGroupings.slice(1).some((g) => sameRef(g, r.ref)) &&
+      isCyclicalPeriod(lastSegment(r.ref)),
+  );
   if (!fine) return [];
   if (ctx.facts.filters.some((f) => sameRef(f.ref, coarsest) && !f.exclude)) return [];
   return [

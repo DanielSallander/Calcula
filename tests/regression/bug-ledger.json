@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 115,
+  "nextId": 118,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4312,6 +4312,85 @@
         ]
       },
       "notes": "Probe script (scratchpad, not committed): omitted-args2.mjs — 15 functions, each as an omitted/written PAIR against the grader binary, reporting a defect only when the omitted form errors AND the written form does not. 5 of 15 fire. A first version of the same script compared whole outcome objects, which echo the formula text, and so reported 8 of 8 — the comparator must read the VALUE only. Excel-parity takes priority (owner decision D1-D7), which is what makes this a defect rather than a documented limitation."
+    },
+    {
+      "id": "BUG-0115",
+      "status": "open",
+      "discovered": "2026-09-15",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "Formula eval corpus growth (60 -> 144 hand tasks, twelve per family). A task author drafting a date-window SUMIFS wrote the Excel-idiomatic literal criterion and measured 0. All three findings below were then re-verified independently against calcula-target/release/examples/eval-formulas.exe, each probe paired with a form that works so a difference can only be the criteria handling."
+      },
+      "violation": {
+        "oracleId": "criteria-date-literal-matches-nothing",
+        "message": "A DATE LITERAL INSIDE A CRITERIA STRING MATCHES NOTHING, AND THE NEGATED FORM KEEPS THE ROW IT WAS TOLD TO DROP. Measured over a column of three typed dates (2025-01-01, 2025-01-15, 2024-06-30) with amounts 100/200/400:\n  =COUNTIF(A2:A4,\">=2025-01-01\")        -> 0     Excel: 2\n  =SUMIF(A2:A4,\">=2025-01-01\",B2:B4)    -> 0     Excel: 300\n  =COUNTIF(A2:A4,\"<>2025-01-15\")        -> 3     Excel: 2   <-- THE WORST ONE\nThe concatenated forms are all correct, which localises the defect to literal parsing rather than comparison:\n  =COUNTIF(A2:A4,\">=\"&DATE(2025,1,1))   -> 2  OK\n  =COUNTIF(A2:A4,\">=\"&F1)               -> 2  OK\n  =COUNTIF(A2:A4,\">=45658\")             -> 2  OK\nCONTROL THAT MAKES THIS A DEFECT RATHER THAN A DESIGN CHOICE: =ISNUMBER(A2) is TRUE, so a cell typed 2025-01-15 stores a NUMBER. The range side therefore holds numbers while the criteria side refuses to produce one.\n\nSUSPECTED CAUSE (reported by the finder, not re-derived here): ParsePolicy::CRITERIA sets dates: DateText::Reject (core/engine/src/number_text.rs:248-252), and parse_criteria (core/engine/src/evaluator.rs:6222-6305) then falls through to ExactText(whole string) at :6302 — a string no cell text ever equals. The policy's stated rationale is symmetry, 'a criteria and a cell must be read the same way', which is RIGHT for percent and currency where the cell really does store text, and INVERTS for dates, which do not.\n\nThe negated case is the one to fix first: '<>that date' counting the row that IS that date is not a zero anyone notices, it is a total that silently keeps the row the user excluded."
+      },
+      "whyNobodyNoticed": "Every reference formula in the 97-task eval corpus writes its date criteria in the concatenated form, which works, so 97 graded tasks per run could never surface it. The literal form is what Microsoft's own COUNTIFS documentation shows, so it is what a user and a language model both reach for first — which is exactly how it was found.",
+      "repro": {
+        "kind": "formula",
+        "steps": [
+          "A2 = 2025-01-01, A3 = 2025-01-15, A4 = 2024-06-30 (typed as dates).",
+          "In an empty cell: =COUNTIF(A2:A4,\">=2025-01-01\")",
+          "EXPECTED 2 (Excel). ACTUAL 0.",
+          "Then: =COUNTIF(A2:A4,\"<>2025-01-15\")   EXPECTED 2, ACTUAL 3.",
+          "Control: =COUNTIF(A2:A4,\">=\"&DATE(2025,1,1)) answers 2, so only the literal differs.",
+          "Control: =ISNUMBER(A2) is TRUE, so the cell holds a number, not text."
+        ]
+      },
+      "notes": "Verified by an independent 18-probe pair sweep (scratchpad verify-criteria-bugs.mjs) against the release grader. Excel parity takes priority always (owner decision D1-D7). Related: BUG-0114 (omitted optional arguments), same class — correct Excel that this engine refuses."
+    },
+    {
+      "id": "BUG-0116",
+      "status": "open",
+      "discovered": "2026-09-15",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "Formula eval corpus growth (60 -> 144 hand tasks, twelve per family). A task author drafting a date-window SUMIFS wrote the Excel-idiomatic literal criterion and measured 0. All three findings below were then re-verified independently against calcula-target/release/examples/eval-formulas.exe, each probe paired with a form that works so a difference can only be the criteria handling."
+      },
+      "violation": {
+        "oracleId": "criteria-comparison-operators-ignore-text",
+        "message": "FOUR OF THE FIVE CRITERIA COMPARISON OPERATORS DO NOT COMPARE TEXT AT ALL. Measured over {\"Mango\",\"Apple\",\"Zebra\"}:\n  =COUNTIF(D2:D4,\">=M\")      -> 0     Excel: 2\n  =COUNTIF(D2:D4,\"<M\")       -> 0     Excel: 1\n  =COUNTIF(D2:D4,\">Apple\")   -> 0     Excel: 2\n<, <=, > and >= have a numeric arm only and answer 0 rather than an error when handed text.\nTHE FAMILY IS INTERNALLY INCONSISTENT, which is the tell: <> DOES have a text arm (=COUNTIF(D2:D4,\"<>Apple\") -> 2, correct), and plain equality works (=COUNTIF(D2:D4,\"Mango\") -> 1). One of the five operators handles text and four do not.\n\nAlphabetic range criteria are ordinary spreadsheet usage — 'count the customers from M onwards', 'everything before Apple' — and they silently answer zero."
+      },
+      "whyNobodyNoticed": "Text criteria in the corpus and in the test suite are all EQUALITY criteria, where the working arm is exercised. The <> operator having a text arm makes the family look complete on any spot check that happens to pick it.",
+      "repro": {
+        "kind": "formula",
+        "steps": [
+          "D2 = \"Mango\", D3 = \"Apple\", D4 = \"Zebra\".",
+          "=COUNTIF(D2:D4,\">=M\")   EXPECTED 2 (Mango, Zebra). ACTUAL 0.",
+          "=COUNTIF(D2:D4,\"<M\")    EXPECTED 1 (Apple). ACTUAL 0.",
+          "Control: =COUNTIF(D2:D4,\"<>Apple\") answers 2 — the <> operator DOES compare text.",
+          "Control: =COUNTIF(D2:D4,\"Mango\") answers 1 — equality works."
+        ]
+      },
+      "notes": "Reported cause: the numeric-only arms in parse_criteria (core/engine/src/evaluator.rs around 6222-6305); the <> text arm is at :6252-6260 and is the model for the missing four."
+    },
+    {
+      "id": "BUG-0117",
+      "status": "open",
+      "discovered": "2026-09-15",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "Formula eval corpus growth (60 -> 144 hand tasks, twelve per family). A task author drafting a date-window SUMIFS wrote the Excel-idiomatic literal criterion and measured 0. All three findings below were then re-verified independently against calcula-target/release/examples/eval-formulas.exe, each probe paired with a form that works so a difference can only be the criteria handling."
+      },
+      "violation": {
+        "oracleId": "criteria-argument-error-swallowed",
+        "message": "AN ERROR IN THE CRITERIA ARGUMENT IS SWALLOWED AND BECOMES A CONFIDENT ZERO.\n  =SUMIF(A2:A4,NA(),B2:B4)          -> 0     Excel: #N/A\n  =SUMIF(A2:A4,1/0,B2:B4)           -> 0     Excel: #DIV/0!\n  =SUMIFS(B2:B4,A2:A4,Nowhere)      -> 0     Excel: #NAME?   (Nowhere undefined)\n  =COUNTIF(A2:A4,Nowhere)           -> 0     Excel: #NAME?\nCONTROL: =SUM(Nowhere) correctly answers #NAME?, so the engine KNOWS the name is bad and discards that knowledge at the criteria boundary.\nTHE TELL: =AVERAGEIFS(B2:B4,A2:A4,NA()) answers #DIV/0! rather than #N/A — the original error was consumed and a new one manufactured by dividing over an empty match set. That proves the error is not propagating rather than merely being reformatted.\n\nReported cause: the catch-all `_ => CriteriaMatch::ExactText(String::new())` at core/engine/src/evaluator.rs:6304 maps every remaining EvalResult, errors included, to 'match nothing'.\n\nA mistyped range name or an upstream #N/A therefore turns a total into a zero that looks like a real answer, in a function family whose entire job is to total things."
+      },
+      "whyNobodyNoticed": "It requires the criteria ARGUMENT itself to be an expression that errors, which no corpus task and no hand test wrote — every one passes a literal or a cell reference. The zero is indistinguishable from an honest 'nothing matched', which is a legitimate and common answer for this family.",
+      "repro": {
+        "kind": "formula",
+        "steps": [
+          "A2:A4 any values, B2:B4 = 100, 200, 400.",
+          "=SUMIF(A2:A4,NA(),B2:B4)   EXPECTED #N/A. ACTUAL 0.",
+          "=SUMIFS(B2:B4,A2:A4,Nowhere) with Nowhere undefined   EXPECTED #NAME?. ACTUAL 0.",
+          "Control: =SUM(Nowhere) answers #NAME?, so the name really is known to be bad.",
+          "Tell: =AVERAGEIFS(B2:B4,A2:A4,NA()) answers #DIV/0!, not #N/A."
+        ]
+      },
+      "notes": "Of the three criteria defects filed together this is the one that most resembles a correct answer, because 0 is what an honest empty match set also returns."
     }
   ]
 }

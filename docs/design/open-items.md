@@ -1838,27 +1838,78 @@ for micro and 4 of 11 for granite-1b, because the query underneath is usually mi
 LAYOUT or a SORT as well. That CONFIRMS the restraint lesson rather than refuting it, on a model
 family with the opposite failure mode from the one it was measured on — see `grammar.ts`.
 
-**Phase 4 is now the binding constraint, and the reason is arithmetic.** McNemar needs six clean
-flips whatever the corpus size, and that applies to every SUBSET too, so a capability sampled by
-three tasks can never be measured no matter how much compute is spent. Today: every formula family
-is exactly **5** tasks — so not one of the twelve can ever reach p<0.05 on its own — and the
-design-query corpus carries SORT=2, BOTTOM=2, LAYOUT=3, TOP=4, COLUMNS=6, FILTERS=7. The corpora
-can answer "is this model better overall" and can NEVER answer "better at what", which is exactly
-what a pin decision between two complementary candidates needs. Growing to ~12 tasks per capability
-(design queries 40 -> ~100, formulas 60 -> ~144 hand tasks) is the next real work, and it is
-hand-authoring, not compute. The ten backfilled English tasks are also measurably harder than the
-thirty they joined (3/10 vs 13/30 for two models, 5/10 vs 19/30 for the third) — not wrong, but the
-balance should be deliberate next time.
+**Phase 4 WAS the binding constraint, and it is now DONE.** McNemar needs six clean flips whatever
+the corpus size, and that applies to every SUBSET too, so a capability sampled by three tasks could
+never be measured no matter how much compute was spent. Every formula family held exactly **5**
+tasks — not one of the twelve could ever reach p<0.05 alone — and the design-query corpus carried
+SORT=2, BOTTOM=2, LAYOUT=3, TOP=4. The corpora could answer "is this model better overall" and
+never "better at WHAT", which is precisely what a pin decision between two COMPLEMENTARY candidates
+needs.
 
-*Still open, in order:* **Phase 4**, the
-corpus: 40 tasks over ONE fixture (`sales_star.json`, hardcoded at `run-design-query-eval.mjs`)
-cannot resolve anything smaller than ~15 percentage points, and the number that matters is the
-GAP BETWEEN SCHEMAS — if the model scores near 17/40 on `sales_star` and near zero on a schema
-with different column names, every design-query number so far is about that fixture. Also open:
-the rules-only intent router (prototyped at 76.5-91.2% against the current detectors' measured
-18.2%, zero false scripts, and it should ship gated on a held-out split), and `npm run eval:all`
-— there is no `eval:*` script at all, so every measurement is a hand-typed command whose flags
-decide the number.
+*Grown and balanced 2026-09-15.* **Design queries 40 -> 122**; every clause now ROWS 122, VALUES 122,
+FILTERS 28, COLUMNS 21, TOP 15, SORT 13, LAYOUT 13, BOTTOM 12. **Formula hand tasks 60 -> 144,
+twelve per family exactly** (181 measured, with the 37 held-out `lib:*`). Each task was authored
+against the real compiler or the real grader and then adversarially reviewed by a second reader who
+re-derived the arithmetic rather than trusting the `handCheck`.
+
+**Three shipped design-query tasks were REMOVED rather than repaired: they filtered on members the
+fixture does not contain.** There is no "Europe" region (Nordics, DACH, Benelux, UK and Ireland) and
+no "Consumer" segment. The compiler checks NAMES, not VALUES, so all three compiled and passed every
+gate for as long as they existed, while the query they describe is unanswerable — and a model that
+picked a real region was marked wrong for being more sensible than the reference. All three were in
+the "no model passes" set. Same-shape replacements over real members took their place.
+
+*Four gates are now permanent, two per side, each sabotaged and seen to fail on the right
+assertion:*
+- `designQueryCorpus.test.ts` — a clause floor (>=12 each, sabotage: SORT cut to 3 -> names `SORT=3`)
+  and a filter-literal check against the fixture's real members (sabotage: a task filtering on
+  "Europe" -> named, while that task's own compile and candidate tests stayed green).
+- `corpus_tests.rs` — `MIN_TASKS` 50 -> 140 and a new `MIN_PER_FAMILY = 12`
+  (sabotage: condagg cut to 5 -> names `condagg=5`, reference and distractor tests unaffected).
+
+*The growth immediately found five defects, which is the argument for having done it:*
+- **Three engine defects in the criteria parser, all filed** — BUG-0115 a date literal inside a
+  criteria string matches nothing (and `"<>2025-01-15"` KEEPS the row it was told to drop),
+  BUG-0116 four of the five comparison operators do not compare text at all (`<>` does, which is
+  why the family looks complete on a spot check), BUG-0117 an error in the criteria argument is
+  swallowed and becomes a confident zero. All three are the "lie" class: a plausible number with
+  nothing on screen to say it is wrong. Each was re-verified independently against the grader
+  binary, paired against a form that works, with controls (`=ISNUMBER(A2)` TRUE proves dates are
+  stored as numbers; `=SUM(Nowhere)` correctly errors, so the engine discards that knowledge at the
+  criteria boundary).
+- **Two next-edit rule defects**, fixed here. The coarser-time rule fired on three tasks grouping by
+  `Date.Month` — whose values are `"2024-01"`, already year-qualified — while stating "adds the same
+  period across every year", which is simply false about it. `timeGrain` alone cannot tell: `Month`
+  and `MonthName` are both grain 2. A new `isCyclicalPeriod` is the discriminator, deliberately
+  narrow and asymmetric (a bare `Month` answers "absolute", because saying "cyclical" wrongly makes
+  a correction fight a correct query while the reverse merely withholds a suggestion). The rule also
+  no longer fires when the query RANKS: `TOP/BOTTOM N BY` ranks the rows as grouped, so inserting a
+  coarser level changes what is ranked — the four quietest months of the year become the four
+  quietest year-months. A correction may refine a query; it may never replace the question.
+
+*One measurement note for whoever re-runs the bake-off:* a task combining `TOP N BY` with `SORT`
+must be written SORT-first. Both orders compile and are canonically identical, but the grammar's
+root is `… (nl sort)? (nl topn)? …`, so a model on the grammar path can only emit one of them.
+Also, `gen-renamed-star.mjs` regenerates `design-queries-renamed.json` from the corpus and has a
+`--check` mode — regenerate after any corpus edit or CI reds.
+
+*Still open, in order:* **re-run the bake-off on the grown corpora** — this is the payoff and it is
+now pure compute: granite-4.0-1b is kept at `AppData/Local/calcula-bakeoff/` (granite-micro deleted,
+it failed the latency gate), and the two near-misses at p=0.057/0.061 are exactly what 122 and 181
+tasks exist to resolve. Then, in order: the rules-only intent router (prototyped at 76.5-91.2%
+against the current detectors' measured 18.2%, zero false scripts, and it should ship gated on a
+held-out split); `npm run eval:all` — there is still no `eval:*` script at all, so every
+measurement is a hand-typed command whose flags decide the number, which is how two runs of the
+same arm came to be recorded as 17/40 and 16/40; and `finishReason`, computed at
+`run-formula-eval.mjs:468` and never persisted per task, so no artifact can say which task
+truncated.
+
+**A THIRD SCHEMA is no longer the open question it was.** The second one settled it: `renamed_star`
+is a controlled rename of the same star — same rows, same questions, different vocabulary — and
+English scored 13/30 vs 12/30 with four tasks FIXED by the rename, the scatter of noise rather than
+the signature of memorisation. The design-query numbers are about the DSL. `gen-renamed-star.mjs`
+regenerates it from the corpus, so it grew to 122 alongside; a third schema would buy breadth, not
+validity, and is no longer on the critical path.
 
 **2.AI.11 — Next-edit suggestions: A, B and C SHIPPED 2026-09-11; D measured, not built.**
 A is Tier 0 and on, B is the model's chip (measured and OFF), C puts A in the text and at another
