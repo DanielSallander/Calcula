@@ -683,104 +683,104 @@
       "source": "design-queries.json#revenue-and-quantity-by-segment-europe"
     },
     {
-      "id": "dq:sv-omsattning-per-kategori",
-      "lang": "sv",
-      "text": "omsättning per produktkategori",
+      "id": "dq:categories-sorted-by-name",
+      "lang": "en",
+      "text": "revenue by product category, in alphabetical order",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-omsattning-per-kategori"
+      "source": "design-queries.json#categories-sorted-by-name"
     },
     {
-      "id": "dq:sv-kostnad-och-marginal-per-region",
-      "lang": "sv",
-      "text": "kostnad och marginal per region",
+      "id": "dq:revenue-by-segment-aliased",
+      "lang": "en",
+      "text": "revenue by customer segment, with the revenue column headed \"Net\"",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-kostnad-och-marginal-per-region"
+      "source": "design-queries.json#revenue-by-segment-aliased"
     },
     {
-      "id": "dq:sv-antal-kunder-per-segment",
-      "lang": "sv",
-      "text": "antal kunder per segment",
+      "id": "dq:revenue-by-country-excluding-nordics",
+      "lang": "en",
+      "text": "revenue by country, leaving out Sweden and Denmark",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-antal-kunder-per-segment"
+      "source": "design-queries.json#revenue-by-country-excluding-nordics"
     },
     {
-      "id": "dq:sv-omsattning-per-ar",
-      "lang": "sv",
-      "text": "omsättning per år",
+      "id": "dq:average-amount-by-category",
+      "lang": "en",
+      "text": "the average of the Amount column by product category",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-omsattning-per-ar"
+      "source": "design-queries.json#average-amount-by-category"
     },
     {
-      "id": "dq:sv-fem-storsta-landerna",
-      "lang": "sv",
-      "text": "de fem största länderna efter omsättning",
+      "id": "dq:revenue-by-category-and-subcategory",
+      "lang": "en",
+      "text": "revenue broken down by product category and then subcategory",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-fem-storsta-landerna"
+      "source": "design-queries.json#revenue-by-category-and-subcategory"
     },
     {
-      "id": "dq:sv-tre-kategorier-hogst-marginal",
-      "lang": "sv",
-      "text": "de tre kategorier som har högst marginal",
+      "id": "dq:bottom-3-countries-by-revenue",
+      "lang": "en",
+      "text": "the three countries with the lowest revenue",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-tre-kategorier-hogst-marginal"
+      "source": "design-queries.json#bottom-3-countries-by-revenue"
     },
     {
-      "id": "dq:sv-omsattning-per-kategori-region-kolumner",
-      "lang": "sv",
-      "text": "omsättning per kategori med region som kolumner",
+      "id": "dq:revenue-by-category-years-as-columns",
+      "lang": "en",
+      "text": "revenue by product category with the years across the top",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-omsattning-per-kategori-region-kolumner"
+      "source": "design-queries.json#revenue-by-category-years-as-columns"
     },
     {
-      "id": "dq:sv-omsattning-per-manad-2024",
-      "lang": "sv",
-      "text": "omsättning per månad under 2024",
+      "id": "dq:revenue-share-of-row-by-region",
+      "lang": "en",
+      "text": "revenue by region and segment, shown as a percentage of each row",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-omsattning-per-manad-2024"
+      "source": "design-queries.json#revenue-share-of-row-by-region"
     },
     {
-      "id": "dq:sv-andel-av-omsattningen-per-segment",
-      "lang": "sv",
-      "text": "andel av den totala omsättningen per segment",
+      "id": "dq:cost-and-margin-by-region-2025",
+      "lang": "en",
+      "text": "cost and margin by region for 2025",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-andel-av-omsattningen-per-segment"
+      "source": "design-queries.json#cost-and-margin-by-region-2025"
     },
     {
-      "id": "dq:sv-kvantitet-per-land-utan-totalsummor",
-      "lang": "sv",
-      "text": "kvantitet per land utan totalsummor",
+      "id": "dq:quantity-by-segment-no-totals",
+      "lang": "en",
+      "text": "quantity by customer segment, without any totals",
       "intent": "bi-query",
       "decisive": true,
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#sv-kvantitet-per-land-utan-totalsummor"
+      "source": "design-queries.json#quantity-by-segment-no-totals"
     },
     {
       "id": "an-1",
@@ -863,46 +863,6 @@
       "source": "written"
     },
     {
-      "id": "an-sv-1",
-      "lang": "sv",
-      "text": "analysera det här området",
-      "intent": "analyze",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish for the same request",
-      "source": "written"
-    },
-    {
-      "id": "an-sv-2",
-      "lang": "sv",
-      "text": "finns det några avvikelser i kolumn C",
-      "intent": "analyze",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "avvikelse is in the Swedish word list",
-      "source": "written"
-    },
-    {
-      "id": "an-sv-3",
-      "lang": "sv",
-      "text": "vad säger de här siffrorna",
-      "intent": "analyze",
-      "decisive": false,
-      "confusableWith": "question",
-      "why": "Swedish 'what do these numbers say'",
-      "source": "written"
-    },
-    {
-      "id": "an-sv-4",
-      "lang": "sv",
-      "text": "visa mönster i försäljningen över tid",
-      "intent": "analyze",
-      "decisive": true,
-      "confusableWith": "bi-query",
-      "why": "mönster is an analysis word; 'över tid' pulls toward a report",
-      "source": "written"
-    },
-    {
       "id": "fo-1",
       "lang": "en",
       "text": "=SUM(B2:B100)",
@@ -963,26 +923,6 @@
       "source": "written"
     },
     {
-      "id": "fo-sv-1",
-      "lang": "sv",
-      "text": "vilken formel ger medelvärdet av kolumn D",
-      "intent": "formula",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish, asks for a formula",
-      "source": "written"
-    },
-    {
-      "id": "fo-sv-2",
-      "lang": "sv",
-      "text": "förklara formeln i C10",
-      "intent": "formula",
-      "decisive": true,
-      "confusableWith": "question",
-      "why": "Swedish, explicitly about a formula",
-      "source": "written"
-    },
-    {
       "id": "fm-1",
       "lang": "en",
       "text": "make A1:D1 bold",
@@ -1033,26 +973,6 @@
       "source": "written"
     },
     {
-      "id": "fm-sv-1",
-      "lang": "sv",
-      "text": "gör rubrikraden fet",
-      "intent": "format",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish, appearance only",
-      "source": "written"
-    },
-    {
-      "id": "fm-sv-2",
-      "lang": "sv",
-      "text": "visa kolumn E som procent med en decimal",
-      "intent": "format",
-      "decisive": true,
-      "confusableWith": "formula",
-      "why": "Swedish number format",
-      "source": "written"
-    },
-    {
       "id": "ch-1",
       "lang": "en",
       "text": "make a line chart of revenue by month",
@@ -1093,26 +1013,6 @@
       "source": "written"
     },
     {
-      "id": "ch-sv-1",
-      "lang": "sv",
-      "text": "gör ett linjediagram över omsättning per månad",
-      "intent": "chart",
-      "decisive": true,
-      "confusableWith": "bi-query",
-      "why": "Swedish, names the chart type",
-      "source": "written"
-    },
-    {
-      "id": "ch-sv-2",
-      "lang": "sv",
-      "text": "lägg till en trendlinje i diagrammet",
-      "intent": "chart",
-      "decisive": true,
-      "confusableWith": "analyze",
-      "why": "Swedish chart object change",
-      "source": "written"
-    },
-    {
       "id": "do-1",
       "lang": "en",
       "text": "delete the empty rows between 40 and 60",
@@ -1143,26 +1043,6 @@
       "source": "written"
     },
     {
-      "id": "do-sv-1",
-      "lang": "sv",
-      "text": "ta bort dubbletter och behåll den första",
-      "intent": "data-op",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish, one clean-up",
-      "source": "written"
-    },
-    {
-      "id": "do-sv-2",
-      "lang": "sv",
-      "text": "sortera raderna efter kolumn A stigande",
-      "intent": "data-op",
-      "decisive": true,
-      "confusableWith": "script",
-      "why": "Swedish sort",
-      "source": "written"
-    },
-    {
       "id": "sc-1",
       "lang": "en",
       "text": "every time this sheet opens, refresh the totals",
@@ -1180,26 +1060,6 @@
       "decisive": true,
       "confusableWith": null,
       "why": "macro plus a click handler",
-      "source": "written"
-    },
-    {
-      "id": "sc-sv-1",
-      "lang": "sv",
-      "text": "skriv ett makro som uppdaterar totalerna varje gång arket öppnas",
-      "intent": "script",
-      "decisive": true,
-      "confusableWith": "data-op",
-      "why": "Swedish, macro plus a lifecycle hook",
-      "source": "written"
-    },
-    {
-      "id": "sc-sv-2",
-      "lang": "sv",
-      "text": "när knappen klickas, kopiera A1 till B1",
-      "intent": "script",
-      "decisive": true,
-      "confusableWith": "data-op",
-      "why": "Swedish button click",
       "source": "written"
     },
     {
@@ -1230,26 +1090,6 @@
       "decisive": true,
       "confusableWith": null,
       "why": "a capability question",
-      "source": "written"
-    },
-    {
-      "id": "qu-sv-1",
-      "lang": "sv",
-      "text": "vad gör en pivottabell",
-      "intent": "question",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish product question",
-      "source": "written"
-    },
-    {
-      "id": "qu-sv-2",
-      "lang": "sv",
-      "text": "hur delar jag den här arbetsboken",
-      "intent": "question",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish how-to",
       "source": "written"
     },
     {
@@ -1290,186 +1130,6 @@
       "decisive": true,
       "confusableWith": null,
       "why": "refers to context the router does not have",
-      "source": "written"
-    },
-    {
-      "id": "un-sv-1",
-      "lang": "sv",
-      "text": "fixa det här",
-      "intent": "unclear",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish, no object",
-      "source": "written"
-    },
-    {
-      "id": "un-sv-2",
-      "lang": "sv",
-      "text": "kan du hjälpa mig",
-      "intent": "unclear",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "Swedish, no content",
-      "source": "written"
-    },
-    {
-      "id": "sv-fo-1",
-      "lang": "sv",
-      "text": "=SUMMA(B2:B100)",
-      "intent": "formula",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "a leading equals sign, with the Swedish function name",
-      "source": "written"
-    },
-    {
-      "id": "sv-fo-2",
-      "lang": "sv",
-      "text": "hur räknar jag celler som inte är tomma",
-      "intent": "formula",
-      "decisive": false,
-      "confusableWith": "question",
-      "why": "a how-to a formula answers",
-      "source": "written"
-    },
-    {
-      "id": "sv-fo-3",
-      "lang": "sv",
-      "text": "varför visar C7 #DIVISION/0!",
-      "intent": "formula",
-      "decisive": true,
-      "confusableWith": "question",
-      "why": "a Swedish error literal in a cell",
-      "source": "written"
-    },
-    {
-      "id": "sv-fm-1",
-      "lang": "sv",
-      "text": "centrera rubrikerna och lås översta raden",
-      "intent": "format",
-      "decisive": true,
-      "confusableWith": "data-op",
-      "why": "alignment plus a view setting",
-      "source": "written"
-    },
-    {
-      "id": "sv-fm-2",
-      "lang": "sv",
-      "text": "färga celler över 100 röda",
-      "intent": "format",
-      "decisive": false,
-      "confusableWith": "script",
-      "why": "conditional formatting, not automation",
-      "source": "written"
-    },
-    {
-      "id": "sv-do-1",
-      "lang": "sv",
-      "text": "dela kolumn A i förnamn och efternamn",
-      "intent": "data-op",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "text to columns",
-      "source": "written"
-    },
-    {
-      "id": "sv-do-2",
-      "lang": "sv",
-      "text": "ta bort tomma rader mellan 40 och 60",
-      "intent": "data-op",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "one structural edit",
-      "source": "written"
-    },
-    {
-      "id": "sv-do-3",
-      "lang": "sv",
-      "text": "skapa ett nytt blad som heter Sammanfattning",
-      "intent": "data-op",
-      "decisive": true,
-      "confusableWith": "script",
-      "why": "one structural change",
-      "source": "written"
-    },
-    {
-      "id": "sv-sc-1",
-      "lang": "sv",
-      "text": "fråga användaren innan A1:D100 rensas",
-      "intent": "script",
-      "decisive": true,
-      "confusableWith": "data-op",
-      "why": "asks the user at run time",
-      "source": "written"
-    },
-    {
-      "id": "sv-sc-2",
-      "lang": "sv",
-      "text": "uppdatera totalerna var femtonde minut",
-      "intent": "script",
-      "decisive": true,
-      "confusableWith": "data-op",
-      "why": "a schedule is durable",
-      "source": "written"
-    },
-    {
-      "id": "sv-sc-3",
-      "lang": "sv",
-      "text": "gör ett formulär med kundnamn bundet till B2",
-      "intent": "script",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "a form is an authored object",
-      "source": "written"
-    },
-    {
-      "id": "sv-qu-1",
-      "lang": "sv",
-      "text": "kan Calcula öppna en Excel-fil",
-      "intent": "question",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "a capability question",
-      "source": "written"
-    },
-    {
-      "id": "sv-qu-2",
-      "lang": "sv",
-      "text": "hur stor är datamängden på det här bladet",
-      "intent": "question",
-      "decisive": false,
-      "confusableWith": "analyze",
-      "why": "wants a fact about the sheet",
-      "source": "written"
-    },
-    {
-      "id": "sv-ch-1",
-      "lang": "sv",
-      "text": "vilken diagramtyp passar den här datan",
-      "intent": "chart",
-      "decisive": false,
-      "confusableWith": "question",
-      "why": "advice about charts",
-      "source": "written"
-    },
-    {
-      "id": "sv-un-1",
-      "lang": "sv",
-      "text": "siffrorna ser fel ut",
-      "intent": "unclear",
-      "decisive": false,
-      "confusableWith": "analyze",
-      "why": "a complaint; analysis or a formula error",
-      "source": "written"
-    },
-    {
-      "id": "sv-an-1",
-      "lang": "sv",
-      "text": "hänger utgifterna ihop med antalet leads",
-      "intent": "analyze",
-      "decisive": true,
-      "confusableWith": null,
-      "why": "correlation without the word",
       "source": "written"
     },
     {
@@ -1523,26 +1183,6 @@
       "source": "written"
     },
     {
-      "id": "pf-sv-1",
-      "lang": "sv",
-      "text": "gör rubrikraden fet varje gång data importeras",
-      "intent": "script",
-      "decisive": true,
-      "confusableWith": "format",
-      "why": "Swedish: formatting, automated",
-      "source": "written"
-    },
-    {
-      "id": "pf-sv-2",
-      "lang": "sv",
-      "text": "formatera om datumen som ÅÅÅÅ-MM-DD",
-      "intent": "format",
-      "decisive": true,
-      "confusableWith": "script",
-      "why": "Swedish: one format change",
-      "source": "written"
-    },
-    {
       "id": "pq-1",
       "lang": "en",
       "text": "is there a function for the median",
@@ -1573,16 +1213,6 @@
       "source": "written"
     },
     {
-      "id": "pq-sv-1",
-      "lang": "sv",
-      "text": "finns det en funktion för median",
-      "intent": "formula",
-      "decisive": true,
-      "confusableWith": "question",
-      "why": "Swedish: does a function exist",
-      "source": "written"
-    },
-    {
       "id": "pa-1",
       "lang": "en",
       "text": "is this month better or worse than last month",
@@ -1610,16 +1240,6 @@
       "decisive": true,
       "confusableWith": "question",
       "why": "a summary of the data, not of the product",
-      "source": "written"
-    },
-    {
-      "id": "pa-sv-1",
-      "lang": "sv",
-      "text": "är den här månaden bättre eller sämre än förra",
-      "intent": "analyze",
-      "decisive": true,
-      "confusableWith": "question",
-      "why": "Swedish comparison",
       "source": "written"
     },
     {

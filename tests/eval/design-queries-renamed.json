@@ -343,117 +343,116 @@
       "distractor": "ROWS: Account.Tier\nVALUES: [NetValue], [Units]\nFILTERS: Territory.Market = (\"Europe\")"
     },
     {
-      "id": "sv-omsattning-per-kategori",
-      "lang": "sv",
+      "id": "categories-sorted-by-name",
+      "lang": "en",
       "tags": [
         "rows",
-        "one-measure"
+        "sort"
       ],
-      "intent": "nettosumma per artikelfamilj",
-      "reference": "ROWS: Item.Family\nVALUES: [NetValue]",
-      "distractor": "ROWS: Item.Name\nVALUES: [NetValue]"
+      "intent": "net value by item family, in alphabetical order",
+      "reference": "ROWS: Item.Family\nVALUES: [NetValue]\nSORT: Item.Family ASC",
+      "distractor": "ROWS: Item.Family\nVALUES: [NetValue]\nTOP 5 BY [NetValue]"
     },
     {
-      "id": "sv-kostnad-och-marginal-per-region",
-      "lang": "sv",
+      "id": "revenue-by-segment-aliased",
+      "lang": "en",
       "tags": [
         "rows",
-        "two-measures"
+        "alias"
       ],
-      "intent": "utgift och överskott per zon",
-      "reference": "ROWS: Territory.Zone\nVALUES: [Spend], [Surplus]",
-      "distractor": "ROWS: Territory.Zone\nVALUES: [Spend], [NetValue]",
-      "alternatives": [
-        "ROWS: Territory.Zone\nVALUES: [Spend], [SurplusPct]"
-      ]
-    },
-    {
-      "id": "sv-antal-kunder-per-segment",
-      "lang": "sv",
-      "tags": [
-        "rows",
-        "one-measure"
-      ],
-      "intent": "antal konton per skikt",
-      "reference": "ROWS: Account.Tier\nVALUES: [Accounts]",
-      "distractor": "ROWS: Account.Tier\nVALUES: [Units]"
-    },
-    {
-      "id": "sv-omsattning-per-ar",
-      "lang": "sv",
-      "tags": [
-        "time"
-      ],
-      "intent": "nettosumma per år",
-      "reference": "ROWS: Date.Year\nVALUES: [NetValue]",
-      "distractor": "ROWS: Date.MonthName\nVALUES: [NetValue]"
-    },
-    {
-      "id": "sv-fem-storsta-landerna",
-      "lang": "sv",
-      "tags": [
-        "top"
-      ],
-      "intent": "de fem största marknaderna efter nettosumma",
-      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 5 BY [NetValue]",
-      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nBOTTOM 5 BY [NetValue]"
-    },
-    {
-      "id": "sv-tre-kategorier-hogst-marginal",
-      "lang": "sv",
-      "tags": [
-        "top"
-      ],
-      "intent": "de tre familjer som har högst överskott",
-      "reference": "ROWS: Item.Family\nVALUES: [Surplus]\nTOP 3 BY [Surplus]",
-      "distractor": "ROWS: Item.Family\nVALUES: [Surplus]\nBOTTOM 3 BY [Surplus]",
-      "alternatives": [
-        "ROWS: Item.Family\nVALUES: [SurplusPct]\nTOP 3 BY [SurplusPct]"
-      ]
-    },
-    {
-      "id": "sv-omsattning-per-kategori-region-kolumner",
-      "lang": "sv",
-      "tags": [
-        "columns"
-      ],
-      "intent": "nettosumma per familj med zon som kolumner",
-      "reference": "ROWS: Item.Family\nCOLUMNS: Territory.Zone\nVALUES: [NetValue]",
-      "distractor": "ROWS: Item.Family, Territory.Zone\nVALUES: [NetValue]"
-    },
-    {
-      "id": "sv-omsattning-per-manad-2024",
-      "lang": "sv",
-      "tags": [
-        "filter",
-        "time"
-      ],
-      "intent": "nettosumma per månad under 2024",
-      "reference": "ROWS: Date.MonthName\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")",
-      "distractor": "ROWS: Date.Year, Date.MonthName\nVALUES: [NetValue]",
-      "alternatives": [
-        "ROWS: Date.Month\nVALUES: [NetValue]\nFILTERS: Date.Year = (\"2024\")"
-      ]
-    },
-    {
-      "id": "sv-andel-av-omsattningen-per-segment",
-      "lang": "sv",
-      "tags": [
-        "show-as"
-      ],
-      "intent": "andel av den totala nettosumman per skikt",
-      "reference": "ROWS: Account.Tier\nVALUES: [NetValue] [% of grand total]",
+      "intent": "net value by account tier, with the net value column headed \"Net\"",
+      "reference": "ROWS: Account.Tier\nVALUES: [NetValue] AS \"Net\"",
       "distractor": "ROWS: Account.Tier\nVALUES: [NetValue]"
     },
     {
-      "id": "sv-kvantitet-per-land-utan-totalsummor",
-      "lang": "sv",
+      "id": "revenue-by-country-excluding-nordics",
+      "lang": "en",
       "tags": [
+        "rows",
+        "exclude",
+        "filter"
+      ],
+      "intent": "net value by market, leaving out Sweden and Denmark",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nFILTERS: Territory.Market NOT IN (\"Sweden\", \"Denmark\")",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nFILTERS: Territory.Market = (\"Sweden\", \"Denmark\")"
+    },
+    {
+      "id": "average-amount-by-category",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "aggregate-column"
+      ],
+      "intent": "the average of the Value column by item family",
+      "reference": "ROWS: Item.Family\nVALUES: average(Ledger.Value)",
+      "distractor": "ROWS: Item.Family\nVALUES: sum(Ledger.Value)"
+    },
+    {
+      "id": "revenue-by-category-and-subcategory",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-levels"
+      ],
+      "intent": "net value broken down by item family and then subcategory",
+      "reference": "ROWS: Item.Family, Line.LineName\nVALUES: [NetValue]",
+      "distractor": "ROWS: Item.Family\nCOLUMNS: Line.LineName\nVALUES: [NetValue]"
+    },
+    {
+      "id": "bottom-3-countries-by-revenue",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "top"
+      ],
+      "intent": "the three markets with the lowest net value",
+      "reference": "ROWS: Territory.Market\nVALUES: [NetValue]\nBOTTOM 3 BY [NetValue]",
+      "distractor": "ROWS: Territory.Market\nVALUES: [NetValue]\nTOP 3 BY [NetValue]"
+    },
+    {
+      "id": "revenue-by-category-years-as-columns",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "time"
+      ],
+      "intent": "net value by item family with the years across the top",
+      "reference": "ROWS: Item.Family\nCOLUMNS: Date.Year\nVALUES: [NetValue]",
+      "distractor": "ROWS: Item.Family, Date.Year\nVALUES: [NetValue]"
+    },
+    {
+      "id": "revenue-share-of-row-by-region",
+      "lang": "en",
+      "tags": [
+        "columns",
+        "show-as"
+      ],
+      "intent": "net value by zone and tier, shown as a percentage of each row",
+      "reference": "ROWS: Territory.Zone\nCOLUMNS: Account.Tier\nVALUES: [NetValue] [% of row]",
+      "distractor": "ROWS: Territory.Zone\nCOLUMNS: Account.Tier\nVALUES: [NetValue] [% of grand total]"
+    },
+    {
+      "id": "cost-and-margin-by-region-2025",
+      "lang": "en",
+      "tags": [
+        "rows",
+        "two-measures",
+        "filter"
+      ],
+      "intent": "spend and surplus by zone for 2025",
+      "reference": "ROWS: Territory.Zone\nVALUES: [Spend], [Surplus]\nFILTERS: Date.Year = (\"2025\")",
+      "distractor": "ROWS: Territory.Zone\nVALUES: [Spend], [Surplus]"
+    },
+    {
+      "id": "quantity-by-segment-no-totals",
+      "lang": "en",
+      "tags": [
+        "rows",
         "layout"
       ],
-      "intent": "enheter per marknad utan totalsummor",
-      "reference": "ROWS: Territory.Market\nVALUES: [Units]\nLAYOUT: no-grand-totals",
-      "distractor": "ROWS: Territory.Market\nVALUES: [Units]"
+      "intent": "units by account tier, without any totals",
+      "reference": "ROWS: Account.Tier\nVALUES: [Units]\nLAYOUT: no-grand-totals",
+      "distractor": "ROWS: Account.Tier\nVALUES: [Units]"
     }
   ]
 }

@@ -1,17 +1,5 @@
 {
-  "$comment": [
-    "THE FORMULA EVAL CORPUS — the hand-written half.",
-    "",
-    "Each task states a request a person would make, a fixture as typed cell",
-    "text, the formula that answers it, and the answer Calcula's own engine",
-    "produces. A `distractor` names the plausible wrong formula a model",
-    "reaches for and MUST NOT satisfy the expectation; a task whose",
-    "distractor also passes measures nothing and is a defect.",
-    "",
-    "Every reference and every distractor in this file has been run through",
-    "the engine via `core/calcula-format/examples/eval-formulas.rs`.",
-    "Formulas are INVARIANT: comma separators, dot decimals."
-  ],
+  "$comment": "THE FORMULA EVAL CORPUS — the hand-written half.,,Each task states a request a person would make, a fixture as typed cell,text, the formula that answers it, and the answer Calcula's own engine,produces. A `distractor` names the plausible wrong formula a model,reaches for and MUST NOT satisfy the expectation; a task whose,distractor also passes measures nothing and is a defect.,,Every reference and every distractor in this file has been run through,the engine via `core/calcula-format/examples/eval-formulas.rs`.,Formulas are INVARIANT: comma separators, dot decimals. 2026-09-15: twelve tasks carried a dead `intentSv` field and were mislabelled lang:\"sv\" although their `intent` — the only field the runner prompts with — was always English. The field is gone and the labels corrected (owner decision: the AI programme is English only). No task was removed: the corpus stays at 60 hand tasks, 97 with the library split.",
   "version": 1,
   "tasks": [
     {
@@ -167,7 +155,7 @@
     {
       "id": "condagg-countifs-belopp-over-1000",
       "family": "condagg",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "countifs",
         "two-conditions",
@@ -175,7 +163,6 @@
         "swedish"
       ],
       "intent": "In the order table in A1:C10, count how many rows have a Belopp that is STRICTLY greater than 1000 (a Belopp of exactly 1000 does not count) AND a Status of Skickad. Put the count in E2.",
-      "intentSv": "Räkna hur många rader i ordertabellen A1:C10 som både har ett belopp strikt större än 1000 (exakt 1000 ska alltså inte räknas med) och status Skickad. Skriv antalet i E2.",
       "fixture": {
         "sheet": "Sheet1",
         "cells": [
@@ -1032,7 +1019,7 @@
     {
       "id": "lookup-name-left-of-badge",
       "family": "lookup",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "index-match",
         "left-lookup",
@@ -1040,7 +1027,6 @@
         "text-result"
       ],
       "intent": "The staff list has the employee name in column A and the badge number in column B. Return the name of the employee whose badge number is exactly 4126. The answer sits to the LEFT of the badge column.",
-      "intentSv": "Personallistan har namnen i kolumn A och bricknumren i kolumn B. Vilket namn hör till bricknummer 4126? Det ska vara en exakt träff, och namnet står till vänster om kolumnen med bricknummer.",
       "fixture": {
         "sheet": "Staff",
         "cells": [
@@ -1238,7 +1224,7 @@
     {
       "id": "date-networkdays-project-holidays",
       "family": "date",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "date",
         "networkdays",
@@ -1247,7 +1233,6 @@
         "inclusive-endpoints"
       ],
       "intent": "In H2, count the working days for the Site survey task in row 2: from its start date 2025-04-01 in B2 through its due date 2025-04-30 in C2, counting both of those days themselves, treating every Saturday and Sunday as a non-working day, and also skipping the public holidays listed in F2:F4.",
-      "intentSv": "Räkna ut antalet arbetsdagar för uppgiften Site survey på rad 2: från startdatumet 2025-04-01 i B2 till och med slutdatumet 2025-04-30 i C2, där båda dagarna ska räknas med. Lördagar och söndagar är inte arbetsdagar, och helgdagarna som står i F2:F4 ska inte heller räknas. Skriv formeln i H2.",
       "fixture": {
         "sheet": "Sheet1",
         "cells": [
@@ -1809,7 +1794,7 @@
     {
       "id": "textsplit-country-after-last-comma",
       "family": "textsplit",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "text",
         "textafter",
@@ -1818,7 +1803,6 @@
         "negative-instance"
       ],
       "intent": "Column B holds locations written as comma-separated parts, always ending with the country, but the NUMBER of parts varies from row to row — some rows are \"City, Region, Country\" and some carry an extra district part. In E2, return the country from B3 — that is, the part after the LAST comma, whichever comma that turns out to be — with any leading or trailing spaces removed.",
-      "intentSv": "Kolumn B innehåller platser skrivna som kommaseparerade delar som alltid slutar med landet, men antalet delar varierar mellan raderna — vissa rader är \"Stad, Region, Land\" och vissa har ett extra stadsdelsled. Ge i E2 landet för B3, alltså den del som står efter det sista kommatecknet oavsett hur många kommatecken raden har, utan inledande eller avslutande blanksteg.",
       "fixture": {
         "sheet": "Sheet1",
         "cells": [
@@ -2138,7 +2122,7 @@
     {
       "id": "textjoin-emails-skip-blanks",
       "family": "textjoin",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "textjoin",
         "ignore-empty",
@@ -2147,7 +2131,6 @@
         "blanks"
       ],
       "intent": "In D2, join every email address in B2:B6 into one single text value, in the order they appear from top to bottom, separated by a comma and a space, and leave out the people who have no email address (their email cell is empty).",
-      "intentSv": "Skriv i D2 en enda text som slår ihop alla e-postadresser i B2:B6, uppifrån och ned, åtskilda med kommatecken och mellanslag, och hoppa över de personer som saknar e-postadress.",
       "fixture": {
         "sheet": "Sheet1",
         "cells": [
@@ -2493,7 +2476,7 @@
     {
       "id": "running-cumulative-total-anchored",
       "family": "running",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "running-total",
         "cumulative",
@@ -2502,7 +2485,6 @@
         "sum"
       ],
       "intent": "Column C should show a running (cumulative) total of the Amount in column B, starting at the first data row, row 2. Write the formula for cell C7 — the total of B2 down through B7 — as a fill-down formula: the sum must always begin at row 2 no matter which row of column C it is copied into, and it must end at the formula's own row. The amount on row 8 belongs to a later week and must not be counted.",
-      "intentSv": "Kolumn C ska visa en löpande summa av beloppen i kolumn B, räknat från och med rad 2. Skriv formeln för cell C7, alltså summan av B2 till och med B7. Formeln ska gå att kopiera nedåt i hela kolumnen utan att startraden flyttas, så rad 2 måste ligga fast medan slutraden följer med. Beloppet på rad 8 ska inte räknas med.",
       "fixture": {
         "sheet": "Sheet1",
         "cells": [
@@ -3209,7 +3191,7 @@
     {
       "id": "rank-highest-amount-in-region",
       "family": "rank",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "rank",
         "maxifs",
@@ -3217,7 +3199,6 @@
         "top-1"
       ],
       "intent": "In E2, return the largest amount in C2:C8, counting only the rows whose region in B2:B8 is Nord.",
-      "intentSv": "Skriv i E2 det högsta beloppet i C2:C8, men bara för de rader där regionen i B2:B8 är Nord.",
       "fixture": {
         "sheet": "Forsaljning",
         "cells": [
@@ -3522,7 +3503,7 @@
     {
       "id": "share-percent-of-total-anchored",
       "family": "share",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "percent-of-total",
         "anchored-denominator",
@@ -3531,7 +3512,6 @@
         "exclude-total-row"
       ],
       "intent": "The sheet Sales lists five regions with their sales in B2:B6, and row 7 is a Total row that must not be counted in the denominator. In D2, compute North's share of the five regions' combined sales, expressed as a fraction between 0 and 1 (a tenth is written 0.1, not 10). Write it so the formula can be copied down to D3:D6 with the reference to the total staying fixed on B2:B6.",
-      "intentSv": "Bladet Sales listar fem regioner med försäljning i B2:B6, och rad 7 är en totalrad som inte ska räknas med i nämnaren. Räkna i D2 ut hur stor andel av de fem regionernas sammanlagda försäljning som North står för. Svaret ska anges som en andel mellan 0 och 1 (en tiondel skrivs 0.1, inte 10). Skriv formeln så att den kan kopieras nedåt till D3:D6 utan att referensen till totalsumman glider med.",
       "fixture": {
         "sheet": "Sales",
         "cells": [
@@ -4058,7 +4038,7 @@
     {
       "id": "logic-grade-letter-four-bands",
       "family": "logic",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "logic",
         "ifs",
@@ -4068,7 +4048,6 @@
         "text-result"
       ],
       "intent": "In D2, return the letter grade for the score in B2 using four bands: \"A\" when the score is 90 or higher, \"B\" when it is 80 or higher but below 90, \"C\" when it is 70 or higher but below 80, and \"F\" for anything below 70. The band edges are inclusive at the bottom: a score of exactly 90 is an A, exactly 80 is a B, and exactly 70 is a C. Return the letter as text.",
-      "intentSv": "Skriv i D2 bokstavsbetyget för poängen i B2 enligt fyra nivåer: A från 90 och uppåt, B från 80 upp till 90, C från 70 upp till 80, och F för allt under 70. Gränserna räknas nedåt, så exakt 90 ger A, exakt 80 ger B och exakt 70 ger C. Svara med bokstaven som text.",
       "fixture": {
         "sheet": "Grades",
         "cells": [
@@ -4522,7 +4501,7 @@
     {
       "id": "errguard-iferror-zero-units-divide",
       "family": "errguard",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "iferror",
         "division-by-zero",
@@ -4530,7 +4509,6 @@
         "stated-fallback"
       ],
       "intent": "Cell E4 must show the revenue per unit for the product on row 4: the revenue in B4 divided by the units in C4. If the unit count is zero that division is a #DIV/0! error, and in that case E4 must show the number 0 instead of the error.",
-      "intentSv": "Cell E4 ska visa intäkten per enhet för produkten på rad 4, alltså B4 delat med C4. Om antalet enheter är noll blir divisionen felet #DIV/0!, och då ska E4 visa talet 0 i stället för felet.",
       "fixture": {
         "sheet": "Sales",
         "cells": [
@@ -4932,7 +4910,7 @@
     {
       "id": "dynarray-filter-region-and-amount",
       "family": "dynarray",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "FILTER",
         "two-conditions",
@@ -4941,7 +4919,6 @@
         "text-anchor"
       ],
       "intent": "In E2, use one formula to list the rep names from A2:A9 for every row where the Region in column B is North AND the Amount in column C is strictly greater than 200 (an amount of exactly 200 does not qualify). Keep the rows in their original sheet order and let the result spill down.",
-      "intentSv": "Skriv en formel i E2 som listar namnen på de säljare i A2:A9 vars region i kolumn B är North och vars belopp i kolumn C är större än 200 (exakt 200 räknas inte). Behåll radernas ursprungliga ordning och låt resultatet spillas nedåt.",
       "fixture": {
         "sheet": "Sales",
         "cells": [
@@ -5777,7 +5754,7 @@
     {
       "id": "statfin-loan-monthly-payment",
       "family": "statfin",
-      "lang": "sv",
+      "lang": "en",
       "tags": [
         "finance",
         "pmt",
@@ -5786,7 +5763,6 @@
         "sign-convention"
       ],
       "intent": "In D2, calculate the fixed monthly payment on the loan described in B1:B4: the loan amount is in B1, the annual interest rate in B2, the term in years in B3 and the number of payments per year in B4. Use the monthly rate (annual rate divided by payments per year) and the total number of payments (years times payments per year). Payments are made at the END of each month, and nothing is left owing at the end of the term. The arrangement fee in B5 is paid up front in cash and is not financed, so it is not part of the loan amount. Keep PMT's own sign — the answer is a negative number — and round it to 2 decimals.",
-      "intentSv": "Beräkna i D2 den fasta månadsbetalningen på lånet som beskrivs i B1:B4: lånebeloppet står i B1, årsräntan i B2, löptiden i år i B3 och antalet betalningar per år i B4. Använd månadsräntan (årsräntan delad med antalet betalningar per år) och det totala antalet betalningar (antal år gånger betalningar per år). Betalningarna sker i slutet av varje månad och lånet är helt återbetalt när löptiden är slut. Uppläggningsavgiften i B5 betalas kontant och ingår inte i lånebeloppet. Behåll PMT:s eget tecken — svaret ska vara negativt — och avrunda till 2 decimaler.",
       "fixture": {
         "sheet": "Loan",
         "cells": [

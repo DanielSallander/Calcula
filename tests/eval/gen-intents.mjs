@@ -119,10 +119,6 @@ const WRITTEN = [
   ["an-6", "en", "explain these numbers to me", "analyze", true, "question", "a reported phrase"],
   ["an-7", "en", "what stands out here", "analyze", false, "question", "vague, but the analysis phrase list carries it"],
   ["an-8", "en", "check whether spend and leads move together", "analyze", true, null, "correlation without the word"],
-  ["an-sv-1", "sv", "analysera det här området", "analyze", true, null, "Swedish for the same request"],
-  ["an-sv-2", "sv", "finns det några avvikelser i kolumn C", "analyze", true, null, "avvikelse is in the Swedish word list"],
-  ["an-sv-3", "sv", "vad säger de här siffrorna", "analyze", false, "question", "Swedish 'what do these numbers say'"],
-  ["an-sv-4", "sv", "visa mönster i försäljningen över tid", "analyze", true, "bi-query", "mönster is an analysis word; 'över tid' pulls toward a report"],
 
   // -- formula ------------------------------------------------------------
   ["fo-1", "en", "=SUM(B2:B100)", "formula", true, null, "a leading equals sign is decisive on its own"],
@@ -131,8 +127,6 @@ const WRITTEN = [
   ["fo-4", "en", "why does C7 show #DIV/0!", "formula", true, "question", "an error in a cell is formula territory"],
   ["fo-5", "en", "explain the formula in C10", "formula", true, "question", "explicitly about a formula"],
   ["fo-6", "en", "how do I count cells that are not empty", "formula", false, "question", "a how-to that a formula answers"],
-  ["fo-sv-1", "sv", "vilken formel ger medelvärdet av kolumn D", "formula", true, null, "Swedish, asks for a formula"],
-  ["fo-sv-2", "sv", "förklara formeln i C10", "formula", true, "question", "Swedish, explicitly about a formula"],
 
   // -- format -------------------------------------------------------------
   ["fm-1", "en", "make A1:D1 bold", "format", true, null, "appearance only"],
@@ -140,44 +134,32 @@ const WRITTEN = [
   ["fm-3", "en", "show column E as a percentage with one decimal", "format", true, "formula", "a number format, not a calculation"],
   ["fm-4", "en", "centre the headers and freeze the top row", "format", true, "data-op", "alignment plus a view setting"],
   ["fm-5", "en", "colour any cell over 100 red", "format", false, "script", "conditional formatting, not automation"],
-  ["fm-sv-1", "sv", "gör rubrikraden fet", "format", true, null, "Swedish, appearance only"],
-  ["fm-sv-2", "sv", "visa kolumn E som procent med en decimal", "format", true, "formula", "Swedish number format"],
 
   // -- chart --------------------------------------------------------------
   ["ch-1", "en", "make a line chart of revenue by month", "chart", true, "bi-query", "names the chart type"],
   ["ch-2", "en", "plot these two columns against each other", "chart", true, null, "'plot' is chart language"],
   ["ch-3", "en", "add a trendline to the sales chart", "chart", true, "analyze", "a chart object change; 'trend' is nearby"],
   ["ch-4", "en", "which chart type suits this data", "chart", false, "question", "advice about charts"],
-  ["ch-sv-1", "sv", "gör ett linjediagram över omsättning per månad", "chart", true, "bi-query", "Swedish, names the chart type"],
-  ["ch-sv-2", "sv", "lägg till en trendlinje i diagrammet", "chart", true, "analyze", "Swedish chart object change"],
 
   // -- data-op ------------------------------------------------------------
   ["do-1", "en", "delete the empty rows between 40 and 60", "data-op", true, null, "one structural edit"],
   ["do-2", "en", "split column A into first and last name", "data-op", true, null, "text to columns"],
   ["do-3", "en", "remove duplicate rows keeping the first", "data-op", true, null, "one clean-up"],
-  ["do-sv-1", "sv", "ta bort dubbletter och behåll den första", "data-op", true, null, "Swedish, one clean-up"],
-  ["do-sv-2", "sv", "sortera raderna efter kolumn A stigande", "data-op", true, "script", "Swedish sort"],
 
   // -- script -------------------------------------------------------------
   ["sc-1", "en", "every time this sheet opens, refresh the totals", "script", true, "data-op", "'every time' is the durability signal"],
   ["sc-2", "en", "write a macro that emails the summary when I click the button", "script", true, null, "macro plus a click handler"],
-  ["sc-sv-1", "sv", "skriv ett makro som uppdaterar totalerna varje gång arket öppnas", "script", true, "data-op", "Swedish, macro plus a lifecycle hook"],
-  ["sc-sv-2", "sv", "när knappen klickas, kopiera A1 till B1", "script", true, "data-op", "Swedish button click"],
 
   // -- question -----------------------------------------------------------
   ["qu-1", "en", "what does a pivot table do", "question", true, null, "a question about the product"],
   ["qu-2", "en", "how do I share this workbook with my team", "question", true, null, "a how-to with no cell target"],
   ["qu-3", "en", "can Calcula open an Excel file", "question", true, null, "a capability question"],
-  ["qu-sv-1", "sv", "vad gör en pivottabell", "question", true, null, "Swedish product question"],
-  ["qu-sv-2", "sv", "hur delar jag den här arbetsboken", "question", true, null, "Swedish how-to"],
 
   // -- unclear ------------------------------------------------------------
   ["un-1", "en", "fix this", "unclear", true, null, "no object, no verb that names a surface"],
   ["un-2", "en", "the numbers look wrong", "unclear", false, "analyze", "a complaint; could be analysis or a formula error"],
   ["un-3", "en", "can you help", "unclear", true, null, "no content at all"],
   ["un-4", "en", "do the thing we discussed", "unclear", true, null, "refers to context the router does not have"],
-  ["un-sv-1", "sv", "fixa det här", "unclear", true, null, "Swedish, no object"],
-  ["un-sv-2", "sv", "kan du hjälpa mig", "unclear", true, null, "Swedish, no content"],
 
   // -- more Swedish -------------------------------------------------------
   // The design asks for at least 40 Swedish utterances, and they are not
@@ -185,22 +167,6 @@ const WRITTEN = [
   // Swedish analysis vocabulary and nothing else does, so Swedish is where a
   // rule table is most likely to be thin and a model most likely to be leaned
   // on. Spread across the intents that had one Swedish example or none.
-  ["sv-fo-1", "sv", "=SUMMA(B2:B100)", "formula", true, null, "a leading equals sign, with the Swedish function name"],
-  ["sv-fo-2", "sv", "hur räknar jag celler som inte är tomma", "formula", false, "question", "a how-to a formula answers"],
-  ["sv-fo-3", "sv", "varför visar C7 #DIVISION/0!", "formula", true, "question", "a Swedish error literal in a cell"],
-  ["sv-fm-1", "sv", "centrera rubrikerna och lås översta raden", "format", true, "data-op", "alignment plus a view setting"],
-  ["sv-fm-2", "sv", "färga celler över 100 röda", "format", false, "script", "conditional formatting, not automation"],
-  ["sv-do-1", "sv", "dela kolumn A i förnamn och efternamn", "data-op", true, null, "text to columns"],
-  ["sv-do-2", "sv", "ta bort tomma rader mellan 40 och 60", "data-op", true, null, "one structural edit"],
-  ["sv-do-3", "sv", "skapa ett nytt blad som heter Sammanfattning", "data-op", true, "script", "one structural change"],
-  ["sv-sc-1", "sv", "fråga användaren innan A1:D100 rensas", "script", true, "data-op", "asks the user at run time"],
-  ["sv-sc-2", "sv", "uppdatera totalerna var femtonde minut", "script", true, "data-op", "a schedule is durable"],
-  ["sv-sc-3", "sv", "gör ett formulär med kundnamn bundet till B2", "script", true, null, "a form is an authored object"],
-  ["sv-qu-1", "sv", "kan Calcula öppna en Excel-fil", "question", true, null, "a capability question"],
-  ["sv-qu-2", "sv", "hur stor är datamängden på det här bladet", "question", false, "analyze", "wants a fact about the sheet"],
-  ["sv-ch-1", "sv", "vilken diagramtyp passar den här datan", "chart", false, "question", "advice about charts"],
-  ["sv-un-1", "sv", "siffrorna ser fel ut", "unclear", false, "analyze", "a complaint; analysis or a formula error"],
-  ["sv-an-1", "sv", "hänger utgifterna ihop med antalet leads", "analyze", true, null, "correlation without the word"],
 
   // -- the confusable pairs the design names a target for -----------------
   // `script/format confusion <= 3%` is a stated target, so that pair is
@@ -213,18 +179,14 @@ const WRITTEN = [
   ["pf-3", "en", "apply our house number format to this sheet", "format", true, "script", "a one-off style application"],
   ["pf-4", "en", "add a button that formats the selection as currency", "script", true, "format", "a button is an authored object"],
   ["pf-5", "en", "reformat these dates as YYYY-MM-DD", "format", true, "script", "one number-format change"],
-  ["pf-sv-1", "sv", "gör rubrikraden fet varje gång data importeras", "script", true, "format", "Swedish: formatting, automated"],
-  ["pf-sv-2", "sv", "formatera om datumen som ÅÅÅÅ-MM-DD", "format", true, "script", "Swedish: one format change"],
 
   ["pq-1", "en", "is there a function for the median", "formula", true, "question", "asks whether a function exists"],
   ["pq-2", "en", "what does VLOOKUP's last argument do", "formula", true, "question", "about a formula's semantics"],
   ["pq-3", "en", "should I use SUMIF or SUMPRODUCT here", "formula", true, "question", "choosing between two functions"],
-  ["pq-sv-1", "sv", "finns det en funktion för median", "formula", true, "question", "Swedish: does a function exist"],
 
   ["pa-1", "en", "is this month better or worse than last month", "analyze", true, "question", "a comparison the data answers"],
   ["pa-2", "en", "how healthy does this look to you", "analyze", false, "question", "vague, but asks the data to speak"],
   ["pa-3", "en", "summarise what changed this quarter", "analyze", true, "question", "a summary of the data, not of the product"],
-  ["pa-sv-1", "sv", "är den här månaden bättre eller sämre än förra", "analyze", true, "question", "Swedish comparison"],
 
   // -- REGRESSIONS for the defects found in the current detectors ----------
   // Each of these is currently routed WRONGLY by `scriptIntent.ts`, which
@@ -267,7 +229,7 @@ function build() {
   for (const task of queries.tasks) {
     utterances.push({
       id: `dq:${task.id}`,
-      lang: task.lang === "sv" ? "sv" : "en",
+      lang: "en",
       text: task.intent,
       intent: "bi-query",
       // A report request names a measure and a grouping; that is what makes it

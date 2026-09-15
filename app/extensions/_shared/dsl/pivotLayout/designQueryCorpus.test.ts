@@ -52,9 +52,22 @@ function namesUsed(dsl: string): { dimensions: string[]; measures: string[] } {
 }
 
 describe("the design-query corpus", () => {
-  it("is non-trivial", () => {
+  it("is non-trivial, and ENGLISH ONLY", () => {
+    // THE SIZE IS LOAD-BEARING, not a round number. McNemar exact needs six
+    // clean flips for p < 0.05 whatever the corpus size, so every task removed
+    // makes the bar a larger FRACTION of the corpus: six of forty is a seventh,
+    // six of thirty is a fifth. When the ten Swedish tasks were dropped
+    // (2026-09-15, owner decision — the AI programme is English only) they were
+    // replaced one for one rather than simply deleted, for exactly this reason.
     expect(corpus.tasks.length).toBeGreaterThanOrEqual(40);
-    expect(corpus.tasks.filter((t) => t.lang === "sv").length).toBeGreaterThanOrEqual(10);
+
+    // This assertion used to require at least ten SWEDISH tasks. It is inverted
+    // rather than deleted: a floor that is gone says nothing, while this pins
+    // the decision, so a Swedish task added later fails here and has to be a
+    // choice rather than a drift.
+    const other = corpus.tasks.filter((t) => t.lang !== "en").map((t) => `${t.id} (${t.lang})`);
+    expect(other, "the AI corpus is English only; see open-items 2.AI.12").toEqual([]);
+
     const ids = corpus.tasks.map((t) => t.id);
     expect(new Set(ids).size, "duplicate ids").toBe(ids.length);
   });

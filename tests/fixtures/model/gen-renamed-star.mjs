@@ -87,8 +87,12 @@ const IDENTS = new Map(
  * The intents are what a person types, so they must move with the schema or the
  * task becomes unanswerable rather than merely renamed — "revenue by product
  * category" over a model with neither word is a different and unfair question.
- * Swedish is mapped too: 10 of the 40 tasks are Swedish and dropping them would
- * quietly halve the locale coverage of the second schema.
+ *
+ * ENGLISH ONLY since 2026-09-15. A Swedish map lived here and carried a
+ * confound worth remembering if a second language ever returns: "segment" is
+ * spelled identically in English and Swedish, so its replacement lost an
+ * identical-cognate hint the original had, making the Swedish half of the
+ * renamed corpus slightly HARDER than the original rather than merely renamed.
  */
 const PROSE_EN = [
   // Longest first, so "product category" is rewritten before "product".
@@ -116,68 +120,6 @@ const PROSE_EN = [
   ["cost", "spend"],
 ];
 
-/**
- * Swedish, kept SEPARATE from English and applied only to Swedish tasks.
- *
- * ONE MAP FOR BOTH LANGUAGES DOES NOT WORK, and the first version proved it:
- * "region" is spelled identically in the two languages, so the English rule
- * fired on the Swedish intents and produced "per zone" — an English word inside
- * a Swedish sentence, which measures the model's tolerance for broken Swedish
- * rather than its grasp of a renamed schema.
- *
- * TWO THINGS THIS MAP HAS TO RESPECT THAT THE ENGLISH ONE DOES NOT:
- *
- *  1. GRAMMATICAL GENDER, because the corpus contains "andel av den totala
- *     omsättningen". `omsättning` is an EN-word, so a replacement must be one
- *     too or the definite article and the adjective both go wrong — the first
- *     attempt used `nettovärde` (ETT) and produced "den totala nettovärdet".
- *     `nettosumma` is en-gender and keeps the sentence grammatical.
- *
- *  2. COMPOUNDS. Swedish compounds are single words, so a word-boundary rule
- *     never reaches the parts: "produktkategori" survived the first pass
- *     untouched. Every compound the corpus actually uses is listed explicitly.
- *
- * A confound worth recording rather than hiding: `segment` is spelled the same
- * in both languages, so the original Swedish tasks got an identical-cognate
- * hint that `skikt` does not give. The Swedish half of this corpus is therefore
- * very slightly HARDER than the original, and the English half is the cleaner
- * comparison. Report the two separately.
- */
-const PROSE_SV = [
-  // Compounds first — they contain the simple words.
-  ["produktkategorier", "artikelfamiljer"],
-  ["produktkategori", "artikelfamilj"],
-  ["kundsegment", "kontoskikt"],
-  ["totalsummor", "totalsummor"], // unchanged: not domain vocabulary
-  // Definite/plural forms before their stems.
-  ["omsättningen", "nettosumman"],
-  ["omsättning", "nettosumma"],
-  ["kategorier", "familjer"],
-  ["kategorin", "familjen"],
-  ["kategori", "familj"],
-  ["marginalen", "överskottet"],
-  ["marginal", "överskott"],
-  ["länderna", "marknaderna"],
-  ["länder", "marknader"],
-  ["landet", "marknaden"],
-  ["land", "marknad"],
-  ["kunderna", "kontona"],
-  ["kunder", "konton"],
-  ["kunden", "kontot"],
-  ["kund", "konto"],
-  ["produkterna", "artiklarna"],
-  ["produkter", "artiklar"],
-  ["produkten", "artikeln"],
-  ["produkt", "artikel"],
-  ["segmenten", "skikten"],
-  ["segment", "skikt"],
-  ["regionen", "zonen"],
-  ["regioner", "zoner"],
-  ["region", "zon"],
-  ["kvantitet", "enheter"],
-  ["kostnaden", "utgiften"],
-  ["kostnad", "utgift"],
-];
 
 /** Rename every identifier in a string, as WHOLE words. */
 function renameIdents(text) {
@@ -191,9 +133,9 @@ function renameIdents(text) {
 }
 
 /** Rewrite a natural-language intent, preserving case of the first letter. */
-function renameProse(text, lang) {
+function renameProse(text) {
   let out = text;
-  for (const [from, to] of lang === "sv" ? PROSE_SV : PROSE_EN) {
+  for (const [from, to] of PROSE_EN) {
     out = out.replace(new RegExp(`\\b${from}\\b`, "gi"), (m) =>
       m[0] === m[0].toUpperCase() ? to[0].toUpperCase() + to.slice(1) : to,
     );
@@ -235,7 +177,7 @@ const newCorpus = {
     // table ("headed Sales"), and prose rules keyed on lowercase domain words
     // never reach those. Identifiers first so `Amount` becomes `Value` before
     // any prose rule can see it.
-    intent: renameProse(renameIdents(t.intent), t.lang),
+    intent: renameProse(renameIdents(t.intent)),
     reference: renameIdents(t.reference),
     ...(t.distractor ? { distractor: renameIdents(t.distractor) } : {}),
     ...(t.alternatives ? { alternatives: t.alternatives.map(renameIdents) } : {}),
