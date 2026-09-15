@@ -149,7 +149,7 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
+              style={{ width: "100%", maxWidth: 420, boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
                 border: `1px solid ${TOKENS.border}`, borderRadius: 4, background: TOKENS.inputBg, color: "inherit" }}
             />
 
@@ -159,11 +159,11 @@ export function EditReportDialog(props: DialogProps): React.ReactElement | null 
               onChange={setDslText}
               biModel={biModel}
               controlHints={controlHints}
-              height="300px"
+              autoHeight={{ min: 120, max: 420 }}
               assist={{ connectionId: report.connectionId, dryRun: dryRunDesignQuery }}
               assistPlacement="blade"
             />
-            <div style={{ fontSize: 11, color: TOKENS.textSecondary, margin: "6px 0 12px" }}>
+            <div style={{ fontSize: 11, color: TOKENS.textSecondary, margin: "6px 0 12px", maxWidth: 760 }}>
               Anchored at <strong>{cellRef(report.anchorRow, report.anchorCol)}</strong>. Saving
               re-runs the query and replaces the report's cells (one Ctrl+Z step).
             </div>

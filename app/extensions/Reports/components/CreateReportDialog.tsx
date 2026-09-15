@@ -207,16 +207,16 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
-            border: "1px solid ${TOKENS.border}", borderRadius: 4, background: `${TOKENS.inputBg}`, color: "inherit" }}
+          style={{ width: "100%", maxWidth: 420, boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
+            border: `1px solid ${TOKENS.border}`, borderRadius: 4, background: TOKENS.inputBg, color: "inherit" }}
         />
 
         <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Connection</label>
         <select
           value={connectionId}
           onChange={(e) => setConnectionId(e.target.value)}
-          style={{ width: "100%", boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
-            border: "1px solid ${TOKENS.border}", borderRadius: 4, background: `${TOKENS.inputBg}`, color: "inherit" }}
+          style={{ width: "100%", maxWidth: 420, boxSizing: "border-box", padding: "6px 8px", marginBottom: 12,
+            border: `1px solid ${TOKENS.border}`, borderRadius: 4, background: TOKENS.inputBg, color: "inherit" }}
         >
           <option value="">— Select a BI connection —</option>
           {connections.map((c) => (
@@ -232,11 +232,11 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
           onChange={setDslText}
           biModel={biModel}
           controlHints={controlHints}
-          height="300px"
+          autoHeight={{ min: 120, max: 420 }}
           assist={{ connectionId, dryRun: dryRunDesignQuery }}
           assistPlacement="blade"
         />
-        <div style={{ fontSize: 11, color: `${TOKENS.textSecondary}`, margin: "6px 0 12px" }}>
+        <div style={{ fontSize: 11, color: TOKENS.textSecondary, margin: "6px 0 12px", maxWidth: 760 }}>
           Materializes at <strong>{destination}</strong>. Bind a Controls-pane value or ribbon
           filter in FILTERS with <code>@Name</code> — quote names with spaces or dots:{" "}
           <code>@"Products.Category"</code> (type <code>@</code> for suggestions). The report
@@ -246,7 +246,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
         </div>
 
         {error && (
-          <div style={{ fontSize: 12, color: `${TOKENS.dangerFg}`, whiteSpace: "pre-wrap", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: TOKENS.dangerFg, whiteSpace: "pre-wrap", marginBottom: 12 }}>
             {error}
           </div>
         )}
@@ -256,8 +256,8 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexShrink: 0, paddingTop: 12 }}>
           <button
             onClick={onClose}
-            style={{ padding: "6px 14px", borderRadius: 4, border: "1px solid ${TOKENS.border}",
-              background: `${TOKENS.panelBg}`, color: "inherit", cursor: "pointer" }}
+            style={{ padding: "6px 14px", borderRadius: 4, border: `1px solid ${TOKENS.border}`,
+              background: TOKENS.panelBg, color: "inherit", cursor: "pointer" }}
           >
             Cancel
           </button>
@@ -265,7 +265,7 @@ export function CreateReportDialog(props: DialogProps): React.ReactElement | nul
             onClick={handleCreate}
             disabled={busy}
             style={{ padding: "6px 14px", borderRadius: 4, border: "none",
-              background: busy ? "#8bbf9f" : `${TOKENS.accent}`, color: "#fff", cursor: busy ? "default" : "pointer" }}
+              background: busy ? "#8bbf9f" : TOKENS.accent, color: "#fff", cursor: busy ? "default" : "pointer" }}
           >
             {busy ? "Creating…" : "Create report"}
           </button>

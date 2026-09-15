@@ -309,6 +309,39 @@ describe("the list as a whole", () => {
     expect(s.every((x) => roleOfSuggestion(x) === "exploration")).toBe(true);
   });
 
+  it("crosses an axis with a DIFFERENT table, not another column of the same one", () => {
+    // OBSERVED ON A REAL MODEL. A query grouped by `Date.Year` was offered
+    // `Date.Quarter` to cross it with — two columns of one date dimension.
+    // Legal, and almost never what makes a cross-tab worth building: the point
+    // of the second axis is a second SUBJECT. Nothing caught it, because every
+    // other assertion about this rule only checks that it proposes SOMETHING.
+    //
+    // ITS OWN MODEL, because the shared fixture makes this test vacuous: a
+    // non-Date dimension already ranks first there, so the assertion passed
+    // with the preference deleted. Here the axis table is declared FIRST and
+    // carries several columns, so the same-table pick is the one the fallback
+    // would otherwise reach for — which is the situation on the real model.
+    const dateFirst: DesignQueryModel = {
+      tables: [
+        { name: "Date", columns: [col("Year", "Int64"), col("Quarter"), col("MonthName")] },
+        { name: "Product", columns: [col("Category"), col("Name")] },
+      ],
+      measures: [{ name: "Revenue" }],
+      strategy: null,
+    };
+    const s = suggestNextEdits(
+      facts({ rows: [f("Date.Year")], values: [m("Revenue")] }),
+      dateFirst,
+    );
+    const columns = s.find((x) => x.kind === "explore-columns");
+    expect(columns, "the rule should still offer a cross-tab").toBeDefined();
+    expect(
+      columns!.text,
+      "offered another column of the dimension already on ROWS",
+    ).not.toContain("Date.");
+    expect(columns!.text).toContain("Product.");
+  });
+
   it("holds explorations BELOW every correction, so a fix is never outranked", () => {
     // A query with no VALUES cannot compile. If an exploration could outrank
     // that, the row would lead with "you could add a time axis" over "this

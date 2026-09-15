@@ -30,8 +30,24 @@ interface DesignQueryEditorProps {
   /** Named controls / ribbon filters for `@Name` completion (Reports @param
    *  binding). Omit for editors that don't support @params (pivots, charts). */
   controlHints?: DslControlHint[];
-  /** Editor height (CSS). Defaults to 160px. */
+  /** Editor height (CSS). Defaults to 160px. Ignored when `autoHeight` is set. */
   height?: string;
+  /**
+   * Size the editor to the query instead of pinning it, between two bounds.
+   *
+   * A fixed height is wrong in both directions here. A design query is usually
+   * three to six lines, so 300px of box around 54px of text is mostly void —
+   * and in a blade that void is doubled, because the conversation column
+   * stretches to match and pushes its composer to the bottom of a mostly-empty
+   * column. But the same editor has to hold a twenty-line query with FILTERS
+   * and a CALC block without becoming a two-line slot.
+   *
+   * Computed from the LINE COUNT rather than measured, deliberately: Monaco
+   * exposes a content height only after layout, reading it means a
+   * `ResizeObserver` (absent in jsdom) and a second render pass, and the answer
+   * is `lines × lineHeight` anyway for an editor with no wrapping widgets.
+   */
+  autoHeight?: { min: number; max: number };
   /**
    * When set, a "describe the report in words" row is shown above the editor
    * and a drafted query is put into it through `onChange`. The host supplies
@@ -73,6 +89,7 @@ export function DesignQueryEditor({
   assist,
   suggest,
   assistPlacement = "inline",
+  autoHeight,
 }: DesignQueryEditorProps): React.ReactElement {
   useEffect(() => {
     registerPivotDslLanguage();
@@ -157,11 +174,22 @@ export function DesignQueryEditor({
       />
     ) : null;
 
+  // `lineHeight: 18` and `padding: { top: 8, bottom: 8 }` are set on the Editor
+  // below; the +2 is the box's own border. One blank line of slack keeps the
+  // caret off the bottom edge as the person types the next clause, so the box
+  // grows a line AHEAD of the text rather than in lockstep with it.
+  const fittedHeight = autoHeight
+    ? `${Math.min(
+        autoHeight.max,
+        Math.max(autoHeight.min, (value.split("\n").length + 1) * 18 + 16 + 2),
+      )}px`
+    : height;
+
   const editorAndChips = (
     <>
     <div
       style={{
-        height,
+        height: fittedHeight,
         // `--border-color` was never a declared token, and with no fallback the
         // whole shorthand was invalid — so this box had NO border at all
         // wherever a skin did not happen to define one, which was everywhere.

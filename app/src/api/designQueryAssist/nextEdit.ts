@@ -602,14 +602,34 @@ const exploreColumns: Rule = (ctx) => {
     .filter((q) => !isForbidden(ctx, q))
     .map(qualifiedToDsl)
     .filter((ref) => !onAnAxis(ctx, ref) && !ctx.pinned.has(normalizeRef(ref)));
+  // PREFER A DIFFERENT TABLE THAN THE ONES ALREADY ON AN AXIS.
+  //
+  // Measured on a real model: a query grouped by `dim_date.year` was offered
+  // `dim_date.quarter` to cross it with — two columns of the same date
+  // dimension. That is a legal cross-tab and almost never the interesting one;
+  // what makes a cross-tab worth building is a SECOND subject, and the person
+  // whose rows are years is far likelier to want products across the top than a
+  // finer slice of the same calendar. (Year against quarter is also the shape
+  // the coarser-time CORRECTION already owns, from the other direction.)
+  const axisTables = new Set(
+    ctx.axes
+      .map((a) => splitQualified(a.field.qualified ?? "")?.[0]?.toLowerCase())
+      .filter((t): t is string => Boolean(t)),
+  );
+  const usable = (ref: string): boolean =>
+    !onAnAxis(ctx, ref) &&
+    !ctx.pinned.has(normalizeRef(ref)) &&
+    !ctx.forbiddenRefs.has(normalizeRef(ref));
+  const tableOf = (ref: string): string => normalizeRef(ref).split(".")[0] ?? "";
+  const fresh = ctx.fallbackDimensions.filter(
+    (ref) => usable(ref) && !axisTables.has(tableOf(ref)),
+  );
   const pick =
     fromStrategy[0] ??
-    ctx.fallbackDimensions.find(
-      (ref) =>
-        !onAnAxis(ctx, ref) &&
-        !ctx.pinned.has(normalizeRef(ref)) &&
-        !ctx.forbiddenRefs.has(normalizeRef(ref)),
-    );
+    // A dimension from elsewhere first; anything usable only if the model has
+    // nothing else to offer.
+    fresh[0] ??
+    ctx.fallbackDimensions.find(usable);
   if (!pick) return [];
   return [
     exploration(
