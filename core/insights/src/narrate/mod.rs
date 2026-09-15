@@ -9,6 +9,7 @@ pub mod cite;
 pub mod en;
 pub mod number;
 pub mod prompt;
+pub mod sv;
 
 use engine::LocaleSettings;
 use serde::{Deserialize, Serialize};
@@ -57,14 +58,19 @@ pub trait Narrator {
 
 /// The narrator for a locale.
 ///
-/// Swedish currently gets the ENGLISH templates with SWEDISH NUMBERS. That is
-/// deliberate and not a stub: the number formatting is the half a Swedish
-/// reader cannot work around (a decimal point in a Swedish report reads as a
-/// thousands separator and changes the value by three orders of magnitude),
-/// while English prose is merely inconvenient. When `sv.rs` lands, only this
-/// function changes.
+/// Swedish got the ENGLISH templates with Swedish numbers until 2026-09-15,
+/// which was documented as deliberate and temporary — the number formatting is
+/// the half a reader cannot work around, while English prose is merely
+/// inconvenient. It had one consequence nobody noticed: the narration eval
+/// scored the on-board model 0 of 5 on Swedish bundles, and that was read as a
+/// MODEL failure when the deterministic side it was measured against was not
+/// Swedish either. `sv.rs` has landed and, as this comment promised, only this
+/// function changed.
 pub fn narrator_for(locale: Locale) -> Box<dyn Narrator> {
-    Box::new(en::EnNarrator::new(locale))
+    match locale {
+        Locale::Sv => Box::new(sv::SvNarrator::new(locale)),
+        _ => Box::new(en::EnNarrator::new(locale)),
+    }
 }
 
 pub fn narrator_for_locale_id(id: &str) -> Box<dyn Narrator> {

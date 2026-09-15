@@ -56,6 +56,19 @@ const useSchema = String(arg("schema", "on")) !== "off";
 const useGrammar = String(arg("grammar", "off")) === "on";
 const useExamples = String(arg("examples", "on")) !== "off";
 const repairRounds = Number(arg("repair", 0));
+/**
+ * Which clauses the per-request grammar is allowed to emit.
+ *
+ *  `off`    — every clause, as before.
+ *  `oracle` — only the clauses the TASK'S OWN TAGS say its reference needs.
+ *
+ * The oracle gate is a CEILING MEASUREMENT, not a shippable feature: it uses
+ * the answer to decide what the model may write, so its gate is perfect by
+ * construction. It exists to answer one question before anyone writes a real
+ * intent detector — if a PERFECT gate does not move the score, no imperfect one
+ * will, and the whole restraint idea dies for the cost of one run.
+ */
+const clauseGate = String(arg("clause-gate", "off"));
 const langFilter = arg("lang", "");
 const tagFilter = arg("tag", "");
 const limit = Number(arg("limit", 0));
@@ -194,10 +207,24 @@ for (const task of tasks) {
   };
   try {
     if (showReplies) console.log(`\n--- ${task.id} INTENT --- ${task.intent}`);
+    // THE ORACLE GATE reads the TASK'S OWN TAGS, which is to say the answer. It
+    // is a ceiling measurement and can never ship: its gate is perfect by
+    // construction, so it reports what deterministic restraint is worth BEFORE
+    // anyone pays to build an imperfect detector. `top`/`show-as`/`layout` are
+    // the corpus's own tag names.
+    const allowedClauses =
+      clauseGate === "oracle"
+        ? {
+            topN: (task.tags ?? []).includes("top"),
+            showAs: (task.tags ?? []).includes("show-as"),
+            layout: (task.tags ?? []).includes("layout"),
+          }
+        : undefined;
     const draft = await draftDesignQuery(task.intent, biModel, {
       provider,
       compile: (dsl) => compileDesignQuery(dsl, "fixture", biModel),
       maxRepairs: repairRounds,
+      allowedClauses,
     });
     row.ms = Date.now() - started;
     row.dsl = draft.dsl;
@@ -234,8 +261,43 @@ const latencies = ran.map((r) => r.ms).sort((a, b) => a - b);
 const pick = (q) => (latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(q * latencies.length))] : 0);
 const meanPrompt = ran.length ? Math.round(ran.reduce((a, r) => a + r.promptTokens, 0) / ran.length) : 0;
 
+/**
+ * EVERY INDEPENDENT VARIABLE, one key per CLI knob, with a stable type.
+ *
+ * WHY THIS EXISTS. The summaries used to record knobs inline, ad hoc and
+ * incompletely: `schema` was a BOOLEAN here and a STRING in the formula runner,
+ * `--schema lean` recorded the same value as the default so two runs that
+ * differed were byte-identical in their summaries, and nothing recorded
+ * `--grammar` at all in the comparison tool's label. A knob that is not written
+ * down cannot be recovered from the artifact, so a paired comparison months
+ * later cannot say what was actually varied — which is how two incomparable
+ * latency figures came to sit in the same document.
+ *
+ * The rule: one key per knob, the type never varies, and the value is the
+ * RESOLVED one (what the run used), not the raw argument. `evalKnobs.test.mjs`
+ * fails if a knob the CLI accepts is missing here.
+ */
+const knobs = {
+  provider: String(providerId ?? ""),
+  model: String(model ?? ""),
+  baseUrl: String(baseUrl ?? ""),
+  // Spelled EXACTLY like its flag and typed the same as the formula runner's.
+  // This pipeline has two modes where that one has three, but a knob that is a
+  // BOOLEAN in one artifact and a STRING in another cannot be diffed across
+  // them — which is the whole failure this block exists to end.
+  schema: String(useSchema ? "on" : "off"),
+  grammar: Boolean(useGrammar),
+  examples: Boolean(useExamples),
+  repair: Number(repairRounds),
+  lang: String(langFilter ?? ""),
+  tag: String(tagFilter ?? ""),
+  limit: Number(limit),
+  clauseGate: String(clauseGate),
+};
+
 const summary = {
   provider: providerId, model,
+  knobs,
   schema: useSchema, grammar: useGrammar, examples: useExamples, repair: repairRounds,
   tasks: results.length, ran: ran.length, errors: results.length - ran.length,
   passed: passed.length, compiled: compiled.length,

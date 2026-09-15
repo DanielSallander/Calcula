@@ -2,6 +2,12 @@ import { defineConfig } from "vitest/config";
 import path from "path";
 
 export default defineConfig({
+  // The eval-harness guards live at `tests/eval/`, one level ABOVE this root.
+  // Vite serves test files through `/@fs/` and refuses anything outside the
+  // root unless it is allowed here, so without this the files are collected and
+  // then fail to load — which reads as "no tests" rather than as a
+  // misconfiguration.
+  server: { fs: { allow: [path.resolve(__dirname, ".."), __dirname] } },
   resolve: {
     alias: [
       { find: "@api", replacement: path.resolve(__dirname, "./src/api") },
@@ -33,10 +39,19 @@ export default defineConfig({
     // all, which is how the trace minimiser shipped with a bug that made it
     // discard its own answer: nothing could exercise it without launching the
     // whole app.
+    //
+    // THE EVAL HARNESS IS INCLUDED FOR THE SAME REASON, and only as *.test.mjs.
+    // `tests/eval/` decides every AI number this project records, and it had no
+    // unit tier at all — which is how a runner came to accept `--schema lean`
+    // and write the same summary value as the default, making two runs that
+    // really did differ indistinguishable in their own artifacts. The runners
+    // themselves need a model server; the guards on their argument handling do
+    // not.
     include: [
       "src/**/*.{test,spec}.{ts,tsx}",
       "extensions/**/*.{test,spec}.{ts,tsx}",
       "e2e/**/*.test.ts",
+      "../tests/eval/**/*.test.mjs",
     ],
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],

@@ -107,7 +107,7 @@ const MAX_EXTRA_FILTER_VALUES = 19;
  * Every rule except `root`: the clause bodies, the names, and the value forms.
  * Shared by both grammars, so neither can teach a shape the other refuses.
  */
-function clauseRules(c: DesignQueryCandidates): string[] {
+function clauseRules(c: DesignQueryCandidates, allow?: { showAs?: boolean }): string[] {
   const hasMeasures = c.measures.length > 0;
   const hasNumeric = c.numericColumns.length > 0;
   const dims = [...new Set([...c.dimensions, ...c.timeGroupings])];
@@ -123,7 +123,9 @@ function clauseRules(c: DesignQueryCandidates): string[] {
   rules.push(`layout ::= "LAYOUT: " directive ${more("directive")}`);
   rules.push(`dims ::= dim ${more("dim")}`);
   rules.push(`dim ::= ${alternatives(dims)}`);
-  rules.push("val ::= valref alias? sva?");
+  // Dropping `sva?` removes the ONLY route to a show-values-as suffix, so an
+  // unasked "[% of grand total]" becomes unwriteable rather than discouraged.
+  rules.push(allow?.showAs === false ? "val ::= valref alias?" : "val ::= valref alias? sva?");
 
   const valrefs: string[] = [];
   if (hasMeasures) {
@@ -137,7 +139,7 @@ function clauseRules(c: DesignQueryCandidates): string[] {
   }
   rules.push(`valref ::= ${valrefs.join(" | ")}`);
   rules.push('alias ::= " AS \\"" [^"\\n]+ "\\""');
-  rules.push(`sva ::= " [" (${alternatives(DSL_SHOW_VALUES_AS)}) "]"`);
+  if (allow?.showAs !== false) rules.push(`sva ::= " [" (${alternatives(DSL_SHOW_VALUES_AS)}) "]"`);
   rules.push('filter ::= dim ((" = " | " NOT IN ") vals)?');
   rules.push(`vals ::= "(" str (", " str){0,${MAX_EXTRA_FILTER_VALUES}} ")"`);
   rules.push('str ::= "\\"" [^"\\n]* "\\""');
@@ -155,18 +157,74 @@ function clauseRules(c: DesignQueryCandidates): string[] {
  * a grammar with an empty alternative is a runtime error, and a null tells
  * the caller to fall back to the schema.
  */
-export function buildDesignQueryGrammar(c: DesignQueryCandidates): string | null {
+/**
+ * Clauses a caller may forbid the grammar from emitting at all.
+ *
+ * MEASURED 2026-09-15, AND THE ANSWER IS NO. Keep this seam, do not build a
+ * clause detector on it, and read this note before proposing one again.
+ *
+ * The premise was good: 20 of 23 remaining design-query failures were
+ * over-production — an unasked TOP, an unasked share label, an extra name, a
+ * filtered column repeated — so the model looked like it knew Calcula and
+ * lacked restraint. A production that does not exist cannot be emitted, which
+ * is a stronger guarantee than an instruction (the prompt already states all
+ * four restraint rules in plain English and the 1.5B ignores them; more prompt
+ * engineering measured p = 0.375).
+ *
+ * So the ceiling was measured with a PERFECT gate — `--clause-gate oracle` in
+ * `run-design-query-eval.mjs` reads each task's own tags, i.e. the answer, to
+ * decide what the model may write. Over the 40-task corpus on the built-in
+ * 1.5B: **17/40 -> 18/40, one task fixed, none broken, McNemar p = 1.0.**
+ * `classify-design-failures.mjs` says why the prior was wrong: only 4 failing
+ * tasks had a gateable defect as their SOLE difference from the reference, and
+ * suppressing the production on those mostly produced a DIFFERENT wrong answer
+ * rather than the right one.
+ *
+ * The lesson generalises past this feature: **constraining what a model may not
+ * say does not tell it what to say.** A grammar buys structural guarantees —
+ * everything compiles, no invented name, half the latency — and buys no
+ * judgement at all.
+ *
+ * NAMES ARE DELIBERATELY NOT GATEABLE EITHER. Narrowing the NAME set to what an
+ * intent mentions was measured and refuted separately: 23 of the 99 names a
+ * correct answer needs would become unwriteable, including one in every Swedish
+ * task ("omsättning" never reaches Revenue). Restrict the CLAUSES, never the
+ * names — and now, on the evidence above, mostly do not restrict at all.
+ */
+export interface AllowedClauses {
+  /** `TOP n BY [m]` / `BOTTOM n BY [m]`. */
+  topN?: boolean;
+  /** The `[% of grand total]` style suffix on a value. */
+  showAs?: boolean;
+  layout?: boolean;
+}
+
+export function buildDesignQueryGrammar(
+  c: DesignQueryCandidates,
+  allowed?: AllowedClauses,
+): string | null {
   if (!usable(c)) return null;
+  const topOk = allowed?.topN !== false;
+  const showAsOk = allowed?.showAs !== false;
+  const layoutOk = allowed?.layout !== false;
   // THE CLAUSES COME IN THE CANONICAL ORDER, EACH AT MOST ONCE. The first
   // version let any clause follow any other, and the built-in runtime's
   // 1.5B used the freedom: a second VALUES after COLUMNS, LAYOUT first, a
   // trailing TOP nobody asked for.
   const rules = [
-    'root ::= head "\\n" values (nl filters)? (nl sort)? (nl topn)? (nl layout)? "\\n"?',
+    'root ::= head "\\n" values (nl filters)? (nl sort)?' +
+      (topOk ? " (nl topn)?" : "") +
+      (layoutOk ? " (nl layout)?" : "") +
+      ' "\\n"?',
     'head ::= rows ("\\n" columns)? | columns',
-    ...clauseRules(c),
+    ...clauseRules(c, { showAs: showAsOk }),
   ];
-  return rules.join("\n") + "\n";
+  // A production nothing references is legal GBNF but noise; dropping the rule
+  // as well as the reference keeps the grammar readable when it is dumped for
+  // debugging, which is how the "unasked LAYOUT on every reply" defect was found.
+  return rules
+    .filter((r) => (topOk || !r.startsWith("topn ::=")) && (layoutOk || !r.startsWith("layout ::=")))
+    .join("\n") + "\n";
 }
 
 /** What the query already has, for deciding which clause may come next. */

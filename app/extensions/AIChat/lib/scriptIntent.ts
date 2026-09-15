@@ -54,6 +54,57 @@ const SCRIPT_WORDS = [
  */
 const ONE_OFF_WORDS = ["just", "right now", "one-off", "one off", "quickly", "for now"];
 
+/**
+ * A DELIBERATELY OVER-BROAD sniff: might this message want scripting help?
+ *
+ * The opposite trade to `detectScriptIntent`, and it exists because that
+ * function is measured to MISS 23 of 35 script requests in
+ * `tests/eval/intents.json`. That miss rate is fine for OFFERING to write a
+ * script — a missed offer costs a card nobody sees — and unacceptable for
+ * deciding to WITHHOLD the API reference, where a miss costs the model the
+ * knowledge it needs and it explains what it would write instead of writing it.
+ *
+ * So the two questions are asked by two functions with opposite failure modes:
+ *   - `detectScriptIntent`  — precise. Wrong when it fires on nothing.
+ *   - `mightWantScript`     — recall. Wrong when it STAYS SILENT.
+ *
+ * Over-firing here costs only the prompt tokens that were being spent anyway,
+ * which is why the list includes plain verbs like "write" and "skriv" that
+ * would be far too loose for an offer. It is not Swedish-complete and does not
+ * need to be: the cost of a miss is bounded by whatever `looksLikeAnalysis`
+ * also has to be true for.
+ */
+const MIGHT_WANT_SCRIPT_WORDS = [
+  ...SCRIPT_WORDS,
+  "makro",
+  "makron",
+  "skript",
+  "automatisera",
+  "automatiskt",
+  "button",
+  "knapp",
+  "write",
+  "skriv",
+  "create",
+  "skapa",
+  "build",
+  "bygg",
+  "add",
+  "lägg",
+  "code",
+  "kod",
+  "function",
+  "funktion",
+  "trigger",
+  "run",
+  "kör",
+];
+
+export function mightWantScript(message: string): boolean {
+  const text = message.toLowerCase();
+  return MIGHT_WANT_SCRIPT_WORDS.some((w) => mentionsWord(text, w) || (w.includes(" ") && text.includes(w)));
+}
+
 export interface ScriptIntent {
   /** True when the message reads as a request to author something durable. */
   looksLikeScript: boolean;

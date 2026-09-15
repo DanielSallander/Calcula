@@ -26,6 +26,14 @@ node_modules/
 dist/
 build/
 out/
+
+# ...but eval artifacts are EVIDENCE and must survive. Every AI number this
+# project records is a paired comparison, and McNemar needs the per-task
+# outcomes — which is why two design-query baselines (17/40 and 16/40) can no
+# longer be told apart: their artifacts were written to the ignored out/ and are
+# gone.
+!tests/eval/runs/
+!tests/eval/runs/**
 xlsx-workbooks/
 
 # Documentation

@@ -32,6 +32,7 @@
 import type { AiCompletionProvider } from "@api/aiCompletionService";
 import {
   buildDesignQueryGrammar,
+  type AllowedClauses,
   buildRepairPrompt,
   buildUserPrompt,
   chooseCandidates,
@@ -84,6 +85,15 @@ export interface DraftDeps {
    * the very columns the query already uses.
    */
   prior?: { intent: string; dsl: string };
+  /**
+   * Clauses the grammar may NOT emit for this request.
+   *
+   * A measurement seam, not a product feature yet: the eval runner can gate
+   * TOP / show-as / LAYOUT from a task's own tags to measure the CEILING of
+   * deterministic restraint with a perfect gate, before anyone writes an
+   * imperfect one. Absent in the product, where every clause stays legal.
+   */
+  allowedClauses?: AllowedClauses;
 }
 
 export interface DesignQueryDraft {
@@ -154,7 +164,10 @@ export async function draftDesignQuery(
     deps.prior ? `${deps.prior.intent}\n${intent}` : intent,
   );
 
-  const grammar = deps.provider.honorsGrammar() === true ? buildDesignQueryGrammar(candidates) : null;
+  const grammar =
+    deps.provider.honorsGrammar() === true
+      ? buildDesignQueryGrammar(candidates, deps.allowedClauses)
+      : null;
   const responseSchema = grammar ? undefined : designQueryResponseSchema();
   // The grammar can only emit the bare query, so the prompt asks for exactly
   // that; asking for JSON under a grammar that forbids it made every reply

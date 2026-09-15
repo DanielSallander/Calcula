@@ -16,7 +16,7 @@
 //
 // USAGE
 //   node tests/eval/run-eval.mjs --provider ollama --model qwen3-coder:30b
-//   node tests/eval/run-eval.mjs --provider anthropic --model claude-opus-4-8 --canary
+//   node tests/eval/run-eval.mjs --provider openrouter --model anthropic/claude-opus-4-8 --canary
 //   node tests/eval/run-eval.mjs --provider ollama --model x --json results.json
 //
 // The provider must be one `ai_providers_list` knows, and its key (if any) must

@@ -56,7 +56,7 @@ import {
   startTool, finishTool, failTool, settleRunning, formatToolBubble, truncate, draftIdFromResult,
   type Bubble,
 } from "../lib/toolTimeline";
-import { detectScriptIntent, guessObjectType } from "../lib/scriptIntent";
+import { detectScriptIntent, guessObjectType, mightWantScript } from "../lib/scriptIntent";
 import { detectAnalysisIntent } from "../lib/analysisIntent";
 import { describeTierZero, prepareTierZeroFacts, type TierZeroFacts } from "../lib/tierZero";
 import { subscribeToJobs, latestJob, formatElapsed, type AuthorJob } from "../lib/authorJobs";
@@ -495,7 +495,28 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     // all (qwen2.5:7b, 3/3 text-only -> 2/3 valid drafts). See apiSurface.ts.
     // Awaited: the surface module is imported lazily so ~209 KB of generated
     // reference data stays out of the extension's activation path.
-    const surface = await apiSurfaceSection(text, guessedType);
+    // ...but NOT for a message that is plainly a question about the data.
+    //
+    // The surface is ~6,000 tokens of scripting reference (`apiSurface.ts`
+    // BUDGET), built unconditionally on EVERY message including a pure
+    // "analyse this" — roughly 15 s of prompt processing on the built-in
+    // runtime's measured ~400 tok/s, for a reply that will never call a script
+    // tool.
+    //
+    // THE GATE IS THE NEGATIVE ONE, and that is the whole care in it. Gating on
+    // the POSITIVE script detector was the obvious move and is wrong: measured
+    // on `tests/eval/intents.json`, `detectScriptIntent` MISSES 23 of 35 script
+    // requests, so building the surface only when it fires would starve two
+    // thirds of them of the reference they need. Suppressing only where a
+    // message is confidently analysis AND not script keeps every one of those
+    // 23 served — a false negative here costs latency, a false positive costs
+    // the feature.
+    // `scriptish` is the SAME detection the offer card above used, deliberately
+    // reused rather than recomputed: two answers to "is this a script request?"
+    // in one send is exactly the drift that made the offer card and the surface
+    // disagree about which object type to build for.
+    const skipSurface = detectAnalysisIntent(text).looksLikeAnalysis && !mightWantScript(text);
+    const surface = skipSurface ? "" : await apiSurfaceSection(text, guessedType);
     try {
       for (turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         const streamId = newStreamId();

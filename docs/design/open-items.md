@@ -1677,6 +1677,100 @@ build of the same 1.5B scored 21/40 on the schema path earlier the same day, so 
 quantisation are worth about three tasks of noise. The clean wins are structural: everything
 compiles, half the wait, and a runtime the app owns end to end.
 
+**2.AI.12 — The on-board-model programme: Phase 0 and Phase 1 SHIPPED 2026-09-15, and the
+restraint lens is MEASURED DEAD.** The owner asked whether small on-board models can be made
+smarter about Calcula. Five lenses were researched against this repo's own measurements and
+produced one reframe worth keeping: **the apparatus could not detect an improvement.** Not one
+headline number in 2.AI.1 or 2.AI.10 had a retained per-task artifact — `out/` is git-ignored —
+while McNemar, the instrument this programme chose, needs per-task outcomes. The drift was
+already visible: 17/40 at :1658 and 16/40 at :1783 for the same arm.
+
+*Phase 0 — the measurement survives being taken.* Every runner now writes a `knobs` block, one
+key per CLI flag, spelled the same as the flag and typed the same across runners (`schema` was a
+BOOLEAN in the design runner and a STRING in the formula one, and `--schema lean` recorded the
+same value as the default, so two runs that really did differ were byte-identical in their own
+artifacts). `compare-runs.mjs` labels by DIFFING those blocks instead of four hardcoded keys —
+`grammar` was not among them, so the two most important design-query arms printed identical
+headers — and says out loud when two runs were configured identically, which is the one case
+nobody can see by eye. `tests/eval/runs/` is now un-ignored and holds the baselines.
+`tests/eval/lib/evalKnobs.test.mjs` fails the build when a runner accepts a flag it does not
+record; it found two on its first run (`--tag` and `--limit` on the formula runner, both of which
+select WHICH tasks execute). The eval harness is now in vitest's include list — it had no unit
+tier at all, which is how the `lean` defect survived. Also fixed: `--provider anthropic` was
+documented in two places with no endpoint, so the documented command exits "No endpoint known".
+
+*Phase 1 — the restraint lens, measured and closed.* The premise was the strongest in the
+programme: 20 of 23 remaining design-query failures were OVER-PRODUCTION, so the model looked
+like it knew Calcula and merely lacked restraint. Two measurements, in the order that kills the
+expensive one cheaply:
+
+  1. `classify-design-failures.mjs` (new, offline, no model) joins a saved run to the corpus and
+     reports defects per TASK rather than per defect. The recorded 6+6+6+2 counted DEFECTS; the
+     number that decides the lens is how many failing tasks have a gateable defect as their SOLE
+     difference from the reference, and that is **4**. McNemar on 40 tasks needs b=6, c=0 for
+     p<0.05, so even a perfect gate could not be certified on this corpus. It positive-controls
+     itself by injecting a known `TOP` into every reference and requiring that damage to be named
+     and nothing else.
+  2. The ceiling was then measured directly. `buildDesignQueryGrammar` gained an `allowed`
+     parameter and the runner a `--clause-gate oracle` that derives the allowance from each
+     task's OWN TAGS — i.e. from the answer, so the gate is perfect by construction and can never
+     ship. Result: **17/40 -> 18/40, one task fixed, none broken, McNemar p = 1.0.**
+
+**So the lens is dead, and the DPO/fine-tune case that shares its taxonomy dies with it.** The
+generalisable lesson is written into `grammar.ts` so it is not re-proposed: *constraining what a
+model may not say does not tell it what to say.* A grammar buys structural guarantees —
+everything compiles, no invented name, half the latency — and no judgement whatsoever. That
+matches the earlier paired runs (p = 0.77 design queries, p = 0.69 formulas) rather than
+contradicting them; this is the same finding reached from the other direction, and it cost two
+runs and an afternoon instead of the weeks a clause detector would have.
+
+*Also Phase 1: the surface tax.* `apiSurfaceSection` built ~6,000 tokens of scripting reference on
+EVERY chat message including a pure "analyse this" — roughly 15 s of prompt processing at the
+built-in runtime's measured ~400 tok/s, for a reply that will never call a script tool. It is now
+skipped when a message is confidently analysis and shows no sign of wanting a script. **The gate
+is the NEGATIVE one and the asymmetry is the whole care in it**: gating on `detectScriptIntent`
+was the obvious move and is wrong, because that detector is measured to MISS 23 of 35 script
+requests, so building the surface only when it fires would starve two thirds of them. A new
+`mightWantScript` is its deliberately over-broad sibling — the two questions now have opposite
+failure modes, and this one is wrong when it stays SILENT. The first version of the gate used the
+precise detector and its own test caught the hole ("analysera och skriv ett makro" was starved,
+because "makro" is not in the precise list).
+
+*Phase 3 — the Tier-0 harvest: `sv.rs` SHIPPED.* `narrator_for` returned `EnNarrator` for BOTH
+locales, which `mod.rs` documented as deliberate and temporary. It had a consequence nobody
+noticed: **the narration eval's "0 of 5 Swedish bundles" was read as a MODEL failure when the
+deterministic side it was measured against was not Swedish either.** `core/insights/src/narrate/`
+`sv.rs` now carries a Swedish template for all 21 fact kinds, the match exhaustive and
+wildcard-free so a new `FactKind` cannot compile until someone has written what it says. Two
+Swedish specifics the English file has no need of: grammatical gender decides plurals (`en rad` ->
+`rader` but `ett värde` -> `värden`, and `ett fel` -> `fel`), so each noun carries its own forms
+rather than being assembled from a rule; and `R²` stays as the symbol rather than becoming a
+back-translation of an English name. Verified the way that matters: `run-narration-eval.mjs`
+narrates all five bundles DETERMINISTICALLY through the real citation check before it measures
+any model and exits 3 if any is rejected — it did not, so all 41 Swedish facts pass the same
+fabrication check English does. A test also fails if a Swedish template still contains English
+fragments, because an exhaustive match does not stop a template being copied and left.
+
+*Corrected while doing it, and worth recording because the research got it wrong:* `explainFormula`
+was reported as a built capability with zero consumers. The SEAM member has none, but
+`explainCell` is called directly by `FormulaAssistPopover`, so the capability is reachable —
+what is unused is the `formulaAssistService` member. Exposing it to the chat is a bigger job than
+reported, because every chat tool dispatches through `ai_chat_run_tool` in Rust and this one is a
+frontend orchestration over two backend calls.
+
+*Still open, in order:* **Phase 2**, the model bake-off — the harness now takes `--model` and
+retains artifacts, so this is a day of mostly-unattended compute, but it needs weights fetched
+and the shortlist the research produced carries byte-exact sizes and benchmark scores that are
+NOT verifiable from this repo and must be checked against their sources first. **Phase 4**, the
+corpus: 40 tasks over ONE fixture (`sales_star.json`, hardcoded at `run-design-query-eval.mjs`)
+cannot resolve anything smaller than ~15 percentage points, and the number that matters is the
+GAP BETWEEN SCHEMAS — if the model scores near 17/40 on `sales_star` and near zero on a schema
+with different column names, every design-query number so far is about that fixture. Also open:
+the rules-only intent router (prototyped at 76.5-91.2% against the current detectors' measured
+18.2%, zero false scripts, and it should ship gated on a held-out split), and `npm run eval:all`
+— there is no `eval:*` script at all, so every measurement is a hand-typed command whose flags
+decide the number.
+
 **2.AI.11 — Next-edit suggestions: A, B and C SHIPPED 2026-09-11; D measured, not built.**
 A is Tier 0 and on, B is the model's chip (measured and OFF), C puts A in the text and at another
 line, D is the macro fill-in-the-middle measurement. Design: `insights-strategy-layer.md`

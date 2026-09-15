@@ -419,9 +419,36 @@ const latencies = ran.map((s) => s.ms).sort((a, b) => a - b);
 const pick = (q) => (latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(q * latencies.length))] : 0);
 const meanPrompt = ran.length ? Math.round(ran.reduce((a, s) => a + s.promptTokens, 0) / ran.length) : 0;
 
+/**
+ * Every independent variable, one key per CLI knob, stable types.
+ * See the same block in `run-design-query-eval.mjs` for why this exists.
+ *
+ * `schema` is deliberately the STRING mode here and a BOOLEAN there, because
+ * this runner genuinely has three modes (`on` / `lean` / `off`) and that one
+ * has two — so the knob is recorded as `schemaMode` in both, and each runner
+ * also keeps whatever legacy key its own older artifacts carry.
+ */
+const knobs = {
+  provider: String(providerId ?? ""),
+  model: String(model ?? ""),
+  baseUrl: String(baseUrl ?? ""),
+  schema: String(useGrammar ? "off" : schemaMode),
+  grammar: Boolean(useGrammar),
+  retrieval: Number(retrievalK),
+  context: Boolean(useContext),
+  repair: Number(repairRounds),
+  split: String(split),
+  // FOUND BY THE GUARD, not by review: both of these select WHICH tasks run, so
+  // a filtered run and a full one produced artifacts that looked identical and
+  // would have been compared as if they measured the same thing.
+  tag: String(tagFilter ?? ""),
+  limit: Number(limit),
+};
+
 const summary = {
   provider: providerId,
   model,
+  knobs,
   schema: useGrammar ? "off" : schemaMode,
   grammar: useGrammar,
   retrieval: retrievalK,

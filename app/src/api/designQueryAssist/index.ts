@@ -10,6 +10,8 @@
 //          the extension side (`_shared/dsl/pivotLayout`), which `@api` may
 //          not import. The drafting loop there injects them.
 
+export type { AllowedClauses } from "./grammar";
+
 export type {
   DesignMeasureHints,
   DesignQueryCandidates,

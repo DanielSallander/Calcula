@@ -215,7 +215,7 @@ cd app && npx vitest run src/api/scriptHost/scriptEval
 ```
 node tests/eval/run-eval.mjs --provider ollama --model qwen3-coder:30b
 node tests/eval/run-eval.mjs --provider ollama --model llama3.3:70b --canary
-node tests/eval/run-eval.mjs --provider anthropic --model claude-opus-4-8 --json out.json
+node tests/eval/run-eval.mjs --provider openrouter --model anthropic/claude-opus-4-8 --json out.json
 ```
 
 `--canary` runs only the subset the in-app model picker uses, which is the same

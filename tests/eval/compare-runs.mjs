@@ -106,13 +106,64 @@ const p = mcnemarExact(onlyA, onlyB);
 const rateA = (both + onlyA) / shared.length;
 const rateB = (both + onlyB) / shared.length;
 
-const label = (run, file) =>
-  `${run.summary.model} schema=${run.summary.schema ? "on" : "off"} ` +
-  `retrieval=${run.summary.retrieval} context=${run.summary.context ? "on" : "off"} ` +
-  `repair=${run.summary.repair}  [${file}]`;
+/**
+ * What actually differs between two runs, read off their own knob blocks.
+ *
+ * THE OLD LABEL NAMED FOUR HARDCODED KEYS and `grammar` was not one of them —
+ * so the two most important design-query arms printed IDENTICAL headers, and
+ * `retrieval`/`context` printed `undefined` for a pipeline that has no such
+ * knobs. A comparison tool that cannot say what was varied is a tool that
+ * invites a conclusion about the wrong variable.
+ *
+ * Diffing the blocks also catches the case nobody can catch by eye: two runs
+ * that were MEANT to differ and do not. If this prints "the two runs were
+ * configured identically", the experiment did not happen.
+ */
+function knobsOf(run) {
+  if (run.summary && run.summary.knobs) return run.summary.knobs;
+  // A pre-2026-09-15 artifact has no knob block. Recover what is recoverable
+  // and say so, rather than silently comparing against absent keys.
+  const s = run.summary || {};
+  return {
+    provider: s.provider,
+    model: s.model,
+    schema: s.schema,
+    grammar: s.grammar,
+    retrieval: s.retrieval,
+    context: s.context,
+    repair: s.repair,
+    __legacy: true,
+  };
+}
 
-console.log(`A: ${label(a, aPath)}`);
-console.log(`B: ${label(b, bPath)}`);
+function knobDiff(ka, kb) {
+  const keys = [...new Set([...Object.keys(ka), ...Object.keys(kb)])].filter((k) => k !== "__legacy");
+  const changed = [];
+  for (const k of keys) {
+    const va = ka[k];
+    const vb = kb[k];
+    if (JSON.stringify(va) !== JSON.stringify(vb)) changed.push(`${k}: ${JSON.stringify(va)} -> ${JSON.stringify(vb)}`);
+  }
+  return changed;
+}
+
+const ka = knobsOf(a);
+const kb = knobsOf(b);
+const changedKnobs = knobDiff(ka, kb);
+
+console.log(`A: ${ka.model ?? "?"}  [${aPath}]`);
+console.log(`B: ${kb.model ?? "?"}  [${bPath}]`);
+if (ka.__legacy || kb.__legacy) {
+  console.log("  (one or both runs predate the knob block; the diff below may be incomplete)");
+}
+console.log("");
+if (changedKnobs.length === 0) {
+  console.log("  WHAT CHANGED: nothing — the two runs were configured identically.");
+  console.log("                Any difference below is run-to-run noise, not an effect.");
+} else {
+  console.log("  WHAT CHANGED:");
+  for (const line of changedKnobs) console.log(`    ${line}`);
+}
 console.log("");
 console.log(`  tasks compared          ${shared.length}`);
 console.log(`  A pass rate             ${(rateA * 100).toFixed(1)}%`);
