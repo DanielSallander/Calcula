@@ -1776,10 +1776,81 @@ The calendar columns are deliberately NOT renamed (chooseCandidates finds time g
 name, so renaming them would move a second variable), the generator is reproducible under --check
 like its sibling, and it refuses to write a fixture in which any original identifier survives — a
 partial rename would silently measure a MIXTURE of the two vocabularies.
-*Still open, in order:* **Phase 2**, the model bake-off — the harness now takes `--model` and
-retains artifacts, so this is a day of mostly-unattended compute, but it needs weights fetched
-and the shortlist the research produced carries byte-exact sizes and benchmark scores that are
-NOT verifiable from this repo and must be checked against their sources first. **Phase 4**, the
+*Phase 2 — THE BAKE-OFF RAN, AND THE ANSWER IS DO NOT PIN.* Two first-party IBM GGUFs under
+Apache-2.0, both verified byte-for-byte against their model cards before use, served on the
+product's own flags (`-c 8192 -np 1 --jinja --no-webui`). The incumbent was RE-BASELINED first,
+because the standing 17/40 was taken on the pre-Swedish-drop corpus and ten tasks had changed.
+Artifacts for all four runs are retained in `tests/eval/runs/` with their knob blocks.
+
+| model | download | design queries | formulas | FX median | 3 s FX gate |
+|---|---|---|---|---|---|
+| incumbent qwen2.5-coder-1.5B | 1.12 GB | 16/40 | 38/97 | 2342 ms | PASS |
+| granite-4.0-1b | 1.02 GB | 16/40 (p=1.00) | **49/97** (p=0.0614) | **2057 ms** | PASS |
+| granite-4.0-micro 3B | 2.10 GB | **24/40** (p=0.0574) | 40/97 (p=0.83) | 4226 ms | **FAIL** |
+
+Against the pre-registered rule (+6 net with zero regressions, OR p<0.05 on formulas; abandon only
+if both corpora move under 3 tasks) **neither candidate clears and neither is abandonable.** The
+two are COMPLEMENTARY, not ranked: granite-1b is the formula model, granite-micro the design-query
+model, and micro cannot serve formulas at all at 4226 ms.
+
+**What settles it is not the p-values — it is the FOURTH surface.** The bake-off had measured two
+of the six eval runners, so granite-1b was carried through the rest:
+
+| surface | incumbent | granite-1b | |
+|---|---|---|---|
+| formulas | 38/97, 2342 ms | 49/97, 2057 ms | granite-1b, +11 |
+| design queries | 16/40, 1004 ms | 16/40, 1416 ms | tie |
+| next-edit (`run-next-edit-eval`) | 0/77, 676 ms, gate FAIL | 0/77, 766 ms, gate FAIL | tie AT ZERO |
+| narration (`run-narration-eval`) | 1/5 clean, **5 inventions**, 31.7 s | 0/5 clean, **13 inventions**, 48.5 s | **incumbent** |
+
+granite-1b invents 2.6x more numbers in narration and is 50% slower there. For a feature whose
+failure mode is a FLUENT SENTENCE CARRYING A FABRICATED FIGURE, that is the worst axis to lose on,
+and it converts "smaller, faster, better at formulas — just take it" into a trade. **Recorded as a
+programme conclusion: narration is not shippable on ANY 1-3B on-board model.** Both models miss
+the 8 s gate by 4-6x and both invent; this is Tier 2/3 work, not Tier 1. `run-intent-eval` needs no
+model (it scores deterministic detectors), so five of six surfaces are now accounted for.
+
+*The failure diagnosis: 38 adversarial agents, five lenses, and ZERO surviving claims.* Every
+hypothesis about why the formula corpus fails was refuted by a verifier who re-derived the
+arithmetic independently. Three of them were mine. What the refutations VERIFIED is worth more than
+the claims were:
+
+  - **The formula result is CLEAN.** Real harness defects exist — 16 of 97 fixtures have their
+    header row refused by `hasHeaderRow` (`context.ts:159-163` requires a non-text cell in row 2);
+    all 37 `lib:*` "Request" lines are function documentation rather than a question about the
+    data, and 4 need a literal that appears nowhere in the prompt. Their maximum combined swing was
+    measured by replaying each model's own formula with the missing piece supplied: **+4/+3/+3,
+    against an 11-point lead.** No harness defect explains granite-1b's formula win.
+  - **The library half is EASIER than the hand half, not broken**: lib 19-21/37 (51-57%) vs hand
+    19-28/60 (32-47%) in every run.
+  - **My own sample-row hypothesis is dead.** `MAX_SAMPLE_ROWS = 3` shows the model three data rows
+    of a longer table; it explains 1 failure of 48 for granite-1b, 1 of 59 for the incumbent, 0 for
+    granite-micro. The models read the extent from the prose and reach past the window fine.
+  - **`finishReason` is computed (`run-formula-eval.mjs:468`) and never persisted** in the per-task
+    rows (:505-516), so no artifact can say WHICH task was truncated. A live measurement blind spot.
+
+*The models have OPPOSITE pathologies, which is why no single swap is simply better.* Per-clause
+recall over the design-query corpus: the incumbent writes **COLUMNS 0/6** — it never emits the
+clause when one is needed — and spuriously adds TOP ten times. Both Granites write COLUMNS 6/6 and
+5/6 and then spuriously add it ELEVEN times each. An over-producer looks fixable and mostly is not:
+stripping the unrequested COLUMNS line and re-comparing with `sameDesignQuery` rescues **3 of 11**
+for micro and 4 of 11 for granite-1b, because the query underneath is usually missing a FILTERS, a
+LAYOUT or a SORT as well. That CONFIRMS the restraint lesson rather than refuting it, on a model
+family with the opposite failure mode from the one it was measured on — see `grammar.ts`.
+
+**Phase 4 is now the binding constraint, and the reason is arithmetic.** McNemar needs six clean
+flips whatever the corpus size, and that applies to every SUBSET too, so a capability sampled by
+three tasks can never be measured no matter how much compute is spent. Today: every formula family
+is exactly **5** tasks — so not one of the twelve can ever reach p<0.05 on its own — and the
+design-query corpus carries SORT=2, BOTTOM=2, LAYOUT=3, TOP=4, COLUMNS=6, FILTERS=7. The corpora
+can answer "is this model better overall" and can NEVER answer "better at what", which is exactly
+what a pin decision between two complementary candidates needs. Growing to ~12 tasks per capability
+(design queries 40 -> ~100, formulas 60 -> ~144 hand tasks) is the next real work, and it is
+hand-authoring, not compute. The ten backfilled English tasks are also measurably harder than the
+thirty they joined (3/10 vs 13/30 for two models, 5/10 vs 19/30 for the third) — not wrong, but the
+balance should be deliberate next time.
+
+*Still open, in order:* **Phase 4**, the
 corpus: 40 tasks over ONE fixture (`sales_star.json`, hardcoded at `run-design-query-eval.mjs`)
 cannot resolve anything smaller than ~15 percentage points, and the number that matters is the
 GAP BETWEEN SCHEMAS — if the model scores near 17/40 on `sales_star` and near zero on a schema

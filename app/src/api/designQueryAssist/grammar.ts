@@ -185,6 +185,25 @@ function clauseRules(c: DesignQueryCandidates, allow?: { showAs?: boolean }): st
  * everything compiles, no invented name, half the latency — and buys no
  * judgement at all.
  *
+ * RE-TESTED 2026-09-15 ON A MODEL FAMILY WITH THE OPPOSITE PATHOLOGY, AND IT
+ * HOLDS. The objection to the paragraph above is fair and was raised: the 1.5B
+ * UNDER-produces (it writes `COLUMNS` 0 times out of the 6 the corpus needs), so
+ * a gate that only forbids could not possibly have helped it, and this interface
+ * cannot gate `COLUMNS` at all. The bake-off then supplied two models that
+ * OVER-produce — both Granites add an unrequested `COLUMNS` line 11 times each,
+ * and it is 11 of granite-4.0-micro's 16 total failures. That is the case this
+ * lens was designed for, measured offline at zero compute cost: strip the
+ * offending line from each saved reply and re-compare with `sameDesignQuery`.
+ * **3 of 11 become correct for micro, 4 of 11 for granite-1b** (b=3, c=0 is
+ * McNemar p = 0.25). The other seven or eight are ALSO missing a FILTERS, a
+ * LAYOUT or a SORT, so suppressing the surplus clause just exposes the deficit
+ * underneath — the same "a DIFFERENT wrong answer rather than the right one"
+ * that killed it the first time.
+ *
+ * So do not add `columns` to this interface expecting the 11 back. The tic is
+ * real, it is the single most common design-query defect across three models,
+ * and gating it is worth three tasks.
+ *
  * NAMES ARE DELIBERATELY NOT GATEABLE EITHER. Narrowing the NAME set to what an
  * intent mentions was measured and refuted separately: 23 of the 99 names a
  * correct answer needs would become unwriteable, including one in every Swedish

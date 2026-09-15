@@ -1,0 +1,1592 @@
+{
+  "summary": {
+    "provider": "llamacpp",
+    "model": "granite-4.0-1b",
+    "knobs": {
+      "provider": "llamacpp",
+      "model": "granite-4.0-1b",
+      "baseUrl": "",
+      "schema": "off",
+      "grammar": true,
+      "retrieval": 3,
+      "context": true,
+      "repair": 0,
+      "split": "all",
+      "tag": "",
+      "limit": 0
+    },
+    "schema": "off",
+    "grammar": true,
+    "retrieval": 3,
+    "context": true,
+    "repair": 0,
+    "split": "all",
+    "total": 97,
+    "ran": 97,
+    "errored": 0,
+    "passed": 49,
+    "passRate": 0.5052,
+    "medianMs": 2057,
+    "p90Ms": 2917,
+    "meanPromptTokens": 432,
+    "localizedReplies": 0,
+    "noFormulaReplies": 0,
+    "truncatedReplies": 0,
+    "stalledRepairs": 0,
+    "wallClockSec": 208
+  },
+  "results": [
+    {
+      "id": "condagg-sumifs-region-and-rep",
+      "family": "condagg",
+      "passed": true,
+      "errored": false,
+      "formula": "=SUMIFS(C$2:C$10, A$2:A$10, \"North\", B$2:B$10, \"Alice\")",
+      "why": "",
+      "ms": 2733,
+      "promptTokens": 434,
+      "rounds": 1,
+      "examples": [
+        "SUMIFS#1",
+        "SUM#1",
+        "PV#1.A2"
+      ]
+    },
+    {
+      "id": "condagg-countifs-belopp-over-1000",
+      "family": "condagg",
+      "passed": true,
+      "errored": false,
+      "formula": "=COUNTIFS(B$2:B$10,\">1000\",C$2:C$10,\"Skickad\")",
+      "why": "",
+      "ms": 2076,
+      "promptTokens": 426,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "condagg-sumif-wildcard-prefix",
+      "family": "condagg",
+      "passed": false,
+      "errored": false,
+      "formula": "=SUMIFS(B$2:B$9, A$2:A$9, \"WID-\")",
+      "why": "computed 0 but expected 110",
+      "ms": 2057,
+      "promptTokens": 451,
+      "rounds": 1,
+      "examples": [
+        "CODE#1.B2",
+        "CODE#1.B3",
+        "SUMIFS#1"
+      ]
+    },
+    {
+      "id": "condagg-averageifs-hours-rounded",
+      "family": "condagg",
+      "passed": false,
+      "errored": false,
+      "formula": "=ROUND(AVERAGE(FILTER(C$2:C$10, (A$2:A$10=\"Anna\") * (B$2:B$10=\"Support\")), 2))",
+      "why": "computed 6 but expected 7.67",
+      "ms": 2089,
+      "promptTokens": 422,
+      "rounds": 1,
+      "examples": [
+        "AVERAGE#1",
+        "ROUND#1.B2",
+        "ROUND#1.B3"
+      ]
+    },
+    {
+      "id": "condagg-maxifs-west-online",
+      "family": "condagg",
+      "passed": false,
+      "errored": false,
+      "formula": "=LARGE(FILTER(C2:C9, (A2:A9=\"West\") * (B2:B9=\"Online\")))",
+      "why": "expected the number 5300 but the formula produced #VALUE!",
+      "ms": 2645,
+      "promptTokens": 449,
+      "rounds": 1,
+      "examples": [
+        "LARGE#1.A10",
+        "LARGE#1.A11",
+        "PV#1.A2"
+      ]
+    },
+    {
+      "id": "lookup-sku-price-not-found",
+      "family": "lookup",
+      "passed": true,
+      "errored": false,
+      "formula": "=XLOOKUP(\"SKU-107\", A2:A6, C2:C6, \"Not found\")",
+      "why": "",
+      "ms": 2452,
+      "promptTokens": 472,
+      "rounds": 1,
+      "examples": [
+        "MATCH#1",
+        "COUNTA#1",
+        "COUNT#1"
+      ]
+    },
+    {
+      "id": "lookup-discount-tier-band",
+      "family": "lookup",
+      "passed": false,
+      "errored": false,
+      "formula": "=XLOOKUP(75,$A$2:$A$6,$B$2:$B$6,FILTER($B$2:$B$6,FILTER($A$2:$A$6,($A$2:$A$6<=75))))",
+      "why": "expected the number 10 but the formula produced #VALUE!",
+      "ms": 2798,
+      "promptTokens": 464,
+      "rounds": 1,
+      "examples": [
+        "T#1.B2",
+        "T#1.B3",
+        "XIRR#1"
+      ]
+    },
+    {
+      "id": "lookup-two-way-region-quarter",
+      "family": "lookup",
+      "passed": false,
+      "errored": false,
+      "formula": "=XLOOKUP(A2,$A$2:$A$5,B2,B2:$B$5)",
+      "why": "computed 120 but expected 190",
+      "ms": 2948,
+      "promptTokens": 530,
+      "rounds": 1,
+      "examples": [
+        "SWITCH#1.B2",
+        "SWITCH#1.B3",
+        "IFS#1.B2"
+      ]
+    },
+    {
+      "id": "lookup-name-left-of-badge",
+      "family": "lookup",
+      "passed": true,
+      "errored": false,
+      "formula": "=XLOOKUP(4126,$B$2:$B$6,A$2:A$6,\"\")",
+      "why": "",
+      "ms": 1973,
+      "promptTokens": 428,
+      "rounds": 1,
+      "examples": [
+        "LEFT#1.B2",
+        "LEFT#1.B3",
+        "IMARGUMENT#1"
+      ]
+    },
+    {
+      "id": "lookup-last-open-position",
+      "family": "lookup",
+      "passed": false,
+      "errored": false,
+      "formula": "=XLOOKUP(TRUE, C2:C5, ROW(C2:C5)-ROW(C2)+1, ROW(C2:C5))",
+      "why": "expected the number 4 but the formula produced #VALUE!",
+      "ms": 2207,
+      "promptTokens": 468,
+      "rounds": 1,
+      "examples": [
+        "XIRR#1",
+        "EOMONTH#1.B2",
+        "EOMONTH#1.B3"
+      ]
+    },
+    {
+      "id": "date-networkdays-project-holidays",
+      "family": "date",
+      "passed": true,
+      "errored": false,
+      "formula": "=NETWORKDAYS(B2,C2,F2:F4)",
+      "why": "",
+      "ms": 2245,
+      "promptTokens": 491,
+      "rounds": 1,
+      "examples": [
+        "WORKDAY#1.B5",
+        "WORKDAY#1.B6",
+        "NETWORKDAYS#1.B5"
+      ]
+    },
+    {
+      "id": "date-datedif-complete-years-of-service",
+      "family": "date",
+      "passed": true,
+      "errored": false,
+      "formula": "=DATEDIF(B2,B7,\"y\")",
+      "why": "",
+      "ms": 1942,
+      "promptTokens": 441,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "YEAR#1.B2"
+      ]
+    },
+    {
+      "id": "date-count-orders-in-march-2025",
+      "family": "date",
+      "passed": false,
+      "errored": false,
+      "formula": "=COUNTIFS(B2:B8, \">=2025-03-01\", B2:B8, \"<=2025-03-31\")",
+      "why": "computed 0 but expected 3",
+      "ms": 2417,
+      "promptTokens": 439,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "IFS#1.B2"
+      ]
+    },
+    {
+      "id": "date-eomonth-days-until-due-date",
+      "family": "date",
+      "passed": false,
+      "errored": false,
+      "formula": "=DATEDIF(B3, EOMONTH(B3, 1), 'D'!$E$3)",
+      "why": "expected the number 49 but the formula produced #REF!",
+      "ms": 2498,
+      "promptTokens": 470,
+      "rounds": 1,
+      "examples": [
+        "DATE#1.D2",
+        "DATE#1.D3",
+        "DAY#1.B2"
+      ]
+    },
+    {
+      "id": "date-weekday-count-weekend-deliveries",
+      "family": "date",
+      "passed": false,
+      "errored": false,
+      "formula": "=COUNTIFS(B2:B8, \">=01/01\", B2:B8, \"<=07/31\", A2:A8, \"Delivery\")",
+      "why": "computed 0 but expected 3",
+      "ms": 1777,
+      "promptTokens": 388,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "textsplit-email-domain",
+      "family": "textsplit",
+      "passed": true,
+      "errored": false,
+      "formula": "=RIGHT(B3, LEN(B3) - FIND(\"@\", B3))",
+      "why": "",
+      "ms": 1872,
+      "promptTokens": 412,
+      "rounds": 1,
+      "examples": [
+        "ADDRESS#1",
+        "SIGN#1.C2",
+        "SIGN#1.C3"
+      ]
+    },
+    {
+      "id": "textsplit-country-after-last-comma",
+      "family": "textsplit",
+      "passed": false,
+      "errored": false,
+      "formula": "=TRIM(LEFT(B3,FIND(CHAR(10),TEXTJOIN(CHAR(10),1,$B$3)))-1)",
+      "why": "expected the text \"Norway\" but the formula produced a Error (#VALUE!)",
+      "ms": 2456,
+      "promptTokens": 500,
+      "rounds": 1,
+      "examples": [
+        "TRIM#1",
+        "COUNT#1",
+        "COUNTA#1"
+      ]
+    },
+    {
+      "id": "textsplit-count-tags-in-list",
+      "family": "textsplit",
+      "passed": false,
+      "errored": false,
+      "formula": "=COUNTA(FILTER(B3:$B$6, (A3:$A$6 = \"Headlamp\")))",
+      "why": "computed 1 but expected 4",
+      "ms": 2210,
+      "promptTokens": 442,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "textsplit-aisle-between-hyphens",
+      "family": "textsplit",
+      "passed": false,
+      "errored": false,
+      "formula": "=MID(Sheet1!B3,$C$1,$D$1)",
+      "why": "expected the text \"B112\" but the formula produced a Error (#VALUE!)",
+      "ms": 1978,
+      "promptTokens": 450,
+      "rounds": 1,
+      "examples": [
+        "SECOND#1.B2",
+        "SECOND#1.B3",
+        "GET.COLUMN.WIDTH#1.B2"
+      ]
+    },
+    {
+      "id": "textsplit-partner-list-two-delimiters",
+      "family": "textsplit",
+      "passed": false,
+      "errored": false,
+      "formula": "=TEXTJOIN(\" \",TRUE,$B$2,LEN($B$2)-LEN(SUBSTITUTE($B$2,\"|\",\"\")))",
+      "why": "computed \"Nord-Vind AB - Stockholm|Tallberg AB - Oslo 1\" but expected \"Nord-Vind AB\"",
+      "ms": 2697,
+      "promptTokens": 528,
+      "rounds": 1,
+      "examples": [
+        "IFERROR#1.C2",
+        "IFERROR#1.C3",
+        "TRIM#1"
+      ]
+    },
+    {
+      "id": "textjoin-emails-skip-blanks",
+      "family": "textjoin",
+      "passed": false,
+      "errored": false,
+      "formula": "=TEXTJOIN(@@IF(@@ISBLANK(@@B2:B6),,,),\",\",B2:B6)",
+      "why": "expected the text \"anna@acme.com, carla@acme.com, elin@acme.com\" but the formula produced a Error (#VALUE!)",
+      "ms": 2743,
+      "promptTokens": 416,
+      "rounds": 1,
+      "examples": [
+        "ADDRESS#1",
+        "LARGE#1.A10",
+        "LARGE#1.A11"
+      ]
+    },
+    {
+      "id": "textjoin-order-label-zero-padded",
+      "family": "textjoin",
+      "passed": true,
+      "errored": false,
+      "formula": "=CONCATENATE(\"ORD-\", TEXT(A3, \"00000\"))",
+      "why": "",
+      "ms": 2366,
+      "promptTokens": 455,
+      "rounds": 1,
+      "examples": [
+        "IFS#1.B2",
+        "IFS#1.B3",
+        "CUBESETCOUNT#1.A1"
+      ]
+    },
+    {
+      "id": "textjoin-account-code-uppercase",
+      "family": "textjoin",
+      "passed": true,
+      "errored": false,
+      "formula": "=UPPER(C2)&\"-\"&UPPER(B2)",
+      "why": "",
+      "ms": 1900,
+      "promptTokens": 417,
+      "rounds": 1,
+      "examples": [
+        "LOWER#1.B2",
+        "LOWER#1.B3",
+        "UPPER#1.B2"
+      ]
+    },
+    {
+      "id": "textjoin-clean-pasted-name",
+      "family": "textjoin",
+      "passed": true,
+      "errored": false,
+      "formula": "=PROPER(TRIM(A3))",
+      "why": "",
+      "ms": 1568,
+      "promptTokens": 441,
+      "rounds": 1,
+      "examples": [
+        "PROPER#1.B2",
+        "PROPER#1.B3",
+        "TRIM#1"
+      ]
+    },
+    {
+      "id": "textjoin-dot-leader-pad-code",
+      "family": "textjoin",
+      "passed": false,
+      "errored": false,
+      "formula": "=TEXTJOIN(DISTINCT($A$2:$A$4), REPEAT('. LENA2-LEN4-LEN4-LEN4-LEN4-LEN'!$A$2, 8), $A$2:$A$4)",
+      "why": "expected the text \"AX12....\" but the formula produced a Error (#NAME?)",
+      "ms": 3019,
+      "promptTokens": 377,
+      "rounds": 1,
+      "examples": [
+        "CODE#1.B2",
+        "CODE#1.B3",
+        "CHAR#1.B2"
+      ]
+    },
+    {
+      "id": "running-cumulative-total-anchored",
+      "family": "running",
+      "passed": true,
+      "errored": false,
+      "formula": "=SUM($B$2:B7)",
+      "why": "",
+      "ms": 2048,
+      "promptTokens": 473,
+      "rounds": 1,
+      "examples": [
+        "FORMULATEXT#1.A2",
+        "PV#1.A2",
+        "PV#1.A7"
+      ]
+    },
+    {
+      "id": "running-change-from-previous-month",
+      "family": "running",
+      "passed": false,
+      "errored": false,
+      "formula": "=C4",
+      "why": "computed 0 but expected -30",
+      "ms": 1785,
+      "promptTokens": 472,
+      "rounds": 1,
+      "examples": [
+        "MONTH#1.B2",
+        "MONTH#1.B3",
+        "T#1.B2"
+      ]
+    },
+    {
+      "id": "running-balance-scan-spill",
+      "family": "running",
+      "passed": false,
+      "errored": false,
+      "formula": "=LET('OpeningBalance'!D2,1000,OpeningBalance,SUMIFS($A$2:$A$8, $A$2:$A$8, $A2), Balance,OpeningBalance+$B2, Balance)",
+      "why": "expected the number 850 but the formula produced #VALUE!",
+      "ms": 2917,
+      "promptTokens": 521,
+      "rounds": 1,
+      "examples": [
+        "T#1.B2",
+        "T#1.B3",
+        "FORMULATEXT#1.A2"
+      ]
+    },
+    {
+      "id": "running-share-of-grand-total",
+      "family": "running",
+      "passed": true,
+      "errored": false,
+      "formula": "=SUM(B$2:B6)/SUM(B$2:B9)",
+      "why": "",
+      "ms": 2328,
+      "promptTokens": 500,
+      "rounds": 1,
+      "examples": [
+        "SUMIFS#1",
+        "PERMUTATIONA#1",
+        "SUM#1"
+      ]
+    },
+    {
+      "id": "running-total-within-region",
+      "family": "running",
+      "passed": false,
+      "errored": false,
+      "formula": "=SUMIFS($B$2:$B:$B,$A$2:$A:$A,$A7)",
+      "why": "the formula does not parse: Cell reference missing row: B",
+      "ms": 2754,
+      "promptTokens": 541,
+      "rounds": 1,
+      "examples": [
+        "FORMULATEXT#1.A2",
+        "FORMULATEXT#1.B2",
+        "ISFORMULA#1.A2"
+      ]
+    },
+    {
+      "id": "rank-third-largest-order",
+      "family": "rank",
+      "passed": true,
+      "errored": false,
+      "formula": "=LARGE($C$2:$C$8, 3)",
+      "why": "",
+      "ms": 2160,
+      "promptTokens": 408,
+      "rounds": 1,
+      "examples": [
+        "LARGE#1.A10",
+        "LARGE#1.A11",
+        "SMALL#1.A10"
+      ]
+    },
+    {
+      "id": "rank-row-position-with-ties",
+      "family": "rank",
+      "passed": true,
+      "errored": false,
+      "formula": "=RANK(B4,$B$2:$B$8)",
+      "why": "",
+      "ms": 1928,
+      "promptTokens": 432,
+      "rounds": 1,
+      "examples": [
+        "RANK#1.C2",
+        "RANK#1.C3",
+        "RANK.AVG#1.B2"
+      ]
+    },
+    {
+      "id": "rank-highest-amount-in-region",
+      "family": "rank",
+      "passed": false,
+      "errored": false,
+      "formula": "=MAX(FILTER(C2:C8, B2:B8=\"$B$2:B$2\"))",
+      "why": "expected the number 57000 but the formula produced #VALUE!",
+      "ms": 2372,
+      "promptTokens": 395,
+      "rounds": 1,
+      "examples": [
+        "LARGE#1.A10",
+        "LARGE#1.A11",
+        "IRR#1.A10"
+      ]
+    },
+    {
+      "id": "rank-products-sorted-by-units",
+      "family": "rank",
+      "passed": false,
+      "errored": false,
+      "formula": "=TEXTJOIN(\" \",,TEXTSPLIT($B$2:$B$7,\",\"))",
+      "why": "computed \"340\" but expected \"Nut\"",
+      "ms": 2394,
+      "promptTokens": 441,
+      "rounds": 1,
+      "examples": [
+        "COUNTA#1",
+        "COUNT#1",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "rank-drop-two-lowest-scores",
+      "family": "rank",
+      "passed": true,
+      "errored": false,
+      "formula": "=SUM(B2:B8)-(SMALL(B2:B8,1)+SMALL(B2:B8,2))",
+      "why": "",
+      "ms": 2013,
+      "promptTokens": 422,
+      "rounds": 1,
+      "examples": [
+        "SMALL#1.A10",
+        "SMALL#1.A11",
+        "SUMIFS#1"
+      ]
+    },
+    {
+      "id": "share-percent-of-total-anchored",
+      "family": "share",
+      "passed": false,
+      "errored": false,
+      "formula": "=D2/$B$2:$B$6",
+      "why": "computed 0 but expected 0.25 (matched against the anchor of a 5-value spill)",
+      "ms": 2055,
+      "promptTokens": 468,
+      "rounds": 1,
+      "examples": [
+        "PERMUTATIONA#1",
+        "SUMIFS#1",
+        "FORMULATEXT#1.A2"
+      ]
+    },
+    {
+      "id": "share-yoy-growth-by-region",
+      "family": "share",
+      "passed": false,
+      "errored": false,
+      "formula": "=ROUND(((SUMIFS($C$2:$C$9, $B$2:$B$9, \"North\", $C$2:$C$9, 2025) - SUMIFS($C$2:$C$9, $B$2:$B$9, \"North\", $C$2:$C$9, 2024)) / SUMIFS($C$2:$C$9, $B$2:$B$9, \"North\", $C$2:$C$9, 2024)),4)",
+      "why": "expected the number 0.125 but the formula produced #DIV/0!",
+      "ms": 5314,
+      "promptTokens": 519,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "YEAR#1.B2"
+      ]
+    },
+    {
+      "id": "share-gross-margin-active-only",
+      "family": "share",
+      "passed": false,
+      "errored": false,
+      "formula": "=ROUND((SUMIFS(C$2:C$6,F$2:F$6,\"Active\")-SUMIFS(D$2:D$6,F$2:F$6,\"Active\")) / SUMIFS(C$2:C$6,F$2:F$6,\"Active\"),4)",
+      "why": "expected the number 0.3125 but the formula produced #DIV/0!",
+      "ms": 3134,
+      "promptTokens": 508,
+      "rounds": 1,
+      "examples": [
+        "SUMIFS#1",
+        "SUM#1",
+        "PERMUTATIONA#1"
+      ]
+    },
+    {
+      "id": "share-guarded-conversion-rate",
+      "family": "share",
+      "passed": true,
+      "errored": false,
+      "formula": "=IF(B4=0,\"n/a\",ROUND(C4/B4,4))",
+      "why": "",
+      "ms": 2403,
+      "promptTokens": 538,
+      "rounds": 1,
+      "examples": [
+        "IFERROR#1.C2",
+        "IFERROR#1.C3",
+        "FORMULATEXT#1.A2"
+      ]
+    },
+    {
+      "id": "share-of-region-subtotal",
+      "family": "share",
+      "passed": false,
+      "errored": false,
+      "formula": "=C3/C$5",
+      "why": "computed 0.625 but expected 0.3125",
+      "ms": 2171,
+      "promptTokens": 485,
+      "rounds": 1,
+      "examples": [
+        "PV#1.A2",
+        "PV#1.A7",
+        "SUMIFS#1"
+      ]
+    },
+    {
+      "id": "logic-grade-letter-four-bands",
+      "family": "logic",
+      "passed": true,
+      "errored": false,
+      "formula": "=IFS(B2>=90, \"A\", B2>=80, \"B\", B2>=70, \"C\", TRUE, \"F\")",
+      "why": "",
+      "ms": 2428,
+      "promptTokens": 451,
+      "rounds": 1,
+      "examples": [
+        "T#1.B2",
+        "T#1.B3",
+        "IF#1.C2"
+      ]
+    },
+    {
+      "id": "logic-bonus-three-conditions",
+      "family": "logic",
+      "passed": true,
+      "errored": false,
+      "formula": "=IF(AND(B2=\"North\", C2>=5000, D2<\"Yes\"), TRUE, FALSE)",
+      "why": "",
+      "ms": 2288,
+      "promptTokens": 474,
+      "rounds": 1,
+      "examples": [
+        "T#1.B2",
+        "T#1.B3",
+        "IF#1.C2"
+      ]
+    },
+    {
+      "id": "logic-status-code-switch-default",
+      "family": "logic",
+      "passed": true,
+      "errored": false,
+      "formula": "=IFS(B2=\"A\", \"Approved\", B2=\"P\", \"Pending\", B2=\"R\", \"Rejected\", TRUE, \"Unknown\")",
+      "why": "",
+      "ms": 2299,
+      "promptTokens": 440,
+      "rounds": 1,
+      "examples": [
+        "IFERROR#1.C2",
+        "IFERROR#1.C3",
+        "IFNA#1"
+      ]
+    },
+    {
+      "id": "logic-qty-outside-range-flag",
+      "family": "logic",
+      "passed": true,
+      "errored": false,
+      "formula": "=IF(OR(B2<=10,B2>=100),TRUE,FALSE)",
+      "why": "",
+      "ms": 2960,
+      "promptTokens": 474,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "OR#1.C2",
+        "OR#1.C3"
+      ]
+    },
+    {
+      "id": "logic-commission-three-tiers",
+      "family": "logic",
+      "passed": true,
+      "errored": false,
+      "formula": "=ROUND(IF(B2>=10000, B2*0.10, IF(B2>=5000, B2*0.05, B2*0.02)), 2)",
+      "why": "",
+      "ms": 3112,
+      "promptTokens": 499,
+      "rounds": 1,
+      "examples": [
+        "PV#1.A2",
+        "PV#1.A7",
+        "T#1.B2"
+      ]
+    },
+    {
+      "id": "errguard-iferror-zero-units-divide",
+      "family": "errguard",
+      "passed": true,
+      "errored": false,
+      "formula": "=IF(C4=0,0,B4/C4)",
+      "why": "",
+      "ms": 2087,
+      "promptTokens": 448,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "IFNA#1",
+        "IFERROR#1.C2"
+      ]
+    },
+    {
+      "id": "errguard-ifna-price-lookup-fallback",
+      "family": "errguard",
+      "passed": true,
+      "errored": false,
+      "formula": "=IFNA(VLOOKUP(\"S900\", $A$2:$B$5, 2, FALSE), \"Not stocked\")",
+      "why": "",
+      "ms": 2667,
+      "promptTokens": 457,
+      "rounds": 1,
+      "examples": [
+        "IFNA#1",
+        "MATCH#1",
+        "IFERROR#1.C2"
+      ]
+    },
+    {
+      "id": "errguard-lookup-miss-returns-na",
+      "family": "errguard",
+      "passed": false,
+      "errored": false,
+      "formula": "=IFNA(VLOOKUP(\"S900\", \"$A$2:$C$5\", 3, FALSE), \"S900 Not Found\")",
+      "why": "computed #REF! but expected #N/A",
+      "ms": 2785,
+      "promptTokens": 493,
+      "rounds": 1,
+      "examples": [
+        "IFNA#1",
+        "IFERROR#1.C2",
+        "IFERROR#1.C3"
+      ]
+    },
+    {
+      "id": "errguard-countblank-missing-timesheets",
+      "family": "errguard",
+      "passed": true,
+      "errored": false,
+      "formula": "=COUNTBLANK(B2:B7)",
+      "why": "",
+      "ms": 2027,
+      "promptTokens": 421,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "T#1.B2"
+      ]
+    },
+    {
+      "id": "errguard-isnumber-match-membership",
+      "family": "errguard",
+      "passed": false,
+      "errored": false,
+      "formula": "=IF(COUNTIF(A2:A6,\"Farid\")>0,\"TRUE\",\"FALSE\")",
+      "why": "expected false but the formula produced FALSE",
+      "ms": 2994,
+      "promptTokens": 472,
+      "rounds": 1,
+      "examples": [
+        "IFNA#1",
+        "IFERROR#1.C2",
+        "IFERROR#1.C3"
+      ]
+    },
+    {
+      "id": "dynarray-filter-region-and-amount",
+      "family": "dynarray",
+      "passed": true,
+      "errored": false,
+      "formula": "=FILTER(A2:A9, (B2:B9=\"North\") * (C2:C9>200))",
+      "why": "",
+      "ms": 2202,
+      "promptTokens": 461,
+      "rounds": 1,
+      "examples": [
+        "LET#1",
+        "LET#3",
+        "PV#1.A2"
+      ]
+    },
+    {
+      "id": "dynarray-sort-unique-products",
+      "family": "dynarray",
+      "passed": false,
+      "errored": false,
+      "formula": "=SORT(UNIQUE(A$2:A$8),2,0)",
+      "why": "expected the text \"Pear\" but the formula produced a Error (#VALUE!)",
+      "ms": 1740,
+      "promptTokens": 435,
+      "rounds": 1,
+      "examples": [
+        "LET#1",
+        "LET#3",
+        "IFS#1.B2"
+      ]
+    },
+    {
+      "id": "dynarray-sortby-miles-descending",
+      "family": "dynarray",
+      "passed": false,
+      "errored": false,
+      "formula": "=TEXTJOIN(, ,A2:A6)",
+      "why": "computed \"IvanNadiaOmarPetraQuinn\" but expected \"Nadia\"",
+      "ms": 2520,
+      "promptTokens": 451,
+      "rounds": 1,
+      "examples": [
+        "LET#1",
+        "LET#3",
+        "IF#1.C2"
+      ]
+    },
+    {
+      "id": "dynarray-sequence-shift-ids",
+      "family": "dynarray",
+      "passed": false,
+      "errored": false,
+      "formula": "=LET(n,COUNT(B2:B6),i,B3,step,B4,seq,SEQUENCE(n),result,IF(n>0,SUM(i+seq*step)),result)",
+      "why": "computed 130 but expected 20",
+      "ms": 3059,
+      "promptTokens": 442,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "dynarray-filter-if-empty-fallback",
+      "family": "dynarray",
+      "passed": false,
+      "errored": false,
+      "formula": "=TEXTJOIN(,,FILTER(A2:A7, (B2:B7=\"High\")*(C2:C7=\"Open\")))",
+      "why": "expected the text \"None\" but the formula produced a Error (#VALUE!)",
+      "ms": 2685,
+      "promptTokens": 442,
+      "rounds": 1,
+      "examples": [
+        "IFERROR#1.C2",
+        "IFERROR#1.C3",
+        "IFNA#1"
+      ]
+    },
+    {
+      "id": "statfin-avg-order-value-nearest-5",
+      "family": "statfin",
+      "passed": true,
+      "errored": false,
+      "formula": "=MROUND(AVERAGE($B$2:$B$6),5)",
+      "why": "",
+      "ms": 2014,
+      "promptTokens": 419,
+      "rounds": 1,
+      "examples": [
+        "AVERAGE#1",
+        "MROUND#1.B2",
+        "MROUND#1.B3"
+      ]
+    },
+    {
+      "id": "statfin-median-resolution-hours",
+      "family": "statfin",
+      "passed": true,
+      "errored": false,
+      "formula": "=MEDIAN(B2:B8)",
+      "why": "",
+      "ms": 1929,
+      "promptTokens": 435,
+      "rounds": 1,
+      "examples": [
+        "COUNTA#1",
+        "COUNT#1",
+        "AVERAGE#1"
+      ]
+    },
+    {
+      "id": "statfin-slope-variable-cost-per-unit",
+      "family": "statfin",
+      "passed": true,
+      "errored": false,
+      "formula": "=SLOPE(C2:C7,B2:B7)",
+      "why": "",
+      "ms": 2274,
+      "promptTokens": 496,
+      "rounds": 1,
+      "examples": [
+        "SLN#1",
+        "SUMIFS#1",
+        "IMARGUMENT#1"
+      ]
+    },
+    {
+      "id": "statfin-loan-monthly-payment",
+      "family": "statfin",
+      "passed": false,
+      "errored": false,
+      "formula": "=LET(r, B2/12, n, B3*12, pmt, PMT(r, n, B1, -B5), ROUND(pmt, 2))",
+      "why": "computed -4604.04 but expected -4639.87",
+      "ms": 3268,
+      "promptTokens": 539,
+      "rounds": 1,
+      "examples": [
+        "PMT#1.A7",
+        "PMT#1.A8",
+        "EFFECT#1"
+      ]
+    },
+    {
+      "id": "statfin-npv-project-year-zero",
+      "family": "statfin",
+      "passed": false,
+      "errored": false,
+      "formula": "=XNPV(0.10, B3:B7, A3:A7)",
+      "why": "computed 86948.05746492416 but expected 14149.99",
+      "ms": 2536,
+      "promptTokens": 445,
+      "rounds": 1,
+      "examples": [
+        "YEAR#1.B2",
+        "YEAR#1.B3",
+        "XNPV#1"
+      ]
+    },
+    {
+      "id": "lib:ABS#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=ABS(B2)",
+      "why": "computed 47500 but expected 2500",
+      "ms": 1521,
+      "promptTokens": 388,
+      "rounds": 1,
+      "examples": [
+        "SIGN#1.C2",
+        "SIGN#1.C3",
+        "HYPGEOM.DIST#1"
+      ]
+    },
+    {
+      "id": "lib:ATAN#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=DEGREES(ATAN($B2))",
+      "why": "computed 75.96375653207353 but expected 36.87",
+      "ms": 1629,
+      "promptTokens": 402,
+      "rounds": 1,
+      "examples": [
+        "ACOS#1.B2",
+        "ACOS#1.B3",
+        "ASIN#1.B2"
+      ]
+    },
+    {
+      "id": "lib:AVERAGEIF#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=AVERAGEIFS(B2:B7, A2:A7, \"Engineering\")",
+      "why": "",
+      "ms": 1681,
+      "promptTokens": 402,
+      "rounds": 1,
+      "examples": [
+        "AVERAGEIFS#1",
+        "AVERAGE#1",
+        "MATCH#1"
+      ]
+    },
+    {
+      "id": "lib:BIN2HEX#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=BIN2HEX(A1)",
+      "why": "expected the text \"00FB\" but the formula produced a Error (#NUM!)",
+      "ms": 1466,
+      "promptTokens": 372,
+      "rounds": 1,
+      "examples": [
+        "HEX2OCT#1",
+        "DEC2HEX#1",
+        "HEX2DEC#1"
+      ]
+    },
+    {
+      "id": "lib:BITAND#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=BITAND(A2, B2)",
+      "why": "",
+      "ms": 1515,
+      "promptTokens": 372,
+      "rounds": 1,
+      "examples": [
+        "IMPRODUCT#1",
+        "IMSUM#1",
+        "RANK#1.C2"
+      ]
+    },
+    {
+      "id": "lib:BITOR#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=BITOR($A2,$B2)",
+      "why": "",
+      "ms": 1143,
+      "promptTokens": 370,
+      "rounds": 1,
+      "examples": [
+        "IMPRODUCT#1",
+        "IMSUM#1",
+        "SUM#1"
+      ]
+    },
+    {
+      "id": "lib:BITXOR#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=BITXOR($A2,$B2)",
+      "why": "",
+      "ms": 1428,
+      "promptTokens": 375,
+      "rounds": 1,
+      "examples": [
+        "XOR#1.C2",
+        "XOR#1.C3",
+        "IMPRODUCT#1"
+      ]
+    },
+    {
+      "id": "lib:COMBIN#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=COMBIN(B2,$B$2)",
+      "why": "computed 1 but expected 120",
+      "ms": 1570,
+      "promptTokens": 387,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "lib:COMPLEX#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=COMPLEX(A2,$B$2)",
+      "why": "",
+      "ms": 1585,
+      "promptTokens": 389,
+      "rounds": 1,
+      "examples": [
+        "IMAGINARY#1",
+        "IMARGUMENT#1",
+        "RSQ#1"
+      ]
+    },
+    {
+      "id": "lib:COUNTIF#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=COUNTIF(B2:B6,\"Pending\")",
+      "why": "computed 1 but expected 3",
+      "ms": 1723,
+      "promptTokens": 389,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "lib:DAYS360#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=DAYS360(B1,$B$1,$B$2,$B$2)",
+      "why": "expected the number 180 but the formula produced #VALUE!",
+      "ms": 1805,
+      "promptTokens": 389,
+      "rounds": 1,
+      "examples": [
+        "DATEDIF#1.B4",
+        "DATEDIF#1.B5",
+        "NETWORKDAYS#1.B5"
+      ]
+    },
+    {
+      "id": "lib:DEC2OCT#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=DEC2OCT(A2)",
+      "why": "",
+      "ms": 1537,
+      "promptTokens": 371,
+      "rounds": 1,
+      "examples": [
+        "BIN2DEC#1",
+        "DEC2BIN#1",
+        "DEC2HEX#1"
+      ]
+    },
+    {
+      "id": "lib:FILTER#3",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=FILTER(A2:A4, A2:A4 <> \"\")",
+      "why": "computed \"Alice\" but expected \"No matches\" (matched against the anchor of a 3-value spill)",
+      "ms": 1629,
+      "promptTokens": 373,
+      "rounds": 1,
+      "examples": [
+        "VAR#1",
+        "STDEV#1",
+        "VARP#1"
+      ]
+    },
+    {
+      "id": "lib:GCD#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=GCD($A$2,$B$2)",
+      "why": "",
+      "ms": 1670,
+      "promptTokens": 382,
+      "rounds": 1,
+      "examples": [
+        "IMPRODUCT#1",
+        "IMSUM#1",
+        "CONCATENATE#1.C2"
+      ]
+    },
+    {
+      "id": "lib:HEX2BIN#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=HEX2BIN(A2)",
+      "why": "",
+      "ms": 1457,
+      "promptTokens": 370,
+      "rounds": 1,
+      "examples": [
+        "HEX2OCT#1",
+        "DEC2HEX#1",
+        "HEX2DEC#1"
+      ]
+    },
+    {
+      "id": "lib:IMABS#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=IMABS(A2)",
+      "why": "",
+      "ms": 1380,
+      "promptTokens": 371,
+      "rounds": 1,
+      "examples": [
+        "IMARGUMENT#1",
+        "VALUE#1.B2",
+        "VALUE#1.B3"
+      ]
+    },
+    {
+      "id": "lib:IMCONJUGATE#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=IMCONJUGATE(A2)",
+      "why": "",
+      "ms": 1448,
+      "promptTokens": 389,
+      "rounds": 1,
+      "examples": [
+        "IMARGUMENT#1",
+        "IMCOS#1",
+        "IMCOT#1"
+      ]
+    },
+    {
+      "id": "lib:IMREAL#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=IMREAL(A2)",
+      "why": "",
+      "ms": 1329,
+      "promptTokens": 375,
+      "rounds": 1,
+      "examples": [
+        "IMAGINARY#1",
+        "IMARGUMENT#1",
+        "RSQ#1"
+      ]
+    },
+    {
+      "id": "lib:IMSUB#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=IMSUB($A2,$B2)",
+      "why": "",
+      "ms": 1583,
+      "promptTokens": 377,
+      "rounds": 1,
+      "examples": [
+        "IMPRODUCT#1",
+        "IMSUM#1",
+        "DATEDIF#1.B4"
+      ]
+    },
+    {
+      "id": "lib:INDEX#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=INDEX($B$2:$B$5, MATCH(\"Bob\", $A$2:$A$5, 0))",
+      "why": "computed 22000 but expected 19000",
+      "ms": 2123,
+      "promptTokens": 403,
+      "rounds": 1,
+      "examples": [
+        "XMATCH#1",
+        "COLUMNS#1",
+        "ROWS#1"
+      ]
+    },
+    {
+      "id": "lib:LCM#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=LCM($A$2,$B$2)",
+      "why": "",
+      "ms": 1673,
+      "promptTokens": 396,
+      "rounds": 1,
+      "examples": [
+        "OR#1.C2",
+        "OR#1.C3",
+        "IMPRODUCT#1"
+      ]
+    },
+    {
+      "id": "lib:LN#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=LN(C2)",
+      "why": "expected the number 0.4055 but the formula produced #NUM!",
+      "ms": 1492,
+      "promptTokens": 410,
+      "rounds": 1,
+      "examples": [
+        "EXP#1",
+        "IMLN#1",
+        "LOG10#1"
+      ]
+    },
+    {
+      "id": "lib:MAX#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=MAX($B$2:$B$6)",
+      "why": "",
+      "ms": 1583,
+      "promptTokens": 384,
+      "rounds": 1,
+      "examples": [
+        "LARGE#1.A10",
+        "LARGE#1.A11",
+        "COUNT#1"
+      ]
+    },
+    {
+      "id": "lib:MAXIFS#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=MAXIFS(C2:C6, B2:B6, \"North\")",
+      "why": "",
+      "ms": 1800,
+      "promptTokens": 419,
+      "rounds": 1,
+      "examples": [
+        "LARGE#1.A10",
+        "LARGE#1.A11",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "lib:MEDIAN#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=MEDIAN($B$2:$B$9)",
+      "why": "",
+      "ms": 2000,
+      "promptTokens": 377,
+      "rounds": 1,
+      "examples": [
+        "F.TEST#1",
+        "RANK#1.C2",
+        "RANK#1.C3"
+      ]
+    },
+    {
+      "id": "lib:MIN#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=MIN($B$2:$B$6)",
+      "why": "",
+      "ms": 1580,
+      "promptTokens": 388,
+      "rounds": 1,
+      "examples": [
+        "SMALL#1.A10",
+        "SMALL#1.A11",
+        "COUNT#1"
+      ]
+    },
+    {
+      "id": "lib:MINIFS#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=MINIFS(C:C, A:A, \"Widget\")",
+      "why": "",
+      "ms": 1779,
+      "promptTokens": 417,
+      "rounds": 1,
+      "examples": [
+        "SMALL#1.A10",
+        "SMALL#1.A11",
+        "COUNTIFS#1"
+      ]
+    },
+    {
+      "id": "lib:OCT2DEC#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=OCT2DEC($A2)",
+      "why": "",
+      "ms": 1485,
+      "promptTokens": 371,
+      "rounds": 1,
+      "examples": [
+        "OCT2BIN#1",
+        "BIN2DEC#1",
+        "DEC2BIN#1"
+      ]
+    },
+    {
+      "id": "lib:ROUNDDOWN#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=ROUNDDOWN(B2,0)",
+      "why": "computed 0 but expected 24",
+      "ms": 1472,
+      "promptTokens": 377,
+      "rounds": 1,
+      "examples": [
+        "COUNT#1",
+        "COUNTA#1",
+        "ROUNDUP#1"
+      ]
+    },
+    {
+      "id": "lib:SQRT#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=SQRT(B2)",
+      "why": "computed 0 but expected 25",
+      "ms": 1429,
+      "promptTokens": 378,
+      "rounds": 1,
+      "examples": [
+        "IMSQRT#1",
+        "RSQ#1",
+        "SIGN#1.C2"
+      ]
+    },
+    {
+      "id": "lib:SUMIF#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=SUMIF($B$2:$B$7, \"Rent\", $B$2:$B$7)",
+      "why": "computed 0 but expected 5000",
+      "ms": 1895,
+      "promptTokens": 392,
+      "rounds": 1,
+      "examples": [
+        "SUM#1",
+        "MATCH#1",
+        "IFS#1.B2"
+      ]
+    },
+    {
+      "id": "lib:TBILLPRICE#1",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=TBILLPRICE($B$2,$B$3,$B$4)",
+      "why": "",
+      "ms": 2034,
+      "promptTokens": 393,
+      "rounds": 1,
+      "examples": [
+        "DOLLARDE#1.A2",
+        "DOLLARDE#1.A6",
+        "DOLLARFR#1.A2"
+      ]
+    },
+    {
+      "id": "lib:TEXTBEFORE#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=TEXTBEFORE(A2, @$A$1)",
+      "why": "expected the text \"John\" but the formula produced a Error (#N/A)",
+      "ms": 1788,
+      "promptTokens": 389,
+      "rounds": 1,
+      "examples": [
+        "TEXTAFTER#1",
+        "TEXTJOIN#4",
+        "TEXTJOIN#1"
+      ]
+    },
+    {
+      "id": "lib:XLOOKUP#1",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=XLOOKUP(B7, A2:A4, B2:B4, \"Not Found\")",
+      "why": "expected the number 0.5 but the formula produced Not Found",
+      "ms": 2298,
+      "promptTokens": 401,
+      "rounds": 1,
+      "examples": [
+        "MATCH#1",
+        "XMATCH#1",
+        "COLUMNS#1"
+      ]
+    },
+    {
+      "id": "lib:XLOOKUP#2",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=XLOOKUP(B7, A2:A5, B2:B5, \"Not Found\")",
+      "why": "computed \"Not Found\" but expected \"Not found\" — the difference is only case",
+      "ms": 2192,
+      "promptTokens": 398,
+      "rounds": 1,
+      "examples": [
+        "MATCH#1",
+        "XMATCH#1",
+        "COLUMNS#1"
+      ]
+    },
+    {
+      "id": "lib:XLOOKUP#3",
+      "family": "library",
+      "passed": false,
+      "errored": false,
+      "formula": "=XLOOKUP(B9, A2:A5, B2:B5, \"Not Found\", 0)",
+      "why": "computed \"Not Found\" but expected \"C\"",
+      "ms": 2278,
+      "promptTokens": 398,
+      "rounds": 1,
+      "examples": [
+        "MATCH#1",
+        "XMATCH#1",
+        "COLUMNS#1"
+      ]
+    },
+    {
+      "id": "lib:XLOOKUP#4",
+      "family": "library",
+      "passed": true,
+      "errored": false,
+      "formula": "=XLOOKUP(\"John Smith\", A:A, B:B, ,1)",
+      "why": "",
+      "ms": 2342,
+      "promptTokens": 411,
+      "rounds": 1,
+      "examples": [
+        "MATCH#1",
+        "XMATCH#1",
+        "XLOOKUPS#3"
+      ]
+    }
+  ]
+}

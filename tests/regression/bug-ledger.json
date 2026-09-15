@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 114,
+  "nextId": 115,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4285,6 +4285,33 @@
         "diffSummary": "A srcdoc child gets a CLONE of its embedder's policy container, so the app's `script-src 'self' blob:` (no 'unsafe-inline', no nonce, no hash) landed inside the frame and refused the inline bridge -- and `sandbox=allow-scripts` without allow-same-origin makes the frame's origin OPAQUE, so the inherited 'self' matched nothing either and an external <script src> from 'self' was refused for the same reason. There was no nonce-shaped fix: the shipped Interactive Counter and the default pane scaffold drive the bridge from inline onclick= ATTRIBUTES. The bridge is now a CONSTANT loader served from Rust over a custom URI scheme with its own Content-Security-Policy RESPONSE header, so the frame document gets its own policy container; the script's HTML is pushed to it afterwards. Isolation is unchanged -- the opaque origin comes from the sandbox, not the scheme -- and the app's own script-src is untouched and still pinned by srcdocBridgeCsp.test.ts.",
         "validatedBy": "MEASURED 2026-09-13 against a real `tauri build --no-bundle` (tauri.e2e.conf.json changes only withGlobalTauri) serving from http://tauri.localhost/, via app/e2e/tests/csp-srcdoc-bridge.spec.ts in the `platform` project. Result: ready=true (the custom scheme served the frame and the loader's inline <script> EXECUTED under its own CSP), identityOk=true (its messages pass the host's e.source check), violations=[] , and a REAL MOUSE CLICK on an INLINE onclick= reached the host ('gesture'). A click-free control -- an <img src=x onerror=...> refused by the frame's own `img-src data:` -- also fired ('autofire'), so inline event ATTRIBUTES are confirmed permitted rather than inferred. The same run previously recorded the DEFECT on the same binary: mainInlineRan=false (a CSP is enforced), frameBootRan=false, violations=[\"script-src-elem blocked inline\"]. Unit side: 33 cross-language contract tests pin the Rust loader against the TypeScript host (the tag, the message names, the ?id= key, the frame-src entry) and boot the RUST loader's bridge against the real router; 3 Rust unit tests; 112,114 frontend tests and 2,591 app-lib tests green."
       }
+    },
+    {
+      "id": "BUG-0114",
+      "status": "open",
+      "discovered": "2026-09-15",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "On-board model bake-off, Phase 2. An adversarial verifier refuting an unrelated claim about the formula eval reported in passing that the grader rejected =SORT(UNIQUE(A2:A8),,-1). That is correct Excel, so the question was whether the eval was wrong or the ENGINE was. Probed directly against the same grader binary the bake-off scored with."
+      },
+      "violation": {
+        "oracleId": "omitted-optional-argument-rejected",
+        "message": "AN OMITTED OPTIONAL ARGUMENT IS REJECTED BY FIVE FUNCTIONS AND ACCEPTED BY TEN. Excel treats an empty argument slot as 'use the default': =SORT(range,,-1) sorts descending by column 1, and Microsoft's own SORT documentation writes it that way. Calcula answers #VALUE!. This is NOT a general parser gap — the empty slot is handled correctly by MATCH, ROUND, VLOOKUP, INDEX, FILTER, UNIQUE, SORTBY, TEXTSPLIT, IF and XLOOKUP — so it is per-function argument binding, and the inconsistency is the reason it survived: any single function a reviewer spot-checks is likely to be one of the ten that work.\n\nMEASURED against C:/Users/Salle/AppData/Local/calcula-target/release/examples/eval-formulas.exe (the binary that scored the bake-off), each probe run as a PAIR — the slot omitted, and the documented default typed out — so a difference can only be the binding, never the semantics:\n  =SORT(UNIQUE(A2:A8),,-1)  -> #VALUE!   while =SORT(UNIQUE(A2:A8),1,-1) -> spill 'Pear' x4\n  =SORT(A2:A8,,1)           -> #VALUE!   while =SORT(A2:A8,1,1)          -> spill 'Apple' x7\n  =SEQUENCE(B2,,B3,B4)      -> #VALUE!   while =SEQUENCE(B2,1,B3,B4)     -> spill 10 x4\n  =SUBSTITUTE(A2,\"p\",\"P\",)  -> #VALUE!   while =SUBSTITUTE(A2,\"p\",\"P\")   -> \"APPle\"\n  =WEEKDAY(D2,)             -> #VALUE!   while =WEEKDAY(D2,1)            -> 6\n\nUSER IMPACT, which is larger than the eval impact: a person who types the Excel form of a descending sort gets an error in the product. The AI angle is secondary — a model that writes correct Excel is marked wrong — and is how this was found, not why it matters."
+      },
+      "whyNobodyNoticed": "The ten functions that DO accept an empty slot make this look like a solved problem on any spot check, and the five that do not are the newer dynamic-array/text functions rather than the classics a parity pass starts with. The formula eval corpus never wrote the omitted form in a reference — every reference types its defaults out — so 97 graded tasks per run could not surface it either. It reached notice only because a MODEL wrote the Excel-idiomatic form and was marked wrong for it.",
+      "repro": {
+        "kind": "formula",
+        "steps": [
+          "Put Apple/Pear/Apple/Fig/Pear/Fig/Date in A2:A8 (A1 = 'Fruit').",
+          "In any empty cell enter  =SORT(UNIQUE(A2:A8),,-1)",
+          "EXPECTED (Excel): the unique fruit names, descending — Pear, Fig, Date, Apple.",
+          "ACTUAL: #VALUE!",
+          "Control: =SORT(UNIQUE(A2:A8),1,-1) in the same cell spills correctly, so only the empty slot differs.",
+          "The full 15-probe pair sweep is scripted; see notes."
+        ]
+      },
+      "notes": "Probe script (scratchpad, not committed): omitted-args2.mjs — 15 functions, each as an omitted/written PAIR against the grader binary, reporting a defect only when the omitted form errors AND the written form does not. 5 of 15 fire. A first version of the same script compared whole outcome objects, which echo the formula text, and so reported 8 of 8 — the comparator must read the VALUE only. Excel-parity takes priority (owner decision D1-D7), which is what makes this a defect rather than a documented limitation."
     }
   ]
 }
