@@ -1893,10 +1893,48 @@ root is `… (nl sort)? (nl topn)? …`, so a model on the grammar path can only
 Also, `gen-renamed-star.mjs` regenerates `design-queries-renamed.json` from the corpus and has a
 `--check` mode — regenerate after any corpus edit or CI reds.
 
-*Still open, in order:* **re-run the bake-off on the grown corpora** — this is the payoff and it is
-now pure compute: granite-4.0-1b is kept at `AppData/Local/calcula-bakeoff/` (granite-micro deleted,
-it failed the latency gate), and the two near-misses at p=0.057/0.061 are exactly what 122 and 181
-tasks exist to resolve. Then, in order: the rules-only intent router (prototyped at 76.5-91.2%
+**THE BAKE-OFF WAS RE-RUN ON THE GROWN CORPORA, AND THE GROWTH CHANGED THE ANSWER.** This is the
+payoff of Phase 4 and it is worth stating first: **the near-miss was noise.**
+
+| | old corpus | GROWN corpus |
+|---|---|---|
+| design queries | 16/40 vs 16/40, b=5 c=5, p=1.00 | **24/122 vs 28/122**, b=12 c=8, **p=0.50** |
+| formulas | 38/97 vs 49/97, b=20 c=9, **p=0.061** | **61/181 vs 72/181**, b=29 c=18, **p=0.14** |
+
+The formula result moved AWAY from significance, not toward it. The discordant ratio went 20:9
+(2.2:1) to 29:18 (1.6:1) — with 84 more tasks granite-1b broke proportionally MORE than the small
+corpus suggested. Had the corpus not been grown, the obvious next move would have been "add a few
+tasks and it will cross 0.05", and that would have been wrong. **A p of 0.06 on an underpowered
+corpus is not a result that is nearly there; it is a result that is not there yet measured.**
+
+*So the verdict stands and is now firmly held: DO NOT PIN.* Against the pre-registered rule (+6 net
+with zero regressions, OR p<0.05 on formulas) design queries give +4 with 8 regressions and formulas
+give p=0.14. Neither is abandonable either — both corpora moved far more than 3 tasks.
+
+*Where granite-1b IS ahead, now visible for the first time:* `date` 1→5 (b=4 c=0), `statfin` 2→6
+(b=4 c=0), `dynarray` 1→4 (b=4 c=1), and design-query `COLUMNS` 1→5 (b=5 c=1). Clean directions with
+no or one regression. It is dead level on the 37 held-out `lib:*` tasks (19→18, b=3 c=4), which is
+the half derived from Microsoft's own documentation. Per-family flip counts are still mostly under
+six, so none of these is individually significant — twelve tasks makes a family MEASURABLE, not
+automatically conclusive.
+
+*Two measurement cautions for the next reader.* **Latency in this session is not comparable to the
+earlier one**: the design-query incumbent run agreed with the old run on all 37 shared tasks
+(p=1.00, byte-identical config) while its median went 1004 ms -> 4249 ms. Same config, same answers,
+four times the latency — machine state, not model or configuration. Within the session the ordering
+is valid: granite-1b is faster on formulas (4256 vs 6943 ms) and slower on design queries (5210 vs
+4249). And **the incumbent arm was re-graded with the post-BUG-0118 binary** before any comparison
+was drawn — 172 recorded formulas replayed, zero verdicts changed — because two arms graded by
+different binaries are not a paired comparison however small the change looks.
+
+*The run also found BUG-0118, a PANIC.* granite-1b wrote a one-argument `=FILTER(A2:A9)`, the
+evaluator indexed `args[1]` past a guard that only rejected zero arguments, and the grader process
+died taking 25 minutes of completed inference with it. Fixed, regression-tested, and the test
+sabotaged — on the second attempt, because the first sabotage was a blind string replace that hit a
+DIFFERENT function's identical guard text and left the test passing. It was the only one of 42
+variadic functions probed that crashed rather than answering #VALUE!.
+
+*Still open, in order:* the rules-only intent router (prototyped at 76.5-91.2%
 against the current detectors' measured 18.2%, zero false scripts, and it should ship gated on a
 held-out split); `npm run eval:all` — there is still no `eval:*` script at all, so every
 measurement is a hand-typed command whose flags decide the number, which is how two runs of the

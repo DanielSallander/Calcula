@@ -4754,7 +4754,7 @@ impl<'a> Evaluator<'a> {
     // ==================== Logical Functions ====================
 
     fn fn_if(&self, args: &[Expression]) -> EvalResult {
-        if args.len() < 2 || args.len() > 3 {
+        if args.is_empty() || args.len() > 3 {
             return EvalResult::Error(CellError::Value);
         }
 
@@ -9718,7 +9718,14 @@ impl<'a> Evaluator<'a> {
     /// FILTER(array, include, [if_empty])
     /// Returns only the rows (or values) where include is TRUE.
     fn fn_filter(&self, args: &[Expression]) -> EvalResult {
-        if args.is_empty() || args.len() > 3 {
+        // TWO is the floor, not one. `args.is_empty()` let a single-argument
+        // `=FILTER(A2:A9)` through and the next statement indexes `args[1]`
+        // unconditionally, so the evaluator PANICKED — "index out of bounds: the
+        // len is 1 but the index is 1" — rather than returning a value a cell can
+        // display. Every other variadic function probed alongside it (SORTBY,
+        // XLOOKUP, TEXTJOIN, SUMIFS, INDEX, ...) already answers #VALUE! here;
+        // FILTER was the only one of 42 that crashed.
+        if args.len() < 2 || args.len() > 3 {
             return EvalResult::Error(CellError::Value);
         }
 

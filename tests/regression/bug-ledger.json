@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 118,
+  "nextId": 119,
   "bugs": [
     {
       "id": "BUG-0086",
@@ -4391,6 +4391,33 @@
         ]
       },
       "notes": "Of the three criteria defects filed together this is the one that most resembles a correct answer, because 0 is what an honest empty match set also returns."
+    },
+    {
+      "id": "BUG-0118",
+      "status": "fixed",
+      "discovered": "2026-09-15",
+      "source": {
+        "kind": "review",
+        "seed": null,
+        "runId": "Bake-off re-run on the grown corpora. granite-4.0-1b produced a one-argument FILTER for one of the 181 formula tasks; the grader process PANICKED and took the whole batch with it, losing 25 minutes of already-completed inference. Found by reading the panic site rather than by bisecting the batch."
+      },
+      "violation": {
+        "oracleId": "filter-one-argument-panics-the-evaluator",
+        "message": "A ONE-ARGUMENT `=FILTER(A2:A9)` PANICS THE FORMULA EVALUATOR. Not an error value — a Rust panic:\n  thread 'main' panicked at core/engine/src/evaluator.rs:9726:39:\n  index out of bounds: the len is 1 but the index is 1\n\nCAUSE, one line. `fn_filter` opened with\n    if args.is_empty() || args.len() > 3 { return EvalResult::Error(CellError::Value); }\nwhich rejects zero arguments and four, and lets EXACTLY ONE through — and the next statement is `self.eval_flat(&args[1])`, an unconditional index. The guard's floor is two, not one: FILTER(array, include, [if_empty]).\n\nIT IS THE ONLY FUNCTION THAT DOES THIS. Forty-two variadic functions were probed one at a time, each in its own grader process so one panic could not hide another: SORTBY, XLOOKUP, VLOOKUP, HLOOKUP, INDEX, MATCH, SUMIF, COUNTIF, SUMIFS, AVERAGEIF, IFERROR, IFNA, TEXTJOIN, TEXTSPLIT, TEXTBEFORE, TEXTAFTER, SUBSTITUTE, REPLACE, MID, LEFT, ROUND, MROUND, LARGE, SMALL, RANK, PMT, NPV, SLOPE, CORREL, INTERCEPT, SEQUENCE, UNIQUE, SORT, CHOOSE, IF, DATEDIF, NETWORKDAYS, WORKDAY, EDATE, EOMONTH, YEARFRAC all answer #VALUE! when starved of arguments. FILTER was 1 of 42.\n\nWHY THIS IS WORSE THAN A WRONG ANSWER. A panic has no cell representation. In the eval harness it killed a 181-task batch; in the product it is an evaluator thread dying on a formula the user typed. `=FILTER(A1:A5)` is exactly what a person leaves behind when they start the formula and commit before typing the condition."
+      },
+      "whyNobodyNoticed": "Every FILTER in the corpus, the pattern library and the hand tests passes two or three arguments, because that is what a CORRECT formula looks like — and the arity guard is the one branch a correct formula never takes. It needed a model, which produces plausible-looking but incomplete formulas by nature, to walk into it.",
+      "repro": {
+        "kind": "formula",
+        "steps": [
+          "Put 1, 2, 3 in A1:A3.",
+          "In any empty cell enter  =FILTER(A1:A3)",
+          "EXPECTED: #VALUE! (Excel refuses a FILTER with no include argument).",
+          "ACTUAL (before the fix): the evaluator panics, 'index out of bounds: the len is 1 but the index is 1' at core/engine/src/evaluator.rs:9726.",
+          "Control: =FILTER(A1:A3,A1:A3>1) spills {2;3} and =FILTER(A1:A3,A1:A3>99,\"none\") returns \"none\" — the legal arities are unaffected."
+        ]
+      },
+      "fix": "core/engine/src/evaluator.rs fn_filter: the guard is now `args.len() < 2 || args.len() > 3`. Regression test `filter_with_too_few_arguments_returns_an_error_instead_of_panicking` in core/engine/src/array_semantics_tests.rs asserts the zero-, one- and four-argument forms all return #VALUE! AND that the two- and three-argument forms still produce their spills — a guard of `args.len() != 2` would satisfy the first half and silently break the if_empty form. Sabotaged by restoring the old guard: the test fails with the original panic at the original site. Both grader binaries rebuilt; 876 engine tests pass.",
+      "notes": "The first sabotage attempt did not land — a blind string replace hit a different function's identical guard text and the test passed, which would have been recorded as 'verified'. The counts (20 `len() < 2` guards vs 10 `is_empty()` guards) are what exposed it. Related arity and parity defects found the same day: BUG-0114 (omitted optional arguments), BUG-0115/0116/0117 (criteria parser)."
     }
   ]
 }

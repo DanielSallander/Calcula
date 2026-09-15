@@ -374,3 +374,36 @@ fn the_precedence_of_power_matches_excel_in_both_directions() {
     // Percent binds tighter still.
     assert_eq!(eval(&grid, "=2^2%"), n(2.0f64.powf(0.02)));
 }
+
+/// A one-argument FILTER must ANSWER, not crash. (BUG-0118)
+///
+/// `fn_filter` guarded `args.is_empty() || args.len() > 3` and then indexed
+/// `args[1]` unconditionally, so exactly one argument slipped past the guard and
+/// the evaluator PANICKED: "index out of bounds: the len is 1 but the index is
+/// 1". A panic is categorically worse than an error value — there is no cell
+/// display for it, and it took a whole 181-task grading batch down when a model
+/// wrote `=FILTER(...)` with the include argument missing.
+///
+/// The other arities are asserted beside it so a future "fix" that swings too far
+/// and rejects the legal two- and three-argument forms fails here rather than in
+/// a user's workbook.
+#[test]
+fn filter_with_too_few_arguments_returns_an_error_instead_of_panicking() {
+    let grid = fixture();
+
+    // The crash, now an ordinary error.
+    assert_eq!(eval(&grid, "=FILTER(A1:A3)"), EvalResult::Error(CellError::Value));
+    assert_eq!(eval(&grid, "=FILTER()"), EvalResult::Error(CellError::Value));
+    // Four arguments was already refused; it must stay refused.
+    assert_eq!(
+        eval(&grid, "=FILTER(A1:A3,A1:A3>1,\"none\",\"extra\")"),
+        EvalResult::Error(CellError::Value)
+    );
+
+    // THE HALF THAT MATTERS MOST: the legal arities still work. A guard of
+    // `args.len() != 2` would pass every assertion above and silently break the
+    // if_empty form, which is the one people reach for.
+    assert_eq!(eval(&grid, "=FILTER(A1:A3,A1:A3>1)"), column(vec![n(2.0), n(3.0)]));
+    let none_matched = eval(&grid, "=FILTER(A1:A3,A1:A3>99,\"none\")");
+    assert_eq!(none_matched, EvalResult::Text("none".to_string()));
+}
