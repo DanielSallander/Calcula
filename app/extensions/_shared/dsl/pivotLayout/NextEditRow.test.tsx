@@ -70,6 +70,58 @@ afterEach(async () => {
 });
 
 describe("NextEditRow", () => {
+  it("offers a way back after a dismiss, naming what it will restore", async () => {
+    // A dismissal lasts for the editor's lifetime and leaves no trace on
+    // screen, so without this the only recovery is closing the dialog.
+    await render("VALUES: [Revenue]");
+    const restored = accepts()[0];
+    expect(restored).toBeTruthy();
+    expect(container.querySelector("[data-testid='next-edit-undismiss']")).toBeNull();
+
+    await click(container.querySelector("[data-testid='next-edit-dismiss']")!);
+    const undo = container.querySelector("[data-testid='next-edit-undismiss']");
+    expect(undo).not.toBeNull();
+    // It NAMES the suggestion rather than saying "undo": by the time you want
+    // it back you have forgotten which one you hid.
+    expect(undo!.getAttribute("title")).toContain(restored!);
+
+    await click(undo!);
+    expect(accepts()).toContain(restored);
+    expect(container.querySelector("[data-testid='next-edit-undismiss']")).toBeNull();
+  });
+
+  it("KEEPS THE ROW ALIVE when the dismissed chip was the only one", async () => {
+    // THE TRAP. The row unmounted on `shown.length === 0`, so dismissing the
+    // last suggestion took the undo control down with it — the one moment you
+    // most want it back is the one moment it could not be reached.
+    await render("VALUES: [Revenue]");
+    for (const d of [...container.querySelectorAll("[data-testid='next-edit-dismiss']")]) {
+      await click(d);
+    }
+    expect(chips()).toHaveLength(0);
+    expect(container.querySelector("[data-testid='next-edit-row']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='next-edit-undismiss']")).not.toBeNull();
+  });
+
+  it("stops offering to restore a suggestion the query has outgrown", async () => {
+    // Self-correcting, and the reason the restorable list is DERIVED from the
+    // rules rather than logged at dismiss time. Dismiss the breakdown chip,
+    // then add a breakdown by hand: the rule stops firing, so there is nothing
+    // to give back and the control must not promise otherwise.
+    await render("VALUES: [Revenue]");
+    const dismissedText = accepts()[0]!;
+    await click(container.querySelector("[data-testid='next-edit-dismiss']")!);
+    expect(container.querySelector("[data-testid='next-edit-undismiss']")).not.toBeNull();
+
+    await render("ROWS: Product.Category\nVALUES: [Revenue]");
+    const undo = container.querySelector("[data-testid='next-edit-undismiss']");
+    if (undo) {
+      // Whatever it still offers must be a suggestion the rules make for THIS
+      // text, never the stale one.
+      expect(undo.getAttribute("title")).not.toContain(dismissedText);
+    }
+  });
+
   it("renders nothing for empty text", async () => {
     // An empty editor has no query to reason about. The describe box is the
     // affordance there, not a row of suggestions about nothing.

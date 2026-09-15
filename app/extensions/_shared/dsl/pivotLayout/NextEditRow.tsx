@@ -28,9 +28,12 @@
 //     row vanished — on exactly the half-finished queries where a suggestion is
 //     worth most.
 //
-//  3. NO NAGGING. A dismissed suggestion stays dismissed for the editor's
-//     lifetime; it can only come back as a different suggestion. The row
-//     renders nothing when it has nothing to say.
+//  3. NO NAGGING, BUT NOT A ONE-WAY DOOR. A dismissed suggestion stays
+//     dismissed for the editor's lifetime, and the row renders nothing when it
+//     has nothing to say — but a dismissal is undoable while the rules would
+//     still make it, and the row stays mounted for exactly that reason. It used
+//     to unmount the moment the last chip went, which took the way back with
+//     it: the one moment you want it is the one moment it was unreachable.
 //
 // THE MODEL'S CHIP IS BUILT AND OFF (`MODEL_CHIP_DEFAULT`, below). Milestone B
 // wired it end to end and then measured it, and the built-in 1.5B got the next
@@ -193,6 +196,12 @@ const dismissStyle: React.CSSProperties = {
   background: "transparent", color: "inherit", cursor: "pointer",
 };
 const reasonStyle: React.CSSProperties = { color: "var(--text-secondary, #6b7280)", margin: 0 };
+const undoStyle: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 4, alignSelf: "center",
+  padding: "3px 8px", fontSize: 11, borderRadius: 4,
+  border: "1px dashed var(--border-default, #d1d5db)",
+  background: "transparent", color: "var(--text-secondary, #6b7280)", cursor: "pointer",
+};
 
 export function NextEditRow({
   text,
@@ -220,8 +229,36 @@ export function NextEditRow({
     latestText.current = text;
   }, [text]);
 
+  // WHAT A DISMISS WOULD GIVE BACK, newest first.
+  //
+  // Derived rather than logged. A dismissal is remembered as an id in a set,
+  // and a suggestion's id is a function of its kind and its edit — so the
+  // suggestions this query WOULD offer, minus the filter, are exactly the
+  // dismissed ones, labels and all. A separate log of what was dismissed would
+  // be a second source of truth that goes stale the moment the query moves on:
+  // it would keep offering to restore a suggestion the rules no longer make.
+  //
+  // Self-correcting for the same reason. Dismiss "add a time axis", then add
+  // one by hand, and the rule stops firing — so there is nothing to restore and
+  // the control quietly disappears instead of promising something it cannot do.
+  const [restorable, setRestorable] = useState<NextEditChip[]>([]);
+
   const recompute = useCallback(() => {
     setChips(chipsFor(text, biModel, connectionId, dismissed, compile));
+    // Only when something was actually dismissed: this is a second full pass
+    // over the rules with the compile veto, and paying it on every debounce for
+    // the overwhelmingly common empty set would double the row's cost for
+    // nothing.
+    if (dismissed.size === 0) {
+      setRestorable([]);
+      return;
+    }
+    const order = [...dismissed];
+    setRestorable(
+      chipsFor(text, biModel, connectionId, new Set(), compile)
+        .filter((c) => dismissed.has(c.suggestion.id))
+        .sort((a, b) => order.indexOf(b.suggestion.id) - order.indexOf(a.suggestion.id)),
+    );
   }, [text, biModel, connectionId, compile]);
 
   useEffect(() => {
@@ -296,11 +333,27 @@ export function NextEditRow({
   const dismiss = useCallback((chip: NextEditChip) => {
     dismissed.add(chip.suggestion.id);
     drop(chip.suggestion.id);
-  }, [drop]);
+    // Recompute so the undo control appears in the same paint that the chip
+    // leaves; without it the row can go empty for a debounce and take the way
+    // back with it.
+    recompute();
+  }, [drop, recompute]);
+
+  /** Put the most recently dismissed suggestion back. */
+  const undismiss = useCallback(() => {
+    const newest = restorable[0];
+    if (!newest) return;
+    dismissed.delete(newest.suggestion.id);
+    recompute();
+  }, [restorable, recompute]);
 
   // The rules first, the model last: a rule can say WHY from the document.
   const shown = modelChip ? [...chips, modelChip] : chips;
-  if (shown.length === 0) return null;
+  // NOT `shown.length === 0`. Dismissing the last chip used to unmount the whole
+  // row, which would take the undo control with it — so the one moment you most
+  // want it back is the one moment it cannot be reached. The row survives while
+  // anything is restorable.
+  if (shown.length === 0 && restorable.length === 0) return null;
 
   return (
     <div style={rowStyle} data-testid="next-edit-row" aria-label="Suggested next edits">
@@ -333,6 +386,25 @@ export function NextEditRow({
           <p style={reasonStyle}>{chip.suggestion.reason}</p>
         </div>
       ))}
+
+      {/* THE WAY BACK. A dismissal lasts for the editor's lifetime and leaves
+          no trace, so without this the only recovery is closing the dialog and
+          starting again — and nothing on screen would even say a suggestion had
+          been hidden. It names what it will restore rather than saying "undo",
+          because by the time you want it you have forgotten what you dismissed. */}
+      {restorable.length > 0 ? (
+        <button
+          type="button"
+          style={undoStyle}
+          onClick={undismiss}
+          title={`Bring back: ${restorable[0].suggestion.text}`}
+          aria-label={`Bring back the dismissed suggestion: ${restorable[0].suggestion.text}`}
+          data-testid="next-edit-undismiss"
+        >
+          <span aria-hidden="true">↩</span>
+          {restorable.length > 1 ? `Undo dismiss (${restorable.length})` : "Undo dismiss"}
+        </button>
+      ) : null}
     </div>
   );
 }
