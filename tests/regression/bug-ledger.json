@@ -4288,7 +4288,7 @@
     },
     {
       "id": "BUG-0114",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-15",
       "source": {
         "kind": "review",
@@ -4311,11 +4311,12 @@
           "The full 15-probe pair sweep is scripted; see notes."
         ]
       },
-      "notes": "Probe script (scratchpad, not committed): omitted-args2.mjs — 15 functions, each as an omitted/written PAIR against the grader binary, reporting a defect only when the omitted form errors AND the written form does not. 5 of 15 fire. A first version of the same script compared whole outcome objects, which echo the formula text, and so reported 8 of 8 — the comparator must read the VALUE only. Excel-parity takes priority (owner decision D1-D7), which is what makes this a defect rather than a documented limitation."
+      "notes": "Probe script (scratchpad, not committed): omitted-args2.mjs — 15 functions, each as an omitted/written PAIR against the grader binary, reporting a defect only when the omitted form errors AND the written form does not. 5 of 15 fire. A first version of the same script compared whole outcome objects, which echo the formula text, and so reported 8 of 8 — the comparator must read the VALUE only. Excel-parity takes priority (owner decision D1-D7), which is what makes this a defect rather than a documented limitation.",
+      "fix": "core/engine/src/evaluator.rs: a syntactic `is_omitted(expr)` — `Literal(Value::Blank)` is what the parser fills an omitted slot with — and SORT, SEQUENCE, SUBSTITUTE and WEEKDAY take their default when it is true. A REFERENCE to a blank cell is deliberately not omitted and still reads as 0, as in Excel. THE SECOND HALF, found only because the test covered trailing slots: scalar functions are lifted through `eval_lifted_function`, which rebinds every argument to a `NamedRef` slot, so the literal was gone before the function ran — SORT/SEQUENCE (not lifted) were fixed and WEEKDAY/SUBSTITUTE (lifted) were not. `call_with_values_masked` now hands an omitted slot back as the literal. Tests: `an_omitted_optional_argument_takes_the_default_instead_of_zero` (middle and trailing slots, plus the blank-reference pins) and `a_trailing_omitted_argument_parses_the_same_as_a_middle_one` (pins the parser) in array_semantics_tests.rs. Sabotaged by making `is_omitted` return false: the default test fails on the first SORT assertion while the parser pin and the FILTER test stay green. Probe sweep 5/15 -> 0/15. Bake-off artifacts re-graded with the fixed engine, zero inference: the incumbent's recorded formulas go 61/181 -> 63/181 and granite-4.0-1b's 72/181 -> 74/181, every gained task a formula the model had written correctly and the engine had marked wrong. Both arms +2, the gap unchanged."
     },
     {
       "id": "BUG-0115",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-15",
       "source": {
         "kind": "review",
@@ -4338,11 +4339,12 @@
           "Control: =ISNUMBER(A2) is TRUE, so the cell holds a number, not text."
         ]
       },
-      "notes": "Verified by an independent 18-probe pair sweep (scratchpad verify-criteria-bugs.mjs) against the release grader. Excel parity takes priority always (owner decision D1-D7). Related: BUG-0114 (omitted optional arguments), same class — correct Excel that this engine refuses."
+      "notes": "Verified by an independent 18-probe pair sweep (scratchpad verify-criteria-bugs.mjs) against the release grader. Excel parity takes priority always (owner decision D1-D7). Related: BUG-0114 (omitted optional arguments), same class — correct Excel that this engine refuses.",
+      "fix": "core/engine/src/number_text.rs: a `ParsePolicy::CRITERIA_LITERAL` that accepts ISO dates and nothing else; core/engine/src/evaluator.rs: `criteria_literal_number` uses it for the OPERAND of a criteria string only. The range side keeps `CRITERIA`, so a TEXT cell reading '2025-01-01' still does not match a date criterion — the half of the old symmetry rule that was right. Test `a_date_literal_in_a_criteria_string_compares_against_the_serial` in criteria_negation_tests.rs, on both the scan and pass-cache paths, including the negated '<>2025-01-15' that used to KEEP the row and the text-cell pin. Sabotaged by reverting the policy's date rung: fails on the first count (0 vs 2) while the ordering and error tests stay green. Probe sweep: all 7 date probes now agree with Excel. Bake-off artifacts re-graded with the fixed engine, zero inference: the incumbent's recorded formulas go 61/181 -> 63/181 and granite-4.0-1b's 72/181 -> 74/181, every gained task a formula the model had written correctly and the engine had marked wrong. Both arms +2, the gap unchanged."
     },
     {
       "id": "BUG-0116",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-15",
       "source": {
         "kind": "review",
@@ -4364,11 +4366,12 @@
           "Control: =COUNTIF(D2:D4,\"Mango\") answers 1 — equality works."
         ]
       },
-      "notes": "Reported cause: the numeric-only arms in parse_criteria (core/engine/src/evaluator.rs around 6222-6305); the <> text arm is at :6252-6260 and is the model for the missing four."
+      "notes": "Reported cause: the numeric-only arms in parse_criteria (core/engine/src/evaluator.rs around 6222-6305); the <> text arm is at :6252-6260 and is the model for the missing four.",
+      "fix": "core/engine/src/evaluator.rs: a `CriteriaMatch::CompareText(CriteriaOp, String)` variant. The four ordering arms of `parse_criteria_value` return it when the operand is not a number instead of falling through to an exact-text compare of the whole string; `matches_criteria` orders text with `text_cmp::cmp_ci` and answers false for a non-text value (a number is not >= \"M\"). The pass cache declines the variant, as it does wildcards. Test `ordering_operators_compare_text_case_insensitively`, both paths, all four operators plus the mixed-column pins. Sabotaged by removing the `>=` arm's return: fails (4 vs 2 — the string fell to the `>` arm as \"=M\") while the date and error tests stay green. Probe sweep: all 5 text probes now agree with Excel."
     },
     {
       "id": "BUG-0117",
-      "status": "open",
+      "status": "fixed",
       "discovered": "2026-09-15",
       "source": {
         "kind": "review",
@@ -4390,7 +4393,8 @@
           "Tell: =AVERAGEIFS(B2:B4,A2:A4,NA()) answers #DIV/0!, not #N/A."
         ]
       },
-      "notes": "Of the three criteria defects filed together this is the one that most resembles a correct answer, because 0 is what an honest empty match set also returns."
+      "notes": "Of the three criteria defects filed together this is the one that most resembles a correct answer, because 0 is what an honest empty match set also returns.",
+      "fix": "core/engine/src/evaluator.rs: `parse_criteria` now returns `Result<CriteriaMatch, CellError>` over a `CriteriaMatch::Error` variant produced for an error argument, so every one of the nine call sites had to write the `Err` arm or stop compiling — eight return the error, the D-function site propagates with `?`. Test `an_error_in_the_criteria_argument_propagates_instead_of_matching_nothing` covers SUMIF, SUMIFS (first AND second criteria pair), COUNTIF, COUNTIFS, MAXIFS, MINIFS, AVERAGEIF and AVERAGEIFS — the last was the tell, answering #DIV/0! over the empty match set instead of the #N/A it was handed — with a 'matches nothing is still an honest 0' control. Sabotaged by making the wrapper swallow the variant: fails with Number(0.0) where Error(NA) belongs — the exact original behaviour — while the date and ordering tests stay green. Probe sweep: all 6 error probes now agree with Excel."
     },
     {
       "id": "BUG-0118",

@@ -407,3 +407,80 @@ fn filter_with_too_few_arguments_returns_an_error_instead_of_panicking() {
     let none_matched = eval(&grid, "=FILTER(A1:A3,A1:A3>99,\"none\")");
     assert_eq!(none_matched, EvalResult::Text("none".to_string()));
 }
+
+/// What the parser actually hands a function for `=F(x,,y)` and `=F(x,)`.
+///
+/// Diagnostic, kept as a pin: `an_omitted_optional_argument_takes_the_default`
+/// showed a MIDDLE omitted slot (`,,`) taking the default while a TRAILING one
+/// (`,)`) still answered #VALUE!, through both grader binaries AND this crate's
+/// own harness. Both slots are documented to reach the function as
+/// `Literal(Value::Blank)` via `parse_argument`. This asserts that they do; if
+/// it fails, the difference is in the parser, not in any function.
+#[test]
+fn a_trailing_omitted_argument_parses_the_same_as_a_middle_one() {
+    use parser::ast::{Expression, Value};
+    let shape = |formula: &str| -> Vec<bool> {
+        match parser::parse(formula).expect("parses") {
+            Expression::FunctionCall { args, .. } => args
+                .iter()
+                .map(|a| matches!(a, Expression::Literal(Value::Blank)))
+                .collect(),
+            other => panic!("{formula} parsed to {other:?}, not a call"),
+        }
+    };
+    // [x, BLANK, -1]
+    assert_eq!(shape("=SORT(A1:A5,,-1)"), vec![false, true, false]);
+    // [x, BLANK] — the trailing slot must be filled, never skipped.
+    assert_eq!(shape("=WEEKDAY(C1,)"), vec![false, true]);
+    assert_eq!(shape("=SUBSTITUTE(A2,\"p\",\"P\",)"), vec![false, false, false, true]);
+}
+
+/// An OMITTED optional argument takes the function's default. (BUG-0114)
+///
+/// `=SORT(x,,-1)` is the descending sort Microsoft's own SORT page writes, and
+/// it answered #VALUE!. The parser fills an omitted slot with
+/// `Literal(Value::Blank)`, `Blank.as_number()` is `Some(0.0)`, and every
+/// function read its optional argument through `as_number()` — so an omitted
+/// slot arrived as ZERO. MATCH's default happens to be 0 and it worked by
+/// coincidence; SORT's is 1, WEEKDAY's is 1, SEQUENCE's columns is 1 and
+/// SUBSTITUTE's instance means "all", and all four failed. Ten of fifteen
+/// functions probed passed by the same coincidence, which is why this hid.
+///
+/// Each pair below is the omitted form beside the default written out; the two
+/// MUST agree. Both MIDDLE slots (`,,`) and TRAILING slots (`,)`) are covered,
+/// because the two reach the parser through the same `parse_argument` but a
+/// difference between them was observed through the grader binary and this
+/// test is what decides whether that difference lives in the engine.
+#[test]
+fn an_omitted_optional_argument_takes_the_default_instead_of_zero() {
+    let mut grid = Grid::new();
+    // A1:A5 = "Pear","Apple","Fig","Apple","Date"; B1 = 4, B2 = 10, B3 = 5;
+    // C1 = the serial of 2024-03-15, a Friday.
+    for (i, v) in ["Pear", "Apple", "Fig", "Apple", "Date"].iter().enumerate() {
+        grid.set_cell(i as u32, 0, Cell::new_text((*v).to_string()));
+    }
+    for (i, v) in [4.0, 10.0, 5.0].iter().enumerate() {
+        grid.set_cell(i as u32, 1, Cell::new_number(*v));
+    }
+    grid.set_cell(0, 2, Cell::new_number(45366.0)); // 2024-03-15
+
+    // MIDDLE slot: SORT descending by column 1.
+    assert_eq!(eval(&grid, "=SORT(A1:A5,,-1)"), eval(&grid, "=SORT(A1:A5,1,-1)"));
+    assert_eq!(eval(&grid, "=SORT(A1:A5,,-1)").flatten()[0], EvalResult::Text("Pear".to_string()));
+    // MIDDLE slot: SEQUENCE with columns omitted.
+    assert_eq!(eval(&grid, "=SEQUENCE(B1,,B2,B3)"), eval(&grid, "=SEQUENCE(B1,1,B2,B3)"));
+    assert_eq!(eval(&grid, "=SEQUENCE(B1,,B2,B3)").flatten()[0], n(10.0));
+
+    // TRAILING slot: WEEKDAY with return_type omitted is type 1 (Sunday = 1).
+    assert_eq!(eval(&grid, "=WEEKDAY(C1,)"), eval(&grid, "=WEEKDAY(C1,1)"));
+    assert_eq!(eval(&grid, "=WEEKDAY(C1,)"), n(6.0));
+    // TRAILING slot: SUBSTITUTE with instance omitted replaces every instance.
+    assert_eq!(eval(&grid, "=SUBSTITUTE(A2,\"p\",\"P\",)"), eval(&grid, "=SUBSTITUTE(A2,\"p\",\"P\")"));
+    assert_eq!(eval(&grid, "=SUBSTITUTE(A2,\"p\",\"P\",)"), EvalResult::Text("APPle".to_string()));
+
+    // A REFERENCE TO A BLANK CELL IS NOT AN OMITTED ARGUMENT. Excel reads it as
+    // 0, and `=SORT(A1:A5,D1,-1)` with D1 empty is an error, not a default. The
+    // fix is syntactic on purpose; this pins that it stayed so.
+    assert_eq!(eval(&grid, "=SORT(A1:A5,D1,-1)"), EvalResult::Error(CellError::Value));
+    assert_eq!(eval(&grid, "=WEEKDAY(C1,D1)"), EvalResult::Error(CellError::Value));
+}

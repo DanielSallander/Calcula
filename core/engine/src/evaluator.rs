@@ -309,6 +309,37 @@ pub(crate) fn criteria_number_of_text(text: &str) -> Option<f64> {
     )
 }
 
+/// Was this argument slot left EMPTY in the formula text — `=SORT(x,,-1)`?
+///
+/// The parser fills an omitted slot with `Literal(Value::Blank)` so the arity
+/// is preserved, and that literal evaluates to `Blank`, whose `as_number()` is
+/// `Some(0.0)`. Every function that read its optional argument through
+/// `as_number()` therefore received ZERO for an omitted slot — which happens to
+/// be MATCH's correct default and is not SORT's, SEQUENCE's, SUBSTITUTE's or
+/// WEEKDAY's, so those four answered #VALUE! to correct Excel while MATCH worked
+/// by coincidence (BUG-0114; five of fifteen functions probed). The test is
+/// SYNTACTIC on purpose: a REFERENCE to a blank cell is not an omitted
+/// argument, and Excel reads that as 0 — `=SORT(A1:A5,B1,-1)` with B1 empty is
+/// an error, `=SORT(A1:A5,,-1)` is a descending sort.
+fn is_omitted(expr: &Expression) -> bool {
+    matches!(expr, Expression::Literal(Value::Blank))
+}
+
+/// The number the OPERAND OF A CRITERIA STRING is read as — the `2025-01-01`
+/// in `">=2025-01-01"`, the `1000` in `">1000"`, a bare `"1000"`.
+///
+/// Differs from `criteria_number_of_text`, which reads a TEXT CELL in the
+/// range, in exactly one rung: ISO dates are accepted. See
+/// `ParsePolicy::CRITERIA_LITERAL` for why the symmetry the two used to share
+/// inverts for dates and holds for everything else.
+pub(crate) fn criteria_literal_number(text: &str) -> Option<f64> {
+    crate::number_text::parse(
+        text,
+        crate::number_text::active(),
+        crate::number_text::ParsePolicy::CRITERIA_LITERAL,
+    )
+}
+
 /// The number a RANGE VALUE contributes to a numeric criteria comparison.
 ///
 /// Differs from `as_number` ONLY in the text arm, and only because `as_number`
@@ -488,6 +519,13 @@ enum CriteriaMatch {
     ExactText(String),
     TextNotEqual(String),
     Compare(CriteriaOp, f64),
+    /// `">=M"`, `"<Apple"` — one of the four ordering operators against TEXT.
+    /// Those arms produced a `Compare` only when the operand parsed as a
+    /// number and otherwise FELL THROUGH to `ExactText` of the whole string,
+    /// operator included, which no cell ever equals — so `=COUNTIF(rng,">=M")`
+    /// answered 0 over {Mango, Apple, Zebra}. `<>` had a text arm all along,
+    /// which is why the family looked complete on a spot check (BUG-0116).
+    CompareText(CriteriaOp, String),
     Wildcard(String),
     /// `"<>a*"` — the NEGATION of a wildcard match, which used to be
     /// unreachable: `parse_criteria` tested the `<>` prefix before the wildcard
@@ -501,6 +539,13 @@ enum CriteriaMatch {
     OnlyBlank,
     /// `"<>"` — anything that is not a blank cell.
     NonBlank,
+    /// The criteria ARGUMENT itself evaluated to an error — `NA()`, `1/0`, an
+    /// undefined name. `parse_criteria_value` used to map every non-text,
+    /// non-number result, errors included, to "match nothing", so a mistyped
+    /// range name turned a SUMIF total into a confident 0 while `=SUM(name)`
+    /// beside it correctly said #NAME? (BUG-0117). The `parse_criteria`
+    /// wrapper turns this variant into an `Err` so every caller must decide.
+    Error(CellError),
 }
 
 /// Something a LAMBDA helper can invoke: a user LAMBDA, or a BUILT-IN passed by
@@ -3103,13 +3148,18 @@ impl<'a> Evaluator<'a> {
             }
         }
 
+        // Which slots were left EMPTY in the formula text, decided on the
+        // expressions BEFORE they were bound to values — see
+        // `call_with_values_masked` for what the binding erased.
+        let omitted: Vec<bool> = args.iter().map(is_omitted).collect();
+
         if vals.iter().any(array_lift::lifts) {
-            return self.lift_over_broadcast(func, &vals);
+            return self.lift_over_broadcast(func, &vals, &omitted);
         }
         // Nothing to lift — but still go through the BOUND call, never a second
         // evaluation of `args`. Re-evaluating would double the work of every
         // nested call and turn a recursive lambda into an exponential one.
-        self.call_with_values(func, &vals)
+        self.call_with_values_masked(func, &vals, &omitted)
     }
 
     /// Whether `func` exists to INSPECT an error, so an error argument is its
@@ -3182,12 +3232,17 @@ impl<'a> Evaluator<'a> {
     /// The broadcast loop for a lifted function. Out of line from
     /// `eval_lifted_function` so its locals stay off the recursive frame.
     #[inline(never)]
-    fn lift_over_broadcast(&self, func: &BuiltinFunction, vals: &[EvalResult]) -> EvalResult {
+    fn lift_over_broadcast(
+        &self,
+        func: &BuiltinFunction,
+        vals: &[EvalResult],
+        omitted: &[bool],
+    ) -> EvalResult {
         let refs: Vec<&EvalResult> = vals.iter().collect();
         let (rows, cols) = match array_lift::broadcast_shape(&refs) {
             Some((0, _)) | Some((_, 0)) => return EvalResult::Error(CellError::Value),
             Some(shape) => shape,
-            None => return self.call_with_values(func, vals),
+            None => return self.call_with_values_masked(func, vals, omitted),
         };
 
         let cells = (rows as u64).saturating_mul(cols as u64);
@@ -3202,7 +3257,7 @@ impl<'a> Evaluator<'a> {
             for c in 0..cols {
                 slice.clear();
                 slice.extend(vals.iter().map(|v| array_lift::at(v, r, c)));
-                out.push(self.call_with_values(func, &slice));
+                out.push(self.call_with_values_masked(func, &slice, omitted));
             }
         }
         array_lift::pack(rows, cols, out)
@@ -3219,6 +3274,28 @@ impl<'a> Evaluator<'a> {
     /// save/restore temporaries land on the recursive frame.
     #[inline(never)]
     fn call_with_values(&self, func: &BuiltinFunction, vals: &[EvalResult]) -> EvalResult {
+        self.call_with_values_masked(func, vals, &[])
+    }
+
+    /// `call_with_values`, told which argument slots were OMITTED in the
+    /// formula text.
+    ///
+    /// THE LIFT ERASED OMISSION. Binding every argument to a `NamedRef` slot
+    /// meant a scalar function could never see `Literal(Value::Blank)` — the
+    /// parser's spelling of `=WEEKDAY(d,)` — because by the time `fn_weekday`
+    /// ran, its second argument was a reference to a slot holding `Blank`, and
+    /// `is_omitted` on a `NamedRef` is false. So the BUG-0114 fix worked for
+    /// SORT and SEQUENCE, which are not lifted, and not for WEEKDAY and
+    /// SUBSTITUTE, which are: an omitted slot still arrived as zero. An omitted
+    /// slot is handed back as the literal it was, and only that; a reference to
+    /// a blank cell is still bound and still reads as 0, as Excel reads it.
+    #[inline(never)]
+    fn call_with_values_masked(
+        &self,
+        func: &BuiltinFunction,
+        vals: &[EvalResult],
+        omitted: &[bool],
+    ) -> EvalResult {
         let mut saved: Vec<(&'static str, Option<EvalResult>)> = Vec::with_capacity(vals.len());
         {
             let mut scope = self.scope.borrow_mut();
@@ -3231,9 +3308,16 @@ impl<'a> Evaluator<'a> {
         let bound: Vec<Expression> = LIFT_SLOTS
             .iter()
             .take(vals.len())
-            .map(|slot| Expression::NamedRef {
-                name: (*slot).to_string(),
-                ref_site_id: Default::default(),
+            .enumerate()
+            .map(|(i, slot)| {
+                if omitted.get(i).copied().unwrap_or(false) {
+                    Expression::Literal(Value::Blank)
+                } else {
+                    Expression::NamedRef {
+                        name: (*slot).to_string(),
+                        ref_site_id: Default::default(),
+                    }
+                }
             })
             .collect();
 
@@ -6219,7 +6303,7 @@ impl<'a> Evaluator<'a> {
 
     /// Parses a criteria value into a typed matcher.
     /// Handles: ">5", "<=10", "<>apple", "A*", "?x?", exact match.
-    fn parse_criteria(&self, criteria: &EvalResult) -> CriteriaMatch {
+    fn parse_criteria_value(&self, criteria: &EvalResult) -> CriteriaMatch {
         match criteria {
             EvalResult::Number(n) => CriteriaMatch::ExactNumber(*n),
             EvalResult::Boolean(b) => CriteriaMatch::ExactBool(*b),
@@ -6246,7 +6330,7 @@ impl<'a> Evaluator<'a> {
                 }
                 // Check for comparison operators
                 if let Some(rest) = trimmed.strip_prefix("<>") {
-                    if let Some(n) = criteria_number_of_text(rest) {
+                    if let Some(n) = criteria_literal_number(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::NotEqual, n);
                     }
                     let rest = rest.trim();
@@ -6260,27 +6344,31 @@ impl<'a> Evaluator<'a> {
                     return CriteriaMatch::TextNotEqual(rest.to_uppercase());
                 }
                 if let Some(rest) = trimmed.strip_prefix("<=") {
-                    if let Some(n) = criteria_number_of_text(rest) {
+                    if let Some(n) = criteria_literal_number(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::LessEqual, n);
                     }
+                    return CriteriaMatch::CompareText(CriteriaOp::LessEqual, rest.trim().to_string());
                 }
                 if let Some(rest) = trimmed.strip_prefix(">=") {
-                    if let Some(n) = criteria_number_of_text(rest) {
+                    if let Some(n) = criteria_literal_number(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::GreaterEqual, n);
                     }
+                    return CriteriaMatch::CompareText(CriteriaOp::GreaterEqual, rest.trim().to_string());
                 }
                 if let Some(rest) = trimmed.strip_prefix('<') {
-                    if let Some(n) = criteria_number_of_text(rest) {
+                    if let Some(n) = criteria_literal_number(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::Less, n);
                     }
+                    return CriteriaMatch::CompareText(CriteriaOp::Less, rest.trim().to_string());
                 }
                 if let Some(rest) = trimmed.strip_prefix('>') {
-                    if let Some(n) = criteria_number_of_text(rest) {
+                    if let Some(n) = criteria_literal_number(rest) {
                         return CriteriaMatch::Compare(CriteriaOp::Greater, n);
                     }
+                    return CriteriaMatch::CompareText(CriteriaOp::Greater, rest.trim().to_string());
                 }
                 if let Some(rest) = trimmed.strip_prefix('=') {
-                    if let Some(n) = criteria_number_of_text(rest) {
+                    if let Some(n) = criteria_literal_number(rest) {
                         return CriteriaMatch::ExactNumber(n);
                     }
                     let rest = rest.trim();
@@ -6296,12 +6384,33 @@ impl<'a> Evaluator<'a> {
                 // Try as number — in the WORKBOOK'S dialect. `"1,5"` is one and
                 // a half in sv-SE and is not a number at all in en-US, and the
                 // engine used to answer the second in both.
-                if let Some(n) = criteria_number_of_text(trimmed) {
+                if let Some(n) = criteria_literal_number(trimmed) {
                     return CriteriaMatch::ExactNumber(n);
                 }
                 CriteriaMatch::ExactText(trimmed.to_uppercase())
             }
+            // An error is an ANSWER, not an absence. Before this arm existed,
+            // `NA()`, `1/0` and an undefined name all fell into the catch-all
+            // below and matched nothing — a total of 0 with nothing on screen
+            // to say the criteria was broken, while `=SUM(name)` beside it said
+            // #NAME?. AVERAGEIFS was the tell: it answered #DIV/0! over the
+            // empty match set rather than the #N/A it was handed.
+            EvalResult::Error(e) => CriteriaMatch::Error(e.clone()),
             _ => CriteriaMatch::ExactText(String::new()),
+        }
+    }
+
+    /// The criteria a conditional aggregate compares against, or the error the
+    /// criteria argument itself evaluated to.
+    ///
+    /// A `Result` rather than a variant callers might forget to check: every
+    /// one of the nine call sites has to write the `Err` arm or the function
+    /// stops compiling, which is how a mistyped range name in `=SUMIFS(...)`
+    /// becomes #NAME? in the cell instead of a plausible zero (BUG-0117).
+    fn parse_criteria(&self, criteria: &EvalResult) -> Result<CriteriaMatch, CellError> {
+        match self.parse_criteria_value(criteria) {
+            CriteriaMatch::Error(e) => Err(e),
+            other => Ok(other),
         }
     }
 
@@ -6408,6 +6517,30 @@ impl<'a> Evaluator<'a> {
                 }
                 _ => true,
             },
+            // `">=M"`, `"<Apple"`: text ordered case-insensitively, as Excel
+            // orders it. A NON-text value is never ordered against a string —
+            // a number is not `>= "M"` and a boolean is not `< "Apple"` — so
+            // it answers false, which is the same disjoint-domain rule the
+            // numeric `Compare` arm applies to text in the other direction.
+            CriteriaMatch::CompareText(op, s) => match value {
+                EvalResult::Text(t) => {
+                    let ord = crate::text_cmp::cmp_ci(t, s);
+                    match op {
+                        CriteriaOp::Greater => ord == std::cmp::Ordering::Greater,
+                        CriteriaOp::GreaterEqual => ord != std::cmp::Ordering::Less,
+                        CriteriaOp::Less => ord == std::cmp::Ordering::Less,
+                        CriteriaOp::LessEqual => ord != std::cmp::Ordering::Greater,
+                        CriteriaOp::NotEqual => ord != std::cmp::Ordering::Equal,
+                    }
+                }
+                _ => false,
+            },
+            // Unreachable by construction: `parse_criteria` turns this variant
+            // into an `Err` before any matcher can see it. Answers false rather
+            // than panicking so that a future caller which reaches for
+            // `parse_criteria_value` directly degrades to the old behaviour
+            // instead of taking a workbook down.
+            CriteriaMatch::Error(_) => false,
         }
     }
 
@@ -6433,7 +6566,10 @@ impl<'a> Evaluator<'a> {
             }
         });
         let range_vals_pre = if fast.is_none() { Some(self.eval_flat(&args[0])) } else { None };
-        let criteria = self.parse_criteria(&self.evaluate(&args[1]));
+        let criteria = match self.parse_criteria(&self.evaluate(&args[1])) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
+        };
         if let Some((rect, axis, value_desc)) = fast {
             if let Some(total) = self.criteria_sum_cached(rect, axis, value_desc, &criteria) {
                 return EvalResult::Number(total);
@@ -6466,7 +6602,10 @@ impl<'a> Evaluator<'a> {
         let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
         for i in 0..num_criteria {
             let range_vals = self.eval_flat(&args[1 + i * 2]);
-            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            let criteria = match self.parse_criteria(&self.evaluate(&args[2 + i * 2])) {
+                Ok(c) => c,
+                Err(e) => return EvalResult::Error(e),
+            };
             criteria_data.push((range_vals, criteria));
         }
         let mut total = 0.0;
@@ -6490,7 +6629,10 @@ impl<'a> Evaluator<'a> {
         // FAST PATH (PERF-14): aggregate index over a literal vector.
         let fast = self.literal_vector_desc(&args[0]);
         let range_vals_pre = if fast.is_none() { Some(self.eval_flat(&args[0])) } else { None };
-        let criteria = self.parse_criteria(&self.evaluate(&args[1]));
+        let criteria = match self.parse_criteria(&self.evaluate(&args[1])) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
+        };
         if let Some((rect, axis)) = fast {
             if let Some(count) = self.criteria_count_cached(rect, axis, &criteria) {
                 return EvalResult::Number(count as f64);
@@ -6513,7 +6655,10 @@ impl<'a> Evaluator<'a> {
         let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
         for i in 0..num_criteria {
             let range_vals = self.eval_flat(&args[i * 2]);
-            let criteria = self.parse_criteria(&self.evaluate(&args[i * 2 + 1]));
+            let criteria = match self.parse_criteria(&self.evaluate(&args[i * 2 + 1])) {
+                Ok(c) => c,
+                Err(e) => return EvalResult::Error(e),
+            };
             criteria_data.push((range_vals, criteria));
         }
         let len = criteria_data.first().map_or(0, |(r, _)| r.len());
@@ -6534,7 +6679,10 @@ impl<'a> Evaluator<'a> {
             return EvalResult::Error(CellError::Value);
         }
         let range_vals = self.eval_flat(&args[0]);
-        let criteria = self.parse_criteria(&self.evaluate(&args[1]));
+        let criteria = match self.parse_criteria(&self.evaluate(&args[1])) {
+            Ok(c) => c,
+            Err(e) => return EvalResult::Error(e),
+        };
         let avg_vals_owned = if args.len() == 3 { Some(self.eval_flat(&args[2])) } else { None };
         let avg_vals: &[EvalResult] = avg_vals_owned.as_deref().unwrap_or(&range_vals);
         let mut total = 0.0;
@@ -6559,7 +6707,10 @@ impl<'a> Evaluator<'a> {
         let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
         for i in 0..num_criteria {
             let range_vals = self.eval_flat(&args[1 + i * 2]);
-            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            let criteria = match self.parse_criteria(&self.evaluate(&args[2 + i * 2])) {
+                Ok(c) => c,
+                Err(e) => return EvalResult::Error(e),
+            };
             criteria_data.push((range_vals, criteria));
         }
         let mut total = 0.0;
@@ -6614,7 +6765,10 @@ impl<'a> Evaluator<'a> {
         let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
         for i in 0..num_criteria {
             let range_vals = self.eval_flat(&args[1 + i * 2]);
-            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            let criteria = match self.parse_criteria(&self.evaluate(&args[2 + i * 2])) {
+                Ok(c) => c,
+                Err(e) => return EvalResult::Error(e),
+            };
             criteria_data.push((range_vals, criteria));
         }
         let mut result = f64::INFINITY;
@@ -6642,7 +6796,10 @@ impl<'a> Evaluator<'a> {
         let mut criteria_data: Vec<(Vec<EvalResult>, CriteriaMatch)> = Vec::new();
         for i in 0..num_criteria {
             let range_vals = self.eval_flat(&args[1 + i * 2]);
-            let criteria = self.parse_criteria(&self.evaluate(&args[2 + i * 2]));
+            let criteria = match self.parse_criteria(&self.evaluate(&args[2 + i * 2])) {
+                Ok(c) => c,
+                Err(e) => return EvalResult::Error(e),
+            };
             criteria_data.push((range_vals, criteria));
         }
         let mut result = f64::NEG_INFINITY;
@@ -7858,7 +8015,9 @@ impl<'a> Evaluator<'a> {
         // and `str::replace` in the else branch). The subject can be arbitrarily
         // long — REPT builds megabytes — and neither loop re-enters `evaluate`.
         charge_arith!(self, text.len() as u64);
-        if args.len() == 4 {
+        // A trailing empty slot, `=SUBSTITUTE(a,"p","P",)`, means "every
+        // instance" — the same as three arguments. See `is_omitted`.
+        if args.len() == 4 && !is_omitted(&args[3]) {
             let instance = match arg_or_err!(self.evaluate(&args[3])).as_number() { Some(n) if n >= 1.0 => n as usize, _ => return EvalResult::Error(CellError::Value) };
             let mut count = 0usize;
             let mut result = String::new();
@@ -8249,7 +8408,9 @@ impl<'a> Evaluator<'a> {
     fn fn_weekday(&self, args: &[Expression]) -> EvalResult {
         if args.is_empty() || args.len() > 2 { return EvalResult::Error(CellError::Value); }
         let serial = match self.evaluate(&args[0]).as_number() { Some(n) => n as i64, None => return EvalResult::Error(CellError::Value) };
-        let return_type = if args.len() == 2 {
+        // `=WEEKDAY(d,)` — an omitted return_type is type 1, not type 0, which
+        // is no type at all and answered #VALUE!. See `is_omitted`.
+        let return_type = if args.len() == 2 && !is_omitted(&args[1]) {
             match self.evaluate(&args[1]).as_number() { Some(n) => n as i32, None => return EvalResult::Error(CellError::Value) }
         } else { 1 };
         let dow = date_serial::weekday(serial); // 0=Sunday .. 6=Saturday
@@ -9823,7 +9984,9 @@ impl<'a> Evaluator<'a> {
         }
 
         let (rows, cols, data) = self.eval_range_2d(&args[0]);
-        let sort_index = if args.len() >= 2 {
+        // `=SORT(x,,-1)` is the descending sort Excel's own documentation
+        // writes, and an omitted slot must take the DEFAULT — see `is_omitted`.
+        let sort_index = if args.len() >= 2 && !is_omitted(&args[1]) {
             match self.evaluate(&args[1]).as_number() {
                 Some(n) => n as usize,
                 None => return EvalResult::Error(CellError::Value),
@@ -9831,7 +9994,7 @@ impl<'a> Evaluator<'a> {
         } else {
             1
         };
-        let sort_order = if args.len() >= 3 {
+        let sort_order = if args.len() >= 3 && !is_omitted(&args[2]) {
             match self.evaluate(&args[2]).as_number() {
                 Some(n) => n as i32,
                 None => return EvalResult::Error(CellError::Value),
@@ -9839,7 +10002,7 @@ impl<'a> Evaluator<'a> {
         } else {
             1 // ascending
         };
-        let by_col = if args.len() >= 4 {
+        let by_col = if args.len() >= 4 && !is_omitted(&args[3]) {
             match self.evaluate(&args[3]).as_boolean() {
                 Some(b) => b,
                 None => return EvalResult::Error(CellError::Value),
@@ -10169,7 +10332,9 @@ impl<'a> Evaluator<'a> {
             Some(n) if n >= 1.0 => n as usize,
             _ => return EvalResult::Error(CellError::Value),
         };
-        let seq_cols = if args.len() >= 2 {
+        // `=SEQUENCE(n,,start,step)` — an omitted slot takes the DEFAULT, see
+        // `is_omitted`; it used to arrive as 0 columns and answer #VALUE!.
+        let seq_cols = if args.len() >= 2 && !is_omitted(&args[1]) {
             match self.evaluate(&args[1]).as_number() {
                 Some(n) if n >= 1.0 => n as usize,
                 _ => return EvalResult::Error(CellError::Value),
@@ -10177,7 +10342,7 @@ impl<'a> Evaluator<'a> {
         } else {
             1
         };
-        let start = if args.len() >= 3 {
+        let start = if args.len() >= 3 && !is_omitted(&args[2]) {
             match self.evaluate(&args[2]).as_number() {
                 Some(n) => n,
                 None => return EvalResult::Error(CellError::Value),
@@ -10185,7 +10350,7 @@ impl<'a> Evaluator<'a> {
         } else {
             1.0
         };
-        let step = if args.len() >= 4 {
+        let step = if args.len() >= 4 && !is_omitted(&args[3]) {
             match self.evaluate(&args[3]).as_number() {
                 Some(n) => n,
                 None => return EvalResult::Error(CellError::Value),
@@ -15859,6 +16024,10 @@ impl<'a> Evaluator<'a> {
                 | CriteriaMatch::BlankOrEmpty
                 | CriteriaMatch::OnlyBlank
                 | CriteriaMatch::NonBlank
+                // Text ORDERING has no bucket counter, and an error never
+                // reaches a matcher — both keep the scan.
+                | CriteriaMatch::CompareText(_, _)
+                | CriteriaMatch::Error(_)
         ) {
             return None;
         }
@@ -15891,7 +16060,9 @@ impl<'a> Evaluator<'a> {
                     | CriteriaMatch::WildcardNotEqual(_)
                     | CriteriaMatch::BlankOrEmpty
                     | CriteriaMatch::OnlyBlank
-                    | CriteriaMatch::NonBlank => unreachable!(),
+                    | CriteriaMatch::NonBlank
+                    | CriteriaMatch::CompareText(_, _)
+                    | CriteriaMatch::Error(_) => unreachable!(),
                 })
         });
         match served {
@@ -16975,7 +17146,7 @@ impl<'a> Evaluator<'a> {
                         let db_val = &db_flat[db_row_offset + db_col];
 
                         // Parse criteria and test match
-                        let criteria = self.parse_criteria(cr_val);
+                        let criteria = self.parse_criteria(cr_val)?;
                         if !self.matches_criteria(db_val, &criteria) {
                             all_conditions_match = false;
                             break;

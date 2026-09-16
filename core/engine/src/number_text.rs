@@ -251,6 +251,26 @@ impl ParsePolicy {
         percent: PercentText::Reject,
     };
 
+    /// What the OPERAND OF A CRITERIA STRING is read with — the `2025-01-01`
+    /// in `">=2025-01-01"`.
+    ///
+    /// `CRITERIA` with ISO dates accepted, and nothing else changed. The
+    /// symmetry argument above is right for percent and currency, where the
+    /// cell genuinely stores TEXT, and it INVERTS for dates: a cell typed
+    /// `2025-01-15` stores its serial as a NUMBER, so the range side of a date
+    /// comparison was numeric already and rejecting the date here left the
+    /// criteria side unable to produce the number it had to be compared with.
+    /// `=COUNTIF(rng,">=2025-01-01")` answered 0 and — worse — the negated
+    /// `"<>2025-01-15"` fell through to an exact-text compare no number ever
+    /// equals and KEPT the row it was told to drop (BUG-0115). This policy is
+    /// for the literal only; a text cell in the RANGE reading `2025-01-01` is
+    /// still read with `CRITERIA` and still does not match, as in Excel.
+    pub const CRITERIA_LITERAL: ParsePolicy = ParsePolicy {
+        dates: DateText::AcceptIso,
+        currency: CurrencyText::Reject,
+        percent: PercentText::Reject,
+    };
+
     /// What `NUMBERVALUE()` uses — with a locale BUILT FROM ITS ARGUMENTS, not
     /// from the workbook. Overriding the workbook's separators is the entire
     /// reason that function exists, so the locale is the caller's; only the

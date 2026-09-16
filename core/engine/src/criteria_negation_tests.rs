@@ -265,3 +265,107 @@ fn an_error_inside_an_array_stays_per_element() {
     // And an ordinary argument is untouched.
     assert_eq!(num(&g, "=ABS(A2)"), 4.0);
 }
+
+// ---------------------------------------------------------------------------
+// Three criteria defects found by growing the formula eval corpus, 2026-09-15
+// ---------------------------------------------------------------------------
+
+/// A1:A3 = the serials of 2025-01-01, 2025-01-15, 2024-06-30 (typed dates are
+/// NUMBERS); A4 = the TEXT "2025-01-01"; B1:B4 = 100, 200, 400, 800.
+fn dated() -> Grid {
+    let mut g = Grid::new();
+    for (r, serial) in [(0, 45658.0), (1, 45672.0), (2, 45473.0)] {
+        g.set_cell(r, 0, Cell::new_number(serial));
+    }
+    g.set_cell(3, 0, Cell::new_text("2025-01-01".to_string()));
+    for (r, v) in [(0, 100.0), (1, 200.0), (2, 400.0), (3, 800.0)] {
+        g.set_cell(r, 1, Cell::new_number(v));
+    }
+    g
+}
+
+/// A date LITERAL inside a criteria string is read as the date. (BUG-0115)
+///
+/// `">=2025-01-01"` matched nothing and — far worse — `"<>2025-01-15"` fell
+/// through to an exact-text compare no number ever equals and KEPT the row it
+/// was told to drop: "not equal to that date" counted the row that IS that
+/// date. The cause was a symmetry rule that is right for percent and currency
+/// (the cell stores text) and inverts for dates (the cell stores a NUMBER).
+#[test]
+fn a_date_literal_in_a_criteria_string_compares_against_the_serial() {
+    let g = dated();
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A3,\">=2025-01-01\")"), 2.0);
+    assert_eq!(num_both_paths(&g, "=SUMIF(A1:A3,\">=2025-01-01\",B1:B3)"), 300.0);
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A3,\"<2025-01-01\")"), 1.0);
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A3,\"=2025-01-15\")"), 1.0);
+    // THE NEGATED CASE, the one that silently kept a row: two of the three
+    // dates are not 2025-01-15.
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A3,\"<>2025-01-15\")"), 2.0);
+    // The concatenated spellings agree with the literal, as they always did.
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A3,\">=\"&DATE(2025,1,1))"), 2.0);
+    // A TEXT cell that merely LOOKS like the date is not a date and does not
+    // match a date criterion — Excel's answer, and the half of the old
+    // symmetry rule that was right. The range side keeps `CRITERIA`.
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A4,\">=2025-01-01\")"), 2.0);
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A4:A4,\">=2025-01-01\")"), 0.0);
+}
+
+/// The four ORDERING operators compare text. (BUG-0116)
+///
+/// `<`, `<=`, `>` and `>=` had a numeric arm only: when the operand did not
+/// parse as a number the arm fell through to `ExactText` of the WHOLE string,
+/// operator included, which no cell equals. `<>` had a text arm all along,
+/// which is why the family looked complete on a spot check.
+#[test]
+fn ordering_operators_compare_text_case_insensitively() {
+    let mut g = Grid::new();
+    for (r, v) in [(0, "Mango"), (1, "Apple"), (2, "Zebra"), (3, "apple")] {
+        g.set_cell(r, 0, Cell::new_text((*v).to_string()));
+    }
+    g.set_cell(4, 0, Cell::new_number(5.0));
+    // Over the four names: Mango and Zebra are at or past "M".
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A4,\">=M\")"), 2.0);
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A4,\"<M\")"), 2.0);
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A4,\">Apple\")"), 2.0);
+    // Case-insensitive, like every other text criteria: "apple" <= "APPLE".
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A4,\"<=APPLE\")"), 2.0);
+    // The pre-existing arms are unchanged and agree with the new ones.
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A4,\"<>Apple\")"), 2.0);
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A4,\"Mango\")"), 1.0);
+    // A NUMBER is never ordered against text: 5 is not >= "M" and not < "M".
+    // The two answers over the mixed column must still sum to the four texts.
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A5,\">=M\")"), 2.0);
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A5,\"<M\")"), 2.0);
+    // A numeric operand still takes the numeric path, untouched.
+    assert_eq!(num_both_paths(&g, "=COUNTIF(A1:A5,\">=5\")"), 1.0);
+}
+
+/// An error in the criteria ARGUMENT is the answer, not "match nothing".
+/// (BUG-0117)
+///
+/// `NA()`, `1/0` and an undefined name all fell into the parser's catch-all
+/// and matched nothing — a total of 0 with nothing on screen to say why, while
+/// `=SUM(name)` beside it correctly said #NAME?. AVERAGEIFS was the tell: it
+/// answered #DIV/0! over the empty match set rather than the #N/A it was
+/// handed, proving the error was consumed rather than propagated. The parser
+/// now returns a `Result` so every call site has to write the `Err` arm.
+#[test]
+fn an_error_in_the_criteria_argument_propagates_instead_of_matching_nothing() {
+    let g = dated();
+    let na = EvalResult::Error(CellError::NA);
+    let div0 = EvalResult::Error(CellError::Div0);
+    assert_eq!(eval(&g, "=SUMIF(A1:A3,NA(),B1:B3)"), na);
+    assert_eq!(eval(&g, "=SUMIF(A1:A3,1/0,B1:B3)"), div0);
+    assert_eq!(eval(&g, "=COUNTIF(A1:A3,NA())"), na);
+    assert_eq!(eval(&g, "=SUMIFS(B1:B3,A1:A3,1/0)"), div0);
+    assert_eq!(eval(&g, "=COUNTIFS(A1:A3,NA())"), na);
+    assert_eq!(eval(&g, "=MAXIFS(B1:B3,A1:A3,NA())"), na);
+    assert_eq!(eval(&g, "=MINIFS(B1:B3,A1:A3,1/0)"), div0);
+    // THE TELL, now answering with the error it was handed.
+    assert_eq!(eval(&g, "=AVERAGEIFS(B1:B3,A1:A3,NA())"), na);
+    assert_eq!(eval(&g, "=AVERAGEIF(A1:A3,NA(),B1:B3)"), na);
+    // The second criteria pair of an -IFS propagates too, not only the first.
+    assert_eq!(eval(&g, "=SUMIFS(B1:B3,A1:A3,\">0\",A1:A3,NA())"), na);
+    // CONTROL: a criteria that merely matches nothing is still an honest zero.
+    assert_eq!(num_both_paths(&g, "=SUMIF(A1:A3,\"zzz\",B1:B3)"), 0.0);
+}

@@ -1989,6 +1989,32 @@ The changes stay (neutral, and `T, T, MINIFS` was indefensible) with the null wr
 so nobody tunes the synonym table expecting a score. **Do not build an embedding retriever on this
 evidence** — the seam is there, but the thing it would improve is measured not to matter.
 
+**THE FOUR ENGINE DEFECTS THE CORPUS GROWTH FOUND ARE FIXED (2026-09-16), and re-grading the
+bake-off artifacts with the fixed engine pays both models +2 for free.** BUG-0114 (an omitted
+optional argument answered #VALUE! in SORT, SEQUENCE, SUBSTITUTE and WEEKDAY), BUG-0115 (a date
+literal in a criteria string matched nothing, and `"<>2025-01-15"` KEPT the row it was told to
+drop), BUG-0116 (`<`, `<=`, `>`, `>=` never compared text) and BUG-0117 (an error in the criteria
+argument became a confident zero) — each with a regression test on both the scan and pass-cache
+paths, each sabotaged and seen to fail on its own assertion while the other three stayed green, and
+each probe sweep that filed it now at zero disagreements with Excel (15/15, 18/18). The incumbent's
+recorded formulas re-grade 61/181 -> 63/181 and granite-4.0-1b's 72/181 -> 74/181: every gained
+task is correct Excel the engine had marked wrong. The gap is unchanged, so DO NOT PIN stands, but
+both scores now measure the model rather than the engine.
+
+*Two things learned fixing them that will bite again.* First, **a syntactic check on an argument
+is invisible to any function routed through the lifter.** `eval_lifted_function` rebinds every
+argument to a `NamedRef` slot before the scalar body runs, so `is_omitted` — which matches the
+parser's `Literal(Value::Blank)` — fixed SORT and SEQUENCE (not lifted) and silently did nothing
+for WEEKDAY and SUBSTITUTE (lifted). The only reason it was caught is that the regression test
+covered a TRAILING slot as well as a middle one; a test written from the probe alone would have
+passed. `call_with_values_masked` now carries omission through the binding. Second, **the criteria
+symmetry rule — "a criteria and a cell must be read the same way" — is right for percent and
+currency and inverts for dates**, because a typed date cell stores a NUMBER while a typed `5%`
+cell stores text. The fix splits the literal side (`CRITERIA_LITERAL`, ISO dates accepted) from the
+cell side (`CRITERIA`, unchanged), so a text cell that merely looks like a date still does not
+match, which is also Excel's answer. `parse_criteria` returning a `Result` is what makes BUG-0117
+stay fixed: all nine call sites had to write the `Err` arm or stop compiling.
+
 *Still open, in order:* the rules-only intent router (prototyped at 76.5-91.2%
 against the current detectors' measured 18.2%, zero false scripts, and it should ship gated on a
 held-out split); `npm run eval:all` — there is still no `eval:*` script at all, so every
