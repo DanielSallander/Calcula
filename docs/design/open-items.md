@@ -1969,6 +1969,26 @@ more than repaid by what went away: spurious COLUMNS 44 -> 18 on granite, spurio
 1.5B. The FILTERS example's literal "2024" does appear in replies that never asked for a year;
 trimming that one example is the obvious first bisect if the block is revisited.
 
+*And the same method applied to the FORMULA surface found the opposite: a proxy that does not
+predict the model.* The formula prompt has no fixed examples; it RETRIEVES three library patterns
+per task. Measured offline over 174 tasks, only 18% of tasks ever received a pattern calling a
+function their reference calls — a lookup request was served `T, T, MINIFS`, a text split
+`SECOND, SECOND, GET.COLUMN.WIDTH`. The breakdown was exact: pattern intents are terse dictionary
+definitions that rarely contain "is", "not", "it", so those words carry HIGH IDF and a request that
+uses them three times hands 25 points to whichever pattern happens to contain them; query-side
+repetition multiplied ("count" three times = 33 points to COUNT); and the synonym hint for SUM was
+worth nothing because SUM is called in a hundred library formulas. Four fixes in `retrieval.ts` —
+an expanded stopword list, query-term de-duplication, one-per-function slates, and the synonym hint
+paid as a flat per-function boost instead of an IDF-weighted term — took hit@3 from **18% to 38%**
+(48% on hand tasks, from 23%). **Then the 1.5B was run on all 181 tasks: 61/181 -> 61/181, nine
+fixed, nine broken, p = 1.0.** Doubling example relevance moved the model not at all. The likeliest
+reason is the one the diagnosis already found — these models choose the right FUNCTION and the
+wrong CELLS, and an example from a Microsoft-doc fixture cannot teach which column is which in the
+user's sheet. Retrieval on-vs-off still measures p = 0.0005; WHICH examples, at this size, does not.
+The changes stay (neutral, and `T, T, MINIFS` was indefensible) with the null written into the file
+so nobody tunes the synonym table expecting a score. **Do not build an embedding retriever on this
+evidence** — the seam is there, but the thing it would improve is measured not to matter.
+
 *Still open, in order:* the rules-only intent router (prototyped at 76.5-91.2%
 against the current detectors' measured 18.2%, zero false scripts, and it should ship gated on a
 held-out split); `npm run eval:all` — there is still no `eval:*` script at all, so every
