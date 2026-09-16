@@ -157,6 +157,111 @@ export function buildExamples(c: DesignQueryCandidates, format: DesignQueryReply
       format,
     ));
   }
+
+  // --- The six clauses that had NO example, added 2026-09-16 ----------------
+  //
+  // WHY THEY EXIST. Over 122 design-query tasks against two models, every
+  // capability the prompt DEMONSTRATED scored 29-85%, and the ones it did not
+  // were at or near zero: nesting two fields on ROWS **0 of 21**, an alias
+  // **0 of 8**, filters 7%, layout 8%, bottom 10%. Nesting a second dimension is
+  // barely harder than nesting one, so difficulty does not explain a flat zero —
+  // the absence of an example does.
+  //
+  // AND IT IS MEASURED, on both models, paired, same corpus, same knobs:
+  //   incumbent 1.5B   24/122 -> 35/122   b=15 c=4   McNemar p = 0.0192
+  //   granite-4.0-1b   28/122 -> 44/122   b=19 c=3   McNemar p = 0.0009
+  // The MECHANISM is confirmed rather than assumed: tasks whose capability gained
+  // an example went 5->15 and 4->20, while tasks whose capability did not went
+  // 19->20 and 24->24. The gain is entirely where the examples are. (Run-to-run
+  // variance here is ~zero — two identically configured runs agreed on all 37
+  // shared tasks, p=1.0 — so a paired difference this size is an effect.)
+  //
+  // THIS IS THE FIRST PROMPT-SIDE LEVER IN THE PROGRAMME THAT PAID. Restraint,
+  // clause gating, repair rounds, quantisation and a model swap were all measured
+  // dead or noise; the lesson those left behind was "constraining what a model
+  // may not say does not tell it what to say" (see grammar.ts). This is the other
+  // half of that sentence: SHOWING it what to say does.
+  //
+  // EACH SHOWS EXACTLY ONE THING, for the reason recorded above: the first share
+  // example carried a TOP 10 nobody asked for and both models copied it. None of
+  // these carries a second clause beyond the ROWS/VALUES frame it needs to be a
+  // legal query.
+  //
+  // WHAT IT COST, recorded because it is not free. Prompt ~1034 -> ~1245 tokens,
+  // and median latency rose (4249 -> 6674 ms on the 1.5B, 5210 -> 11099 on
+  // granite) — more than the prompt alone explains, because the models also emit
+  // more clauses. The copying hazard fired PARTIALLY on granite: spurious FILTERS
+  // 12 -> 21 and spurious LAYOUT 9 -> 18. It was more than repaid by what went
+  // AWAY — spurious COLUMNS 44 -> 18 on granite and spurious TOP 33 -> 4 on the
+  // 1.5B — but the FILTERS example's literal "2024" does appear in replies that
+  // did not ask for a year, and trimming that one example is the obvious first
+  // bisect if this block is ever revisited.
+
+  // Nesting. Without this a model puts the second level on COLUMNS, which
+  // crosses the dimensions instead of nesting them — measured as the single most
+  // common design-query defect across three models.
+  if (m0 && d0 && d1 && d1 !== d0) {
+    out.push(example(
+      `${wordsOf(m0)} by ${wordsOf(d0)} and then ${wordsOf(d1)}`,
+      `ROWS: ${d0}, ${d1}\nVALUES: [${m0}]`,
+      `${wordsOf(m0)} by ${wordsOf(d0)}, broken down by ${wordsOf(d1)} within each.`,
+      format,
+    ));
+  }
+  // Renaming. The alias is the one piece of a query that CANNOT be inferred from
+  // the model — it is dictated by the request — so the example teaches the
+  // mapping from the words to the quoted string rather than any particular name.
+  if (m0 && d0) {
+    out.push(example(
+      `${wordsOf(m0)} by ${wordsOf(d0)}, with the ${wordsOf(m0)} column headed "Total"`,
+      `ROWS: ${d0}\nVALUES: [${m0}] AS "Total"`,
+      `${wordsOf(m0)} for each ${wordsOf(d0)}, under the heading Total.`,
+      format,
+    ));
+  }
+  // Ordering the LABELS. Paired deliberately with the TOP example above: the two
+  // together are what separate "in alphabetical order" from "biggest first", and
+  // a SORT on a measure is the one shape the compiler refuses.
+  if (m0 && d0) {
+    out.push(example(
+      `${wordsOf(m0)} by ${wordsOf(d0)}, in alphabetical order`,
+      `ROWS: ${d0}\nVALUES: [${m0}]\nSORT: ${d0} ASC`,
+      `${wordsOf(m0)} for each ${wordsOf(d0)}, ordered by name.`,
+      format,
+    ));
+  }
+  // The other direction of the ranking. BOTTOM is structurally identical to TOP
+  // and is named in the cheat sheet, and that was not enough: 1 of 10.
+  if (m0 && d0) {
+    out.push(example(
+      `the three ${wordsOf(d0)} with the lowest ${wordsOf(m0)}`,
+      `ROWS: ${d0}\nVALUES: [${m0}]\nBOTTOM 3 BY [${m0}]`,
+      `The three ${wordsOf(d0)} with the least ${wordsOf(m0)}.`,
+      format,
+    ));
+  }
+  // Layout. One directive, not a list: models shown a list emit the whole list.
+  if (m0 && d0) {
+    out.push(example(
+      `${wordsOf(m0)} by ${wordsOf(d0)}, without the grand total row`,
+      `ROWS: ${d0}\nVALUES: [${m0}]\nLAYOUT: no-grand-totals`,
+      `${wordsOf(m0)} for each ${wordsOf(d0)}, with no grand total.`,
+      format,
+    ));
+  }
+  // Filtering. The value is a YEAR on purpose. Every other dimension's members
+  // are unknowable from the candidate lists, so any example would have to INVENT
+  // one — and an invented member is exactly what a model copies into an
+  // unrelated query. A year is inferable, safe, and teaches the clause shape,
+  // which is the part that is missing.
+  if (m0 && d0 && time) {
+    out.push(example(
+      `${wordsOf(m0)} by ${wordsOf(d0)} in 2024 only`,
+      `ROWS: ${d0}\nVALUES: [${m0}]\nFILTERS: ${time} = ("2024")`,
+      `${wordsOf(m0)} for each ${wordsOf(d0)}, restricted to 2024.`,
+      format,
+    ));
+  }
   return out;
 }
 

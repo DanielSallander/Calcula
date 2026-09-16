@@ -1934,6 +1934,41 @@ sabotaged — on the second attempt, because the first sabotage was a blind stri
 DIFFERENT function's identical guard text and left the test passing. It was the only one of 42
 variadic functions probed that crashed rather than answering #VALUE!.
 
+**AND THEN THE GROWN CORPUS PAID FOR ITSELF A SECOND TIME: THE FIRST PROMPT-SIDE LEVER IN THE
+PROGRAMME THAT WORKS.** With 122 tasks it became possible to ask which capabilities NEITHER model
+can do at all, and the answer was stark — nesting two fields on ROWS **0 of 21**, an alias **0 of
+8**, filters 7%, layout 8%, bottom 10%. Cross-referencing against `buildExamples` showed the prompt
+demonstrated COLUMNS, TOP, show-as and aggregation (which scored 29-85%) and demonstrated **none**
+of the capabilities at zero. Nesting a second dimension is barely harder than nesting one, so
+difficulty does not explain a flat zero.
+
+Six examples were added, one per missing clause, each showing exactly one thing. Measured paired,
+same corpus, same knobs, one variable:
+
+| | before | after | flips | McNemar |
+|---|---|---|---|---|
+| incumbent 1.5B | 24/122 | **35/122** | b=15 c=4 | **p = 0.0192** |
+| granite-4.0-1b | 28/122 | **44/122** | b=19 c=3 | **p = 0.0009** |
+
+**The mechanism is confirmed, not assumed:** tasks whose capability gained an example went 5->15 and
+4->20, while tasks whose capability did not went 19->20 and 24->24. The entire gain sits where the
+examples are. Run-to-run variance is ~zero here (two identically configured runs agreed on all 37
+shared tasks, p=1.0), so a paired difference of this size is an effect.
+
+This is the other half of the lesson in `grammar.ts`. *Constraining what a model may not say does not
+tell it what to say* — **showing it what to say does.** Every other prompt-side lever tried in this
+programme (restraint, clause gating, repair rounds, quantisation, a model swap) was measured dead or
+noise; this one is worth +11 and +16 tasks.
+
+*What it cost, recorded because it is not free.* Prompt ~1034 -> ~1245 tokens and median latency rose
+(4249 -> 6674 ms on the 1.5B, 5210 -> 11099 on granite) — more than the prompt alone explains, since
+the models also emit more clauses. Note the session-wide latency inflation above: the same numbers on
+the earlier session's machine state would be roughly a quarter of these. The copying hazard the file
+warns about fired PARTIALLY on granite — spurious FILTERS 12 -> 21, spurious LAYOUT 9 -> 18 — and was
+more than repaid by what went away: spurious COLUMNS 44 -> 18 on granite, spurious TOP 33 -> 4 on the
+1.5B. The FILTERS example's literal "2024" does appear in replies that never asked for a year;
+trimming that one example is the obvious first bisect if the block is revisited.
+
 *Still open, in order:* the rules-only intent router (prototyped at 76.5-91.2%
 against the current detectors' measured 18.2%, zero false scripts, and it should ship gated on a
 held-out split); `npm run eval:all` — there is still no `eval:*` script at all, so every
