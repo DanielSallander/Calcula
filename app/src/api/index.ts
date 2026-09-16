@@ -2724,6 +2724,22 @@ export {
   INSIGHT_NARRATION_RULES,
 } from "./insightsService";
 
+// ============================================================================
+// The loaded semantic model's FIELD NAMES, readable synchronously. A decision
+// taken before a model turn — "does this message name one of our fields?" —
+// cannot wait for a tool call; this is the cache that makes it answerable.
+
+export {
+  configureModelFields,
+  warmModelFields,
+  modelFieldIndex,
+  resetModelFields,
+  buildModelFieldIndex,
+  EMPTY_MODEL_FIELDS,
+  __setModelFieldsForTest,
+} from "./biModelFields";
+export type { ModelFieldIndex, ModelFieldsSource } from "./biModelFields";
+
 export type {
   Insight,
   InsightBundle,

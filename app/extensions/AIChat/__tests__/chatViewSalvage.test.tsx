@@ -14,6 +14,7 @@
 //          the provider never saw and the next turn is rejected outright.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { CORE_TOOL_NAMES } from "../lib/chatTools";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { ChatMessage, ChatResponse } from "../lib/aiTypes";
@@ -53,6 +54,17 @@ vi.mock("@api", () => ({
   getInsightsProvider: () => insightsProvider,
   describeBundleForModel: (bundle: { markdown: string }, label?: string | null) =>
     `FACTS for ${label ?? "?"}:\n${bundle.markdown}`,
+  // The router reads the loaded model's field names synchronously in send().
+  // No model here: an empty index, so every message routes on vocabulary alone
+  // — a factory mock that omits an export THROWS on first use, and send()
+  // then never reaches the stream call, which is how this file went red.
+  modelFieldIndex: () => ({
+    measures: new Set<string>(),
+    dimensions: new Set<string>(),
+    calendar: new Set<string>(),
+    tables: new Set<string>(),
+    connections: 0,
+  }),
 }));
 
 // The gate needs a Worker realm it does not have here; it is proved separately
@@ -610,19 +622,98 @@ describe("the tool surface shrinks when the model cannot hold it", () => {
     // confirmed (see the safety guard). Grant it: this test is about the
     // narrowing, not about the confirmation.
     confirmAsync.mockReturnValue(Promise.resolve(true));
-    await ask("colour the selected cells by their content");
+    // A message the router only LEANS on, so the first turn is the whole
+    // surface; a decided one would already have started narrow (next test).
+    await ask("do something with the selected cells");
 
     const first = toolsSent(0);
     const second = toolsSent(1);
+    expect(first.length).toBeGreaterThanOrEqual(20);
     expect(second.length, "the retry must carry FEWER tools").toBeLessThan(first.length);
+    expect([...second].sort()).toEqual([...CORE_TOOL_NAMES].sort());
     expect(container.textContent).toContain("Retrying with a smaller set");
     // ...and the retry actually worked.
     expect(runToolCalls().map((c) => c.name)).toEqual(["apply_formatting"]);
   });
 
+  it("never WIDENS a decided route that already sent fewer tools than the core set", async () => {
+    // "colour the selected cells" is decided as formatting and starts with four
+    // tools. The model invented a name from those four. Handing it the ten-tool
+    // core set as the "smaller set" would be a widening announced as a
+    // narrowing — the retry carries the same four plus the repair message.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "formatSelectedCellsBackgroundColor", input: {} }],
+            stopReason: "toolUse", model: "qwen2.5-coder:3b",
+          } as ChatResponse;
+        }
+        if (nth === 2) {
+          return {
+            blocks: [{ type: "toolUse", id: "c2", name: "apply_formatting", input: { start_row: 0, start_col: 0, end_row: 2, end_col: 0, background_color: "#FFFF00" } }],
+            stopReason: "toolUse", model: "qwen2.5-coder:3b",
+          } as ChatResponse;
+        }
+        return textReply("Done.");
+      }
+      return "formatted";
+    });
+    confirmAsync.mockReturnValue(Promise.resolve(true));
+    await ask("colour the selected cells by their content");
+
+    const first = toolsSent(0);
+    const second = toolsSent(1);
+    expect(first.length).toBeLessThan(CORE_TOOL_NAMES.length);
+    expect(first).toContain("apply_formatting");
+    expect(second, "the retry must not be WIDER than the first turn").toEqual(first);
+    expect(container.textContent).toContain("called a tool that does not exist");
+    expect(container.textContent).toContain("already as short as this job allows");
+    expect(container.textContent).not.toContain("Retrying with a smaller set");
+    // The repair message reached the model and the retry worked from it.
+    expect(runToolCalls().map((c) => c.name)).toEqual(["apply_formatting"]);
+  });
+
+  it("remembers the narrowing across messages without widening a later decided one", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "ai_chat_complete_stream") {
+        const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
+        if (nth === 1) {
+          return {
+            blocks: [{ type: "toolUse", id: "c1", name: "madeUp", input: {} }],
+            stopReason: "toolUse", model: "m",
+          } as ChatResponse;
+        }
+        return textReply("ok");
+      }
+      return "";
+    });
+    await ask("do something");
+    expect([...toolsSent(1)].sort()).toEqual([...CORE_TOOL_NAMES].sort());
+
+    // A decided message afterwards gets its specialist's own, shorter list —
+    // the memory caps the surface at the core set, it does not replace a
+    // shorter one with it.
+    await ask("make A1:D1 bold");
+    const decided = toolsSent(2);
+    expect(decided.length).toBeLessThan(CORE_TOOL_NAMES.length);
+    expect(decided).toContain("apply_formatting");
+
+    // ...and a lean message afterwards starts at the core set, not at 24.
+    await ask("hello again");
+    expect([...toolsSent(3)].sort()).toEqual([...CORE_TOOL_NAMES].sort());
+  });
+
   it("keeps the script path in the core set — it is the headline use case", async () => {
     // The naive "first twelve tools" slice drops draft_object_script, which
-    // produced a model that formatted cells when asked for a SCRIPT.
+    // produced a model that formatted cells when asked for a SCRIPT. Two
+    // halves: the core set itself carries the script path (a lean message
+    // that invents lands there), and a DECIDED script request retried after
+    // an invented name still holds it, because its specialist does.
+    expect(CORE_TOOL_NAMES).toContain("draft_object_script");
+    expect(CORE_TOOL_NAMES).toContain("apply_formatting");
+    expect(CORE_TOOL_NAMES).toContain("get_sheet_summary");
     invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "ai_chat_complete_stream") {
         const nth = invoke.mock.calls.filter((c) => c[0] === "ai_chat_complete_stream").length;
@@ -639,8 +730,8 @@ describe("the tool surface shrinks when the model cannot hold it", () => {
     await ask("make me a script");
     const narrowed = toolsSent(1);
     expect(narrowed).toContain("draft_object_script");
-    expect(narrowed).toContain("apply_formatting");
     expect(narrowed).toContain("get_sheet_summary");
+    expect(narrowed.length).toBeLessThanOrEqual(CORE_TOOL_NAMES.length);
   });
 
   it("narrows the PROMPT with the tools, never promising an absent one", async () => {
@@ -707,7 +798,10 @@ describe("the model is shown the script API before being asked to write one", ()
 
   it("ranks the surface by the USER's words, not a fixed slice", async () => {
     invoke.mockImplementation(async () => textReply("ok"));
-    await ask("format the background of each selected cell");
+    // A SCRIPT request: a bare "format the background of each selected cell"
+    // is decided as one-off formatting and deliberately gets no reference at
+    // all (surfaceTax.test.ts pins that skip).
+    await ask("write a script that formats the background of each selected cell");
     // Without hints drawn from the request, api.getSelection falls outside the
     // budget entirely — and a script about "selected cells" cannot be written
     // without it, because it reads the selection at RUN time.

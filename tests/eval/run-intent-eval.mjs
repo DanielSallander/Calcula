@@ -1,39 +1,51 @@
 //! FILENAME: tests/eval/run-intent-eval.mjs
-// PURPOSE: Score intent routing against `intents.json` — starting with the
-//          detectors that exist TODAY, so the router has a number to beat.
+// PURPOSE: Score the intent router against `intents.json`, on a split that
+//          says how much of its number was earned on utterances it was never
+//          tuned against.
 // CONTEXT: Step 5 of the AI programme (`docs/design/ai-intent-router.md`). The
 //          design's exit criterion is "rules-only >= 80 %" with "100 % precision
-//          on the decisive subset", and neither figure means anything until
-//          somebody says what the current code scores. There is no router yet;
-//          there are two independent detectors, so this measures them.
+//          on the decisive subset". Both figures are reported here; the
+//          precision figure is ALSO a CI gate (`intentRouter.corpus.test.ts`).
 //
-// WHAT "THE CURRENT DETECTORS" CAN EVEN SAY. `scriptIntent` answers script / not
-// script. `analysisIntent` answers analysis / not analysis. Between them they
-// can express THREE of the nine intents — `script`, `analyze`, and "neither,
-// so the chat sends it to the model" — which is mapped here to `question`,
-// because that is what actually happens: no specialist, no facts, the general
-// tool loop. Six of the nine intents are therefore unreachable by construction,
-// and the report says so rather than scoring them as ordinary misses.
+//   node tests/eval/run-intent-eval.mjs
 //
-// AND THEY ARE NOT MUTUALLY EXCLUSIVE. Both run unconditionally in `send()`, so
-// a message can match both and today gets BOTH behaviours. That is counted
-// separately as `bothFired`, because it is not a misroute — it is the absence of
-// a route, and it is the thing M4 exists to add.
+// THE BASELINE IS A RECORDED NUMBER, NOT A MODE. The two detectors the router
+// replaced (`scriptIntent`'s trigger list and `analysisIntent.ts`) scored
+// macro 24/214 raw on this corpus on 2026-09-16 — three of nine intents
+// reachable, 23 of 35 script requests missed. `analysisIntent.ts` was deleted
+// the same day and the trigger list rewritten, so that arm cannot be re-run;
+// the figure lives in `open-items.md` 2.AI.10 and in the router's own tests.
 //
-// NO PORT. The detectors are imported from the product through
-// `lib/appBundle.mjs`, exactly as the design-query runner imports the drafting
-// loop. A re-implementation of two keyword tables would score the copy.
+// THE HEADLINE IS A MACRO AVERAGE. The corpus is 122 `bi-query` rows out of 214
+// — every design-query task is one — so a raw accuracy is mostly a score for one
+// intent. The macro average weights the nine intents equally; the raw figure is
+// printed beside it, never instead of it.
 //
-// USAGE
-//   node tests/eval/run-intent-eval.mjs                  score today's detectors
-//   node tests/eval/run-intent-eval.mjs --show-misses    list every wrong route
-//   node tests/eval/run-intent-eval.mjs --json out/i.json
+// THE SPLIT, and why it is spelled out. The router's rules were derived from
+// this corpus's own vocabulary (design §4b) and its author read every failure
+// of the prototype on the full corpus before writing them. So `held-out` is
+// defined as: rows whose id hashes odd AND whose failure was never inspected
+// during rule authoring — the sixteen inspected ids are pinned to `tune` by
+// name. Nothing in `held-out` was looked at while the rules were written. Its
+// number is the honest one; `tune` is the fitted one; `all` is what CI pins.
+//
+//   --split all|tune|held-out   (default: all, with every split's number printed)
+//   --show-misses               list every wrong route
+//   --json out.json             write {summary, rows}
+//
+// NO PORT. The router and the field index are imported from the product through
+// `lib/appBundle.mjs`; the index is built from `tests/fixtures/model/sales_star.json`
+// with the same function the product uses, so the runner scores exactly what the
+// chat would route with that model open.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { bundleAppModules } from "./lib/appBundle.mjs";
+// The split lives in its own pure module so the CI corpus test imports the SAME
+// one and the two cannot disagree about which rows were held out.
+import { splitOf } from "./run-intent-eval-split.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "../..");
@@ -46,146 +58,147 @@ function arg(name, fallback = undefined) {
   return next && !next.startsWith("--") ? next : true;
 }
 
+const splitArg = String(arg("split", "all"));
 const showMisses = Boolean(arg("show-misses", false));
 const jsonOut = arg("json");
 
+if (!["all", "tune", "held-out"].includes(splitArg)) {
+  console.error(`--split must be all, tune or held-out (got ${splitArg})`);
+  process.exit(2);
+}
+
 const corpus = JSON.parse(readFileSync(path.join(here, "intents.json"), "utf8"));
+const INTENTS = corpus.intents;
+
+// ---------------------------------------------------------------------------
+// The router, bundled from the product
+// ---------------------------------------------------------------------------
 
 const { mod } = await bundleAppModules({
   appRoot,
-  tag: "intents",
+  tag: "intents-router",
   exports: [
-    { from: "extensions/AIChat/lib/scriptIntent.ts", names: ["detectScriptIntent", "guessObjectType"] },
-    { from: "extensions/AIChat/lib/analysisIntent.ts", names: ["detectAnalysisIntent"] },
+    { from: "extensions/AIChat/lib/intentRouter.ts", names: ["routeIntent"] },
+    { from: "src/api/biModelFields.ts", names: ["buildModelFieldIndex"] },
   ],
 });
-const { detectScriptIntent, detectAnalysisIntent } = mod;
+const fixture = JSON.parse(readFileSync(path.join(repo, "tests/fixtures/model/sales_star.json"), "utf8"));
+const fields = mod.buildModelFieldIndex([fixture.model ?? fixture]);
+const route = (text) => {
+  const r = mod.routeIntent(text, { fields });
+  return { routed: r.intent, decisive: r.decisive, clarify: r.clarify ?? null, why: r.matched.join(" | ") };
+};
+const label = "the router";
 
-/** The three intents today's code can actually express. */
-const REACHABLE = new Set(["script", "analyze", "question"]);
+// ---------------------------------------------------------------------------
+// Score
+// ---------------------------------------------------------------------------
 
-function routeToday(text) {
-  const script = detectScriptIntent(text);
-  const analysis = detectAnalysisIntent(text);
+const rows = corpus.utterances.map((u) => {
+  const r = route(u.text);
+  // A clarify pair that CONTAINS the expected intent is the designed answer for
+  // a non-decisive utterance ("genuinely two requests; the design says ask") —
+  // credited there, and never on a row the rules were expected to settle.
+  const clarifyCredit = Boolean(r.clarify && !u.decisive && r.clarify.includes(u.intent));
   return {
-    script: script.looksLikeScript,
-    analysis: analysis.looksLikeAnalysis,
-    scriptMatched: script.matched,
-    analysisMatched: analysis.matched,
-    // What the chat DOES today, in order: the analysis pre-route appends facts,
-    // and the script offer card is rendered beside it. When both fire the person
-    // sees both; the first of the two is what the transcript leads with.
-    routed: script.looksLikeScript ? "script" : analysis.looksLikeAnalysis ? "analyze" : "question",
-  };
-}
-
-const rows = [];
-for (const u of corpus.utterances) {
-  const r = routeToday(u.text);
-  rows.push({
     id: u.id,
-    lang: u.lang,
+    split: splitOf(u.id),
     text: u.text,
     expected: u.intent,
     got: r.routed,
-    correct: r.routed === u.intent,
-    reachable: REACHABLE.has(u.intent),
-    decisive: u.decisive,
-    bothFired: r.script && r.analysis,
-    scriptMatched: r.scriptMatched,
-    analysisMatched: r.analysisMatched,
+    gotDecisive: r.decisive,
+    clarify: r.clarify,
+    correct: r.routed === u.intent || clarifyCredit,
+    clarifyCredit,
+    expectedDecisive: u.decisive,
+    // THE PRECISION FAILURE: the router SETTLED on a wrong answer. A wrong lean
+    // is a recall miss; a wrong decision is the defect the design forbids.
+    decisiveWrong: r.decisive && r.routed !== u.intent,
     isRegression: u.id.startsWith("rg-"),
-    why: u.why,
-  });
+    why: r.why,
+  };
+});
+
+function score(subset) {
+  const n = subset.length;
+  const correct = subset.filter((r) => r.correct).length;
+  const perIntent = {};
+  for (const intent of INTENTS) {
+    const of = subset.filter((r) => r.expected === intent);
+    perIntent[intent] = { n: of.length, correct: of.filter((r) => r.correct).length };
+  }
+  const present = INTENTS.filter((i) => perIntent[i].n > 0);
+  const macro = present.length
+    ? present.reduce((a, i) => a + perIntent[i].correct / perIntent[i].n, 0) / present.length
+    : 0;
+  const decided = subset.filter((r) => r.gotDecisive);
+  const decisiveWrong = subset.filter((r) => r.decisiveWrong);
+  return {
+    n,
+    correct,
+    raw: n ? correct / n : 0,
+    macro,
+    perIntent,
+    decided: decided.length,
+    decisiveWrong: decisiveWrong.length,
+    decisivePrecision: decided.length ? 1 - decisiveWrong.length / decided.length : 1,
+    falseScript: subset.filter((r) => r.got === "script" && r.expected !== "script").length,
+    missedScript: subset.filter((r) => r.expected === "script" && !r.correct).length,
+    clarified: subset.filter((r) => r.clarify).length,
+    regressions: subset.filter((r) => r.isRegression).length,
+    regressionsCorrect: subset.filter((r) => r.isRegression && r.correct).length,
+  };
 }
 
-// ---------------------------------------------------------------------------
-// Report
-// ---------------------------------------------------------------------------
-
-const reachable = rows.filter((r) => r.reachable);
-const unreachable = rows.filter((r) => !r.reachable);
-const decisive = rows.filter((r) => r.decisive);
-const regressions = rows.filter((r) => r.isRegression);
-
-const correct = rows.filter((r) => r.correct).length;
-const correctReachable = reachable.filter((r) => r.correct).length;
-const bothFired = rows.filter((r) => r.bothFired).length;
-
-// A FALSE SCRIPT is the expensive mistake: it renders an offer card and builds
-// the ~6,000-token API surface for a message that never wanted either.
-const falseScript = rows.filter((r) => r.got === "script" && r.expected !== "script");
-const missedScript = rows.filter((r) => r.expected === "script" && r.got !== "script");
-const falseAnalyze = rows.filter((r) => r.got === "analyze" && r.expected !== "analyze");
-const missedAnalyze = rows.filter((r) => r.expected === "analyze" && r.got !== "analyze");
-const decisiveWrong = decisive.filter((r) => r.reachable && !r.correct);
-
-const pct = (n, d) => (d ? `${((n / d) * 100).toFixed(1)}%` : "n/a");
-
-const summary = {
-  utterances: rows.length,
-  swedish: rows.filter((r) => r.lang === "sv").length,
-  overallCorrect: correct,
-  overallRate: correct / rows.length,
-  reachable: reachable.length,
-  reachableCorrect: correctReachable,
-  reachableRate: reachable.length ? correctReachable / reachable.length : 0,
-  unreachableByConstruction: unreachable.length,
-  decisiveTotal: decisive.length,
-  decisiveWrong: decisiveWrong.length,
-  decisivePrecision: decisive.length ? 1 - decisiveWrong.length / decisive.length : 0,
-  bothDetectorsFired: bothFired,
-  falseScript: falseScript.length,
-  missedScript: missedScript.length,
-  falseAnalyze: falseAnalyze.length,
-  missedAnalyze: missedAnalyze.length,
-  regressionsTotal: regressions.length,
-  regressionsCorrect: regressions.filter((r) => r.correct).length,
+const pct = (x) => `${(x * 100).toFixed(1)}%`;
+const bySplit = {
+  all: score(rows),
+  tune: score(rows.filter((r) => r.split === "tune")),
+  "held-out": score(rows.filter((r) => r.split === "held-out")),
 };
 
-console.log(
-  `\n[intent-eval] today's detectors, over ${summary.utterances} utterances ` +
-    `(${summary.swedish} Swedish)\n` +
-    `  overall        ${correct}/${rows.length} routed correctly (${pct(correct, rows.length)})\n` +
-    `  of the three   ${correctReachable}/${reachable.length} (${pct(correctReachable, reachable.length)}) ` +
-    `— the rest of the taxonomy is UNREACHABLE: ${unreachable.length} utterances have an intent ` +
-    `today's code cannot express\n` +
-    `  decisive       ${decisiveWrong.length} wrong of ${decisive.length} the rules should settle ` +
-    `(precision ${pct(decisive.length - decisiveWrong.length, decisive.length)}; the design pins 100%)\n` +
-    `  both fired     ${bothFired} messages match BOTH detectors and get both behaviours — the absence ` +
-    `of a route, which is what M4 adds\n` +
-    `  script         ${falseScript.length} false (an offer card and a ~6,000-token surface nobody asked for), ` +
-    `${missedScript.length} missed\n` +
-    `  analyze        ${falseAnalyze.length} false, ${missedAnalyze.length} missed\n` +
-    `  regressions    ${summary.regressionsCorrect}/${summary.regressionsTotal} of the known-defect cases route correctly`,
-);
+const knobs = { split: splitArg, showMisses, corpus: rows.length };
 
-if (regressions.length > 0) {
-  console.log(`\n[intent-eval] the known-defect cases, one line each:`);
-  for (const r of regressions) {
-    console.log(
-      `  ${r.correct ? "ok  " : "WRONG"} ${r.expected.padEnd(8)} got ${r.got.padEnd(8)} ` +
-        `${r.scriptMatched ? `[script matched ${JSON.stringify(r.scriptMatched)}] ` : ""}${r.text}`,
-    );
+console.log(`\n[intent-eval] ${label}, over ${rows.length} utterances`);
+for (const name of ["all", "tune", "held-out"]) {
+  const s = bySplit[name];
+  console.log(
+    `  ${name.padEnd(9)} n=${String(s.n).padStart(3)}  macro ${pct(s.macro)}  raw ${s.correct}/${s.n} (${pct(s.raw)})  ` +
+      `decisive precision ${pct(s.decisivePrecision)} (${s.decisiveWrong} wrong of ${s.decided} decided)  ` +
+      `false script ${s.falseScript}  clarified ${s.clarified}`,
+  );
+}
+
+const focus = bySplit[splitArg];
+console.log(`\n  per intent, ${splitArg} split (recall):`);
+for (const intent of INTENTS) {
+  const p = focus.perIntent[intent];
+  if (p.n === 0) continue;
+  console.log(`    ${intent.padEnd(9)} ${String(p.correct).padStart(3)}/${String(p.n).padEnd(3)} ${pct(p.correct / p.n)}`);
+}
+console.log(`  regressions ${focus.regressionsCorrect}/${focus.regressions} of the known-defect cases route correctly`);
+
+const wrongDecisions = rows.filter((r) => r.decisiveWrong);
+if (wrongDecisions.length) {
+  console.log(`\n  DECISIVE AND WRONG — each of these is a precision failure the design forbids:`);
+  for (const r of wrongDecisions) {
+    console.log(`    [${r.split}] want ${r.expected.padEnd(9)} decided ${r.got.padEnd(9)} (${r.why}) ${JSON.stringify(r.text).slice(0, 90)}`);
   }
 }
 
 if (showMisses) {
-  console.log(`\n[intent-eval] every wrong route:`);
-  for (const r of rows.filter((x) => !x.correct)) {
-    console.log(
-      `  want ${r.expected.padEnd(8)} got ${r.got.padEnd(8)} ${r.reachable ? "        " : "[UNREACHABLE]"} ` +
-        `${r.lang} ${JSON.stringify(r.text)}`,
-    );
+  console.log(`\n  every wrong route (${splitArg}):`);
+  for (const r of rows.filter((x) => !x.correct && (splitArg === "all" || x.split === splitArg))) {
+    const got = r.clarify ? `ask(${r.clarify.join("/")})` : r.got;
+    console.log(`    [${r.split}] want ${r.expected.padEnd(9)} got ${got.padEnd(18)} ${r.gotDecisive ? "DECISIVE " : "lean     "} (${r.why}) ${JSON.stringify(r.text).slice(0, 80)}`);
   }
 }
 
 if (jsonOut) {
   mkdirSync(path.dirname(path.resolve(jsonOut)), { recursive: true });
-  writeFileSync(jsonOut, JSON.stringify({ summary, rows }, null, 2) + "\n", "utf8");
+  writeFileSync(jsonOut, JSON.stringify({ knobs, summary: bySplit, rows }, null, 2) + "\n", "utf8");
   console.log(`\n[intent-eval] wrote ${jsonOut}`);
 }
 
-// This is a BASELINE, not a gate: today's code cannot express six of the nine
-// intents, so failing the run would only ever say "the router is unbuilt", which
-// is already written down. It exits 0 and reports.
+// Reports; the CI gate is the corpus test, which fails the build on one
+// decisive miss. This exits 0 so both modes stay runnable as measurements.

@@ -1,8 +1,12 @@
-# The intent router (AI programme M4) — design recovered 2026-09-11, unbuilt
+# The intent router (AI programme M4) — design recovered 2026-09-11, built 2026-09-16
 
-Status: DESIGNED, NOT BUILT. Step 5 of the AI programme's build order (owner decision D5).
+Status: BUILT 2026-09-16. §6 records what was built, what deliberately differs from §3, and what
+§5 still blocks. §§1–5 are left as written on 2026-09-11 because they are the argument for the
+ordering and the record of what the code looked like before; §2 describes modules that no longer
+exist in that form. Step 5 of the AI programme's build order (owner decision D5).
 Companion documents: `local-model-script-authoring.md` (where the routing evidence was measured),
-`insights-strategy-layer.md` §14 (the consumers a router would dispatch to), `open-items.md` 2.AI.10.
+`insights-strategy-layer.md` §14 (the consumers a router would dispatch to), `open-items.md` 2.AI.12
+(the build record) and 2.AI.10 (the programme's steps).
 
 ## 0. Why this file exists at all
 
@@ -230,3 +234,104 @@ Two concrete blockers for anything bidirectional:
 
 And there is no narration destination at all: Step 4 shipped the citation check and the
 measurement, not a surface.
+
+## 6. As built, 2026-09-16
+
+Measured on `tests/eval/intents.json` — 214 utterances, regenerated from the other corpora by
+`gen-intents.mjs` and pinned in CI by `check:intents` — with `tests/fixtures/model/sales_star.json`
+as the loaded model, by `tests/eval/run-intent-eval.mjs`:
+
+| split | n | macro | raw | decisive precision | false scripts | clarified |
+|---|---|---|---|---|---|---|
+| all | 214 | 98.9 % | 213/214 | 100 % (0 wrong of 201 decided) | 0 | 2 |
+| tune | 118 | 100 % | 118/118 | 100 % (0 of 112) | 0 | 0 |
+| held-out | 96 | 97.8 % | 95/96 | 100 % (0 of 89) | 0 | 2 |
+
+Per intent over all 214: `formula` 9/10, every other intent 100 %; all nine `rg-*` regression cases
+route correctly. The two detectors this replaced scored 24/214 raw on the same corpus, with three of
+nine intents reachable and 23 of 35 script requests missed. Both §4 targets are cleared on the
+held-out half by rules alone (80 % rules-only; 92 % rules + a 7B).
+
+**What "held-out" means here, because the rules were derived from this corpus.** §4b took the
+rule vocabulary from the corpus itself, and the author read every failure of the prototype on the
+full corpus before writing the rules. So `held-out` is defined as: id hashes odd AND the row's
+failure was never inspected during rule authoring — `run-intent-eval-split.mjs` pins the nineteen
+inspected ids to the `tune` half by name, and the CI gate imports that same module so the runner
+and the gate cannot disagree about which rows were held out. `tune` is the fitted number,
+`held-out` the earned one.
+
+### 6.1 Built as designed
+
+- **`AIChat/lib/intentRouter.ts`.** Nine intents. Rule tables matched with `mentionsWord`, never
+  `includes`. Every strong signal is collected first, then the documented precedence pairs run
+  (script beats format and data-op, and analyze when explicit; chart beats bi-query, analyze and
+  format; bi-query beats analyze and data-op, and format when the format word is report layout;
+  formula vs data-op is settled by whether the verb is a copy; a data-op with a cell target beats
+  format). Exactly one survivor is decisive. Two survivors are `unclear` with a `clarify` pair —
+  the chat prints one notice naming both readings and asks; it never guesses. A lean (a bare cell
+  reference → data-op, a question phrase, weak field evidence → bi-query) is never decisive and
+  keeps every tool.
+- **`script` from durability signals, not the word.** An event, a schedule with an automation verb
+  (a schedule after *for/per/by/of/in* is a grouping, not automation), persistence across sessions,
+  a run-time dialog, an entry point (a command, a form, a button), a network/JSON capability, or the
+  explicit word. A one-off phrase ("just", "right now") cancels only the explicit word: "when this
+  button is clicked, just copy A1" is still a button.
+- **`bi-query` from the loaded model's field names, through the seam §4b said did not exist.**
+  `@api/biModelFields.ts` caches the result of `get_connection_bi_model` per connection, built by
+  `buildModelFieldIndex` (measures, non-calendar columns and their non-generic parts, calendar
+  columns, table names; key columns and generic parts like *name*, *id*, *type* excluded), warmed
+  at activation for every connection the insights provider knows and re-warmed on
+  `bi:model-changed`, and read synchronously in `send()`. The rule: two business fields, or one
+  business field plus a calendar word, and no cell reference. A calendar word alone is a time
+  expression; one word contributes at most one field, so "sales" (a table and a measure synonym) is
+  not two.
+- **`lib/specialists.ts`.** One tool subset (≤ 8) and one byte-stable addendum per intent; only a
+  decisive route narrows; every tool is reachable from some specialist (pinned). Only `script`
+  carries the ~6,000-token API surface, and the gate in ChatView is the NEGATIVE one —
+  `skipSurface = route.decisive && route.intent !== "script" && !mightWantScript(text)` — because
+  gating on a positive script signal would have starved the two thirds of script requests §4a
+  showed carry no trigger word. `scriptIntent.ts` is a thin view over the router that keeps only
+  that over-broad recall sniff (with a handful of Swedish tokens, so a Swedish script request is not
+  starved of the reference). `analysisIntent.ts` is deleted: the router reproduces every English
+  case it fired on and stayed quiet on (carried into `intentRouter.test.ts`), and its "defer to the
+  formula assistant" veto, which had no destination, now IS the `formula` route.
+- **ChatView routes ONCE per message**, before the loop, prints the one-line notice
+  (`describeRoute`), takes tools and system from the specialist, and runs the Tier-0 pre-route on
+  `analyze`. The offer card renders only for a decisive `script` with no clarify pair.
+
+### 6.2 Found during integration, not by design
+
+The reactive narrowing — "the model invented a tool name; retry with the core set" — composed
+wrongly with a decided route: a format request that began with FOUR tools was retried with the
+TEN-tool core set under a notice saying "smaller". The salvage harness caught it (its invariant is
+"the retry must carry fewer tools"). `narrowedSurface(specialist)` now returns the smaller of the
+core set and the specialist's own — the same object when nothing shorter exists, so the notice can
+say the true thing ("the list is already as short as this job allows") — and the remembered
+narrowing caps later lean messages at the core set without replacing a later decided route's
+shorter list. Pinned by three harness cases.
+
+### 6.3 Deliberately not built, and why
+
+- **§3 step 2, the schema-constrained model call for non-decisive messages.** Rules alone clear
+  both §4 targets on the held-out half, every model-backed classification-adjacent feature this
+  programme measured was dead, and the cost of not calling is a wider tool surface on a lean, not a
+  wrong route. Revisit only with a measured lean-accuracy problem.
+- **§3 step 3, buttons.** A clarify pair is a transcript notice; the person rephrases. Buttons that
+  set the intent need a ChatView affordance that does not exist.
+- **§3 specialists as DIRECT calls** to `@api/formulaAssistService` / `insightsService` rendering
+  cards. `formula` and `analyze` still run through the tool loop with a four- and six-tool subset.
+  §5's blockers stand.
+- **Swedish rule tables.** English-only by owner decision.
+- **Sticky `lastIntent` for short follow-ups.** Follow-ups route on their own words and mostly lean,
+  which keeps every tool; nothing measured says the stickiness is needed.
+
+### 6.4 The five defects of §2
+
+1 (no arbitration) — fixed by construction. 2 and 3 (substring traps, `"just "`) — fixed with
+`mentionsWord`; the traps are corpus rows `rg-*` and route correctly. 4 (the formula veto with no
+destination) — the formula is a route. 5 (the surface on every message) — the negative gate.
+`panel` and `range` still have no hint word and take the `button` surface; that is the object-type
+guess, not the route, and it is unchanged.
+
+**Still open from §5:** `registerChatPromptSink` has no caller; the design-query assistant has no
+headless seam; there is no narration destination.

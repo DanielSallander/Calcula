@@ -473,26 +473,6 @@
       "source": "design-queries.json#customers-by-segment"
     },
     {
-      "id": "dq:quantity-by-category-consumer-only",
-      "lang": "en",
-      "text": "quantity sold by category for the Consumer segment only",
-      "intent": "bi-query",
-      "decisive": true,
-      "confusableWith": "analyze",
-      "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#quantity-by-category-consumer-only"
-    },
-    {
-      "id": "dq:revenue-by-region-excluding-europe",
-      "lang": "en",
-      "text": "revenue by region excluding Europe",
-      "intent": "bi-query",
-      "decisive": true,
-      "confusableWith": "analyze",
-      "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#revenue-by-region-excluding-europe"
-    },
-    {
       "id": "dq:share-of-revenue-by-category",
       "lang": "en",
       "text": "share of total revenue by category",
@@ -673,16 +653,6 @@
       "source": "design-queries.json#customers-per-country"
     },
     {
-      "id": "dq:revenue-and-quantity-by-segment-europe",
-      "lang": "en",
-      "text": "revenue and quantity by segment in Europe only",
-      "intent": "bi-query",
-      "decisive": true,
-      "confusableWith": "analyze",
-      "why": "names a measure and a grouping — a report, not a statistic",
-      "source": "design-queries.json#revenue-and-quantity-by-segment-europe"
-    },
-    {
       "id": "dq:categories-sorted-by-name",
       "lang": "en",
       "text": "revenue by product category, in alphabetical order",
@@ -781,6 +751,856 @@
       "confusableWith": "analyze",
       "why": "names a measure and a grouping — a report, not a statistic",
       "source": "design-queries.json#quantity-by-segment-no-totals"
+    },
+    {
+      "id": "dq:five-biggest-countries-listed-alphabetically",
+      "lang": "en",
+      "text": "our five biggest countries by revenue, but printed in alphabetical order rather than by size",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#five-biggest-countries-listed-alphabetically"
+    },
+    {
+      "id": "dq:countries-reverse-alphabetical",
+      "lang": "en",
+      "text": "the countries in reverse alphabetical order, each with its revenue",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#countries-reverse-alphabetical"
+    },
+    {
+      "id": "dq:cost-and-margin-by-segment-alphabetical",
+      "lang": "en",
+      "text": "I want cost and margin for every customer segment, with the segments coming out in name order",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cost-and-margin-by-segment-alphabetical"
+    },
+    {
+      "id": "dq:revenue-by-year-oldest-first",
+      "lang": "en",
+      "text": "revenue per year with the oldest year at the top",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-year-oldest-first"
+    },
+    {
+      "id": "dq:revenue-by-month-newest-first",
+      "lang": "en",
+      "text": "revenue per month with the months written as 2025-03, most recent month at the top",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-month-newest-first"
+    },
+    {
+      "id": "dq:revenue-by-year-and-month-newest-year-first",
+      "lang": "en",
+      "text": "revenue by year and month name, most recent year first",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-year-and-month-newest-year-first"
+    },
+    {
+      "id": "dq:revenue-by-month-name-2024-alphabetical",
+      "lang": "en",
+      "text": "revenue for each month name in 2024, months listed alphabetically so it lines up with our export",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-month-name-2024-alphabetical"
+    },
+    {
+      "id": "dq:margin-by-country-nordics-alphabetical",
+      "lang": "en",
+      "text": "margin by country, just the Nordics, countries in alphabetical order",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#margin-by-country-nordics-alphabetical"
+    },
+    {
+      "id": "dq:category-and-subcategory-both-alphabetical",
+      "lang": "en",
+      "text": "revenue by category and then subcategory, with both levels in alphabetical order",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#category-and-subcategory-both-alphabetical"
+    },
+    {
+      "id": "dq:revenue-and-quantity-by-region-reverse-no-totals",
+      "lang": "en",
+      "text": "revenue and quantity per region, region names starting at the end of the alphabet, and without any totals",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-and-quantity-by-region-reverse-no-totals"
+    },
+    {
+      "id": "dq:bottom-5-subcategories-by-revenue",
+      "lang": "en",
+      "text": "the five subcategories bringing in the least revenue",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-5-subcategories-by-revenue"
+    },
+    {
+      "id": "dq:worst-segment-by-margin-percentage",
+      "lang": "en",
+      "text": "show me only our worst customer segment for margin percentage",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#worst-segment-by-margin-percentage"
+    },
+    {
+      "id": "dq:bottom-5-countries-by-quantity",
+      "lang": "en",
+      "text": "which five countries move the fewest units",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-5-countries-by-quantity"
+    },
+    {
+      "id": "dq:bottom-3-months-by-revenue-2025",
+      "lang": "en",
+      "text": "the three weakest months for revenue in 2025",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-3-months-by-revenue-2025"
+    },
+    {
+      "id": "dq:bottom-3-categories-by-quantity-nordics",
+      "lang": "en",
+      "text": "in the Nordics, which three product categories sell the fewest units",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-3-categories-by-quantity-nordics"
+    },
+    {
+      "id": "dq:bottom-3-subcategories-by-margin-with-revenue",
+      "lang": "en",
+      "text": "the three subcategories with the smallest margin, and show their revenue next to it",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-3-subcategories-by-margin-with-revenue"
+    },
+    {
+      "id": "dq:bottom-2-segments-by-customers",
+      "lang": "en",
+      "text": "the two segments we have the fewest customers in",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-2-segments-by-customers"
+    },
+    {
+      "id": "dq:worst-country-by-margin",
+      "lang": "en",
+      "text": "I want to see the single country where we make the least margin",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#worst-country-by-margin"
+    },
+    {
+      "id": "dq:bottom-2-regions-by-revenue-2024",
+      "lang": "en",
+      "text": "which two regions were our weakest on revenue in 2024",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-2-regions-by-revenue-2024"
+    },
+    {
+      "id": "dq:bottom-4-months-by-quantity",
+      "lang": "en",
+      "text": "taking both years together, which four months of the year are quietest for units shipped",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#bottom-4-months-by-quantity"
+    },
+    {
+      "id": "dq:layout-tabular-category-subcategory",
+      "lang": "en",
+      "text": "show me revenue by category and subcategory as a plain flat table - each of the two levels in its own column, nothing indented and no heading rows in between",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-tabular-category-subcategory"
+    },
+    {
+      "id": "dq:layout-outline-revenue-region-country",
+      "lang": "en",
+      "text": "break revenue down by region and country, each of them in its own column, but I want the region name sitting on a line of its own above its countries rather than sharing the first country's row",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-outline-revenue-region-country"
+    },
+    {
+      "id": "dq:layout-no-totals-top5-countries",
+      "lang": "en",
+      "text": "the five countries with the biggest revenue, and leave the total line off the bottom",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-no-totals-top5-countries"
+    },
+    {
+      "id": "dq:layout-no-row-totals-country-by-year",
+      "lang": "en",
+      "text": "revenue for each country with a column for each year, and leave off the total row at the very bottom of the table",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-no-row-totals-country-by-year"
+    },
+    {
+      "id": "dq:layout-tabular-no-column-totals-segment-category",
+      "lang": "en",
+      "text": "cost for every customer segment with the product categories running across the top - flat table style, and drop the total column on the far right",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-tabular-no-column-totals-segment-category"
+    },
+    {
+      "id": "dq:layout-no-row-totals-keep-subtotals-quantity",
+      "lang": "en",
+      "text": "quantity by segment and country - I still want each segment's own summary line, but drop the overall total at the foot of the table",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-no-row-totals-keep-subtotals-quantity"
+    },
+    {
+      "id": "dq:layout-no-column-totals-margin-segment-year",
+      "lang": "en",
+      "text": "I'd like margin by customer segment with the years across the top. The summary line at the foot is useful, but that extra total column on the right-hand edge is just noise - get rid of it.",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-no-column-totals-margin-segment-year"
+    },
+    {
+      "id": "dq:layout-no-totals-no-subtotals-margin-category-region",
+      "lang": "en",
+      "text": "margin by category and region with no totals anywhere - nothing at the foot of the table, and don't roll each category up into its own line either",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-no-totals-no-subtotals-margin-category-region"
+    },
+    {
+      "id": "dq:layout-tabular-subtotals-off-customers-region-country",
+      "lang": "en",
+      "text": "a flat uninterrupted list of how many customers we have by region and country, with no summary lines breaking up the regions",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#layout-tabular-subtotals-off-customers-region-country"
+    },
+    {
+      "id": "dq:top-10-products-by-margin",
+      "lang": "en",
+      "text": "which ten products earn us the most margin, and what do they cost us",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-10-products-by-margin"
+    },
+    {
+      "id": "dq:top-5-countries-by-revenue-enterprise-only",
+      "lang": "en",
+      "text": "our five strongest countries for revenue, looking at Enterprise customers alone",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-5-countries-by-revenue-enterprise-only"
+    },
+    {
+      "id": "dq:top-3-subcategories-by-quantity",
+      "lang": "en",
+      "text": "which three subcategories shift the most units",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-3-subcategories-by-quantity"
+    },
+    {
+      "id": "dq:biggest-single-month-of-2024",
+      "lang": "en",
+      "text": "which single month of 2024 had the highest revenue",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#biggest-single-month-of-2024"
+    },
+    {
+      "id": "dq:top-2-segments-by-marginpct",
+      "lang": "en",
+      "text": "the two customer segments with the best margin percentage",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-2-segments-by-marginpct"
+    },
+    {
+      "id": "dq:top-3-categories-by-revenue-regions-across",
+      "lang": "en",
+      "text": "the three biggest categories by revenue, with each region getting its own column",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-3-categories-by-revenue-regions-across"
+    },
+    {
+      "id": "dq:revenue-in-the-three-best-margin-countries",
+      "lang": "en",
+      "text": "show me revenue in the three countries where we make the most margin",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-in-the-three-best-margin-countries"
+    },
+    {
+      "id": "dq:top-3-subcategories-by-margin-outside-nordics",
+      "lang": "en",
+      "text": "outside the Nordics, which three subcategories earn us the most margin",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#top-3-subcategories-by-margin-outside-nordics"
+    },
+    {
+      "id": "dq:category-against-segment-grid",
+      "lang": "en",
+      "text": "a grid of category against segment, with revenue in every cell",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#category-against-segment-grid"
+    },
+    {
+      "id": "dq:cost-and-margin-by-country-years-across",
+      "lang": "en",
+      "text": "cost and margin for each country, with a separate column for each year",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cost-and-margin-by-country-years-across"
+    },
+    {
+      "id": "dq:quantity-per-segment-months-across-2025",
+      "lang": "en",
+      "text": "units sold per segment during 2025, with the months across the top",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#quantity-per-segment-months-across-2025"
+    },
+    {
+      "id": "dq:revenue-by-country-segment-across-share-of-whole",
+      "lang": "en",
+      "text": "revenue for each country broken out by segment across the top, every cell as a share of the whole",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-country-segment-across-share-of-whole"
+    },
+    {
+      "id": "dq:revenue-by-region-then-country-one-list",
+      "lang": "en",
+      "text": "revenue broken down by region and then by country underneath it, all in one list",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-region-then-country-one-list"
+    },
+    {
+      "id": "dq:margin-by-segment-then-category-one-list",
+      "lang": "en",
+      "text": "I want margin in a single list by customer segment, with each segment's product categories beneath it",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#margin-by-segment-then-category-one-list"
+    },
+    {
+      "id": "dq:revenue-per-year-column-per-region",
+      "lang": "en",
+      "text": "I'd like to see revenue for each year, with a column per region",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-per-year-column-per-region"
+    },
+    {
+      "id": "dq:revenue-region-country-rows-years-across",
+      "lang": "en",
+      "text": "revenue for each region with its countries listed underneath it, and the years across the top",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-region-country-rows-years-across"
+    },
+    {
+      "id": "dq:quantity-by-category-enterprise-only",
+      "lang": "en",
+      "text": "quantity sold by category, Enterprise customers only",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#quantity-by-category-enterprise-only"
+    },
+    {
+      "id": "dq:revenue-by-region-excluding-benelux",
+      "lang": "en",
+      "text": "revenue by region, leaving Benelux out",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-region-excluding-benelux"
+    },
+    {
+      "id": "dq:revenue-and-quantity-by-segment-nordics",
+      "lang": "en",
+      "text": "revenue and quantity by segment in the Nordics only",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-and-quantity-by-segment-nordics"
+    },
+    {
+      "id": "dq:revenue-by-country-widgets-and-gadgets",
+      "lang": "en",
+      "text": "how much revenue each country brings in from Widgets and Gadgets combined",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-country-widgets-and-gadgets"
+    },
+    {
+      "id": "dq:margin-by-category-skipping-three-countries",
+      "lang": "en",
+      "text": "margin by category, but skip Germany, Austria and Ireland",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#margin-by-category-skipping-three-countries"
+    },
+    {
+      "id": "dq:marginpct-by-subcategory-2025",
+      "lang": "en",
+      "text": "margin percentage for each subcategory, 2025 only",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#marginpct-by-subcategory-2025"
+    },
+    {
+      "id": "dq:revenue-by-region-in-december",
+      "lang": "en",
+      "text": "December revenue for each region",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-region-in-december"
+    },
+    {
+      "id": "dq:revenue-by-category-2025-without-public-sector",
+      "lang": "en",
+      "text": "2025 revenue by category, but don't count Public Sector customers",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-category-2025-without-public-sector"
+    },
+    {
+      "id": "dq:revenue-by-category-in-sweden",
+      "lang": "en",
+      "text": "revenue by category for Sweden",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-category-in-sweden"
+    },
+    {
+      "id": "dq:revenue-by-country-share-of-its-region",
+      "lang": "en",
+      "text": "revenue for every country, expressed as its share of the region it belongs to",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-country-share-of-its-region"
+    },
+    {
+      "id": "dq:quantity-percent-change-year-over-year",
+      "lang": "en",
+      "text": "quantity, year on year, as a percentage change",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#quantity-percent-change-year-over-year"
+    },
+    {
+      "id": "dq:revenue-index-category-by-segment",
+      "lang": "en",
+      "text": "revenue by category and customer segment, showing for each combination how far above or below the figure you would expect from that segment's overall size",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-index-category-by-segment"
+    },
+    {
+      "id": "dq:revenue-month-share-of-its-year-columns",
+      "lang": "en",
+      "text": "monthly revenue by category, with each month shown as a share of its own year",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-month-share-of-its-year-columns"
+    },
+    {
+      "id": "dq:revenue-split-across-categories-per-segment",
+      "lang": "en",
+      "text": "how each customer segment's revenue divides up across the product categories, so every segment's line comes to a hundred percent",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-split-across-categories-per-segment"
+    },
+    {
+      "id": "dq:cumulative-quantity-through-2025",
+      "lang": "en",
+      "text": "a cumulative quantity figure running through the months of 2025",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cumulative-quantity-through-2025"
+    },
+    {
+      "id": "dq:customer-share-of-total-by-region",
+      "lang": "en",
+      "text": "I'd like to know what proportion of all our customers sits in each region",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#customer-share-of-total-by-region"
+    },
+    {
+      "id": "dq:amount-column-by-country-headed-turnover",
+      "lang": "en",
+      "text": "sum of the Amount column by country, headed \"Turnover\"",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#amount-column-by-country-headed-turnover"
+    },
+    {
+      "id": "dq:revenue-and-margin-by-category-margin-called-profit",
+      "lang": "en",
+      "text": "break revenue and margin down by product category, and call the margin column Profit",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-and-margin-by-category-margin-called-profit"
+    },
+    {
+      "id": "dq:revenue-and-cost-by-segment-both-headers-changed",
+      "lang": "en",
+      "text": "for each customer segment show revenue and cost, headed \"Net Sales\" and \"Cost of Sales\"",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-and-cost-by-segment-both-headers-changed"
+    },
+    {
+      "id": "dq:region-share-of-revenue-headed-share-of-total",
+      "lang": "en",
+      "text": "each region as a percentage of all revenue, with that column headed \"Share of Total\"",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#region-share-of-revenue-headed-share-of-total"
+    },
+    {
+      "id": "dq:enterprise-only-revenue-by-country-headed",
+      "lang": "en",
+      "text": "I only care about Enterprise customers - revenue by country, with that column labelled \"Enterprise Revenue\"",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#enterprise-only-revenue-by-country-headed"
+    },
+    {
+      "id": "dq:marginpct-by-year-headed-margin-percent",
+      "lang": "en",
+      "text": "revenue and margin percentage by year, with the percentage column headed \"Margin %\"",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#marginpct-by-year-headed-margin-percent"
+    },
+    {
+      "id": "dq:largest-single-amount-by-region",
+      "lang": "en",
+      "text": "the biggest amount on any single sale in each region",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#largest-single-amount-by-region"
+    },
+    {
+      "id": "dq:count-sales-rows-per-country",
+      "lang": "en",
+      "text": "how many sales did we make in each country",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#count-sales-rows-per-country"
+    },
+    {
+      "id": "dq:smallest-quantity-by-category",
+      "lang": "en",
+      "text": "the smallest quantity on a single sale in each product category",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#smallest-quantity-by-category"
+    },
+    {
+      "id": "dq:cost-column-total-by-segment",
+      "lang": "en",
+      "text": "add up the Cost column for every customer segment",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cost-column-total-by-segment"
+    },
+    {
+      "id": "dq:average-quantity-per-sale-by-subcategory",
+      "lang": "en",
+      "text": "the average quantity per sale for each subcategory",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#average-quantity-per-sale-by-subcategory"
+    },
+    {
+      "id": "dq:count-sales-per-month-2024",
+      "lang": "en",
+      "text": "I want to see how busy each month of 2024 was, measured as the number of individual sales",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#count-sales-per-month-2024"
+    },
+    {
+      "id": "dq:revenue-by-region-then-country",
+      "lang": "en",
+      "text": "revenue by region, and within each region the countries underneath",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-region-then-country"
+    },
+    {
+      "id": "dq:margin-by-segment-then-country",
+      "lang": "en",
+      "text": "I want margin for each customer segment, with the countries it came from listed underneath",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#margin-by-segment-then-country"
+    },
+    {
+      "id": "dq:cost-by-year-then-region",
+      "lang": "en",
+      "text": "cost per year, with each region shown beneath the year it belongs to",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cost-by-year-then-region"
+    },
+    {
+      "id": "dq:revenue-by-segment-then-category",
+      "lang": "en",
+      "text": "start with the customer segment and put the product categories inside each one, with revenue",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-segment-then-category"
+    },
+    {
+      "id": "dq:quantity-by-region-then-category",
+      "lang": "en",
+      "text": "units sold in each region, split further by product category underneath each region",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#quantity-by-region-then-category"
+    },
+    {
+      "id": "dq:revenue-region-country-segment-three-levels",
+      "lang": "en",
+      "text": "revenue for each region, then the countries in it, and the customer segments within each country",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-region-country-segment-three-levels"
+    },
+    {
+      "id": "dq:cost-per-month-across-both-years",
+      "lang": "en",
+      "text": "cost month by month over the whole two-year period, all going down the side, and January 2025 must not be lumped in with January 2024",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cost-per-month-across-both-years"
+    },
+    {
+      "id": "dq:revenue-by-month-with-years-as-columns",
+      "lang": "en",
+      "text": "put each month down the side and the two years side by side, so I can compare revenue for the same month in each year",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-month-with-years-as-columns"
+    },
+    {
+      "id": "dq:best-three-months-of-2025-by-revenue",
+      "lang": "en",
+      "text": "which three months of 2025 brought in the most revenue?",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#best-three-months-of-2025-by-revenue"
+    },
+    {
+      "id": "dq:cumulative-revenue-by-region-months-across",
+      "lang": "en",
+      "text": "for each region I want the cumulative revenue as 2025 goes on, with the months spread along the top",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#cumulative-revenue-by-region-months-across"
+    },
+    {
+      "id": "dq:revenue-by-category-march-2024",
+      "lang": "en",
+      "text": "revenue by product category, March 2024 only",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-by-category-march-2024"
+    },
+    {
+      "id": "dq:revenue-every-month-most-recent-first",
+      "lang": "en",
+      "text": "revenue for every month we have data for, starting with the most recent one",
+      "intent": "bi-query",
+      "decisive": true,
+      "confusableWith": "analyze",
+      "why": "names a measure and a grouping — a report, not a statistic",
+      "source": "design-queries.json#revenue-every-month-most-recent-first"
     },
     {
       "id": "an-1",

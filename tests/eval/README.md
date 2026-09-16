@@ -3,13 +3,14 @@
 Can a given model write Calcula object scripts? This answers it with a number
 instead of a vibe.
 
-Five siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
+Six siblings live beside it: `run-formula-eval.mjs` (formulas, graded by the
 engine — see `docs/design/formula-assist.md`), `run-design-query-eval.mjs`
 (design queries, graded by the DSL compiler and `canonical.ts`),
 `run-next-edit-eval.mjs` (the next-edit row's model chip),
-`run-macro-fim-eval.mjs` (filling in a held-out line of a script) and
-`run-narration-eval.mjs` (wording computed facts without inventing numbers) —
-the last three are described below:
+`run-macro-fim-eval.mjs` (filling in a held-out line of a script),
+`run-narration-eval.mjs` (wording computed facts without inventing numbers) and
+`run-intent-eval.mjs` (the chat's intent router, no model at all) — the last
+four are described below:
 
 ```
 node tests/eval/run-design-query-eval.mjs --provider ollama --model qwen2.5-coder:1.5b
@@ -193,6 +194,48 @@ The corpus is `tasks.json`. It ships in the repo deliberately (design doc
 unfalsifiable, which is a poor look for a project whose pitch is auditability.
 It is a developer/CI artifact — no UI, no support promise, the same standing as
 any other test suite here.
+
+## `run-intent-eval.mjs` — does the chat decide what a message IS before any model turn?
+
+```
+node tests/eval/run-intent-eval.mjs
+node tests/eval/run-intent-eval.mjs --split held-out --show-misses
+node tests/eval/run-intent-eval.mjs --json out/intents.json
+```
+
+No model, no provider flag: the router is deterministic rules
+(`app/extensions/AIChat/lib/intentRouter.ts`) over the message and the loaded
+semantic model's field names, and this runner bundles the product's own router
+and field index (`@api/biModelFields`) with `tests/fixtures/model/sales_star.json`
+open, so it scores exactly what the chat would route with that model loaded.
+The corpus is `intents.json`: 214 utterances over nine intents, every one drawn
+from a prompt some other corpus or session already contained, with the
+known-defect regressions (`rg-*`) that trip the substring traps the old
+detectors had.
+
+It reports a **macro average** first — 122 of the 214 rows are `bi-query`, so a
+raw accuracy would mostly be a score for one intent — and then the number the
+design actually gates on: **precision on the decisive subset**, which is 100 %
+or the router is wrong. A decisive wrong route is apply-formatting-over-the-
+wrong-range and it is silent; a wrong lean only costs the model its narrowed
+tool list. Rows the corpus marks non-decisive earn credit for a clarify pair
+that contains the expected intent, never rows the rules were expected to settle.
+
+**The split is the honest part.** The rules were derived from this corpus's own
+vocabulary and their author read every failure of the prototype before writing
+them, so `held-out` is "id hashes odd AND never inspected during authoring" —
+`run-intent-eval-split.mjs` pins the inspected ids by name, and the CI gate
+(`app/extensions/AIChat/__tests__/intentRouter.corpus.test.ts`) imports the
+same module so the two cannot disagree about which rows were held out. `tune`
+is the fitted number, `held-out` the earned one, `all` what CI pins.
+
+As measured 2026-09-16 when the router shipped: all 214 — macro 98.9 %, raw
+213/214, decisive precision 100 % (0 wrong of 201 decided), 0 false scripts,
+2 clarified; tune 118/118; held-out 96 — macro 97.8 %, 95/96. The two detectors
+it replaced scored 24/214 raw on the same corpus with three of nine intents
+reachable; that arm cannot be re-run (one detector is deleted, the other's
+trigger list rewritten) and the figure is recorded here and in `open-items.md`
+2.AI.10 instead.
 
 ## Two layers
 

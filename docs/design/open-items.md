@@ -1543,15 +1543,17 @@ enumerates the publish entry points and asks per path, with a positive control p
 tell a reached path from an unreached one. Sabotage-verified: removing the new call reds the
 coverage test naming `calp_publish_model`, where the old count would still have passed.
 
-**2.AI.5 — M2 BUILT 2026-09-10 (Step 3 of 2.AI.10); M4/M6 designed, M5 dropped, M7 open.** The
+**2.AI.5 — M2 BUILT 2026-09-10 (Step 3 of 2.AI.10); M4 BUILT 2026-09-16 (Step 5); M6 designed,
+M5 dropped, M7 open.** The
 bundled runtime exists: `app/scripts/fetch-llama-server.mjs` (pinned build, sha256 per
 architecture), `ai/runtime.rs` (job object, free port, health wait, idle unload, six
 `ai_builtin_*` commands), `ai/builtin_model.rs` (consented, resumable, hash-verified download), the
 `calcula-builtin` provider, the `tauri.runtime-<arch>` / `tauri.offline-<arch>` overlays and the
 release step. Design: `local-model-script-authoring.md` §14; measurements: 2.AI.10. M4 (intent
-router) and M6 (Tier-1 narration, Swedish) keep their designs and their seams — `factsJson`
-carries fact ids precisely so a later narrator can be checked for coverage. **M4's design is
-`ai-intent-router.md`, and it only became a file on 2026-09-11.** This sentence had claimed it
+router) SHIPPED 2026-09-16 — `AIChat/lib/intentRouter.ts`, the build record under 2.AI.12 and
+`ai-intent-router.md` §6. M6 (Tier-1 narration, Swedish) keeps its design and its seams —
+`factsJson` carries fact ids precisely so a later narrator can be checked for coverage. **M4's
+design is `ai-intent-router.md`, and it only became a file on 2026-09-11.** This sentence had claimed it
 "keeps its design" while citing nothing, because the design was in a plan snapshot under a user
 profile, outside the repository — a reader following the docs alone concluded none existed. That is
 the citation rot this document warns about, happening to this document. M5 (the fine-tune
@@ -1579,7 +1581,8 @@ or which way was good. Now `analyze_range` / `analyze_model` are chat tools
 `insights/describe.rs` renders — structured attributes only, `context` prose excluded and pinned by
 the fixture's own two sentences, measures in `choose_measures`' order, capped at forty with the cap
 stated; and the chat computes Tier-0 facts BEFORE the model sees an "analyse" message
-(`AIChat/lib/analysisIntent.ts` + `lib/tierZero.ts`, wording from
+(the `analyze` route of `AIChat/lib/intentRouter.ts` + `lib/tierZero.ts` — the original
+`analysisIntent.ts` detector was absorbed into the router and deleted 2026-09-16 — wording from
 `@api/insightsService::describeBundleForModel`, which the Insights pane's "Send to chat" now shares).
 The two tools are NOT in `CORE_TOOL_NAMES`: that set was measured, and a change to it is a
 measurement. Seven sabotages, each redding the test that names it.
@@ -2015,9 +2018,48 @@ cell side (`CRITERIA`, unchanged), so a text cell that merely looks like a date 
 match, which is also Excel's answer. `parse_criteria` returning a `Result` is what makes BUG-0117
 stay fixed: all nine call sites had to write the `Err` arm or stop compiling.
 
-*Still open, in order:* the rules-only intent router (prototyped at 76.5-91.2%
-against the current detectors' measured 18.2%, zero false scripts, and it should ship gated on a
-held-out split); `npm run eval:all` — there is still no `eval:*` script at all, so every
+**STEP 5, THE INTENT ROUTER (M4), SHIPPED 2026-09-16 — corpus first, as the design demanded.**
+`AIChat/lib/intentRouter.ts` routes every chat message ONCE, before any model turn, to one of nine
+intents by deterministic rules: every strong signal is collected, documented precedence pairs
+settle the confusions the corpus is dense on, exactly one survivor is decisive, two survivors are a
+clarify notice (ask, never guess), and a lean is never decisive and keeps every tool. `script` is
+decided from durability signals — an event, a schedule with an automation verb, persistence, a
+run-time dialog, an entry point, a network/JSON capability — because the old twelve-word trigger
+list missed 23 of 35 script requests. `bi-query` is decided from the loaded model's own field
+names through a new seam, `app/src/api/biModelFields.ts` (cached per connection, warmed at
+activation and on `bi:model-changed`, read synchronously in `send()`), which is the seam §4b of
+the design said did not exist. `AIChat/lib/specialists.ts` hands a decided route ≤ 8 tools and a
+one-paragraph addendum; only `script` carries the ~6,000-token API surface, and the gate is the
+NEGATIVE one (`skipSurface = decisive && intent !== "script" && !mightWantScript`), pinned against
+inversion by `surfaceTax.test.ts`. Measured on `tests/eval/intents.json` (214 rows, 122 of them
+`bi-query`, so the headline is a macro average) by `run-intent-eval.mjs`: all — macro 98.9 %,
+213/214, decisive precision 100 % (0 wrong of 201 decided), 0 false scripts, 2 clarified;
+**held-out 96 — macro 97.8 %, 95/96**, where held-out means "id hashes odd AND never inspected
+while the rules were written" (`run-intent-eval-split.mjs` pins the nineteen inspected ids to the
+tune half by name, and the CI gate imports that same module). The detectors it replaced scored
+24/214 on the same corpus with three of nine intents reachable. `intentRouter.corpus.test.ts`
+asserts 100 % decisive precision over EVERY row (sabotaged: flipping the chart/bi-query precedence
+redded that assertion naming `ch-1` and `ch-4` with the sabotage's own reason string, plus three
+companions), zero false scripts, held-out macro ≥ 0.90, every `rg-*` regression, every intent
+reachable, and ≤ 2 asks on rows the corpus marks decisive. `analysisIntent.ts` is deleted: the
+router reproduces all twelve English cases it fired on and all nine it stayed quiet on (carried
+into `intentRouter.test.ts`), and its "defer to the formula assistant" veto, which had no
+destination, now IS the `formula` route.
+
+*Found during integration by the salvage harness, not by design:* the reactive narrowing — "the
+model invented a tool name, retry with the core set" — WIDENED a decided route. A format request
+that started with four tools was retried with the ten-tool core set under a notice saying
+"smaller". `narrowedSurface` (`specialists.ts`) now returns the smaller of the two, by identity, so
+the notice says which of the two things happened; the remembered narrowing caps later lean
+messages at the core set without replacing a later decided route's shorter list (three harness
+cases). *Not built, with reasons, in `ai-intent-router.md` §6.3:* the schema-constrained model
+call for non-decisive messages (rules alone clear both targets on the held-out half, and every
+model-backed classifier-adjacent feature measured here was dead), clarify BUTTONS (a notice; the
+person rephrases), and `formula`/`analyze` as direct `formulaAssistService`/`insightsService`
+calls (the §5 blockers stand: `registerChatPromptSink` still has no caller and the design-query
+assistant still has no headless seam).
+
+*Still open, in order:* `npm run eval:all` — there is still no `eval:*` script at all, so every
 measurement is a hand-typed command whose flags decide the number, which is how two runs of the
 same arm came to be recorded as 17/40 and 16/40; and `finishReason`, computed at
 `run-formula-eval.mjs:468` and never persisted per task, so no artifact can say which task
@@ -2273,14 +2315,13 @@ live path handing a bundle to a model and it builds from `bundle.markdown` — t
 sentences — so the chat paraphrases our prose instead of reading the numbers, which is what
 `facts_json` exists to prevent. Changing it changes what the chat says, so it wants a measurement.
 
-Still open, in order: the rest of **Step 4** above; **Step 5** M4 router absorbing `scriptIntent.ts`
-and `analysisIntent.ts` — design now in `ai-intent-router.md`, which also records the five defects a
-read of those two modules turned up (both detectors fire with no arbitration; `scriptIntent` matches
-its triggers with `includes` where its own comment says that "was WRONG", so *description* fires the
-script offer and *adjust* silently suppresses it; the formula veto has no destination; a ~6,000-token
-API surface is built for every message including a pure "analyse"). **The corpus comes first**:
-`tests/eval/intents.json`, ≥ 120 utterances and ≥ 40 Swedish, exactly as the design-query corpus
-preceded the drafting loop and the citation check preceded the narrator. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to
+Still open, in order: the rest of **Step 4** above. **Step 5 (M4, the router) SHIPPED 2026-09-16**
+— the record is under 2.AI.12 and `ai-intent-router.md` §6; the corpus came first
+(`tests/eval/intents.json`, 214 rows), the five defects the design listed are closed (§6.4), and
+what it left is §6.3: no model call for non-decisive messages by decision, a clarify notice
+rather than buttons, and `formula`/`analyze` through the tool loop rather than direct seams
+because `registerChatPromptSink` still has no caller and the design-query assistant still has no
+headless seam. Also: Vulkan (D7 says after measurement; the CPU numbers above are the ones to
 beat); an offline-installer build (`tauri.offline-<arch>.conf.json` exists, no workflow leg builds
 it); `builtin-runtime.spec.ts` in E2E (passed 2026-09-10 against a real debug build: the app
 starts its runtime on the first completion, answers a grammar exactly, stops it) needs the fetched

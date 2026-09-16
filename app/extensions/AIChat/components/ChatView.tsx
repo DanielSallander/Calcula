@@ -38,11 +38,11 @@
 
 import React, { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import type { TaskPaneViewProps } from "@api";
-import { listenTauriEvent, confirmAsync, hasScriptEditorProvider, requireScriptEditorProvider } from "@api";
-import { aiChatBackend } from "../lib/aiChatBackend";
 import {
-  TOOLS, TOOL_NAMES, CORE_TOOLS, CORE_TOOL_NAMES, AUTORUN_TOOLS, buildSystemPrompt,
-} from "../lib/chatTools";
+  listenTauriEvent, confirmAsync, hasScriptEditorProvider, requireScriptEditorProvider, modelFieldIndex,
+} from "@api";
+import { aiChatBackend } from "../lib/aiChatBackend";
+import { TOOLS, TOOL_NAMES, AUTORUN_TOOLS, buildSystemPrompt } from "../lib/chatTools";
 import {
   AI_STREAM_EVENT, STREAM_CANCELLED, TOOL_USE_TEMPERATURE,
   type ChatBlock, type ChatMessage, type ChatResponse, type StreamEvent,
@@ -56,8 +56,9 @@ import {
   startTool, finishTool, failTool, settleRunning, formatToolBubble, truncate, draftIdFromResult,
   type Bubble,
 } from "../lib/toolTimeline";
-import { detectScriptIntent, guessObjectType, mightWantScript } from "../lib/scriptIntent";
-import { detectAnalysisIntent } from "../lib/analysisIntent";
+import { mightWantScript } from "../lib/scriptIntent";
+import { routeIntent, describeRoute } from "../lib/intentRouter";
+import { specialistFor, narrowedSurface } from "../lib/specialists";
 import { describeTierZero, prepareTierZeroFacts, type TierZeroFacts } from "../lib/tierZero";
 import { subscribeToJobs, latestJob, formatElapsed, type AuthorJob } from "../lib/authorJobs";
 import { onJobViewRequested } from "../lib/jobFocus";
@@ -408,21 +409,34 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     setInput("");
     addBubble({ kind: "user", text });
 
-    // THE BRIDGE. Offered, never automatic: the detector is a word list and it
-    // will be wrong at the margins, so the user decides. It exists because the
-    // model demonstrably cannot make this call itself — asked for "a script
-    // that formats each selected cell by its content" it reached for
-    // `apply_formatting`, which takes ONE range and ONE set of properties and
-    // therefore cannot express a per-cell colour at all.
-    const scriptish = detectScriptIntent(text);
-    // Read ONCE, used twice: the offer card preselects this type, and the API
-    // surface below is built for it. They have to be the same answer -- the
-    // surface used to be hardcoded to "button", so a shape request was shown
-    // `onClick` and none of `onCellChange` / `setProperty` / `render.*`.
-    const guessedType = guessObjectType(text);
-    if (scriptish.looksLikeScript) {
-      setOffer({ intent: text, objectType: guessedType ?? undefined, matched: scriptish.matched ?? "" });
+    // ROUTED ONCE. Every decision below — the offer card, the Tier-0 pre-route,
+    // whether the scripting reference is built, which tools are sent — reads
+    // this one answer. Two detectors used to answer two of those questions
+    // independently and disagreed ("write a macro that flags outliers every
+    // month" got the fact bundle AND the offer card); the router arbitrates,
+    // and when two readings genuinely survive it says so instead of guessing.
+    // It reads the loaded model's field names synchronously: "revenue by
+    // region" is a report because those are fields, not because of any word.
+    const route = routeIntent(text, { fields: modelFieldIndex() });
+    // The offer card preselects this type and the API surface below is built
+    // for it. They have to be the same answer -- the surface used to be
+    // hardcoded to "button", so a shape request was shown `onClick` and none
+    // of `onCellChange` / `setProperty` / `render.*`.
+    const guessedType = route.objectType;
+    // THE BRIDGE. Offered, never automatic: the router will be wrong at the
+    // margins, so the user decides. It exists because the model demonstrably
+    // cannot make this call itself — asked for "a script that formats each
+    // selected cell by its content" it reached for `apply_formatting`, which
+    // takes ONE range and ONE set of properties and cannot express a per-cell
+    // colour at all.
+    if (route.intent === "script" && !route.clarify) {
+      setOffer({ intent: text, objectType: guessedType ?? undefined, matched: route.matched[0] ?? "" });
     }
+    // One honest line: what was decided and on what evidence, or which two
+    // readings it could not choose between. Silent for a lean.
+    const routed = describeRoute(route);
+    if (routed) addBubble({ kind: "notice", text: routed });
+    const specialist = specialistFor(route);
     setBusy(true);
     stoppedRef.current = false;
     draftIdsRef.current = [];
@@ -434,7 +448,7 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     // nothing can be analysed, or the engine refuses, the message goes as
     // typed and the model keeps analyze_range / analyze_model as tools.
     let tierZero: TierZeroFacts | null = null;
-    if (detectAnalysisIntent(text).looksLikeAnalysis) {
+    if (route.intent === "analyze") {
       setActivity("Computing the facts first...");
       tierZero = await prepareTierZeroFacts();
       if (tierZero) addBubble({ kind: "notice", text: describeTierZero(tierZero, selection.model) });
@@ -472,19 +486,23 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
      */
     let misbehaved = false;
     /**
-     * Whether the tool surface has been cut down to `CORE_TOOLS` for this turn
-     * onward.
+     * Whether the tool surface has been cut down for this turn onward, to
+     * `narrowedSurface(specialist)`: the core set for the general loop, the
+     * specialist's own — already shorter — for a decided route.
      *
      * MEASURED (see `CORE_TOOL_NAMES`): handed 24 tool schemas, qwen2.5-coder:3b
      * named a real tool 0 times out of 4; handed 12, it did so 4 times out of 4.
      * The surface SIZE is the lever, so the recovery for "this model keeps
      * inventing names" is to give it fewer names to hold — not to keep repeating
-     * the list at it.
+     * the list at it, and never to give it MORE: a format request that began
+     * with four tools is not "narrowed" to ten.
      *
      * ADAPTIVE rather than a setting, and rather than keyed off the model
      * profile: it needs no probe the user may never have run, it costs a capable
      * model nothing (it never triggers), and it reacts to the thing that
-     * actually went wrong instead of to a prediction about it.
+     * actually went wrong instead of to a prediction about it. Remembered across
+     * messages: the next lean message starts at the core set rather than paying
+     * the same round trip to learn the same thing about the same model.
      */
     let narrowed = narrowedRef.current;
 
@@ -504,18 +522,17 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
     // tool.
     //
     // THE GATE IS THE NEGATIVE ONE, and that is the whole care in it. Gating on
-    // the POSITIVE script detector was the obvious move and is wrong: measured
-    // on `tests/eval/intents.json`, `detectScriptIntent` MISSES 23 of 35 script
-    // requests, so building the surface only when it fires would starve two
-    // thirds of them of the reference they need. Suppressing only where a
-    // message is confidently analysis AND not script keeps every one of those
-    // 23 served — a false negative here costs latency, a false positive costs
-    // the feature.
-    // `scriptish` is the SAME detection the offer card above used, deliberately
-    // reused rather than recomputed: two answers to "is this a script request?"
-    // in one send is exactly the drift that made the offer card and the surface
-    // disagree about which object type to build for.
-    const skipSurface = detectAnalysisIntent(text).looksLikeAnalysis && !mightWantScript(text);
+    // a POSITIVE script signal was the obvious move and is wrong: the old
+    // detector MISSED 23 of 35 script requests, so building the surface only
+    // when it fired would have starved two thirds of them of the reference they
+    // need. The surface is skipped only where the router has DECIDED the message
+    // is something else AND the high-recall sniff is silent — a false negative
+    // here costs latency, a false positive costs the feature. `route` is the
+    // SAME answer the offer card used, deliberately reused rather than
+    // recomputed: two answers to "is this a script request?" in one send is
+    // exactly the drift that made the card and the surface disagree about
+    // which object type to build for.
+    const skipSurface = route.decisive && route.intent !== "script" && !mightWantScript(text);
     const surface = skipSurface ? "" : await apiSurfaceSection(text, guessedType);
     try {
       for (turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -524,6 +541,13 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
         setStreaming("");
         setThinking("");
         setActivity("Preparing the request...");
+
+        // A DECIDED route sends its specialist's tools from the first turn
+        // (≤ 8, and only `script` with the API reference); a lean sends them
+        // all. Once a model has invented a name the retry carries the SMALLER
+        // of the core set and the specialist's — the reactive narrowing
+        // composes with the route and never widens it.
+        const active = narrowed ? narrowedSurface(specialist) : specialist;
 
         // Streaming is a TRANSPORT detail: the command still returns the same
         // ChatResponse the blocking one does, and the loop below is unchanged.
@@ -537,11 +561,9 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
             // while sending 10 would be worse than the bug it fixes.
             // The selection is appended here rather than baked in, so it is
             // whatever the user has selected at the moment they send.
-            system: withSelection(
-              buildSystemPrompt(narrowed ? CORE_TOOL_NAMES : TOOL_NAMES) + surface,
-            ),
+            system: withSelection(buildSystemPrompt(active.toolNames) + active.systemAddendum + surface),
             messages,
-            tools: narrowed ? CORE_TOOLS : TOOLS,
+            tools: [...active.tools],
             temperature: TOOL_USE_TEMPERATURE,
           },
           streamId,
@@ -776,17 +798,25 @@ export function ChatView(_props: TaskPaneViewProps): React.ReactElement {
 
         // FIRST all-invented turn: shrink the surface rather than lecture the
         // model again. This is the measured fix — 0/4 at 24 tools, 4/4 at 12.
+        // When a decided route already sent fewer tools than the core set there
+        // is nothing shorter to offer; the retry then carries the same list plus
+        // the repair message above, and the notice says so rather than
+        // announcing a "smaller set" that would in fact be larger.
         if (inventedStreak >= 1 && !narrowed) {
           narrowed = true;
           // Remembered, so the next message does not pay the same round trip to
           // learn the same thing about the same model.
           narrowedRef.current = true;
+          const retryWith = narrowedSurface(specialist);
           addBubble({
             kind: "notice",
             text:
-              `${selection.model} called a tool that does not exist. Retrying with a smaller set of ` +
-              `${CORE_TOOL_NAMES.length} core tools — smaller models pick the right one far more ` +
-              `reliably from a shorter list.`,
+              retryWith !== specialist
+                ? `${selection.model} called a tool that does not exist. Retrying with a smaller set of ` +
+                  `${retryWith.toolNames.length} core tools — smaller models pick the right one far more ` +
+                  `reliably from a shorter list.`
+                : `${selection.model} called a tool that does not exist. Retrying with the same ` +
+                  `${retryWith.toolNames.length} tools — the list is already as short as this job allows.`,
           });
           continue;
         }

@@ -9,7 +9,9 @@
 // NOTE: Default exports an ExtensionModule object per the contract.
 
 import type { ExtensionModule, ExtensionContext } from "@api/contract";
-import { IconServer, IconAIChat, registerScriptAssistantProvider } from "@api";
+import {
+  IconServer, IconAIChat, registerScriptAssistantProvider, configureModelFields, warmModelFields, getInsightsProvider,
+} from "@api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChatView } from "./components/ChatView";
 import { AuthorStatusItem } from "./components/AuthorStatusItem";
@@ -46,6 +48,22 @@ function activate(context: ExtensionContext): void {
   // Bind the capability-gated backend channel BEFORE anything that could
   // trigger a backend call (both panes render later, post-bind) (A3).
   aiChatBackend.set(context.invokeBackend);
+
+  // THE ROUTER'S FIELD NAMES. The intent router decides "is this a report
+  // request?" by whether the message names a field of the loaded model, and it
+  // decides BEFORE any model turn — so the names have to be cached, not
+  // fetched. Warmed here for every connection the insights provider knows,
+  // re-warmed by the seam itself on `bi:model-changed`, and read synchronously
+  // in `send()`. A connection that cannot be described contributes nothing and
+  // the router falls back to vocabulary for it.
+  cleanupFns.push(
+    configureModelFields({
+      invoke: <T,>(command: string, args?: Record<string, unknown>) =>
+        aiChatBackend.invoke<T>(command, args),
+    }),
+  );
+  const connections = getInsightsProvider()?.modelConnections() ?? [];
+  void warmModelFields(connections.map((c) => c.id));
 
   // Register the task pane
   context.ui.taskPanes.register({

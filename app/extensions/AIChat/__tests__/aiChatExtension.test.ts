@@ -24,6 +24,14 @@ const unregisterAssistant = vi.fn();
 const registerScriptAssistantProvider = vi.fn(() => unregisterAssistant);
 const unregisterCompletion = vi.fn();
 const registerAiCompletionProvider = vi.fn(() => unregisterCompletion);
+// The intent router's field-name cache (`@api/biModelFields`): configured on
+// activate, warmed for every model connection the insights provider knows,
+// released on deactivate. Doubled so the lifecycle can be observed without a
+// backend; the seam's own behaviour is proved in biModelFields.test.ts.
+const unsubscribeModelFields = vi.fn();
+const configureModelFields = vi.fn(() => unsubscribeModelFields);
+const warmModelFields = vi.fn(async () => undefined);
+let insightsProvider: { modelConnections: () => Array<{ id: string }> } | null = null;
 vi.mock("@api", () => ({
   IconServer: () => null,
   IconAIChat: () => null,
@@ -31,6 +39,10 @@ vi.mock("@api", () => ({
     (registerScriptAssistantProvider as unknown as (...x: unknown[]) => unknown)(...a),
   registerAiCompletionProvider: (...a: unknown[]) =>
     (registerAiCompletionProvider as unknown as (...x: unknown[]) => unknown)(...a),
+  configureModelFields: (...a: unknown[]) =>
+    (configureModelFields as unknown as (...x: unknown[]) => unknown)(...a),
+  warmModelFields: (...a: unknown[]) => (warmModelFields as unknown as (...x: unknown[]) => unknown)(...a),
+  getInsightsProvider: () => insightsProvider,
   getSetting: () => "",
   setSetting: () => undefined,
 }));
@@ -78,6 +90,7 @@ describe("AIChat Extension Module", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    insightsProvider = null;
     // Re-import to reset module-level state (isActivated, cleanupFns)
     const mod = await import("../index");
     extension = mod.default;
@@ -192,5 +205,35 @@ describe("AIChat Extension Module", () => {
     extension.activate(createMockContext());
     extension.deactivate();
     expect(unregisterAssistant).toHaveBeenCalled();
+  });
+
+  it("configures and warms the router's field index on activate, one warm per known connection", () => {
+    // The router decides "is this a report request?" from the loaded model's
+    // field names BEFORE any model turn, so they must be cached at activation
+    // — a first message routed on vocabulary alone would miss "revenue by
+    // region" for a model whose measures nobody has fetched yet.
+    insightsProvider = { modelConnections: () => [{ id: "conn-a" }, { id: "conn-b" }] };
+    extension.activate(createMockContext());
+    expect(configureModelFields).toHaveBeenCalledTimes(1);
+    const cfg = configureModelFields.mock.calls[0][0] as { invoke: unknown };
+    expect(cfg.invoke).toBeTypeOf("function");
+    expect(warmModelFields).toHaveBeenCalledTimes(1);
+    expect(warmModelFields).toHaveBeenCalledWith(["conn-a", "conn-b"]);
+  });
+
+  it("warms nothing, and still configures, when no insights provider is registered", () => {
+    insightsProvider = null;
+    extension.activate(createMockContext());
+    expect(configureModelFields).toHaveBeenCalledTimes(1);
+    expect(warmModelFields).toHaveBeenCalledWith([]);
+  });
+
+  it("releases the field-index subscription on deactivate, so a re-activation does not double-subscribe", () => {
+    extension.activate(createMockContext());
+    expect(unsubscribeModelFields).not.toHaveBeenCalled();
+    extension.deactivate();
+    expect(unsubscribeModelFields).toHaveBeenCalledTimes(1);
+    extension.activate(createMockContext());
+    expect(configureModelFields).toHaveBeenCalledTimes(2);
   });
 });
