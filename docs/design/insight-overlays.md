@@ -248,6 +248,46 @@ is the lookup from series name to measure and the plumbing of the optional field
   *"… computed from the numbers; no strategy declares which way is good."*
 - Cues clear on toggle, on data change, and on document open/new. They are never saved unless kept.
 
+### 4.8a The overlay is interactable, steps one point at a time, and follows the data (owner, 2026-09-17)
+
+Added after IO-1, from the owner's review. It supersedes the three-cue cap and the "cues are only
+paint" reading of §4.6; nothing in IO-0/IO-1 changes.
+
+- **Overlay objects.** Two kinds: a **cue** (a ring, from a fact) and a **comment** (the user's
+  words, placed beside a cue). Both are anchored to a **fact id plus a data anchor**, never to
+  pixels and never to a stored index alone. A comment is its own object, persisted in the
+  workbook through the Insights extension's own store (`@api/extensionData`, undoable), keyed by
+  chart id and fact id — NOT a chart annotation. "Keep in chart" remains an explicit act that
+  writes a ring or a comment into the spec as a real annotation (`marker` / `text` layer, §4.6),
+  the writeback-like path, opt-in only.
+- **Interaction.** Cues are hit-tested first, through the same geometry the rings resolve
+  against (a new "cue" hit kind in `chartHitTesting`). Hover shows the fact's sentence; click
+  selects the cue and opens a small popover: the sentence, *Add comment*, *Keep in chart*,
+  *Snapshot*, *Hide*.
+- **Stepping.** One point of interest shown at a time, in the engine's rank order, with a pill
+  drawn in the chart's chrome the way the bound-param widgets already are (`paramWidgets.ts`:
+  computed, drawn, hit-tested per frame): `‹ 2 of 4 ›  Lowest Cost`. The short description is
+  DETERMINISTIC — fact kind + subject (+ direction where declared): "Highest Revenue", "Lowest
+  Cost", "Level shift in Sales", "Outlier in Cost", "Sales overtakes Cost". The full sentence
+  stays in the tooltip. *Show all* is one click in the pane. The three-cue cap (D-IO-2) is
+  withdrawn; stepping is the clutter defence. The transient store gains one field per chart, the
+  active cue index; the cue type gains nothing.
+- **Snapshot.** One click produces the chart WITH its cues and comments as a PNG on the
+  clipboard (and optionally a file). It paints the chart, then the kept annotations (already in
+  the spec), then the transient cues and comments through the same painters. The ordinary
+  *Export as image* stays the document's own picture — no transient cues — so the two commands
+  mean two things: "the chart" and "what I am looking at".
+- **Follows the data — the invariant, extended to comments.** On chart invalidation for ANY
+  reason (a filter, an edit, a param sweep), the bundle is recomputed and every overlay object
+  is re-resolved by fact id. Three outcomes, each honest: (a) the fact still names the same
+  datum → the object stays, at whatever pixel or index the chart now puts it; (b) the fact
+  exists but names a different datum (the highest month moved from Mar to May) → the ring moves
+  and a comment on that fact FOLLOWS it with a "was Mar" badge, because the comment was about
+  the point of interest, not the month; (c) the fact no longer exists → the ring vanishes and the
+  comment goes to an *unattached* tray on the overlay (remove / re-attach), never left over the
+  wrong bar. Rule (b) is the one judgement call; the owner may invert it to "a comment follows
+  the label".
+
 ### 4.8 The chat
 
 The `analyze` route already computes the Tier-0 bundle before the model sees the message
@@ -284,10 +324,15 @@ seems to need judgement ("is this interesting?"), the answer is a new determinis
   §4.5. Tests: every fact kind in the insights fixtures maps to the expected cue kind; the
   **harmful-cue gate** — no cue may anchor to a datum the fact does not name; determinism; the
   withheld-direction case yields neutral.
-- **IO-3 — chart overlay.** The `@api/chartCues` seam, the Charts paint stage, the transient store
-  with document-scope reset, invalidation, the context-menu entry, the pane's "Show on chart", the
-  notice, and keep-as-annotation with the new `marker` layer. Visual E2E snapshots of a chart with
-  and without its overlay (comparator at 0.02 — the retuned threshold, never 0.2).
+- **IO-3a — chart overlay, interactable.** (The seam, paint stage and transient store came with
+  IO-0.) The context-menu entry, the pane's "Show on chart", the notice; the stepper pill with
+  its deterministic description; cue hit-testing, hover and the popover; comments as overlay
+  objects in the Insights store; the follow-the-data re-resolution on invalidation with the three
+  outcomes of §4.8a; keep-as-annotation with the new `marker` layer. Visual E2E snapshots of a
+  chart with and without its overlay (comparator at 0.02 — the retuned threshold, never 0.2).
+- **IO-3b — the snapshot.** One click: chart + kept annotations + transient cues + comments to a
+  PNG on the clipboard, optionally a file; the ordinary export untouched. A test that the export
+  path paints NO transient cue and the snapshot path paints every visible one.
 - **IO-4 — pivot and sheet targets.** `setCellEmphasis` on the pivot seam and its painter, member
   resolution through `getFieldUniqueValues`, the sheet decoration for range facts, the pivot
   context-menu entry, the pane's "Show on pivot / sheet". E2E on the sales-star fixture.
@@ -451,6 +496,23 @@ What IO-2 inherits:
 - **D-IO-5 — the entry points.** Context menu + pane (the design), plus a ribbon toggle?
 - **D-IO-6 — outlier fences.** Draw the two `rule`s, or rings only?
 - **D-IO-7 — the chat tool.** Auto-run and unconfirmed (it is read-only), as designed?
+
+Taken 2026-09-17 with the owner, after IO-1 (§4.8a is the design they produced):
+
+- **D-IO-2 is WITHDRAWN**: stepping one point at a time replaces the cap of three; *show all*
+  stays in the pane. Each step carries a brief deterministic description. — DECIDED.
+- **D-IO-8 — export vs snapshot.** The ordinary *Export as image* stays clean of transient cues;
+  *Snapshot* is its own one-click command that includes cues and comments. — DECIDED (the
+  owner's practice is images mailed around; the snapshot is that image).
+- **D-IO-9 — what a comment is.** A separate overlay object persisted in the Insights store,
+  snapshotted with the rings; *Keep in chart* writes it into the spec on request. — DECIDED, with
+  the owner noting they may return to "annotation in the spec by default" for its kinship with
+  writeback. Both routes exist either way; only the default would move.
+- **D-IO-10 — a comment follows the FACT, not the label** (§4.8a outcome b). — PROPOSED, not yet
+  confirmed.
+- **Overlay objects are never dead**: they re-resolve on every chart invalidation, including a
+  filter change, and an object that cannot be re-resolved is shown as unattached rather than left
+  in place. — DECIDED (the owner's requirement).
 
 ## 8. Risks, and what answers each
 
