@@ -1,8 +1,8 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
-Status: DESIGNED 2026-09-17; **BUILT 2026-09-17, IO-0 through IO-5** (§5a–§5d record what each
-found). Open: the live proof in a running build (§6), the visual E2E snapshots, and the follow-ups
-listed at the end of §5d.
+Status: DESIGNED 2026-09-17; **BUILT 2026-09-17, IO-0 through IO-5, and PROVED LIVE** on the
+running app with stored visual baselines (§5a–§5d record what each found; the live proof is at
+the end of §5d). Open: the follow-ups listed at the end of §5d.
 A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
 model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
@@ -12,9 +12,9 @@ this), `open-items.md` 2.AI.13.
 **Start here, next session.** Read §2 (what exists — the feature is two thirds built already, in
 pieces that have never been joined), then §3 (the seven gaps, each a one-line check), then §7 (the
 owner decisions; the IO-0 session took the doc's recommended answers without the owner live, so
-the IO-1 review took D-IO-8..10 with the owner live, see §4.8a). Every milestone is BUILT — read
-§5a–§5d for what each found. What remains is §6's live proof in a running build and the visual E2E
-snapshots, then the follow-ups at the end of §5d.
+the IO-1 review took D-IO-8..10 with the owner live, see §4.8a). Every milestone is BUILT and the
+live proof has run — read §5a–§5d for what each found. What remains is the follow-up list at the
+end of §5d.
 
 ## 0. The ask, and the one-sentence answer
 
@@ -629,13 +629,44 @@ chart and tells the model not to restate the numbers.
 and schema tests extended. Full vitest, `check-types`, `lint:boundaries`, `check:line-endings`
 green; `cargo test -p insights` 105.
 
-**Not done, and why:** the visual E2E snapshots and the live proof in a running build (§6) need a
-Tauri build and a running app, which this run did not have; the clipboard image write is
-unverified on WebView2 for the same reason (it falls back to a file). Keyboard stepping was not
-added: the grid owns the arrow keys while a chart is selected, and a second binding would need a
-claim. Follow-ups: the pivot member-based route; undo for chart spec edits (Charts-wide); style
-literals in `CUE_STYLES` and the cell decoration → skin tokens; `rule` on a `level` anchor
-(`needs-scale`) through the rule painter; Pareto member positions in Rust.
+**The live proof (§6), 2026-09-17, `app/e2e/journeys/insight-overlays.spec.ts`.** On the running
+debug build, through the gestures a person makes: seed Z1:AA13, create a bar chart through the
+store, select it, right-click → *Show points of interest*; the store then names the highest month
+(Aug, index 7, neutral) and the chart's pixels differ from the "off" capture (positive control);
+`stepChartCues` moves the ring and the pixels change again; select the highest fact, right-click →
+*Add comment on this point…* → the in-app prompt (`[data-calcula-prompt]`) → the comment sits on
+Aug and is painted; write 900 into Dec and emit the app's own `app:cells-updated` → the ring moves
+to Dec and the comment follows with `movedFrom: "Aug"` (D-IO-10, live); *Hide* clears the cues and
+keeps the comment. Then the range: reveal past the data, select Z1:AA13 (verified in the grid
+state), right-click a cell → the grid menu's *Show points of interest* → one owner, the highest
+cell is (row 12, col 26), the cell pixels change; *Hide* through the flipped label empties the
+store. Passed in 46 s. Three findings on the way, none a product defect: (1) a right-click
+immediately after a menu click can hit a STALE hover (the axis menu opened once); the journey
+moves the pointer first and prints the hover state it saw; (2) `setCellValueDirect` dispatches
+only the legacy `cell:updated` + a repaint, NOT `app:cells-updated`, so a direct write never
+invalidates a chart — the journey emits what a user's edit emits; (3) the Name Box scrolls
+minimally, so `selectRange` across the right edge shift-clicks nothing — reveal past the range
+first. Also seen live: the seeded series yields eight cues (extremes, outliers ×3 including the
+new Dec, change callout, smoothed peak/trough), which is exactly the clutter the stepper exists
+for.
+
+**One defect the live proof found and the unit tests could not**: the comment on the tallest bar
+was placed above its attach point, at the chart's top edge, where the stepper pill — painted
+after the comments — covered it. `cueChrome.ts` now keeps comment boxes out of the pill's strip
+(`COMMENT_TOP_RESERVED`) by hanging them below the attach point there; the unit test pins both
+placements and the baseline was re-recorded and re-confirmed.
+
+**Stored baselines** (comparator at 0.02, the retuned threshold): `region-insight-overlay-chart-all.png`
+(every cue, the pill, the selected ring, the comment) and `region-insight-overlay-cells.png` under
+`app/e2e/journeys/__screenshots__/insight-overlays.spec.ts/`, recorded once and confirmed by two
+cold comparison runs (48 s each), per the E2E plan's rules 5 and 7.
+
+**Not done, and why:** the clipboard image write is unverified on WebView2 (it falls back to a
+file). Keyboard stepping was not added: the grid owns
+the arrow keys while a chart is selected, and a second binding would need a claim. Follow-ups:
+the pivot member-based route; undo for chart spec edits (Charts-wide); style literals in
+`CUE_STYLES` and the cell decoration → skin tokens; `rule` on a `level` anchor (`needs-scale`)
+through the rule painter; Pareto member positions in Rust.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

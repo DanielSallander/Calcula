@@ -157,6 +157,8 @@ const COMMENT_FONT = "11px 'Segoe UI', system-ui, sans-serif";
 const COMMENT_PAD = 5;
 const COMMENT_MAX_W = 180;
 const TRAY_ROW = 16;
+/** The strip at the chart's top the stepper pill owns; comment boxes stay out of it. */
+export const COMMENT_TOP_RESERVED = PILL_MARGIN + PILL_HEIGHT + 4;
 
 function attachPointOf(chartX: number, chartY: number, target: CueTarget): { x: number; y: number } {
   switch (target.kind) {
@@ -217,10 +219,14 @@ export function paintChartComments(
     const body = truncate(comment.text, 60);
     const width = Math.min(COMMENT_MAX_W, Math.max(approxTextWidth(body), approxTextWidth(head)) + 2 * COMMENT_PAD);
     const height = (head ? 2 : 1) * 14 + 2 * COMMENT_PAD;
-    // Hang to the right of the datum, flipping left at the chart's edge.
+    // Hang to the right of the datum, flipping left at the chart's edge; above
+    // the attach point, unless that would put the box in the top strip where
+    // the stepper pill is painted AFTER this (the live proof found the comment
+    // on the tallest bar hidden under the pill) — then hang below it instead.
     let x = at.x + 8;
     if (x + width > chartX + chartWidth - 4) x = at.x - 8 - width;
-    const y = Math.max(chartY + 4, at.y - height - 6);
+    const above = at.y - height - 6;
+    const y = above < chartY + COMMENT_TOP_RESERVED ? at.y + 6 : above;
     const polarity = cuesById.get(comment.factId)?.polarity ?? "neutral";
     const stroke = CUE_STYLES[polarity].stroke;
 

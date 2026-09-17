@@ -12,6 +12,7 @@ import {
   drawCueStepper,
   paintChartComments,
   hitTestCommentBoxes,
+  COMMENT_TOP_RESERVED,
   type ChromePaintContext,
 } from "../cueChrome";
 import type { ChartCue, ChartCueComment } from "@api/chartCues";
@@ -104,6 +105,24 @@ describe("comments", () => {
     expect(b.y).toBeGreaterThanOrEqual(50);
     expect(hitTestCommentBoxes(b.x + 2, b.y + 2, boxes)).toBe("k1");
     expect(hitTestCommentBoxes(0, 0, boxes)).toBeNull();
+  });
+
+  it("a comment on a bar that reaches the chart's top hangs BELOW its attach point, out of the pill's strip", () => {
+    // Mar (300) is the tallest bar: its top is at the plot's top, so a box
+    // above it would sit under the stepper pill (found by the live proof).
+    const comments: ChartCueComment[] = [{ id: "k1", factId: ext, text: "Launch month", anchor: { type: "datum", series: "Sales", categoryIndex: 2, categoryLabel: "Mar" } }];
+    const { ctx } = ctxStub();
+    const boxes = paintChartComments(ctx, 100, 50, 600, 400, geometry, data, comments, cues);
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0].y).toBeGreaterThanOrEqual(50 + COMMENT_TOP_RESERVED);
+    const tallest = (geometry as { rects: Array<{ categoryIndex: number; y: number }> }).rects.find((r) => r.categoryIndex === 2)!;
+    expect(boxes[0].y).toBeGreaterThan(50 + tallest.y); // below the bar's top, not above it
+
+    // A short bar keeps the box ABOVE its top.
+    const low: ChartCueComment[] = [{ id: "k2", factId: ext, text: "Low", anchor: { type: "datum", series: "Sales", categoryIndex: 0, categoryLabel: "Jan" } }];
+    const short = (geometry as { rects: Array<{ categoryIndex: number; y: number }> }).rects.find((r) => r.categoryIndex === 0)!;
+    const lowBoxes = paintChartComments(ctxStub().ctx, 100, 50, 600, 400, geometry, data, low, cues);
+    expect(lowBoxes[0].y + lowBoxes[0].height).toBeLessThan(50 + short.y);
   });
 
   it("writes the 'was Mar' badge on a comment that followed its fact", () => {
