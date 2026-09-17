@@ -22,13 +22,18 @@
 //          few words beside a callout); the caller only said WHICH datum.
 //          Nothing here writes to the spec.
 //
-//          A `level` anchor (a rule at a data value) needs the value scale,
-//          which the hit geometry does not carry; it is refused here with
-//          `needs-scale` and is IO-3a's to draw through the rule painter.
+//          A `level` anchor (a rule at a data value) needs the VALUE SCALE,
+//          which the hit geometry does not carry. The caller may hand over the
+//          spec, layout and parsed data it rendered from; `cueContextOf` then
+//          builds the same chrome Y scale the marker painter uses (so a fence
+//          sits where the axis says that value is) for a cartesian mark. With
+//          no scale — a pie, or a caller without one — a level is refused
+//          `needs-scale`, never placed by guesswork.
 
 import type { ChartCue, ChartCueAnchor, ChartCueDatumAnchor, ChartCuePolarity } from "@api/chartCues";
 import { DEFAULT_OVERLAY_STYLE, overlayStyleFor, resolveOverlayStyle } from "@api/insightStyle";
-import type { BarRect, HitGeometry, ParsedChartData, PointMarker, SliceArc } from "../types";
+import type { BarRect, ChartLayout, ChartSpec, HitGeometry, ParsedChartData, PointMarker, SliceArc } from "../types";
+import { buildChromeYScale } from "./chartPainterUtils";
 
 // ============================================================================
 // Resolution (pure)
@@ -50,7 +55,9 @@ export type CueRefusal =
 export type CueShape =
   | { kind: "one"; target: CueTarget }
   | { kind: "many"; targets: CueTarget[] }
-  | { kind: "xspan"; x0: number; x1: number; y0: number; y1: number };
+  | { kind: "xspan"; x0: number; x1: number; y0: number; y1: number }
+  /** A horizontal line across the plot at a value's pixel row. */
+  | { kind: "yline"; x0: number; x1: number; y: number };
 
 export type CueResolution =
   | { ok: true; target: CueTarget }
@@ -64,6 +71,42 @@ export type CueShapeResolution =
 export interface CueDataContext {
   /** Painter-space series names, in draw order. */
   seriesNames: readonly string[];
+  /**
+   * The value axis, when the caller rendered a cartesian mark: a data value's
+   * pixel row (null when it falls outside the plot) and the plot's x-extent.
+   * Absent for a pie or a caller without the spec, and a level is refused.
+   */
+  valueAxis?: {
+    yOf: (value: number) => number | null;
+    x0: number;
+    x1: number;
+  };
+}
+
+/** The spec, layout and parsed data a chart was rendered from, for the value scale. */
+export interface CueScaleSource {
+  spec: ChartSpec;
+  layout: ChartLayout;
+  data: ParsedChartData;
+}
+
+/** Marks with a value axis the chrome Y scale describes. */
+const CARTESIAN_MARKS: ReadonlySet<string> = new Set(["bar", "line", "area", "combo", "waterfall", "histogram", "boxPlot", "stock", "pareto", "scatter", "bubble"]);
+
+/** The value axis of a rendered cartesian chart, or undefined. */
+export function valueAxisOf(source: CueScaleSource | undefined): CueDataContext["valueAxis"] {
+  if (!source || !CARTESIAN_MARKS.has(source.spec.mark)) return undefined;
+  const { plotArea } = source.layout;
+  const scale = buildChromeYScale(source.spec, source.data, [plotArea.y + plotArea.height, plotArea.y]);
+  return {
+    yOf: (value) => {
+      if (!Number.isFinite(value)) return null;
+      const y = scale.scale(value);
+      return y >= plotArea.y && y <= plotArea.y + plotArea.height ? y : null;
+    },
+    x0: plotArea.x,
+    x1: plotArea.x + plotArea.width,
+  };
 }
 
 function fromBars(rects: readonly BarRect[], a: ChartCueDatumAnchor): CueResolution | null {
@@ -188,14 +231,20 @@ export function resolveCue(geometry: HitGeometry, anchor: ChartCueAnchor, ctx: C
       if (!spanned || !all) return { ok: false, reason: "not-drawable" };
       return { ok: true, shape: { kind: "xspan", x0: spanned.x0, x1: spanned.x1, y0: all.y0, y1: all.y1 } };
     }
-    case "level":
-      return { ok: false, reason: "needs-scale" };
+    case "level": {
+      if (!ctx.valueAxis) return { ok: false, reason: "needs-scale" };
+      if (anchor.series !== undefined && !ctx.seriesNames.includes(anchor.series)) return { ok: false, reason: "no-such-datum" };
+      const y = ctx.valueAxis.yOf(anchor.value);
+      if (y === null) return { ok: false, reason: "not-drawable" };
+      return { ok: true, shape: { kind: "yline", x0: ctx.valueAxis.x0, x1: ctx.valueAxis.x1, y } };
+    }
   }
 }
 
 /** The data context the painter needs, from the parsed data the raster was drawn from. */
-export function cueContextOf(data: Pick<ParsedChartData, "series">): CueDataContext {
-  return { seriesNames: data.series.map((s) => s.name) };
+export function cueContextOf(data: Pick<ParsedChartData, "series">, scale?: CueScaleSource): CueDataContext {
+  const valueAxis = valueAxisOf(scale);
+  return { seriesNames: data.series.map((s) => s.name), ...(valueAxis ? { valueAxis } : {}) };
 }
 
 /**
@@ -250,7 +299,7 @@ export const CUE_CALLOUT_FONT = "11px 'Segoe UI', system-ui, sans-serif";
 /** The drawing surface the painter needs; a stub in tests, the grid canvas live. */
 export type CuePaintContext = Pick<
   CanvasRenderingContext2D,
-  "save" | "restore" | "beginPath" | "ellipse" | "arc" | "stroke" | "fill" | "fillRect" | "fillText" | "setLineDash"
+  "save" | "restore" | "beginPath" | "ellipse" | "arc" | "stroke" | "fill" | "fillRect" | "fillText" | "setLineDash" | "moveTo" | "lineTo"
 > & {
   strokeStyle: string | CanvasGradient | CanvasPattern;
   fillStyle: string | CanvasGradient | CanvasPattern;
@@ -350,9 +399,20 @@ function paintOne(ctx: CuePaintContext, chartX: number, chartY: number, cue: Cha
       ctx.fillText(cue.description ?? cue.label ?? "", at.x, at.y);
       return;
     }
-    case "rule":
-      // A level needs the value scale; resolveCue refuses it before this.
+    case "rule": {
+      if (shape.kind !== "yline") return;
+      ctx.lineWidth = live.lineWidth + extra;
+      ctx.beginPath();
+      ctx.moveTo(chartX + shape.x0, chartY + shape.y);
+      ctx.lineTo(chartX + shape.x1, chartY + shape.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = CUE_CALLOUT_FONT;
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(cue.description ?? cue.label ?? "", chartX + shape.x1 - 4, chartY + shape.y - 3);
       return;
+    }
   }
 }
 
@@ -372,9 +432,10 @@ export function paintChartCues(
   data: Pick<ParsedChartData, "series">,
   cues: readonly ChartCue[],
   selectedFactId: string | null = null,
+  scale?: CueScaleSource,
 ): number {
   if (cues.length === 0) return 0;
-  const context = cueContextOf(data);
+  const context = cueContextOf(data, scale);
   let drawn = 0;
   ctx.save();
   ctx.lineWidth = CUE_LINE_WIDTH;

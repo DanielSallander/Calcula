@@ -373,7 +373,15 @@
         "value": "Revenue",
         "topK": 2,
         "categories": 10,
-        "share": 0.83
+        "share": 0.83,
+        "topCategories": [
+          "Gadgets",
+          "Widgets"
+        ],
+        "topIndices": [
+          3,
+          null
+        ]
       }
     },
     {

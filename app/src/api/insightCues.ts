@@ -215,6 +215,15 @@ const RULES: Readonly<Record<string, Rule>> = {
       if (!isRecord(p) || !isIndex(p.index) || typeof p.label !== "string" || typeof p.value !== "number") return "malformed-fact";
       drafts.push({ kind: "ring", tone: "attention", anchor: datum(s, p.index, p.label), description: `Outlier in ${s}`, expectLabel: p.label, expectValue: p.value });
     }
+    // The fences the points are beyond: a rule on the value axis at each, so
+    // the ring is explainable from the chart alone. Drawn only where the
+    // painter has a value scale (a cartesian mark); a pie has no fence to draw.
+    if (typeof k.highFence === "number" && Number.isFinite(k.highFence)) {
+      drafts.push({ kind: "rule", tone: "attention", anchor: { type: "level", series: s, value: k.highFence }, description: `Outlier fence for ${s}` });
+    }
+    if (typeof k.lowFence === "number" && Number.isFinite(k.lowFence)) {
+      drafts.push({ kind: "rule", tone: "attention", anchor: { type: "level", series: s, value: k.lowFence }, description: `Outlier fence for ${s}` });
+    }
     return drafts;
   },
 
@@ -228,6 +237,13 @@ const RULES: Readonly<Record<string, Rule>> = {
     ];
     if (k.atIndex <= last) {
       drafts.push({ kind: "band", tone: "attention", anchor: { type: "span", series: s, from: k.atIndex, to: last }, description });
+    }
+    // The two levels the shift is between, as rules on the value axis.
+    if (typeof k.beforeMean === "number" && Number.isFinite(k.beforeMean)) {
+      drafts.push({ kind: "rule", tone: "attention", anchor: { type: "level", series: s, value: k.beforeMean }, description: `Mean before ${k.atLabel}` });
+    }
+    if (typeof k.afterMean === "number" && Number.isFinite(k.afterMean)) {
+      drafts.push({ kind: "rule", tone: "attention", anchor: { type: "level", series: s, value: k.afterMean }, description: `Mean from ${k.atLabel}` });
     }
     return drafts;
   },
@@ -277,13 +293,29 @@ const RULES: Readonly<Record<string, Rule>> = {
     return [{ kind: "callout", tone, anchor: datum(s, at, k.lastLabel), description: `${s} ${word}`, expectLabel: k.lastLabel, expectValue: k.last }];
   },
 
-  // Pareto names the top-k by SHARE, sorted, and the fact carries no row
-  // positions; a band over "the top two" would be a guess at which bars.
-  pareto: () => "no-position-in-fact",
+  // Pareto names its top-k members (`topCategories`, largest first) and, per
+  // member, the supplied row when there is exactly one (`topIndices`, the
+  // Dominance rule). Each placeable member is emphasised; a member summed
+  // across several rows has no bar to point at. A fact whose no member is
+  // placeable is `no-single-row`, never a band over "the top two".
+  pareto: (k) => {
+    if (typeof k.value !== "string" || typeof k.category !== "string" || !Array.isArray(k.topCategories) || !Array.isArray(k.topIndices)) return "malformed-fact";
+    const names = k.topCategories as unknown[];
+    const indices = k.topIndices as unknown[];
+    if (names.length !== indices.length || names.some((n) => typeof n !== "string")) return "malformed-fact";
+    const drafts: CueDraft[] = [];
+    indices.forEach((idx, i) => {
+      if (idx === null || idx === undefined) return;
+      if (!isIndex(idx)) return;
+      const name = names[i] as string;
+      drafts.push({ kind: "emphasis", tone: "high", anchor: datum(k.value as string, idx, name), description: `${name}: top ${names.length} of ${k.category}`, expectLabel: name });
+    });
+    return drafts.length > 0 ? drafts : "no-single-row";
+  },
 };
 
 /** The fact kinds this table turns into chart cues. Exported for the tests. */
-export const CHART_CUE_FACT_KINDS: readonly string[] = Object.freeze(Object.keys(RULES).filter((k) => k !== "pareto"));
+export const CHART_CUE_FACT_KINDS: readonly string[] = Object.freeze(Object.keys(RULES));
 
 // ============================================================================
 // Validation and assembly

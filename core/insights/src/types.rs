@@ -349,6 +349,14 @@ pub enum FactKind {
         top_k: usize,
         categories: usize,
         share: f64,
+        /// The `top_k` category names, largest first — the members the share
+        /// is made of, so a consumer can point at them instead of at "the top
+        /// two" of a distribution it has to re-sort itself.
+        top_categories: Vec<String>,
+        /// Aligned with `top_categories`: the supplied row holding each, when
+        /// it occurs in EXACTLY one row (the `Dominance::top_index` rule); a
+        /// category summed across several rows has no single row to point at.
+        top_indices: Vec<Option<usize>>,
     },
     Duplicates {
         rows: usize,

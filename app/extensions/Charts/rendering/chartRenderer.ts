@@ -581,7 +581,11 @@ export function renderChart(overlayCtx: OverlayRenderContext): void {
     const overlay = getChartOverlay(chartId);
     if (overlay.cues.length > 0 || overlay.comments.length > 0) {
       const shown = visibleChartCues(chartId);
-      paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, shown, overlay.selectedFactId);
+      paintChartCues(ctx, canvasX, canvasY, cachedData.hitGeometry, cachedData.data, shown, overlay.selectedFactId, {
+        spec: chart.spec,
+        layout: cachedData.layout,
+        data: cachedData.data,
+      });
       const byId = new Map(overlay.cues.map((c) => [c.factId, c] as const));
       cachedData.commentBoxes = paintChartComments(
         ctx, canvasX, canvasY, chartWidth, chartHeight, cachedData.hitGeometry, cachedData.data, overlay.comments, byId,

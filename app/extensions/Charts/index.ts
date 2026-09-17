@@ -109,6 +109,7 @@ import {
   visibleChartCues,
 } from "@api/chartCues";
 import { cueAtDatum } from "./rendering/cuePainter";
+import { isTextEntryTarget, overlayStepDelta } from "./lib/overlayKeys";
 import { onOverlayStyleChanged } from "@api/insightStyle";
 import { hitTestCommentBoxes, hitTestCueStepper } from "./rendering/cueChrome";
 import { chartOverlayHost } from "./lib/chartOverlayHost";
@@ -1824,6 +1825,27 @@ function activate(context: ExtensionContext): void {
   };
   document.addEventListener("keydown", handleDeleteKey, true); // capture phase
   cleanupFunctions.push(() => document.removeEventListener("keydown", handleDeleteKey, true));
+
+  // The keyboard's way through the points of interest (insight-overlays §4.8a):
+  // plain Left/Right step the overlay on the selected chart, and ONLY while it
+  // shows cues — otherwise the grid keeps its arrows. The rule is
+  // `overlayStepDelta` (lib/overlayKeys.ts), pure and tested; this is the
+  // listener that applies it, on the same capture-phase footing as Delete.
+  const handleOverlayStepKey = (e: KeyboardEvent) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (isKeyClaimed(e)) return;
+    if (isTextEntryTarget(e.target)) return;
+    const chartId = getCurrentChartId();
+    if (chartId == null) return;
+    const delta = overlayStepDelta(e, getChartOverlay(chartId).cues.length);
+    if (delta === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    stepChartCues(chartId, delta);
+    requestOverlayRedraw();
+  };
+  document.addEventListener("keydown", handleOverlayStepKey, true);
+  cleanupFunctions.push(() => document.removeEventListener("keydown", handleOverlayStepKey, true));
 
   const handleDeleteRequest = (e: Event) => {
     const chartId = (e as CustomEvent).detail?.chartId as string | undefined;

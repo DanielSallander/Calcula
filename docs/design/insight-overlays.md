@@ -1,9 +1,10 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
 Status: DESIGNED 2026-09-17; **BUILT 2026-09-17, IO-0 through IO-6, and PROVED LIVE** on the
-running app with stored visual baselines (§5a–§5e record what each found; the chart/range proof is
+running app with stored visual baselines (§5a–§5f record what each found; the chart/range proof is
 at the end of §5d, the BI-pivot proof at the end of §5e, which also found and fixed two product
-defects). Open: the follow-ups listed at the end of §5e.
+defects; §5f is the three follow-ups — level rules, Pareto positions, keyboard stepping). Open:
+only the engine finding and the sheet-side Pareto gap named in `open-items.md` 2.AI.13.
 A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
 model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
@@ -838,8 +839,57 @@ for the blank member — a narrator nicety for `model.rs` ("(blank)"), noted in 
 same `Table '' has no registered source` refusal for `% Revenue of Total`, a Block over a measure
 reference, which confirms the engine finding on a model the owner authored.
 
-**Not done:** follow-ups unchanged from §5d: `rule` on a `level` anchor; Pareto member positions;
-keyboard stepping.
+**Not done at this point:** the three follow-ups from §5d — built next, §5f.
+
+## 5f. The follow-ups — level rules, Pareto positions, keyboard stepping (2026-09-17)
+
+Built in one go, as the owner asked, each with its own guard sabotaged.
+
+**A rule on a `level` anchor.** The painter's `cueContextOf(data, scale?)` now takes the spec,
+layout and parsed data the chart was rendered from and builds the SAME chrome Y scale the marker
+painter uses (`buildChromeYScale`), for the cartesian marks; `resolveCue` turns a level into a
+`yline` across the plot at that value's pixel row, and the `rule` case draws it dashed in the
+polarity's colour with the description at the right edge. No scale (a pie, or a caller without
+the spec) → `needs-scale` as before; a value outside the plot → `not-drawable`; a series not drawn
+→ `no-such-datum`. Both the composite paint and the snapshot pass the scale; the export stays
+clean. Two rules now produce levels: **outliers** add a rule at each fence (`lowFence`,
+`highFence`), so the ring is explainable from the chart alone; **changePoint** adds the two means
+(`beforeMean`, `afterMean`) the shift is between. A fact whose rings are refused but whose fences
+still stand is placed with the rules alone (the fences are values on a series the chart still
+shows), so the stale-index test now expects two rules rather than a drop. The harmful-cue gate
+checks a level the way it checks a datum: the series is the fact's subject and the value is one
+of the fact's OWN numbers.
+
+**Pareto member positions, in Rust.** `FactKind::Pareto` gains `top_categories` (the top-k names,
+largest first) and `top_indices` (aligned; the supplied row when the name occurs in EXACTLY one
+row, the `Dominance::top_index` rule, else `None`); `pareto_fact` takes the same `row_positions`
+`dominance_fact` does, and `composition_facts` hands them over. The pinned fixture was regenerated
+(the sample plants one placeable member and one summed across rows). The chart rule emphasises
+each placeable member on its bar with the label check, and refuses `no-single-row` when none is;
+`CHART_CUE_FACT_KINDS` now includes `pareto`. The SHEET rule keeps `no-position-in-fact`: the fact
+names the value column by NAME, not by sheet column, and locating it would be the guess this
+design refuses — a `Subject` on Dominance/Pareto is the change that would close it.
+
+**Keyboard stepping.** The claim is narrow and pure (`Charts/lib/overlayKeys.ts`,
+`overlayStepDelta`): the plain Left/Right arrows step the overlay on the selected chart ONLY
+while it shows cues; any modifier (the grid's own jump), any other key, an empty overlay, or a
+text field leave the keystroke alone. Applied by a capture-phase document listener beside the
+Delete-key one, through the same `isKeyClaimed` gate. The chart journey now steps from the
+keyboard and checks the grid's selection did not move.
+
+**Tests:** `cuePlacement` +3 (level resolution with and without a scale, the pie, the rule's
+line and label), `overlayKeys` (4), `insightCues` (EXPECTED per kind updated; pareto now places
+Gadgets at row 3 and not Widgets), `relations.rs` +1 (positions; none claimed when unknown).
+Sabotaged four ways in one run — the scale source, the member name, the Ctrl modifier, an
+off-by-one in the Rust positions — and each reddened only its own guard.
+
+**Live (the chart journey, rebuilt binary):** the Right arrow moved the ring and the Left arrow
+brought it back while the grid's selection stayed at A1 (printed before and after); the seeded
+series now also carries two "Outlier fence for Sales" level cues, which paint as dashed rules
+in the "all" view, so `region-insight-overlay-chart-all.png` was re-recorded and confirmed by two
+cold comparison runs (51 s each); the `cells` baseline was untouched and still matched. Full
+vitest, `check-types`, `lint:boundaries`, `check:line-endings` and `cargo test -p insights`
+(106) green.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

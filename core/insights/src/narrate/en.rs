@@ -300,6 +300,7 @@ impl Narrator for EnNarrator {
                 top_k,
                 categories,
                 share,
+                ..
             } => format!(
                 "{} of {} {} values account for {} of total {}.",
                 count(*top_k, loc),
@@ -482,6 +483,10 @@ pub(crate) fn every_fact_kind_fixture() -> Vec<FactKind> {
             top_k: 2,
             categories: 10,
             share: 0.83,
+            // One member with a single row, one summed across several: the
+            // TypeScript rule must place the first and refuse the second.
+            top_categories: vec!["Gadgets".to_string(), "Widgets".to_string()],
+            top_indices: vec![Some(3), None],
         },
         FactKind::Duplicates {
             rows: 3,

@@ -312,6 +312,8 @@ function recordingCtx(): { ctx: CuePaintContext; calls: Call[]; styles: string[]
     fill: rec("fill"),
     fillRect: rec("fillRect"),
     fillText: rec("fillText"),
+    moveTo: rec("moveTo"),
+    lineTo: rec("lineTo"),
     setLineDash: (d: number[]) => { dashes.push([...d]); calls.push({ fn: "setLineDash", args: [d] }); },
     lineWidth: 0,
     globalAlpha: 1,
@@ -493,5 +495,66 @@ describe("cue painting", () => {
     expect(dashes.slice(0, 4)).toEqual([[], [], [6, 4], [2, 3]]);
     expect(dashes[dashes.length - 1]).toEqual([]);
     expect(new Set(styles).size).toBe(4);
+  });
+});
+
+// ============================================================================
+// Level anchors: a rule on the value axis (IO-6 follow-up)
+// ============================================================================
+
+describe("level anchors", () => {
+  const level = (value: number, series?: string): ChartCue => ({
+    factId: "outliers:Sales", kind: "rule", polarity: "attention", description: "Outlier fence for Sales",
+    anchor: { type: "level", ...(series ? { series } : {}), value },
+  });
+
+  it("is refused without a value scale, and resolves to a line at the chrome Y scale's row with one", async () => {
+    const data = makeData();
+    const spec = makeSpec({ mark: "bar" });
+    const layout = makeLayout();
+    const g = geometryFor(data, spec, layout);
+    expect(resolveCue(g, level(180, "Sales").anchor, cueContextOf(data))).toEqual({ ok: false, reason: "needs-scale" });
+
+    const { buildChromeYScale } = await import("../chartPainterUtils");
+    const expectedY = buildChromeYScale(spec, data, [layout.plotArea.y + layout.plotArea.height, layout.plotArea.y]).scale(180);
+    const r = resolveCue(g, level(180, "Sales").anchor, cueContextOf(data, { spec, layout, data }));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.shape.kind).toBe("yline");
+      if (r.shape.kind === "yline") {
+        expect(r.shape.y).toBeCloseTo(expectedY, 6);
+        expect(r.shape.x0).toBe(layout.plotArea.x);
+        expect(r.shape.x1).toBe(layout.plotArea.x + layout.plotArea.width);
+      }
+    }
+  });
+
+  it("refuses a value outside the plot, a series not drawn, and any level on a pie", () => {
+    const data = makeData();
+    const spec = makeSpec({ mark: "bar" });
+    const layout = makeLayout();
+    const g = geometryFor(data, spec, layout);
+    const scaled = cueContextOf(data, { spec, layout, data });
+    expect(resolveCue(g, level(1e9, "Sales").anchor, scaled)).toEqual({ ok: false, reason: "not-drawable" });
+    expect(resolveCue(g, level(180, "Nope").anchor, scaled)).toEqual({ ok: false, reason: "no-such-datum" });
+    const pie = makeSpec({ mark: "pie" });
+    expect(resolveCue(geometryFor(data, pie, layout), level(180, "Sales").anchor, cueContextOf(data, { spec: pie, layout, data }))).toEqual({ ok: false, reason: "needs-scale" });
+  });
+
+  it("paints a rule as one horizontal line across the plot with its description at the right", () => {
+    const data = makeData();
+    const spec = makeSpec({ mark: "bar" });
+    const layout = makeLayout();
+    const g = geometryFor(data, spec, layout);
+    const { ctx, calls } = recordingCtx();
+    expect(paintChartCues(ctx, 100, 50, g, data, [level(180, "Sales")], null, { spec, layout, data })).toBe(1);
+    const move = calls.find((c) => c.fn === "moveTo")!;
+    const line = calls.find((c) => c.fn === "lineTo")!;
+    expect((move.args as number[])[0]).toBeCloseTo(100 + layout.plotArea.x, 6);
+    expect((line.args as number[])[0]).toBeCloseTo(100 + layout.plotArea.x + layout.plotArea.width, 6);
+    expect((move.args as number[])[1]).toBeCloseTo((line.args as number[])[1], 6);
+    expect(calls.find((c) => c.fn === "fillText")?.args[0]).toBe("Outlier fence for Sales");
+    // Without the scale the same cue paints nothing, and says so by count.
+    expect(paintChartCues(recordingCtx().ctx, 100, 50, g, data, [level(180, "Sales")])).toBe(0);
   });
 });

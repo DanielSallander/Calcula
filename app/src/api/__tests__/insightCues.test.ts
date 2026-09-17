@@ -70,6 +70,8 @@ function namedDatums(k: FactRecord["kind"]): Named[] {
       ];
     case "dominance":
       return K.topIndex === null ? [] : [{ series: K.value, index: K.topIndex, label: K.topCategory }];
+    case "pareto":
+      return (K.topIndices as Array<number | null>).flatMap((idx, i) => (idx === null ? [] : [{ series: K.value, index: idx, label: K.topCategories[i] }]));
     case "trend":
       return [{ series: name(K.subject), index: "last", value: K.last }];
     case "change":
@@ -91,11 +93,15 @@ function subjectsOf(k: FactRecord["kind"]): string[] {
 const EXPECTED: Record<string, (k: FactRecord["kind"]) => string[]> = {
   extremes: () => ["ring", "ring"],
   smoothedPeak: () => ["ring", "ring"],
-  outliers: (k) => (k as any).points.map(() => "ring"),
-  changePoint: () => ["ring", "band"],
+  // Outliers: a ring per point, then a rule on the value axis at each fence.
+  outliers: (k) => [...(k as any).points.map(() => "ring"), "rule", "rule"],
+  // A level shift: the ring, the band from it, and the two means as rules.
+  changePoint: () => ["ring", "band", "rule", "rule"],
   crossover: () => ["ring", "ring"],
   leader: () => ["emphasis"],
   dominance: (k) => ((k as any).topIndex === null ? [] : ["emphasis"]),
+  // Pareto: an emphasis per named member that sits in exactly one row.
+  pareto: (k) => (k as any).topIndices.filter((i: number | null) => i !== null).map(() => "emphasis"),
   trend: () => ["callout"],
   change: () => ["callout"],
 };
@@ -167,10 +173,13 @@ describe("cuesForChart maps every fact kind to the cue kinds §4.3 names", () =>
     it(`${fact.kind.fact} → [${(EXPECTED[fact.kind.fact]?.(fact.kind) ?? []).join(", ")}]`, () => {
       const { cues, dropped } = cuesForChart(bundleOf([fact]), snapshotFor(fact));
       expect(cues.map((c) => c.kind)).toEqual(EXPECTED[fact.kind.fact]?.(fact.kind) ?? []);
+      expect(dropped).toEqual([]);
       if (fact.kind.fact === "pareto") {
-        expect(dropped).toEqual([{ factId: fact.id, reason: "no-position-in-fact" }]);
-      } else {
-        expect(dropped).toEqual([]);
+        // The fixture plants one placeable member (Gadgets, row 3) and one
+        // summed across rows (Widgets, null): the first is emphasised on ITS
+        // bar, the second is not guessed at.
+        expect(cues.map((c) => c.anchor)).toEqual([{ type: "datum", series: "Revenue", categoryIndex: 3, categoryLabel: "Gadgets" }]);
+        expect(cues[0].description).toBe("Gadgets: top 2 of Product");
       }
       for (const c of cues) {
         expect(c.factId).toBe(fact.id);
@@ -203,7 +212,13 @@ describe("the harmful-cue gate: no cue anchors to a datum the fact did not name"
           if (a.series !== undefined) expect(subjects).toContain(a.series);
           expect(a.to).toBeLessThan(snapshot.categories.length);
         } else {
-          throw new Error(`level anchors are not produced by any rule yet: ${JSON.stringify(a)}`);
+          // A level is a VALUE the fact carries (a fence, a mean) on a subject
+          // series; it names no datum, so the gate checks the series and that
+          // the value is one of the fact's own numbers.
+          const K = fact.kind as Record<string, unknown>;
+          const own = [K.lowFence, K.highFence, K.beforeMean, K.afterMean].filter((v) => typeof v === "number");
+          expect(a.series !== undefined && subjects.includes(a.series), JSON.stringify(a)).toBe(true);
+          expect(own, JSON.stringify(a)).toContain(a.value);
         }
       }
     });
@@ -298,7 +313,12 @@ describe("every refusal has a reason and places nothing", () => {
     const f = factOf("outliers");
     const s = snapshotFor(f);
     const short = { ...s, categories: s.categories.slice(0, 2), series: s.series.map((x) => ({ ...x, values: x.values.slice(0, 2) })) };
-    expect(cuesForChart(bundleOf([f]), short).dropped).toEqual([{ factId: f.id, reason: "index-out-of-range" }]);
+    // The points are past the end, so no ring; the fences are values on the
+    // series the chart still shows, so the two rules remain and the fact is
+    // placed, not dropped.
+    const shortened = cuesForChart(bundleOf([f]), short);
+    expect(shortened.cues.map((c) => c.kind)).toEqual(["rule", "rule"]);
+    expect(shortened.dropped).toEqual([]);
     const none = { ...s, series: [] };
     expect(cuesForChart(bundleOf([f]), none).dropped).toEqual([{ factId: f.id, reason: "series-not-in-snapshot" }]);
   });
@@ -349,9 +369,10 @@ describe("order and determinism", () => {
     }
     const { cues, dropped } = cuesForChart(bundleOf(facts), s);
     expect(dropped).toEqual([]);
-    expect(cues.map((c) => c.factId)).toEqual([facts[0].id, facts[0].id, facts[1].id, facts[1].id, facts[2].id]);
+    // The level shift is four cues (ring, band, two mean rules), all adjacent.
+    expect(cues.map((c) => c.factId)).toEqual([facts[0].id, facts[0].id, facts[0].id, facts[0].id, facts[1].id, facts[1].id, facts[2].id]);
     const steps = stepsOf(cues);
-    expect(steps.map((st) => [st.factId, st.cues.length])).toEqual([[facts[0].id, 2], [facts[1].id, 2], [facts[2].id, 1]]);
+    expect(steps.map((st) => [st.factId, st.cues.length])).toEqual([[facts[0].id, 4], [facts[1].id, 2], [facts[2].id, 1]]);
     expect(steps.map((st) => st.description)).toEqual(["Level shift in Revenue", "Highest Revenue", "Largest series: Revenue"]);
   });
 

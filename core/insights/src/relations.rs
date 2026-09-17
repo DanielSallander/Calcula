@@ -150,7 +150,15 @@ pub fn dominance_fact(
     })
 }
 
-pub fn pareto_fact(category: &str, value: &str, rows: &[(String, f64)]) -> Option<FactKind> {
+/// `row_positions` follows the `dominance_fact` convention: the supplied row
+/// of each pair, or empty when unknown, so every named category's row is
+/// `None` rather than a guess.
+pub fn pareto_fact(
+    category: &str,
+    value: &str,
+    rows: &[(String, f64)],
+    row_positions: &[usize],
+) -> Option<FactKind> {
     let totals = category_totals(rows);
     if totals.len() < PARETO_MIN_CATEGORIES {
         return None;
@@ -172,12 +180,19 @@ pub fn pareto_fact(category: &str, value: &str, rows: &[(String, f64)]) -> Optio
         // one.
         return None;
     }
+    let top_categories: Vec<String> = totals.iter().take(top_k).map(|(n, _)| n.clone()).collect();
+    let top_indices: Vec<Option<usize>> = top_categories
+        .iter()
+        .map(|n| single_row_of(n, rows, row_positions))
+        .collect();
     Some(FactKind::Pareto {
         category: category.to_string(),
         value: value.to_string(),
         top_k,
         categories: totals.len(),
         share: running / grand,
+        top_categories,
+        top_indices,
     })
 }
 
@@ -385,22 +400,56 @@ mod tests {
         for i in 0..9 {
             rows.push((format!("Small{i}"), 22.0));
         }
-        match pareto_fact("Product", "Revenue", &rows).expect("one product carries 80%") {
+        match pareto_fact("Product", "Revenue", &rows, &[]).expect("one product carries 80%") {
             FactKind::Pareto {
                 top_k,
                 categories,
                 share,
+                top_categories,
+                top_indices,
                 ..
             } => {
                 assert_eq!(top_k, 1);
                 assert_eq!(categories, 10);
                 assert!(share >= PARETO_TARGET);
+                assert_eq!(top_categories, vec!["Big".to_string()]);
+                assert_eq!(top_indices, vec![None], "no positions supplied: no row is claimed");
             }
             other => panic!("expected pareto, got {other:?}"),
         }
 
         let flat: Vec<(String, f64)> = (0..10).map(|i| (format!("P{i}"), 100.0)).collect();
-        assert!(pareto_fact("Product", "Revenue", &flat).is_none());
+        assert!(pareto_fact("Product", "Revenue", &flat, &[]).is_none());
+    }
+
+    #[test]
+    fn a_pareto_fact_points_at_each_named_category_row_when_there_is_exactly_one() {
+        // "Big" sits in supplied row 5 (the pairs skip blank rows, so the pair
+        // index is NOT the row); "Twice" is summed across two rows and gets no
+        // row; together they reach the target.
+        let mut rows = vec![
+            ("Twice".to_string(), 300.0),
+            ("Big".to_string(), 500.0),
+            ("Twice".to_string(), 250.0),
+        ];
+        let mut positions = vec![2usize, 5, 7];
+        for i in 0..8 {
+            rows.push((format!("Small{i}"), 20.0));
+            positions.push(10 + i);
+        }
+        match pareto_fact("Product", "Revenue", &rows, &positions).expect("two categories carry 80%") {
+            FactKind::Pareto {
+                top_k,
+                top_categories,
+                top_indices,
+                ..
+            } => {
+                assert_eq!(top_k, 2);
+                assert_eq!(top_categories, vec!["Twice".to_string(), "Big".to_string()]);
+                assert_eq!(top_indices, vec![None, Some(5)]);
+            }
+            other => panic!("expected pareto, got {other:?}"),
+        }
     }
 
     #[test]

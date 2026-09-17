@@ -281,26 +281,34 @@ test.describe("Insight overlays, live", () => {
     const drawn = diffCount(off, on);
     expect(drawn, "POSITIVE CONTROL: turning the overlay on must change the chart's pixels (a ring, the pill)").toBeGreaterThan(50);
 
-    // --- STEP ---------------------------------------------------------------
+    // --- STEP, from the keyboard --------------------------------------------
+    // The chart is selected and shows cues, so the plain Right arrow is the
+    // overlay's (lib/overlayKeys.ts); the grid's active cell must NOT move.
     const steps = await appPage.evaluate(
-      async ({ chartId, mod }) => {
-        const m = (await (window as unknown as AppWindow).__appImport!(mod)) as {
-          chartCueSteps: (id: string) => string[];
-          stepChartCues: (id: string, d: 1 | -1) => void;
-        };
-        const s = m.chartCueSteps(chartId);
-        if (s.length > 1) m.stepChartCues(chartId, 1);
-        return s;
-      },
+      async ({ chartId, mod }) => ((await (window as unknown as AppWindow).__appImport!(mod)) as { chartCueSteps: (id: string) => string[] }).chartCueSteps(chartId),
       { chartId, mod: CHART_CUES },
     );
+    const activeCellBefore = await appPage.evaluate(
+      () => JSON.stringify((window as unknown as { __CALCULA_GRID_STATE__?: { selection?: unknown } }).__CALCULA_GRID_STATE__?.selection ?? null),
+    );
+    await appPage.keyboard.press("ArrowRight");
     await appPage.waitForTimeout(500);
     overlay = await overlayOf(appPage, chartId);
     if (steps.length > 1) {
-      expect(overlay.step).toBe(1);
+      expect(overlay.step, "the Right arrow steps to the next point of interest").toBe(1);
       const stepped = await pixels(appPage, box);
       expect(diffCount(on, stepped), "stepping must move the ring (the pixels must change)").toBeGreaterThan(20);
+      await appPage.keyboard.press("ArrowLeft");
+      await appPage.waitForTimeout(300);
+      expect((await overlayOf(appPage, chartId)).step, "and Left steps back").toBe(0);
+      await appPage.keyboard.press("ArrowRight");
+      await appPage.waitForTimeout(300);
     }
+    const activeCellAfter = await appPage.evaluate(
+      () => JSON.stringify((window as unknown as { __CALCULA_GRID_STATE__?: { selection?: unknown } }).__CALCULA_GRID_STATE__?.selection ?? null),
+    );
+    console.log(`[overlay-journey] grid selection before/after the arrows: ${activeCellBefore} / ${activeCellAfter}`);
+    expect(activeCellAfter, "the arrows were the overlay's, not the grid's: the selection stayed").toBe(activeCellBefore);
 
     // --- A COMMENT on the highest month, through the menu and the in-app prompt
     await appPage.evaluate(

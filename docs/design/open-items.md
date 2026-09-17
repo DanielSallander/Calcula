@@ -2398,8 +2398,12 @@ its headers show (`@api/pivotCues`), PROVED LIVE by `insight-overlays-pivot.spec
 sales-star fixture through a CSV source (Gadgets × 2025-12 marked bad, the cue follows a filter).
 That proof found and fixed two defects: `run_model_insights` lost EVERY measure when one series
 query was refused (now a note, like the slices), and a pivot filter through the API announced
-nothing (`PivotEvents.PIVOT_VIEW_UPDATED` now fires from `cachePivotView`). **Still owed**: a
-value-axis `rule` through the rule painter, Pareto member positions; and, for `model-engine-lib`,
+nothing (`PivotEvents.PIVOT_VIEW_UPDATED` now fires from `cachePivotView`). The three follow-ups
+are BUILT (§5f): level rules (outlier fences, the level shift's two means) through the chrome Y
+scale, Pareto member positions in Rust (`top_categories`/`top_indices`) emphasised on the chart,
+and Left/Right stepping from the keyboard while the selected chart shows cues. **Still owed**:
+Pareto on the SHEET target (the fact names its value column by name, not by sheet column; a
+`Subject` on Dominance/Pareto would close it); and, for `model-engine-lib`,
 a derived measure with no home table (`Margin = [Revenue] - [Cost]`, and the owner's own
 `% Revenue of Total`, a Block over a measure reference) resolves to an EMPTY table in the
 planner's `measure_tables` and is refused with `Table '' has no registered source` — the

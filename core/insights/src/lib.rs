@@ -352,7 +352,7 @@ fn composition_facts(dataset: &Dataset) -> Vec<FactKind> {
 
     let mut out = Vec::new();
     out.extend(relations::dominance_fact(&category.name, &value.name, &rows, &positions));
-    out.extend(relations::pareto_fact(&category.name, &value.name, &rows));
+    out.extend(relations::pareto_fact(&category.name, &value.name, &rows, &positions));
     out
 }
 
