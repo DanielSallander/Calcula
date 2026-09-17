@@ -9,12 +9,14 @@
 //          transient objects are (a series by name, a category index), never
 //          to pixels.
 //
-//          NOT UNDOABLE TODAY, and said so here rather than in the design:
-//          `updateChartSpec` mutates the store and schedules a save; no chart
-//          spec edit enters the undo stack yet (the Design tab's edits do
-//          not either). A kept layer is visible and deletable in the spec
-//          editor, which is the transparency the vision asks for; undo for
-//          chart spec edits is a Charts-wide item, not an overlay one.
+//          UNDOABLE, THROUGH THE BACKEND. `updateChartSpec` mutates the store
+//          and schedules a debounced (300 ms) `update_chart`, and that
+//          command records an "Edit chart" undo entry (`record_chart_undo`);
+//          an undo restores the backend chart and `charts:refresh` reloads the
+//          store. So a kept mark undoes like any chart edit — after the
+//          debounce has flushed, which the live journey waits for. A kept
+//          layer is also visible and deletable in the spec editor, which is
+//          the transparency the vision asks for.
 
 import type { ChartCue, ChartCueComment, ChartCueHost } from "@api/chartCues";
 import { emitAppEvent, AppEvents } from "@api/events";

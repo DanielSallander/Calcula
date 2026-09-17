@@ -31,6 +31,7 @@ import { takeRegionScreenshot, waitForGridStable } from "../helpers/screenshots"
 type AppWindow = Window & {
   __calcImport: (url: string) => Promise<unknown>;
   __appImport?: (modulePath: string) => Promise<unknown>;
+  __TAURI__: { core: { invoke: (cmd: string, args?: unknown) => Promise<unknown> } };
   __CALCULA_CHARTS__?: {
     getAllCharts: () => Array<{ id: string }>;
     selectChart: (id: string) => void;
@@ -331,6 +332,105 @@ test.describe("Insight overlays, live", () => {
     await appPage.mouse.move(4, 4);
     await appPage.waitForTimeout(300);
     await takeRegionScreenshot(appPage, "insight-overlay-chart-all", box);
+
+    // --- KEEP IN CHART, then UNDO through the backend -----------------------
+    // The selected cue (the highest month) becomes a `marker` layer in the
+    // spec; the store's debounced save records an "Edit chart" undo entry in
+    // Rust, so undo removes it again. Both halves read the BACKEND's spec.
+    const backendLayers = async (): Promise<string[]> =>
+      appPage.evaluate(async (id: string) => {
+        const charts = (await (window as unknown as AppWindow).__TAURI__.core.invoke("get_charts")) as Array<{ id: string; specJson: string }>;
+        const found = charts.find((c) => c.id === id);
+        if (!found) throw new Error("chart missing from the backend");
+        // `specJson` is the WHOLE ChartDefinition (chartStore.toEntry), so the
+        // spec — and its layers — sit one level down.
+        const def = JSON.parse(found.specJson) as { spec?: { layers?: Array<{ mark: string }> } };
+        return (def.spec?.layers ?? []).map((l) => l.mark);
+      }, chartId);
+    expect(await backendLayers(), "no layer before keeping").toEqual([]);
+    const selectedBeforeKeep = await appPage.evaluate(
+      async ({ chartId, mod }) => {
+        const m = (await (window as unknown as AppWindow).__appImport!(mod)) as { getSelectedChartCue: (id: string) => { factId: string } | null };
+        return m.getSelectedChartCue(chartId)?.factId ?? null;
+      },
+      { chartId, mod: CHART_CUES },
+    );
+    expect(selectedBeforeKeep, "a cue must be selected for Keep to have a subject").toBe(highest!.factId);
+    await chartMenu(appPage, box, "Keep this mark in the chart");
+    // The store's 300 ms save debounce, then the backend round trip; poll
+    // rather than sleep, and say what each side holds if it never lands.
+    // The STORE's own definition (the `__CALCULA_CHARTS__` bridge carries ids
+    // only, so reading layers through it answers 0 whatever the truth).
+    const storeLayers = async (): Promise<string[]> =>
+      appPage.evaluate(async (id: string) => {
+        const store = (await (window as unknown as AppWindow).__appImport!("/extensions/Charts/lib/chartStore.ts")) as {
+          getChartById: (id: string) => { spec?: { layers?: Array<{ mark: string }> } } | null;
+        };
+        return (store.getChartById(id)?.spec?.layers ?? []).map((l) => l.mark);
+      }, chartId);
+    let kept: string[] = [];
+    let storeLayersAfterKeep: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      await appPage.waitForTimeout(500);
+      kept = await backendLayers();
+      storeLayersAfterKeep = await storeLayers();
+      if (kept.length > 0) break;
+    }
+    expect(storeLayersAfterKeep, "POSITIVE CONTROL: the store holds the kept layer").toEqual(["marker"]);
+    const toasts = await appPage.evaluate(() => [...document.querySelectorAll("[data-toast]")].map((t) => t.textContent ?? ""));
+    console.log(`[overlay-journey] after keep: backend layers=${JSON.stringify(kept)} store layers=${storeLayersAfterKeep} toasts=${JSON.stringify(toasts)}`);
+    expect(kept, `keeping writes a marker layer into the backend's spec (store had ${storeLayersAfterKeep}, toasts ${JSON.stringify(toasts)})`).toEqual(["marker"]);
+    await appPage.evaluate(async () => {
+      const w = window as unknown as AppWindow;
+      await w.__TAURI__.core.invoke("undo");
+      // The shell's own undo path translates the result's domains into these
+      // two events; a direct invoke has to dispatch them itself.
+      window.dispatchEvent(new Event("charts:refresh"));
+      window.dispatchEvent(new Event("grid:refresh"));
+    });
+    await appPage.waitForTimeout(900);
+    expect(await backendLayers(), "undo removes the kept layer from the backend").toEqual([]);
+    expect(await storeLayers(), "and the store reloaded it").toEqual([]);
+
+    // --- SNAPSHOT: the clipboard write, on this platform ----------------------
+    // First the platform probe on its own, so a refusal is named as the
+    // platform's and not mistaken for the snapshot's; then the real command.
+    const clipboardProbe = await appPage.evaluate(async () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 2;
+        canvas.height = 2;
+        const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
+        if (!blob) return "no blob";
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        return "ok";
+      } catch (e) {
+        return `refused: ${String(e)}`;
+      }
+    });
+    console.log(`[overlay-journey] clipboard image probe: ${clipboardProbe}`);
+    expect(clipboardProbe, "WebView2 must accept an image ClipboardItem, or the snapshot cannot copy").toBe("ok");
+    await chartMenu(appPage, box, "Snapshot with points of interest");
+    const toast = appPage.locator("[data-toast]").filter({ hasText: /Snapshot copied/ });
+    await expect(toast, "the snapshot must report that it reached the clipboard").toBeVisible({ timeout: 10_000 });
+    const readBack = await appPage.evaluate(async () => {
+      try {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          if (item.types.includes("image/png")) {
+            const blob = await item.getType("image/png");
+            return `png ${blob.size} bytes`;
+          }
+        }
+        return "no png";
+      } catch (e) {
+        return `read refused: ${String(e)}`;
+      }
+    });
+    console.log(`[overlay-journey] clipboard read-back: ${readBack}`);
+    if (readBack.startsWith("png")) {
+      expect(Number(readBack.split(" ")[1]), "the clipboard PNG must be a real image, not the 2x2 probe").toBeGreaterThan(5_000);
+    }
 
     // --- FOLLOW THE DATA: Dec becomes the maximum ----------------------------
     // `setCellValueDirect` writes through `update_cell` and dispatches only the

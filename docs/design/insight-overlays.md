@@ -609,8 +609,12 @@ Built in one run after the owner's "all items in one go". What exists now, per m
   `createBandScale` / `createPointScale` / `buildChromeYScale` so it sits where the bar sits — the
   older `rule`/`text` painters divide the plot width by the category count and drift; the new
   painter does not inherit that); a comment becomes a `text` layer at its datum's value.
-  **Not undoable today**: `updateChartSpec` schedules a save and enters no undo entry — true of
-  every chart spec edit, said in `chartOverlayHost.ts` rather than promised in §4.8a.
+  **Undoable, through the backend** — corrected after a second look: `updateChartSpec` schedules a
+  debounced `update_chart`, and that command records an "Edit chart" undo entry
+  (`record_chart_undo`); an undo restores the backend chart and `charts:refresh` reloads the
+  store. The live journey keeps a mark, reads the marker layer from the backend's spec, undoes
+  through the backend, and reads it gone. (This paragraph said "not undoable" for a while, on
+  the strength of the frontend store alone.)
 - **The pane**: `InsightsPaneState.origin` (`range | pivot | model | chart`, with the request or
   the id) replaces the label-only origin; a bundle from a chart shows a master toggle with the
   tier notice beneath it and a per-card *Show on chart* that lands the stepper on that fact and
@@ -670,7 +674,12 @@ store, select it, right-click → *Show points of interest*; the store then name
 *Add comment on this point…* → the in-app prompt (`[data-calcula-prompt]`) → the comment sits on
 Aug and is painted; write 900 into Dec and emit the app's own `app:cells-updated` → the ring moves
 to Dec and the comment follows with `movedFrom: "Aug"` (D-IO-10, live); *Hide* clears the cues and
-keeps the comment. Then the range: reveal past the data, select Z1:AA13 (verified in the grid
+keeps the comment. In between: *Keep this mark in the chart* → the backend's `specJson` (the
+whole definition; the spec sits one level down) carries a `marker` layer and the store's own
+definition agrees; `invoke("undo")` + `charts:refresh` → both empty again — undo of a kept mark,
+live. And the snapshot: a 2×2 `ClipboardItem` probe is accepted by WebView2, *Snapshot with
+points of interest* toasts "copied", and `navigator.clipboard.read()` hands back a 48 KB PNG —
+the clipboard write is no longer unverified. Then the range: reveal past the data, select Z1:AA13 (verified in the grid
 state), right-click a cell → the grid menu's *Show points of interest* → one owner, the highest
 cell is (row 12, col 26), the cell pixels change; *Hide* through the flipped label empties the
 store. Passed in 46 s. Three findings on the way, none a product defect: (1) a right-click
@@ -694,12 +703,11 @@ placements and the baseline was re-recorded and re-confirmed.
 `app/e2e/journeys/__screenshots__/insight-overlays.spec.ts/`, recorded once and confirmed by two
 cold comparison runs (48 s each), per the E2E plan's rules 5 and 7.
 
-**Not done, and why:** the clipboard image write is unverified on WebView2 (it falls back to a
-file). Keyboard stepping was not added: the grid owns
-the arrow keys while a chart is selected, and a second binding would need a claim. Follow-ups:
-the pivot member-based route; undo for chart spec edits (Charts-wide); `rule` on a `level` anchor
-(`needs-scale`) through the rule painter; Pareto member positions in Rust. (The style literals
-became the document setting of §4.10.)
+**Not done, and why:** keyboard stepping was not added: the grid owns the arrow keys while a chart
+is selected, and a second binding would need a claim. Follow-ups: the pivot member-based route;
+`rule` on a `level` anchor (`needs-scale`) through the rule painter; Pareto member positions in
+Rust. (The style literals became the document setting of §4.10; the clipboard write and the undo
+of a kept mark are proved by the live journey, below.)
 
 ## 6. Verification — the standard this repository holds a milestone to
 
