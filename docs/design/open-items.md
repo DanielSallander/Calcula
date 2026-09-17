@@ -2394,10 +2394,16 @@ client-side tool; the overlay's style is a document setting the publisher owns, 
 the application (D-IO-11). PROVED LIVE by `app/e2e/journeys/insight-overlays.spec.ts` with two
 stored baselines. The member-based pivot route (IO-6, §5e) followed the same day: a BI-backed
 pivot takes the MODEL's facts with the strategy's polarity, matched to its cells by the labels
-its headers show (`@api/pivotCues`), unit-proved on hand-built views. **Still owed**: the live
-proof of IO-6 on the sales-star fixture, a value-axis `rule` through the rule painter, Pareto
-member positions. D-IO-10 (a comment follows the FACT, not the label) is built as proposed and
-confirmed by the owner in passing ("proceed").
+its headers show (`@api/pivotCues`), PROVED LIVE by `insight-overlays-pivot.spec.ts` on the
+sales-star fixture through a CSV source (Gadgets × 2025-12 marked bad, the cue follows a filter).
+That proof found and fixed two defects: `run_model_insights` lost EVERY measure when one series
+query was refused (now a note, like the slices), and a pivot filter through the API announced
+nothing (`PivotEvents.PIVOT_VIEW_UPDATED` now fires from `cachePivotView`). **Still owed**: a
+value-axis `rule` through the rule painter, Pareto member positions; and, for `model-engine-lib`,
+a derived measure with no home table (`Margin = [Revenue] - [Cost]`) resolves to an EMPTY table in
+the planner's `measure_tables` and is refused with `Table '' has no registered source` — the
+sales-star fixture's own measures hit it. D-IO-10 (a comment follows the FACT, not the label) is
+built as proposed and confirmed by the owner in passing ("proceed").
 
 ## 3. How to keep this file honest
 

@@ -2,10 +2,18 @@
 // PURPOSE: Shared pivot view cache accessible from both index.ts and pivot-api.ts.
 // CONTEXT: Avoids circular imports while allowing IPC responses to be cached immediately.
 
+import { emitAppEvent } from "@api/events";
 import type { PivotViewResponse, PivotRowData, PivotCellWindowResponse } from "./pivot-api";
+import { PivotEvents } from "../../_shared/lib/pivotEvents";
 
 /** Cache of the latest PivotViewResponse for each pivot table. */
 const pivotViewCache = new Map<string, PivotViewResponse>();
+
+/** Announce that a pivot's view was replaced (see `PivotEvents.PIVOT_VIEW_UPDATED`). */
+function announceViewUpdated(pivotId: string, view: PivotViewResponse): void {
+  if (typeof window === "undefined") return;
+  emitAppEvent(PivotEvents.PIVOT_VIEW_UPDATED, { pivotId, version: view.version });
+}
 
 /**
  * Tracks which pivotIds were just cached by updatePivotFields/togglePivotGroup.
@@ -34,6 +42,7 @@ export function cachePivotView(pivotId: string, view: PivotViewResponse): void {
     // Non-windowed: clear any stale cell window cache
     cellWindowCaches.delete(pivotId);
   }
+  announceViewUpdated(pivotId, view);
 }
 
 /**
@@ -69,6 +78,7 @@ export function setCachedPivotView(pivotId: string, view: PivotViewResponse): vo
   } else {
     cellWindowCaches.delete(pivotId);
   }
+  announceViewUpdated(pivotId, view);
 }
 
 /**

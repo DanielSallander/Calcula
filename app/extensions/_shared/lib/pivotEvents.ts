@@ -20,6 +20,16 @@ export const PivotEvents = {
   PIVOT_REQUEST_LAYOUT: "app:pivot-request-layout",
   /** Emitted when filter values are applied via the filter dropdown */
   PIVOT_FILTER_APPLIED: "app:pivot-filter-applied",
+  /**
+   * Emitted whenever a pivot's VIEW is replaced by a fresh backend response —
+   * a field change, a filter, a sort, a group toggle, whichever path asked.
+   * Payload `{ pivotId, version }`. `PIVOT_REGIONS_UPDATED` fires only when the
+   * region SYNC runs, which the API paths (a filter applied by a script or a
+   * test) never trigger; anything that must follow a pivot's cells listens
+   * here. Found live by the insight overlay, whose cue stayed in the column a
+   * filtered-out category had vacated.
+   */
+  PIVOT_VIEW_UPDATED: "app:pivot-view-updated",
   /** Emitted by the backend during long-running pivot operations (Tauri event) */
   PIVOT_PROGRESS: "pivot:progress",
 } as const;

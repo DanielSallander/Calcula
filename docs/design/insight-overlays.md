@@ -1,9 +1,9 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
 Status: DESIGNED 2026-09-17; **BUILT 2026-09-17, IO-0 through IO-6, and PROVED LIVE** on the
-running app with stored visual baselines (§5a–§5e record what each found; the live proof is at
-the end of §5d; IO-6, the member-based pivot route, is §5e and unit-proved only). Open: the
-follow-ups listed at the end of §5e.
+running app with stored visual baselines (§5a–§5e record what each found; the chart/range proof is
+at the end of §5d, the BI-pivot proof at the end of §5e, which also found and fixed two product
+defects). Open: the follow-ups listed at the end of §5e.
 A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
 model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
@@ -779,11 +779,51 @@ route test included) and no polarity or refusal test; removing the field check o
 reds only "matches a member on ITS dimension". Full vitest, `check-types`, `lint:boundaries`,
 `check:line-endings` green.
 
-**Not done:** the live proof on the sales-star fixture (a real BI pivot with a strategy) — the
-unit fixtures are hand-built from the engine's shapes, and the router milestone's lesson says the
-defects that matter will come from the live run; `variance` needs a model with targets to show
-anything. Follow-ups unchanged from §5d: `rule` on a `level` anchor; Pareto member positions;
-keyboard stepping.
+**The live proof (2026-09-17, `app/e2e/journeys/insight-overlays-pivot.spec.ts`, ~31 s).** The
+owner offered `context_manager/model.json` (AdventureWorks on a local Postgres); it carries no
+strategy and needs a login this machine has not cached, so the proof runs on the insights engine's
+OWN fixture instead: `tests/fixtures/model/sales_star.json`, whose rows are written to a temp
+folder as CSV files and bound through a `csv` source (the model-transform journey's recipe — no
+credentials), with `sales_star_strategy.json` set through `bi_model_strategy` and its time axis
+moved to `Date[Month]` so a fact's period label IS the pivot's header label. A BI pivot of six
+months × five categories on Revenue; the grid menu inside it → *Show points of interest*. What the
+running app then held: seven cues, **Gadgets × 2025-12 marked BAD** ("Gadgets: Revenue down" — the
+planted collapse, judged by `higherIsBetter`), Doodads and Widgets good, Trinkets and Gizmos bad,
+and on the month's Grand Total cell both "Revenue down 10%" and "Revenue below target" (the
+variance fact, against the strategy's 1 500 000), all bad; the cells located from the VIEW and
+the region, never from the cue; the notice reading "3 points of interest from the model; colours
+follow the strategy's declared directions"; the Gadgets cell's pixels changed; a stored baseline
+(`region-insight-overlay-pivot-model.png`, recorded once, compared cold three times). Then the
+filter dropdown's gesture (`pivot.applyFilter`, a manual selection) hides Doodads: the view's
+Gadgets column moves one step left and **the cue moves with it** — follow-the-data on a pivot,
+live. Cost and Quantity facts were dropped `measure-not-in-pivot`, the Segment and Region
+contributions `dimension-not-in-pivot`: the refusals, in the log, are the ones the design names.
+
+**Two product defects the live proof found, both fixed here, neither reachable by a unit test:**
+1. **One refused measure lost the whole model analysis.** The fixture's derived measures
+   (`Margin = [Revenue] - [Cost]`, `MarginPct`) carry no home table, the planner refuses their
+   series query (`Table '' has no registered source`), and `run_model_insights` propagated it with
+   `?` — the pane and the overlay got NOTHING, Revenue included, while the dimension slices a few
+   lines below already noted a refusal and went on. The series query now follows the same rule:
+   "MarginPct was not analysed: …" in the notes, the other measures' facts survive (the journey
+   asserts both). The engine side — a derived measure resolving to an EMPTY home table — is a
+   separate finding for `model-engine-lib`, recorded in open-items, not fixed here.
+2. **A filter applied through the pivot API announced nothing.** `PIVOT_REGIONS_UPDATED` fires
+   only from the region sync, which the API paths (a filter from a script, a test, or the
+   Model-Editor-driven field change) never run; the overlay's cue stayed in the column Doodads had
+   vacated (0 region events, measured). `cachePivotView` — the one funnel every fresh view passes
+   through — now emits `PivotEvents.PIVOT_VIEW_UPDATED {pivotId, version}`, and `followSheetData`
+   recomputes the owning pivot on it (unit-pinned: another pivot's event is ignored, a burst is one
+   recompute; sabotaged → only that test reds).
+
+**Three E2E findings, not product defects:** `hiddenItems` on a `BiFieldRef` is not the filter
+path (every month stayed visible) — the dropdown's `applyFilter` with a `manualFilter` is;
+`PivotRegionInfo.sourceFields` carry the BARE column name ("Month"), not "Date.Month"; the
+recompute's silent `.catch` now warns, so a stayed-put cue is diagnosable from the console.
+
+**Not done:** the owner's AdventureWorks model itself (needs its Postgres login and a strategy;
+the same journey would run on it with a `postgres` source once both exist). Follow-ups unchanged
+from §5d: `rule` on a `level` anchor; Pareto member positions; keyboard stepping.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

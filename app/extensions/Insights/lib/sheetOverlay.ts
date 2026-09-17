@@ -254,12 +254,18 @@ export function scheduleSheetRecompute(id: string, delayMs: number = SHEET_RECOM
       if (!current) return;
       void compute(current.owner)
         .then((next) => {
-          if (typeof next === "string" || !active.has(id)) return;
+          if (!active.has(id)) return;
+          if (typeof next === "string") {
+            // Keep the last honest overlay, and say why it was not replaced.
+            console.warn(`[Insights] overlay for ${id} not recomputed: ${next}`);
+            return;
+          }
           next.onlyFactId = current.onlyFactId;
           publish(id, next);
         })
-        .catch(() => {
-          // Keep the last honest overlay until the range can be analysed again.
+        .catch((err: unknown) => {
+          // Keep the last honest overlay until the target can be analysed again.
+          console.warn(`[Insights] overlay for ${id} not recomputed:`, err);
         });
     }, delayMs),
   );
@@ -285,9 +291,20 @@ export function followSheetData(): () => void {
       if (entry.owner.kind === "pivot") scheduleSheetRecompute(id);
     }
   });
+  // A filter, sort or field change applied through the pivot API replaces the
+  // view WITHOUT a region sync (found live: the Gadgets cue stayed in the
+  // column the filtered-out Doodads had vacated), so the view event is the one
+  // that follows a pivot's cells.
+  const offViews = onAppEvent<{ pivotId?: string }>(PivotEvents.PIVOT_VIEW_UPDATED, (payload) => {
+    const pivotId = payload?.pivotId;
+    if (typeof pivotId !== "string") return;
+    const id = ownerId({ kind: "pivot", pivotId });
+    if (active.has(id)) scheduleSheetRecompute(id);
+  });
   return () => {
     offCells();
     offPivots();
+    offViews();
   };
 }
 

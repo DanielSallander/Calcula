@@ -550,13 +550,29 @@ pub async fn run_model_insights(
                 ..Default::default()
             },
         };
-        let grid = run_query(bi_state, request.connection_id.clone(), series_request).await?;
+        // One measure the engine refuses must not lose the whole report — the
+        // same rule the dimension slices below already follow. Found live: a
+        // model whose derived measures (`Margin = [Revenue] - [Cost]`) carry no
+        // home table is refused by the planner for THOSE measures, and before
+        // this every other measure's facts, Revenue's included, went with them.
+        // The refusal is SAID, in the notes, with the engine's own words.
+        let grid = match run_query(bi_state, request.connection_id.clone(), series_request).await {
+            Ok(g) => g,
+            Err(e) => {
+                notes.push(format!("{measure} was not analysed: {e}"));
+                queries_used += 1;
+                continue;
+            }
+        };
         queries_used += 1;
 
         let group_by_count = usize::from(axis.is_some());
-        let value_col = grid
-            .measure_column(measure, group_by_count, 0)
-            .ok_or_else(|| format!("The query for {measure} returned no value column"))?;
+        let Some(value_col) = grid.measure_column(measure, group_by_count, 0) else {
+            notes.push(format!(
+                "{measure} was not analysed: the query returned no value column for it."
+            ));
+            continue;
+        };
 
         let mut labels: Vec<String> = Vec::new();
         let mut values: Vec<f64> = Vec::new();

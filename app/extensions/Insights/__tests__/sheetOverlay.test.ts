@@ -215,6 +215,23 @@ describe("following the data", () => {
     expect(h.invoke).toHaveBeenCalledTimes(2);
     off();
   });
+
+  it("recomputes a pivot owner when ITS view is replaced (a filter through the API), and not another pivot's", async () => {
+    const events = await import("@api/events");
+    h.regions.current = [{ type: "pivot", data: { pivotId: "p1" }, startRow: 10, startCol: 2, endRow: 20, endCol: 6 }];
+    await sheet.showSheetOverlay({ kind: "pivot", pivotId: "p1" });
+    const off = sheet.followSheetData();
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+    events.emitAppEvent("app:pivot-view-updated", { pivotId: "p9", version: 2 });
+    await vi.advanceTimersByTimeAsync(sheet.SHEET_RECOMPUTE_DEBOUNCE_MS + 10);
+    expect(h.invoke, "another pivot's view is not this owner's business").toHaveBeenCalledTimes(1);
+    events.emitAppEvent("app:pivot-view-updated", { pivotId: "p1", version: 2 });
+    events.emitAppEvent("app:pivot-view-updated", { pivotId: "p1", version: 3 });
+    await vi.advanceTimersByTimeAsync(sheet.SHEET_RECOMPUTE_DEBOUNCE_MS + 10);
+    await flush();
+    expect(h.invoke, "one recompute for a burst of view updates").toHaveBeenCalledTimes(2);
+    off();
+  });
 });
 
 describe("the decoration's colours", () => {
