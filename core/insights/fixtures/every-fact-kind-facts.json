@@ -1,0 +1,503 @@
+{
+  "engineVersion": 1,
+  "localeId": "en-US",
+  "source": {
+    "label": "Sheet1!A1:D30",
+    "sheet": "Sheet1",
+    "range": {
+      "sheet": "Sheet1",
+      "startRow": 0,
+      "startCol": 0,
+      "endRow": 3,
+      "endCol": 3
+    }
+  },
+  "facts": [
+    {
+      "id": "shape::",
+      "score": 0.95,
+      "evidenceA1": [],
+      "kind": {
+        "fact": "shape",
+        "rows": 12,
+        "cols": 4,
+        "hasHeader": true
+      }
+    },
+    {
+      "id": "columnSummary:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.168,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "columnSummary",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "n": 12,
+        "min": 10.0,
+        "max": 90.0,
+        "mean": 45.5,
+        "median": 44.0,
+        "stdev": 22.25
+      }
+    },
+    {
+      "id": "textSummary:c/Sales/Spend/Sales!C2:C13:",
+      "score": 0.273,
+      "evidenceA1": [
+        "Sales!C2:C13"
+      ],
+      "kind": {
+        "fact": "textSummary",
+        "subject": {
+          "type": "column",
+          "name": "Spend",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 2,
+            "endRow": 12,
+            "endCol": 2
+          }
+        },
+        "distinct": 5,
+        "top": [
+          [
+            "North",
+            9
+          ],
+          [
+            "South",
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "id": "booleanShare:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.2,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "booleanShare",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "trueShare": 0.625,
+        "n": 16
+      }
+    },
+    {
+      "id": "trend:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.8117500000000001,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "trend",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "slopePerStep": 3.25,
+        "r2": 0.91,
+        "pctChange": 0.42,
+        "first": 100.0,
+        "last": 142.0,
+        "n": 12,
+        "direction": "rising"
+      }
+    },
+    {
+      "id": "change:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.426,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "change",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "firstLabel": "Jan",
+        "lastLabel": "Dec",
+        "first": 100.0,
+        "last": 142.0,
+        "pct": 0.42
+      }
+    },
+    {
+      "id": "extremes:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.37776315789473686,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "extremes",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "bestLabel": "Aug",
+        "bestIndex": 7,
+        "best": 190.0,
+        "worstLabel": "Feb",
+        "worstIndex": 1,
+        "worst": 61.0
+      }
+    },
+    {
+      "id": "smoothedPeak:c/Sales/Revenue/Sales!B2:B13:3",
+      "score": 0.3270655270655271,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "smoothedPeak",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "window": 3,
+        "peakLabel": "Jul",
+        "peakIndex": 6,
+        "peak": 175.5,
+        "troughLabel": "Feb",
+        "troughIndex": 1,
+        "trough": 64.0
+      }
+    },
+    {
+      "id": "seasonality:c/Sales/Revenue/Sales!B2:B13:12",
+      "score": 0.67875,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "seasonality",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "lag": 12,
+        "acf": 0.81
+      }
+    },
+    {
+      "id": "changePoint:c/Sales/Revenue/Sales!B2:B13:6",
+      "score": 0.6266666666666667,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "changePoint",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "atLabel": "Jul",
+        "atIndex": 6,
+        "beforeMean": 101.0,
+        "afterMean": 148.0,
+        "shiftSd": 3.4
+      }
+    },
+    {
+      "id": "outliers:c/Sales/Revenue/Sales!B2:B13:interquartile",
+      "score": 0.49349999999999994,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "outliers",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "method": "iqr",
+        "lowFence": 20.0,
+        "highFence": 180.0,
+        "points": [
+          {
+            "index": 7,
+            "label": "Aug",
+            "value": 400.0,
+            "z": 4.1
+          }
+        ],
+        "total": 1
+      }
+    },
+    {
+      "id": "correlation:c/Sales/Revenue/Sales!B2:B13+c/Sales/Spend/Sales!C2:C13:",
+      "score": 0.6732,
+      "evidenceA1": [
+        "Sales!B2:B13",
+        "Sales!C2:C13"
+      ],
+      "kind": {
+        "fact": "correlation",
+        "a": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "b": {
+          "type": "column",
+          "name": "Spend",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 2,
+            "endRow": 12,
+            "endCol": 2
+          }
+        },
+        "r": 0.87,
+        "n": 12
+      }
+    },
+    {
+      "id": "dominance::Region|Revenue",
+      "score": 0.5265000000000001,
+      "evidenceA1": [],
+      "kind": {
+        "fact": "dominance",
+        "category": "Region",
+        "value": "Revenue",
+        "topCategory": "North",
+        "topIndex": 0,
+        "topShare": 0.62,
+        "categories": 5
+      }
+    },
+    {
+      "id": "pareto::Product|Revenue",
+      "score": 0.558,
+      "evidenceA1": [],
+      "kind": {
+        "fact": "pareto",
+        "category": "Product",
+        "value": "Revenue",
+        "topK": 2,
+        "categories": 10,
+        "share": 0.83
+      }
+    },
+    {
+      "id": "duplicates::",
+      "score": 0.31625,
+      "evidenceA1": [],
+      "kind": {
+        "fact": "duplicates",
+        "rows": 3,
+        "exampleRow": 11
+      }
+    },
+    {
+      "id": "blankRows::",
+      "score": 0.1925,
+      "evidenceA1": [],
+      "kind": {
+        "fact": "blankRows",
+        "rows": 2
+      }
+    },
+    {
+      "id": "errors:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.92,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "errors",
+        "count": 4,
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "example": "#DIV/0!"
+      }
+    },
+    {
+      "id": "mixedTypes:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.4,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "mixedTypes",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "numberShare": 0.7,
+        "textShare": 0.3
+      }
+    },
+    {
+      "id": "crossover:c/Sales/Revenue/Sales!B2:B13+c/Sales/Spend/Sales!C2:C13:5",
+      "score": 0.54,
+      "evidenceA1": [
+        "Sales!B2:B13",
+        "Sales!C2:C13"
+      ],
+      "kind": {
+        "fact": "crossover",
+        "a": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "b": {
+          "type": "column",
+          "name": "Spend",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 2,
+            "endRow": 12,
+            "endCol": 2
+          }
+        },
+        "atLabel": "Jun",
+        "atIndex": 5
+      }
+    },
+    {
+      "id": "leader:c/Sales/Revenue/Sales!B2:B13:",
+      "score": 0.44949999999999996,
+      "evidenceA1": [
+        "Sales!B2:B13"
+      ],
+      "kind": {
+        "fact": "leader",
+        "subject": {
+          "type": "column",
+          "name": "Revenue",
+          "sheet": "Sales",
+          "range": {
+            "sheet": "Sales",
+            "startRow": 1,
+            "startCol": 1,
+            "endRow": 12,
+            "endCol": 1
+          }
+        },
+        "share": 0.55,
+        "others": 3
+      }
+    }
+  ]
+}

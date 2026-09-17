@@ -2795,7 +2795,20 @@ export {
   onChartCuesChanged,
 } from "./chartCues";
 
-export type { ChartCue, ChartCueAnchor, ChartCueDatumAnchor, ChartCuePolarity } from "./chartCues";
+export type {
+  ChartCue,
+  ChartCueAnchor,
+  ChartCueDatumAnchor,
+  ChartCueSeriesAnchor,
+  ChartCueSpanAnchor,
+  ChartCueLevelAnchor,
+  ChartCueKind,
+  ChartCuePolarity,
+} from "./chartCues";
+
+// The cue rules (IO-2): facts → cues, validated against the chart's snapshot.
+export { cuesForChart, stepsOf, parseFacts, polarityFor, directionOf, CHART_CUE_FACT_KINDS } from "./insightCues";
+export type { ChartCueSet, CueDrop, CueDropReason, CueTone, FactRecord } from "./insightCues";
 
 export {
   registerChartContextMenuContribution,

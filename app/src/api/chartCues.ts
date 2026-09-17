@@ -22,9 +22,16 @@
 //          to draw when the two disagree — a stale index after a filter or a
 //          data change is the encircled wrong bar, and a dropped ring is the
 //          only honest answer.
+//
+//          THE VOCABULARY IS CLOSED (§4.2): five kinds, four anchors, and no
+//          sixth of either without a measured reason. `@api/insightCues` is
+//          the only producer; the Charts painter is the only consumer.
 
 /** Good / bad come from a declared direction, never from a number's sign. */
 export type ChartCuePolarity = "good" | "bad" | "attention" | "neutral";
+
+/** The closed cue vocabulary (docs/design/insight-overlays.md §4.2). */
+export type ChartCueKind = "ring" | "emphasis" | "band" | "rule" | "callout";
 
 /**
  * One datum on a chart: a series by NAME (indices shift when a series is
@@ -38,18 +45,43 @@ export interface ChartCueDatumAnchor {
   categoryLabel: string;
 }
 
-/** Closed. IO-2 widens this to span / level anchors; IO-0 needs only a datum. */
-export type ChartCueAnchor = ChartCueDatumAnchor;
+/** A whole series (the largest of several, say). */
+export interface ChartCueSeriesAnchor {
+  type: "series";
+  series: string;
+}
+
+/** A run of categories, inclusive, in painter-space indices. */
+export interface ChartCueSpanAnchor {
+  type: "span";
+  series?: string;
+  from: number;
+  to: number;
+}
+
+/** A data value on the value axis (a fence, a target). */
+export interface ChartCueLevelAnchor {
+  type: "level";
+  series?: string;
+  value: number;
+}
+
+export type ChartCueAnchor =
+  | ChartCueDatumAnchor
+  | ChartCueSeriesAnchor
+  | ChartCueSpanAnchor
+  | ChartCueLevelAnchor;
 
 export interface ChartCue {
   /** The fact this cue is the picture of. A cue with no fact behind it is a defect. */
   factId: string;
-  /** Closed vocabulary. IO-0 draws rings only. */
-  kind: "ring";
+  kind: ChartCueKind;
   polarity: ChartCuePolarity;
   anchor: ChartCueAnchor;
-  /** The fact's own deterministic sentence, or a short form of it. */
+  /** The fact's own deterministic sentence. */
   label?: string;
+  /** A few words for the stepper: "Highest Revenue", "Level shift in Cost". Deterministic. */
+  description?: string;
 }
 
 type Listener = (chartId: string) => void;

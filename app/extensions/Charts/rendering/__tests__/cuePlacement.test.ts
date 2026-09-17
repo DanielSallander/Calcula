@@ -19,10 +19,12 @@ import { DEFAULT_CHART_THEME } from "../chartTheme";
 import { applyChartFilters } from "../../lib/chartFilters";
 import {
   resolveCueTarget,
+  resolveCue,
   cueContextOf,
   paintChartCues,
   CUE_RING_PAD,
   CUE_STYLES,
+  CUE_EMPHASIS_LINE_WIDTH,
   type CuePaintContext,
 } from "../cuePainter";
 import type { ChartCue, ChartCueDatumAnchor } from "@api/chartCues";
@@ -307,8 +309,16 @@ function recordingCtx(): { ctx: CuePaintContext; calls: Call[]; styles: string[]
     ellipse: rec("ellipse"),
     arc: rec("arc"),
     stroke: rec("stroke"),
+    fill: rec("fill"),
+    fillRect: rec("fillRect"),
+    fillText: rec("fillText"),
     setLineDash: (d: number[]) => { dashes.push([...d]); calls.push({ fn: "setLineDash", args: [d] }); },
     lineWidth: 0,
+    globalAlpha: 1,
+    fillStyle: "",
+    font: "",
+    textAlign: "left",
+    textBaseline: "alphabetic",
     _stroke: "" as string,
     get strokeStyle() { return this._stroke; },
     set strokeStyle(v: string) { this._stroke = v; styles.push(v); },
@@ -374,6 +384,79 @@ describe("cue painting", () => {
     const drawn = paintChartCues(ctx, 0, 0, g, data, [cue(anchor("Sales", 2, "March")), cue(anchor("Profit"))]);
     expect(drawn).toBe(0);
     expect(calls.some((c) => c.fn === "ellipse" || c.fn === "arc" || c.fn === "stroke")).toBe(false);
+  });
+
+  it("emphasis on a SERIES strokes every datum of that series and nothing else", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    const r = resolveCue(g, { type: "series", series: "Cost" }, cueContextOf(data));
+    if (!r.ok || r.shape.kind !== "many") throw new Error("expected many targets");
+    expect(r.shape.targets).toHaveLength(5);
+    for (const t of r.shape.targets) expect(t.kind === "rect" && t.rect.seriesName).toBe("Cost");
+
+    const { ctx, calls } = recordingCtx();
+    const drawn = paintChartCues(ctx, 0, 0, g, data, [
+      { factId: "leader", kind: "emphasis", polarity: "good", anchor: { type: "series", series: "Cost" } },
+    ]);
+    expect(drawn).toBe(1);
+    expect(calls.filter((c) => c.fn === "ellipse")).toHaveLength(5);
+    expect(calls.filter((c) => c.fn === "stroke")).toHaveLength(5);
+    expect(ctx.lineWidth).toBe(CUE_EMPHASIS_LINE_WIDTH);
+    // A series the chart does not have is refused.
+    expect(resolveCue(g, { type: "series", series: "Profit" }, cueContextOf(data))).toEqual({ ok: false, reason: "no-such-datum" });
+  });
+
+  it("a band over a span fills the x-extent of exactly those categories, over the plot's data extent", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    const r = resolveCue(g, { type: "span", series: "Sales", from: 2, to: 4 }, cueContextOf(data));
+    if (!r.ok || r.shape.kind !== "xspan") throw new Error("expected an x-span");
+    const mar = rectAt(g, "Sales", 2);
+    const may = rectAt(g, "Sales", 4);
+    expect(r.shape.x0).toBe(mar.x);
+    expect(r.shape.x1).toBe(may.x + may.width);
+    // Feb's bar lies outside the band.
+    expect(rectAt(g, "Sales", 1).x + rectAt(g, "Sales", 1).width).toBeLessThanOrEqual(r.shape.x0);
+
+    const { ctx, calls } = recordingCtx();
+    paintChartCues(ctx, 100, 50, g, data, [
+      { factId: "cp", kind: "band", polarity: "attention", anchor: { type: "span", series: "Sales", from: 2, to: 4 } },
+    ]);
+    const fill = calls.find((c) => c.fn === "fillRect")!;
+    expect((fill.args as number[])[0]).toBeCloseTo(100 + mar.x, 6);
+    expect((fill.args as number[])[2]).toBeCloseTo(may.x + may.width - mar.x, 6);
+    expect(ctx.globalAlpha).toBe(1); // restored after the translucent fill
+  });
+
+  it("a callout rings the datum and writes its description above it", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "line" }));
+    const { ctx, calls } = recordingCtx();
+    paintChartCues(ctx, 0, 0, g, data, [
+      { factId: "t", kind: "callout", polarity: "good", anchor: anchor("Sales", 4, "May"), description: "Sales rising" },
+    ]);
+    const text = calls.find((c) => c.fn === "fillText")!;
+    expect(text.args[0]).toBe("Sales rising");
+    const marker = (g as { markers: Array<{ seriesName: string; categoryIndex: number; cx: number; cy: number }> }).markers.find(
+      (m) => m.seriesName === "Sales" && m.categoryIndex === 4,
+    )!;
+    expect(text.args[1]).toBeCloseTo(marker.cx, 6);
+    expect(text.args[2] as number).toBeLessThan(marker.cy);
+  });
+
+  it("a level anchor is refused with needs-scale until IO-3a draws it through the rule painter", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "bar" }));
+    expect(resolveCue(g, { type: "level", series: "Sales", value: 180 }, cueContextOf(data))).toEqual({ ok: false, reason: "needs-scale" });
+    const { ctx, calls } = recordingCtx();
+    expect(paintChartCues(ctx, 0, 0, g, data, [{ factId: "f", kind: "rule", polarity: "attention", anchor: { type: "level", value: 180 } }])).toBe(0);
+    expect(calls.some((c) => c.fn === "stroke" || c.fn === "fillRect")).toBe(false);
+  });
+
+  it("a band on a pie is refused: a wedge has no x-extent worth a band", () => {
+    const data = makeData();
+    const g = geometryFor(data, makeSpec({ mark: "pie" }));
+    expect(resolveCue(g, { type: "span", series: "Sales", from: 1, to: 2 }, cueContextOf(data))).toEqual({ ok: false, reason: "not-drawable" });
   });
 
   it("colour and dash follow polarity, so shape carries the meaning where colour cannot", () => {

@@ -1,7 +1,7 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
-Status: DESIGNED 2026-09-17; **IO-0 and IO-1 BUILT 2026-09-17** (§5a and §5b record what each
-found), IO-2..5 open.
+Status: DESIGNED 2026-09-17; **IO-0, IO-1 and IO-2 BUILT 2026-09-17** (§5a, §5b and §5c record
+what each found), IO-3a..5 open.
 A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
 model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
@@ -11,10 +11,11 @@ this), `open-items.md` 2.AI.13.
 **Start here, next session.** Read §2 (what exists — the feature is two thirds built already, in
 pieces that have never been joined), then §3 (the seven gaps, each a one-line check), then §7 (the
 owner decisions; the IO-0 session took the doc's recommended answers without the owner live, so
-confirm them before IO-2). IO-0 and IO-1 are BUILT — read §5a and §5b for what they found,
-including the correction to §4.5 — so the next milestone is IO-2 (§5): the pure cue rules in
-`@api/insightCues`, the §4.3 table as data, the harmful-cue gate. §5b's "what IO-2 inherits" list
-is its starting point.
+the IO-1 review took D-IO-8..10 with the owner live, see §4.8a). IO-0, IO-1 and IO-2 are BUILT —
+read §5a, §5b and §5c for what they found — so the next milestone is IO-3a (§5): the overlay as
+a user surface: context-menu entry, the stepper pill, cue hit-testing and the popover, comments as
+overlay objects, follow-the-data on invalidation, keep-as-annotation. §5c's "what IO-3a inherits"
+list is its starting point.
 
 ## 0. The ask, and the one-sentence answer
 
@@ -319,9 +320,10 @@ seems to need judgement ("is this interesting?"), the answer is a new determinis
   the optional strategy context on `insights_for_series` (§4.4); the request field names pinned
   in `commands.rs`; `core/insights` unit tests for every changed kind; the narration fixtures
   still narrate every kind (`every_fact_kind_has_a_fixture`).
-- **IO-2 — cues (pure TypeScript, `@api/insightCues.ts`).** `cuesFor(bundle, target) -> Cue[]`,
-  the table in §4.3 as data, polarity from provenance, ranking and caps, the validation rule from
-  §4.5. Tests: every fact kind in the insights fixtures maps to the expected cue kind; the
+- **IO-2 — cues (pure TypeScript, `@api/insightCues.ts`).** BUILT, see §5c.
+  `cuesForChart(bundle, snapshot) -> { cues, dropped }`, the table in §4.3 as data, polarity from
+  provenance, rank order and per-fact steps (the cap is withdrawn, §4.8a), the validation rule
+  from §4.5. Tests: every fact kind in Rust's pinned fixture maps to the expected cue kind; the
   **harmful-cue gate** — no cue may anchor to a datum the fact does not name; determinism; the
   withheld-direction case yields neutral.
 - **IO-3a — chart overlay, interactable.** (The seam, paint stage and transient store came with
@@ -469,6 +471,71 @@ What IO-2 inherits:
   `bestPolarity` reads; put it in one function and test the withheld case for every kind.
 - The sampled-snapshot hole from §5a still stands: above `CHART_SERIES_MAX_POINTS`, a snapshot
   index is not a painter index. The label check refuses rather than misplaces.
+
+## 5c. IO-2 — what was built, and what it found (2026-09-17)
+
+The cue rules, pure. What exists now:
+
+- **`@api/insightCues.ts`** — `cuesForChart(bundle, snapshot) -> { cues, dropped }`. The §4.3
+  table is a `RULES` record keyed by fact kind; each rule turns the fact's numbers into DRAFTS
+  (kind, tone, anchor, description, and what to check at the anchor), and one `validate` runs
+  every draft against the snapshot: series present, index in range, label at the index equals
+  the fact's label where the fact named one, value at the index equals the fact's value where the
+  fact carries the DATUM's value. A fact whose every draft fails is returned once in `dropped`
+  with the first reason (`series-not-in-snapshot` | `index-out-of-range` | `label-mismatch` |
+  `value-mismatch` | `no-single-row` | `no-position-in-fact` | `malformed-fact`). Kinds that point
+  at nothing on a chart (the summaries, correlation, seasonality, shape) and the sheet-only
+  hygiene kinds produce neither a cue nor a drop. `stepsOf(cues)` groups one fact's cues into one
+  step, in rank order, for the stepper; `polarityFor(tone, direction)` and `directionOf(insight)`
+  are the colour rule.
+- **The table as built** (deviations from §4.3 noted): `extremes` → ring best (tone high) + ring
+  worst (tone low), label AND value checked; `smoothedPeak` → ring peak + ring trough, LABEL ONLY
+  checked (the peak value is a smoothed mean, no bar holds it); `outliers` → ring per point,
+  attention, label and value checked, NO fence rules (D-IO-6); `changePoint` → ring at the point
+  + `band` over `[atIndex, last]`, attention — the §4.3 "rule at at_index" became the ring,
+  because `rule` is a value-axis mark and a category position is a datum; `crossover` → ring on
+  both series at the crossing, neutral; `leader` → `emphasis` on the whole series (a new `series`
+  anchor, §4.2 gained an anchor, not a kind); `dominance` → `emphasis` on the top row when
+  `topIndex` is a single row, else dropped `no-single-row`; `trend` → `callout` at the series'
+  LAST NUMBER (a trailing blank is skipped), value checked against `last`, tone from
+  rising/falling/flat; `change` → `callout` at the last number, label and value checked, tone from
+  the sign of `pct`; `pareto` → dropped `no-position-in-fact` (the fact carries shares, not rows;
+  IO-1 did not add member positions and a band over "the top two" would be a guess).
+- **Descriptions** are the fact kind plus the subject: "Highest Revenue", "Lowest Cost", "Peak of
+  Sales (smoothed)", "Outlier in Cost", "Level shift in Sales", "Sales and Cost cross", "Largest
+  series: Sales", "North dominates Revenue", "Sales rising", "Cost down 12%".
+- **The vocabulary widened where the type lives** (`@api/chartCues`): `kind` is the five of §4.2;
+  `anchor` is `datum | series | span | level`; `description?` joined `label?`. The IO-0 mapper
+  (`Insights/lib/cuePlacement.ts`) is DELETED; the hidden command calls `cuesForChart` and
+  places every justified cue (stepping is IO-3a's).
+- **The Charts painter draws four of the five kinds** (`cuePainter.ts`): `ring` and `callout` on a
+  datum (the callout writes its description above the datum), `emphasis` on a datum or on every
+  datum of a series, `band` as a translucent fill over the x-extent of the spanned categories
+  across the plot's data extent (refused on a pie: `not-drawable`). A `level` anchor is refused
+  with `needs-scale`: the hit geometry carries no value scale, so `rule` waits for IO-3a to reach
+  the rule painter with the spec and layout the renderer already holds.
+- **The fixture is Rust's, pinned.** `core/insights/fixtures/every-fact-kind-facts.json` is
+  written by `every_fact_kind_facts_document_is_pinned_for_the_typescript_consumers` (lib.rs)
+  from `every_fact_kind_fixture()` and diffed on every run; `insightCues.test.ts` reads that file.
+  A renamed field fails in Rust first and in TypeScript second, never in a running app.
+  Regenerate with `INSIGHTS_WRITE_FIXTURE=1 cargo test -p insights every_fact_kind_facts`.
+- **Tests.** `insightCues.test.ts` (55): per fact kind in the fixture, the expected cue kinds;
+  the HARMFUL-CUE GATE, whose oracle reads each fact's named datums with its own hands and asserts
+  every datum anchor, series anchor and span start is among them; polarity per direction and
+  neutral under `withheld`/`targetBand`/`neutral`/absent for every colourable kind; every refusal
+  reason; rank order, per-fact steps and determinism over the whole fixture. The painter suite
+  grew to 25 (series emphasis, band extent, callout text, level refused, band-on-pie refused).
+  Two sabotages, each reddening only its own guard: the band's start moved one category past the
+  fact's index (the gate's changePoint case), and an undeclared direction coloured a cue (the two
+  polarity tests).
+
+What IO-3a inherits:
+
+- `rule` on a `level` anchor: pass `chart.spec` and `cachedData.layout` from `renderChart` to the
+  cue painter and draw through `rulePainter`; then D-IO-6 (fences) can be revisited cheaply.
+- The stepper reads `stepsOf(cues)`; the active step lives in the transient store as one field.
+- Style literals in `CUE_STYLES` → skin tokens.
+- Pareto stays cue-less until the fact carries member positions (a small IO-1-style Rust change).
 
 ## 6. Verification — the standard this repository holds a milestone to
 

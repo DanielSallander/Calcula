@@ -670,6 +670,44 @@ mod tests {
         );
     }
 
+    /// THE FACTS DOCUMENT, ONE OF EVERY KIND, PINNED AS A FILE the TypeScript
+    /// side reads (`app/src/api/__tests__/insightCues.test.ts`). A cue rule in
+    /// TypeScript is written against `bestIndex`, `points[].index`, `atIndex`,
+    /// `topIndex`; if a field here is renamed or a kind gains a field, this test
+    /// fails in Rust and the TypeScript test fails on the regenerated file, in
+    /// that order. Retyping the fixture in TypeScript would have let the two
+    /// drift in silence -- the same lesson as `interpreterReachDrift.test.ts`.
+    ///
+    /// Regenerate: `INSIGHTS_WRITE_FIXTURE=1 cargo test -p insights every_fact_kind_facts`.
+    #[test]
+    fn every_fact_kind_facts_document_is_pinned_for_the_typescript_consumers() {
+        let ds = dataset(vec![column("Revenue", 1, numbers(&[1.0, 2.0, 3.0]))]);
+        let insights: Vec<Insight> = crate::narrate::en::every_fact_kind_fixture()
+            .into_iter()
+            .map(|kind| {
+                let score = rank::score(&kind);
+                Insight::new(kind, score)
+            })
+            .collect();
+        let json = build_facts_json(&ds, &insights, Locale::En);
+        assert!(!json.contains("\"error\""), "the fixture must serialise: {json}");
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/every-fact-kind-facts.json");
+        if std::env::var("INSIGHTS_WRITE_FIXTURE").is_ok() {
+            std::fs::write(path, format!("{json}\n")).expect("write the fixture");
+        }
+        let pinned = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("no pinned fixture at {path} ({e}); regenerate with INSIGHTS_WRITE_FIXTURE=1"))
+            .replace("\r\n", "\n");
+        assert_eq!(
+            pinned.trim_end(),
+            json.trim_end(),
+            "the facts document changed shape; regenerate the fixture with \
+             INSIGHTS_WRITE_FIXTURE=1 cargo test -p insights every_fact_kind_facts, then \
+             re-run the TypeScript cue tests"
+        );
+    }
+
     #[test]
     fn facts_json_carries_the_numbers_and_none_of_the_narration() {
         let values: Vec<f64> = (0..20).map(|i| 100.0 + 2.5 * i as f64).collect();
