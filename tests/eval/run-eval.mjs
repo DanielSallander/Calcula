@@ -22,7 +22,7 @@
 // The provider must be one `ai_providers_list` knows, and its key (if any) must
 // already be stored — this script never asks for or handles a secret.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -104,6 +104,13 @@ const PROVIDER_ENDPOINTS = {
  * environment, which is a CI convention and keeps the OS keychain (where the
  * PRODUCT stores keys) out of a script that has no business touching it.
  */
+const MAX_TOKENS = 2000;
+
+// The last reply's finish reason, kept beside the text because the repair
+// loop's `complete` callback returns a string. A reply cut off at MAX_TOKENS
+// is scored as a failure, and the artifact must be able to say which ones.
+let lastFinishReason = "";
+
 async function complete(systemPrompt, userPrompt) {
   const base = baseUrl || PROVIDER_ENDPOINTS[providerId];
   if (!base) throw new Error(`No endpoint known for provider "${providerId}"; pass --base-url.`);
@@ -116,7 +123,7 @@ async function complete(systemPrompt, userPrompt) {
     headers,
     body: JSON.stringify({
       model,
-      max_tokens: 2000,
+      max_tokens: MAX_TOKENS,
       temperature: 0,
       messages: [
         { role: "system", content: systemPrompt },
@@ -126,6 +133,7 @@ async function complete(systemPrompt, userPrompt) {
   });
   if (!res.ok) throw new Error(`${res.status}: ${(await res.text()).slice(0, 300)}`);
   const body = await res.json();
+  lastFinishReason = body.choices?.[0]?.finish_reason ?? "";
   return body.choices?.[0]?.message?.content ?? "";
 }
 
@@ -360,7 +368,9 @@ for (const task of tasks) {
   // number: there is no way to tell a weak model from a broken prompt, and the
   // first real run of this corpus turned out to be diagnosing the VALIDATOR
   // rather than the model.
-  scores.push(score.passed ? score : { ...score, candidate });
+  // `finishReason` is the LAST round's: a repair loop that ended on a cut-off
+  // reply was cut off where it mattered.
+  scores.push({ ...(score.passed ? score : { ...score, candidate }), finishReason: lastFinishReason });
   const mark = score.passed ? "PASS" : "FAIL";
   const fixes = rounds > 0 ? ` [+${rounds} repair${rounds === 1 ? "" : "s"}]` : "";
   const graded = score.graded
@@ -392,7 +402,23 @@ for (const task of tasks) {
   console.log(`  ${mark} ${task.id} ${score.score.toFixed(2)}${fixes}${graded}${why}`);
 }
 
-const summary = summarize(scores);
+/**
+ * Every independent variable, one key per CLI knob, stable types — the same
+ * block the sibling runners carry, so `compare-runs.mjs` can say what differed
+ * between two script runs and `evalKnobs.test.mjs` can hold this runner to it.
+ */
+const knobs = {
+  provider: String(providerId ?? ""),
+  model: String(model ?? ""),
+  baseUrl: String(baseUrl ?? ""),
+  budget: Number(budgetTokens),
+  canary: Boolean(canaryOnly),
+  repair: Number(repairRounds),
+  maxTokens: MAX_TOKENS,
+};
+
+const truncatedReplies = scores.filter((s) => s.finishReason === "length").length;
+const summary = { ...summarize(scores), knobs, truncatedReplies };
 // A harness gap silently downgrades a task to static-only scoring; a run with
 // many of them is measuring less than it appears to, and must say so.
 const gapped = scores.filter((s) => s.outcome && !s.outcome.gradable);
@@ -409,7 +435,16 @@ if (scores.length < tasks.length) {
   console.log(`[eval] WARNING: ${tasks.length - scores.length} task(s) errored and are NOT counted above.`);
 }
 
+if (truncatedReplies > 0) {
+  console.log(
+    `[eval] WARNING: ${truncatedReplies} reply/replies hit the ${MAX_TOKENS}-token limit: ` +
+      `${scores.filter((s) => s.finishReason === "length").map((s) => s.taskId).join(", ")}\n` +
+      "       Those are this runner's truncation, not the model's answer; each carries `finishReason` in the artifact.",
+  );
+}
+
 if (jsonOut && typeof jsonOut === "string") {
+  mkdirSync(path.dirname(path.resolve(jsonOut)), { recursive: true });
   writeFileSync(
     jsonOut,
     JSON.stringify(

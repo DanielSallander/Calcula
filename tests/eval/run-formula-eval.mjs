@@ -443,6 +443,9 @@ const knobs = {
   // would have been compared as if they measured the same thing.
   tag: String(tagFilter ?? ""),
   limit: Number(limit),
+  // Decides whether a reply is CUT OFF, and a cut-off reply is graded as
+  // wrong — an independent variable, not plumbing.
+  maxTokens: Number(maxTokens),
 };
 
 const summary = {
@@ -466,6 +469,10 @@ const summary = {
   localizedReplies: ran.filter((s) => s.localized).length,
   noFormulaReplies: ran.filter((s) => !s.formula).length,
   truncatedReplies: ran.filter((s) => s.finishReason === "length").length,
+  // WHICH grader. Re-grading the 2026-09-15 artifacts with the engine fixed
+  // moved both models +2, so the grader's build is a variable of the score
+  // and an artifact that does not name it cannot be re-graded honestly.
+  grader: { exe: grader.exe, source: grader.source, builtAt: grader.builtAt ?? "" },
   stalledRepairs: ran.filter((s) => s.stalled).length,
   wallClockSec: Math.round((Date.now() - started) / 1000),
 };
@@ -489,8 +496,10 @@ if (summary.stalledRepairs) {
 }
 if (summary.truncatedReplies) {
   console.log(
-    `[formula-eval] WARNING: ${summary.truncatedReplies} reply/replies hit the ${maxTokens}-token limit.\n` +
-      "               Those are this runner's truncation, not the model's answer. Raise --max-tokens and re-run.",
+    `[formula-eval] WARNING: ${summary.truncatedReplies} reply/replies hit the ${maxTokens}-token limit: ` +
+      `${ran.filter((s) => s.finishReason === "length").map((s) => s.task.id).join(", ")}\n` +
+      "               Those are this runner's truncation, not the model's answer. Raise --max-tokens and re-run;\n" +
+      "               the artifact carries `finishReason` per task so a comparison can set them aside.",
   );
 }
 
@@ -512,6 +521,12 @@ if (jsonOut && typeof jsonOut === "string") {
           ms: s.ms,
           promptTokens: s.promptTokens,
           rounds: s.rounds,
+          // Per task, not only as the count in the summary: a reply cut off at
+          // --max-tokens is graded as WRONG, and without this nothing in the
+          // artifact can say which of the failures were the runner's doing.
+          // The 2026-09-15 baseline recorded nine truncated replies and could
+          // not name one of them.
+          finishReason: s.finishReason,
           examples: s.exampleIds,
         })),
       },

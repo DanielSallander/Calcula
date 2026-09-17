@@ -157,7 +157,12 @@ const bySplit = {
   "held-out": score(rows.filter((r) => r.split === "held-out")),
 };
 
-const knobs = { split: splitArg, showMisses, corpus: rows.length };
+/** One key per CLI knob, stable types — the block `evalKnobs.test.mjs` reads. */
+const knobs = {
+  split: String(splitArg),
+  showMisses: Boolean(showMisses),
+  corpus: Number(rows.length),
+};
 
 console.log(`\n[intent-eval] ${label}, over ${rows.length} utterances`);
 for (const name of ["all", "tune", "held-out"]) {
@@ -196,7 +201,10 @@ if (showMisses) {
 
 if (jsonOut) {
   mkdirSync(path.dirname(path.resolve(jsonOut)), { recursive: true });
-  writeFileSync(jsonOut, JSON.stringify({ knobs, summary: bySplit, rows }, null, 2) + "\n", "utf8");
+  // The knob block rides INSIDE the summary, as in every sibling artifact, so
+  // one reader (`compare-runs.mjs`, the suite's aggregate) finds it in one place.
+  const summary = { ...bySplit, knobs };
+  writeFileSync(jsonOut, JSON.stringify({ summary, rows }, null, 2) + "\n", "utf8");
   console.log(`\n[intent-eval] wrote ${jsonOut}`);
 }
 

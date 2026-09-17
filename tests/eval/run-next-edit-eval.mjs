@@ -470,8 +470,20 @@ const trulySilent = count(ends, "silent") + count(ends, "no-grammar");
 const nagged = ends.filter((r) => r.outcome === "chip").length;
 const medianMs = pick(0.5);
 
+/** Every independent variable, one key per CLI knob (see run-design-query-eval.mjs). */
+const knobs = {
+  provider: String(providerId ?? ""),
+  model: String(model ?? ""),
+  baseUrl: String(baseUrl ?? ""),
+  grammar: Boolean(useGrammar),
+  limit: Number(limit),
+  warmup: Number(warmups),
+  gateMedianMs: Number(gateMedianMs),
+};
+
 const summary = {
   provider: providerId, model, grammar: useGrammar,
+  knobs,
   tasks: results.length, ran: ran.length, errors: results.length - ran.length,
   prefixTasks: next.length,
   exact, exactRate: rate(exact, next.length),

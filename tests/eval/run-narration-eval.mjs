@@ -37,9 +37,11 @@
 //   node tests/eval/run-narration-eval.mjs --provider llamacpp --json out/m6.json
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+
+import { resolveExample } from "./lib/grader.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "../..");
@@ -74,26 +76,23 @@ const PROVIDER_ENDPOINTS = {
 // The product's own pieces, through the example binary
 // ---------------------------------------------------------------------------
 
-const EXE = path.join(
-  process.env.CARGO_TARGET_DIR || path.join(repo, "core", "target"),
-  "debug",
-  "examples",
-  process.platform === "win32" ? "narration.exe" : "narration",
-);
-
-if (!existsSync(EXE)) {
-  console.error(
-    `The narration helper is not built: ${EXE}\n` +
-      `Build it first (PowerShell, because the MSVC environment is a PowerShell script):\n` +
-      `  . .\\core\\setup-rust-env.ps1\n` +
-      `  $env:CARGO_TARGET_DIR='C:\\Users\\Salle\\AppData\\Local\\calcula-target'\n` +
-      `  cd core; cargo build -p insights --example narration`,
-  );
+// Resolved the way the formula grader is (`lib/grader.mjs`): from the target
+// directory cargo would use, never from ambient shell state. Until 2026-09-17
+// this read `CARGO_TARGET_DIR` directly, so an npm shell without it looked in
+// the in-repo `core/target` and reported the helper missing while it sat
+// built in %LOCALAPPDATA%. Printed, and recorded in the summary, because a
+// stale helper is a stale prompt and a stale check.
+let helperExe;
+try {
+  helperExe = resolveExample("narration", { repo });
+} catch (e) {
+  console.error(e.message);
   process.exit(2);
 }
+console.log(`[narration-eval] helper: ${helperExe.exe}${helperExe.builtAt ? ` (built ${helperExe.builtAt})` : ""}`);
 
 const helper = (args, input) =>
-  execFileSync(EXE, args, { input, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  execFileSync(helperExe.exe, args, { input, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
 
 const bundles = JSON.parse(helper(["facts", localeId]));
 const { system, schemaName, schema } = JSON.parse(helper(["prompt", localeId]));
@@ -256,8 +255,20 @@ const kept = sum((r) => r.kept);
 const invented = sum((r) => r.droppedUncited);
 const medianMs = pick(0.5);
 
+/** Every independent variable, one key per CLI knob (see run-design-query-eval.mjs). */
+const knobs = {
+  provider: String(providerId ?? ""),
+  model: String(model ?? ""),
+  baseUrl: String(baseUrl ?? ""),
+  locale: String(localeId),
+  maxTokens: Number(maxTokens),
+  gateMedianMs: Number(gateMedianMs),
+};
+
 const summary = {
   provider: providerId, model, localeId,
+  knobs,
+  helper: { exe: helperExe.exe, source: helperExe.source, builtAt: helperExe.builtAt ?? "" },
   bundles: results.length, ran: ran.length, errors: results.length - ran.length,
   passed: ran.filter((r) => r.passed).length,
   sentencesOffered: offered,

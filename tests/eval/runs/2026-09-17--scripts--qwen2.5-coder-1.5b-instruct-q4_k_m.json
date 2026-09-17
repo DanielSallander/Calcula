@@ -1,0 +1,1848 @@
+{
+  "provider": "llamacpp",
+  "model": "qwen2.5-coder-1.5b-instruct-q4_k_m",
+  "budgetTokens": 8000,
+  "canaryOnly": false,
+  "corpusVersion": 2,
+  "ungradable": [],
+  "summary": {
+    "total": 37,
+    "passed": 3,
+    "meanScore": 0.4946,
+    "failures": [
+      {
+        "taskId": "grid-read-write-cell",
+        "parsed": false,
+        "mountable": false,
+        "reachClean": false,
+        "capabilitiesDeclared": false,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "api.getCellValue",
+          "api.setCellValue"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the script failed to compile: Unexpected end of input",
+          "checksTotal": 2,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.05,
+        "passed": false,
+        "candidate": "```javascript\nexport function setup(context) {\n  context.onClick((detail) => {\n    context.api.copyRange(0, 0, 0, 0, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n      if (cell) {\n        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n          if (cell) {\n            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n              if (cell) {\n                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                  if (cell) {\n                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                      if (cell) {\n                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                          if (cell) {\n                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                              if (cell) {\n                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                  if (cell) {\n                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                      if (cell) {\n                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                          if (cell) {\n                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                              if (cell) {\n                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                  if (cell) {\n                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                      if (cell) {\n                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                          if (cell) {\n                                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                              if (cell) {\n                                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                  if (cell) {\n                                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                      if (cell) {\n                                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                          if (cell) {\n                                                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                              if (cell) {\n                                                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                  if (cell) {\n                                                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                      if (cell) {\n                                                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                          if (cell) {\n                                                                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                              if (cell) {\n                                                                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                                  if (cell) {\n                                                                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                                      if (cell) {\n                                                                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                                          if (\n",
+        "finishReason": "length"
+      },
+      {
+        "taskId": "grid-sum-column",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.4,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"sumFormula\", (startRow, endRow) => {\n    const formula = `=SUM(B${startRow}:B${endRow})`;\n    context.api.setCellFormula(101, 1, formula);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-sum-in-script",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getRangeValues",
+          "api.setCellValue"
+        ],
+        "inventedMethods": [
+          "`context.setCellValue` is not part of the context a button script is handed. It is declared by SheetContext, TableContext, so only a script attached to sheet or table can call it."
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: context.setCellValue is not a function",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.25,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const startRow = 2;\n    const endRow = 100;\n    const startCol = 1;\n    const endCol = 2;\n    const formula = `=SUM(B${startRow}:${endRow})`;\n    context.setCellValue(101, 1, formula);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-bold-header-row",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "api.setRangeFormat"
+        ],
+        "inventedMethods": [
+          "`context.getCurrentRegion` is not part of the object-script API",
+          "`context.setRangeFormat` is not part of the context a button script is handed. It is declared by SheetContext, so only a script attached to sheet can call it."
+        ],
+        "graded": false,
+        "score": 0.5,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"makeHeaderBold\", async () => {\n    const headerRow = context.getCurrentRegion(0, 0, 1, 6);\n    const headerFormat = {\n      fill: { color: \"#f0f0f0\" },\n      font: { bold: true }\n    };\n    await context.setRangeFormat(0, 0, 1, 6, headerFormat);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-used-range-report",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getUsedRange",
+          "notify"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.8,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const sheet = context.api.activeCell();\n    if (sheet) {\n      const dataRange = sheet.getUsedRange();\n      const rowCount = dataRange.rowCount;\n      const colCount = dataRange.colCount;\n      context.log(`The sheet has ${rowCount} rows and ${colCount} columns.`);\n    } else {\n      context.log(\"No active cell found.\");\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-sort-by-first-column",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+          "checksTotal": 6,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.4,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"sortRows\", async (startRow, endRow, startCol, endCol) => {\n    await context.api.sortRange(startRow, startCol, endRow, endCol, [{ column: startCol, direction: \"asc\" }]);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-find-and-replace",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.replaceAll"
+        ],
+        "inventedMethods": [
+          "`context.api.setRangeFormula` is not part of the object-script API"
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: context.api.setRangeFormula is not a function",
+          "checksTotal": 3,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.25,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const sheet = context.api.activeCell();\n    if (sheet) {\n      const formula = `=IFERROR(INDEX(A:A, MATCH(\"N/A\", A:A, 0)), \"\")`;\n      context.api.setRangeFormula(sheet, formula, { applyTo: \"contents\" });\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-count-matches",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.findAll"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: cell.getCellFormula is not a function",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [
+            "/(^|[^0-9])3([^0-9]|$)/i"
+          ],
+          "grade": 0
+        },
+        "score": 0.4,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const cell = context.api.activeCell();\n    if (cell) {\n      const formula = cell.getCellFormula();\n      if (formula) {\n        const matches = formula.match(/overdue/g);\n        if (matches) {\n          context.notify(`Found ${matches.length} cells containing 'overdue'`);\n        } else {\n          context.notify('No cells found containing \"overdue\"');\n        }\n      } else {\n        context.notify('No formula found in the active cell');\n      }\n    } else {\n      context.notify('No active cell found');\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-add-sheet",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.8,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"createSheet\", async (name) => {\n    const sheet = await context.api.addSheet(name);\n    context.notify(`Sheet \"${name}\" created.`);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-create-table",
+        "parsed": false,
+        "mountable": false,
+        "reachClean": false,
+        "capabilitiesDeclared": false,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "api.createTable"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.1,
+        "passed": false,
+        "candidate": "```javascript\nexport function setup(context) {\n  context.expose(\"createTable\", async (startRow, startCol, endRow, endCol, options) => {\n    const table = await context.api.createTable(startRow, startCol, endRow, endCol, options);\n    const tableHandle = context.namedRange(table.id);\n    return tableHandle;\n  });\n\n  context.expose(\"rename\", async (newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.rename(newName);\n  });\n\n  context.expose(\"setStyle\", async (style) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setStyle(style);\n  });\n\n  context.expose(\"setTotalsFunction\", async (column, fn, customFormula) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsFunction(column, fn, customFormula);\n  });\n\n  context.expose(\"setTotalsRow\", async (show) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsRow(show);\n  });\n\n  context.expose(\"toRange\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    return tableHandle.toRange();\n  });\n\n  context.expose(\"renameColumn\", async (oldName, newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.renameColumn(oldName, newName);\n  });\n\n  context.expose(\"insertRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.insertRow(position);\n  });\n\n  context.expose(\"removeColumn\", async (name) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.removeColumn(name);\n  });\n\n  context.expose(\"delete\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.delete();\n  });\n\n  context.expose(\"deleteRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.deleteRow(position);\n  });\n\n  context.expose(\"rename\", async (newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.rename(newName);\n  });\n\n  context.expose(\"setStyle\", async (style) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setStyle(style);\n  });\n\n  context.expose(\"setTotalsFunction\", async (column, fn, customFormula) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsFunction(column, fn, customFormula);\n  });\n\n  context.expose(\"setTotalsRow\", async (show) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsRow(show);\n  });\n\n  context.expose(\"toRange\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    return tableHandle.toRange();\n  });\n\n  context.expose(\"renameColumn\", async (oldName, newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.renameColumn(oldName, newName);\n  });\n\n  context.expose(\"insertRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.insertRow(position);\n  });\n\n  context.expose(\"removeColumn\", async (name) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.removeColumn(name);\n  });\n\n  context.expose(\"delete\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.delete();\n  });\n\n  context.expose(\"deleteRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.deleteRow(position);\n  });\n\n  context.expose(\"rename\", async (newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.rename(newName);\n  });\n\n  context.expose(\"setStyle\", async (style) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setStyle(style);\n  });\n\n  context.expose(\"setTotalsFunction\", async (column, fn, customFormula) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsFunction(column, fn, customFormula);\n  });\n\n  context.expose(\"setTotalsRow\", async (show) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsRow(show);\n  });\n\n  context.expose(\"toRange\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    return tableHandle.toRange();\n  });\n\n  context.expose(\"renameColumn\", async (oldName, newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.renameColumn(oldName, newName);\n  });\n\n  context.expose(\"insertRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.insertRow(position);\n  });\n\n  context.expose(\"removeColumn\", async (name) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.removeColumn(name);\n  });\n\n  context.expose(\"delete\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.delete();\n  });\n\n  context.expose(\"deleteRow\n",
+        "finishReason": "length"
+      },
+      {
+        "taskId": "grid-recalculate",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.recalculate"
+        ],
+        "inventedMethods": [
+          "`context.recalculate` is not part of the object-script API"
+        ],
+        "graded": false,
+        "score": 0.5,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    context.recalculate();\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "grid-act-on-selection",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.selection"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.8,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const selectedRange = context.api.activeCell();\n    if (selectedRange) {\n      const selectedCells = selectedRange.cells;\n      for (const cell of selectedCells) {\n        cell.value = cell.value.toUpperCase();\n      }\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "cap-storage-counter",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "caps.storage.get",
+          "caps.storage.set",
+          "api.setCellValue"
+        ],
+        "inventedMethods": [
+          "`context.getObject` is not part of the object-script API",
+          "`context.getObject.onClick` is not part of the object-script API",
+          "`context.getObject.setCellValue` is not part of the object-script API"
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "setup(context) threw: context.getObject is not a function",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.2,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  const button = context.getObject(\"button\");\n  const countCell = context.getObject(\"A1\");\n\n  let clickCount = 0;\n\n  button.onClick((detail) => {\n    clickCount++;\n    countCell.setCellValue(clickCount);\n  });\n\n  return {\n    onClick: () => {}\n  };\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "cap-fetch-rate",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "caps.fetch"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.35,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"downloadRate\", async () => {\n    const response = await fetch(\"https://api.example.com/rates\");\n    const data = await response.json();\n    const usdRate = data.usdRate;\n    context.api.setCellValue(1, 1, usdRate);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "cap-schedule-refresh",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "caps.schedule.every",
+          "expose"
+        ],
+        "inventedMethods": [
+          "`context.refreshAllPivots` is not part of the object-script API",
+          "`context.onAfterOpen` is not part of the object-script API"
+        ],
+        "graded": false,
+        "score": 0.4,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onAfterSave(async (detail) => {\n    if (detail.kind === \"save\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onBeforeClose(async (handler) => {\n    if (handler.cancel) {\n      return;\n    }\n    context.refreshAllPivots();\n  });\n\n  context.onAfterOpen(() => {\n    context.refreshAllPivots();\n  });\n\n  context.onSheetAdd(async (detail) => {\n    if (detail.source === \"new\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onSheetChange(async (detail) => {\n    if (detail.sheetName === \"Sheet1\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onSheetDelete(async (detail) => {\n    if (detail.sheetName === \"Sheet1\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onSheetRename(async (detail) => {\n    if (detail.sheetName === \"Sheet1\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onThemeChange(() => {\n    context.refreshAllPivots();\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "cap-dialog-confirm-before-clearing",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "caps.dialog.confirm"
+        ],
+        "inventedMethods": [
+          "`context.dialog.confirm` is not part of the object-script API"
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: Cannot read properties of undefined (reading 'confirm')",
+          "checksTotal": 3,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.2,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const confirmed = context.dialog.confirm(\"Are you sure you want to clear A1:D100?\");\n    if (confirmed) {\n      context.api.clearRange(1, 1, 100, 100);\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "cap-dialog-prompt-for-name",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "caps.dialog.prompt"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: prompt is not defined",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.35,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const title = prompt(\"Enter a report title:\");\n    if (title) {\n      context.api.getCellData(1, 1).then((cell) => {\n        cell.value = title;\n        context.api.setCellValue(1, 1, cell.value);\n      });\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "cap-two-capabilities",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "caps.fetch",
+          "caps.storage.set"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.35,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"downloadFigures\", async () => {\n    const today = new Date();\n    const lastDownload = await context.api.getCellData(1, 1);\n    const age = today - lastDownload.timestamp;\n    context.notify(`Last download: ${age} days ago`);\n    await context.api.copyRange(1, 1, 1, 100, { applyTo: \"contents\" });\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "cap-form-customer-quantity",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": false,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "define"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.45,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"showForm\", () => {\n    context.show({\n      values: {\n        Customer: \"John Doe\",\n        Quantity: 10\n      }\n    });\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "obj-named-range-values",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "getValues",
+          "log"
+        ],
+        "inventedMethods": [
+          "`context.namedRange` is not part of the object-script API",
+          "`context.namedRange.getValues` is not part of the object-script API"
+        ],
+        "graded": false,
+        "score": 0.5,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose('readRows', async () => {\n    const range = context.namedRange('yourRangeName');\n    const values = await range.getValues();\n    console.log(`The named range 'yourRangeName' has ${values.length} rows.`);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "trap-vba-cells-idiom",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": true,
+        "missingCalls": [],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "grading subprocess failed: file:///C:/Dropbox/Projekt/Calcula/app/node_modules/.cache/calcula-eval-script-30488/eval.mjs:9037\r\n        entry.reject(new RpcError(error ?? { code: \"HostError\", message: \"unknown host error\" }));\r\n                     ^\r\n\r\nRpcError: the preview backend does not implement api.getCellData\r\n    at O",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.5,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    context.api.getCellData(1, 1).then(cell => {\n      if (cell.type === \"string\") {\n        cell.value = \"Hello\";\n        context.api.setCellValue(1, 1, cell.value);\n      }\n    });\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "trap-office-js-idiom",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getCellValue"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "grading subprocess failed: file:///C:/Dropbox/Projekt/Calcula/app/node_modules/.cache/calcula-eval-script-30488/eval.mjs:9037\r\n        entry.reject(new RpcError(error ?? { code: \"HostError\", message: \"unknown host error\" }));\r\n                     ^\r\n\r\nRpcError: the preview backend does not implement api.getCellData\r\n    at O",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [
+            "Quarterly"
+          ],
+          "grade": 0
+        },
+        "score": 0.4,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const cell = context.api.getCellData(1, 1);\n    context.notify(`The value in A1 is: ${cell.value}`);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "trap-console-log",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getCellValue"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "grading subprocess failed: file:///C:/Dropbox/Projekt/Calcula/app/node_modules/.cache/calcula-eval-script-30488/eval.mjs:9037\r\n        entry.reject(new RpcError(error ?? { code: \"HostError\", message: \"unknown host error\" }));\r\n                     ^\r\n\r\nRpcError: the preview backend does not implement api.getCellData\r\n    at O",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [
+            "alpha-42"
+          ],
+          "grade": 0
+        },
+        "score": 0.4,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    context.log(context.api.getCellData(1, 1).then((cell) => {\n      console.log(`A1 value: ${cell.value}`);\n    }));\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "trap-undeclared-capability",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "caps.storage.set",
+          "caps.storage.get"
+        ],
+        "inventedMethods": [
+          "`context.setNote` is not part of the object-script API",
+          "`context.getNote` is not part of the object-script API",
+          "`context.saveNote` is not part of the object-script API",
+          "`context.readNote` is not part of the object-script API"
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: context.saveNote is not a function",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [
+            "hello"
+          ],
+          "grade": 0
+        },
+        "score": 0.2,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"saveNote\", async (note) => {\n    await context.setNote(1, 1, note);\n  });\n\n  context.expose(\"readNote\", async () => {\n    const note = await context.getNote(1, 1);\n    context.log(note);\n  });\n\n  context.onClick(() => {\n    context.saveNote(\"hello\");\n    context.readNote();\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "trap-browser-fetch",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "caps.fetch"
+        ],
+        "inventedMethods": [
+          "`context.fetch` is not part of the object-script API",
+          "`context.fetch.json` is not part of the object-script API"
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+          "checksTotal": 1,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.2,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"fetchData\", async () => {\n    const response = await context.fetch(\"https://api.example.com/data\");\n    const data = await response.json();\n    context.api.setCellValue(1, 1, data.count);\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "trap-window-alert",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": false,
+        "behavioural": false,
+        "missingCalls": [
+          "caps.dialog.alert"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.7,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    context.notify(\"Import finished!\");\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-multi-step-report",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "api.setCellValue",
+          "api.setRangeFormat"
+        ],
+        "inventedMethods": [
+          "`context.activeSheet` is not part of the object-script API",
+          "`context.table.toRange` is not part of the object-script API",
+          "`context.table.getTotals` is not part of the object-script API",
+          "`context.table.columns` is not part of the object-script API",
+          "`context.api.table.range.setFormula` is not part of the object-script API",
+          "`context.api.table.range.setFormat` is not part of the object-script API"
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+          "checksTotal": 2,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.25,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"buildSummary\", async () => {\n    const sheet = context.activeSheet();\n    const table = context.table.toRange();\n    const totals = context.table.getTotals();\n    const columnC = context.table.columns(2);\n\n    // Add a Totals header in A1\n    context.api.table.range(\"A1\").setFormula(`=SUM(${columnC})`, { sheet });\n\n    // Sum column C into B1\n    context.api.table.range(\"B1\").setFormula(`=SUM(${columnC})`, { sheet });\n\n    // Bold both\n    context.api.table.range(\"A1:B1\").setFormat({ bold: true }, { sheet });\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-guard-empty-input",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getCellValue"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": true,
+          "checksTotal": 1,
+          "checksPassed": 1,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 1
+        },
+        "score": 0.9,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const cellA1 = context.api.activeCell();\n    if (cellA1 && cellA1.value) {\n      context.api.setCellValue(1, 1, cellA1.value);\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-loop-over-rows",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getRangeValues",
+          "api.setCellValue"
+        ],
+        "inventedMethods": [
+          "`context.activeSheet.range` is not part of the object-script API",
+          "`context.activeSheet.range.forEach` is not part of the object-script API"
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: Cannot read properties of undefined (reading 'range')",
+          "checksTotal": 6,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.25,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const sheet = context.activeSheet;\n    const range = sheet.range(1, 3, 50, 3);\n    range.forEach((cell) => {\n      if (cell.value && cell.value > 100) {\n        cell.value = 'HIGH';\n      }\n    });\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-format-number-columns",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "onClick",
+          "api.setRangeFormat"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.8,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.expose(\"formatCurrency\", async (startRow, endRow) => {\n    await context.api.range(startRow, startCol, endRow).format({\n      numberFormat: \"0.00\"\n    });\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-report-errors",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getCellValue"
+        ],
+        "inventedMethods": [],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": true,
+          "checksTotal": 3,
+          "checksPassed": 3,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 1
+        },
+        "score": 0.9,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    context.api.copyRange(1, 1, 1, 1).then((result) => {\n      if (result.count === 1) {\n        context.notify(\"Copy successful!\", \"success\");\n      } else {\n        context.notify(\"Copy failed!\", \"error\");\n      }\n    }).catch((error) => {\n      context.notify(\"Copy failed!\", \"error\");\n    });\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-read-format-back",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": true,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getCellFormat"
+        ],
+        "inventedMethods": [],
+        "graded": false,
+        "score": 0.8,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const cell = context.api.getCellData(1, 1);\n    if (cell && cell.format && cell.format.font.bold) {\n      context.log(\"A1 is bold\");\n    } else {\n      context.log(\"A1 is not bold\");\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-formula-read",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": false,
+        "missingCalls": [
+          "api.getCellFormula",
+          "api.setCellFormula"
+        ],
+        "inventedMethods": [
+          "`context.getCellFormula` is not part of the context a button script is handed. It is declared by SheetContext, so only a script attached to sheet can call it."
+        ],
+        "graded": true,
+        "outcome": {
+          "gradable": true,
+          "ran": false,
+          "error": "the \"onClick\" handler threw: context.getCellFormula is not a function",
+          "checksTotal": 2,
+          "checksPassed": 0,
+          "wrongCells": [],
+          "missingOutput": [],
+          "grade": 0
+        },
+        "score": 0.25,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const formula = context.getCellFormula(10, 10);\n    if (formula) {\n      context.getCellFormula(11, 10, { formula });\n    }\n  });\n}\n",
+        "finishReason": "stop"
+      },
+      {
+        "taskId": "shape-no-capability-needed",
+        "parsed": true,
+        "mountable": true,
+        "reachClean": false,
+        "capabilitiesDeclared": true,
+        "capabilitiesExact": true,
+        "behavioural": true,
+        "missingCalls": [],
+        "inventedMethods": [
+          "`context.getActiveSheet` is not part of the object-script API"
+        ],
+        "graded": false,
+        "score": 0.7,
+        "passed": false,
+        "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const today = new Date();\n    const date = today.toLocaleDateString();\n    context.api.setCellValue(1, 1, date, context.getActiveSheet());\n  });\n}\n",
+        "finishReason": "stop"
+      }
+    ],
+    "knobs": {
+      "provider": "llamacpp",
+      "model": "qwen2.5-coder-1.5b-instruct-q4_k_m",
+      "baseUrl": "http://127.0.0.1:61250/v1",
+      "budget": 8000,
+      "canary": false,
+      "repair": 0,
+      "maxTokens": 2000
+    },
+    "truncatedReplies": 2
+  },
+  "scores": [
+    {
+      "taskId": "grid-read-write-cell",
+      "parsed": false,
+      "mountable": false,
+      "reachClean": false,
+      "capabilitiesDeclared": false,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "api.getCellValue",
+        "api.setCellValue"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the script failed to compile: Unexpected end of input",
+        "checksTotal": 2,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.05,
+      "passed": false,
+      "candidate": "```javascript\nexport function setup(context) {\n  context.onClick((detail) => {\n    context.api.copyRange(0, 0, 0, 0, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n      if (cell) {\n        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n          if (cell) {\n            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n              if (cell) {\n                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                  if (cell) {\n                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                      if (cell) {\n                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                          if (cell) {\n                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                              if (cell) {\n                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                  if (cell) {\n                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                      if (cell) {\n                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                          if (cell) {\n                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                              if (cell) {\n                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                  if (cell) {\n                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                      if (cell) {\n                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                          if (cell) {\n                                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                              if (cell) {\n                                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                  if (cell) {\n                                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                      if (cell) {\n                                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                          if (cell) {\n                                                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                              if (cell) {\n                                                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                  if (cell) {\n                                                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                      if (cell) {\n                                                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                          if (cell) {\n                                                                                            context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                              if (cell) {\n                                                                                                context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                                  if (cell) {\n                                                                                                    context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                                      if (cell) {\n                                                                                                        context.api.copyRange(cell.row, cell.col, cell.row, cell.col, { applyTo: \"contents\" }, context.activeCell().then((cell) => {\n                                                                                                          if (\n",
+      "finishReason": "length"
+    },
+    {
+      "taskId": "grid-sum-column",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.4,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"sumFormula\", (startRow, endRow) => {\n    const formula = `=SUM(B${startRow}:B${endRow})`;\n    context.api.setCellFormula(101, 1, formula);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-sum-in-script",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getRangeValues",
+        "api.setCellValue"
+      ],
+      "inventedMethods": [
+        "`context.setCellValue` is not part of the context a button script is handed. It is declared by SheetContext, TableContext, so only a script attached to sheet or table can call it."
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: context.setCellValue is not a function",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.25,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const startRow = 2;\n    const endRow = 100;\n    const startCol = 1;\n    const endCol = 2;\n    const formula = `=SUM(B${startRow}:${endRow})`;\n    context.setCellValue(101, 1, formula);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-bold-header-row",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "api.setRangeFormat"
+      ],
+      "inventedMethods": [
+        "`context.getCurrentRegion` is not part of the object-script API",
+        "`context.setRangeFormat` is not part of the context a button script is handed. It is declared by SheetContext, so only a script attached to sheet can call it."
+      ],
+      "graded": false,
+      "score": 0.5,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"makeHeaderBold\", async () => {\n    const headerRow = context.getCurrentRegion(0, 0, 1, 6);\n    const headerFormat = {\n      fill: { color: \"#f0f0f0\" },\n      font: { bold: true }\n    };\n    await context.setRangeFormat(0, 0, 1, 6, headerFormat);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-used-range-report",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getUsedRange",
+        "notify"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.8,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const sheet = context.api.activeCell();\n    if (sheet) {\n      const dataRange = sheet.getUsedRange();\n      const rowCount = dataRange.rowCount;\n      const colCount = dataRange.colCount;\n      context.log(`The sheet has ${rowCount} rows and ${colCount} columns.`);\n    } else {\n      context.log(\"No active cell found.\");\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-sort-by-first-column",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+        "checksTotal": 6,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.4,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"sortRows\", async (startRow, endRow, startCol, endCol) => {\n    await context.api.sortRange(startRow, startCol, endRow, endCol, [{ column: startCol, direction: \"asc\" }]);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-find-and-replace",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.replaceAll"
+      ],
+      "inventedMethods": [
+        "`context.api.setRangeFormula` is not part of the object-script API"
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: context.api.setRangeFormula is not a function",
+        "checksTotal": 3,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.25,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const sheet = context.api.activeCell();\n    if (sheet) {\n      const formula = `=IFERROR(INDEX(A:A, MATCH(\"N/A\", A:A, 0)), \"\")`;\n      context.api.setRangeFormula(sheet, formula, { applyTo: \"contents\" });\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-count-matches",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.findAll"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: cell.getCellFormula is not a function",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [
+          "/(^|[^0-9])3([^0-9]|$)/i"
+        ],
+        "grade": 0
+      },
+      "score": 0.4,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const cell = context.api.activeCell();\n    if (cell) {\n      const formula = cell.getCellFormula();\n      if (formula) {\n        const matches = formula.match(/overdue/g);\n        if (matches) {\n          context.notify(`Found ${matches.length} cells containing 'overdue'`);\n        } else {\n          context.notify('No cells found containing \"overdue\"');\n        }\n      } else {\n        context.notify('No formula found in the active cell');\n      }\n    } else {\n      context.notify('No active cell found');\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-add-sheet",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.8,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"createSheet\", async (name) => {\n    const sheet = await context.api.addSheet(name);\n    context.notify(`Sheet \"${name}\" created.`);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-create-table",
+      "parsed": false,
+      "mountable": false,
+      "reachClean": false,
+      "capabilitiesDeclared": false,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "api.createTable"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.1,
+      "passed": false,
+      "candidate": "```javascript\nexport function setup(context) {\n  context.expose(\"createTable\", async (startRow, startCol, endRow, endCol, options) => {\n    const table = await context.api.createTable(startRow, startCol, endRow, endCol, options);\n    const tableHandle = context.namedRange(table.id);\n    return tableHandle;\n  });\n\n  context.expose(\"rename\", async (newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.rename(newName);\n  });\n\n  context.expose(\"setStyle\", async (style) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setStyle(style);\n  });\n\n  context.expose(\"setTotalsFunction\", async (column, fn, customFormula) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsFunction(column, fn, customFormula);\n  });\n\n  context.expose(\"setTotalsRow\", async (show) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsRow(show);\n  });\n\n  context.expose(\"toRange\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    return tableHandle.toRange();\n  });\n\n  context.expose(\"renameColumn\", async (oldName, newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.renameColumn(oldName, newName);\n  });\n\n  context.expose(\"insertRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.insertRow(position);\n  });\n\n  context.expose(\"removeColumn\", async (name) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.removeColumn(name);\n  });\n\n  context.expose(\"delete\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.delete();\n  });\n\n  context.expose(\"deleteRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.deleteRow(position);\n  });\n\n  context.expose(\"rename\", async (newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.rename(newName);\n  });\n\n  context.expose(\"setStyle\", async (style) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setStyle(style);\n  });\n\n  context.expose(\"setTotalsFunction\", async (column, fn, customFormula) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsFunction(column, fn, customFormula);\n  });\n\n  context.expose(\"setTotalsRow\", async (show) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsRow(show);\n  });\n\n  context.expose(\"toRange\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    return tableHandle.toRange();\n  });\n\n  context.expose(\"renameColumn\", async (oldName, newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.renameColumn(oldName, newName);\n  });\n\n  context.expose(\"insertRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.insertRow(position);\n  });\n\n  context.expose(\"removeColumn\", async (name) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.removeColumn(name);\n  });\n\n  context.expose(\"delete\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.delete();\n  });\n\n  context.expose(\"deleteRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.deleteRow(position);\n  });\n\n  context.expose(\"rename\", async (newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.rename(newName);\n  });\n\n  context.expose(\"setStyle\", async (style) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setStyle(style);\n  });\n\n  context.expose(\"setTotalsFunction\", async (column, fn, customFormula) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsFunction(column, fn, customFormula);\n  });\n\n  context.expose(\"setTotalsRow\", async (show) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.setTotalsRow(show);\n  });\n\n  context.expose(\"toRange\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    return tableHandle.toRange();\n  });\n\n  context.expose(\"renameColumn\", async (oldName, newName) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.renameColumn(oldName, newName);\n  });\n\n  context.expose(\"insertRow\", async (position) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.insertRow(position);\n  });\n\n  context.expose(\"removeColumn\", async (name) => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.removeColumn(name);\n  });\n\n  context.expose(\"delete\", async () => {\n    const tableHandle = context.namedRange(\"Orders\");\n    await tableHandle.delete();\n  });\n\n  context.expose(\"deleteRow\n",
+      "finishReason": "length"
+    },
+    {
+      "taskId": "grid-recalculate",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.recalculate"
+      ],
+      "inventedMethods": [
+        "`context.recalculate` is not part of the object-script API"
+      ],
+      "graded": false,
+      "score": 0.5,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    context.recalculate();\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "grid-act-on-selection",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.selection"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.8,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const selectedRange = context.api.activeCell();\n    if (selectedRange) {\n      const selectedCells = selectedRange.cells;\n      for (const cell of selectedCells) {\n        cell.value = cell.value.toUpperCase();\n      }\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "cap-storage-counter",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "caps.storage.get",
+        "caps.storage.set",
+        "api.setCellValue"
+      ],
+      "inventedMethods": [
+        "`context.getObject` is not part of the object-script API",
+        "`context.getObject.onClick` is not part of the object-script API",
+        "`context.getObject.setCellValue` is not part of the object-script API"
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "setup(context) threw: context.getObject is not a function",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.2,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  const button = context.getObject(\"button\");\n  const countCell = context.getObject(\"A1\");\n\n  let clickCount = 0;\n\n  button.onClick((detail) => {\n    clickCount++;\n    countCell.setCellValue(clickCount);\n  });\n\n  return {\n    onClick: () => {}\n  };\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "cap-fetch-rate",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "caps.fetch"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.35,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"downloadRate\", async () => {\n    const response = await fetch(\"https://api.example.com/rates\");\n    const data = await response.json();\n    const usdRate = data.usdRate;\n    context.api.setCellValue(1, 1, usdRate);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "cap-schedule-refresh",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "caps.schedule.every",
+        "expose"
+      ],
+      "inventedMethods": [
+        "`context.refreshAllPivots` is not part of the object-script API",
+        "`context.onAfterOpen` is not part of the object-script API"
+      ],
+      "graded": false,
+      "score": 0.4,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onAfterSave(async (detail) => {\n    if (detail.kind === \"save\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onBeforeClose(async (handler) => {\n    if (handler.cancel) {\n      return;\n    }\n    context.refreshAllPivots();\n  });\n\n  context.onAfterOpen(() => {\n    context.refreshAllPivots();\n  });\n\n  context.onSheetAdd(async (detail) => {\n    if (detail.source === \"new\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onSheetChange(async (detail) => {\n    if (detail.sheetName === \"Sheet1\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onSheetDelete(async (detail) => {\n    if (detail.sheetName === \"Sheet1\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onSheetRename(async (detail) => {\n    if (detail.sheetName === \"Sheet1\") {\n      context.refreshAllPivots();\n    }\n  });\n\n  context.onThemeChange(() => {\n    context.refreshAllPivots();\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "cap-dialog-confirm-before-clearing",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "caps.dialog.confirm"
+      ],
+      "inventedMethods": [
+        "`context.dialog.confirm` is not part of the object-script API"
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: Cannot read properties of undefined (reading 'confirm')",
+        "checksTotal": 3,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.2,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const confirmed = context.dialog.confirm(\"Are you sure you want to clear A1:D100?\");\n    if (confirmed) {\n      context.api.clearRange(1, 1, 100, 100);\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "cap-dialog-prompt-for-name",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "caps.dialog.prompt"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: prompt is not defined",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.35,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const title = prompt(\"Enter a report title:\");\n    if (title) {\n      context.api.getCellData(1, 1).then((cell) => {\n        cell.value = title;\n        context.api.setCellValue(1, 1, cell.value);\n      });\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "cap-two-capabilities",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "caps.fetch",
+        "caps.storage.set"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.35,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"downloadFigures\", async () => {\n    const today = new Date();\n    const lastDownload = await context.api.getCellData(1, 1);\n    const age = today - lastDownload.timestamp;\n    context.notify(`Last download: ${age} days ago`);\n    await context.api.copyRange(1, 1, 1, 100, { applyTo: \"contents\" });\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "cap-form-customer-quantity",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": false,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "define"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.45,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"showForm\", () => {\n    context.show({\n      values: {\n        Customer: \"John Doe\",\n        Quantity: 10\n      }\n    });\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "obj-sheet-context",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": true,
+      "missingCalls": [],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 1,
+      "passed": true,
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "obj-workbook-context",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": true,
+      "missingCalls": [],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 1,
+      "passed": true,
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "obj-named-range-values",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "getValues",
+        "log"
+      ],
+      "inventedMethods": [
+        "`context.namedRange` is not part of the object-script API",
+        "`context.namedRange.getValues` is not part of the object-script API"
+      ],
+      "graded": false,
+      "score": 0.5,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose('readRows', async () => {\n    const range = context.namedRange('yourRangeName');\n    const values = await range.getValues();\n    console.log(`The named range 'yourRangeName' has ${values.length} rows.`);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "trap-vba-cells-idiom",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": true,
+      "missingCalls": [],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "grading subprocess failed: file:///C:/Dropbox/Projekt/Calcula/app/node_modules/.cache/calcula-eval-script-30488/eval.mjs:9037\r\n        entry.reject(new RpcError(error ?? { code: \"HostError\", message: \"unknown host error\" }));\r\n                     ^\r\n\r\nRpcError: the preview backend does not implement api.getCellData\r\n    at O",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.5,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    context.api.getCellData(1, 1).then(cell => {\n      if (cell.type === \"string\") {\n        cell.value = \"Hello\";\n        context.api.setCellValue(1, 1, cell.value);\n      }\n    });\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "trap-office-js-idiom",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getCellValue"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "grading subprocess failed: file:///C:/Dropbox/Projekt/Calcula/app/node_modules/.cache/calcula-eval-script-30488/eval.mjs:9037\r\n        entry.reject(new RpcError(error ?? { code: \"HostError\", message: \"unknown host error\" }));\r\n                     ^\r\n\r\nRpcError: the preview backend does not implement api.getCellData\r\n    at O",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [
+          "Quarterly"
+        ],
+        "grade": 0
+      },
+      "score": 0.4,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const cell = context.api.getCellData(1, 1);\n    context.notify(`The value in A1 is: ${cell.value}`);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "trap-console-log",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getCellValue"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "grading subprocess failed: file:///C:/Dropbox/Projekt/Calcula/app/node_modules/.cache/calcula-eval-script-30488/eval.mjs:9037\r\n        entry.reject(new RpcError(error ?? { code: \"HostError\", message: \"unknown host error\" }));\r\n                     ^\r\n\r\nRpcError: the preview backend does not implement api.getCellData\r\n    at O",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [
+          "alpha-42"
+        ],
+        "grade": 0
+      },
+      "score": 0.4,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    context.log(context.api.getCellData(1, 1).then((cell) => {\n      console.log(`A1 value: ${cell.value}`);\n    }));\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "trap-undeclared-capability",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "caps.storage.set",
+        "caps.storage.get"
+      ],
+      "inventedMethods": [
+        "`context.setNote` is not part of the object-script API",
+        "`context.getNote` is not part of the object-script API",
+        "`context.saveNote` is not part of the object-script API",
+        "`context.readNote` is not part of the object-script API"
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: context.saveNote is not a function",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [
+          "hello"
+        ],
+        "grade": 0
+      },
+      "score": 0.2,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"saveNote\", async (note) => {\n    await context.setNote(1, 1, note);\n  });\n\n  context.expose(\"readNote\", async () => {\n    const note = await context.getNote(1, 1);\n    context.log(note);\n  });\n\n  context.onClick(() => {\n    context.saveNote(\"hello\");\n    context.readNote();\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "trap-browser-fetch",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "caps.fetch"
+      ],
+      "inventedMethods": [
+        "`context.fetch` is not part of the object-script API",
+        "`context.fetch.json` is not part of the object-script API"
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+        "checksTotal": 1,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.2,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"fetchData\", async () => {\n    const response = await context.fetch(\"https://api.example.com/data\");\n    const data = await response.json();\n    context.api.setCellValue(1, 1, data.count);\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "trap-window-alert",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": false,
+      "behavioural": false,
+      "missingCalls": [
+        "caps.dialog.alert"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.7,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    context.notify(\"Import finished!\");\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-multi-step-report",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "api.setCellValue",
+        "api.setRangeFormat"
+      ],
+      "inventedMethods": [
+        "`context.activeSheet` is not part of the object-script API",
+        "`context.table.toRange` is not part of the object-script API",
+        "`context.table.getTotals` is not part of the object-script API",
+        "`context.table.columns` is not part of the object-script API",
+        "`context.api.table.range.setFormula` is not part of the object-script API",
+        "`context.api.table.range.setFormat` is not part of the object-script API"
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the script never registers the \"onClick\" hook (for a button, the click handler is context.onClick(handler))",
+        "checksTotal": 2,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.25,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"buildSummary\", async () => {\n    const sheet = context.activeSheet();\n    const table = context.table.toRange();\n    const totals = context.table.getTotals();\n    const columnC = context.table.columns(2);\n\n    // Add a Totals header in A1\n    context.api.table.range(\"A1\").setFormula(`=SUM(${columnC})`, { sheet });\n\n    // Sum column C into B1\n    context.api.table.range(\"B1\").setFormula(`=SUM(${columnC})`, { sheet });\n\n    // Bold both\n    context.api.table.range(\"A1:B1\").setFormat({ bold: true }, { sheet });\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-guard-empty-input",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getCellValue"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": true,
+        "checksTotal": 1,
+        "checksPassed": 1,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 1
+      },
+      "score": 0.9,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const cellA1 = context.api.activeCell();\n    if (cellA1 && cellA1.value) {\n      context.api.setCellValue(1, 1, cellA1.value);\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-loop-over-rows",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getRangeValues",
+        "api.setCellValue"
+      ],
+      "inventedMethods": [
+        "`context.activeSheet.range` is not part of the object-script API",
+        "`context.activeSheet.range.forEach` is not part of the object-script API"
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: Cannot read properties of undefined (reading 'range')",
+        "checksTotal": 6,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.25,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const sheet = context.activeSheet;\n    const range = sheet.range(1, 3, 50, 3);\n    range.forEach((cell) => {\n      if (cell.value && cell.value > 100) {\n        cell.value = 'HIGH';\n      }\n    });\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-format-number-columns",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "onClick",
+        "api.setRangeFormat"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.8,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.expose(\"formatCurrency\", async (startRow, endRow) => {\n    await context.api.range(startRow, startCol, endRow).format({\n      numberFormat: \"0.00\"\n    });\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-named-handler",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": true,
+      "missingCalls": [],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 1,
+      "passed": true,
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-report-errors",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getCellValue"
+      ],
+      "inventedMethods": [],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": true,
+        "checksTotal": 3,
+        "checksPassed": 3,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 1
+      },
+      "score": 0.9,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    context.api.copyRange(1, 1, 1, 1).then((result) => {\n      if (result.count === 1) {\n        context.notify(\"Copy successful!\", \"success\");\n      } else {\n        context.notify(\"Copy failed!\", \"error\");\n      }\n    }).catch((error) => {\n      context.notify(\"Copy failed!\", \"error\");\n    });\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-read-format-back",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": true,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getCellFormat"
+      ],
+      "inventedMethods": [],
+      "graded": false,
+      "score": 0.8,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick((detail) => {\n    const cell = context.api.getCellData(1, 1);\n    if (cell && cell.format && cell.format.font.bold) {\n      context.log(\"A1 is bold\");\n    } else {\n      context.log(\"A1 is not bold\");\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-formula-read",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": false,
+      "missingCalls": [
+        "api.getCellFormula",
+        "api.setCellFormula"
+      ],
+      "inventedMethods": [
+        "`context.getCellFormula` is not part of the context a button script is handed. It is declared by SheetContext, so only a script attached to sheet can call it."
+      ],
+      "graded": true,
+      "outcome": {
+        "gradable": true,
+        "ran": false,
+        "error": "the \"onClick\" handler threw: context.getCellFormula is not a function",
+        "checksTotal": 2,
+        "checksPassed": 0,
+        "wrongCells": [],
+        "missingOutput": [],
+        "grade": 0
+      },
+      "score": 0.25,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const formula = context.getCellFormula(10, 10);\n    if (formula) {\n      context.getCellFormula(11, 10, { formula });\n    }\n  });\n}\n",
+      "finishReason": "stop"
+    },
+    {
+      "taskId": "shape-no-capability-needed",
+      "parsed": true,
+      "mountable": true,
+      "reachClean": false,
+      "capabilitiesDeclared": true,
+      "capabilitiesExact": true,
+      "behavioural": true,
+      "missingCalls": [],
+      "inventedMethods": [
+        "`context.getActiveSheet` is not part of the object-script API"
+      ],
+      "graded": false,
+      "score": 0.7,
+      "passed": false,
+      "candidate": "export function setup(context) {\n  context.onClick(() => {\n    const today = new Date();\n    const date = today.toLocaleDateString();\n    context.api.setCellValue(1, 1, date, context.getActiveSheet());\n  });\n}\n",
+      "finishReason": "stop"
+    }
+  ]
+}

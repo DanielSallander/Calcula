@@ -482,12 +482,28 @@ const naiveOnRan = ran.filter((r) => r.naiveHit).length;
 
 const medianMs = pick(0.5);
 
+/** Every independent variable, one key per CLI knob (see run-design-query-eval.mjs). */
+const knobs = {
+  provider: String(providerId ?? ""),
+  baseUrl: String(baseUrl ?? ""),
+  // Not a flag: read from the server's /props, and recorded here because it
+  // is the one variable that matters most and the one no flag could tell.
+  model: String(loadedModel),
+  surface: Number(surfaceTokens),
+  hints: String(hintsMode),
+  maxTokens: Number(maxTokens),
+  limit: Number(limit),
+  warmup: Number(warmups),
+  gateMedianMs: Number(gateMedianMs),
+};
+
 const summary = {
   // THE INDEPENDENT VARIABLES BELONG IN THE SUMMARY. `compare-runs.mjs` pairs
   // two JSON files and this header invites exactly that, so a file that does
   // not record which surface budget produced it — or which model answered —
   // cannot be told apart from another six months later.
   provider: providerId, baseUrl, maxTokens,
+  knobs,
   surfaceTokens, surfaceChains, hintsFrom: hintsMode, model: loadedModel,
   tasks: results.length, ran: ran.length, errors: results.length - ran.length,
   exact, exactRate: rate(exact),

@@ -46,12 +46,25 @@ if (shared.length !== A.size || shared.length !== B.size) {
   );
 }
 
+/**
+ * Tasks whose reply was CUT OFF by the runner's token limit, per side. A
+ * failure on a truncated reply is the runner's doing, not the model's, so a
+ * discordant pair whose losing side was truncated is marked `*` below rather
+ * than counted as evidence in silence. Every runner records this per task
+ * (`finishReason === "length"` on the chat runners, `truncated` on infill).
+ */
+const truncatedIn = (run) =>
+  new Set(run.results.filter((r) => r.finishReason === "length" || r.truncated === true).map((r) => r.id));
+const truncA = truncatedIn(a);
+const truncB = truncatedIn(b);
+
 let both = 0;
 let neither = 0;
 let onlyA = 0; // A passed, B failed
 let onlyB = 0; // B passed, A failed
 const flippedToB = [];
 const flippedToA = [];
+let flipsOnTruncation = 0;
 for (const id of shared) {
   const pa = A.get(id).passed;
   const pb = B.get(id).passed;
@@ -59,10 +72,15 @@ for (const id of shared) {
   else if (!pa && !pb) neither++;
   else if (pa) {
     onlyA++;
-    flippedToA.push(id);
+    // B failed here — was B cut off?
+    const cut = truncB.has(id);
+    if (cut) flipsOnTruncation++;
+    flippedToA.push(cut ? `${id}*` : id);
   } else {
     onlyB++;
-    flippedToB.push(id);
+    const cut = truncA.has(id);
+    if (cut) flipsOnTruncation++;
+    flippedToB.push(cut ? `${id}*` : id);
   }
 }
 
@@ -173,6 +191,13 @@ console.log(`  neither passed          ${neither}`);
 console.log(`  A only (B broke these)  ${onlyA}`);
 console.log(`  B only (B fixed these)  ${onlyB}`);
 console.log(`  McNemar exact p         ${p.toFixed(4)}`);
+console.log(`  truncated replies       A ${truncA.size}, B ${truncB.size}`);
+if (flipsOnTruncation > 0) {
+  console.log(
+    `  CAUTION: ${flipsOnTruncation} of the ${onlyA + onlyB} discordant pairs failed on a CUT-OFF reply (marked *).\n` +
+      "           Those are the runner's token limit, not the model. Raise --max-tokens and re-run before deciding.",
+  );
+}
 console.log("");
 if (onlyA + onlyB === 0) {
   console.log("  VERDICT: the two runs agree on every task. The setting changed nothing.");

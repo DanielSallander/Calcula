@@ -2059,11 +2059,54 @@ person rephrases), and `formula`/`analyze` as direct `formulaAssistService`/`ins
 calls (the §5 blockers stand: `registerChatPromptSink` still has no caller and the design-query
 assistant still has no headless seam).
 
-*Still open, in order:* `npm run eval:all` — there is still no `eval:*` script at all, so every
-measurement is a hand-typed command whose flags decide the number, which is how two runs of the
-same arm came to be recorded as 17/40 and 16/40; and `finishReason`, computed at
-`run-formula-eval.mjs:468` and never persisted per task, so no artifact can say which task
-truncated.
+**THE TWO MEASUREMENT-HYGIENE ITEMS — `npm run eval:all` and per-task `finishReason` — CLOSED
+2026-09-17, and the first suite-produced baseline is on record.** `tests/eval/suite.mjs` is the
+suite as DATA: every runner, every knob it reads, pinned to the 2026-09-15 bake-off arm —
+explicitly, even where equal to the runner's default, so a default that changes in a runner cannot
+change what `eval:all` measures — and `lib/evalSuite.test.mjs` holds the pins to the runners'
+`arg("…")` lists in both directions. `run-suite.mjs` resolves and hashes the GGUF, starts the
+product's own `llama-server` on the product's flags (`serverArgs` is diffed against
+`ai/runtime.rs engine_args` by the test) on a FREE port, runs the runners one after another, stops
+it, and writes `runs/<date>--all--<model>.json` naming the machine, the binary build, the model's
+sha256, the server's `/props`, every argv and every summary. *What it closed that the item never
+named:* the server behind every on-board number so far had been started BY HAND with a GGUF picked
+by hand, and no artifact recorded which one answered — the bake-off arms were labelled by what the
+runner was TOLD (`--model calcula-builtin`), not by what served. An override
+(`npm run eval:formulas -- --retrieval 0`) REPLACES its pin — the runners read the FIRST occurrence
+of a flag, so an appended override is a silent no-op — and demotes the run to `out/` unless
+`--keep`, because a pinned run is evidence and an overridden one is an experiment.
+`evalKnobs.test.mjs` now covers all seven runners (two before), and `max-tokens` is a knob: it
+decides truncation, and truncation is graded as failure. Every artifact carries `finishReason` per
+task (`truncated` on infill), and `compare-runs.mjs` marks a discordant pair whose loser was cut
+off with `*` and a caution instead of counting it as evidence about the model. *Found on the way:*
+the narration runner read `CARGO_TARGET_DIR` from ambient shell state and reported its helper
+missing from an npm shell while it sat built in `%LOCALAPPDATA%` — `lib/grader.mjs
+resolveExample` now resolves every Rust helper the way the grader is resolved — and the formula
+artifact now records the grader's build, since the re-grade that paid +2 made it a variable of the
+score. Five sabotages (a dropped pin, a changed server flag, a renamed npm script, a dropped
+per-task field, an appended override), each redding its own assertion.
+
+*First baseline from the suite, 2026-09-17, the incumbent 1.5B, 41 min wall clock on a Snapdragon
+X Elite (12 cores):* intents macro 98.9 % (213/214, decisive precision 100 %); formulas 64/181
+(35.4 %, median 2.5 s, 4 cut off and now NAMED — `textsplit-country-after-last-comma`,
+`date-edate-contract-renewal-term`, `date-yearfrac-actual-365-loan`,
+`rank-average-rank-four-way-tie`, all four failures); design queries 38/122 (31.1 %, 122/122
+compiled, median 1.8 s); scripts 3/37 single-shot (mean score 0.495, 2 cut off) — the first
+number for that surface on the on-board model; narration 1/5 clean, 10 invented, median 11.7 s
+(gate FAIL); next-edit exact 0/292, rules 61/292, median 351 ms (gate PASS); macro-fim 26/141
+(18.4 %), median 348 ms (gate PASS). Every figure agrees with its recorded predecessor within noise
+(formulas 63 re-graded → 64, design queries 35 → 38), which is the point: the pins reproduce the
+arms.
+
+*Next, in order — the fine-tune milestones decided 2026-09-17 (base: a Tier-1 candidate, chosen
+by measurement; Tier 0 has no model):* **FT1**, the demonstration curve — 6 → ~20 compiling
+examples on the design-query prompt, paired on the incumbent and granite-4.0-1b — as the go/no-go
+(rising: headroom; flat: a caution, not a verdict, since small models use long contexts poorly);
+**FT0**, the synthetic generator with a contamination guard against the eval corpora; **FT2**,
+base selection by training one recipe on two Apache-2.0 candidates on the owner's GPU box (the
+origin question recorded there as an owner decision); **FT3**, the third bake-off arm on all six
+surfaces under the pre-registered rule; **FT4**, ship with the recipe published and a drift guard
+in CI.
 
 **A THIRD SCHEMA is no longer the open question it was.** The second one settled it: `renamed_star`
 is a controlled rename of the same star — same rows, same questions, different vocabulary — and

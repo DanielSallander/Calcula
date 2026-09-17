@@ -34,33 +34,37 @@ export function cargoTargetDir() {
   return null;
 }
 
-const BUILD_HINT = [
-  "Build it first, from PowerShell (Git Bash's `link` shadows MSVC's):",
-  "",
-  "    . .\\core\\setup-rust-env.ps1",
-  "    cd core; cargo build -q -p calcula-format --example eval-formulas --release",
-  "",
-  "Or point CALCULA_FORMULA_GRADER at an existing binary.",
-].join("\n");
+/** How each Rust helper the eval harness shells out to gets built. */
+const BUILD_COMMANDS = {
+  [EXAMPLE]: "cd core; cargo build -q -p calcula-format --example eval-formulas --release",
+  narration: "cd core; cargo build -p insights --example narration",
+};
+
+function buildHint(example) {
+  return [
+    "Build it first, from PowerShell (Git Bash's `link` shadows MSVC's):",
+    "",
+    "    . .\\core\\setup-rust-env.ps1",
+    `    ${BUILD_COMMANDS[example] ?? `cd core; cargo build --example ${example}`}`,
+    "",
+    example === EXAMPLE ? "Or point CALCULA_FORMULA_GRADER at an existing binary." : "",
+  ]
+    .filter((l, i, all) => l !== "" || i < all.length - 1)
+    .join("\n");
+}
 
 /**
- * The grader executable, newest-wins between release and debug.
+ * A built Rust example binary, newest-wins between release and debug.
  *
- * Release first because that is what the build hint produces and what a
+ * Release first because that is what the build hints produce and what a
  * hundred-task run wants; a debug build is accepted so a developer mid-change is
  * not blocked, and the choice is REPORTED rather than silent — running
  * yesterday's binary and not knowing it is the stale-binary trap this repo has
- * paid for more than once.
+ * paid for more than once. Generalised from the grader on 2026-09-17 when the
+ * narration runner was found reading `CARGO_TARGET_DIR` from ambient shell
+ * state and reporting its helper missing from an npm shell that had none.
  */
-export function resolveGrader({ repo }) {
-  const override = process.env.CALCULA_FORMULA_GRADER;
-  if (override) {
-    if (!existsSync(override)) {
-      throw new Error(`CALCULA_FORMULA_GRADER points at ${override}, which does not exist.`);
-    }
-    return { exe: override, source: "CALCULA_FORMULA_GRADER" };
-  }
-
+export function resolveExample(example, { repo }) {
   const roots = [];
   const target = cargoTargetDir();
   if (target) roots.push(target);
@@ -71,15 +75,15 @@ export function resolveGrader({ repo }) {
   const candidates = [];
   for (const root of roots) {
     for (const profile of ["release", "debug"]) {
-      const exe = path.join(root, profile, "examples", `${EXAMPLE}.exe`);
-      const plain = path.join(root, profile, "examples", EXAMPLE);
+      const exe = path.join(root, profile, "examples", `${example}.exe`);
+      const plain = path.join(root, profile, "examples", example);
       for (const p of [exe, plain]) {
         if (existsSync(p)) candidates.push({ exe: p, mtime: statSync(p).mtimeMs, profile, root });
       }
     }
   }
   if (candidates.length === 0) {
-    throw new Error(`The formula grader has not been built.\n\n${BUILD_HINT}`);
+    throw new Error(`The ${example === EXAMPLE ? "formula grader" : `${example} helper`} has not been built.\n\n${buildHint(example)}`);
   }
   candidates.sort((a, b) => b.mtime - a.mtime);
   const best = candidates[0];
@@ -88,6 +92,18 @@ export function resolveGrader({ repo }) {
     source: `${best.profile} build in ${best.root}`,
     builtAt: new Date(best.mtime).toISOString(),
   };
+}
+
+/** The formula grader, or whatever CALCULA_FORMULA_GRADER points at. */
+export function resolveGrader({ repo }) {
+  const override = process.env.CALCULA_FORMULA_GRADER;
+  if (override) {
+    if (!existsSync(override)) {
+      throw new Error(`CALCULA_FORMULA_GRADER points at ${override}, which does not exist.`);
+    }
+    return { exe: override, source: "CALCULA_FORMULA_GRADER" };
+  }
+  return resolveExample(EXAMPLE, { repo });
 }
 
 /**

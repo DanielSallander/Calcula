@@ -28,20 +28,70 @@ honours the field. `run-formula-eval.mjs` takes the same `--grammar on`, which
 replaces the reply schema with `buildFormulaGrammar` (the same envelope, the
 formula inside it constrained to formula syntax).
 
-**Measuring the BUILT-IN runtime.** The app's own copy of llama-server and the
-on-board model are fetched artifacts:
+**Measuring the BUILT-IN runtime — `npm run eval:*`, the sanctioned way to
+produce a number.** The app's own copy of llama-server and the on-board model
+are fetched artifacts (`cd app && npm run fetch:llama-server && npm run
+fetch:builtin-model`). Since 2026-09-17 the suite starts the server itself:
 
 ```
-cd app && npm run fetch:llama-server && npm run fetch:builtin-model
-app/src-tauri/binaries/llama-server-<triple>/llama-server.exe \
-  -m app/src-tauri/models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf \
-  --host 127.0.0.1 --port 8080 -c 8192 -np 1 --jinja --no-webui
-node tests/eval/run-design-query-eval.mjs --provider llamacpp --model calcula-builtin --grammar on
-node tests/eval/run-formula-eval.mjs --provider llamacpp --model calcula-builtin --grammar on
+cd app
+npm run eval:all                                   every surface, ~40 min on this CPU
+npm run eval:formulas                              one surface (intents, formulas, design-queries,
+                                                   scripts, narration, next-edit, macro-fim)
+npm run eval:all -- --dry-run                      the preflight and every exact command; nothing starts
+npm run eval:all -- --model granite-4.0-1b-Q4_K_M --label granite-1b     another arm, same pins
+npm run eval:formulas -- --retrieval 0             an OVERRIDE: goes to out/, not runs/, unless --keep
+npm run eval:all -- --only formulas,design-queries --skip scripts
 ```
 
-Those are the flags `ai/runtime.rs` starts it with, so a run on port 8080 is a
-run on the product's runtime; only the port differs.
+`suite.mjs` is the suite as DATA: every runner, every knob it reads, pinned to
+the value of the 2026-09-15 bake-off arm — explicitly, even where that is the
+runner's default, so a default that changes in a runner cannot change what
+`eval:all` measures. `run-suite.mjs` is the process around it. It resolves the
+model (`calcula-builtin`, a GGUF name under `app/src-tauri/models/` or the
+bake-off folder, or a path), hashes it, starts `llama-server` from
+`app/src-tauri/binaries/` on the flags `ai/runtime.rs` uses (`-c 8192 -np 1
+--jinja --no-webui` — `evalSuite.test.mjs` diffs them against the Rust) on a
+FREE port so a server someone left on 8080 cannot answer in its place, waits
+for `/health`, hands each runner its `--base-url` and its `--json`, runs them
+one after another (one slot: in parallel they would queue on each other and
+inflate every latency), stops the server, and writes an aggregate —
+`runs/<date>--all--<model>.json` — recording the machine, the binary build,
+the model's sha256, the server's `/props`, every argv and every summary. Until
+this existed the server was started BY HAND with a GGUF picked by hand, and
+no artifact recorded which one answered.
+
+An override is `--knob value` after the surface. It REPLACES the pin (the
+runners read the first occurrence of a flag; an appended override would be a
+silent no-op) and demotes the run to `out/` unless `--keep`, because a pinned
+run is evidence and an overridden one is an experiment. Two guards hold this:
+`evalSuite.test.mjs` fails the build when a runner reads a knob the suite does
+not pin, and `evalKnobs.test.mjs` when a runner does not record one in its
+artifact. Every artifact now names each CUT-OFF reply per task (`finishReason`
+on the chat runners, `truncated` on infill), and `compare-runs.mjs` marks a
+discordant pair whose loser was cut off with `*` and a caution instead of
+counting it as evidence about the model.
+
+A server started by hand still works — `--base-url http://127.0.0.1:8080`,
+the ROOT; the suite adds `/v1` where a runner wants it — but then nothing
+records which GGUF answered, which is the hole the suite closes.
+
+**First baseline from the suite, 2026-09-17** (incumbent qwen2.5-coder-1.5b
+Q4_K_M, 41 min wall clock on a Snapdragon X Elite, `runs/2026-09-17--all--*.json`):
+
+| surface | result | latency | gate |
+|---|---|---|---|
+| intents | macro 98.9 %, 213/214, decisive precision 100 % | — | — |
+| formulas | 64/181 (35.4 %), 4 cut off — now named per task, all four failures | median 2.5 s | — |
+| design-queries | 38/122 (31.1 %), 122/122 compiled | median 1.8 s | — |
+| scripts | 3/37 single-shot, mean score 0.495, 2 cut off | — | — |
+| narration | 1/5 bundles clean, 10 invented numbers | median 11.7 s | FAIL (8 s) |
+| next-edit | exact 0/292, rules 61/292 | median 351 ms | PASS (400 ms) |
+| macro-fim | 26/141 (18.4 %) | median 348 ms | PASS (1 s) |
+
+Each agrees with its recorded predecessor within noise (formulas 63 re-graded
+→ 64, design queries 35 → 38), which is the point: the pins reproduce the
+arms. The scripts figure is the first for that surface on the on-board model.
 
 ## `run-narration-eval.mjs` — can the on-board model word facts without inventing numbers?
 

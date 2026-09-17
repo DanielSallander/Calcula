@@ -24,67 +24,43 @@
 //          silently producing artifacts that cannot be compared.
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
-const EVAL = join(process.cwd(), "..", "tests", "eval");
-
-/** A runner's source with `//` comments stripped, so prose cannot fabricate a flag. */
-function codeOf(rel) {
-  return readFileSync(join(EVAL, rel), "utf8")
-    .split("\n")
-    .map((l) => {
-      const i = l.indexOf("//");
-      return i >= 0 ? l.slice(0, i) : l;
-    })
-    .join("\n");
-}
+import { SURFACES } from "../suite.mjs";
+import { codeOf, flagsIn as allFlagsIn, knobKeysIn } from "./runnerFlags.mjs";
 
 /**
  * Flags that select WHICH tasks run or HOW they run — the independent
  * variables. Deliberately excludes plumbing that cannot change an outcome.
+ *
+ * `max-tokens` is NOT here: it decides whether a reply is cut off, and a
+ * cut-off reply is graded as wrong, so two runs that differ only in it can
+ * differ in their score. It was excluded until 2026-09-17; the 2026-09-15
+ * formula baseline carries nine truncated replies its knob block cannot
+ * explain.
  */
 const NOT_A_KNOB = new Set([
   "json", // where the artifact goes
   "show-replies",
+  "show-misses",
   "timeout-ms",
-  "max-tokens",
   "help",
   "quiet",
   "concurrency",
   "gate-median-ms",
 ]);
 
-/** `--foo` -> `foo`, as the runners spell them in `arg("foo", …)`. */
+/** `--foo` -> `foo`, as the runners spell them in `arg("foo", …)`, knobs only. */
 function flagsIn(src) {
-  return [...new Set(Array.from(src.matchAll(/\barg\(\s*"([a-z0-9-]+)"/g), (m) => m[1]))].filter(
-    (f) => !NOT_A_KNOB.has(f),
-  );
-}
-
-/** The keys of the `knobs = { … }` object literal. */
-function knobKeysIn(src) {
-  const at = src.indexOf("const knobs = {");
-  if (at < 0) return null;
-  let depth = 0;
-  let end = at;
-  for (let i = src.indexOf("{", at); i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i;
-        break;
-      }
-    }
-  }
-  return Array.from(src.slice(at, end).matchAll(/^\s{2}([A-Za-z][A-Za-z0-9]*)\s*:/gm), (m) => m[1]);
+  return allFlagsIn(src).filter((f) => !NOT_A_KNOB.has(f));
 }
 
 /** `--clause-gate` is `clauseGate` in the block; compare shape-insensitively. */
 const norm = (s) => s.replace(/-/g, "").toLowerCase();
 
-const RUNNERS = ["run-design-query-eval.mjs", "run-formula-eval.mjs"];
+// EVERY runner, from the suite's own list — a runner the suite runs and this
+// guard does not cover would be an artifact `eval:all` produces that cannot
+// be compared. Two runners were covered until 2026-09-17; seven are now.
+const RUNNERS = SURFACES.map((s) => s.runner);
 
 describe("every eval knob reaches the artifact", () => {
   for (const rel of RUNNERS) {
@@ -92,7 +68,7 @@ describe("every eval knob reaches the artifact", () => {
       const src = codeOf(rel);
       const keys = knobKeysIn(src);
       expect(keys, `${rel} has no \`const knobs = { … }\` block`).not.toBeNull();
-      expect(keys.length).toBeGreaterThan(4);
+      expect(keys.length).toBeGreaterThan(0);
 
       const recorded = new Set(keys.map(norm));
       const missing = flagsIn(src).filter((f) => !recorded.has(norm(f)));
@@ -119,5 +95,41 @@ describe("every eval knob reaches the artifact", () => {
       /retrieval=\$\{run\.summary\.retrieval\}/.test(src),
       "compare-runs is labelling from hardcoded summary keys again",
     ).toBe(false);
+  });
+});
+
+describe("a cut-off reply is recorded PER TASK, not only counted", () => {
+  // A reply the runner's token limit cut short is graded as wrong. Every runner
+  // counted those in its summary; only some named them, and the formula
+  // baseline of 2026-09-15 carries nine it cannot point to. The per-task field
+  // is what lets `compare-runs.mjs` set a truncated failure aside instead of
+  // counting it as evidence about the model.
+  const PER_TASK = {
+    // runner: [the per-task field, the summary count]
+    "run-formula-eval.mjs": [/results:\s*state\.map\([\s\S]*?\bfinishReason:\s*s\.finishReason/, /truncatedReplies:/],
+    "run-eval.mjs": [/scores\.push\(\{[\s\S]*?finishReason:\s*lastFinishReason/, /truncatedReplies/],
+    "run-design-query-eval.mjs": [/row\.finishReason\s*=/, /truncated:/],
+    "run-next-edit-eval.mjs": [/row\.finishReason\s*=/, /truncated:/],
+    "run-narration-eval.mjs": [/row\.finishReason\s*=/, /truncated:/],
+    "run-macro-fim-eval.mjs": [/row\.truncated\s*=/, /truncated:/],
+  };
+
+  for (const [rel, [perTask, counted]] of Object.entries(PER_TASK)) {
+    it(`${rel} names each truncated task in its artifact and counts them in its summary`, () => {
+      const src = codeOf(rel);
+      expect(src, `${rel}: no per-task truncation field`).toMatch(perTask);
+      expect(src, `${rel}: no truncation count in the summary`).toMatch(counted);
+    });
+  }
+
+  it("covers every runner that calls a model", () => {
+    const modelRunners = SURFACES.filter((s) => s.needsModel).map((s) => s.runner);
+    expect([...Object.keys(PER_TASK)].sort()).toEqual([...modelRunners].sort());
+  });
+
+  it("compare-runs sets a truncated failure aside instead of counting it", () => {
+    const src = codeOf("compare-runs.mjs");
+    expect(src).toMatch(/finishReason === "length"/);
+    expect(src).toMatch(/flipsOnTruncation/);
   });
 });
