@@ -821,9 +821,25 @@ path (every month stayed visible) — the dropdown's `applyFilter` with a `manua
 `PivotRegionInfo.sourceFields` carry the BARE column name ("Month"), not "Date.Month"; the
 recompute's silent `.catch` now warns, so a stayed-put cue is diagnosable from the console.
 
-**Not done:** the owner's AdventureWorks model itself (needs its Postgres login and a strategy;
-the same journey would run on it with a `postgres` source once both exist). Follow-ups unchanged
-from §5d: `rule` on a `level` anchor; Pareto member positions; keyboard stepping.
+**The owner's AdventureWorks model, over its local Postgres (a throwaway probe, not kept — it
+depends on a database only that machine has; the dev login was supplied by the owner and
+connected with `remember: false`, so nothing entered the Credential Manager).** A minimal
+strategy (Revenue higherIsBetter, sliced by product category and territory group, time along
+`BI.dim_date[yearmonth]`) and a pivot of 40 months × categories: the route worked end to end on
+DOTTED table names (`BI.dim_product[categoryname]` → the pivot's `BI.dim_product.categoryname`),
+Bikes/Components/Clothing good and Accessories bad on the last month's row, the change fact on
+that row's Grand Total. **One more defect, found only here:** some sales carry a NULL product
+category, and the engine skips `VALUE_ID_EMPTY` when it builds a group path, so the blank
+category's LEAF cell carries the same pairs as the month's total — the change cue landed on it
+too. A fact never names a blank member; `pivotCuesFor` now leaves out a `Data` cell with fewer
+pairs than the pivot has axis fields (unit-pinned; sabotaged → only that test reds; the probe
+then showed the Grand Total alone). Also seen: the contribution sentence reads " rose 16 614,3"
+for the blank member — a narrator nicety for `model.rs` ("(blank)"), noted in open-items; and the
+same `Table '' has no registered source` refusal for `% Revenue of Total`, a Block over a measure
+reference, which confirms the engine finding on a model the owner authored.
+
+**Not done:** follow-ups unchanged from §5d: `rule` on a `level` anchor; Pareto member positions;
+keyboard stepping.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

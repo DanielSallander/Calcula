@@ -226,6 +226,24 @@ describe("a contribution fact", () => {
   });
 });
 
+describe("a blank member", () => {
+  it("is never the cell a fact lands on: its leaf carries a subtotal's pairs, and a fact names no blank", () => {
+    // Found live: a null product category. The engine skips VALUE_ID_EMPTY, so
+    // the blank column's header has no path and its leaf cells carry only the
+    // month pair — the same pairs as the month's grand total.
+    const v = view([
+      row("ColumnHeader", 0, [cell("Corner", ""), cell("ColumnHeader", "", []), cell("ColumnHeader", "Gadgets", [[CAT, GADGETS]]), cell("GrandTotalColumn", "Grand Total")], 0),
+      row("Data", 0, [cell("RowHeader", "2024-Q2", [[QTR, Q2]]), cell("Data", 16, [[QTR, Q2]]), cell("Data", 150, [[QTR, Q2], [CAT, GADGETS]]), cell("GrandTotalColumn", 166, [[QTR, Q2]])], 1),
+      row("GrandTotal", 0, [cell("GrandTotalRow", "Grand Total", []), cell("GrandTotalRow", 16, []), cell("GrandTotalRow", 150, [[CAT, GADGETS]]), cell("GrandTotal", 166, [])], 2),
+    // Field indices are what matter to the mapper: CAT (0) is Product.Category
+    // and QTR (10) is Date.Quarter, whichever axis the builder lists them on.
+    ], ["Product.Category"], ["Date.Quarter"]);
+    const set = pivotCuesFor(bundle([change("Total Sales", "better"), contribution("Total Sales", "Product[Category]", [["Gadgets", 5], ["", 3]])]), v, ["[Total Sales]"]);
+    expect(set.cues.map((c) => [c.description, ...at(c)])).toEqual([["Total Sales up 13%", 1, 3], ["Gadgets: Total Sales up", 1, 2]]);
+    expect(set.dropped).toEqual([]);
+  });
+});
+
 describe("a member move and a series fact", () => {
   it("place like a contribution and like a change, respectively", () => {
     const facts = [change("Total Sales", "better"), memberMove("Total Sales", "Product[Category]", "Widgets", -3), series("Total Sales", { fact: "changePoint", atLabel: "2024-Q2", atIndex: 1, before: 1, after: 2 }, "higherIsBetter")];

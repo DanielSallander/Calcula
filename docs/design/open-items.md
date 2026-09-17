@@ -2400,9 +2400,12 @@ That proof found and fixed two defects: `run_model_insights` lost EVERY measure 
 query was refused (now a note, like the slices), and a pivot filter through the API announced
 nothing (`PivotEvents.PIVOT_VIEW_UPDATED` now fires from `cachePivotView`). **Still owed**: a
 value-axis `rule` through the rule painter, Pareto member positions; and, for `model-engine-lib`,
-a derived measure with no home table (`Margin = [Revenue] - [Cost]`) resolves to an EMPTY table in
-the planner's `measure_tables` and is refused with `Table '' has no registered source` — the
-sales-star fixture's own measures hit it. D-IO-10 (a comment follows the FACT, not the label) is
+a derived measure with no home table (`Margin = [Revenue] - [Cost]`, and the owner's own
+`% Revenue of Total`, a Block over a measure reference) resolves to an EMPTY table in the
+planner's `measure_tables` and is refused with `Table '' has no registered source` — the
+sales-star fixture's measures hit it and so does AdventureWorks. Small: the narrator writes
+" rose 16 614,3" for a member whose name is blank (`model.rs` contribution sentence) — say
+"(blank)". D-IO-10 (a comment follows the FACT, not the label) is
 built as proposed and confirmed by the owner in passing ("proceed").
 
 ## 3. How to keep this file honest

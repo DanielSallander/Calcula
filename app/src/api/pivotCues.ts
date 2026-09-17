@@ -164,12 +164,23 @@ function indexView(view: PivotViewResponse, valueFields: readonly string[]): Vie
   const only = stripped.length === 1 ? stripped[0] : null;
 
   // Pass 2: the data cells.
+  //
+  // A BLANK MEMBER (a category whose name is empty or null) has no pair at
+  // all: the engine skips `VALUE_ID_EMPTY` when it builds a group path, so the
+  // blank member's LEAF cell carries the same pairs as a subtotal one level up
+  // and would pass for "the cell that IS the fact". A fact never names a blank
+  // member, so a leaf (`Data`) cell with fewer pairs than the pivot has axis
+  // fields is left out — found live on a model whose product category was
+  // null for some sales, where the month's change cue landed on that column
+  // as well as on the Grand Total.
+  const axisFields = view.rowFieldSummaries.length + view.columnFieldSummaries.length;
   const cells: DataCell[] = [];
   const measures = new Set<string>();
   view.rows.forEach((row, viewRow) => {
     if (row.rowType === "ColumnHeader" || row.rowType === "FilterRow") return;
     row.cells.forEach((cell, viewCol) => {
       if (typeof cell.value !== "number" || CHROME_TYPES.has(cell.cellType) || !cell.groupPath) return;
+      if (cell.cellType === "Data" && cell.groupPath.length < axisFields) return;
       const pairs: Pair[] = [];
       for (const p of cell.groupPath) {
         const field = fieldNameOf.get(p[0]);
