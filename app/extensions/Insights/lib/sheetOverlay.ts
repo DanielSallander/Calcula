@@ -12,10 +12,15 @@
 //          rows and header included), and hand them to `@api/cellCues` under
 //          an owner id. The decoration registered here paints them.
 //
-//          A BI pivot's facts are computed from the numbers it shows, which is
-//          what the reader sees; the member-based route (a model fact's
-//          `topCategory` matched to a pivot's header labels) is recorded as a
-//          follow-up in §5d, not built.
+//          TWO ROUTES FOR A PIVOT (IO-6). A BI-backed pivot is a query over a
+//          model, so its facts are the MODEL's (`insights_analyze_model`, with
+//          the strategy's directions) matched to its cells by the labels the
+//          headers show (`@api/pivotCues` `pivotCuesFor`): the Gadgets row at
+//          the last period, coloured by whether the strategy says a rise there
+//          is good. Any other pivot — a sheet-range pivot, one whose model
+//          info is missing — is analysed as a range of numbers, neutral. The
+//          route is decided per computation, so a pivot re-pointed at a model
+//          switches on its next recompute.
 //
 //          FOLLOWS THE DATA: a cell change inside the owner's rectangle, or a
 //          pivot refresh, recomputes after a short debounce; the owner's cues
@@ -26,11 +31,13 @@ import { registerCellDecoration, type CellDecorationContext } from "@api/cellDec
 import { AppEvents, emitAppEvent, onAppEvent, type CellValuesChangedPayload } from "@api/events";
 import { getGridStateSnapshot } from "@api/grid";
 import { getGridRegions } from "@api/gridOverlays";
-import { cuesForSheet, parseFactsDocument, type CellCueSet } from "@api/insightCues";
+import { cuesForSheet, parseFactsDocument, type CellCueDrop } from "@api/insightCues";
 import { overlayStyleFor, resolveOverlayStyle } from "@api/insightStyle";
 import type { InsightBundle, RangeInsightsRequest } from "@api/insightsService";
+import { pivot } from "@api/pivot";
+import { pivotCuesFor, type PivotCueDrop } from "@api/pivotCues";
 import { PivotEvents } from "../../_shared/lib/pivotEvents";
-import { analyzeRange } from "./backend";
+import { analyzeModel, analyzeRange } from "./backend";
 import { refreshBundleFor, type InsightsOrigin } from "./store";
 
 // ============================================================================
@@ -55,10 +62,20 @@ export function ownerId(owner: SheetOverlayOwner): string {
   return `range:${r.sheetIndex}:${r.startRow}:${r.startCol}:${r.endRow}:${r.endCol}`;
 }
 
+/** Which facts a target's cues came from. */
+export type SheetOverlayRoute = "range" | "model";
+
+/** A cell cue set from either route; a model-route drop carries the pivot reasons. */
+export interface SheetCueSet {
+  cues: CellCue[];
+  dropped: Array<CellCueDrop | PivotCueDrop>;
+}
+
 interface Entry {
   owner: SheetOverlayOwner;
   bundle: InsightBundle;
-  cueSet: CellCueSet;
+  cueSet: SheetCueSet;
+  route: SheetOverlayRoute;
   /** The rectangle analysed (a pivot's region at the time), for change intersection. */
   rect: RangeInsightsRequest;
   /** When set, only this fact's cues are shown (a card's "Show on sheet"). */
@@ -97,12 +114,52 @@ function rectOf(owner: SheetOverlayOwner): RangeInsightsRequest | null {
   return owner.kind === "range" ? owner.request : pivotRect(owner.pivotId);
 }
 
+/** The model a BI-backed pivot queries, or null for any other pivot. */
+async function modelConnectionOf(rect: RangeInsightsRequest): Promise<string | null> {
+  try {
+    const info = await pivot.getAtCell(rect.startRow, rect.startCol);
+    const id = info?.biModel?.connectionId;
+    return typeof id === "string" && id !== "" ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The model route: the model's facts on the pivot's cells, offset into the sheet. */
+async function computeFromModel(pivotId: string, connectionId: string, rect: RangeInsightsRequest): Promise<{ bundle: InsightBundle; cueSet: SheetCueSet } | string> {
+  const [bundle, view, hierarchies] = await Promise.all([
+    analyzeModel({ connectionId }),
+    pivot.getView(pivotId),
+    pivot.getHierarchies(pivotId),
+  ]);
+  if (view.isWindowed) return "This pivot is too large to place points of interest on its cells.";
+  const set = pivotCuesFor(bundle, view, hierarchies.dataHierarchies.map((d) => d.name));
+  const cues: CellCue[] = set.cues.map((c) => ({
+    factId: c.factId,
+    polarity: c.polarity,
+    description: c.description,
+    ...(c.label ? { label: c.label } : {}),
+    sheetIndex: rect.sheetIndex,
+    row: rect.startRow + c.viewRow,
+    col: rect.startCol + c.viewCol,
+  }));
+  return { bundle, cueSet: { cues, dropped: set.dropped } };
+}
+
 async function compute(owner: SheetOverlayOwner): Promise<Entry | string> {
   const rect = rectOf(owner);
   if (!rect) return "This pivot is not on the active sheet.";
+  if (owner.kind === "pivot") {
+    const connectionId = await modelConnectionOf(rect);
+    if (connectionId !== null) {
+      const result = await computeFromModel(owner.pivotId, connectionId, rect);
+      if (typeof result === "string") return result;
+      return { owner, bundle: result.bundle, cueSet: result.cueSet, route: "model", rect, onlyFactId: null };
+    }
+  }
   const bundle = await analyzeRange({ ...rect, expandToRegion: false });
   const cueSet = cuesForSheet(bundle, sheetResolverFor(bundle, rect));
-  return { owner, bundle, cueSet, rect, onlyFactId: null };
+  return { owner, bundle, cueSet, route: "range", rect, onlyFactId: null };
 }
 
 function shown(entry: Entry): CellCue[] {
@@ -124,12 +181,19 @@ function publish(id: string, entry: Entry): void {
 // ============================================================================
 
 export type ShowSheetOverlayResult =
-  | { outcome: "shown"; ownerId: string; cueSet: CellCueSet; notice: string }
+  | { outcome: "shown"; ownerId: string; cueSet: SheetCueSet; route: SheetOverlayRoute; notice: string }
   | { outcome: "refused"; ownerId: string; reason: string };
 
-export function sheetNotice(cueSet: CellCueSet): string {
+export function sheetNotice(cueSet: SheetCueSet, route: SheetOverlayRoute = "range"): string {
   const n = new Set(cueSet.cues.map((c) => c.factId)).size;
-  return `${n} point${n === 1 ? "" : "s"} of interest, computed from the numbers; no strategy declares which way is good.`;
+  const points = `${n} point${n === 1 ? "" : "s"} of interest`;
+  if (route === "model") {
+    const judged = cueSet.cues.some((c) => c.polarity === "good" || c.polarity === "bad");
+    return judged
+      ? `${points} from the model; colours follow the strategy's declared directions.`
+      : `${points} from the model; no declared direction reached them, so none is coloured good or bad.`;
+  }
+  return `${points}, computed from the numbers; no strategy declares which way is good.`;
 }
 
 export async function showSheetOverlay(owner: SheetOverlayOwner, options: { onlyFactId?: string } = {}): Promise<ShowSheetOverlayResult> {
@@ -143,7 +207,7 @@ export async function showSheetOverlay(owner: SheetOverlayOwner, options: { only
   if (typeof entry === "string") return { outcome: "refused", ownerId: id, reason: entry };
   entry.onlyFactId = options.onlyFactId ?? null;
   publish(id, entry);
-  return { outcome: "shown", ownerId: id, cueSet: entry.cueSet, notice: sheetNotice(entry.cueSet) };
+  return { outcome: "shown", ownerId: id, cueSet: entry.cueSet, route: entry.route, notice: sheetNotice(entry.cueSet, entry.route) };
 }
 
 export function hideSheetOverlay(owner: SheetOverlayOwner | string): void {
@@ -164,7 +228,7 @@ export function isSheetOverlayOn(owner: SheetOverlayOwner | string): boolean {
 
 export function sheetOverlayNotice(owner: SheetOverlayOwner | string): string | null {
   const e = active.get(typeof owner === "string" ? owner : ownerId(owner));
-  return e ? sheetNotice(e.cueSet) : null;
+  return e ? sheetNotice(e.cueSet, e.route) : null;
 }
 
 export function resetSheetOverlays(): void {

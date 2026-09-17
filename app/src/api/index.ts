@@ -2854,6 +2854,11 @@ export type {
   CellCueDropReason,
 } from "./insightCues";
 
+// The member-based pivot route (IO-6): a MODEL's facts matched to a BI pivot's
+// cells by the labels its headers show; polarity is the strategy's.
+export { pivotCuesFor, stripBrackets, dimensionToFieldName, PIVOT_CUE_FACT_KINDS } from "./pivotCues";
+export type { PivotCue, PivotCueSet, PivotCueDrop, PivotCueDropReason } from "./pivotCues";
+
 // How the overlay looks: the document's (publisher's) style, else the defaults.
 export {
   DEFAULT_OVERLAY_STYLE,

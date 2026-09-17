@@ -1,8 +1,9 @@
 # Insight overlays — points of interest drawn on charts, pivots and sheets
 
-Status: DESIGNED 2026-09-17; **BUILT 2026-09-17, IO-0 through IO-5, and PROVED LIVE** on the
-running app with stored visual baselines (§5a–§5d record what each found; the live proof is at
-the end of §5d). Open: the follow-ups listed at the end of §5d.
+Status: DESIGNED 2026-09-17; **BUILT 2026-09-17, IO-0 through IO-6, and PROVED LIVE** on the
+running app with stored visual baselines (§5a–§5e record what each found; the live proof is at
+the end of §5d; IO-6, the member-based pivot route, is §5e and unit-proved only). Open: the
+follow-ups listed at the end of §5e.
 A milestone of its own, built in its own session — the owner's decision. **Tier 0 throughout**: no
 model computes, places or colours anything here.
 Companion documents: `insights-strategy-layer.md` (the engine and the strategy this consumes; §14 is
@@ -13,8 +14,8 @@ this), `open-items.md` 2.AI.13.
 pieces that have never been joined), then §3 (the seven gaps, each a one-line check), then §7 (the
 owner decisions; the IO-0 session took the doc's recommended answers without the owner live, so
 the IO-1 review took D-IO-8..10 with the owner live, see §4.8a). Every milestone is BUILT and the
-live proof has run — read §5a–§5d for what each found. What remains is the follow-up list at the
-end of §5d.
+live proof has run — read §5a–§5e for what each found. What remains is the follow-up list at the
+end of §5e.
 
 ## 0. The ask, and the one-sentence answer
 
@@ -371,8 +372,11 @@ seems to need judgement ("is this interesting?"), the answer is a new determinis
   one.
 - **IO-4 — pivot and sheet targets.** BUILT, see §5d — as ONE mechanism: an over-selection cell
   decoration reaches a pivot's cells, so no pivot seam; `rowOrigins` in the facts document
-  makes a fact's row a sheet row. The member-based pivot route and the E2E on the sales-star
-  fixture are still owed.
+  makes a fact's row a sheet row. The E2E on the sales-star fixture is still owed.
+- **IO-6 — the member-based pivot route.** BUILT, see §5e. A BI-backed pivot takes the MODEL's
+  facts (`insights_analyze_model`, strategy polarity) and lands them on the cells whose header
+  labels the facts name (`@api/pivotCues`); every other pivot keeps the range route. Unit-proved
+  on hand-built views; not yet proved live on the sales-star fixture.
 - **IO-5 — the chat tool, the records.** BUILT, see §5d. `show_points_of_interest` in the
   `analyze` and `chart` specialists, run in the webview; `insights-strategy-layer.md` §14.8;
   `open-items.md` 2.AI.13 closed; memory.
@@ -645,9 +649,8 @@ target as a range (a pivot's rectangle from its grid region, never expanded), ow
 narrow-to-one-fact, follows `CELL_VALUES_CHANGED` inside the rectangle and
 `PIVOT_REGIONS_UPDATED` (debounced), and registers the decoration (an inset frame per polarity, a
 dot when a cell carries several cues). The grid context menu gains *Show/Hide points of
-interest*, visible for a real rectangle or a click inside a pivot region. A BI pivot's facts are
-computed from the numbers it shows; the member-based route (a model fact's `topCategory` matched
-to header labels) is a follow-up, not built.
+interest*, visible for a real rectangle or a click inside a pivot region. At this point a BI
+pivot's facts were computed from the numbers it shows; the member-based route came next, §5e.
 
 **IO-5 — the chat tool.** `show_points_of_interest({ chart_id | pivot_id | rectangle })`, in the
 `analyze` and `chart` specialists (7 tools each, cap 8), auto-run (`AUTORUN_TOOLS`, D-IO-7: a
@@ -704,10 +707,83 @@ placements and the baseline was re-recorded and re-confirmed.
 cold comparison runs (48 s each), per the E2E plan's rules 5 and 7.
 
 **Not done, and why:** keyboard stepping was not added: the grid owns the arrow keys while a chart
-is selected, and a second binding would need a claim. Follow-ups: the pivot member-based route;
-`rule` on a `level` anchor (`needs-scale`) through the rule painter; Pareto member positions in
-Rust. (The style literals became the document setting of §4.10; the clipboard write and the undo
-of a kept mark are proved by the live journey, below.)
+is selected, and a second binding would need a claim. Follow-ups at the time: the pivot
+member-based route (built next, §5e); `rule` on a `level` anchor (`needs-scale`) through the rule
+painter; Pareto member positions in Rust. (The style literals became the document setting of
+§4.10; the clipboard write and the undo of a kept mark are proved by the live journey, below.)
+
+## 5e. IO-6 — the member-based pivot route: what was built, and what it found (2026-09-17)
+
+**Why it exists.** The original ask was "the pivot cell holding the highest revenue marked",
+judged by the strategy. IO-4 analysed a pivot as a range of the numbers it shows, so every pivot
+cue was NEUTRAL and about the displayed figures — honest, but strategy-blind, on the one target
+that is a query over the model. A BI-backed pivot's cells ARE the model's measures at members
+and periods, so the honest facts about them are the model's (`insights_analyze_model`, which the
+strategy layer already judges: direction, materiality, suppression, the withheld case).
+
+**The join, and its two spellings.** A model fact names a measure by name (`Total Sales`), a
+dimension as the strategy writes it (`Product[Category]`), members and periods by LABEL. A pivot
+view names its cells by `(fieldIndex, valueId)` pairs and shows the labels in header cells: a
+header cell's group path ends in the pair it names, a data cell's path is the row path followed
+by the column path (`core/pivot-engine/src/engine.rs` 2402-2408, 3100-3106). The field summaries
+spell a BI field `Table.Column` (`pivot/commands.rs`), a BI value field is `[Measure]`
+(`commands.rs` 5353) and its caption may be a custom name. `@api/pivotCues` (`pivotCuesFor(bundle,
+view, valueFields)`, pure) reads a full view once — every pair keeps the SET of labels shown for
+it, because a subtotal header shows "Gadgets Total" for the same pair as "Gadgets"; every
+numeric cell with a group path is a data cell (the engine types a subtotal row's numbers
+`RowSubtotal`, so the value decides, not the cell type); a column's measure comes from the
+caption row, or from the pivot's only value field when no caption names one — and turns each
+fact into REQUIREMENTS: "a pair on `Product.Category` showing Gadgets", "any pair showing
+2024-Q2".
+
+**The cell that IS the fact, else every cell the fact covers.** Among the data cells of the
+fact's measure that satisfy every requirement, those whose pair count EQUALS the requirement
+count are the fact itself — the Q2 grand total for "Total Sales rose to Q2", the Gadgets × Q2
+leaf for "Gadgets drove it", the North subtotal for a Region member. When no cell has exactly
+those pairs (Gadgets under each region with no Category subtotal), every covering cell is
+marked, because each of them IS Gadgets and the description names what was judged. A member
+fact lands on the member's LAST-period cell when the pivot shows that period (borrowed from the
+measure's change fact), and on the member alone when it does not (a totals pivot).
+
+**Polarity is the strategy's, never the number's.** A change or variance fact carries Rust's
+`favourability` — the direction already applied, `None` for the withheld case — mapped directly
+(`better` → good, `worse` → bad, else neutral). Direction provenance is attached only to change
+and variance facts (`model.rs` 1615, 1677), so a contribution or member-move fact BORROWS the
+direction that reached its measure's change fact and colours its member's delta through
+`polarityFor`; a measure whose direction was withheld colours nothing. Series facts nested in
+the model bundle (`{fact:"series", inner}`: extremes, smoothed peak, outliers, change point)
+place by their period label with their own tone. Definitional drivers are `no-position-in-fact`;
+trend, seasonality, crossover point at nothing here.
+
+**Refusals, in the order a reader would ask:** `measure-not-in-pivot` (also a custom caption
+that hides the measure — a renamed caption is never guessed), `dimension-not-in-pivot`,
+`member-not-in-pivot` (a member is matched on ITS field only; "North" on Region never matches
+"North" asked of Category), `period-not-in-pivot`, `malformed-fact`. A WINDOWED view carries
+only some rows and is refused by the caller ("too large to place points of interest on its
+cells") rather than placed on the rows it does not have.
+
+**The route switch** (`Insights/lib/sheetOverlay.ts`): a pivot owner asks `pivot.getAtCell` at
+its region's origin; a `biModel.connectionId` selects the model route (`analyzeModel` +
+`getView` + `getHierarchies` for the value-field names, cues offset by the region's origin into
+sheet cells); anything else — a sheet-range pivot, a missing pivot API — keeps the range route.
+The route is decided per computation, so the follow-the-data recompute on `PIVOT_REGIONS_UPDATED`
+(a filter change re-queries the pivot) re-resolves through the model. The notice names the route:
+"from the model; colours follow the strategy's declared directions", or, when no direction
+reached any cue, says so.
+
+**Tests:** `pivotCues.test.ts` (18, hand-built views: Category × Quarter with one value field,
+Category with two captioned measures, Region ▸ Category compact with and without subtotals) and
+`sheetOverlay.test.ts` (+2: the model route with offsets, the windowed refusal and the fallback).
+Sabotaged twice: removing the exact-cell preference reds the seven placement assertions (the
+route test included) and no polarity or refusal test; removing the field check on a member match
+reds only "matches a member on ITS dimension". Full vitest, `check-types`, `lint:boundaries`,
+`check:line-endings` green.
+
+**Not done:** the live proof on the sales-star fixture (a real BI pivot with a strategy) — the
+unit fixtures are hand-built from the engine's shapes, and the router milestone's lesson says the
+defects that matter will come from the live run; `variance` needs a model with targets to show
+anything. Follow-ups unchanged from §5d: `rule` on a `level` anchor; Pareto member positions;
+keyboard stepping.
 
 ## 6. Verification — the standard this repository holds a milestone to
 

@@ -2392,9 +2392,12 @@ clipboard while *Export* stays clean (D-IO-8); the sheet and pivot targets share
 cell decoration (no pivot seam was needed); `show_points_of_interest` is the chat's first
 client-side tool; the overlay's style is a document setting the publisher owns, published with
 the application (D-IO-11). PROVED LIVE by `app/e2e/journeys/insight-overlays.spec.ts` with two
-stored baselines. **Still owed**: the member-based pivot route, a value-axis `rule` through the
-rule painter, Pareto member positions. D-IO-10 (a comment follows the FACT, not the label) is
-built as proposed and confirmed by the owner in passing ("proceed").
+stored baselines. The member-based pivot route (IO-6, §5e) followed the same day: a BI-backed
+pivot takes the MODEL's facts with the strategy's polarity, matched to its cells by the labels
+its headers show (`@api/pivotCues`), unit-proved on hand-built views. **Still owed**: the live
+proof of IO-6 on the sales-star fixture, a value-axis `rule` through the rule painter, Pareto
+member positions. D-IO-10 (a comment follows the FACT, not the label) is built as proposed and
+confirmed by the owner in passing ("proceed").
 
 ## 3. How to keep this file honest
 

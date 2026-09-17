@@ -13,11 +13,17 @@ const h = vi.hoisted(() => ({
   activeSheet: { current: 0 },
   emitted: [] as string[],
   decorations: [] as Array<{ id: string; fn: (c: unknown) => void; priority: number; anchor: string }>,
+  pivot: {
+    getAtCell: vi.fn(),
+    getView: vi.fn(),
+    getHierarchies: vi.fn(),
+  },
 }));
 
 vi.mock("@api/backendCommands", () => ({
   createBackendChannel: () => ({ set: () => undefined, invoke: (...a: unknown[]) => h.invoke(...a), bound: true }),
 }));
+vi.mock("@api/pivot", () => ({ pivot: h.pivot }));
 vi.mock("@api/grid", () => ({
   getGridStateSnapshot: () => ({ sheetContext: { activeSheetIndex: h.activeSheet.current, activeSheetName: "Sales" } }),
   navigateToRange: vi.fn(),
@@ -67,9 +73,39 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
+/** A model bundle: one change fact on Total Sales, judged "better" by a declared direction. */
+function modelBundle() {
+  const id = "change:m/Total Sales";
+  return {
+    source: "model",
+    insights: [{ id, kind: "change", score: 0.7, text: "Total Sales rose.", evidence: [], provenance: [{ attribute: "direction", value: "higherIsBetter", source: "strategy", detail: "" }] }],
+    dropped: 0, markdown: "", notes: [],
+    factsJson: JSON.stringify({ modelLabel: "Sales", facts: [{ id, score: 0.7, kind: { fact: "change", measure: "Total Sales", firstLabel: "Q1", lastLabel: "Q2", first: 1, last: 2, delta: 1, pct: 1, favourability: "better", band: null } }] }),
+  };
+}
+
+/** Category × Quarter with one value field; the Q2 grand total sits at view (2, 2). */
+function modelView() {
+  const c = (cellType: string, value: unknown, groupPath?: number[][]) => ({ cellType, value, backgroundStyle: "Normal", ...(groupPath ? { groupPath } : {}) });
+  return {
+    pivotId: "p1", version: 1, rowCount: 3, colCount: 3, rowLabelColCount: 1, columnHeaderRowCount: 1, filterRowCount: 0, filterRows: [],
+    rowFieldSummaries: [{ fieldIndex: 0, fieldName: "Product.Category", hasActiveFilter: false }],
+    columnFieldSummaries: [{ fieldIndex: 1, fieldName: "Date.Quarter", hasActiveFilter: false }],
+    columns: [],
+    rows: [
+      { viewRow: 0, rowType: "ColumnHeader", depth: 0, visible: true, cells: [c("Corner", ""), c("ColumnHeader", "Q1", [[1, 10]]), c("ColumnHeader", "Q2", [[1, 11]])] },
+      { viewRow: 1, rowType: "Data", depth: 0, visible: true, cells: [c("RowHeader", "Gadgets", [[0, 1]]), c("Data", 1, [[0, 1], [1, 10]]), c("Data", 2, [[0, 1], [1, 11]])] },
+      { viewRow: 2, rowType: "GrandTotal", depth: 0, visible: true, cells: [c("GrandTotalRow", "Grand Total", []), c("GrandTotalRow", 1, [[1, 10]]), c("GrandTotalRow", 2, [[1, 11]])] },
+    ],
+  };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   h.invoke.mockReset().mockResolvedValue(bundle(2, 0, [4, 5, 7, 8]));
+  h.pivot.getAtCell.mockReset().mockResolvedValue(null);
+  h.pivot.getView.mockReset().mockResolvedValue(modelView());
+  h.pivot.getHierarchies.mockReset().mockResolvedValue({ hierarchies: [], rowHierarchies: [], columnHierarchies: [], filterHierarchies: [], dataHierarchies: [{ id: 1, name: "[Total Sales]", fieldIndex: 2, summarizeBy: "Sum", position: 0 }] });
   h.regions.current = [];
   h.activeSheet.current = 0;
   h.emitted.length = 0;
@@ -123,6 +159,40 @@ describe("showSheetOverlay on a pivot", () => {
     expect(r.outcome).toBe("shown");
     expect(h.invoke).toHaveBeenCalledWith("insights_analyze_range", { request: { sheetIndex: 0, startRow: 10, startCol: 2, endRow: 20, endCol: 6, expandToRegion: false } });
     expect((await sheet.showSheetOverlay({ kind: "pivot", pivotId: "p9" })).outcome).toBe("refused");
+    expect(h.pivot.getAtCell).toHaveBeenCalledWith(10, 2);
+    expect(h.invoke).not.toHaveBeenCalledWith("insights_analyze_model", expect.anything());
+  });
+
+  it("takes the MODEL route for a BI-backed pivot: the model's facts on the cells the headers name, offset into the sheet", async () => {
+    h.regions.current = [{ type: "pivot", data: { pivotId: "p1" }, startRow: 10, startCol: 2, endRow: 12, endCol: 4 }];
+    h.pivot.getAtCell.mockResolvedValue({ pivotId: "p1", isEmpty: false, biModel: { connectionId: "conn-1", tables: [], measures: [] } });
+    h.invoke.mockImplementation(async (cmd: string) => (cmd === "insights_analyze_model" ? modelBundle() : bundle(2, 0, [4, 5])));
+    const r = await sheet.showSheetOverlay({ kind: "pivot", pivotId: "p1" });
+    expect(r.outcome).toBe("shown");
+    expect(h.invoke).toHaveBeenCalledWith("insights_analyze_model", { request: { connectionId: "conn-1" } });
+    expect(h.invoke).not.toHaveBeenCalledWith("insights_analyze_range", expect.anything());
+    expect(h.pivot.getView).toHaveBeenCalledWith("p1");
+    // View (2, 2) → sheet (10 + 2, 2 + 2); coloured by the strategy, not by the rise.
+    expect(cells.getCellCues("pivot:p1")).toEqual([
+      { factId: "change:m/Total Sales", polarity: "good", description: "Total Sales up 100%", label: "Total Sales rose.", sheetIndex: 0, row: 12, col: 4 },
+    ]);
+    expect(r.outcome === "shown" && r.route).toBe("model");
+    expect(r.outcome === "shown" && r.notice).toBe("1 point of interest from the model; colours follow the strategy's declared directions.");
+    expect(sheet.sheetOverlayNotice("pivot:p1")).toContain("from the model");
+  });
+
+  it("refuses a windowed view rather than placing on the rows it does not have, and falls back to the range route without model info", async () => {
+    h.regions.current = [{ type: "pivot", data: { pivotId: "p1" }, startRow: 10, startCol: 2, endRow: 12, endCol: 4 }];
+    h.pivot.getAtCell.mockResolvedValue({ pivotId: "p1", isEmpty: false, biModel: { connectionId: "conn-1", tables: [], measures: [] } });
+    h.invoke.mockImplementation(async (cmd: string) => (cmd === "insights_analyze_model" ? modelBundle() : bundle(2, 0, [4, 5])));
+    h.pivot.getView.mockResolvedValue({ ...modelView(), isWindowed: true, rows: [] });
+    const r = await sheet.showSheetOverlay({ kind: "pivot", pivotId: "p1" });
+    expect(r).toEqual({ outcome: "refused", ownerId: "pivot:p1", reason: "This pivot is too large to place points of interest on its cells." });
+
+    h.pivot.getAtCell.mockRejectedValue(new Error("no pivot api"));
+    const fallback = await sheet.showSheetOverlay({ kind: "pivot", pivotId: "p1" });
+    expect(fallback.outcome === "shown" && fallback.route).toBe("range");
+    expect(h.invoke).toHaveBeenCalledWith("insights_analyze_range", { request: { sheetIndex: 0, startRow: 10, startCol: 2, endRow: 12, endCol: 4, expandToRegion: false } });
   });
 });
 
